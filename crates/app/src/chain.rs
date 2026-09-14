@@ -843,6 +843,21 @@ impl Receiver {
                 ));
             }
         }
+        // The same for a channel on the strip. A channel the dial has left
+        // behind is not a fault, because moving the dial back fixes it, but
+        // a span too narrow to hold the channel at all is: the stages are
+        // never built, and the pane the decoder feeds stays empty with
+        // nothing anywhere saying why.
+        for spec in &plan.channels {
+            if spec.offset_hz.abs() <= plan.eff_rate() / 2.0 && !spec.fits_rate(plan.eff_rate()) {
+                refused = Some(format!(
+                    "{} needs {:.2} MS/s and the span is {:.2}",
+                    spec.label,
+                    spec.min_rate() / 1e6,
+                    plan.eff_rate() / 1e6
+                ));
+            }
+        }
         let banks: Vec<NodeId> = of_kind("bank");
         let mut sources: Vec<NodeId> = of_kind("source_detect");
         sources.extend(of_kind("auto"));
@@ -859,7 +874,7 @@ impl Receiver {
             // width, is left out and the strip shows it as out of reach. It
             // used to be a fault, and restoring a session tuned elsewhere
             // raised one per channel for something the dial fixes.
-            if spec.offset_hz.abs() > plan.eff_rate() / 2.0 || plan.eff_rate() < spec.min_rate() {
+            if !spec.fits_rate(plan.eff_rate()) {
                 continue;
             }
             let of = |what: &str| -> Option<NodeId> {
@@ -2756,7 +2771,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     let mut tails: Vec<(Source, &ChannelSpec)> = Vec::new();
     let mut fronts: Vec<u64> = Vec::new();
     for spec in &plan.channels {
-        if spec.offset_hz.abs() > rate / 2.0 || rate < spec.min_rate() {
+        if !spec.fits_rate(rate) {
             continue;
         }
         let tail = channel_stages(p, head, spec, plan.center.as_f64(), rate);
@@ -2778,7 +2793,11 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         if let Some(port) = port {
             tails.push((Source::Stage(tail, port), spec));
         }
-        if spec.mode.is_decode() {
+        // Only if what it ends in is something the packet bus reads. A
+        // DVB-T channel ends in a transport stream, which is bytes for a
+        // stage above rather than packets for a list, and wiring it to the
+        // bus took the whole graph down.
+        if spec.mode.is_decode() && p.stage(tail).is_some_and(|s| feeds_bus(&s.kind)) {
             fronts.push(tail);
         }
     }
@@ -4456,6 +4475,70 @@ pub(crate) mod tests {
             assert_eq!(rx.channels().len(), 1, "{}", proto.id());
             assert!(rx.refused.is_none(), "{}: {:?}", proto.id(), rx.refused);
         }
+    }
+
+    /// The span a decoder says it can read is a span it is given.
+    ///
+    /// The strip used to demand twice the channel's width, which is a guess,
+    /// and the guess refused DVB-T: an 8 MHz channel read from 9.142857 MS/s,
+    /// because the standard says so. A capture opened at its own rate then
+    /// drew no front end, no picture and no reason.
+    #[test]
+    fn a_channel_is_built_in_the_span_its_decoder_asks_for() {
+        for proto in nodes::protocol::all() {
+            let shape = proto.shape();
+            if shape.min_rate_hz <= 0.0 {
+                continue;
+            }
+            // A whole number of samples a second, as every recording and
+            // every radio's rate control gives.
+            let rate = shape.min_rate_hz.floor();
+            let mut p = plan(rate, Hz(proto.default_hz() as u64));
+            p.fronts.clear();
+            let mut spec = chan(1, 0.0, Demod::Nfm);
+            spec.mode = ChanMode::Decode(proto.id().to_string());
+            p.channels = vec![spec];
+            assert!(
+                derived_patch(&p).stages().iter().any(|s| s.kind == proto.id()),
+                "{}: no front end at {:.3} MS/s",
+                proto.id(),
+                rate / 1e6
+            );
+            let rx = Receiver::build(&p, Sinks::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", proto.id()));
+            assert!(rx.refused.is_none(), "{}: {:?}", proto.id(), rx.refused);
+        }
+    }
+
+    /// A decoder whose output is not packets is not wired to the packet bus.
+    ///
+    /// DVB-T puts out a transport stream, which is bytes for a stage above
+    /// rather than a line in a list. Wired to the bus it was rejected at
+    /// negotiation, and the whole graph came down with it: no spectrum, no
+    /// audio, no picture, and a message about the packet log.
+    #[test]
+    fn a_channel_that_puts_out_bytes_is_kept_off_the_packet_bus() {
+        let mut p = plan(9_142_857.0, Hz::mhz(429));
+        p.fronts.clear();
+        // One channel that does feed the bus, so the bus is drawn at all.
+        let mut pager = chan(1, 100_000.0, Demod::Nfm);
+        pager.mode = ChanMode::Decode("pocsag".into());
+        let mut tv = chan(2, 0.0, Demod::Nfm);
+        tv.mode = ChanMode::Decode("dvbt".into());
+        p.channels = vec![pager, tv];
+
+        let patch = derived_patch(&p);
+        let dvbt = patch.stages().iter().find(|s| s.kind == "dvbt").expect("the multiplex");
+        assert!(
+            !patch.links().iter().any(|l| {
+                l.to.0 == derived::BUS
+                    && matches!(l.from, crate::patch::Source::Stage(f, _) if f == dvbt.id)
+            }),
+            "a transport stream was wired into the packet bus"
+        );
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+        assert_eq!(rx.channels().len(), 2);
     }
 
     #[test]

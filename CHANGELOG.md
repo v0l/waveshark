@@ -47,6 +47,10 @@ the code is in the commit log.
 
 ### Fixed
 
+- A DVB-T channel on the strip built no decoder, so no picture ever came.
+- A DVB-T channel took the whole graph down over the packet log.
+- Restarting a source switched decoding back on, whatever the switch said.
+- A channel the span was too narrow for vanished without saying so.
 - An agent refusing the whole MCP tool list over a schema that described
   nothing.
 - A half-fetched speech model was picked and read nothing, with no sign of why.

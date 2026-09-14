@@ -86,8 +86,18 @@ impl ChanMode {
             ChanMode::Audio(d) => d.if_rate().max(bandwidth * IF_HEADROOM),
             // The front end mixes and decimates its own channel out of
             // whatever it is handed, so what it needs is a stream that holds
-            // the channel at all.
-            ChanMode::Decode(_) | ChanMode::Auto => bandwidth * 2.0,
+            // the channel at all. Where the protocol says what that is, it
+            // is taken: twice the width is a guess, and a guess refuses
+            // DVB-T, whose 8 MHz channel is read from a stream only 1.14
+            // times as wide because the standard says so.
+            // A span-wide decoder reads less than its whole allocation on
+            // purpose, so the declared rate stands alone rather than being
+            // held up to the width.
+            ChanMode::Decode(kind) => nodes::protocol::by_id(kind)
+                .map(|p| p.shape().min_rate_hz)
+                .filter(|r| *r > 0.0)
+                .unwrap_or(bandwidth * 2.0),
+            ChanMode::Auto => bandwidth * 2.0,
         }
     }
 
@@ -642,6 +652,17 @@ impl ChannelSpec {
     /// The least span this channel can be built in, at its own width.
     pub fn min_rate(&self) -> f64 {
         self.mode.min_rate_for(self.bandwidth())
+    }
+
+    /// Whether a span at this rate covers the channel and can hold it.
+    ///
+    /// The rate is allowed a part in a million under, because a standard's
+    /// rate is not always a whole number of hertz while a recording's always
+    /// is: DVB-T asks for 64/7 MS/s, which is 9142857.14, and a file at
+    /// 9142857 is that stream. Compared exactly, the receiver drops the
+    /// channel for a seventh of a hertz.
+    pub fn fits_rate(&self, rate: f64) -> bool {
+        self.offset_hz.abs() <= rate / 2.0 && rate >= self.min_rate() * (1.0 - 1e-6)
     }
 }
 
