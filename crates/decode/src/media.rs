@@ -53,7 +53,9 @@ pub struct Sound {
 pub struct Picture {
     pub width: usize,
     pub height: usize,
-    /// Three bytes a pixel, already in the studio range television uses.
+    /// Four bytes a pixel, red, green, blue and an opaque alpha: what a
+    /// texture takes, so nothing between here and the screen has to walk
+    /// over two million pixels to widen them.
     pub rgb: Vec<u8>,
     /// When it is shown, in seconds on the stream's own clock, where the
     /// stream said.
@@ -232,7 +234,7 @@ fn run(
             if let Some(p) = &on {
                 for index in [p.video, p.sound].into_iter().flatten() {
                     if let Some(s) = info.streams.iter().find(|s| s.index as i32 == index) {
-                        decoder.setup_decoder(s, None)?;
+                        decoder.setup_decoder(s, Some(threads()))?;
                     }
                 }
             }
@@ -296,6 +298,16 @@ fn pick(
     (video.is_some() || sound.is_some()).then_some(Programme { video, sound, service })
 }
 
+/// What to tell a decoder about threads.
+///
+/// One thread reads a 1080i broadcast at about one and a half times real
+/// time on this machine, which is no margin at all once the radio and the
+/// demodulator are on the same processor. Frame threading costs a picture or
+/// two of latency and nothing else.
+fn threads() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("threads".into(), "auto".into())])
+}
+
 /// When a frame is shown or heard, in seconds on the stream's own clock.
 fn stamp(frame: &ffmpeg_rs_raw::AvFrameRef) -> Option<f64> {
     (frame.pts != ffmpeg_rs_raw::ffmpeg_sys_the_third::AV_NOPTS_VALUE)
@@ -333,13 +345,13 @@ fn send(
     if w == 0 || h == 0 {
         return true;
     }
-    let Ok(rgb) = scaler.process_frame(frame, w, h, AVPixelFormat::RGB24) else {
+    let Ok(rgb) = scaler.process_frame(frame, w, h, AVPixelFormat::RGBA) else {
         return true;
     };
     // A scaled frame is one plane with a stride that may be wider than the
     // picture, so the rows are copied rather than the buffer.
     let stride = rgb.linesize[0] as usize;
-    let row = w as usize * 3;
+    let row = w as usize * 4;
     let mut pixels = vec![0u8; row * h as usize];
     unsafe {
         let src = rgb.data[0];

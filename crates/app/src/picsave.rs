@@ -203,6 +203,9 @@ fn save_png(f: &VideoFrame, path: &std::path::Path) -> std::io::Result<()> {
     }
     let rgb: std::borrow::Cow<'_, [u8]> = match f.pixels {
         Pixels::Rgb8 => std::borrow::Cow::Borrowed(&f.samples),
+        Pixels::Rgba8 => std::borrow::Cow::Owned(
+            f.samples.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect(),
+        ),
         Pixels::Luma8 => {
             std::borrow::Cow::Owned(f.samples.iter().flat_map(|&v| [v, v, v]).collect())
         }

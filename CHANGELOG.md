@@ -44,7 +44,7 @@ the code is in the commit log.
 
 - The MCP server is on by default, on 127.0.0.1:8931. `--mcp-listen off`
   turns it off, and a port or host:port still moves it.
-- DVB-T decodes faster than real time on a modern x86.
+- DVB-T decodes at twice real time on a modern x86.
 - SSTV holds up better on a weak signal.
 
 ### Fixed

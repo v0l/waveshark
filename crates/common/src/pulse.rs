@@ -531,6 +531,14 @@ pub enum Pixels {
     Luma8,
     /// Three bytes a pixel, red then green then blue.
     Rgb8,
+    /// Four bytes a pixel, red, green, blue and an alpha nothing sets to
+    /// anything but opaque.
+    ///
+    /// It exists because the screen wants it: every texture is four bytes a
+    /// pixel, so a picture that arrives as three is expanded pixel by pixel
+    /// on the thread that paints. A decoder that can put out four for the
+    /// same work should.
+    Rgba8,
 }
 
 impl Pixels {
@@ -538,6 +546,7 @@ impl Pixels {
         match self {
             Self::Luma8 => 1,
             Self::Rgb8 => 3,
+            Self::Rgba8 => 4,
         }
     }
 }
