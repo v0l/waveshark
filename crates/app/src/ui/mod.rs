@@ -854,18 +854,6 @@ impl App {
             return;
         }
         self.apply_radio_settings();
-        let want = self.saved.clone();
-        if !want.dc_block {
-            self.send(Cmd::DcBlock(false));
-        }
-        if !want.decode_on {
-            self.send(Cmd::Decode(false));
-        }
-        if want.manual_chain {
-            let mut cmds = std::mem::take(&mut self.cmds);
-            self.chain.set_manual(true, &mut cmds);
-            self.cmds = cmds;
-        }
     }
 
     /// Tell the tracker where the receiver is, so a single position frame
@@ -1112,38 +1100,17 @@ impl App {
             self.scope.fft,
             move || c.request_repaint(),
         ));
-        if self.zoom > 1 {
-            self.send(Cmd::Zoom(self.zoom));
+        for cmd in self.startup_cmds() {
+            self.send(cmd);
         }
-        if let Some(r) = self.record_dir.clone() {
-            self.send(Cmd::Record(Some(r)));
-        }
-        // A new radio thread has a new graph, whose log and capture are at
-        // their defaults until they are told otherwise.
         // The thread opens the default speaker at startup; this puts the one
         // the session asked for in its place, and hands over the microphone
         // to use when a channel is keyed.
         if !self.audio_out.is_empty() || !self.audio_in.is_empty() {
             self.send_audio();
         }
-        self.send(Cmd::PacketLogCap(self.log_cap_mb.map(|mb| mb << 20)));
-        self.send(Cmd::CaptureCap(self.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)));
-        if self.capture {
-            self.send(Cmd::CaptureIq(true));
-        }
-        // The log is a node in the graph, so a new radio thread means a new
-        // graph and it has to be told where to write again.
-        if let Some(d) = self.log.path.clone() {
-            self.send(Cmd::PacketLog(Some(d)));
-        }
-        // The survey and the GPS are the same: both belong to the graph and
-        // the thread that had them is gone.
-        if let Some(p) = self.survey.path.clone() {
-            self.send(Cmd::Survey(Some(p)));
-        }
-        if let Some(t) = self.survey.gps.clone() {
-            self.send(Cmd::Gps(Some(t)));
-        }
+        // The uploads carry an account or a promise rather than a value, so
+        // each is restored by the same call that switches it on.
         if self.survey.wigle.on {
             self.apply_wigle();
         }
@@ -1153,43 +1120,60 @@ impl App {
         if self.survey.homeassistant.on {
             self.apply_homeassistant();
         }
-        // Same for the feeds and the station position: they belong to the
-        // graph, and a new radio thread has built a new one.
-        if !self.feeds.is_empty() {
-            self.send(Cmd::Feeds(self.feeds.clone()));
-        }
-        if let Some((lat, lon)) = self.location {
-            self.send(Cmd::Location(lat, lon));
-        }
-        // Decoding and the DC blocker are the graph's too, and a new thread
-        // builds its graph with both on: stopping and starting a source put
-        // every front end of the scanner table back into a receiver whose
-        // switch said decoding was off.
-        self.send(Cmd::Decode(self.decode_on));
-        self.send(Cmd::DcBlock(self.dc_block));
-        // The spectrum's frame rate and averaging live in the graph, so a new
-        // radio thread has them at their defaults until it is told otherwise.
-        self.send(Cmd::Refresh(self.scope.refresh));
-        self.send(Cmd::Smoothing(self.scope.smoothing));
-        // Same for the bus: a new thread has one at its defaults.
-        self.send(Cmd::Volume { volume: self.audio.volume, muted: self.audio.muted });
-        self.send(Cmd::CallVolume { volume: self.audio.call_volume, muted: self.audio.call_muted });
-        self.send(Cmd::CallAgc(self.audio.call_agc));
-        // And what was changed about the graph goes back on top of it
-        // before anything else settles: the alternative is a receiver that
-        // runs the automatic chain for a moment and then rebuilds into the
-        // edited one.
-        if !self.chain.edits.is_empty() {
-            self.send(Cmd::Edits(self.chain.edits.clone()));
-        }
-        if !self.calls.subs.is_empty() {
-            self.send(Cmd::CallSubs(self.calls.subs.clone()));
-        }
         // Whatever the radio was set to has to be pushed at it again: a new
         // thread means a freshly opened device at its defaults. Start and
         // reset are the same path through here.
         self.radio_dirty = true;
         self.reset_waterfall();
+    }
+
+    /// Everything a freshly started radio thread has to be told.
+    ///
+    /// A thread builds its graph from its own defaults: no channels, the
+    /// scanner table running, the DC blocker in, nothing being recorded and
+    /// no picture watched. Every one of those is the operator's, so a source
+    /// stopped and started came back decoding a band nobody asked for and
+    /// without the channel that was on the strip a second earlier.
+    ///
+    /// Built from the live state rather than the session, because the two
+    /// differ as soon as anything is changed, and returned as a list so the
+    /// whole of it can be read in a test.
+    fn startup_cmds(&self) -> Vec<Cmd> {
+        let mut cmds = vec![
+            // The channels first: everything below is about a graph that
+            // has them in it.
+            Cmd::Channels(self.channel_specs()),
+            Cmd::Zoom(self.zoom),
+            Cmd::Decode(self.decode_on),
+            Cmd::DcBlock(self.dc_block),
+            Cmd::Manual(self.chain.manual()),
+            // The spectrum, and the bus with every level on it.
+            Cmd::Refresh(self.scope.refresh),
+            Cmd::Smoothing(self.scope.smoothing),
+            Cmd::Volume { volume: self.audio.volume, muted: self.audio.muted },
+            Cmd::CallVolume { volume: self.audio.call_volume, muted: self.audio.call_muted },
+            Cmd::CallAgc(self.audio.call_agc),
+            Cmd::CallSubs(self.calls.subs.clone()),
+            Cmd::WatchVideo(self.video.rules()),
+            // What writes to disk.
+            Cmd::PacketLogCap(self.log_cap_mb.map(|mb| mb << 20)),
+            Cmd::CaptureCap(self.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)),
+            Cmd::CaptureIq(self.capture),
+            Cmd::PacketLog(self.log.path.clone()),
+            Cmd::Record(self.record_dir.clone()),
+            Cmd::Survey(self.survey.path.clone()),
+            Cmd::Gps(self.survey.gps.clone()),
+            Cmd::Feeds(self.feeds.clone()),
+        ];
+        if let Some((lat, lon)) = self.location {
+            cmds.push(Cmd::Location(lat, lon));
+        }
+        // Last, so the edited graph is the first one that settles rather
+        // than the automatic one rebuilt a moment later.
+        if !self.chain.edits.is_empty() {
+            cmds.push(Cmd::Edits(self.chain.edits.clone()));
+        }
+        cmds
     }
 
     /// Release the radio without quitting.

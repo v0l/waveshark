@@ -43,6 +43,17 @@ pub(super) struct VideoState {
     watching_label: Option<String>,
 }
 
+impl VideoState {
+    /// What the bus should publish: the one transmission being watched, or
+    /// whatever comes.
+    pub(super) fn rules(&self) -> Vec<crate::videobus::Rule> {
+        match &self.watching {
+            Some(k) => vec![crate::videobus::Rule::Channel(k.clone())],
+            None => vec![crate::videobus::Rule::Everything],
+        }
+    }
+}
+
 pub(super) struct VideoPane<'a> {
     pub st: &'a mut VideoState,
     /// The newest field, or `None` when nothing is producing pictures.
