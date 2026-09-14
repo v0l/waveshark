@@ -251,17 +251,16 @@ impl CodeRate {
         }
     }
 
-    /// Which of the mother code's two outputs each transmitted bit is, over
-    /// one puncturing period: 0 is X, 1 is Y. EN 300 744 table 3, read as
-    /// the standard writes the pattern out: X1Y1, X1Y1Y2, X1Y1Y2X3,
-    /// X1Y1Y2X3Y4X5, X1Y1Y2Y3Y4X5Y6X7.
-    pub const fn pattern(self) -> &'static [(usize, usize)] {
+    /// Which mother bits the transmitter sends, one entry a bit in the order
+    /// X1 Y1 X2 Y2 and so on. EN 300 744 table 3, which writes the kept bits
+    /// out as X1Y1, X1Y1Y2, X1Y1Y2X3, X1Y1Y2X3Y4X5 and X1Y1Y2Y3Y4X5Y6X7.
+    pub const fn mask(self) -> &'static [u8] {
         match self {
-            CodeRate::R1_2 => &[(0, 0), (0, 1)],
-            CodeRate::R2_3 => &[(0, 0), (0, 1), (1, 1)],
-            CodeRate::R3_4 => &[(0, 0), (0, 1), (1, 1), (2, 0)],
-            CodeRate::R5_6 => &[(0, 0), (0, 1), (1, 1), (2, 0), (3, 1), (4, 0)],
-            CodeRate::R7_8 => &[(0, 0), (0, 1), (1, 1), (2, 1), (3, 1), (4, 0), (5, 1), (6, 0)],
+            CodeRate::R1_2 => &[1, 1],
+            CodeRate::R2_3 => &[1, 1, 0, 1],
+            CodeRate::R3_4 => &[1, 1, 0, 1, 1, 0],
+            CodeRate::R5_6 => &[1, 1, 0, 1, 1, 0, 0, 1, 1, 0],
+            CodeRate::R7_8 => &[1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0],
         }
     }
 
