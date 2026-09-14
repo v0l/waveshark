@@ -9,6 +9,8 @@ use super::*;
 pub(super) struct Chain<'a> {
     pub st: &'a mut ChainState,
     pub cmds: &'a mut Vec<Cmd>,
+    /// The open-a-file dialog, for a stage whose setting is a path.
+    pub files: &'a mut super::state::FilePick,
 }
 
 impl Chain<'_> {
@@ -45,6 +47,7 @@ impl Chain<'_> {
         // against where it sits in the chain, and a panel covering the chain
         // hides half of that.
         let mut act = crate::chainview::Interaction { selected: self.st.sel, ..Default::default() };
+        let mut browse = None;
         if self.st.sel.is_some() {
             Panel::right("chain-inspector")
                 .default_size(260.0)
@@ -56,7 +59,7 @@ impl Chain<'_> {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if let Some(sel) = self.st.sel {
-                            act.changed = crate::chainview::inspector(ui, &topo, sel);
+                            act.changed = crate::chainview::inspector(ui, &topo, sel, &mut browse);
                         }
                     });
                 });
@@ -142,6 +145,9 @@ impl Chain<'_> {
                     }
                 });
             }
+        }
+        if let Some((node, param)) = browse {
+            self.files.ask(ui.ctx(), node, &param, "Choose a file for this stage");
         }
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
             self.cmds.push(Cmd::NodeParam(id, name, value));

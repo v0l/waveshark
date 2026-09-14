@@ -334,6 +334,19 @@ impl Line {
         resp
     }
 
+    /// The same line, cut short with an ellipsis if it does not fit.
+    ///
+    /// For a value whose length nobody here chose: a file name, a path, a
+    /// station's own idea of what to call itself. Without it the galley is
+    /// as wide as the text and the panel holding it grows to match, so one
+    /// long name makes the whole strip wide.
+    pub fn elided(mut self, ui: &mut egui::Ui) -> egui::Response {
+        self.job.wrap.max_width = ui.available_width();
+        self.job.wrap.max_rows = 1;
+        self.job.wrap.overflow_character = Some('…');
+        self.show(ui)
+    }
+
     /// The same line, allowed to wrap into the width available. For prose and
     /// for anything off the air, whose length nobody here chose.
     pub fn wrapped(mut self, ui: &mut egui::Ui) -> egui::Response {

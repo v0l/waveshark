@@ -772,3 +772,75 @@ impl Default for AudioState {
         }
     }
 }
+
+/// A file being chosen for a stage's setting.
+///
+/// One at a time, wherever it was asked for: the chain view's inspector and
+/// the channel strip both open the same dialog for the same stage, and what
+/// comes back is a command like any other setting change. The dialog runs on
+/// a thread of its own, because a window that stops painting while it is up
+/// is a window the compositor puts a "not responding" notice over.
+#[derive(Default)]
+pub(super) struct FilePick {
+    going: Option<(usize, String, poll_promise::Promise<Option<std::path::PathBuf>>)>,
+}
+
+impl FilePick {
+    /// Ask for a file for `param` on the stage with this node id.
+    pub fn ask(&mut self, ctx: &egui::Context, node: usize, param: &str, title: &str) {
+        if self.going.is_some() {
+            return;
+        }
+        // Where videos usually are on this machine, falling back to
+        // wherever the receiver was started from.
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("Videos"))
+            .filter(|d| d.is_dir())
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .unwrap_or_default();
+        let (ctx, title) = (ctx.clone(), title.to_string());
+        self.going = Some((
+            node,
+            param.to_string(),
+            poll_promise::Promise::spawn_thread("open file", move || {
+                let picked = rfd::FileDialog::new()
+                    .set_title(&title)
+                    .set_directory(&start)
+                    .add_filter(
+                        "Video and transport streams",
+                        &["ts", "m2ts", "mpg", "mpeg", "mp4", "mkv", "mov", "avi", "webm", "m4v"],
+                    )
+                    .add_filter("Anything", &["*"])
+                    .pick_file();
+                // Nothing is drawing while the dialog is up, so the frame
+                // that reads this has to be asked for.
+                ctx.request_repaint();
+                picked
+            }),
+        ));
+    }
+
+    /// Whether a dialog is up, so a second button press does nothing.
+    pub fn busy(&self) -> bool {
+        self.going.is_some()
+    }
+
+    /// Send what the dialog came back with, once it has.
+    pub fn poll(&mut self, cmds: &mut Vec<crate::radio::Cmd>) {
+        if self.going.as_ref().is_none_or(|(.., p)| p.ready().is_none()) {
+            return;
+        }
+        let Some((node, param, promise)) = self.going.take() else {
+            return;
+        };
+        let Some(path) = promise.block_and_take() else {
+            return;
+        };
+        cmds.push(crate::radio::Cmd::NodeParam(
+            node,
+            param,
+            pipeline::param::ParamValue::Text(path.display().to_string()),
+        ));
+    }
+}

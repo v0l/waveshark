@@ -2256,6 +2256,8 @@ pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
         TxMode::Am => (300.0, 4_000.0),
         // Broadcast, where 15 kHz is the standard and the pilot is above it.
         TxMode::Wfm => (30.0, 15_000.0),
+        // No audio anywhere in it: what a data mode transmits is bytes.
+        TxMode::Digital(_) => (0.0, 0.0),
     }
 }
 
@@ -2407,52 +2409,68 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // on air is a carrier full of holes and nothing else.
         p.connect(Source::Span, (derived::TX_CLOCK, 0));
 
-        let band = tx_audio_band(tx.mode);
-        let (kind, mut settings) = match tx.spec.source {
-            TxSource::Mic => {
-                let mut s = Settings::new();
-                s.insert("level".into(), pipeline::ParamValue::Float(tx.spec.mic_gain as f64));
-                // What the receiving radio de-emphasises by: 750 us on a
-                // voice channel, 50 us on broadcast FM in Europe, nothing
-                // on AM.
-                let emphasis = match tx.mode {
-                    TxMode::Nfm | TxMode::Fm | TxMode::Carrier => 750.0,
-                    TxMode::Wfm => 50.0,
-                    TxMode::Am => 0.0,
-                };
-                s.insert("emphasis_us".into(), pipeline::ParamValue::Float(emphasis));
-                ("mic", s)
-            }
-            TxSource::Tone => {
-                let mut s = Settings::new();
-                s.insert("hz".into(), pipeline::ParamValue::Float(tx.spec.tone_hz.max(1.0)));
-                // A carrier is a tone at nothing: the modulator sees silence
-                // and leaves the carrier where it is.
-                let level = match tx.mode {
-                    TxMode::Carrier => 0.0,
-                    _ => 0.8,
-                };
-                s.insert("level".into(), pipeline::ParamValue::Float(level));
-                ("tone", s)
-            }
-        };
-        settings.insert("low_hz".into(), pipeline::ParamValue::Float(band.0));
-        settings.insert("high_hz".into(), pipeline::ParamValue::Float(band.1));
-        p.add_derived(derived::TX_SOURCE, kind, settings);
-        p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
+        // A data mode's chain comes off the protocol registry: its source is
+        // not a microphone and its modulator is none of the four below.
+        if let TxMode::Digital(id) = tx.mode {
+            let chain = nodes::protocol::all()
+                .iter()
+                .find(|p| p.id() == id)
+                .and_then(|p| p.transmit())
+                .expect("a digital transmit mode names a protocol that transmits");
+            p.add_derived(derived::TX_SOURCE, &chain.source.kind, chain.source.settings);
+            p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
+            p.add_derived(derived::TX_MOD, &chain.modulator.kind, chain.modulator.settings);
+            p.connect(Source::Stage(derived::TX_SOURCE, 0), (derived::TX_MOD, 0));
+        } else {
+            let band = tx_audio_band(tx.mode);
+            let (kind, mut settings) = match tx.spec.source {
+                TxSource::Mic => {
+                    let mut s = Settings::new();
+                    s.insert("level".into(), pipeline::ParamValue::Float(tx.spec.mic_gain as f64));
+                    // What the receiving radio de-emphasises by: 750 us on a
+                    // voice channel, 50 us on broadcast FM in Europe, nothing
+                    // on AM.
+                    let emphasis = match tx.mode {
+                        TxMode::Nfm | TxMode::Fm | TxMode::Carrier => 750.0,
+                        TxMode::Wfm => 50.0,
+                        TxMode::Am => 0.0,
+                        TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+                    };
+                    s.insert("emphasis_us".into(), pipeline::ParamValue::Float(emphasis));
+                    ("mic", s)
+                }
+                TxSource::Tone => {
+                    let mut s = Settings::new();
+                    s.insert("hz".into(), pipeline::ParamValue::Float(tx.spec.tone_hz.max(1.0)));
+                    // A carrier is a tone at nothing: the modulator sees silence
+                    // and leaves the carrier where it is.
+                    let level = match tx.mode {
+                        TxMode::Carrier => 0.0,
+                        _ => 0.8,
+                    };
+                    s.insert("level".into(), pipeline::ParamValue::Float(level));
+                    ("tone", s)
+                }
+            };
+            settings.insert("low_hz".into(), pipeline::ParamValue::Float(band.0));
+            settings.insert("high_hz".into(), pipeline::ParamValue::Float(band.1));
+            p.add_derived(derived::TX_SOURCE, kind, settings);
+            p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
 
-        let (mod_kind, deviation) = match tx.mode {
-            TxMode::Nfm | TxMode::Carrier => ("fm_mod", nodes::NBFM_DEVIATION_HZ),
-            TxMode::Fm => ("fm_mod", nodes::FM_DEVIATION_HZ),
-            TxMode::Wfm => ("fm_mod", nodes::WBFM_DEVIATION_HZ),
-            TxMode::Am => ("am_mod", 0.0),
-        };
-        let mut m = Settings::new();
-        if deviation > 0.0 {
-            m.insert("deviation_hz".into(), pipeline::ParamValue::Float(deviation));
+            let (mod_kind, deviation) = match tx.mode {
+                TxMode::Nfm | TxMode::Carrier => ("fm_mod", nodes::NBFM_DEVIATION_HZ),
+                TxMode::Fm => ("fm_mod", nodes::FM_DEVIATION_HZ),
+                TxMode::Wfm => ("fm_mod", nodes::WBFM_DEVIATION_HZ),
+                TxMode::Am => ("am_mod", 0.0),
+                TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+            };
+            let mut m = Settings::new();
+            if deviation > 0.0 {
+                m.insert("deviation_hz".into(), pipeline::ParamValue::Float(deviation));
+            }
+            p.add_derived(derived::TX_MOD, mod_kind, m);
+            p.connect(Source::Stage(derived::TX_SOURCE, 0), (derived::TX_MOD, 0));
         }
-        p.add_derived(derived::TX_MOD, mod_kind, m);
-        p.connect(Source::Stage(derived::TX_SOURCE, 0), (derived::TX_MOD, 0));
 
         p.add_derived(derived::TX_RADIO, TX_RADIO, Settings::new());
         p.connect(Source::Stage(derived::TX_MOD, 0), (derived::TX_RADIO, 0));
@@ -5552,6 +5570,12 @@ pub fn transmit_graph(
         TxMode::Fm => Box::new(nodes::FmModNode::new(0.0, nodes::FM_DEVIATION_HZ, 0.25)),
         TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
         TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
+        // This builds the audio transmitter on its own, for a test of the
+        // modulators. A data mode's chain is a source and a modulator off
+        // the registry, which `derived_patch` draws and the receiver runs.
+        TxMode::Digital(id) => {
+            return Err(common::Error::other(format!("{id} transmits from the receiver's patch")));
+        }
     };
     pipeline::chain(input, vec![head, modulator, Box::new(nodes::TxSinkNode::new(stream))])
 }
@@ -5948,6 +5972,186 @@ mod tx_in_graph_tests {
         for want in ["tx_clock", "tone", "fm_mod", "radio_tx"] {
             assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
         }
+    }
+
+    /// A television channel keys up as a multiplex, not as a microphone.
+    ///
+    /// What is pinned is the shape of the chain and where the stages came
+    /// from: the registry, through the protocol, rather than a list of
+    /// modes in this file.
+    #[test]
+    fn a_television_channel_transmits_its_own_multiplex() {
+        let mut plan = tests::plan(20_000_000.0, Hz(474_000_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("dvbt".into()),
+            bandwidth_hz: None,
+            volume: 0.8,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: Some(TxSpec::default()),
+        }];
+        let mode = crate::radio::tx_mode_for(&plan.channels[0].mode)
+            .expect("a television channel can be keyed");
+        assert_eq!(mode, TxMode::Digital("dvbt"));
+        assert_eq!(mode.label(), "dvbt", "the button says what the mode menu says");
+        plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(474_000_000) });
+
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let topo = rx.topology();
+        let kinds: Vec<&str> = topo.nodes.iter().map(|n| n.kind.as_str()).collect();
+        for want in ["tx_clock", "ts_source", "dvbt_mod", "radio_tx"] {
+            assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
+        }
+        assert!(!kinds.contains(&"tone"), "a multiplex is not a test tone: {kinds:?}");
+        // The modulator puts out the radio's own rate, whatever the
+        // standard's 64/7 megasamples the multiplex is built at.
+        let port = rx
+            .node_of_stage(derived::TX_MOD)
+            .and_then(|id| rx.graph.topology().nodes.iter().find(|n| n.id == id).cloned());
+        let spec = port.and_then(|n| n.outputs.first().cloned()).expect("the modulator has a port");
+        assert_eq!(spec.1.rate, 20_000_000.0);
+    }
+
+    /// A transport packet that says which packet it is in every payload
+    /// byte, so a stream read back off the air can be checked against the
+    /// file it came from.
+    fn ts_packet(n: u16) -> [u8; 188] {
+        let mut p = [0u8; 188];
+        p[0] = 0x47;
+        p[1] = 0x01;
+        p[2] = 0x23;
+        p[3] = 0x10 | (n % 16) as u8;
+        for (i, b) in p[4..].iter_mut().enumerate() {
+            *b = (i as u16).wrapping_mul(7).wrapping_add(n) as u8;
+        }
+        p
+    }
+
+    /// Read a span back with the receiver's own DVB-T stage: its transport
+    /// stream, and what its TPS said the modulation was.
+    fn read_multiplex(air: &[C32], rate: f64) -> (Vec<u8>, Option<dsp::dvbt::Params>) {
+        use pipeline::node::Node;
+        use pipeline::port::{Payload, PortKind};
+        let mut node = nodes::dvbt_nodes::DvbtNode::new(474_000_000.0);
+        let spec = pipeline::node::PortSpec {
+            spec: pipeline::StreamSpec::iq(rate, Hz(474_000_000)),
+            latency: 0,
+        };
+        node.negotiate(&[spec]).expect("a channel in the span");
+        let mut stream = Vec::new();
+        let mut events = Vec::new();
+        for chunk in air.chunks(65_536) {
+            let payload = Payload::Iq(chunk.to_vec());
+            let mut out = [
+                Payload::empty_of(PortKind::Bytes),
+                Payload::empty_of(PortKind::Video),
+                Payload::empty_of(PortKind::Real),
+            ];
+            let ins = [spec];
+            let (tags, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = pipeline::node::NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            node.process(&[&payload], &mut out, &mut ctx).expect("the stage runs");
+            stream.extend_from_slice(out[0].as_bytes().unwrap_or(&[]));
+        }
+        let mut frames = Vec::new();
+        stream.extend_from_slice(&node.flush(&mut frames).bytes);
+        let heard = node.heard_params();
+        (stream, heard)
+    }
+
+    /// What a keyed television channel actually puts on the air, read back
+    /// off the radio by the receiver's own decoder.
+    ///
+    /// The whole path this time: the patch the receiver derives, the stages
+    /// it builds, the samples the device is handed, and the packets that
+    /// were in the file at the other end of it.
+    #[test]
+    fn a_keyed_television_channel_puts_a_readable_multiplex_on_the_air() {
+        let path = std::env::temp_dir().join("waveshark-chain-dvbt-tx.ts");
+        let mut file = Vec::new();
+        for n in 0..240u16 {
+            file.extend_from_slice(&ts_packet(n));
+        }
+        std::fs::write(&path, &file).expect("a transport stream on the disk");
+
+        let rate = 20_000_000.0;
+        let mut plan = tests::plan(rate, Hz(474_000_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("dvbt".into()),
+            bandwidth_hz: None,
+            volume: 0.8,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: Some(TxSpec::default()),
+        }];
+        plan.tx = Some(TxPlan {
+            spec: TxSpec::default(),
+            mode: crate::radio::tx_mode_for(&plan.channels[0].mode).expect("it transmits"),
+            on_air: Hz(474_000_000),
+        });
+
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        // The multiplex is 2k QPSK 1/2 here, which locks in fewer frames
+        // than the 8k the stage starts at and so keeps the test short.
+        let modulator = rx.node_of_stage(derived::TX_MOD).expect("the modulator is in the graph");
+        let source = rx.node_of_stage(derived::TX_SOURCE).expect("the source is in the graph");
+        let params = dsp::dvbt::Params {
+            mode: dsp::dvbt::Mode::M2k,
+            guard: dsp::dvbt::Guard::G1_32,
+            constellation: dsp::dvbt::Constellation::Qpsk,
+            hierarchy: dsp::dvbt::Hierarchy::None,
+            code_rate_hp: dsp::dvbt::CodeRate::R1_2,
+            code_rate_lp: dsp::dvbt::CodeRate::R1_2,
+            cell_id: None,
+        };
+        rx.set_node_param(modulator.0, "mode", pipeline::ParamValue::Choice(0)).unwrap();
+        rx.set_node_param(modulator.0, "constellation", pipeline::ParamValue::Choice(0)).unwrap();
+        rx.set_node_param(modulator.0, "code_rate", pipeline::ParamValue::Choice(0)).unwrap();
+        rx.set_node_param(source.0, "path", pipeline::ParamValue::Text(path.display().to_string()))
+            .unwrap();
+        rx.set_node_param(source.0, "bitrate", pipeline::ParamValue::Float(params.bitrate()))
+            .unwrap();
+
+        let (mut dev, captured) =
+            sources::FileSink::in_memory(Sps(20_000_000), common::SampleFormat::Cs8);
+        assert!(rx.key(dev.start_tx().unwrap()));
+        let block = vec![C32::new(0.0, 0.0); 65_536];
+        for _ in 0..((0.45 * rate / 65_536.0).ceil() as usize) {
+            rx.process(&block).unwrap();
+        }
+        rx.unkey();
+
+        // Off the radio's own bytes, not off the graph: what is read back is
+        // what the device was given.
+        let air: Vec<C32> = captured
+            .lock()
+            .chunks_exact(2)
+            .map(|p| C32::new(p[0] as i8 as f32 / 128.0, p[1] as i8 as f32 / 128.0))
+            .collect();
+        let (stream, heard) = read_multiplex(&air, rate);
+        assert_eq!(heard, Some(params), "the TPS says what the transmitter was set to");
+        let packets = stream.len() / 188;
+        assert!(packets >= 900, "only {packets} packets came off the air");
+        let first = (0..240u16)
+            .find(|n| stream[..188] == ts_packet(*n))
+            .expect("the first packet back is one of the file's");
+        let wrong = stream
+            .chunks_exact(188)
+            .enumerate()
+            .filter(|(i, got)| *got != ts_packet(((first as usize + i) % 240) as u16))
+            .count();
+        assert_eq!(wrong, 0, "{wrong} of {packets} packets are not the ones in the file");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

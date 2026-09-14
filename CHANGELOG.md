@@ -11,6 +11,10 @@ the code is in the commit log.
 
 ### Added
 
+- Transmit a DVB-T multiplex from a transport stream file.
+- Transmit any file ffmpeg can open: it is re-encoded as a multiplex.
+- Choose what to transmit with a file dialog, on the strip or in the chain view.
+- Colour bars and a tone go on the air when no file is chosen.
 - SSTV pictures on the video pane: Martin 1 and 2, Scottie 1, 2 and DX, Robot
   36 and 72, on 144.500 or any chain with audio.
 - Every still picture is saved to `~/.local/share/waveshark/pictures`.

@@ -395,6 +395,10 @@ fn key_up(
     // it was set to MIC rather than when it was keyed: the meter has to move
     // before an operator can set a level against it.
     let src = match tx.source {
+        // A data mode transmits a file, whatever the channel's source says:
+        // refusing to key up for want of a microphone nothing will read
+        // would be refusing for no reason.
+        _ if matches!(mode, TxMode::Digital(_)) => None,
         TxSource::Mic => {
             Some(mic.as_ref().ok_or_else(|| common::Error::other("no microphone is open"))?.tap())
         }
@@ -744,6 +748,11 @@ pub enum TxMode {
     Am,
     /// An unmodulated carrier, for measuring what the transmitter is doing.
     Carrier,
+    /// A protocol with a transmit chain of its own, named by its id: the
+    /// stages come off the registry rather than from the list here, because
+    /// a data mode's source is not a microphone and its modulator is not one
+    /// of these four.
+    Digital(&'static str),
 }
 
 /// What a channel transmits, from what it receives.
@@ -760,7 +769,12 @@ pub fn tx_mode_for(mode: &ChanMode) -> Option<TxMode> {
         ChanMode::Audio(Demod::Cw) => Some(TxMode::Carrier),
         ChanMode::Audio(Demod::Usb | Demod::Lsb) => None,
         ChanMode::Auto => None,
-        ChanMode::Decode(_) => None,
+        // Whether a decoder transmits is the decoder's own answer, not a
+        // list kept here.
+        ChanMode::Decode(kind) => nodes::protocol::all()
+            .iter()
+            .find(|p| p.id() == kind && p.transmit().is_some())
+            .map(|p| TxMode::Digital(p.id())),
     }
 }
 
@@ -772,6 +786,11 @@ impl TxMode {
             Self::Wfm => "WFM",
             Self::Am => "AM",
             Self::Carrier => "CW",
+            Self::Digital(id) => nodes::protocol::all()
+                .iter()
+                .find(|p| p.id() == id)
+                .map(|p| p.label())
+                .unwrap_or(id),
         }
     }
 }

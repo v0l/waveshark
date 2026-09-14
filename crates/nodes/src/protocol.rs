@@ -455,6 +455,16 @@ pub trait Protocol: Send + Sync {
     /// found source draw the same chain.
     fn chain(&self, at: Placed) -> Vec<NodeSpec>;
 
+    /// The stages that transmit this protocol: what supplies the payload and
+    /// what modulates it, the transmit chain's mirror of [`Protocol::chain`].
+    ///
+    /// `None` for a protocol nothing can key up yet, which is most of them.
+    /// Refusing is the point: the alternative is a transmitter keyed in a
+    /// mode the other end cannot read.
+    fn transmit(&self) -> Option<TxChain> {
+        None
+    }
+
     /// Whether what this protocol reads says where the transmitter was, so
     /// the tracker is worth attaching to the bus: a squitter carrying an
     /// aircraft's own position, a vessel's, a station's beacon.
@@ -488,6 +498,16 @@ pub trait Protocol: Send + Sync {
     fn dedupe_key(&self, _p: &Packet) -> Option<Vec<u8>> {
         None
     }
+}
+
+/// What a protocol puts on the air, as the two stages a transmit chain draws
+/// between the clock and the radio.
+#[derive(Clone, Debug)]
+pub struct TxChain {
+    /// Where the payload comes from: a file, a keyer, a microphone.
+    pub source: NodeSpec,
+    /// What turns it into samples.
+    pub modulator: NodeSpec,
 }
 
 /// Every protocol compiled into this build.

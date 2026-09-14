@@ -382,6 +382,12 @@ impl Default for DvbtNode {
 }
 
 impl DvbtNode {
+    /// What the TPS says the multiplex being read is, or `None` before it
+    /// has locked.
+    pub fn heard_params(&self) -> Option<Params> {
+        self.rx.heard().params
+    }
+
     pub fn new(channel_hz: f64) -> Self {
         Self {
             channel_hz,
@@ -1083,6 +1089,21 @@ impl Protocol for Dvbt {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    fn transmit(&self) -> Option<crate::protocol::TxChain> {
+        // The source's bit rate and the modulator's parameters are the same
+        // multiplex described twice, so both come from one `Params`: a
+        // source feeding a rate the modulation cannot carry is a multiplex
+        // that stuffs or backs up.
+        let params = Params::typical();
+        Some(crate::protocol::TxChain {
+            source: NodeSpec::new(TS_SOURCE.name).f(BITRATE, params.bitrate()),
+            modulator: NodeSpec::new(DVBT_MOD.name)
+                .f(MODE, mode_choice(params.mode) as f64)
+                .f(GUARD, guard_choice(params.guard) as f64)
+                .f(CONSTELLATION, constellation_choice(params.constellation) as f64)
+                .f(CODE_RATE, code_choice(params.code_rate_hp) as f64),
+        })
+    }
 }
 
 pub const DESC: StageDesc = StageDesc {
@@ -1107,6 +1128,542 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
             None => Want::Any,
         },
     });
+    Ok(Box::new(node))
+}
+
+/// A transport stream off the disk, clocked by the radio.
+///
+/// The multiplex's bit rate is set by the modulation, not by the file, so
+/// this hands over exactly that many bytes a second and no more: a file
+/// recorded at a different rate plays fast or slow rather than running the
+/// modulator dry or backing it up. A file that runs out starts again, which
+/// is what a test card does.
+///
+/// Anything that is not already a transport stream is re-encoded into one at
+/// the multiplex's rate, so a film in a `.mkv` or a clip off a phone can be
+/// transmitted without being converted first.
+///
+/// With no file it puts out null packets, so a chain built before anybody
+/// has chosen anything transmits a real, empty multiplex rather than
+/// nothing.
+pub struct TsSourceNode {
+    path: String,
+    bitrate: f64,
+    /// The radio's rate, which is what turns a block of samples into the
+    /// length of time this has to fill.
+    rate: f64,
+    file: Option<Source>,
+    /// Bytes owed from the last block, kept as a fraction so a byte rate
+    /// that does not divide the block size still comes out right.
+    owed: f64,
+    /// Where in a packet the file's next byte belongs, so a file that does
+    /// not start on a sync byte is cut into packets the same way twice.
+    at: usize,
+    packet: Vec<u8>,
+    loops: u64,
+}
+
+impl Default for TsSourceNode {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            bitrate: Params::typical().bitrate(),
+            rate: 0.0,
+            file: None,
+            owed: 0.0,
+            at: 0,
+            packet: vec![0u8; mpegts::PACKET],
+            loops: 0,
+        }
+    }
+}
+
+impl TsSourceNode {
+    pub fn new(path: &str, bitrate: f64) -> Self {
+        let mut n = Self { path: path.into(), ..Default::default() };
+        n.bitrate = bitrate.max(1.0);
+        n.open();
+        n
+    }
+
+    fn open(&mut self) {
+        self.file = match self.path.is_empty() {
+            // Nothing chosen: colour bars and a tone rather than an empty
+            // multiplex, so a receiver tuned to the transmission shows that
+            // everything between the two is working.
+            #[cfg(feature = "ffmpeg")]
+            true => Some(Source::Encoded(decode::transcode::ToTs::bars(self.bitrate))),
+            #[cfg(not(feature = "ffmpeg"))]
+            true => None,
+            false => match std::fs::File::open(&self.path) {
+                Ok(f) => Some(self.read_as(f)),
+                Err(e) => {
+                    tracing::warn!("ts_source: {}: {e}", self.path);
+                    None
+                }
+            },
+        };
+        self.loops = 0;
+    }
+
+    /// A transport stream is read as it is; anything else goes through
+    /// ffmpeg. What it is is read off the front of the file rather than off
+    /// its name, because a transport stream is often called something else.
+    fn read_as(&self, f: std::fs::File) -> Source {
+        use std::io::Read;
+        let mut head = [0u8; 2 * mpegts::PACKET + 1];
+        let mut probe = std::io::BufReader::new(f);
+        let n = probe.read(&mut head).unwrap_or(0);
+        #[cfg(feature = "ffmpeg")]
+        if !decode::transcode::is_transport_stream(&head[..n]) {
+            tracing::info!("ts_source: re-encoding {} as a multiplex", self.path);
+            return Source::Encoded(decode::transcode::ToTs::open(&self.path, self.bitrate));
+        }
+        #[cfg(not(feature = "ffmpeg"))]
+        if !head[..n].starts_with(&[0x47]) {
+            tracing::warn!("ts_source: {} is not a transport stream", self.path);
+        }
+        let _ = n;
+        let _ = std::io::Seek::rewind(&mut probe);
+        Source::Packets(probe)
+    }
+
+    /// Times the file has been round, which is what says a transmission is
+    /// repeating rather than running out.
+    pub fn loops(&self) -> u64 {
+        self.loops
+    }
+
+    /// One packet of nothing, which is what a multiplex sends when it has
+    /// nothing: PID 0x1FFF and no payload worth reading.
+    fn null_packet(&mut self) {
+        self.packet.clear();
+        self.packet.extend_from_slice(&[0x47, 0x1F, 0xFF, 0x10]);
+        self.packet.resize(mpegts::PACKET, 0xFF);
+    }
+
+    /// The next packet from the file, or a null one where there is no file.
+    fn next_packet(&mut self) -> &[u8] {
+        use std::io::Read;
+        let Some(f) = self.file.as_mut() else {
+            self.null_packet();
+            return &self.packet;
+        };
+        self.packet.resize(mpegts::PACKET, 0);
+        let mut got = 0;
+        while got < mpegts::PACKET {
+            match f.read(&mut self.packet[got..]) {
+                Ok(0) => {
+                    // Round again from the top. Anything short of a packet is
+                    // thrown away rather than joined to the first packet of
+                    // the next pass, which would be a packet that was never
+                    // in the file. What ffmpeg is encoding starts itself
+                    // over; ending means it will send no more at all.
+                    if !f.rewind() {
+                        self.null_packet();
+                        return &self.packet;
+                    }
+                    self.loops += 1;
+                    got = 0;
+                }
+                Ok(n) => got += n,
+                Err(_) => {
+                    self.null_packet();
+                    return &self.packet;
+                }
+            }
+        }
+        &self.packet
+    }
+}
+
+impl pipeline::node::Simple for TsSourceNode {
+    fn name(&self) -> &str {
+        TS_SOURCE.name
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("ts_source needs a clock to run against"));
+        }
+        self.rate = input.spec.rate;
+        Ok(StreamSpec {
+            kind: PortKind::Bytes,
+            // The clock, passed on: what the bytes are worth in time is this
+            // stage's own business, and the modulator behind needs the
+            // radio's rate to know what to resample to.
+            rate: input.spec.rate,
+            center: input.spec.center,
+            bandwidth: input.spec.bandwidth,
+            channels: 1,
+            flow: pipeline::port::Flow::Tx,
+            domain: pipeline::port::Domain::Baseband,
+        })
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        if self.rate <= 0.0 {
+            return Ok(());
+        }
+        self.owed += input.len() as f64 / self.rate * self.bitrate / 8.0;
+        let out = output.bytes_mut();
+        while self.owed >= mpegts::PACKET as f64 {
+            self.owed -= mpegts::PACKET as f64;
+            let packet = self.next_packet().to_vec();
+            out.extend_from_slice(&packet);
+        }
+        Ok(())
+    }
+
+    fn params(&self) -> Vec<pipeline::param::Param> {
+        vec![
+            pipeline::param::Param::text(PATH, self.path.clone()).label("Transport stream"),
+            pipeline::param::Param::float(BITRATE, self.bitrate, 1.0..=100e6)
+                .label("Bit rate")
+                .unit("bit/s"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: pipeline::ParamValue) -> Result<()> {
+        match name {
+            PATH => {
+                let want = value.as_str().unwrap_or_default().to_string();
+                if want != self.path {
+                    self.path = want;
+                    self.open();
+                }
+                Ok(())
+            }
+            BITRATE => {
+                self.bitrate = value.as_f64().unwrap_or(self.bitrate).max(1.0);
+                Ok(())
+            }
+            _ => Err(common::Error::other(format!("ts_source: unknown parameter {name:?}"))),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.open();
+        self.owed = 0.0;
+    }
+}
+
+/// Where a transmitted stream comes from: the file, or ffmpeg encoding it.
+enum Source {
+    Packets(std::io::BufReader<std::fs::File>),
+    #[cfg(feature = "ffmpeg")]
+    Encoded(decode::transcode::ToTs),
+}
+
+impl std::io::Read for Source {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Packets(f) => f.read(out),
+            #[cfg(feature = "ffmpeg")]
+            Self::Encoded(t) => t.read(out),
+        }
+    }
+}
+
+impl Source {
+    /// Start the file again, or say that there is no starting it again.
+    fn rewind(&mut self) -> bool {
+        match self {
+            Self::Packets(f) => std::io::Seek::rewind(f).is_ok(),
+            // The thread starts its own next pass, so nothing arriving here
+            // means ffmpeg has stopped for good.
+            #[cfg(feature = "ffmpeg")]
+            Self::Encoded(_) => false,
+        }
+    }
+}
+
+/// A transport stream onto the air: bytes in, an 8 MHz multiplex out.
+///
+/// The modulator runs at the standard's own 64/7 MS/s whatever the radio is
+/// sampling at, and a resampler puts it on the radio's rate, so a
+/// transmission does not depend on the device happening to offer 9.142857
+/// MS/s. Short of packets it stuffs the multiplex with nulls, which is what
+/// a real one does between programmes rather than leaving a hole.
+pub struct DvbtModNode {
+    params: Params,
+    tx: DvbtModulator,
+    resample: Rational,
+    level: f32,
+    out_rate: f64,
+    /// Bytes that did not make a whole packet last block.
+    pending: Vec<u8>,
+    baseband: Vec<C32>,
+    stuffed: u64,
+    clipped: u64,
+}
+
+impl Default for DvbtModNode {
+    fn default() -> Self {
+        Self::new(Params::typical(), 0.25)
+    }
+}
+
+impl DvbtModNode {
+    pub fn new(params: Params, level: f32) -> Self {
+        Self {
+            tx: DvbtModulator::new(params),
+            resample: Rational::approx(dvbt::RATE_HZ, dvbt::RATE_HZ, 1 << 14),
+            level,
+            out_rate: 0.0,
+            pending: Vec::new(),
+            baseband: Vec::new(),
+            stuffed: 0,
+            clipped: 0,
+            params,
+        }
+    }
+
+    /// Null packets sent because the source had nothing ready. A steady
+    /// count is a source at the wrong bit rate.
+    pub fn stuffed(&self) -> u64 {
+        self.stuffed
+    }
+
+    /// Samples the level held back from clipping. OFDM peaks about ten
+    /// decibels above its own average, so a level set for the average is
+    /// what decides whether those peaks survive.
+    pub fn clipped(&self) -> u64 {
+        self.clipped
+    }
+
+    /// What the multiplex carries, which is what the source has to feed it.
+    pub fn bitrate(&self) -> f64 {
+        self.params.bitrate()
+    }
+
+    fn rebuild(&mut self) {
+        self.tx = DvbtModulator::new(self.params);
+        self.pending.clear();
+    }
+}
+
+impl pipeline::node::Simple for DvbtModNode {
+    fn name(&self) -> &str {
+        DVBT_MOD.name
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Bytes {
+            return Err(common::Error::other("dvbt_mod takes a transport stream as bytes"));
+        }
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("dvbt_mod needs the radio's rate to modulate at"));
+        }
+        if input.spec.rate < CHANNEL_WIDTH_HZ {
+            // Not refused: the chain is drawn whether or not a key is down,
+            // and refusing here would take the receiver down with it. What
+            // goes out is the multiplex filtered to the span it was given,
+            // which no receiver will read.
+            tracing::warn!(
+                "dvbt_mod: {:.3} MS/s is narrower than the 8 MHz multiplex",
+                input.spec.rate / 1e6
+            );
+        }
+        self.out_rate = input.spec.rate;
+        self.resample = Rational::approx(dvbt::RATE_HZ, self.out_rate, 1 << 14);
+        Ok(StreamSpec {
+            kind: PortKind::Iq,
+            rate: self.out_rate,
+            center: input.spec.center,
+            bandwidth: CHANNEL_WIDTH_HZ,
+            channels: 1,
+            flow: pipeline::port::Flow::Tx,
+            domain: pipeline::port::Domain::Baseband,
+        })
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(bytes) = input.as_bytes() else {
+            return Ok(());
+        };
+        self.pending.extend_from_slice(bytes);
+        self.baseband.clear();
+        while self.pending.len() >= mpegts::PACKET {
+            let packet: Vec<u8> = self.pending.drain(..mpegts::PACKET).collect();
+            self.tx.push(&packet, &mut self.baseband);
+        }
+        if self.baseband.is_empty() {
+            return Ok(());
+        }
+        let out = output.iq_mut();
+        let at = out.len();
+        self.resample.process(&self.baseband, out);
+        for v in out[at..].iter_mut() {
+            *v *= self.level;
+            if v.norm() > 1.0 {
+                *v /= v.norm();
+                self.clipped += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn params(&self) -> Vec<pipeline::param::Param> {
+        use pipeline::param::Param;
+        vec![
+            Param::choice(MODE, mode_choice(self.params.mode), labels(MODES)).label("Carriers"),
+            Param::choice(GUARD, guard_choice(self.params.guard), labels(GUARDS))
+                .label("Guard interval"),
+            Param::choice(
+                CONSTELLATION,
+                constellation_choice(self.params.constellation),
+                labels(CONSTELLATIONS),
+            )
+            .label("Constellation"),
+            Param::choice(CODE_RATE, code_choice(self.params.code_rate_hp), labels(CODE_RATES))
+                .label("Code rate"),
+            Param::float(LEVEL, self.level as f64, 0.0..=1.0).label("Level"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: pipeline::ParamValue) -> Result<()> {
+        let pick = |value: &pipeline::ParamValue, n: usize| {
+            value.as_f64().map(|v| (v as usize).min(n - 1)).unwrap_or(0)
+        };
+        match name {
+            MODE => {
+                self.params.mode = MODES[pick(&value, MODES.len())].0;
+                self.rebuild();
+                Ok(())
+            }
+            GUARD => {
+                self.params.guard = GUARDS[pick(&value, GUARDS.len())].0;
+                self.rebuild();
+                Ok(())
+            }
+            CONSTELLATION => {
+                self.params.constellation = CONSTELLATIONS[pick(&value, CONSTELLATIONS.len())].0;
+                self.rebuild();
+                Ok(())
+            }
+            CODE_RATE => {
+                let rate = CODE_RATES[pick(&value, CODE_RATES.len())].0;
+                self.params.code_rate_hp = rate;
+                self.params.code_rate_lp = rate;
+                self.rebuild();
+                Ok(())
+            }
+            LEVEL => {
+                self.level = value.as_f64().unwrap_or(0.25).clamp(0.0, 1.0) as f32;
+                Ok(())
+            }
+            _ => Err(common::Error::other(format!("dvbt_mod: unknown parameter {name:?}"))),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.rebuild();
+        self.stuffed = 0;
+        self.clipped = 0;
+    }
+}
+
+/// The modulation an operator can pick, each with the word it is known by.
+const MODES: &[(Mode, &str)] = &[(Mode::M2k, "2k"), (Mode::M8k, "8k")];
+const GUARDS: &[(dvbt::Guard, &str)] = &[
+    (dvbt::Guard::G1_32, "1/32"),
+    (dvbt::Guard::G1_16, "1/16"),
+    (dvbt::Guard::G1_8, "1/8"),
+    (dvbt::Guard::G1_4, "1/4"),
+];
+const CONSTELLATIONS: &[(dvbt::Constellation, &str)] = &[
+    (dvbt::Constellation::Qpsk, "QPSK"),
+    (dvbt::Constellation::Qam16, "16-QAM"),
+    (dvbt::Constellation::Qam64, "64-QAM"),
+];
+const CODE_RATES: &[(dvbt::CodeRate, &str)] = &[
+    (dvbt::CodeRate::R1_2, "1/2"),
+    (dvbt::CodeRate::R2_3, "2/3"),
+    (dvbt::CodeRate::R3_4, "3/4"),
+    (dvbt::CodeRate::R5_6, "5/6"),
+    (dvbt::CodeRate::R7_8, "7/8"),
+];
+
+fn labels<T>(list: &[(T, &str)]) -> Vec<String> {
+    list.iter().map(|(_, l)| (*l).to_string()).collect()
+}
+
+fn mode_choice(mode: Mode) -> usize {
+    MODES.iter().position(|(m, _)| *m == mode).unwrap_or(1)
+}
+
+fn guard_choice(guard: dvbt::Guard) -> usize {
+    GUARDS.iter().position(|(g, _)| *g == guard).unwrap_or(0)
+}
+
+fn constellation_choice(c: dvbt::Constellation) -> usize {
+    CONSTELLATIONS.iter().position(|(x, _)| *x == c).unwrap_or(2)
+}
+
+fn code_choice(r: dvbt::CodeRate) -> usize {
+    CODE_RATES.iter().position(|(x, _)| *x == r).unwrap_or(1)
+}
+
+/// What a transmit chain's two stages are called and what they read.
+const PATH: &str = "path";
+const BITRATE: &str = "bitrate";
+const MODE: &str = "mode";
+const GUARD: &str = "guard";
+const CONSTELLATION: &str = "constellation";
+const CODE_RATE: &str = "code_rate";
+const LEVEL: &str = "level";
+
+pub const TS_SOURCE: StageDesc = StageDesc {
+    name: "ts_source",
+    summary: "Read a transport stream off the disk at the multiplex's own bit rate",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_ts_source(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(TsSourceNode::new(
+        s.str_or(PATH, ""),
+        s.f64_or(BITRATE, Params::typical().bitrate()),
+    )))
+}
+
+pub const DVBT_MOD: StageDesc = StageDesc {
+    name: "dvbt_mod",
+    summary: "Modulate a transport stream as a DVB-T multiplex",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_dvbt_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut node = DvbtModNode::default();
+    for (name, n) in [
+        (MODE, MODES.len()),
+        (GUARD, GUARDS.len()),
+        (CONSTELLATION, CONSTELLATIONS.len()),
+        (CODE_RATE, CODE_RATES.len()),
+    ] {
+        if let Some(v) = s.get(name).and_then(|v| v.as_f64()) {
+            pipeline::node::Node::set_param(
+                &mut node,
+                name,
+                pipeline::ParamValue::Float(v.min(n as f64 - 1.0)),
+            )?;
+        }
+    }
+    if let Some(v) = s.get(LEVEL).and_then(|v| v.as_f64()) {
+        pipeline::node::Node::set_param(&mut node, LEVEL, pipeline::ParamValue::Float(v))?;
+    }
     Ok(Box::new(node))
 }
 
@@ -1216,7 +1773,7 @@ mod tests {
 
 #[cfg(test)]
 mod node_tests {
-    use super::tests::on_air;
+    use super::tests::{on_air, packet};
     use super::*;
     use common::Hz;
     use dvbt::{CodeRate, Constellation, Guard, Hierarchy};
@@ -1250,6 +1807,126 @@ mod node_tests {
     /// The whole stage: a multiplex two megahertz off the middle of a 20 MS/s
     /// span, mixed down, resampled to a rate that is not a whole number of
     /// hertz, decoded, and its own tables read back off it.
+    /// The transmit chain as the graph builds it, read back by the receiver.
+    ///
+    /// Both stages as nodes rather than the modulator on its own: what this
+    /// pins is that a file on the disk, clocked by the radio's own rate and
+    /// resampled off the standard's 64/7 MS/s, comes back as the packets
+    /// that were in the file.
+    #[test]
+    fn a_file_transmitted_as_a_multiplex_is_read_back_off_the_air() {
+        use pipeline::node::Simple;
+
+        let params = Params {
+            mode: Mode::M2k,
+            guard: Guard::G1_32,
+            constellation: Constellation::Qpsk,
+            hierarchy: Hierarchy::None,
+            code_rate_hp: CodeRate::R1_2,
+            code_rate_lp: CodeRate::R1_2,
+            cell_id: Some(0x2F1A),
+        };
+        let path = std::env::temp_dir().join("waveshark-dvbt-tx-test.ts");
+        let mut file = Vec::new();
+        for n in 0..240u16 {
+            file.extend_from_slice(&packet(n));
+        }
+        std::fs::write(&path, &file).expect("a transport stream on the disk");
+
+        // Four hundred milliseconds of radio, which is long enough for the
+        // receiver to lock the TPS, start the inner decoder and read packets
+        // out of the third super frame.
+        let radio_hz = 20_000_000.0;
+        let block = 65_536;
+        let blocks = (0.45 * radio_hz / block as f64).ceil() as usize;
+
+        let mut source = TsSourceNode::new(path.to_str().unwrap_or_default(), params.bitrate());
+        let mut modulator = DvbtModNode::new(params, 0.25);
+        let clock = PortSpec {
+            spec: StreamSpec {
+                kind: PortKind::Real,
+                rate: radio_hz,
+                center: Hz(474_000_000),
+                channels: 1,
+                flow: pipeline::port::Flow::Tx,
+                ..Default::default()
+            },
+            latency: 0,
+        };
+        let bytes = PortSpec {
+            spec: Simple::negotiate(&mut source, &clock).expect("the source takes a clock"),
+            latency: 0,
+        };
+        let air = Simple::negotiate(&mut modulator, &bytes).expect("the modulator takes bytes");
+        assert_eq!(air.kind, PortKind::Iq);
+        assert_eq!(air.rate, radio_hz, "the modulator puts out the radio's rate");
+
+        let mut span = Vec::new();
+        let mut sent = 0usize;
+        for _ in 0..blocks {
+            let mut ts = Payload::empty_of(PortKind::Bytes);
+            let mut iq = Payload::empty_of(PortKind::Iq);
+            let ins = [clock];
+            let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            Simple::process(&mut source, &Payload::Real(vec![0.0; block]), &mut ts, &mut ctx)
+                .expect("the source runs");
+            sent += ts.as_bytes().map(|b| b.len()).unwrap_or(0);
+            Simple::process(&mut modulator, &ts, &mut iq, &mut ctx).expect("the modulator runs");
+            span.extend_from_slice(iq.as_iq().unwrap_or(&[]));
+        }
+        // The bit rate is the multiplex's, so the bytes taken off the file
+        // and the samples put on the air are both what that much time holds.
+        let seconds = blocks as f64 * block as f64 / radio_hz;
+        let want_bytes = seconds * params.bitrate() / 8.0;
+        assert!(
+            (sent as f64 - want_bytes).abs() < 2.0 * mpegts::PACKET as f64,
+            "{sent} bytes off the file, {want_bytes:.0} in {seconds:.3} s of multiplex"
+        );
+        assert!(
+            (span.len() as f64 - seconds * radio_hz).abs() < 0.02 * seconds * radio_hz,
+            "{} samples for {seconds:.3} s at {radio_hz}",
+            span.len()
+        );
+
+        let mut node = DvbtNode::new(474_000_000.0);
+        let spec = PortSpec { spec: StreamSpec::iq(radio_hz, Hz(474_000_000)), latency: 0 };
+        node.negotiate(&[spec]).expect("a channel in the span");
+        let mut stream = Vec::new();
+        let mut events = Vec::new();
+        for chunk in span.chunks(block) {
+            let payload = Payload::Iq(chunk.to_vec());
+            let mut out = [
+                Payload::empty_of(PortKind::Bytes),
+                Payload::empty_of(PortKind::Video),
+                Payload::empty_of(PortKind::Real),
+            ];
+            let ins = [spec];
+            let (tags, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            Node::process(&mut node, &[&payload], &mut out, &mut ctx).expect("the stage runs");
+            stream.extend_from_slice(out[0].as_bytes().unwrap_or(&[]));
+        }
+        let mut frames = Vec::new();
+        stream.extend_from_slice(&node.flush(&mut frames).bytes);
+
+        assert_eq!(node.rx.heard().params, Some(params), "the TPS says what was transmitted");
+        let packets = stream.len() / mpegts::PACKET;
+        assert!(packets >= 900, "only {packets} packets came back");
+        // Every packet is one of the file's, and they arrive in the order
+        // they were written.
+        let first = (0..240u16)
+            .find(|n| stream[..mpegts::PACKET] == packet(*n))
+            .expect("the first packet back is one of the file's");
+        let mut wrong = 0;
+        for (i, got) in stream.chunks_exact(mpegts::PACKET).enumerate() {
+            let want = packet(((first as usize + i) % 240) as u16);
+            wrong += (got != want) as usize;
+        }
+        assert_eq!(wrong, 0, "{wrong} of {packets} packets are not the ones in the file");
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn a_multiplex_off_centre_in_a_wide_span_is_read() {
         let params = Params {
