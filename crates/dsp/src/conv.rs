@@ -1,132 +1,159 @@
-//! The rate 1/2, constraint length 7 convolutional code, soft decoded.
+//! Convolutional codes, soft decoded: one trellis for every standard here.
 //!
-//! G1 = 171 octal and G2 = 133 octal is the industry code: DVB-T, DVB-S,
-//! 802.11a/g and most of the satellite links use it, punctured to whatever
-//! rate they want. This module is the code and not the standard that puts it
-//! to work, so puncturing arrives as a pattern from the caller.
+//! A code is a constraint length and a list of generator polynomials, and
+//! that is all that differs between DVB-T's rate 1/2 K=7, 802.11's same code
+//! with its two outputs the other way round, TETRA's rate 1/4 K=5 and M17's
+//! rate 1/2 K=5. Writing the trellis out once per standard was four copies of
+//! the same loop, each with its own register convention, and only one of them
+//! could be made fast.
+//!
+//! A generator is a mask over the window `u D1 D2 .. D(K-1)`, the input bit
+//! at the top. So 171 octal is 1111001, which is 1 + D + D^2 + D^3 + D^6. The
+//! order of the polynomials is the order the standard transmits them in:
+//! DVB-T sends 171 first and calls it X, 802.11 sends 133 first and calls it
+//! A, and an encoder with them the wrong way round decodes its own output
+//! perfectly and reads nothing off the air.
 //!
 //! A soft value is positive for a zero bit and negative for a one, in any
-//! scale the caller likes, and a punctured bit is a zero, which costs the two
-//! hypotheses the same and so says nothing. That is what makes depuncturing
-//! free: an erased bit is a soft value of zero.
-//!
-//! Two things about the code are the standard's rather than the code's, and
-//! both are parameters here. Which output goes first: DVB-T calls 171 octal X
-//! and sends it first, 802.11 calls 133 octal A and sends that first, and an
-//! encoder with them the wrong way round decodes its own output perfectly and
-//! reads nothing off the air. And the puncturing, which arrives as a mask
-//! over the mother stream: one entry per coded bit, in transmission order,
-//! one for a bit that is sent and zero for one that is not.
+//! scale the caller likes, and a punctured bit is a zero, which costs every
+//! hypothesis the same and so says nothing. That is what makes depuncturing
+//! free: an erased bit is a soft value of zero. Puncturing arrives as a mask
+//! over the mother stream, one entry a coded bit in transmission order.
 //!
 //! The survivors are traced back over a sliding window rather than the whole
 //! stream, because a DVB-T multiplex never ends and the decisions taken more
 //! than a few constraint lengths ago have all converged on one path anyway.
+//! A frame that does end is [`Viterbi::decode_block`], which traces the whole
+//! thing at once.
 
-/// States, which is two to the constraint length less one.
-const STATES: usize = 64;
-/// Trellis steps between one pass that pulls the costs back towards zero.
-/// One branch metric is bounded by the soft values, so the costs can only
-/// climb so fast, and taking the best off every step was a pass over all
-/// sixty-four for nothing.
-const NORMALISE_EVERY: usize = 64;
+/// One convolutional code: how far back it reaches, and what it puts out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Code {
+    /// K, the input bit and the delays behind it.
+    pub constraint: usize,
+    /// The generators, in the order the standard transmits them.
+    pub polys: &'static [usize],
+}
+
+impl Code {
+    pub const fn states(&self) -> usize {
+        1 << (self.constraint - 1)
+    }
+
+    /// Coded bits out per bit in, before any puncturing.
+    pub const fn rate(&self) -> usize {
+        self.polys.len()
+    }
+}
+
+/// The industry rate 1/2, constraint length 7 code, as DVB-T names it: 171
+/// octal is X and goes first. DVB-S and most satellite links use it too.
+pub const K7_X_FIRST: Code = Code { constraint: 7, polys: &[0o171, 0o133] };
+
+/// The same code as 802.11 names it: 133 octal is A and goes first.
+pub const K7_A_FIRST: Code = Code { constraint: 7, polys: &[0o133, 0o171] };
+
+/// M17's rate 1/2, K=5: 1 + D^3 + D^4 then 1 + D + D^2 + D^4.
+pub const M17: Code = Code { constraint: 5, polys: &[0b1_0011, 0b1_1101] };
+
+/// TETRA's rate 1/4 mother code, EN 300 392-2 clause 8.2.3.1.1: 1 + D + D^4,
+/// 1 + D^2 + D^3 + D^4, 1 + D + D^2 + D^4 and 1 + D + D^3 + D^4.
+pub const TETRA_1_4: Code =
+    Code { constraint: 5, polys: &[0b1_1001, 0b1_0111, 0b1_1101, 0b1_1011] };
+
+/// TETRA's rate 1/3 mother code for speech, EN 300 392-2 clause 5.4.3.1,
+/// which is a different set from the rate 1/4 one above: 1 + D + D^2 + D^3 +
+/// D^4, 1 + D + D^3 + D^4 and 1 + D^2 + D^4.
+pub const TETRA_1_3: Code = Code { constraint: 5, polys: &[0b1_1111, 0b1_1011, 0b1_0101] };
+
+/// No puncturing: every mother bit is sent.
+pub const P_1_2: &[u8] = &[1, 1];
+
 /// How far back the survivors are traced before a bit is believed. Five
 /// constraint lengths is the usual rule; DVB-T at rate 7/8 wants more, so
 /// this is the depth every rate is decoded at.
 pub const DEPTH: usize = 96;
 
-/// The two generator polynomials over the seven bit window.
-const G1: usize = 0o171;
-const G2: usize = 0o133;
+/// Trellis steps between one pass that pulls the costs back towards zero.
+/// A branch metric is bounded by the soft values, so the costs can only climb
+/// so fast, and taking the best off every step was a pass over every state
+/// for nothing.
+const NORMALISE_EVERY: usize = 64;
 
-/// Which of the mother code's outputs the standard sends first.
+/// Where the traceback starts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum First {
-    /// 171 octal first, as DVB-T's X and Y.
+pub enum Ends {
+    /// Wherever the trellis ended up. For a stream, and for a frame whose
+    /// tail is followed by padding that is coded too.
     #[default]
-    X,
-    /// 133 octal first, as 802.11's A and B.
-    Y,
-}
-
-/// Puncturing as a mask over the mother stream: one entry a coded bit, in
-/// transmission order.
-pub const P_1_2: &[u8] = &[1, 1];
-
-/// The encoder, which exists so the decoder can be tested and so a transmit
-/// chain has one.
-#[derive(Clone, Debug, Default)]
-pub struct Encoder {
-    state: usize,
-}
-
-impl Encoder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Encode one bit into its two coded bits, X first.
-    pub fn push(&mut self, bit: u8) -> (u8, u8) {
-        let window = ((bit as usize & 1) << 6) | self.state;
-        self.state = window >> 1;
-        (parity(window & G1), parity(window & G2))
-    }
-
-    /// Encode and puncture: the coded bits a transmitter sends, in order.
-    pub fn punctured(&mut self, bits: &[u8], mask: &[u8], first: First) -> Vec<u8> {
-        let mut out = Vec::with_capacity(bits.len() * 2);
-        let mut at = 0usize;
-        for &b in bits {
-            let (x, y) = self.push(b);
-            let pair = match first {
-                First::X => [x, y],
-                First::Y => [y, x],
-            };
-            for g in pair {
-                if mask[at % mask.len()] == 1 {
-                    out.push(g);
-                }
-                at += 1;
-            }
-        }
-        out
-    }
+    Anywhere,
+    /// In state zero, because the transmitter flushed the register with
+    /// zeros and nothing followed them.
+    Zero,
 }
 
 fn parity(v: usize) -> u8 {
     (v.count_ones() & 1) as u8
 }
 
-/// What each transition of the trellis puts on the air, as a two bit number:
-/// the X output in bit 1 and the Y output in bit 0.
-///
-/// A number rather than the pair of expected amplitudes, because there are
-/// only four branch metrics in a step and looking one up beats working it
-/// out sixty-four times. That is most of the decoder's inner loop: what is
-/// left is two loads, two adds and a comparison a state.
-struct Table {
-    /// `out[state][bit]`, for the state a transition comes from.
-    out: [[u8; 2]; STATES],
+/// The encoder, which exists so the decoder can be tested and so a transmit
+/// chain has one.
+#[derive(Clone, Debug)]
+pub struct Encoder {
+    code: Code,
+    state: usize,
+    /// Coded bits sent, which is where the puncturing mask is up to.
+    sent: usize,
 }
 
-impl Table {
-    fn new() -> Self {
-        let mut out = [[0u8; 2]; STATES];
-        for (state, row) in out.iter_mut().enumerate() {
-            for (bit, cell) in row.iter_mut().enumerate() {
-                let window = (bit << 6) | state;
-                *cell = (parity(window & G1) << 1) | parity(window & G2);
+impl Encoder {
+    pub fn new(code: Code) -> Self {
+        Self { code, state: 0, sent: 0 }
+    }
+
+    pub fn reset(&mut self) {
+        self.state = 0;
+        self.sent = 0;
+    }
+
+    /// Encode one bit into its coded bits, in the order the standard sends
+    /// them.
+    pub fn push(&mut self, bit: u8, out: &mut Vec<u8>) {
+        let window = ((bit as usize & 1) << (self.code.constraint - 1)) | self.state;
+        self.state = window >> 1;
+        for &g in self.code.polys {
+            out.push(parity(window & g));
+        }
+    }
+
+    /// Encode and puncture: the coded bits a transmitter sends, in order.
+    pub fn punctured(&mut self, bits: &[u8], mask: &[u8]) -> Vec<u8> {
+        let mut mother = Vec::with_capacity(self.code.rate());
+        let mut out = Vec::with_capacity(bits.len() * self.code.rate());
+        for &b in bits {
+            mother.clear();
+            self.push(b, &mut mother);
+            for g in mother.drain(..) {
+                if mask[self.sent % mask.len()] == 1 {
+                    out.push(g);
+                }
+                self.sent += 1;
             }
         }
-        Self { out }
+        out
     }
 }
 
 /// A soft decision Viterbi decoder over a stream with no end.
 pub struct Viterbi {
-    table: Table,
-    first: First,
-    cost: [f32; STATES],
-    next: [f32; STATES],
+    code: Code,
+    /// `out[state][bit]` as the index of the branch metric it costs.
+    table: Vec<[u16; 2]>,
+    cost: Vec<f32>,
+    next: Vec<f32>,
+    /// Branch metrics of the step being worked, one per combination of coded
+    /// bits: two to the rate of them, worked out once and read per state.
+    metric: Vec<f32>,
     /// One bit per state per step: which of the two predecessors survived.
     decisions: Vec<u64>,
     depth: usize,
@@ -139,45 +166,78 @@ pub struct Viterbi {
     phase: usize,
     /// Steps since the costs were last pulled back towards zero.
     since_normal: usize,
-}
-
-impl Default for Viterbi {
-    fn default() -> Self {
-        Self::new(DEPTH)
-    }
+    ends: Ends,
+    /// Whether the code's branch metrics come in equal and opposite pairs,
+    /// which lets the trellis run as butterflies. See [`Viterbi::push_step`].
+    butterfly: bool,
 }
 
 impl Viterbi {
-    pub fn new(depth: usize) -> Self {
-        let mut cost = [f32::INFINITY; STATES];
+    pub fn new(code: Code) -> Self {
+        let states = code.states();
+        // What each transition puts on the air, as a number with the first
+        // transmitted output in the top bit. A number rather than the
+        // expected amplitudes, because a step has only two to the rate
+        // branch metrics in it and looking one up beats working it out once
+        // per state. That is most of the inner loop: what is left is two
+        // loads, two adds and a comparison a state.
+        let mut table = vec![[0u16; 2]; states];
+        for (state, row) in table.iter_mut().enumerate() {
+            for (bit, cell) in row.iter_mut().enumerate() {
+                let window = (bit << (code.constraint - 1)) | state;
+                let mut v = 0u16;
+                for &g in code.polys {
+                    v = (v << 1) | parity(window & g) as u16;
+                }
+                *cell = v;
+            }
+        }
+        let mut cost = vec![f32::INFINITY; states];
         // The encoder starts at zero, and a stream joined in the middle
         // forgets this within a constraint length either way.
         cost[0] = 0.0;
         Self {
-            table: Table::new(),
-            first: First::X,
+            table,
             cost,
-            next: [f32::INFINITY; STATES],
+            next: vec![f32::INFINITY; states],
+            metric: vec![0.0; 1 << code.rate()],
             decisions: Vec::new(),
-            depth,
-            block: depth,
+            depth: DEPTH,
+            block: DEPTH,
             pending: Vec::new(),
             phase: 0,
             since_normal: 0,
+            ends: Ends::Anywhere,
+            // A generator with both end taps set flips every output when the
+            // input bit flips, and again when the oldest bit does. So the two
+            // branches into a state cost exactly minus each other, and one
+            // metric does a whole butterfly. Every code here is like this;
+            // one that is not still decodes, by the long way round.
+            butterfly: code
+                .polys
+                .iter()
+                .all(|g| g & 1 == 1 && g & (1 << (code.constraint - 1)) != 0),
+            code,
         }
     }
 
-    /// Which output the transmitter sends first. DVB-T sends 171 octal and
-    /// 802.11 sends 133.
-    pub fn sending(mut self, first: First) -> Self {
-        self.first = first;
+    /// How far back the survivors are traced before a bit is released.
+    pub fn with_depth(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self.block = depth;
+        self
+    }
+
+    /// Where a whole block's traceback starts.
+    pub fn ending(mut self, ends: Ends) -> Self {
+        self.ends = ends;
         self
     }
 
     /// Forget the path, keeping the decoder usable: for a new lock rather
     /// than a new bit.
     pub fn reset(&mut self) {
-        self.cost = [f32::INFINITY; STATES];
+        self.cost.iter_mut().for_each(|c| *c = f32::INFINITY);
         self.cost[0] = 0.0;
         self.decisions.clear();
         self.pending.clear();
@@ -185,31 +245,59 @@ impl Viterbi {
         self.since_normal = 0;
     }
 
-    /// One step of the trellis over a pair of coded soft values.
-    pub fn push_pair(&mut self, x: f32, y: f32, out: &mut Vec<u8>) {
-        // The four branch metrics of this step, indexed by what the branch
-        // puts on the air: a coded zero is expected at +1 and a one at -1,
-        // and the cost is the negative correlation with what arrived.
-        let metric = [-(x + y), -(x - y), x - y, x + y];
-        let mut decision = 0u64;
+    /// One step of the trellis over one bit's worth of coded soft values.
+    pub fn push_step(&mut self, soft: &[f32], out: &mut Vec<u8>) {
+        // Every branch metric of this step: a coded zero is expected at +1
+        // and a one at -1, and the cost is the negative correlation with what
+        // arrived.
+        for (p, m) in self.metric.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for (k, &v) in soft.iter().enumerate() {
+                let one = (p >> (soft.len() - 1 - k)) & 1 == 1;
+                sum += if one { -v } else { v };
+            }
+            *m = -sum;
+        }
+
+        let states = self.code.states();
+        let half = states >> 1;
         let mut best = f32::INFINITY;
-        for t in 0..STATES {
-            // The two states that can reach `t`, and the input bit that
-            // takes them there, which is the top bit of `t`.
-            let bit = t >> 5;
-            let s0 = (t & 0x1F) << 1;
-            let s1 = s0 | 1;
-            let c0 = self.cost[s0] + metric[self.table.out[s0][bit] as usize];
-            let c1 = self.cost[s1] + metric[self.table.out[s1][bit] as usize];
-            let (cost, took) = if c0 <= c1 { (c0, 0u64) } else { (c1, 1u64) };
-            self.next[t] = cost;
-            decision |= took << t;
-            best = best.min(cost);
+        let mut decision = 0u64;
+        if self.butterfly {
+            // Two states at a time, from the two that feed them both. The
+            // metric is read once instead of four times and the four costs
+            // are independent, which is what lets the processor run them at
+            // once.
+            for k in 0..half {
+                let m = self.metric[self.table[2 * k][0] as usize];
+                let (a, b) = (self.cost[2 * k], self.cost[2 * k + 1]);
+                let (c0, c1) = (a + m, b - m);
+                let (lo, took) = if c0 <= c1 { (c0, 0u64) } else { (c1, 1u64) };
+                self.next[k] = lo;
+                decision |= took << k;
+                let (d0, d1) = (a - m, b + m);
+                let (hi, took) = if d0 <= d1 { (d0, 0u64) } else { (d1, 1u64) };
+                self.next[k + half] = hi;
+                decision |= took << (k + half);
+                best = best.min(lo.min(hi));
+            }
+        } else {
+            for t in 0..states {
+                // The two states that can reach `t`, and the input bit that takes
+                // them there, which is the top bit of `t`.
+                let bit = t / half;
+                let s0 = (t % half) << 1;
+                let s1 = s0 | 1;
+                let c0 = self.cost[s0] + self.metric[self.table[s0][bit] as usize];
+                let c1 = self.cost[s1] + self.metric[self.table[s1][bit] as usize];
+                let (cost, took) = if c0 <= c1 { (c0, 0u64) } else { (c1, 1u64) };
+                self.next[t] = cost;
+                decision |= took << t;
+                best = best.min(cost);
+            }
         }
         // Hold the costs where f32 keeps its precision. Only the differences
-        // decide, so taking the best off all of them changes nothing, and at
-        // this depth the spread cannot reach the exponent's limits between
-        // one pass and the next.
+        // decide, so taking the best off all of them changes nothing.
         self.since_normal += 1;
         if self.since_normal >= NORMALISE_EVERY {
             self.since_normal = 0;
@@ -220,7 +308,7 @@ impl Viterbi {
         std::mem::swap(&mut self.cost, &mut self.next);
         self.decisions.push(decision);
         if self.decisions.len() >= self.depth + self.block {
-            self.release(self.block, out);
+            self.release(self.block, Ends::Anywhere, out);
         }
     }
 
@@ -234,54 +322,60 @@ impl Viterbi {
         // time.
         let mut pending = std::mem::take(&mut self.pending);
         pending.extend_from_slice(soft);
+        let rate = self.code.rate();
+        let mut step = vec![0.0f32; rate];
         let mut at = 0usize;
         loop {
-            // One trellis step is two mother bits, each either sent or not.
-            let sent = mask[self.phase % mask.len()] as usize
-                + mask[(self.phase + 1) % mask.len()] as usize;
+            let sent: usize = (0..rate).map(|k| mask[(self.phase + k) % mask.len()] as usize).sum();
             if at + sent > pending.len() {
                 break;
             }
-            let mut pair = [0.0f32; 2];
-            for k in 0..2 {
-                if mask[(self.phase + k) % mask.len()] == 1 {
-                    pair[k] = pending[at];
+            for (k, s) in step.iter_mut().enumerate() {
+                *s = if mask[(self.phase + k) % mask.len()] == 1 {
                     at += 1;
-                }
+                    pending[at - 1]
+                } else {
+                    0.0
+                };
             }
-            self.phase = (self.phase + 2) % mask.len();
-            let (x, y) = match self.first {
-                First::X => (pair[0], pair[1]),
-                First::Y => (pair[1], pair[0]),
-            };
-            self.push_pair(x, y, out);
+            self.phase = (self.phase + rate) % mask.len();
+            let taken = std::mem::take(&mut step);
+            self.push_step(&taken, out);
+            step = taken;
         }
         pending.drain(..at);
         self.pending = pending;
     }
 
-    /// Release `count` decoded bits, traced back from the best survivor.
-    fn release(&mut self, count: usize, out: &mut Vec<u8>) {
+    /// Release `count` decoded bits, traced back from `ends`.
+    fn release(&mut self, count: usize, ends: Ends, out: &mut Vec<u8>) {
         let n = self.decisions.len();
         if n < count {
             return;
         }
-        let mut state = self
-            .cost
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.total_cmp(b.1))
-            .map(|(s, _)| s)
-            .unwrap_or(0);
+        let half = self.code.states() >> 1;
+        let mut state = match ends {
+            Ends::Zero => 0,
+            Ends::Anywhere => self
+                .cost
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(s, _)| s)
+                .unwrap_or(0),
+        };
         // Back through the part still settling, which says nothing, then
         // through the part being released, which does.
+        let step_back = |state: usize, decisions: u64| -> usize {
+            ((state % half) << 1) | ((decisions >> state) & 1) as usize
+        };
         for step in (count..n).rev() {
-            state = ((state & 0x1F) << 1) | ((self.decisions[step] >> state) & 1) as usize;
+            state = step_back(state, self.decisions[step]);
         }
         let start = out.len();
         for step in (0..count).rev() {
-            out.push((state >> 5) as u8);
-            state = ((state & 0x1F) << 1) | ((self.decisions[step] >> state) & 1) as usize;
+            out.push((state / half) as u8);
+            state = step_back(state, self.decisions[step]);
         }
         out[start..].reverse();
         self.decisions.drain(..count);
@@ -289,19 +383,20 @@ impl Viterbi {
 
     /// Decode a whole block at once: a frame with an end, rather than a
     /// stream without one.
-    ///
-    /// The survivor is traced from wherever the trellis ends up rather than
-    /// from state zero. A terminated code ends in zero, but the padding that
-    /// follows the tail to fill a symbol is coded too, so a decoder that
-    /// insists on zero loses the last few bits of every frame that needed
-    /// padding.
-    pub fn decode_block(soft: &[f32], mask: &[u8], count: usize, first: First) -> Vec<u8> {
-        let mut v = Viterbi::new(1).sending(first);
+    pub fn decode_block(
+        code: Code,
+        soft: &[f32],
+        mask: &[u8],
+        count: usize,
+        ends: Ends,
+    ) -> Vec<u8> {
+        let mut v = Viterbi::new(code).ending(ends);
         // Nothing is released until the end, so the window is the block.
         v.block = usize::MAX;
         let mut out = Vec::with_capacity(count);
         v.push(soft, mask, &mut out);
-        v.release(v.decisions.len().min(count), &mut out);
+        let have = v.decisions.len().min(count);
+        v.release(have, ends, &mut out);
         out.truncate(count);
         out.resize(count, 0);
         out
@@ -310,7 +405,7 @@ impl Viterbi {
     /// Release everything held back, for the end of a recording.
     pub fn finish(&mut self, out: &mut Vec<u8>) {
         let n = self.decisions.len().saturating_sub(self.depth);
-        self.release(n, out);
+        self.release(n, Ends::Anywhere, out);
     }
 
     /// Bits decoded but not yet released, which is the decoder's delay.
@@ -323,15 +418,13 @@ impl Viterbi {
 mod tests {
     use super::*;
 
-    fn encode(bits: &[u8]) -> Vec<f32> {
-        let mut enc = Encoder::new();
-        let mut out = Vec::new();
+    fn encode(code: Code, bits: &[u8]) -> Vec<f32> {
+        let mut enc = Encoder::new(code);
+        let mut coded = Vec::new();
         for &b in bits {
-            let (x, y) = enc.push(b);
-            out.push(1.0 - 2.0 * x as f32);
-            out.push(1.0 - 2.0 * y as f32);
+            enc.push(b, &mut coded);
         }
-        out
+        coded.iter().map(|&c| 1.0 - 2.0 * c as f32).collect()
     }
 
     fn bits(n: usize, seed: u32) -> Vec<u8> {
@@ -348,28 +441,46 @@ mod tests {
     /// tap down: 171 octal is 1111001 and 133 octal is 1011011.
     #[test]
     fn the_encoder_puts_out_its_generators() {
-        let mut enc = Encoder::new();
-        let got: Vec<(u8, u8)> = [1u8, 0, 0, 0, 0, 0, 0, 0].iter().map(|&b| enc.push(b)).collect();
-        assert_eq!(got, vec![(1, 1), (1, 0), (1, 1), (1, 1), (0, 0), (0, 1), (1, 1), (0, 0)]);
-        let x: Vec<u8> = got.iter().take(7).map(|p| p.0).collect();
-        let y: Vec<u8> = got.iter().take(7).map(|p| p.1).collect();
+        let mut enc = Encoder::new(K7_X_FIRST);
+        let mut out = Vec::new();
+        for b in [1u8, 0, 0, 0, 0, 0, 0] {
+            enc.push(b, &mut out);
+        }
+        let x: Vec<u8> = out.iter().step_by(2).copied().collect();
+        let y: Vec<u8> = out.iter().skip(1).step_by(2).copied().collect();
         assert_eq!(x, vec![1, 1, 1, 1, 0, 0, 1], "171 octal");
         assert_eq!(y, vec![1, 0, 1, 1, 0, 1, 1], "133 octal");
     }
 
-    /// A clean rate 1/2 stream decodes to exactly what was encoded.
+    /// 802.11 is the same code with the outputs the other way round, which is
+    /// the difference that cannot be seen in a loopback and destroys a
+    /// receiver.
     #[test]
-    fn a_clean_stream_decodes_bit_for_bit() {
-        let want = bits(4000, 7);
-        let soft = encode(&want);
-        let mut rx = Viterbi::default();
-        let mut got = Vec::new();
-        for pair in soft.chunks(2) {
-            rx.push_pair(pair[0], pair[1], &mut got);
+    fn the_two_orders_are_each_others_mirror() {
+        let want = bits(64, 5);
+        let x = encode(K7_X_FIRST, &want);
+        let a = encode(K7_A_FIRST, &want);
+        assert_ne!(x, a);
+        assert_eq!(
+            x.iter().step_by(2).collect::<Vec<_>>(),
+            a.iter().skip(1).step_by(2).collect::<Vec<_>>()
+        );
+    }
+
+    /// Every code here decodes a clean stream of its own making, bit for bit.
+    #[test]
+    fn every_code_decodes_what_it_encoded() {
+        for code in [K7_X_FIRST, K7_A_FIRST, M17, TETRA_1_4, TETRA_1_3] {
+            let want = bits(2000, 9);
+            let soft = encode(code, &want);
+            let mask = vec![1u8; code.rate()];
+            let mut rx = Viterbi::new(code);
+            let mut got = Vec::new();
+            rx.push(&soft, &mask, &mut got);
+            rx.finish(&mut got);
+            assert_eq!(got.len(), want.len() - DEPTH, "K={}", code.constraint);
+            assert_eq!(got, want[..got.len()], "K={} rate 1/{}", code.constraint, code.rate());
         }
-        rx.finish(&mut got);
-        assert_eq!(got.len(), want.len() - DEPTH, "all but the window still settling");
-        assert_eq!(got, want[..got.len()]);
     }
 
     /// Every rate DVB-T punctures to decodes a clean stream exactly, which is
@@ -379,8 +490,7 @@ mod tests {
         use crate::dvbt::CodeRate;
         for rate in CodeRate::ALL {
             let want = bits(7000 - 7000 % rate.k(), 11);
-            let soft = encode(&want);
-            // Puncture: keep only the mother bits the mask sends.
+            let soft = encode(K7_X_FIRST, &want);
             let mask = rate.mask();
             let sent: Vec<f32> = soft
                 .iter()
@@ -388,30 +498,21 @@ mod tests {
                 .filter(|(i, _)| mask[i % mask.len()] == 1)
                 .map(|(_, v)| *v)
                 .collect();
-            let mut rx = Viterbi::default();
+            let mut rx = Viterbi::new(K7_X_FIRST);
             let mut got = Vec::new();
             rx.push(&sent, mask, &mut got);
             rx.finish(&mut got);
-            assert!(
-                got.len() >= want.len() - DEPTH - rate.k(),
-                "{} released {} of {}",
-                rate.label(),
-                got.len(),
-                want.len()
-            );
             let errors = got.iter().zip(&want).filter(|(a, b)| a != b).count();
             assert_eq!(errors, 0, "{} decoded {errors} bits wrong", rate.label());
         }
     }
 
     /// A channel that flips one coded bit in forty, with no soft information
-    /// to say which, is corrected completely at rate 1/2. Flipping one in
-    /// twenty instead leaves fifty-seven bits wrong in twenty thousand, which
-    /// is where hard decisions on this code give out.
+    /// to say which, is corrected completely at rate 1/2.
     #[test]
     fn a_noisy_half_rate_stream_is_corrected() {
         let want = bits(20_000, 3);
-        let mut soft = encode(&want);
+        let mut soft = encode(K7_X_FIRST, &want);
         let mut s = 12345u32;
         let mut flipped = 0;
         for v in soft.iter_mut() {
@@ -422,13 +523,22 @@ mod tests {
             }
         }
         assert!(flipped > 900, "{flipped} coded bits flipped");
-        let mut rx = Viterbi::default();
+        let mut rx = Viterbi::new(K7_X_FIRST);
         let mut got = Vec::new();
-        for pair in soft.chunks(2) {
-            rx.push_pair(pair[0], pair[1], &mut got);
-        }
+        rx.push(&soft, P_1_2, &mut got);
         rx.finish(&mut got);
         let errors = got.iter().zip(&want).filter(|(a, b)| a != b).count();
         assert_eq!(errors, 0, "{errors} bits wrong after correction");
+    }
+
+    /// A block that ends in state zero is traced from there, which is worth a
+    /// few bits at the end of every frame that says so.
+    #[test]
+    fn a_terminated_block_is_traced_from_zero() {
+        let mut want = bits(200, 7);
+        want.extend([0, 0, 0, 0, 0, 0]);
+        let soft = encode(K7_X_FIRST, &want);
+        let got = Viterbi::decode_block(K7_X_FIRST, &soft, P_1_2, want.len(), Ends::Zero);
+        assert_eq!(got, want);
     }
 }

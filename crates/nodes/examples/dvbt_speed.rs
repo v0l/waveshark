@@ -43,7 +43,7 @@ fn main() {
     }
     println!("demap and deinterleave {:.2}x real time", air / t.elapsed().as_secs_f64());
 
-    let mut v = dsp::conv::Viterbi::default();
+    let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
     let mut bits = Vec::new();
     let t = std::time::Instant::now();
     for s in &symbols {

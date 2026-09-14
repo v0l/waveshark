@@ -74,41 +74,19 @@ fn conv_encode(bits: &[u8]) -> Vec<u8> {
 /// Viterbi over the rate 1/3 mother: `soft` is three values per step (+1 for a
 /// received 0, -1 for a 1, 0 an erasure), `n` decoded bits out. The encoder
 /// ends in the zero state because the type-2 block's four tail bits are zero.
+///
+/// The trellis is [`crate::conv`]'s, which every convolutional code in this
+/// receiver shares; the generators here are the speech ones rather than the
+/// control channel's.
 fn viterbi(soft: &[i32], n: usize) -> Vec<u8> {
-    const STATES: usize = 16;
-    const NEG: i32 = i32::MIN / 4;
-    let mut metric = [NEG; STATES];
-    metric[0] = 0;
-    let mut back = vec![0u8; n * STATES];
-    for step in 0..n {
-        let s = &soft[step * 3..step * 3 + 3];
-        let mut next = [NEG; STATES];
-        for state in 0..STATES as u8 {
-            if metric[state as usize] <= NEG {
-                continue;
-            }
-            for b in 0u8..2 {
-                let o = branch((b << 4) | state);
-                let m: i32 = (0..3).map(|k| if o[k] == 0 { s[k] } else { -s[k] }).sum::<i32>()
-                    + metric[state as usize];
-                let ns = (((state << 1) | b) & 0xf) as usize;
-                if m > next[ns] {
-                    next[ns] = m;
-                    back[step * STATES + ns] = state;
-                }
-            }
-        }
-        metric = next;
-    }
-    // Survivor from the zero state back to the start.
-    let mut out = vec![0u8; n];
-    let mut state = 0u8;
-    for step in (0..n).rev() {
-        let prev = back[step * STATES + state as usize];
-        out[step] = state & 1; // the input bit is the lsb of the state it made
-        state = prev;
-    }
-    out
+    let f: Vec<f32> = soft.iter().map(|&v| v as f32).collect();
+    crate::conv::Viterbi::decode_block(
+        crate::conv::TETRA_1_3,
+        &f,
+        &[1, 1, 1],
+        n,
+        crate::conv::Ends::Zero,
+    )
 }
 
 fn depuncture(type3: &[u8], mother_len: usize, period: usize, keep: &[usize]) -> Vec<i32> {

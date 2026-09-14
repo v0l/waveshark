@@ -85,12 +85,12 @@ pub const P_3_4: &[u8] = &[1, 1, 1, 0, 0, 1];
 /// The rate an HT frame adds at MCS 7.
 pub const P_5_6: &[u8] = &[1, 1, 1, 0, 0, 1, 1, 0, 0, 1];
 
-/// Which of the mother code's outputs 802.11 sends first.
-const ORDER: crate::conv::First = crate::conv::First::Y;
+/// The code, as 802.11 names its outputs: 133 octal is A and goes first.
+const CODE: crate::conv::Code = crate::conv::K7_A_FIRST;
 
 /// Encode and puncture. `bits` must already carry its six zero tail bits.
 pub fn encode(bits: &[u8], pattern: &[u8]) -> Vec<u8> {
-    crate::conv::Encoder::new().punctured(bits, pattern, ORDER)
+    crate::conv::Encoder::new(CODE).punctured(bits, pattern)
 }
 
 /// Soft-decision Viterbi over the terminated code, depuncturing as it goes.
@@ -103,7 +103,13 @@ pub fn encode(bits: &[u8], pattern: &[u8]) -> Vec<u8> {
 /// available once the trellis has spoken.
 pub fn viterbi(soft: &[f32], pattern: &[u8], count: usize) -> (Vec<u8>, f32) {
     let flipped: Vec<f32> = soft.iter().map(|v| -v).collect();
-    let bits = crate::conv::Viterbi::decode_block(&flipped, pattern, count, ORDER);
+    let bits = crate::conv::Viterbi::decode_block(
+        CODE,
+        &flipped,
+        pattern,
+        count,
+        crate::conv::Ends::Anywhere,
+    );
 
     let check = encode(&bits, pattern);
     let mut wrong = 0usize;

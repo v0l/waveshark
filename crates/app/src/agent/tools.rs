@@ -450,6 +450,34 @@ impl Tools {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Tools {
+    /// The tools, with the output schemas taken off.
+    ///
+    /// Every tool here answers with whatever JSON the receiver has to hand:
+    /// a list of packets, a spectrum, a whole patch. The macro derives a
+    /// schema from that return type and, for arbitrary JSON, derives one
+    /// that says nothing at all. A schema with no `type` is not an object
+    /// schema, which is what the protocol requires of an output schema, and
+    /// strict clients refuse the whole tool list over it. An absent schema
+    /// is allowed and honest; a schema that describes nothing is neither.
+    async fn list_tools(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+        let _ = (request, context);
+        let mut tools = self.tool_router.list_all();
+        for t in tools.iter_mut() {
+            let object = t
+                .output_schema
+                .as_ref()
+                .is_some_and(|s| s.get("type").and_then(|v| v.as_str()) == Some("object"));
+            if !object {
+                t.output_schema = None;
+            }
+        }
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools))
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("waveshark", env!("CARGO_PKG_VERSION")))
