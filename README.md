@@ -143,17 +143,16 @@ every time. A capture that decodes is a test fixture.
 
 ## Letting an agent drive
 
-```sh
-waveshark --mcp-listen 8931
-```
-
-serves the receiver over the Model Context Protocol at
+Every run serves the receiver over the Model Context Protocol at
 `http://127.0.0.1:8931/mcp`. It is the receiver on the screen, not a second
 one: what the agent tunes, opens or switches on appears in the window, and it
 can take a picture of that window to see what it did. It can read the
 spectrum, the packets, the calls, the transcript and the tracker, change
 anything in the signal chain, and draw the chain itself: add stages, wire
 them and take them out again. It cannot transmit.
+
+`--mcp-listen off` stops it listening, and a port or a `host:port` puts it
+somewhere else. The default reaches no further than this machine.
 
 ## Command line
 
@@ -172,7 +171,7 @@ them and take them out again. It cannot transmit.
 --headless             run with no window, scanning and logging as it would
 --ha-broker <broker>   publish every device heard to Home Assistant over MQTT
 --ha-spaces <kinds>    which kinds are worth publishing, e.g. ism,wmbus
---mcp-listen <addr>    serve this receiver to an agent over MCP, on loopback
+--mcp-listen <addr>    where to serve MCP, or `off`; 8931 on loopback by default
 --print-log            print every packet as it arrives, window or not
 --fetch-data           warm the dataset cache before going somewhere offline
 --squelch-probe [mhz]  report what the squelch reads on a frequency

@@ -64,7 +64,7 @@ impl DvbtReceiver {
         Self {
             front: dvbt::Dvbt::new(),
             inner: None,
-            viterbi: conv::Viterbi::default(),
+            viterbi: conv::Viterbi::new(conv::K7_X_FIRST),
             outer: Outer::new(),
             params: None,
             started: false,
@@ -172,7 +172,7 @@ impl DvbtModulator {
     pub fn new(params: Params) -> Self {
         Self {
             outer: OuterTx::new(),
-            encoder: conv::Encoder::new(),
+            encoder: conv::Encoder::new(conv::K7_X_FIRST),
             inner: Inner::new(params.mode, params.constellation),
             ofdm: dvbt::tx::Modulator::new(params),
             coded: Vec::new(),
@@ -194,7 +194,7 @@ impl DvbtModulator {
         }
         let mask = self.params.code_rate_hp.mask();
         let whole = self.pending.len() - self.pending.len() % (mask.len() / 2);
-        let sent = self.encoder.punctured(&self.pending[..whole], mask, conv::First::X);
+        let sent = self.encoder.punctured(&self.pending[..whole], mask);
         self.coded.extend_from_slice(&sent);
         self.pending.drain(..whole);
         let per_symbol = self.inner.bits_per_symbol();

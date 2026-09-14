@@ -892,11 +892,27 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
 /// A bare port means loopback: an agent socket that carries the whole
 /// receiver should not be offered to a network by leaving a host out.
 #[cfg(feature = "mcp")]
-fn parse_listen(s: &str) -> Result<std::net::SocketAddr, String> {
-    if let Ok(port) = s.parse::<u16>() {
-        return Ok(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+/// Where to serve something, or nowhere.
+///
+/// A word for "nowhere" is an answer to the question the option asks rather
+/// than a bad answer, so it parses rather than failing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listen(pub Option<std::net::SocketAddr>);
+
+impl std::str::FromStr for Listen {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if matches!(s.trim().to_ascii_lowercase().as_str(), "off" | "no" | "none") {
+            return Ok(Self(None));
+        }
+        if let Ok(port) = s.parse::<u16>() {
+            return Ok(Self(Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)))));
+        }
+        s.parse()
+            .map(|a| Self(Some(a)))
+            .map_err(|_| format!("{s:?} is not a port, a host:port, or off"))
     }
-    s.parse().map_err(|_| format!("{s:?} is not a port or a host:port"))
 }
 
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
@@ -995,10 +1011,11 @@ struct Args {
     #[arg(long, value_name = "SPACES")]
     ha_spaces: Option<String>,
     /// Serve MCP on this address, so an agent can drive this receiver:
-    /// a port, or host:port. Loopback unless a host is given
+    /// a port, or host:port. Loopback unless a host is given. Served on
+    /// 127.0.0.1:8931 unless this says otherwise, and `off` turns it off
     #[cfg(feature = "mcp")]
-    #[arg(long, value_name = "ADDR", value_parser = parse_listen)]
-    mcp_listen: Option<std::net::SocketAddr>,
+    #[arg(long, value_name = "ADDR", default_value = "8931")]
+    mcp_listen: Listen,
 
     /// Open on the picture, for analogue video
     #[arg(long)]
@@ -1312,7 +1329,7 @@ fn main() -> eframe::Result<()> {
         // nothing to serve without one. Said rather than ignored: an agent
         // waiting on a port that will never open is a worse failure.
         #[cfg(feature = "mcp")]
-        if args.mcp_listen.is_some() {
+        if args.mcp_listen.0.is_some() && std::env::args().any(|a| a == "--mcp-listen") {
             eprintln!("--mcp-listen needs the window: it serves the receiver the interface holds");
             std::process::exit(1);
         }
@@ -1425,11 +1442,15 @@ fn main() -> eframe::Result<()> {
                     args.ha_spaces.clone().unwrap_or_else(|| session::DEFAULT_HA_SPACES.into());
                 app.publish_to(p);
             }
+            // On unless asked otherwise, on the loopback: an agent that has
+            // to be enabled by a flag nobody remembers is an agent nobody
+            // uses, and a port on 127.0.0.1 reaches no further than this
+            // machine. A port already in use is said once and carried on
+            // from, because it is not a reason to refuse to be a receiver.
             #[cfg(feature = "mcp")]
-            if let Some(addr) = args.mcp_listen {
+            if let Some(addr) = args.mcp_listen.0 {
                 if let Err(e) = app.serve_mcp(addr, &cc.egui_ctx) {
-                    eprintln!("--mcp-listen {addr}: {e}");
-                    std::process::exit(1);
+                    eprintln!("not serving MCP on {addr}: {e}");
                 }
             }
             app.shot = args.shot.clone();

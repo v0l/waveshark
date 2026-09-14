@@ -137,56 +137,17 @@ pub fn depuncture(pu: &Puncture, type3: &[u8], mother_len: usize) -> Vec<i8> {
 /// Viterbi over the mother code: `soft` is 4 bits per step, `n` steps out.
 ///
 /// The encoder starts and ends in the zero state (the type-2 block carries
-/// four tail zeros), so the survivor is read from state 0.
+/// four tail zeros), so the survivor is read from state 0. The trellis is
+/// [`crate::conv`]'s; what is here is the soft values this layer works in.
 pub fn viterbi(soft: &[i8], n: usize) -> Vec<u8> {
-    const STATES: usize = 16;
-    let inf = i32::MIN / 2;
-    let mut metric = [inf; STATES];
-    metric[0] = 0;
-    // Survivor per state per step: which of the two predecessors won. The
-    // input bit itself is the state's low bit, so it needs no storing.
-    let mut decisions = vec![0u16; n];
-
-    for step in 0..n {
-        let s = &soft[step * 4..step * 4 + 4];
-        let mut next = [inf; STATES];
-        let mut dec = 0u16;
-        for to in 0..STATES as u8 {
-            let bit = to & 1;
-            for high in 0..2u8 {
-                let from = (to >> 1) | (high << 3);
-                let m = metric[from as usize];
-                if m == inf {
-                    continue;
-                }
-                let out = branch_bits((bit << 4) | from);
-                let mut score = m;
-                for (o, &r) in out.iter().zip(s) {
-                    // r: +1 expects 0, -1 expects 1, 0 says nothing
-                    score += if *o == 0 { r as i32 } else { -(r as i32) };
-                }
-                if score > next[to as usize] {
-                    next[to as usize] = score;
-                    if high == 1 {
-                        dec |= 1 << to;
-                    } else {
-                        dec &= !(1 << to);
-                    }
-                }
-            }
-        }
-        metric = next;
-        decisions[step] = dec;
-    }
-
-    // Trace back from the zero state the tail drove the encoder into.
-    let mut bits = vec![0u8; n];
-    let mut state = 0u8;
-    for step in (0..n).rev() {
-        bits[step] = state & 1;
-        state = (state >> 1) | ((decisions[step] >> state & 1) as u8) << 3;
-    }
-    bits
+    let f: Vec<f32> = soft.iter().map(|&v| v as f32).collect();
+    crate::conv::Viterbi::decode_block(
+        crate::conv::TETRA_1_4,
+        &f,
+        &[1, 1, 1, 1],
+        n,
+        crate::conv::Ends::Zero,
+    )
 }
 
 /// CRC-16 ITU-T over bits, MSB-first, seeded with all ones (8.2.2).

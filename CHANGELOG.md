@@ -40,10 +40,14 @@ the code is in the commit log.
 
 ### Changed
 
+- The MCP server is on by default, on 127.0.0.1:8931. `--mcp-listen off`
+  turns it off, and a port or host:port still moves it.
 - SSTV holds up better on a weak signal.
 
 ### Fixed
 
+- An agent refusing the whole MCP tool list over a schema that described
+  nothing.
 - A half-fetched speech model was picked and read nothing, with no sign of why.
 - The Transcribe switch turning itself back off whenever a channel changed.
 - Keying a second transmit channel put the first channel's source on air.

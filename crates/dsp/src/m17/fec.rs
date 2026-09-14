@@ -101,15 +101,13 @@ pub fn deinterleave(soft: &[f32], out: &mut [f32]) {
     }
 }
 
-/// The two generator polynomials, G1 = 1 + D^3 + D^4 and G2 = 1 + D + D^2 +
-/// D^4, evaluated for an input bit and the four before it.
-///
-/// `sr` holds those four, most recent in bit 0.
-fn outputs(u: u8, sr: u8) -> (u8, u8) {
-    let g1 = u ^ (sr >> 2 & 1) ^ (sr >> 3 & 1);
-    let g2 = u ^ (sr & 1) ^ (sr >> 1 & 1) ^ (sr >> 3 & 1);
-    (g1, g2)
-}
+/// The code: M17's rate 1/2, K=5, decoded by the one trellis in
+/// [`crate::conv`]. The register conventions differ between the standards,
+/// so the generators are written there over the window `u D1 D2 D3 D4`.
+const CODE: crate::conv::Code = crate::conv::M17;
+
+/// The register is flushed with four zeros, so the path ends in state zero.
+const TAIL: usize = 4;
 
 /// Convolutionally encode `bits`, flush the register with four zeros, and
 /// puncture the result with `pattern`.
@@ -117,19 +115,10 @@ fn outputs(u: u8, sr: u8) -> (u8, u8) {
 /// The puncturing index advances for every encoder output rather than every
 /// input bit, which is what makes P1 drop G1 on one pass and G2 on the next.
 pub fn conv_encode(bits: &[u8], pattern: &[u8], out: &mut Vec<u8>) {
-    out.clear();
-    let mut sr = 0u8;
-    let mut p = 0usize;
-    for &u in bits.iter().chain([0, 0, 0, 0].iter()) {
-        let (g1, g2) = outputs(u, sr);
-        for g in [g1, g2] {
-            if pattern[p] == 1 {
-                out.push(g);
-            }
-            p = (p + 1) % pattern.len();
-        }
-        sr = (sr << 1 | u) & 0xF;
-    }
+    let mut with_tail = Vec::with_capacity(bits.len() + TAIL);
+    with_tail.extend_from_slice(bits);
+    with_tail.extend([0u8; TAIL]);
+    *out = crate::conv::Encoder::new(CODE).punctured(&with_tail, pattern);
 }
 
 /// Decode `soft` back to `count` content bits with a soft-decision Viterbi
@@ -143,62 +132,17 @@ pub fn conv_encode(bits: &[u8], pattern: &[u8], out: &mut Vec<u8>) {
 /// bits exactly; noise, a wrong polarity or a false sync all show up here as
 /// a disagreement rate near a half.
 ///
-/// The transmitter flushes the register with four zeros, so the path is known
-/// to end in state zero and the traceback starts there rather than at the
-/// best final state.
+/// `soft` is positive for a one, which is this module's convention and the
+/// opposite of [`crate::conv`]'s, so the signs are turned over on the way in.
 pub fn viterbi(soft: &[f32], pattern: &[u8], count: usize) -> (Vec<u8>, f32) {
-    const STATES: usize = 16;
-    let steps = count + 4;
-    let mut metric = [f32::NEG_INFINITY; STATES];
-    metric[0] = 0.0;
-    let mut next = [f32::NEG_INFINITY; STATES];
-    let mut decisions = vec![0u16; steps];
-
-    // Depuncture as we go: a bit the transmitter dropped arrives as 0.0,
-    // which contributes nothing to either branch.
-    let mut p = 0usize;
-    let mut read = 0usize;
-    let take = |p: &mut usize, read: &mut usize| -> f32 {
-        let v = if pattern[*p] == 1 {
-            let v = soft.get(*read).copied().unwrap_or(0.0);
-            *read += 1;
-            v
-        } else {
-            0.0
-        };
-        *p = (*p + 1) % pattern.len();
-        v
-    };
-
-    for step in decisions.iter_mut() {
-        let (s1, s2) = (take(&mut p, &mut read), take(&mut p, &mut read));
-        next.fill(f32::NEG_INFINITY);
-        let mut choice = 0u16;
-        for t in 0..STATES {
-            let u = (t & 1) as u8;
-            for from in [t >> 1, (t >> 1) | 8] {
-                if metric[from] == f32::NEG_INFINITY {
-                    continue;
-                }
-                let (g1, g2) = outputs(u, from as u8);
-                let m =
-                    metric[from] + if g1 == 1 { s1 } else { -s1 } + if g2 == 1 { s2 } else { -s2 };
-                if m > next[t] {
-                    next[t] = m;
-                    choice = choice & !(1 << t) | u16::from(from >= 8) << t;
-                }
-            }
-        }
-        *step = choice;
-        metric.copy_from_slice(&next);
-    }
-
-    let mut bits = vec![0u8; steps];
-    let mut state = 0usize;
-    for k in (0..steps).rev() {
-        bits[k] = (state & 1) as u8;
-        state = state >> 1 | usize::from(decisions[k] >> state & 1) << 3;
-    }
+    let flipped: Vec<f32> = soft.iter().map(|v| -v).collect();
+    let mut bits = crate::conv::Viterbi::decode_block(
+        CODE,
+        &flipped,
+        pattern,
+        count + TAIL,
+        crate::conv::Ends::Zero,
+    );
     bits.truncate(count);
 
     // Re-encode and compare against what arrived, counting only the bits that
