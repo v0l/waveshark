@@ -173,6 +173,8 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (sstv_nodes::DESC, sstv_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),
+    (dvbt_nodes::TS_SOURCE, dvbt_nodes::build_ts_source),
+    (dvbt_nodes::DVBT_MOD, dvbt_nodes::build_dvbt_mod),
     (video_nodes::DESC, video_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),
     (wifi_nodes::DESC, wifi_nodes::build),

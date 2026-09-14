@@ -384,6 +384,7 @@ pub fn inspector(
     ui: &mut egui::Ui,
     topo: &Topology,
     selected: usize,
+    browse: &mut Option<(usize, String)>,
 ) -> Option<(usize, String, pipeline::param::ParamValue)> {
     use pipeline::param::{ParamRange, ParamValue};
     let node = topo.nodes.iter().find(|n| n.id.0 == selected)?;
@@ -483,10 +484,23 @@ pub fn inspector(
             }
             (ParamValue::Text(s), _) => {
                 let mut t = s.clone();
-                let r = ui.add(egui::TextEdit::singleline(&mut t).desired_width(f32::INFINITY));
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    out = Some((node.id.0, prm.name.clone(), ParamValue::Text(t)));
-                }
+                // A path gets a dialog beside the box. Typing one in still
+                // works, and is the only way to reach a file on a machine
+                // with no file manager behind the dialog.
+                let file = prm.name == "path";
+                ui.horizontal(|ui| {
+                    let w = match file {
+                        true => (ui.available_width() - 30.0).max(40.0),
+                        false => f32::INFINITY,
+                    };
+                    let r = ui.add(egui::TextEdit::singleline(&mut t).desired_width(w));
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        out = Some((node.id.0, prm.name.clone(), ParamValue::Text(t)));
+                    }
+                    if file && ui.button("…").on_hover_text("Choose a file").clicked() {
+                        *browse = Some((node.id.0, prm.name.clone()));
+                    }
+                });
             }
             // A value whose range says something else about it: show the
             // number rather than a control that would write the wrong type.

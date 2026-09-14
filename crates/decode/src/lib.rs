@@ -62,6 +62,8 @@ pub mod ta61;
 #[cfg(feature = "tea")]
 pub mod tea;
 pub mod tetra;
+#[cfg(feature = "ffmpeg")]
+pub mod transcode;
 pub mod vdl2;
 pub mod video_channels;
 pub mod vocoder;

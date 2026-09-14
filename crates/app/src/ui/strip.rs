@@ -28,6 +28,11 @@ pub(super) struct Strip<'a> {
     pub memory_group: &'a mut String,
     pub acts: Vec<Action>,
     pub cmds: &'a mut Vec<Cmd>,
+    /// The running chain, for the stages a channel's own controls reach
+    /// into: the transport stream a television channel transmits is a
+    /// setting on the source stage.
+    pub chain: Option<&'a pipeline::graph::Topology>,
+    pub files: &'a mut super::state::FilePick,
 }
 
 impl Strip<'_> {
@@ -237,6 +242,8 @@ impl Strip<'_> {
         mic_clipped: bool,
         keying: &mut crate::ui::state::Keying,
         cmds: &mut Vec<Cmd>,
+        source: Option<(usize, String)>,
+        files: &mut super::state::FilePick,
     ) -> bool {
         let mut changed = false;
         // Nothing to draw for a mode with no modulator behind it. A dead key
@@ -263,15 +270,20 @@ impl Strip<'_> {
             });
         });
 
-        ui.horizontal(|ui| {
-            theme::Line::new().legend("src").show(ui);
-            for src in [TxSource::Mic, TxSource::Tone] {
-                if ui.selectable_label(tx.source == src, src.label()).clicked() {
-                    tx.source = src;
-                    changed = true;
+        // A data mode has no microphone and no test tone: what it sends is a
+        // file, chosen on the stage that reads it.
+        let digital = matches!(mode, crate::radio::TxMode::Digital(_));
+        if !digital {
+            ui.horizontal(|ui| {
+                theme::Line::new().legend("src").show(ui);
+                for src in [TxSource::Mic, TxSource::Tone] {
+                    if ui.selectable_label(tx.source == src, src.label()).clicked() {
+                        tx.source = src;
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
+        }
         // Its own row. Right-aligned beside the source buttons it was drawn
         // over them at the strip's default width, and the buttons underneath
         // could not be pressed.
@@ -293,6 +305,34 @@ impl Strip<'_> {
         });
 
         match tx.source {
+            _ if digital => {
+                let (node, path) = source.unzip();
+                let path = path.unwrap_or_default();
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("file").show(ui);
+                    let chosen = std::path::Path::new(&path);
+                    let name = match path.is_empty() {
+                        true => "nothing: an empty multiplex".to_string(),
+                        false => chosen
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or(path.clone()),
+                    };
+                    let open = ui.button("OPEN").on_hover_text(
+                        "Choose what to transmit: a transport stream, or anything \
+                         ffmpeg can open",
+                    );
+                    if open.clicked()
+                        && let Some(node) = node
+                    {
+                        files.ask(ui.ctx(), node, "path", "Choose what to transmit");
+                    }
+                    // Cut short: a file name is as long as somebody else
+                    // made it, and a strip as wide as the longest one is a
+                    // strip nobody can use.
+                    theme::Line::new().value(name).size(11.0).elided(ui);
+                });
+            }
             TxSource::Mic => {
                 // The microphone's own fader and meter, read the way the
                 // channel's audio is: the level beside the control that sets
@@ -754,7 +794,17 @@ impl Strip<'_> {
                                 }
                             }
                             if can_tx
-                                && Self::channel_tx(ui, ch, keyed, mic, mic_clipped, &mut self.st.keying, self.cmds)
+                                && Self::channel_tx(
+                                    ui,
+                                    ch,
+                                    keyed,
+                                    mic,
+                                    mic_clipped,
+                                    &mut self.st.keying,
+                                    self.cmds,
+                                    tx_source_file(self.chain),
+                                    self.files,
+                                )
                             {
                                 tune = Some(i);
                             }
@@ -832,4 +882,21 @@ impl Strip<'_> {
             });
         self.acts
     }
+}
+
+/// The stage a television channel transmits from, and what it is set to
+/// read: its node id and the file it has, or `None` where nothing in the
+/// running chain transmits a stream.
+fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, String)> {
+    let node = topo?.nodes.iter().find(|n| n.kind == "ts_source")?;
+    let path = node
+        .params
+        .iter()
+        .find(|p| p.name == "path")
+        .and_then(|p| match &p.value {
+            pipeline::param::ParamValue::Text(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Some((node.id.0, path))
 }

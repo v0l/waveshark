@@ -113,6 +113,9 @@ pub struct App {
     /// The open-a-capture dialog, while it is up. It runs on its own thread
     /// so the receiver keeps painting behind it.
     picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
+    /// The open-a-file dialog for a stage's own setting, wherever it was
+    /// asked for: the chain view's inspector or the channel strip.
+    pick_file: state::FilePick,
     device: Option<crate::devices::Entry>,
     /// Where the connected tuner reaches and whether it can be moved, from
     /// the radio thread's reading of the device.
@@ -551,6 +554,7 @@ impl Default for App {
             open: None,
             devices: Vec::new(),
             picking: None,
+            pick_file: state::FilePick::default(),
             device: None,
             reach: (24e6, 1766e6),
             tunable: true,
@@ -1518,6 +1522,8 @@ impl App {
             memory_group: &mut self.memory_group,
             acts: Vec::new(),
             cmds: &mut self.cmds,
+            chain: self.chain.topo.as_ref(),
+            files: &mut self.pick_file,
         }
         .show(ui);
         for a in acts {
@@ -1530,7 +1536,8 @@ impl App {
 
     /// Draw the chain view over the graph it edits.
     fn chain_view(&mut self, ui: &mut egui::Ui) {
-        chain_pane::Chain { st: &mut self.chain, cmds: &mut self.cmds }.show(ui);
+        chain_pane::Chain { st: &mut self.chain, cmds: &mut self.cmds, files: &mut self.pick_file }
+            .show(ui);
     }
 
     /// Draw the map, and take the station position it was given.
@@ -2365,6 +2372,7 @@ impl eframe::App for App {
         // is open. Both used to be read only under --soak, so the call list
         // and the transcript filled in a soak run and stayed empty in use.
         self.poll_capture(ui.ctx());
+        self.pick_file.poll(&mut self.cmds);
         self.read_heard();
         self.read_said();
         self.soak_check(ui.ctx());
