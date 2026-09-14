@@ -1161,6 +1161,12 @@ impl App {
         if let Some((lat, lon)) = self.location {
             self.send(Cmd::Location(lat, lon));
         }
+        // Decoding and the DC blocker are the graph's too, and a new thread
+        // builds its graph with both on: stopping and starting a source put
+        // every front end of the scanner table back into a receiver whose
+        // switch said decoding was off.
+        self.send(Cmd::Decode(self.decode_on));
+        self.send(Cmd::DcBlock(self.dc_block));
         // The spectrum's frame rate and averaging live in the graph, so a new
         // radio thread has them at their defaults until it is told otherwise.
         self.send(Cmd::Refresh(self.scope.refresh));

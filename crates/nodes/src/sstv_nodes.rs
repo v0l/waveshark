@@ -229,7 +229,10 @@ impl Protocol for Sstv {
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
+            // The picture is read off 44.1 kHz of audio and the stage only
+            // decimates, so a stream slower than that is one it cannot
+            // reach, whatever the channel in it is worth.
+            min_rate_hz: AUDIO_HZ,
             feed_rate_hz: 100_000.0,
             span_wide: false,
             families: &[],

@@ -444,7 +444,9 @@ impl pipeline::node::Node for DvbtNode {
             return Err(common::Error::other("dvbt reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        if rate < RATE_HZ {
+        // A part in a million under is still the rate: 64/7 MS/s is not a
+        // whole number of hertz, and a recording of it is.
+        if rate < RATE_HZ * (1.0 - 1e-6) {
             return Err(common::Error::other("dvbt needs 9.14 MS/s of channel"));
         }
         if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
