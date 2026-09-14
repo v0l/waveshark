@@ -12,9 +12,9 @@
 //! line by line over its two minutes rather than in jumps, and nothing
 //! rescans audio it has already read.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
 use crate::RealFir;
+use crate::protocol::{Placed, Placement, Protocol, Shape};
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::sstv;
 use dsp::resample::Rational;

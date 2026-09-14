@@ -47,10 +47,10 @@
 //! rather than guess; the packet is still reported as a chirp it could not
 //! read. `decode::lora_li` says how another rate was measured.
 
+use crate::NodeSpec;
 use crate::lora_nodes::{ChirpReader, Found};
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
-use crate::NodeSpec;
-use common::{Result, C32};
+use common::{C32, Result};
 use decode::elrs;
 use pipeline::event::{Decoded, Request};
 use pipeline::lock::{Lock, Raster};
@@ -544,7 +544,7 @@ impl Protocol for Elrs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Hz, C32};
+    use common::{C32, Hz};
 
     const UID: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
 

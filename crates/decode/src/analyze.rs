@@ -24,9 +24,9 @@
 //!   every width is an integer number of symbols. NRZ.
 
 use crate::bits::BitBuffer;
-use crate::framing::{frame_from_preamble, Framing, MIN_PREAMBLE_BITS};
-use crate::slicer::{slice, Coding, Timing};
-use crate::whiten::{read_framed, Framed};
+use crate::framing::{Framing, MIN_PREAMBLE_BITS, frame_from_preamble};
+use crate::slicer::{Coding, Timing, slice};
+use crate::whiten::{Framed, read_framed};
 use common::pulse::Package;
 
 /// What a burst looks like, and the bits that fall out under that reading.

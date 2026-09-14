@@ -69,8 +69,8 @@ pub mod whiten;
 pub mod wifi;
 pub mod wmbus;
 
-pub use analyze::{analyze, Analysis};
+pub use analyze::{Analysis, analyze};
 pub use bits::BitBuffer;
 pub use framing::Framing;
 pub use protocol::{DecodeError, Protocol, Protocols, Report, Value};
-pub use slicer::{slice, Coding, SliceError, Timing};
+pub use slicer::{Coding, SliceError, Timing, slice};

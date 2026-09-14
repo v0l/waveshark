@@ -27,7 +27,7 @@
 //! corroboration Prologue needs applies: the frame appears on two rows, or the
 //! package is one frame and nothing else.
 
-use crate::bits::{reflect8, BitBuffer};
+use crate::bits::{BitBuffer, reflect8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::Timing;
 

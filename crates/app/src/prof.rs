@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tracing::span::{Attributes, Id};
 use tracing::Subscriber;
+use tracing::span::{Attributes, Id};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 #[derive(Default, Clone, Copy)]
 pub struct Acc {

@@ -11,17 +11,17 @@
 //! stream is 25 frames a second and none of them means anything on its own,
 //! whereas "M0ABC called M17-M17 C for nine seconds" is one row in a log.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use codec2::{Codec2, Codec2Mode};
 use common::Result;
 use decode::m17::{self, Assembler, DataType, Event};
 use dsp::m17::{
-    Body, Frame, M17Config, M17Demod, BAUD, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ,
+    BAUD, Body, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ, Frame, M17Config, M17Demod,
     SYMBOLS_PER_FRAME,
 };
 use dsp::{FirDecim, FmDemod, Mixer};
-use pipeline::event::{media, Decoded};
+use pipeline::event::{Decoded, media};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -521,7 +521,7 @@ mod tests {
     use super::*;
     use common::Hz;
     use decode::m17::Address;
-    use dsp::m17::{fec, frame_symbols, preamble_symbols, Kind, BAUD};
+    use dsp::m17::{BAUD, Kind, fec, frame_symbols, preamble_symbols};
 
     fn spec(rate: f64, center: f64) -> PortSpec {
         PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }

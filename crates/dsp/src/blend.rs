@@ -68,11 +68,7 @@ impl NoiseMeter {
 
     /// Out-of-band noise relative to audio-band content. Low is clean.
     pub fn level(&self) -> f32 {
-        if self.lf > 1e-9 {
-            self.hf / self.lf
-        } else {
-            1.0
-        }
+        if self.lf > 1e-9 { self.hf / self.lf } else { 1.0 }
     }
 
     pub fn reset(&mut self) {

@@ -43,7 +43,7 @@
 //! and the whitening means a wrong channel index fails it too, so a frame that
 //! reports here was received on the channel it says it was.
 
-use crate::fir::{lowpass, FirDecim};
+use crate::fir::{FirDecim, lowpass};
 use crate::gate::{ChannelGate, SpanGate};
 use crate::mixer::Mixer;
 use crate::pulse::LevelGate;

@@ -28,8 +28,8 @@
 //! What is not here yet: slot 2 is not separated from slot 1, so the node
 //! follows whichever slot it locks onto first.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::dmr::{self, LinkControl};
 use dsp::fir::FirDecimReal;
@@ -572,11 +572,7 @@ impl Framer {
                         best = i as u8;
                     }
                 }
-                if flip {
-                    3 - best
-                } else {
-                    best
-                }
+                if flip { 3 - best } else { best }
             })
             .collect()
     }

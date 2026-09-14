@@ -1566,11 +1566,7 @@ mod tests {
         for _ in 0..300 {
             let sym = g.bit() % levels;
             let offset = if levels == 2 {
-                if sym == 0 {
-                    -deviation
-                } else {
-                    deviation
-                }
+                if sym == 0 { -deviation } else { deviation }
             } else {
                 deviation * crate::fourlevel::IDEAL[sym] as f64 / 3.0
             };

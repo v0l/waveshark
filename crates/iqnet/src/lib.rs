@@ -22,11 +22,11 @@
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use iqstream::client::{ClientConfig, IqStream};
 use iqstream::proto::Codec;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// The port `iqstreamd` listens on for control connections.

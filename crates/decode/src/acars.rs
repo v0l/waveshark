@@ -316,11 +316,7 @@ mod tests {
 
     /// Odd parity, which every character on the wire carries.
     fn parity(b: u8) -> u8 {
-        if b.count_ones() % 2 == 0 {
-            b | 0x80
-        } else {
-            b
-        }
+        if b.count_ones() % 2 == 0 { b | 0x80 } else { b }
     }
 
     /// A transmission as the bits arrive: sync, header, block, check bytes.

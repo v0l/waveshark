@@ -14,7 +14,7 @@
 //! follows a common phase error for free, because every symbol is estimated
 //! from its own pilots.
 
-use super::{bin, Carrier, Guard, Layout, Mode, Params, TpsDecoder, SYMBOLS_PER_FRAME};
+use super::{Carrier, Guard, Layout, Mode, Params, SYMBOLS_PER_FRAME, TpsDecoder, bin};
 use common::C32;
 use rustfft::{Fft, FftPlanner};
 use std::collections::HashMap;
@@ -525,7 +525,7 @@ fn wrap(mut a: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dvbt::{tx::Modulator, CodeRate, Constellation, Hierarchy};
+    use crate::dvbt::{CodeRate, Constellation, Hierarchy, tx::Modulator};
 
     /// A deterministic cell sequence, so a test can say which cell it expected
     /// where. Not a transport stream: this is the front end, which cannot see

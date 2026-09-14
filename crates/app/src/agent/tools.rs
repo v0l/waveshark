@@ -5,13 +5,13 @@
 //! interface can be touched; what lives here is the name, the schema and the
 //! sentence an agent reads before choosing.
 
-use super::{args, Action, Desk};
+use super::{Action, Desk, args};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, Implementation, ServerCapabilities, ServerInfo,
 };
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 #[derive(Clone)]
 pub struct Tools {

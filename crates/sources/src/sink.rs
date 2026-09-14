@@ -15,8 +15,8 @@ use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps, TxStream};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where a sink puts what it is given.
 #[derive(Clone)]

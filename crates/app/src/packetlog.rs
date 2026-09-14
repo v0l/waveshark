@@ -391,11 +391,7 @@ impl PacketLog {
         let next = match last {
             Some((seq, ref p)) => {
                 let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                if size >= SEGMENT_BYTES {
-                    seq + 1
-                } else {
-                    seq
-                }
+                if size >= SEGMENT_BYTES { seq + 1 } else { seq }
             }
             None => 0,
         };

@@ -64,11 +64,7 @@ fn decode_under(symbols: &[u16], h: &Hypothesis) -> Vec<u8> {
             .iter()
             .map(|&s| {
                 let s = s % (1 << ppm);
-                if h.gray {
-                    s ^ (s >> 1)
-                } else {
-                    s
-                }
+                if h.gray { s ^ (s >> 1) } else { s }
             })
             .collect();
         // The interleaver writes codewords along a diagonal of a rows by ppm

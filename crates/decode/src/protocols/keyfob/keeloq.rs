@@ -18,7 +18,7 @@
 //! another protocol does not fall into that shape, so the report stands
 //! with no integrity field rather than none at all.
 
-use crate::bits::{reflect8, BitBuffer};
+use crate::bits::{BitBuffer, reflect8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::Timing;
 
@@ -93,8 +93,8 @@ impl Protocol for KeeLoq {
 mod tests {
     use super::*;
     use crate::protocol::Value;
-    use dsp::pulse::Package;
     use dsp::Pulse;
+    use dsp::pulse::Package;
 
     /// The burst as it came off the air, one of a remote pressed every few
     /// seconds on 433.889 MHz: the preamble, the header gap, 66 bits.

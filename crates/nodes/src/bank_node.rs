@@ -17,12 +17,12 @@
 
 use common::{Hz, Result};
 use dsp::DetectorConfig;
+use pipeline::Graph;
 use pipeline::event::Event;
 use pipeline::graph::Topology;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
-use pipeline::Graph;
 
 use crate::bank::{ChannelBank, Gating};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};

@@ -81,11 +81,7 @@ impl NoiseFloor {
         }
         // Before the first sub-window completes, fall back to the running
         // minimum so detection is merely insensitive rather than wrong.
-        if self.floor.is_nan() {
-            self.current.min(power) * self.bias
-        } else {
-            self.floor
-        }
+        if self.floor.is_nan() { self.current.min(power) * self.bias } else { self.floor }
     }
 
     /// Current estimate, or NaN before the first sub-window completes.

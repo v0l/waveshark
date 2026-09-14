@@ -19,8 +19,8 @@
 //! pipelines. This node is the wiring, exactly as `PulseDetectNode` is the
 //! wiring around `dsp::OokDetector`.
 
-use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::adsb::{self, AddressBook, Message};
 use decode::bds;

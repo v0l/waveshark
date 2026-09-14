@@ -8,9 +8,9 @@
 //! no grid: the detector has to find each one, measure it, cut it out at a
 //! width that fits and hand it to a decoder that has never heard of the span.
 
-use common::{Hz, C32};
+use common::{C32, Hz};
 use dsp::Mixer;
-use nodes::{build_chain, registry, NodeSpec};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::event::Event;
 use sources::FileSource;
 
@@ -36,7 +36,7 @@ fn fixture() -> Option<common::IqBuf> {
 }
 
 macro_rules! need_fixture {
-    ($e:expr) => {
+    ($e:expr_2021) => {
         match $e {
             Some(v) => v,
             None => {

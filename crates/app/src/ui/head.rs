@@ -226,7 +226,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|r| r.status.capture_on.load(std::sync::atomic::Ordering::Relaxed));
             segment(ui, DEVICE_W, |ui| {
-                use crate::icons::{icon_button_sized, Icon};
+                use crate::icons::{Icon, icon_button_sized};
                 let t = crate::i18n::t;
                 // Stopping releases the USB claim, which is the only way to
                 // hand the radio to another program without quitting.
@@ -427,7 +427,7 @@ impl App {
         let mut setup = false;
         cell(ui, "panels", PANELS_W, |ui| {
             segment(ui, PANELS_W, |ui| {
-                use crate::icons::{icon_button_sized, Icon};
+                use crate::icons::{Icon, icon_button_sized};
                 // Only the switch that opens the log. What decodes and what
                 // runs where are questions about the packets, so they are
                 // asked in the window that shows them rather than up here.

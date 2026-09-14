@@ -719,7 +719,7 @@ impl LiveTranscribeNode {
 #[cfg(feature = "stt")]
 mod work {
     use super::*;
-    use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
+    use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 
     pub(super) struct Job {
         pub key: common::ConversationKey,
@@ -1148,7 +1148,7 @@ impl Simple for LiveTranscribeNode {
             _ => {
                 return Err(common::Error::other(format!(
                     "transcribe_live: unknown parameter {name:?}"
-                )))
+                )));
             }
         }
         Ok(())

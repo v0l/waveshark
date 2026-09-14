@@ -13,7 +13,7 @@
 //! to Gaussian: measured on 2.4 GHz captures the beacons sit at kurtosis 1.6
 //! to 2.1 and 802.11's own OFDM frames at 2.9 to 3.3.
 
-use super::hypothesis::{ramp, Evidence, Hypothesis};
+use super::hypothesis::{Evidence, Hypothesis, ramp};
 use super::{Features, Modulation};
 
 pub struct Dsss;

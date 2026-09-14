@@ -25,13 +25,13 @@
 
 use common::{Hz, Packet, Result, SourceBlock};
 use dsp::{SourceConfig, SourceDetector, SourceEvent};
+use pipeline::Graph;
 use pipeline::event::{Event, Request};
 use pipeline::graph::Topology;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Registry, Settings, SettingsExt, StageDesc};
-use pipeline::Graph;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -818,7 +818,7 @@ impl Node for AutoNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{SourceState, C32};
+    use common::{C32, SourceState};
     use pipeline::node::Node;
 
     fn spec(rate: f64, center: Hz) -> PortSpec {
@@ -1118,9 +1118,9 @@ mod tests {
         Node::negotiate(&mut planned, &[spec(rate, center)]).unwrap();
         let between = openings(&mut planned, rate, center, &iq);
         assert!(between.iter().any(|o| (o - 362_500.0).abs() < 5_000.0), "{between:?}");
-        assert!(!between
-            .iter()
-            .any(|o| (o - 350_000.0).abs() < 1.0 || (o - 375_000.0).abs() < 1.0));
+        assert!(
+            !between.iter().any(|o| (o - 350_000.0).abs() < 1.0 || (o - 375_000.0).abs() < 1.0)
+        );
     }
 
     #[test]

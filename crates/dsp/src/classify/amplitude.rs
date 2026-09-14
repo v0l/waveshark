@@ -1,6 +1,6 @@
 //! Amplitude keying: on-off, and shallow.
 
-use super::hypothesis::{band, ramp, Evidence, Hypothesis};
+use super::hypothesis::{Evidence, Hypothesis, band, ramp};
 use super::{Features, Modulation};
 
 /// Keyed all the way down to the noise. The plain envelope path reads these.

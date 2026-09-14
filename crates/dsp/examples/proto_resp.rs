@@ -25,6 +25,9 @@ fn main() {
             }
             k += 1;
         }
-        println!("m={m} t={t} atten_req={a}: |H| at 2ch = {at2:.1} dB, worst stopband = {worst:.1} dB, taps={}", h.len());
+        println!(
+            "m={m} t={t} atten_req={a}: |H| at 2ch = {at2:.1} dB, worst stopband = {worst:.1} dB, taps={}",
+            h.len()
+        );
     }
 }

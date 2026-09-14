@@ -36,7 +36,7 @@ use common::Result;
 use std::io::Write;
 
 mod upload;
-pub use upload::{upload, Account, Receipt};
+pub use upload::{Account, Receipt, upload};
 
 /// What WiGLE calls a device of this kind, or `None` for something it has no
 /// bucket for.

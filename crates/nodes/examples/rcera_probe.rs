@@ -626,11 +626,7 @@ fn decoded_stability(aligned: &[&[u8]], m: &Manchester) {
 fn median(xs: impl Iterator<Item = f64>) -> f64 {
     let mut v: Vec<f64> = xs.collect();
     v.sort_by(f64::total_cmp);
-    if v.is_empty() {
-        0.0
-    } else {
-        v[v.len() / 2]
-    }
+    if v.is_empty() { 0.0 } else { v[v.len() / 2] }
 }
 
 fn hex(bits: &[u8], bytes: usize) -> String {

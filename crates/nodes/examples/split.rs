@@ -25,7 +25,11 @@ fn main() {
             }
         }
         let t_tr = t.elapsed().as_secs_f64();
-        println!("M={m:3}: channelize {t_ch:.3}s ({:.2}x real)  transpose {:.3}s  -> channelizer alone caps at {:.1} MS/s",
-            secs/t_ch, t_tr, rate/1e6*(secs/t_ch));
+        println!(
+            "M={m:3}: channelize {t_ch:.3}s ({:.2}x real)  transpose {:.3}s  -> channelizer alone caps at {:.1} MS/s",
+            secs / t_ch,
+            t_tr,
+            rate / 1e6 * (secs / t_ch)
+        );
     }
 }

@@ -221,7 +221,7 @@ impl Simple for SourceDetectNode {
             _ => {
                 return Err(common::Error::other(format!(
                     "source_detect: unknown parameter {name:?}"
-                )))
+                )));
             }
         }
         // Thresholds and timings are read every frame; everything else

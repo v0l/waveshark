@@ -33,9 +33,9 @@
 mod corpus;
 
 use common::C32;
-use corpus::{fixtures, packages, Fixture};
-use decode::protocol::Report;
+use corpus::{Fixture, fixtures, packages};
 use decode::Protocols;
+use decode::protocol::Report;
 
 /// Decodes recovered from a capture, deduplicated the way the corpus harness
 /// does it.

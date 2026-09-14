@@ -17,11 +17,11 @@
 //! and a clipped carrier splatters across the band instead of staying in the
 //! channel it was tuned to.
 
-use common::{Package, Result, C32};
+use common::{C32, Package, Result};
+use pipeline::Tag;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec, TAG_TX_END, TAG_TX_START};
-use pipeline::Tag;
 
 /// The setting names these stages read, spelled once for the builder, the
 /// parameter list and the setter that share each of them.

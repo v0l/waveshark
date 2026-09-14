@@ -8,7 +8,7 @@ use crate::bits::BitFrame;
 use crate::edac::{golay23_check_and_correct, hamming15_check_and_correct};
 use crate::mbe::{FrameType, MbeSynthesizer, ModelParameters, SAMPLES_PER_FRAME};
 use tables::{
-    DEINTERLEAVE, GAINS, GAIN_INDEXES, HARMONIC_ALLOCATIONS, QUANTIZED_VALUE_INDEXES, STEP_SIZES,
+    DEINTERLEAVE, GAIN_INDEXES, GAINS, HARMONIC_ALLOCATIONS, QUANTIZED_VALUE_INDEXES, STEP_SIZES,
     VOICE_DECISION_INDEX,
 };
 
@@ -37,11 +37,7 @@ impl ImbeFundamentalFrequency {
 
     /// Port of `fromValue`: values 0 to 207 are valid, all else is INVALID.
     pub fn from_value(value: u32) -> Self {
-        if value <= 207 {
-            Self { index: value as i32 }
-        } else {
-            Self::INVALID
-        }
+        if value <= 207 { Self { index: value as i32 } } else { Self::INVALID }
     }
 
     pub fn is_valid(self) -> bool {

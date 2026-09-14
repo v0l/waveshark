@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use crate::audiobus::StripParam;
 use crate::scanners::Front;
-use common::{Hz, Result, C32};
+use common::{C32, Hz, Result};
 use dsp::rds::Station;
 use nodes::{AgcNode, BankNode, SpectrumNode, SquelchNode, WfmDemodNode};
 use pipeline::graph::{NodePart, Topology};
@@ -2260,7 +2260,7 @@ pub mod derived {
 /// from an empty canvas, and what they change stays changed while the rest
 /// of it follows the dial.
 pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
-    use crate::patch::{builtin, Source};
+    use crate::patch::{Source, builtin};
     use pipeline::registry::Settings;
     let mut p = crate::patch::Patch::default();
 
@@ -2674,8 +2674,8 @@ const CHAN_STAGES: [&str; 10] = [
 /// than the bus is a picture no view can find.
 fn sync_video(p: &mut crate::patch::Patch) {
     use crate::patch::Source;
-    use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
+    use pipeline::registry::Settings;
 
     let feeds: Vec<(u64, usize, String)> = p
         .stages()
@@ -2742,7 +2742,7 @@ pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::
 /// manual mode froze the channels as they were when it was switched on, and
 /// a channel added or retuned afterwards was silent.
 fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
-    use crate::patch::{builtin, Source};
+    use crate::patch::{Source, builtin};
     use pipeline::ParamValue as V;
     let rate = plan.eff_rate();
     let head = p.tap(builtin::HEAD).unwrap_or(Source::Span);
@@ -2975,8 +2975,8 @@ fn auto_channel_stages(
     rate: f64,
 ) -> u64 {
     use crate::patch::Source;
-    use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
+    use pipeline::registry::Settings;
 
     let hz = spec.offset_hz;
     let width = spec.bandwidth();
@@ -3044,8 +3044,8 @@ fn decode_channel_stages(
     rate: f64,
 ) -> u64 {
     use crate::patch::Source;
-    use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
+    use pipeline::registry::Settings;
 
     let hz = spec.offset_hz;
     let width = spec.bandwidth();
@@ -3125,8 +3125,8 @@ fn audio_channel_stages(
     rate: f64,
 ) -> u64 {
     use crate::patch::Source;
-    use pipeline::registry::Settings;
     use pipeline::ParamValue as V;
+    use pipeline::registry::Settings;
 
     // The channel's own width decides the IF rate when it is wider than the
     // mode's: a 25 kHz repeater set by hand on an NFM channel has to survive
@@ -3756,11 +3756,7 @@ fn add_patch(
 
 /// A rate as a person reads it, for a node label.
 fn hz_label(hz: f64) -> String {
-    if hz >= 1e6 {
-        format!("{:.3} MHz", hz / 1e6)
-    } else {
-        format!("{:.1} kHz", hz / 1e3)
-    }
+    if hz >= 1e6 { format!("{:.3} MHz", hz / 1e6) } else { format!("{:.1} kHz", hz / 1e3) }
 }
 
 /// Where a front end is listening inside the current span, for drawing.
@@ -5383,7 +5379,7 @@ pub fn transmit_graph(
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
         (TxSource::Mic, Some(src)) => Box::new(nodes::MicNode::with_band(src, tx.mic_gain, band)),
         (TxSource::Mic, None) => {
-            return Err(common::Error::other("no microphone is open to transmit from"))
+            return Err(common::Error::other("no microphone is open to transmit from"));
         }
         (TxSource::Tone, _) => Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
     };

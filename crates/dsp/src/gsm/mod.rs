@@ -1120,11 +1120,7 @@ pub fn modulate(bits: &[u8], sps: usize) -> Vec<C32> {
         .map(|&b| {
             let d = b ^ prev;
             prev = b;
-            if d == 0 {
-                1.0
-            } else {
-                -1.0
-            }
+            if d == 0 { 1.0 } else { -1.0 }
         })
         .collect();
 

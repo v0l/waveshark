@@ -18,7 +18,7 @@
 //! than something the caller is trusted to watch, and reaching it stops the
 //! writing rather than the receiver.
 
-use common::{Error, Hz, Result, SampleFormat, C32};
+use common::{C32, Error, Hz, Result, SampleFormat};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -399,11 +399,7 @@ fn now_us() -> u64 {
 /// Anything that would confuse the name back into metadata, or a shell.
 fn sanitise(s: &str) -> String {
     let s: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
-    if s.is_empty() {
-        "capture".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "capture".into() } else { s }
 }
 
 #[cfg(test)]

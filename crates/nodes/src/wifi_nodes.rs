@@ -21,11 +21,11 @@
 //! the two can be compared, and the port centre stays the truth about where
 //! the receiver was listening.
 
-use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
 use decode::wifi as mac;
-use dsp::wifi::{ofdm, WifiConfig, WifiFrame, WifiSpan};
+use dsp::wifi::{WifiConfig, WifiFrame, WifiSpan, ofdm};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};

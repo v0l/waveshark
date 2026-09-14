@@ -12,7 +12,7 @@
 //! show; a complex one is drawn from minus half the rate to plus, centred on
 //! the stream's frequency.
 
-use common::{Result, C32};
+use common::{C32, Result};
 use dsp::{FirDecim, Spectrum};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};

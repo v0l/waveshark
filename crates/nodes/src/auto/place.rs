@@ -1,6 +1,6 @@
 //! Which decoders a source gets, when, and what they make of a block.
 
-use common::{Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState, C32};
+use common::{C32, Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState};
 use pipeline::event::Event;
 use pipeline::port::StreamSpec;
 use rayon::prelude::*;
@@ -10,8 +10,8 @@ use super::evidence::Evidence;
 use super::locks::{Claimed, LockId};
 use super::member::Ring;
 use super::{AutoNode, Member};
-use crate::protocol::{self, Origin, Placed, Protocol};
 use crate::NodeSpec;
+use crate::protocol::{self, Origin, Placed, Protocol};
 
 /// One open source and the decoders reading it.
 pub(super) struct Slot {

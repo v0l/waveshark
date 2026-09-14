@@ -27,5 +27,5 @@
 pub mod nmea;
 pub mod source;
 
-pub use nmea::{parse_sentence, Fix, Sentence};
+pub use nmea::{Fix, Sentence, parse_sentence};
 pub use source::{Config, Sky, Source, Transport};

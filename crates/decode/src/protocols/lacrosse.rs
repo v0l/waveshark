@@ -29,7 +29,7 @@
 //! - `H`     humidity percent, 0x6a meaning the sensor has none
 //! - `C`     CRC-8, polynomial 0x31, init 0x00, over the preceding four bytes
 
-use crate::bits::{crc8, lfsr_digest8_reflect, BitBuffer};
+use crate::bits::{BitBuffer, crc8, lfsr_digest8_reflect};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::protocols::find_frame;
 use crate::slicer::{Coding, Timing};

@@ -131,7 +131,7 @@ impl Simple for PulseDetectNode {
             _ => {
                 return Err(common::Error::other(format!(
                     "pulse_detect: unknown parameter {name:?}"
-                )))
+                )));
             }
         }
         // The detector caches derived values, so rebuild at the current rate.
@@ -256,7 +256,9 @@ impl Simple for AskDetectNode {
             MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
             HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
-                return Err(common::Error::other(format!("ask_detect: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!(
+                    "ask_detect: unknown parameter {name:?}"
+                )));
             }
         }
         let rate = self.det.rate();
@@ -384,7 +386,9 @@ impl Simple for FskDetectNode {
             MIN_SNR_DB => self.cfg.min_snr_db = f as f32,
             HYSTERESIS => self.cfg.hysteresis = f.clamp(0.0, 0.9) as f32,
             _ => {
-                return Err(common::Error::other(format!("fsk_detect: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!(
+                    "fsk_detect: unknown parameter {name:?}"
+                )));
             }
         }
         let rate = self.det.rate();
@@ -652,7 +656,7 @@ impl Simple for ProtocolDecodeNode {
             _ => {
                 return Err(common::Error::other(format!(
                     "protocol_decode: unknown parameter {name:?}"
-                )))
+                )));
             }
         }
         Ok(())
@@ -1030,7 +1034,7 @@ impl Node for BurstRouteNode {
             _ => {
                 return Err(common::Error::other(format!(
                     "burst_route: unknown parameter {name:?}"
-                )))
+                )));
             }
         }
         let rate = self.cfg.classify.channel_hz as f64;

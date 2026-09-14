@@ -187,7 +187,10 @@ impl App {
             line.show(ui);
         });
         if active.is_empty() {
-            hint(ui, "No block covers this frequency and span, so nothing is decoded here. Add one, or widen a range.");
+            hint(
+                ui,
+                "No block covers this frequency and span, so nothing is decoded here. Add one, or widen a range.",
+            );
         }
         ui.add_space(8.0);
 

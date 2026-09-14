@@ -15,9 +15,9 @@
 //! has to be read before a single packet can come out, and why nothing is
 //! read for the first sixty-eight symbols.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
-use common::{Result, C32};
+use crate::protocol::{Placed, Placement, Protocol, Shape};
+use common::{C32, Result};
 use decode::dvbt::{Outer, OuterTx, TsPacket};
 use decode::mpeg2;
 use decode::mpegts::Mux;

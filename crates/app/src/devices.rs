@@ -240,11 +240,7 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
 /// Serial tails identify a unit; the leading zeros do not.
 fn short(s: &str) -> String {
     let t = s.trim_start_matches('0');
-    if t.len() > 8 {
-        t[t.len() - 8..].to_string()
-    } else {
-        t.to_string()
-    }
+    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
 }
 
 pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
@@ -356,11 +352,7 @@ pub fn spans_for(range: &std::ops::RangeInclusive<Sps>) -> Vec<(String, f64)> {
 fn label(hz: f64) -> String {
     if hz >= 1e6 {
         let m = hz / 1e6;
-        if (m - m.round()).abs() < 1e-9 {
-            format!("{m:.0}M")
-        } else {
-            format!("{m:.3}M")
-        }
+        if (m - m.round()).abs() < 1e-9 { format!("{m:.0}M") } else { format!("{m:.3}M") }
     } else {
         format!("{:.0}k", hz / 1e3)
     }

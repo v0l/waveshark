@@ -368,7 +368,7 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("unsupported baud rate {other}"),
-            ))
+            ));
         }
     };
     // SAFETY: `fd` is open for the lifetime of `file`, and `tty` is a valid
@@ -404,7 +404,7 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
 fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Devices::Communication::{
-        GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB,
+        COMMTIMEOUTS, DCB, GetCommState, SetCommState, SetCommTimeouts,
     };
 
     // COM10 and above cannot be opened by name: only the first nine have a

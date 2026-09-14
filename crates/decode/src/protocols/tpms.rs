@@ -10,10 +10,10 @@
 //! is a few milliseconds long, it arrives once per wheel per minute, and it is
 //! gone. Nothing here can be asked to repeat itself.
 
-use crate::bits::{crc8, BitBuffer};
+use crate::bits::{BitBuffer, crc8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::protocols::find_frame;
-use crate::slicer::{differential_manchester_decode, Coding, Timing};
+use crate::slicer::{Coding, Timing, differential_manchester_decode};
 
 /// Schrader Electronics MRXGG4, the sensor fitted to a large share of European
 /// and American cars.

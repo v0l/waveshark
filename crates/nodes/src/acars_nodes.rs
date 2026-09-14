@@ -11,13 +11,13 @@
 //! whose CRC-16 checked, so a row here is a message that was received rather
 //! than one that was guessed at.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::acars;
 use dsp::msk::{MskConfig, MskDemod};
 use dsp::{AmDemod, FirDecim, Mixer};
-use pipeline::event::{media, Decoded};
+use pipeline::event::{Decoded, media};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};

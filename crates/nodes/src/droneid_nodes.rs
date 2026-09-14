@@ -29,8 +29,8 @@
 //! sends zeros, which `decode::droneid` reports as absent rather than as a
 //! position off Africa.
 
-use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};

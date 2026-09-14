@@ -12,10 +12,10 @@
 //! period rather than configured, and a port that carries whole fields with
 //! the channel they came from.
 
-use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use crate::NodeSpec;
+use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use common::{Pixels, Result, VideoFrame};
-use dsp::video::{find_lines, Lock, Standard, SyncSeparator};
+use dsp::video::{Lock, Standard, SyncSeparator, find_lines};
 use pipeline::event::Request;
 use pipeline::node::{NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
@@ -203,11 +203,7 @@ impl pipeline::node::Node for VideoNode {
         self.demod = dsp::FmDemod::new(self.rate, DEVIATION_HZ);
         self.sep = self.forced.map(|std| {
             let s = SyncSeparator::new(self.rate, std, WIDTH);
-            if self.colour {
-                s.with_colour()
-            } else {
-                s
-            }
+            if self.colour { s.with_colour() } else { s }
         });
         self.priming.clear();
         let mut out = i.spec.with_kind(PortKind::Video);
@@ -509,7 +505,7 @@ impl Protocol for Video {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Hz, C32};
+    use common::{C32, Hz};
     use pipeline::node::Node;
 
     /// One block through the node, as the graph would run it: the fields it

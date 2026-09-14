@@ -1,9 +1,9 @@
 //! Finding what is transmitting: the noise floor, the runs of bins over it,
 //! and the tracks those runs become.
 
-use super::{bin_of_hz, frame_start, hz_of_bin, Owned, Source, SourceConfig, SourceEvent};
+use super::{Owned, Source, SourceConfig, SourceEvent, bin_of_hz, frame_start, hz_of_bin};
 use crate::window;
-use common::{SourceId, C32};
+use common::{C32, SourceId};
 use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;

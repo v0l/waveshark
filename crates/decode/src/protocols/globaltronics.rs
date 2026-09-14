@@ -152,10 +152,10 @@ impl Protocol for GtWt03 {
 ///
 /// The low byte of a Galois LFSR-16 seeded per byte, in other words, which is
 /// why neither a CRC nor a sum reproduces it.
-fn roll_byte(data: &[u8], gen: u16) -> u8 {
+fn roll_byte(data: &[u8], r#gen: u16) -> u8 {
     let mut sum = 0u8;
     for &byte in data {
-        let mut key = gen;
+        let mut key = r#gen;
         for i in (0..8).rev() {
             if byte >> i & 1 != 0 {
                 sum ^= key as u8;

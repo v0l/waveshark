@@ -84,11 +84,7 @@ pub fn design(
             let narrow = lowpass(n, lo, atten_db);
             // The difference of two lowpasses is the band between them.
             let band: Vec<f32> = wide.iter().zip(&narrow).map(|(a, b)| a - b).collect();
-            if response == Response::Bandpass {
-                band
-            } else {
-                invert(band)
-            }
+            if response == Response::Bandpass { band } else { invert(band) }
         }
     }
 }

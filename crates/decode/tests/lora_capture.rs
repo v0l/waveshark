@@ -19,7 +19,7 @@
 //! Skips when the fixtures are absent, so a fresh clone passes without
 //! network access. Run `testdata/fetch.sh` to get them.
 
-use common::{SampleFormat, C32};
+use common::{C32, SampleFormat};
 use decode::lora;
 use dsp::fir::FirDecim;
 use std::path::{Path, PathBuf};

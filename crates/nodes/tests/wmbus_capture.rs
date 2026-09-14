@@ -9,8 +9,8 @@
 //! the reference: manufacturer, meter number, version, type, and the bytes
 //! themselves.
 
-use common::{Hz, PacketBody, C32};
-use nodes::{build_chain, registry, NodeSpec};
+use common::{C32, Hz, PacketBody};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 use sources::FileSource;
 use std::path::{Path, PathBuf};

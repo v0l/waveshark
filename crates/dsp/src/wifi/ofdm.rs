@@ -98,11 +98,7 @@ pub const fn bin(k: i32) -> usize {
 
 /// The LTS value on subcarrier `k`.
 pub fn lts(k: i32) -> f32 {
-    if (-26..=26).contains(&k) {
-        LTS[(k + 26) as usize]
-    } else {
-        0.0
-    }
+    if (-26..=26).contains(&k) { LTS[(k + 26) as usize] } else { 0.0 }
 }
 
 /// One of the eight data rates a SIGNAL field can name.
@@ -137,19 +133,11 @@ impl Rate {
     /// Columns the interleaver writes in, which is the one parameter that
     /// differs between a legacy symbol and an HT one.
     pub fn columns(&self) -> usize {
-        if self.mcs.is_some() {
-            13
-        } else {
-            16
-        }
+        if self.mcs.is_some() { 13 } else { 16 }
     }
     /// Samples one data symbol occupies, prefix included.
     pub fn symbol_samples(&self) -> usize {
-        if self.short_gi {
-            FFT + CP / 2
-        } else {
-            SYMBOL
-        }
+        if self.short_gi { FFT + CP / 2 } else { SYMBOL }
     }
     pub fn puncture(&self) -> &'static [u8] {
         match self.coding {
@@ -161,11 +149,7 @@ impl Rate {
     }
     /// The subcarriers this rate's symbols carry data on.
     pub fn carriers(&self) -> &'static [i32] {
-        if self.mcs.is_some() {
-            &HT_DATA_SUBCARRIERS
-        } else {
-            &DATA_SUBCARRIERS
-        }
+        if self.mcs.is_some() { &HT_DATA_SUBCARRIERS } else { &DATA_SUBCARRIERS }
     }
     /// What a person reads: "36 Mbit/s" or "MCS 5".
     pub fn label(&self) -> String {
@@ -275,11 +259,7 @@ fn level(bits: &[u8]) -> f32 {
         }
         2 => {
             let mag = if bits[1] == 1 { 1.0 } else { 3.0 };
-            if bits[0] == 1 {
-                mag
-            } else {
-                -mag
-            }
+            if bits[0] == 1 { mag } else { -mag }
         }
         _ => {
             let mag = match (bits[1], bits[2]) {
@@ -288,11 +268,7 @@ fn level(bits: &[u8]) -> f32 {
                 (1, 1) => 3.0,
                 _ => 1.0,
             };
-            if bits[0] == 1 {
-                mag
-            } else {
-                -mag
-            }
+            if bits[0] == 1 { mag } else { -mag }
         }
     }
 }

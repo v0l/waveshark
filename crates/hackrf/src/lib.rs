@@ -7,8 +7,8 @@
 pub mod gain;
 
 use common::{
-    Device, DeviceInfo, DriverKind, Error, GainMode, Hz, IqBuf, Result, RxStream, SampleFormat,
-    Sps, TunerRange, TxInfo, TxStream, C32,
+    C32, Device, DeviceInfo, DriverKind, Error, GainMode, Hz, IqBuf, Result, RxStream,
+    SampleFormat, Sps, TunerRange, TxInfo, TxStream,
 };
 use hackrf_usb::{AsyncReadControlHandle, AsyncReadHandle, AsyncWriteHandle, HackRf};
 use std::time::Duration;
@@ -267,13 +267,16 @@ impl HackRfDevice {
 
     fn apply_tx_gain(&self) -> Result<()> {
         let gain::TxStages { amp, txvga } = self.tx_stages;
-        if let Some(c) = self.ctl() {
-            c.set_amp_enable(amp).map_err(map_err)?;
-            c.set_txvga_gain(txvga).map_err(map_err)?;
-        } else {
-            let d = self.hw()?;
-            d.set_amp_enable(amp).map_err(map_err)?;
-            d.set_txvga_gain(txvga).map_err(map_err)?;
+        match self.ctl() {
+            Some(c) => {
+                c.set_amp_enable(amp).map_err(map_err)?;
+                c.set_txvga_gain(txvga).map_err(map_err)?;
+            }
+            _ => {
+                let d = self.hw()?;
+                d.set_amp_enable(amp).map_err(map_err)?;
+                d.set_txvga_gain(txvga).map_err(map_err)?;
+            }
         }
         Ok(())
     }
@@ -289,15 +292,18 @@ impl HackRfDevice {
     fn apply_gain(&self) -> Result<()> {
         self.shared.want.lock().stages = self.stages;
         let gain::Stages { amp, lna, vga } = self.stages;
-        if let Some(c) = self.ctl() {
-            c.set_amp_enable(amp).map_err(map_err)?;
-            c.set_lna_gain(lna).map_err(map_err)?;
-            c.set_vga_gain(vga).map_err(map_err)?;
-        } else {
-            let d = self.hw()?;
-            d.set_amp_enable(amp).map_err(map_err)?;
-            d.set_lna_gain(lna).map_err(map_err)?;
-            d.set_vga_gain(vga).map_err(map_err)?;
+        match self.ctl() {
+            Some(c) => {
+                c.set_amp_enable(amp).map_err(map_err)?;
+                c.set_lna_gain(lna).map_err(map_err)?;
+                c.set_vga_gain(vga).map_err(map_err)?;
+            }
+            _ => {
+                let d = self.hw()?;
+                d.set_amp_enable(amp).map_err(map_err)?;
+                d.set_lna_gain(lna).map_err(map_err)?;
+                d.set_vga_gain(vga).map_err(map_err)?;
+            }
         }
         Ok(())
     }
@@ -307,11 +313,7 @@ fn short_serial(s: &str) -> String {
     // Serials are 32 hex digits and mostly leading zeros; the tail identifies
     // the unit and is what is printed on comparison tools.
     let t = s.trim_start_matches('0');
-    if t.len() > 8 {
-        t[t.len() - 8..].to_string()
-    } else {
-        t.to_string()
-    }
+    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
 }
 
 impl Device for HackRfDevice {

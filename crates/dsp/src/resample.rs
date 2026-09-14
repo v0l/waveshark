@@ -233,11 +233,7 @@ fn ratio(a: f64, b: f64, max_denominator: usize) -> Option<(usize, usize)> {
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@
 //! it has to demodulate; the loop filter is already far narrower than any
 //! practical prefilter, so this feeds the phase detector directly.
 
-use crate::fir::{lowpass, FirDecimReal};
+use crate::fir::{FirDecimReal, lowpass};
 use std::f64::consts::TAU;
 
 const PILOT_HZ: f64 = 19_000.0;
@@ -524,9 +524,13 @@ mod diag {
             };
             println!(
                 "n={consumed:>7} err {:+7.2}deg  L {:.4} R {:.4} sep {:5.1}dB | R@1k {:.5} R@2k {:.5} R@dc {:.5}",
-                e.to_degrees(), rms(&l), rms(&r),
-                20.0*(rms(&l)/rms(&r).max(1e-12)).log10(),
-                g(&r, 1000.0), g(&r, 2000.0), g(&r, 1.0)
+                e.to_degrees(),
+                rms(&l),
+                rms(&r),
+                20.0 * (rms(&l) / rms(&r).max(1e-12)).log10(),
+                g(&r, 1000.0),
+                g(&r, 2000.0),
+                g(&r, 1.0)
             );
         }
     }

@@ -9,15 +9,15 @@
 
 #[cfg(feature = "tea")]
 mod imp {
-    use super::super::{Recovery, TetraNode, COLLISION_QUORUM, TEA1_RULED_OUT};
+    use super::super::{COLLISION_QUORUM, Recovery, TEA1_RULED_OUT, TetraNode};
     use decode::gpu::{GpuSearch, Ta61Gpu};
     use decode::recover::{Progress, Search};
     use decode::ta61::IdPair;
     use decode::tea::{Collision, Key, Timestamp};
     use decode::tetra::{Address, CallPdu, MmPdu};
     use decode::voice::{decrypt_frame, frame_timestamps};
-    use dsp::tetra::speech::FRAME_BITS;
     use dsp::tetra::TdmaTime;
+    use dsp::tetra::speech::FRAME_BITS;
     use poll_promise::Promise;
     use std::collections::HashMap;
 
@@ -639,8 +639,8 @@ pub(crate) use imp::Crypto;
 mod stub {
     use super::super::{Recovery, TetraNode};
     use decode::tetra::{CallPdu, MmPdu};
-    use dsp::tetra::speech::FRAME_BITS;
     use dsp::tetra::TdmaTime;
+    use dsp::tetra::speech::FRAME_BITS;
 
     /// A zero-size stand-in for the `tea` subsystem: every method is the
     /// clear-network answer, so the node body carries no `#[cfg]`.

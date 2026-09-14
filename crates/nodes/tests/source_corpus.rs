@@ -14,11 +14,11 @@
 #[path = "../../decode/tests/corpus/mod.rs"]
 mod corpus;
 
-use common::{Package, C32};
-use corpus::{fixtures, Fixture};
-use decode::protocol::Report;
+use common::{C32, Package};
+use corpus::{Fixture, fixtures};
 use decode::Protocols;
-use nodes::{build_chain, ism_decode_graph, registry, ChannelBank, Gating, NodeSpec};
+use decode::protocol::Report;
+use nodes::{ChannelBank, Gating, NodeSpec, build_chain, ism_decode_graph, registry};
 use pipeline::StreamSpec;
 use sources::FileSource;
 

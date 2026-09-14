@@ -37,14 +37,14 @@
 //! memory bandwidth is wasted. Doing it once, in tiles, then handing each graph
 //! a contiguous run, is far cheaper than doing it lazily per channel.
 
-use common::{Error, Hz, Package, Result, C32};
+use common::{C32, Error, Hz, Package, Result};
 use dsp::{Channelizer, Detector, DetectorConfig};
 use pipeline::event::Event;
 use pipeline::registry::Registry;
 use pipeline::{Graph, Out, StreamSpec};
 use rayon::prelude::*;
 
-use crate::{build_chain, NodeSpec};
+use crate::{NodeSpec, build_chain};
 
 /// An event, tagged with where it came from.
 #[derive(Clone, Debug)]

@@ -247,7 +247,7 @@ impl Simple for PacketDecodeNode {
             _ => {
                 return Err(common::Error::other(format!(
                     "packet_decode: unknown parameter {name:?}"
-                )))
+                )));
             }
         }
         Ok(())
@@ -703,8 +703,10 @@ mod tests {
                 modulation: None,
             },
         );
-        p.decodes = vec![Decoded::bytes(protocol, Hz(freq as u64), 0.0, vec![1, 2, 3])
-            .with_modulation(common::Modulation::Fsk2)];
+        p.decodes = vec![
+            Decoded::bytes(protocol, Hz(freq as u64), 0.0, vec![1, 2, 3])
+                .with_modulation(common::Modulation::Fsk2),
+        ];
         p
     }
 

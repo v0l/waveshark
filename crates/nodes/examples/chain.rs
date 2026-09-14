@@ -8,7 +8,7 @@
 //!
 //! With no chain argument it lists the available nodes and their parameters.
 
-use nodes::{build_chain, registry, NodeSpec};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::event::Event;
 use pipeline::{ParamValue, StreamSpec};
 use sources::FileSource;

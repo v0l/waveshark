@@ -11,14 +11,14 @@
 //! is the link layer: an ACARS message inside one is read, and the X.25 and
 //! CLNP that carry the air traffic protocols above it are not.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::vdl2;
 use dsp::d8psk::{Burst, D8pskConfig, D8pskDemod};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::{media, Decoded};
+use pipeline::event::{Decoded, media};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};

@@ -10,8 +10,8 @@
 //! what reaches the bus is bytes that proved themselves, and the parsing that
 //! happens downstream is reading rather than acceptance.
 
-use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::ais::{self, Message};
 use dsp::ais::{AisConfig, AisDetector, AisFrame, BAND_CENTER_HZ, CHANNEL_HZ};
@@ -159,11 +159,7 @@ pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Deco
             if let Some(v) = p.nav_status {
                 fields.push(("nav_status".into(), Value::Text(ais::nav_status_name(v).into())));
             }
-            if p.class_b {
-                "AIS-PositionB"
-            } else {
-                "AIS-Position"
-            }
+            if p.class_b { "AIS-PositionB" } else { "AIS-Position" }
         }
         Message::Static(s) => {
             // No coordinates in a static message: what it carries is what the

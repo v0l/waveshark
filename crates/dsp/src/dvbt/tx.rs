@@ -8,7 +8,7 @@
 //! in front of it as the guard.
 
 use super::tps;
-use super::{bin, Carrier, Layout, Params, SYMBOLS_PER_FRAME};
+use super::{Carrier, Layout, Params, SYMBOLS_PER_FRAME, bin};
 use common::C32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;

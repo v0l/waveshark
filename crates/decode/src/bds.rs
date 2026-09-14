@@ -143,11 +143,7 @@ fn bit(p: u64, at: u32) -> bool {
 /// complement: a set sign bit with a zero magnitude is the largest negative
 /// value, not minus zero.
 fn signed(mag: u64, width: u32, negative: bool) -> f64 {
-    if negative {
-        mag as f64 - (1u64 << width) as f64
-    } else {
-        mag as f64
-    }
+    if negative { mag as f64 - (1u64 << width) as f64 } else { mag as f64 }
 }
 
 /// A status bit that is clear while the field it guards is not means this is

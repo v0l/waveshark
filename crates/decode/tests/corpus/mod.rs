@@ -11,8 +11,8 @@
 #![allow(dead_code)]
 
 use common::C32;
-use decode::protocol::{Report, Value};
 use decode::Protocols;
+use decode::protocol::{Report, Value};
 use dsp::{FirDecim, FskConfig, FskDetector, Mixer, OokDetector, Package, PulseConfig};
 use sources::FileSource;
 use std::collections::BTreeMap;

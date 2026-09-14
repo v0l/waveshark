@@ -12,7 +12,7 @@
 //! of evidence as the classifier's row for a burst no front end read, and it
 //! carries the samples it was measured from for the same reason.
 
-use common::{Modulation, Package, Packet, C32};
+use common::{C32, Modulation, Package, Packet};
 
 use super::member::Ring;
 

@@ -401,7 +401,7 @@ fn hz_of_bin(bin: f64, n: usize, bin_hz: f64) -> f64 {
 mod tests {
     use super::detect::floor_bias;
     use super::*;
-    use common::{SourceBlock, SourceState, C32};
+    use common::{C32, SourceBlock, SourceState};
 
     fn noise(n: usize, amp: f32, seed: u64) -> Vec<C32> {
         // xorshift, Box-Muller: deterministic Gaussian noise.

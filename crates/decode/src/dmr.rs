@@ -143,11 +143,7 @@ fn nearest(code: u32, info_bits: u32, max_errors: u32, encode: impl Fn(u32) -> u
             best = (d, v);
         }
     }
-    if best.0 <= max_errors {
-        Some(best.1)
-    } else {
-        None
-    }
+    if best.0 <= max_errors { Some(best.1) } else { None }
 }
 
 /// QR(16,7,6) as its 15 used bits: seven information bits and the remainder
@@ -162,14 +158,14 @@ fn golay_encode(v: u32) -> u32 {
 }
 
 /// Remainder of `value` divided by `gen` over GF(2), with `deg` parity bits.
-fn poly_rem(value: u32, gen: u32, deg: u32) -> u32 {
+fn poly_rem(value: u32, r#gen: u32, deg: u32) -> u32 {
     let mut r = value;
-    let g_deg = 32 - gen.leading_zeros() - 1;
+    let g_deg = 32 - r#gen.leading_zeros() - 1;
     let mut shift = 32 - r.leading_zeros();
     while shift > deg {
         shift -= 1;
         if r >> shift & 1 == 1 {
-            r ^= gen << (shift - g_deg);
+            r ^= r#gen << (shift - g_deg);
         }
         shift = 32 - r.leading_zeros();
     }

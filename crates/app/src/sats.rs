@@ -15,8 +15,8 @@
 use datasets::tle::Group;
 use orbit::{Pass, Sat, Station};
 use parking_lot::{Mutex, RwLock};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// How far ahead passes are searched. A day covers everything in low orbit
 /// several times over and is a table a person can read to the end of.

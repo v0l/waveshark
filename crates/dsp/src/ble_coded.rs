@@ -34,7 +34,7 @@
 //! dropped, and it is missing every packet whose legacy copy was lost to a
 //! collision.
 
-use crate::ble::{crc24, Whitening, ADV_ACCESS_ADDRESS};
+use crate::ble::{ADV_ACCESS_ADDRESS, Whitening, crc24};
 
 /// Ten repeats of the pattern, uncoded, at one symbol a microsecond.
 pub const PREAMBLE: [bool; 8] = [false, false, true, true, true, true, false, false];
@@ -340,11 +340,7 @@ mod tests {
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
                 seed ^= seed << 17;
-                if seed & 1 == 0 {
-                    1.0
-                } else {
-                    -1.0
-                }
+                if seed & 1 == 0 { 1.0 } else { -1.0 }
             })
             .collect();
         assert!(decode(&sym, 37).is_none());

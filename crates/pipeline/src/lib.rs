@@ -25,7 +25,7 @@ pub mod registry;
 pub use cost::Cost;
 pub use event::{Decoded, Event, Request};
 pub use graph::{
-    chain, Emitted, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, GRAPH_INPUT,
+    Emitted, GRAPH_INPUT, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, chain,
 };
 pub use lock::{Claim, Lock, Raster, Verdict};
 pub use node::{Node, NodeCtx, PortSpec, Simple};

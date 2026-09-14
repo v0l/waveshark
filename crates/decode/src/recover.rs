@@ -7,10 +7,10 @@
 //! answer without ever blocking. A found register is a TEA1 key
 //! ([`crate::tea::Key::Tea1`]).
 
-use crate::tea::{recover_tea1, Collision};
+use crate::tea::{Collision, recover_tea1};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::sync::Arc;
 
 /// What a running search has to say when polled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

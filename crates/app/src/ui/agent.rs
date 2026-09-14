@@ -12,8 +12,8 @@
 //! that disagrees with the screen would be worse than no number at all.
 
 use super::*;
-use crate::agent::{args, Action, Ask};
-use serde_json::{json, Value};
+use crate::agent::{Action, Ask, args};
+use serde_json::{Value, json};
 
 /// Widest a screenshot is sent at. Wide enough that the spectrum's axis
 /// labels and a packet row are still legible; wider costs a lot, since a
@@ -1498,23 +1498,25 @@ mod tests {
 
         // A channel that is not there is said so rather than silently doing
         // nothing, which from an agent's side are the same call.
-        assert!(call(
-            &mut a,
-            Action::SetChannel(args::SetChannel {
-                id: id + 99,
-                mhz: None,
-                mode: None,
-                bandwidth_khz: None,
-                label: None,
-                on: None,
-                volume: None,
-                muted: None,
-                squelch_db: None,
-                agc: None,
-                voice: None,
-            })
-        )
-        .is_err());
+        assert!(
+            call(
+                &mut a,
+                Action::SetChannel(args::SetChannel {
+                    id: id + 99,
+                    mhz: None,
+                    mode: None,
+                    bandwidth_khz: None,
+                    label: None,
+                    on: None,
+                    volume: None,
+                    muted: None,
+                    squelch_db: None,
+                    agc: None,
+                    voice: None,
+                })
+            )
+            .is_err()
+        );
 
         call(&mut a, Action::RemoveChannel(args::Channel { id })).unwrap();
         assert_eq!(a.audio.channels.len(), 0);
@@ -1679,25 +1681,29 @@ mod tests {
 
         // A stage cannot feed itself, and the patch says so rather than
         // quietly drawing nothing.
-        assert!(call(
-            &mut a,
-            Action::Connect(args::Connect {
-                source: args::Tap::Stage { id: dec_id, port: 0 },
-                to_stage: dec_id,
-                to_port: 0,
-            })
-        )
-        .is_err());
+        assert!(
+            call(
+                &mut a,
+                Action::Connect(args::Connect {
+                    source: args::Tap::Stage { id: dec_id, port: 0 },
+                    to_stage: dec_id,
+                    to_port: 0,
+                })
+            )
+            .is_err()
+        );
         // Neither can a wire name a stage that is not there.
-        assert!(call(
-            &mut a,
-            Action::Connect(args::Connect {
-                source: args::Tap::Span,
-                to_stage: dec_id + 4096,
-                to_port: 0,
-            })
-        )
-        .is_err());
+        assert!(
+            call(
+                &mut a,
+                Action::Connect(args::Connect {
+                    source: args::Tap::Span,
+                    to_stage: dec_id + 4096,
+                    to_port: 0,
+                })
+            )
+            .is_err()
+        );
         assert!(
             call(&mut a, Action::AddStage(args::StageKind { kind: "wobbulator".into() })).is_err()
         );

@@ -9,9 +9,9 @@
 //! carrier at about -10.5 kHz from nominal, and that offset rides along into
 //! every channel here.
 
-use common::{Hz, C32};
+use common::{C32, Hz};
 use dsp::Mixer;
-use nodes::{registry, ChannelBank, Gating, NodeSpec};
+use nodes::{ChannelBank, Gating, NodeSpec, registry};
 use pipeline::event::Event;
 use sources::FileSource;
 
@@ -36,7 +36,7 @@ fn fixture() -> Option<common::IqBuf> {
 }
 
 macro_rules! need_fixture {
-    ($e:expr) => {
+    ($e:expr_2021) => {
         match $e {
             Some(v) => v,
             None => {

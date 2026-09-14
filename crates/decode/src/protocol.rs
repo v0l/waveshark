@@ -4,7 +4,7 @@
 //! lives in `common`.
 
 use crate::bits::BitBuffer;
-use crate::slicer::{slice, Timing};
+use crate::slicer::{Timing, slice};
 pub use common::Value;
 
 use dsp::pulse::Package;

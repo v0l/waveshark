@@ -11,9 +11,9 @@ pub use resample::Resampler;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, StreamConfig};
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// Queue depth before the producer drops.
 const QUEUE_DEPTH: usize = 32;

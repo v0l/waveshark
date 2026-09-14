@@ -5,7 +5,7 @@
 //! `dsp` is usable without the graph, and the graph never constrains how the
 //! DSP is written.
 
-use common::{Result, C32};
+use common::{C32, Result};
 use dsp::agc::Agc;
 use dsp::squelch::{NoiseMeter, Squelch};
 use dsp::ssb::{Sideband, SsbDemod};
@@ -91,9 +91,9 @@ impl Simple for MixerNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float(SHIFT_HZ, self.shift_hz, -30e6..=30e6)
-            .unit("Hz")
-            .label("Frequency shift")]
+        vec![
+            Param::float(SHIFT_HZ, self.shift_hz, -30e6..=30e6).unit("Hz").label("Frequency shift"),
+        ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -289,10 +289,12 @@ impl Simple for FmDemodNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float(DEVIATION_HZ, self.deviation_hz, 500.0..=200_000.0)
-            .unit("Hz")
-            .label("Peak deviation")
-            .log()]
+        vec![
+            Param::float(DEVIATION_HZ, self.deviation_hz, 500.0..=200_000.0)
+                .unit("Hz")
+                .label("Peak deviation")
+                .log(),
+        ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -358,9 +360,11 @@ impl Simple for DeemphasisNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float(TAU_US, self.tau_us, 25.0..=100.0)
-            .unit("us")
-            .label("Time constant (50 EU, 75 Americas)")]
+        vec![
+            Param::float(TAU_US, self.tau_us, 25.0..=100.0)
+                .unit("us")
+                .label("Time constant (50 EU, 75 Americas)"),
+        ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -615,7 +619,7 @@ impl Simple for SsbDemodNode {
             LOW_HZ => self.low_hz = v.as_f64().unwrap_or(VOICE_LOW_HZ),
             HIGH_HZ => self.high_hz = v.as_f64().unwrap_or(VOICE_HIGH_HZ),
             _ => {
-                return Err(common::Error::other(format!("ssb_demod: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!("ssb_demod: unknown parameter {name:?}")));
             }
         }
         self.demod = SsbDemod::new(self.demod_rate(), self.sideband, self.low_hz, self.high_hz);
@@ -711,11 +715,7 @@ impl std::fmt::Display for AgcPreset {
 impl AgcNode {
     /// Gain currently applied, or 0 dB when switched off.
     pub fn gain_db(&self) -> f32 {
-        if self.enabled {
-            self.agc.gain_db()
-        } else {
-            0.0
-        }
+        if self.enabled { self.agc.gain_db() } else { 0.0 }
     }
 
     pub fn set_enabled(&mut self, on: bool) {

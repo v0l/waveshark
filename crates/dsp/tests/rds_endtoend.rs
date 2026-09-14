@@ -7,9 +7,9 @@
 //! message is known, a pass proves the whole chain rather than just that it
 //! produced plausible-looking output.
 
-use dsp::rds::block::{encode, Offset};
-use dsp::rds::{BlockSync, GroupDecoder, RdsDemod};
 use dsp::StereoDecoder;
+use dsp::rds::block::{Offset, encode};
+use dsp::rds::{BlockSync, GroupDecoder, RdsDemod};
 use std::f64::consts::TAU;
 
 const RATE: f64 = 228_000.0;

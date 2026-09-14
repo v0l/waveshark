@@ -15,13 +15,13 @@
 //! table adds an encoder and reuses this carrier.
 
 use crate::mod_nodes::OokModNode;
-use common::{Result, C32};
+use common::{C32, Result};
+use pipeline::Graph;
 use pipeline::graph::Topology;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-use pipeline::Graph;
 
 /// Bytes of text in, Morse timings out.
 pub struct MorseKeyNode {
@@ -589,7 +589,9 @@ impl Node for TxMonitorNode {
             }
             ENABLED => self.enabled = value.as_bool().unwrap_or(false),
             _ => {
-                return Err(common::Error::other(format!("tx_monitor: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!(
+                    "tx_monitor: unknown parameter {name:?}"
+                )));
             }
         }
         Ok(())

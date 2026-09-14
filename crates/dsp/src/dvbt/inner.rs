@@ -10,7 +10,7 @@
 //! cells, scatters the bits of a cell across the stream so that the ones that
 //! share a constellation point are not neighbours in the code.
 
-use super::{axis, Constellation, Mode};
+use super::{Constellation, Mode, axis};
 use common::C32;
 
 /// Cells in one bit interleaver block.

@@ -11,8 +11,8 @@
 //! AX.25 is HDLC. What reaches the bus is an AX.25 frame that has already
 //! proved itself.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::{aprs, ax25};
 use dsp::afsk::{AfskConfig, AfskDemod};

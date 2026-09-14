@@ -105,19 +105,11 @@ impl Broker {
     }
 
     fn prefix(&self) -> &str {
-        if self.prefix.trim().is_empty() {
-            "homeassistant"
-        } else {
-            self.prefix.trim()
-        }
+        if self.prefix.trim().is_empty() { "homeassistant" } else { self.prefix.trim() }
     }
 
     fn topic(&self) -> &str {
-        if self.topic.trim().is_empty() {
-            "waveshark"
-        } else {
-            self.topic.trim()
-        }
+        if self.topic.trim().is_empty() { "waveshark" } else { self.topic.trim() }
     }
 
     /// What the broker is told to publish if this receiver disappears, and
@@ -803,11 +795,7 @@ fn slug(s: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
         .collect();
     let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() {
-        "unnamed".into()
-    } else {
-        trimmed
-    }
+    if trimmed.is_empty() { "unnamed".into() } else { trimmed }
 }
 
 /// A field name as a person reads it: `temperature_c` is Temperature, since

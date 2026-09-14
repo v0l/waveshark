@@ -220,7 +220,7 @@ impl Cells {
 
     /// Every cell of one network in the export, for drawing a network's
     /// footprint rather than answering about one beacon.
-    pub fn in_network(&self, mcc: u16, mnc: &str) -> impl Iterator<Item = &Cell> {
+    pub fn in_network(&self, mcc: u16, mnc: &str) -> impl Iterator<Item = &Cell> + use<'_> {
         let want = mnc.trim_start_matches('0').to_string();
         self.0.iter().filter(move |c| c.mcc == mcc && c.mnc.trim_start_matches('0') == want)
     }

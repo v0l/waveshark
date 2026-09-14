@@ -13,7 +13,7 @@
 //! recorder's ring is far larger than that. Events are for things that
 //! happened; these are things that are.
 
-use common::{Error, Result, C32};
+use common::{C32, Error, Result};
 use dsp::Spectrum;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -782,11 +782,7 @@ mod adc_tests {
         let starved: Vec<C32> = (0..4096)
             .map(|i| {
                 let v = |k: u32| {
-                    if (i * 7 + k).is_multiple_of(3) {
-                        -0.5 / 127.5
-                    } else {
-                        0.5 / 127.5
-                    }
+                    if (i * 7 + k).is_multiple_of(3) { -0.5 / 127.5 } else { 0.5 / 127.5 }
                 };
                 C32::new(v(0), v(1))
             })

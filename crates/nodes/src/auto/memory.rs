@@ -6,7 +6,7 @@ use pipeline::event::Event;
 use pipeline::registry::Settings;
 
 use super::AutoNode;
-use crate::protocol::{self, Stickiness, CHANNEL_WIDTH_TOLERANCE};
+use crate::protocol::{self, CHANNEL_WIDTH_TOLERANCE, Stickiness};
 
 /// A channel a front end has read something on, kept for as long as the
 /// node runs.

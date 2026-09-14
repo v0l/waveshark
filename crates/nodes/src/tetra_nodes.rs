@@ -16,11 +16,11 @@
 //! registration or a data session, and only a row that carries `voice`
 //! reaches the call list.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::tetra::{
-    Address, CallPdu, Event, D_DISCONNECT, D_RELEASE, D_SETUP, D_TX_CEASED, D_TX_GRANTED, RESOURCE,
+    Address, CallPdu, D_DISCONNECT, D_RELEASE, D_SETUP, D_TX_CEASED, D_TX_GRANTED, Event, RESOURCE,
     TRAFFIC, TRAFFIC_END,
 };
 use decode::voice::CallDecoder;
@@ -29,8 +29,8 @@ use std::collections::HashMap;
 mod tetra_crypto;
 use dsp::tetra::speech;
 use dsp::tetra::{
-    Block, Burst, BurstKind, TetraConfig, TetraDemod, TetraRx, BAUD, NDB_BB1, NDB_BLK1, NDB_BLK2,
-    OCCUPIED_HZ, SLOT_BITS, SLOT_SYMBOLS,
+    BAUD, Block, Burst, BurstKind, NDB_BB1, NDB_BLK1, NDB_BLK2, OCCUPIED_HZ, SLOT_BITS,
+    SLOT_SYMBOLS, TetraConfig, TetraDemod, TetraRx,
 };
 use dsp::{FirDecim, Mixer};
 use pipeline::event::{Decoded, Request};
@@ -1207,11 +1207,7 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
                 fields.push(("slot".into(), Value::Int(t.tn.into())));
                 fields.push(("frame".into(), Value::Int(t.frame.into())));
             }
-            if c.text.is_some() {
-                "TETRA-SDS"
-            } else {
-                "TETRA-Call"
-            }
+            if c.text.is_some() { "TETRA-SDS" } else { "TETRA-Call" }
         }
         Event::Network(n) => {
             fields.push(("neighbours".into(), Value::Int(n.neighbours.len() as i64)));
@@ -1324,7 +1320,7 @@ impl Protocol for Tetra {
 mod tests {
     use super::*;
     use common::Hz;
-    use dsp::tetra::{coding, synth, SLOT_BITS};
+    use dsp::tetra::{SLOT_BITS, coding, synth};
 
     fn spec(rate: f64, center: f64) -> PortSpec {
         PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
@@ -1663,7 +1659,7 @@ mod tests {
     #[test]
     fn a_reused_timestamp_is_caught_and_a_crib_reads_it() {
         use decode::keystream::{keystream_from_known, xor};
-        use decode::tea::{keystream, Key, Timestamp};
+        use decode::tea::{Key, Timestamp, keystream};
         use dsp::tetra::{Cell, TdmaTime};
 
         let mut node = TetraNode::new(390_000_000.0);

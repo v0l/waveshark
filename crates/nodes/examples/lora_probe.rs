@@ -53,8 +53,17 @@ fn main() {
                 let r = decode::lora::decode(&p.symbols, sf, ldro);
                 eprintln!(
                     "SF{sf}: start {} preamble {} sync {:#04x} cfo {:.2} sto {:.2} syms {} peak_mean {:.0} complete {} -> {:?}",
-                    p.start, p.preamble_syms, p.sync_word, p.cfo_bins, p.sto, p.symbols.len(), p.peak_mean, p.complete,
-                    r.as_ref().map(|f| (f.header.length, f.header.coding_rate, f.crc_ok)).map_err(|e| format!("{e:?}"))
+                    p.start,
+                    p.preamble_syms,
+                    p.sync_word,
+                    p.cfo_bins,
+                    p.sto,
+                    p.symbols.len(),
+                    p.peak_mean,
+                    p.complete,
+                    r.as_ref()
+                        .map(|f| (f.header.length, f.header.coding_rate, f.crc_ok))
+                        .map_err(|e| format!("{e:?}"))
                 );
             }
         }

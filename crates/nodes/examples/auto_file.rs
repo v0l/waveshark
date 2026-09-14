@@ -1,7 +1,7 @@
 //! Replay a .cu8 through the auto node and report throughput.
 //!     auto_file <file.cu8> <rate> <centre_hz>
-use common::{Hz, C32};
-use nodes::{build_chain, registry, NodeSpec};
+use common::{C32, Hz};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 
 fn main() {

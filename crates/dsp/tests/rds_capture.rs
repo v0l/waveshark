@@ -97,7 +97,7 @@ fn decode() -> Option<Decoded> {
 }
 
 macro_rules! need {
-    ($e:expr) => {
+    ($e:expr_2021) => {
         match $e {
             Some(v) => v,
             None => {

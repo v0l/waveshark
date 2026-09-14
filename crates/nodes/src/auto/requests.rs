@@ -3,8 +3,8 @@
 use common::SourceId;
 use pipeline::event::{Event, Request};
 
-use super::place::Slot;
 use super::AutoNode;
+use super::place::Slot;
 use crate::protocol::{self, Stickiness};
 
 /// Where the front end that asked was reading.

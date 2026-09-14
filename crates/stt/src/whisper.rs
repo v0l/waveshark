@@ -8,9 +8,9 @@
 //! fallback used are still applied, as a verdict rather than as a retry.
 
 use candle_core::{Device, IndexOp, Tensor};
-use candle_nn::ops::softmax;
 use candle_nn::VarBuilder;
-use candle_transformers::models::whisper::{self as m, audio, Config};
+use candle_nn::ops::softmax;
+use candle_transformers::models::whisper::{self as m, Config, audio};
 use common::{Error, Result};
 use tokenizers::Tokenizer;
 
@@ -196,7 +196,7 @@ impl Whisper {
 
         let language = match (files.flavour, language) {
             (Flavour::English, Some(l)) if l != "en" => {
-                return Err(Error::other(format!("this model is English only, not {l}")))
+                return Err(Error::other(format!("this model is English only, not {l}")));
             }
             (Flavour::English, _) => None,
             (Flavour::Multilingual, l) => {

@@ -1,9 +1,9 @@
 //! One node over a span, told nothing, against recordings of three kinds of
 //! thing: keyed sensors, Mode S replies and a pager transmission.
 
-use common::{Hz, PacketBody, C32};
+use common::{C32, Hz, PacketBody};
 use dsp::Mixer;
-use nodes::{build_chain, registry, NodeSpec};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 use sources::FileSource;
 
@@ -281,7 +281,7 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
 #[test]
 fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
     use decode::m17::Address;
-    use dsp::m17::{fec, frame_symbols, preamble_symbols, Kind, BAUD, DEVIATION_HZ};
+    use dsp::m17::{BAUD, DEVIATION_HZ, Kind, fec, frame_symbols, preamble_symbols};
 
     let rate = 2_400_000.0;
     let center = Hz::hz(433_000_000);

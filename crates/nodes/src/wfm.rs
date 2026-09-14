@@ -12,10 +12,10 @@
 //! wobbled.
 
 use common::Result;
-use dsp::rds::{BlockSync, GroupDecoder, RdsDemod};
 use dsp::NoiseMeter;
+use dsp::rds::{BlockSync, GroupDecoder, RdsDemod};
 use dsp::{FmDemod, StereoDecoder};
-use pipeline::event::{media, Decoded, Event};
+use pipeline::event::{Decoded, Event, media};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag, TagValue};

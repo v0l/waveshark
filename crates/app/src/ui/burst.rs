@@ -8,11 +8,7 @@ use super::*;
 /// A level in dB, or blank when the decoder did not measure one. Blank rather
 /// than a zero: a missing measurement and a strong signal must not look alike.
 pub(super) fn fmt_db(v: f32) -> String {
-    if v.is_finite() {
-        format!("{v:6.1}")
-    } else {
-        " -".into()
-    }
+    if v.is_finite() { format!("{v:6.1}") } else { " -".into() }
 }
 
 /// Amber when a packet is loud enough to be clipping the front end, which is

@@ -15,19 +15,19 @@ pub mod units;
 pub mod value;
 
 pub use decode::{
-    media, Airtime, Cpr, Decoded, Identity, Link, Party, PartyKind, Position, ReportDetail,
-    Secrecy, CONTROL_CHANNELS,
+    Airtime, CONTROL_CHANNELS, Cpr, Decoded, Identity, Link, Party, PartyKind, Position,
+    ReportDetail, Secrecy, media,
 };
 pub use device::{
     Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,
     Tuning, TxInfo, TxStream,
 };
 pub use error::{Error, Result};
-pub use iq::{IqBuf, SampleFormat, C32};
+pub use iq::{C32, IqBuf, SampleFormat};
 pub use modulation::Modulation;
 pub use pulse::{
-    Cadence, ConversationKey, Frame, FrontEnd, IqBurst, Measure, Package, Packet, PacketBody,
-    Pixels, Pulse, Speech, Update, VideoFrame, Voice, CHANNEL_MATCH_HZ,
+    CHANNEL_MATCH_HZ, Cadence, ConversationKey, Frame, FrontEnd, IqBurst, Measure, Package, Packet,
+    PacketBody, Pixels, Pulse, Speech, Update, VideoFrame, Voice,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use units::{Hz, Sps};

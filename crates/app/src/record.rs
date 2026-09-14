@@ -13,7 +13,7 @@
 //! than saving a few bytes with a private format.
 
 use crate::radio::DecodeRecord;
-use common::{Hz, C32};
+use common::{C32, Hz};
 use dsp::fir::FirDecim;
 use dsp::mixer::Mixer;
 use std::io::Write;
@@ -296,11 +296,7 @@ fn to_cu8(iq: &[C32]) -> Vec<u8> {
 fn sanitise(s: &str) -> String {
     let s: String =
         s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-    if s.is_empty() {
-        "unknown".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "unknown".into() } else { s }
 }
 
 fn esc(s: &str) -> String {

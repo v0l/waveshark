@@ -38,7 +38,7 @@
 //! the dibit mapping is left to the protocol.
 
 use crate::fourlevel;
-use crate::pulse::{dbfs, LevelGate};
+use crate::pulse::{LevelGate, dbfs};
 use common::C32;
 
 #[derive(Clone, Copy, Debug)]

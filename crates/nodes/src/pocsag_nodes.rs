@@ -11,13 +11,13 @@
 //! frame that passed a check sequence, this carries a run of codewords that
 //! passed theirs.
 
-use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::pocsag::{self, Body};
-use dsp::pocsag::{PocsagConfig, PocsagDemod, Transmission, DEVIATION_HZ};
+use dsp::pocsag::{DEVIATION_HZ, PocsagConfig, PocsagDemod, Transmission};
 use dsp::{FirDecim, FmDemod, Mixer};
-use pipeline::event::{media, Decoded};
+use pipeline::event::{Decoded, media};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};

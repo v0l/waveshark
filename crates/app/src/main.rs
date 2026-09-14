@@ -446,12 +446,24 @@ fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
     );
     println!(
         "\n{:>8} {:>10} {:>10}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}\n{:>8} {:>9.2}x {:>9.2}",
-        "", "x real", "ms",
-        "median", x(median), median / 1e3,
-        "p90", x(at(0.90)), at(0.90) / 1e3,
-        "p99", x(at(0.99)), at(0.99) / 1e3,
-        "worst", x(sorted[sorted.len() - 1]), sorted[sorted.len() - 1] / 1e3,
-        "best", x(sorted[0]), sorted[0] / 1e3,
+        "",
+        "x real",
+        "ms",
+        "median",
+        x(median),
+        median / 1e3,
+        "p90",
+        x(at(0.90)),
+        at(0.90) / 1e3,
+        "p99",
+        x(at(0.99)),
+        at(0.99) / 1e3,
+        "worst",
+        x(sorted[sorted.len() - 1]),
+        sorted[sorted.len() - 1] / 1e3,
+        "best",
+        x(sorted[0]),
+        sorted[0] / 1e3,
     );
     let over = timed.iter().filter(|b| b.us > block_secs * 1e6).count();
     println!(
@@ -1221,7 +1233,7 @@ fn m17_dump(path: &std::path::Path) {
 /// offline tools say, and that needs the parent's console attached by hand.
 #[cfg(windows)]
 fn attach_console() {
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     // SAFETY: no arguments, no handles, and a failure (there is no parent
     // console) is reported by the return value rather than by anything
     // happening.

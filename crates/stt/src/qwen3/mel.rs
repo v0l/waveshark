@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 /// Compute Hann window coefficients.
 fn hann_window(n: usize) -> Vec<f32> {
@@ -79,19 +79,11 @@ fn create_mel_filterbank(
     let logstep = (6.4f64).ln() / 27.0;
 
     let hz_to_mel = |f: f64| -> f64 {
-        if f < min_log_hz {
-            f / f_sp
-        } else {
-            min_log_mel + (f / min_log_hz).ln() / logstep
-        }
+        if f < min_log_hz { f / f_sp } else { min_log_mel + (f / min_log_hz).ln() / logstep }
     };
 
     let mel_to_hz = |m: f64| -> f64 {
-        if m < min_log_mel {
-            f_sp * m
-        } else {
-            min_log_hz * (logstep * (m - min_log_mel)).exp()
-        }
+        if m < min_log_mel { f_sp * m } else { min_log_hz * (logstep * (m - min_log_mel)).exp() }
     };
 
     let mel_min = hz_to_mel(fmin);
