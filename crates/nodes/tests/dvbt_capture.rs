@@ -12,10 +12,9 @@
 //! skips rather than fails, so a fresh clone with no network still passes.
 
 use common::C32;
-use decode::mpeg2::Decoder;
 use decode::mpegts::{Mux, StreamKind};
 use dsp::dvbt::{CodeRate, Constellation, Guard, Hierarchy, Mode, Params};
-use nodes::dvbt_nodes::DvbtReceiver;
+use nodes::dvbt_nodes::{DvbtNode, DvbtReceiver};
 
 const FIXTURE: &str = "dvbt_hd_429M_9142857.cs8";
 
@@ -66,6 +65,55 @@ fn read() -> Option<(DvbtReceiver, Vec<decode::dvbt::TsPacket>, Mux)> {
 
 fn skip() {
     eprintln!("skipping: {FIXTURE} absent, run testdata/fetch.sh");
+}
+
+/// The whole stage over the capture: the transport stream it puts out and
+/// the pictures it read, for whichever service was asked for.
+fn run(
+    samples: &[C32],
+    want: Option<pipeline::ParamValue>,
+) -> (DvbtNode, Vec<common::VideoFrame>, Vec<f32>) {
+    use pipeline::node::{Node, NodeCtx, PortSpec};
+    use pipeline::port::{Payload, PortKind, StreamSpec};
+
+    let mut node = DvbtNode::new(429_000_000.0);
+    let spec = PortSpec {
+        spec: StreamSpec::iq(nodes::dvbt_nodes::RATE_HZ, common::Hz(429_000_000)),
+        latency: 0,
+    };
+    let specs = node.negotiate(&[spec]).expect("the channel is the span");
+    assert_eq!(specs[1].kind, PortKind::Video);
+    if let Some(v) = want {
+        Node::set_param(&mut node, nodes::dvbt_nodes::SERVICE, v).expect("the service");
+    }
+
+    let mut frames = Vec::new();
+    let mut pcm: Vec<f32> = Vec::new();
+    for block in samples.chunks(BLOCK) {
+        let input = Payload::Iq(block.to_vec());
+        let mut out = [
+            Payload::empty_of(PortKind::Bytes),
+            Payload::empty_of(PortKind::Video),
+            Payload::empty_of(PortKind::Real),
+        ];
+        let ins = [spec];
+        let tags = Vec::new();
+        let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+        let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags)
+            .with_block_seconds(block.len() as f64 / nodes::dvbt_nodes::RATE_HZ);
+        Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("the stage runs");
+        frames.extend(out[1].as_video().unwrap_or(&[]).iter().cloned());
+        // Every block carries exactly what the block covers: the bus mixes a
+        // block at a time and throws away anything longer.
+        let sound = out[2].as_real().unwrap_or(&[]);
+        let want = (ctx.block_seconds * decode::media::SOUND_HZ as f64).round() as usize;
+        assert_eq!(sound.len(), want, "sound handed over in one block");
+        pcm.extend_from_slice(sound);
+    }
+    // The capture ends inside a picture's own run of packets, so the last is
+    // still in the decoder until it is told there is no more.
+    pcm.extend(node.flush(&mut frames).pcm);
+    (node, frames, pcm)
 }
 
 /// The TPS says what the multiplex is, and it is what the flow graph that
@@ -139,51 +187,51 @@ fn the_service_streams_reassemble_into_pes_packets() {
     assert!(stamps.windows(2).any(|w| w[1] < w[0]), "{stamps:?}");
 }
 
-/// The picture itself: an MPEG-2 intra picture, decoded from the multiplex
-/// this receiver read off the air, with every macroblock of it read.
+/// The pictures themselves, decoded by the container reader.
 ///
-/// The pictures between are coded as differences from their neighbours, which
-/// this decoder counts and skips, so what comes out is the one picture in the
-/// window that stands alone.
+/// The transport stream goes to ffmpeg's mpegts demuxer whole, so what is
+/// pinned here is what comes back out of a multiplex the receiver read off
+/// the air: high definition, in the number of pictures this window carries.
+#[cfg(feature = "ffmpeg")]
 #[test]
-fn an_intra_picture_comes_out_of_the_multiplex() {
-    let Some((_, _, mut mux)) = read() else { return skip() };
-    let mut video = Decoder::new();
-    let mut pictures = Vec::new();
-    for pes in mux.take_pes().iter().filter(|p| p.pid == 49) {
-        video.push(&pes.data, &mut pictures);
+fn the_pictures_come_out_of_the_multiplex() {
+    let Some(samples) = samples() else { return skip() };
+    let (_, frames, pcm) = run(&samples, None);
+    // One, not the eleven video packets the stream carries: this cut holds a
+    // single sequence header, and nothing before it can be decoded because
+    // nothing has said what size the pictures are. The packets after the
+    // intra picture are differences from pictures the cut does not contain.
+    assert_eq!(frames.len(), 1, "pictures in the window");
+    for f in &frames {
+        assert_eq!((f.width, f.height), (1920, 1080));
+        assert_eq!(f.pixels, common::Pixels::Rgb8);
+        assert_eq!(f.samples.len(), 1920 * 1080 * 3);
     }
-    video.flush(&mut pictures);
-    assert_eq!(video.size(), Some((1920, 1080)), "the sequence header says high definition");
-    assert_eq!(pictures.len(), 1, "intra pictures in the window");
-    // The pictures before the sequence header are not counted as skipped
-    // because nothing had said what size they are: a decoder that joins a
-    // stream mid-way can do nothing at all until one arrives, which is why
-    // this capture is cut where it is.
-    assert_eq!(video.stats.predicted, 0);
-    assert_eq!(video.stats.failed, 0);
-
-    let p = &pictures[0];
-    assert_eq!((p.width, p.height), (1920, 1080));
-    assert_eq!(p.damaged, 0, "every macroblock of it was read");
-    assert_eq!(p.y.len(), 1920 * 1080);
-    assert_eq!(p.cb.len(), 960 * 540, "4:2:0, so the colour planes are quartered");
     // Not a flat or a black picture: a decoder that lost its coefficients
-    // still produces a picture, and it is one colour.
-    let mean = p.y.iter().map(|&v| v as u64).sum::<u64>() / p.y.len() as u64;
-    assert!((100..200).contains(&mean), "mean luma {mean}");
-    let lowest = *p.y.iter().min().unwrap();
-    let highest = *p.y.iter().max().unwrap();
-    assert!(lowest < 40 && highest > 215, "luma runs {lowest} to {highest}");
-    assert_eq!(p.rgb().len(), 1920 * 1080 * 3);
+    // still produces one, and it is one colour.
+    let f = &frames[0];
+    let mean = f.samples.iter().map(|&v| v as u64).sum::<u64>() / f.samples.len() as u64;
+    assert!((40..200).contains(&mean), "mean brightness {mean}");
+    assert!(f.samples.iter().any(|&v| v < 40) && f.samples.iter().any(|&v| v > 215));
+
+    // And the sound that goes with it: AC-3 on this multiplex, resampled to
+    // the rate the audio bus mixes at. Not silence, and not a full second,
+    // because the recording is not one.
+    // Counted as sound rather than as samples, because the blocks are
+    // padded with silence while the decoder catches up: a capture read as
+    // fast as the machine can manage outruns it, and what is still in flight
+    // at the end is handed back by `flush`.
+    let heard = pcm.iter().filter(|v| **v != 0.0).count() as f64 / decode::media::SOUND_HZ as f64;
+    assert!((0.3..0.9).contains(&heard), "{heard:.2} s of sound in a 0.88 s recording");
+    let loudest = pcm.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!((0.01..=1.0).contains(&loudest), "peak {loudest}");
 }
 
 /// The whole stage, as the graph runs it: samples in, a transport stream on
-/// one port and a picture on the other, with the service that carried it
+/// one port and pictures on the other, with the service that carried them
 /// named on the frame.
 #[test]
 fn the_stage_puts_a_picture_on_the_video_port() {
-    use nodes::dvbt_nodes::DvbtNode;
     use pipeline::node::{Node, NodeCtx, PortSpec};
     use pipeline::port::{Payload, PortKind, StreamSpec};
 
@@ -193,14 +241,17 @@ fn the_stage_puts_a_picture_on_the_video_port() {
         spec: StreamSpec::iq(nodes::dvbt_nodes::RATE_HZ, common::Hz(429_000_000)),
         latency: 0,
     };
-    let specs = node.negotiate(&[spec]).expect("the channel is the span");
-    assert_eq!(specs[1].kind, PortKind::Video);
+    node.negotiate(&[spec]).expect("the channel is the span");
 
     let mut frames: Vec<common::VideoFrame> = Vec::new();
     let mut stream = 0usize;
     for block in samples.chunks(BLOCK) {
         let input = Payload::Iq(block.to_vec());
-        let mut out = [Payload::empty_of(PortKind::Bytes), Payload::empty_of(PortKind::Video)];
+        let mut out = [
+            Payload::empty_of(PortKind::Bytes),
+            Payload::empty_of(PortKind::Video),
+            Payload::empty_of(PortKind::Real),
+        ];
         let ins = [spec];
         let tags = Vec::new();
         let (mut events, mut new_tags) = (Vec::new(), Vec::new());
@@ -209,24 +260,29 @@ fn the_stage_puts_a_picture_on_the_video_port() {
         stream += out[0].as_bytes().unwrap_or(&[]).len();
         frames.extend(out[1].as_video().unwrap_or(&[]).iter().cloned());
     }
+    // The decoding thread is still reading the last blocks when the samples
+    // run out, so what it had not finished comes back here.
+    stream += node.flush(&mut frames).bytes.len();
 
     assert_eq!(stream, 5999 * 188, "transport packets on the byte port");
     assert_eq!(node.watching(), Some(49), "the video of the only service");
-    // The capture ends inside the picture's own run of packets, so the last
-    // one is still in the decoder: on the air the next picture would push it
-    // out forty milliseconds later.
-    node.flush(&mut frames);
-    assert_eq!(frames.len(), 1, "pictures on the video port");
-    let f = &frames[0];
-    assert_eq!((f.width, f.height), (1920, 1080));
-    assert_eq!(f.pixels, common::Pixels::Rgb8);
-    assert_eq!(f.samples.len(), 1920 * 1080 * 3);
-    assert_eq!(f.lines_seen, f.height, "a picture is whole or it is not read");
-    assert_eq!(f.channel_hz, 429_000_000.0);
-    assert_eq!(f.system, nodes::dvbt_nodes::DVB);
-    // This stream carries no service description table, so the service has a
-    // number and no name, and the frame says so rather than inventing one.
-    assert_eq!(f.label, None);
+    #[cfg(feature = "ffmpeg")]
+    {
+        assert_eq!(frames.len(), 1, "pictures on the video port");
+        let f = &frames[0];
+        assert_eq!((f.width, f.height), (1920, 1080));
+        assert_eq!(f.pixels, common::Pixels::Rgb8);
+        assert_eq!(f.samples.len(), 1920 * 1080 * 3);
+        assert_eq!(f.lines_seen, f.height, "a picture is whole or it is not read");
+        assert_eq!(f.channel_hz, 429_000_000.0);
+        assert_eq!(f.system, nodes::dvbt_nodes::DVB);
+        // This stream carries no service description table, so the service
+        // has a number and no name, and the frame says so rather than
+        // inventing one.
+        assert_eq!(f.label, None);
+    }
+    #[cfg(not(feature = "ffmpeg"))]
+    assert!(frames.is_empty(), "no picture without a container decoder");
 }
 
 /// The service is a parameter, so a menu, an agent or a saved patch can all
@@ -250,29 +306,13 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
         latency: 0,
     };
     // The tables, and the pictures, for whatever the node was asked for.
-    let run = |want: Option<ParamValue>| -> (DvbtNode, usize) {
-        let mut node = DvbtNode::new(429_000_000.0);
-        node.negotiate(&[spec]).expect("the channel is the span");
-        if let Some(v) = want {
-            Node::set_param(&mut node, SERVICE, v).expect("the parameter");
-        }
-        let mut frames: Vec<common::VideoFrame> = Vec::new();
-        for block in samples.chunks(BLOCK) {
-            let input = Payload::Iq(block.to_vec());
-            let mut out = [Payload::empty_of(PortKind::Bytes), Payload::empty_of(PortKind::Video)];
-            let ins = [spec];
-            let tags = Vec::new();
-            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("the stage runs");
-            frames.extend(out[1].as_video().unwrap_or(&[]).iter().cloned());
-        }
-        node.flush(&mut frames);
+    let one = |want: Option<ParamValue>| -> (DvbtNode, usize) {
+        let (node, frames, _) = run(&samples, want);
         (node, frames.len())
     };
 
     // Left alone, the node takes the first service with a picture on it.
-    let (node, pictures) = run(None);
+    let (node, pictures) = one(None);
     assert_eq!(node.wanted(), &Want::Any);
     assert_eq!(node.watching(), Some(49));
     assert_eq!(pictures, 1);
@@ -289,7 +329,7 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
     assert_eq!(params[0].value, ParamValue::Choice(0), "nothing was asked for");
 
     // Asked for by its identifier, which is what survives the list growing.
-    let (node, pictures) = run(Some(ParamValue::Int(1)));
+    let (node, pictures) = one(Some(ParamValue::Int(1)));
     assert_eq!(node.wanted(), &Want::Id(1), "unnamed here, so it is asked for by number");
     assert_eq!(node.watching(), Some(49), "the video of service 1");
     assert_eq!(pictures, 1);
@@ -297,7 +337,7 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
 
     // And by the name the list shows, which is what an agent has to hand.
     // Both need the tables, so they are set on a node that has read them.
-    let (mut node, _) = run(None);
+    let (mut node, _) = one(None);
     Node::set_param(&mut node, SERVICE, ParamValue::Text("service 1".into())).expect("by name");
     assert_eq!(node.wanted(), &Want::Named("service 1".into()));
     Node::set_param(&mut node, SERVICE, ParamValue::Choice(1)).expect("by position");
@@ -310,7 +350,7 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
 
     // A service the multiplex does not carry decodes nothing at all, rather
     // than the picture of whichever service does.
-    let (node, pictures) = run(Some(ParamValue::Int(2)));
+    let (node, pictures) = one(Some(ParamValue::Int(2)));
     assert_eq!(node.wanted(), &Want::Id(2));
     assert_eq!(node.watching(), None);
     assert_eq!(pictures, 0);

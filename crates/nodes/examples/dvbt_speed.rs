@@ -53,4 +53,43 @@ fn main() {
         v.push(&soft, params.code_rate_hp.mask(), &mut bits);
     }
     println!("with the viterbi {:.2}x real time", air / t.elapsed().as_secs_f64());
+
+    // The soft values once, then the trellis over them on its own, which is
+    // the one stage that cannot be made wider by adding carriers.
+    let mut all = Vec::new();
+    for s in &symbols {
+        soft.clear();
+        inner.demodulate(&s.cells, &s.csi, s.index.unwrap_or(0), &mut soft);
+        all.extend_from_slice(&soft);
+    }
+    let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
+    let mut bits = Vec::new();
+    let t = std::time::Instant::now();
+    v.push(&all, params.code_rate_hp.mask(), &mut bits);
+    let took = t.elapsed().as_secs_f64();
+    println!(
+        "the trellis alone {:.2}x real time, {:.1} Msteps/s over {} soft values",
+        air / took,
+        bits.len() as f64 / took / 1e6,
+        all.len()
+    );
+
+    // And the outer code over the bits it puts out.
+    let mut bytes = Vec::with_capacity(bits.len() / 8);
+    let mut acc = 0u8;
+    for (n, b) in bits.iter().enumerate() {
+        acc = (acc << 1) | b;
+        if n % 8 == 7 {
+            bytes.push(acc);
+        }
+    }
+    let mut outer = decode::dvbt::Outer::new();
+    let mut packets = Vec::new();
+    let t = std::time::Instant::now();
+    outer.push(&bytes, &mut packets);
+    println!(
+        "the outer code alone {:.2}x real time, {} packets",
+        air / t.elapsed().as_secs_f64(),
+        packets.len()
+    );
 }

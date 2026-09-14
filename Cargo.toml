@@ -88,6 +88,8 @@ httpc = { path = "crates/httpc" }
 orbit = { path = "crates/orbit" }
 
 anyhow = "1.0"
+# Raw ffmpeg, for the container and the codecs a broadcast multiplex uses.
+ffmpeg-rs-raw = "1.0"
 thiserror = "2.0"
 num-complex = "0.4"
 rustfft = "6.4"

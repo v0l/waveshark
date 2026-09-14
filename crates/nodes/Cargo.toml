@@ -23,7 +23,7 @@ poll-promise = { workspace = true, optional = true }
 # dependency tree, and a receiver without a model directory has no use for it.
 stt = { workspace = true, optional = true }
 candle-core = { version = "0.11", optional = true }
-crossbeam-channel = { workspace = true, optional = true }
+crossbeam-channel.workspace = true
 rayon.workspace = true
 # M17 voice is Codec 2 3200, whose frame is exactly the 8 bytes M17 puts in
 # half a stream frame. Pure Rust, so it costs the build nothing.
@@ -35,6 +35,7 @@ rumqttc = { version = "0.25", default-features = false }
 serde_json.workspace = true
 
 [features]
+default = ["ffmpeg"]
 # TETRA air-interface decryption and TEA1 key recovery in the TETRA node.
 # Off by default; enables `decode/tea`. Without it the node still reads
 # signalling and decodes clear speech, but carries no cipher or key search.
@@ -43,7 +44,9 @@ tea = ["decode/tea", "dep:poll-promise"]
 # it the DMR node reads signalling only.
 ambe = ["dep:mbe"]
 # Whisper transcription of decoded speech, on the packet bus.
-stt = ["dep:stt", "dep:candle-core", "dep:crossbeam-channel"]
+stt = ["dep:stt", "dep:candle-core"]
+# Pictures off a broadcast multiplex, through the system ffmpeg libraries.
+ffmpeg = ["decode/ffmpeg"]
 
 [dev-dependencies]
 sources.workspace = true

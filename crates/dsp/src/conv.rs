@@ -126,6 +126,92 @@ fn wide_step(cost: &[f32], row: &[f32], next: &mut [f32], half: usize) -> (u64, 
     }
 }
 
+/// The butterfly again, with the metric worked out per lane.
+///
+/// The metrics of a rate 1/2 step are the two magnitudes with a sign, so
+/// the row is `sum * (x + y) + diff * (x - y)` where each lane's pair of
+/// weights is one plus or minus one and one zero. Two multiply-adds a lane
+/// beats gathering a metric a state out of a four entry table, which was
+/// thirty-two loads a bit and most of what was left of the inner loop.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_pair_step(
+    cost: &[f32],
+    sum: &[f32],
+    diff: &[f32],
+    m_sum: f32,
+    m_diff: f32,
+    next: &mut [f32],
+    half: usize,
+) -> (u64, f32) {
+    use std::arch::x86_64::*;
+
+    let mut decision = 0u64;
+    // SAFETY: the caller has checked for avx2; `cost` is `2 * half` long and
+    // `sum`, `diff` and `next` are `half`.
+    unsafe {
+        let mut least = _mm256_set1_ps(f32::INFINITY);
+        let (ms, md) = (_mm256_set1_ps(m_sum), _mm256_set1_ps(m_diff));
+        #[target_feature(enable = "avx2")]
+        unsafe fn sort(v: __m256) -> __m256 {
+            unsafe { _mm256_castpd_ps(_mm256_permute4x64_pd::<0b11_01_10_00>(_mm256_castps_pd(v))) }
+        }
+        for k in (0..half).step_by(8) {
+            let v0 = _mm256_loadu_ps(cost.as_ptr().add(2 * k));
+            let v1 = _mm256_loadu_ps(cost.as_ptr().add(2 * k + 8));
+            let a = sort(_mm256_shuffle_ps::<0b10_00_10_00>(v0, v1));
+            let b = sort(_mm256_shuffle_ps::<0b11_01_11_01>(v0, v1));
+            let m = _mm256_fmadd_ps(
+                _mm256_loadu_ps(sum.as_ptr().add(k)),
+                ms,
+                _mm256_mul_ps(_mm256_loadu_ps(diff.as_ptr().add(k)), md),
+            );
+
+            let c0 = _mm256_add_ps(a, m);
+            let c1 = _mm256_sub_ps(b, m);
+            let lo = _mm256_min_ps(c0, c1);
+            decision |= (_mm256_movemask_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(c1, c0)) as u64) << k;
+            _mm256_storeu_ps(next.as_mut_ptr().add(k), lo);
+
+            let d0 = _mm256_sub_ps(a, m);
+            let d1 = _mm256_add_ps(b, m);
+            let hi = _mm256_min_ps(d0, d1);
+            decision |=
+                (_mm256_movemask_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(d1, d0)) as u64) << (k + half);
+            _mm256_storeu_ps(next.as_mut_ptr().add(k + half), hi);
+
+            least = _mm256_min_ps(least, _mm256_min_ps(lo, hi));
+        }
+        let mut lanes = [0.0f32; 8];
+        _mm256_storeu_ps(lanes.as_mut_ptr(), least);
+        (decision, lanes.iter().copied().fold(f32::INFINITY, f32::min))
+    }
+}
+
+/// The same, for a rate 1/2 code, with the metrics made from the two
+/// magnitudes rather than read from a table.
+fn wide_pair_step(
+    cost: &[f32],
+    sum: &[f32],
+    diff: &[f32],
+    m_sum: f32,
+    m_diff: f32,
+    next: &mut [f32],
+    half: usize,
+) -> (u64, f32) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: as `wide_step`, with `sum` and `diff` the same length as
+    // `next`.
+    unsafe {
+        avx2_pair_step(cost, sum, diff, m_sum, m_diff, next, half)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (cost, sum, diff, m_sum, m_diff, next, half);
+        unreachable!("the wide path is x86_64 only")
+    }
+}
+
 /// The butterfly of [`Viterbi::push_step`], eight state pairs at a time.
 ///
 /// The two costs a butterfly reads sit next to each other and the two it
@@ -256,6 +342,16 @@ pub struct Viterbi {
     wide: bool,
     /// The branch metric each butterfly reads, as an index into `metric`.
     pair: Vec<u16>,
+    /// For a rate 1/2 code, the same thing as two sign vectors.
+    ///
+    /// A rate 1/2 step has four branch metrics and only two magnitudes:
+    /// with `x` and `y` the two soft values, they are the four ways of
+    /// writing plus or minus `x + y` and plus or minus `x - y`. So a
+    /// butterfly's metric is one of those two magnitudes with a sign, and
+    /// the whole row is two multiply-adds a lane rather than a gather a
+    /// state. Empty for any other rate, which reads `pair` instead.
+    sum: Vec<f32>,
+    diff: Vec<f32>,
     /// Those metrics gathered for the step being worked, one per butterfly,
     /// so the wide path loads them rather than chasing the index.
     row: Vec<f32>,
@@ -307,6 +403,22 @@ impl Viterbi {
             butterfly,
             wide: butterfly && half >= 8 && half % 8 == 0 && wide_available(),
             pair: (0..half).map(|k| table[2 * k][0]).collect(),
+            sum: (0..half)
+                .map(|k| match table[2 * k][0] {
+                    0 => -1.0,
+                    3 => 1.0,
+                    _ => 0.0,
+                })
+                .filter(|_| code.rate() == 2)
+                .collect(),
+            diff: (0..half)
+                .map(|k| match table[2 * k][0] {
+                    1 => -1.0,
+                    2 => 1.0,
+                    _ => 0.0,
+                })
+                .filter(|_| code.rate() == 2)
+                .collect(),
             row: vec![0.0; half],
             table,
             code,
@@ -356,12 +468,29 @@ impl Viterbi {
         let mut best = f32::INFINITY;
         let mut decision = 0u64;
         if self.wide {
-            for (r, &p) in self.row.iter_mut().zip(self.pair.iter()) {
-                *r = self.metric[p as usize];
+            if self.sum.len() == half {
+                // Two magnitudes and a sign apiece, so the metrics are made
+                // in the loop that uses them.
+                let (x, y) = (soft[0], soft[1]);
+                let (d, b) = wide_pair_step(
+                    &self.cost,
+                    &self.sum,
+                    &self.diff,
+                    x + y,
+                    x - y,
+                    &mut self.next,
+                    half,
+                );
+                decision = d;
+                best = b;
+            } else {
+                for (r, &p) in self.row.iter_mut().zip(self.pair.iter()) {
+                    *r = self.metric[p as usize];
+                }
+                let (d, b) = wide_step(&self.cost, &self.row, &mut self.next, half);
+                decision = d;
+                best = b;
             }
-            let (d, b) = wide_step(&self.cost, &self.row, &mut self.next, half);
-            decision = d;
-            best = b;
         } else if self.butterfly {
             // Two states at a time, from the two that feed them both. The
             // metric is read once instead of four times and the four costs

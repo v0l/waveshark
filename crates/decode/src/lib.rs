@@ -41,10 +41,11 @@ pub mod lora;
 pub mod lora_li;
 pub mod lorawan;
 pub mod m17;
+#[cfg(feature = "ffmpeg")]
+pub mod media;
 pub mod meshcore;
 pub mod meshtastic;
 pub mod morse;
-pub mod mpeg2;
 pub mod mpegts;
 pub mod nrf24;
 pub mod odid;

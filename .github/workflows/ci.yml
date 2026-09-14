@@ -23,6 +23,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
             libasound2-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
