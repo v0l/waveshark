@@ -264,6 +264,31 @@ pub const EUROPE: &[Band] = &[
         color: ISM,
         raster: None,
     },
+    // Band IV and V, DVB-T on 8 MHz channels numbered from 21 at 474 MHz.
+    // The top of it was sold for mobile, so this is the 700 MHz plan rather
+    // than the 862 MHz one a pre-2020 receiver would show.
+    Band {
+        lo: 470.0e6,
+        hi: 694.0e6,
+        name: "UHF TV",
+        demod: Demod::Nfm,
+        color: BROADCAST,
+        raster: Some(Raster::from(474.0e6, 8.0e6)),
+    },
+    // What a satellite dish receives, which is what the dial reads once the
+    // LNB's oscillator is set as the tuner's offset. The band below that,
+    // the 950 to 2150 MHz the cable actually carries, is not here on purpose:
+    // as frequencies they are GNSS, DME and cellular, and naming them after
+    // whatever is on somebody's cable would be wrong for every receiver
+    // without a dish on it.
+    Band {
+        lo: 10.7e9,
+        hi: 12.75e9,
+        name: "Satellite TV (Ku)",
+        demod: Demod::Nfm,
+        color: BROADCAST,
+        raster: None,
+    },
     // Cellular. Uplink and downlink are named separately because which one a
     // receiver hears says where the transmitter is: downlink is a mast a
     // kilometre away and always on, uplink is a handset in the same room.
@@ -573,6 +598,16 @@ pub const AMERICAS: &[Band] = &[
         name: "UHF TV",
         demod: Demod::Nfm,
         color: BROADCAST,
+        // ATSC on 6 MHz channels, numbered from 14 at 473 MHz. The repack
+        // took everything above channel 36 for mobile.
+        raster: Some(Raster::from(473.0e6, 6.0e6)),
+    },
+    Band {
+        lo: 10.7e9,
+        hi: 12.75e9,
+        name: "Satellite TV (Ku)",
+        demod: Demod::Nfm,
+        color: BROADCAST,
         raster: None,
     },
     Band {
@@ -805,6 +840,24 @@ pub const ASIA_PACIFIC: &[Band] = &[
         lo: 170.0e6,
         hi: 222.0e6,
         name: "ISDB-T / Band III",
+        demod: Demod::Nfm,
+        color: BROADCAST,
+        raster: None,
+    },
+    // ISDB-T on 6 MHz channels, 13 to 62, the first centred a seventh of a
+    // megahertz above 473.
+    Band {
+        lo: 470.0e6,
+        hi: 710.0e6,
+        name: "UHF TV",
+        demod: Demod::Nfm,
+        color: BROADCAST,
+        raster: Some(Raster::from(473.142857e6, 6.0e6)),
+    },
+    Band {
+        lo: 10.7e9,
+        hi: 12.75e9,
+        name: "Satellite TV (Ku)",
         demod: Demod::Nfm,
         color: BROADCAST,
         raster: None,
@@ -1045,6 +1098,34 @@ mod tests {
         assert_eq!(name_at_in(Plan::Europe, 124.0e6), "Airband");
         assert_eq!(name_at_in(Plan::Europe, 145.5e6), "2 m");
         assert_eq!(name_at_in(Plan::Europe, 156.8e6), "Marine VHF");
+    }
+
+    /// Where a protocol says it can be, the ribbon names it.
+    ///
+    /// Europe had nothing at all between PMR446 and LTE 800, so a receiver
+    /// tuned to a television multiplex said UNALLOCATED and offered narrow
+    /// FM. The decoder knew the band the whole time.
+    #[test]
+    fn a_television_multiplex_is_named_where_the_decoder_says_it_is() {
+        for (lo, hi) in nodes::protocol::by_id("dvbt").expect("dvbt").placement().bands(8.0e6) {
+            for hz in [lo + 1e6, (lo + hi) / 2.0, hi - 1e6] {
+                let name = name_at_in(Plan::Europe, hz);
+                assert!(
+                    matches!(name, "UHF TV" | "DAB / Band III"),
+                    "{:.1} MHz is {name}",
+                    hz / 1e6
+                );
+            }
+        }
+        // Channel 21 is the bottom of the UHF plan and every channel above
+        // it is 8 MHz on: 429 is the capture's own frequency, not a
+        // broadcast one, so it stays unallocated.
+        assert_eq!(snap_in(Plan::Europe, 475.3e6), 474.0e6);
+        assert_eq!(snap_in(Plan::Europe, 601.0e6), 602.0e6);
+        // A dish, once the LNB's oscillator is set as the offset: the dial
+        // reads what came out of the sky rather than what is on the cable.
+        assert_eq!(name_at_in(Plan::Europe, 11.778e9), "Satellite TV (Ku)");
+        assert_eq!(name_at_in(Plan::Americas, 12.2e9), "Satellite TV (Ku)");
     }
 
     #[test]

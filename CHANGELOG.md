@@ -35,6 +35,7 @@ the code is in the commit log.
   at the aerial when an LNB or transverter is on the cable.
 - DVB-T television multiplexes on the UHF and band III channels: the
   transmission parameters, the transport stream, and the services on it.
+- The band plan names UHF television and the Ku satellite band.
 - Television pictures on the video pane, one every second or so, from the
   standard definition services of a DVB-T multiplex.
 
