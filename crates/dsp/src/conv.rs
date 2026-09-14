@@ -96,6 +96,88 @@ fn parity(v: usize) -> u8 {
     (v.count_ones() & 1) as u8
 }
 
+fn wide_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Eight butterflies at a time: the survivors into `next`, the decisions as
+/// one bit each, and the least cost for the normaliser.
+///
+/// Only ever reached when [`wide_available`] said so, so the target feature
+/// is satisfied by the check in [`Viterbi::new`].
+fn wide_step(cost: &[f32], row: &[f32], next: &mut [f32], half: usize) -> (u64, f32) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: `wide` is only set when avx2 was detected, and the slices are
+    // the trellis's own, `cost` of `2 * half` and `row` and `next` of `half`.
+    unsafe {
+        avx2_step(cost, row, next, half)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (cost, row, next, half);
+        unreachable!("the wide path is x86_64 only")
+    }
+}
+
+/// The butterfly of [`Viterbi::push_step`], eight state pairs at a time.
+///
+/// The two costs a butterfly reads sit next to each other and the two it
+/// writes are half the trellis apart, so the loads are deinterleaved and the
+/// stores are two straight runs. The comparison that picks the survivor is
+/// also the decision, which `movemask` turns into the eight bits the
+/// traceback wants without going through memory.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_step(cost: &[f32], row: &[f32], next: &mut [f32], half: usize) -> (u64, f32) {
+    use std::arch::x86_64::*;
+
+    let mut decision = 0u64;
+    // SAFETY: the caller has checked for avx2, `cost` is `2 * half` long and
+    // `row` and `next` are `half`, so every load and store below is in
+    // bounds.
+    unsafe {
+        let mut least = _mm256_set1_ps(f32::INFINITY);
+        // `shuffle_ps` works within each 128 bit half, so the evens come out
+        // as two pairs of pairs and one 64 bit permute puts them in order.
+        #[target_feature(enable = "avx2")]
+        unsafe fn sort(v: __m256) -> __m256 {
+            unsafe { _mm256_castpd_ps(_mm256_permute4x64_pd::<0b11_01_10_00>(_mm256_castps_pd(v))) }
+        }
+        for k in (0..half).step_by(8) {
+            let v0 = _mm256_loadu_ps(cost.as_ptr().add(2 * k));
+            let v1 = _mm256_loadu_ps(cost.as_ptr().add(2 * k + 8));
+            let a = sort(_mm256_shuffle_ps::<0b10_00_10_00>(v0, v1));
+            let b = sort(_mm256_shuffle_ps::<0b11_01_11_01>(v0, v1));
+            let m = _mm256_loadu_ps(row.as_ptr().add(k));
+
+            let c0 = _mm256_add_ps(a, m);
+            let c1 = _mm256_sub_ps(b, m);
+            let lo = _mm256_min_ps(c0, c1);
+            decision |= (_mm256_movemask_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(c1, c0)) as u64) << k;
+            _mm256_storeu_ps(next.as_mut_ptr().add(k), lo);
+
+            let d0 = _mm256_sub_ps(a, m);
+            let d1 = _mm256_add_ps(b, m);
+            let hi = _mm256_min_ps(d0, d1);
+            decision |=
+                (_mm256_movemask_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(d1, d0)) as u64) << (k + half);
+            _mm256_storeu_ps(next.as_mut_ptr().add(k + half), hi);
+
+            least = _mm256_min_ps(least, _mm256_min_ps(lo, hi));
+        }
+        let mut lanes = [0.0f32; 8];
+        _mm256_storeu_ps(lanes.as_mut_ptr(), least);
+        (decision, lanes.iter().copied().fold(f32::INFINITY, f32::min))
+    }
+}
+
 /// The encoder, which exists so the decoder can be tested and so a transmit
 /// chain has one.
 #[derive(Clone, Debug)]
@@ -170,6 +252,13 @@ pub struct Viterbi {
     /// Whether the code's branch metrics come in equal and opposite pairs,
     /// which lets the trellis run as butterflies. See [`Viterbi::push_step`].
     butterfly: bool,
+    /// Whether the butterflies run eight at a time.
+    wide: bool,
+    /// The branch metric each butterfly reads, as an index into `metric`.
+    pair: Vec<u16>,
+    /// Those metrics gathered for the step being worked, one per butterfly,
+    /// so the wide path loads them rather than chasing the index.
+    row: Vec<f32>,
 }
 
 impl Viterbi {
@@ -196,8 +285,15 @@ impl Viterbi {
         // The encoder starts at zero, and a stream joined in the middle
         // forgets this within a constraint length either way.
         cost[0] = 0.0;
+        let half = states >> 1;
+        // A generator with both end taps set flips every output when the
+        // input bit flips, and again when the oldest bit does. So the two
+        // branches into a state cost exactly minus each other, and one
+        // metric does a whole butterfly. Every code here is like this;
+        // one that is not still decodes, by the long way round.
+        let butterfly =
+            code.polys.iter().all(|g| g & 1 == 1 && g & (1 << (code.constraint - 1)) != 0);
         Self {
-            table,
             cost,
             next: vec![f32::INFINITY; states],
             metric: vec![0.0; 1 << code.rate()],
@@ -208,15 +304,11 @@ impl Viterbi {
             phase: 0,
             since_normal: 0,
             ends: Ends::Anywhere,
-            // A generator with both end taps set flips every output when the
-            // input bit flips, and again when the oldest bit does. So the two
-            // branches into a state cost exactly minus each other, and one
-            // metric does a whole butterfly. Every code here is like this;
-            // one that is not still decodes, by the long way round.
-            butterfly: code
-                .polys
-                .iter()
-                .all(|g| g & 1 == 1 && g & (1 << (code.constraint - 1)) != 0),
+            butterfly,
+            wide: butterfly && half >= 8 && half % 8 == 0 && wide_available(),
+            pair: (0..half).map(|k| table[2 * k][0]).collect(),
+            row: vec![0.0; half],
+            table,
             code,
         }
     }
@@ -263,7 +355,14 @@ impl Viterbi {
         let half = states >> 1;
         let mut best = f32::INFINITY;
         let mut decision = 0u64;
-        if self.butterfly {
+        if self.wide {
+            for (r, &p) in self.row.iter_mut().zip(self.pair.iter()) {
+                *r = self.metric[p as usize];
+            }
+            let (d, b) = wide_step(&self.cost, &self.row, &mut self.next, half);
+            decision = d;
+            best = b;
+        } else if self.butterfly {
             // Two states at a time, from the two that feed them both. The
             // metric is read once instead of four times and the four costs
             // are independent, which is what lets the processor run them at
@@ -307,7 +406,9 @@ impl Viterbi {
         }
         std::mem::swap(&mut self.cost, &mut self.next);
         self.decisions.push(decision);
-        if self.decisions.len() >= self.depth + self.block {
+        // Saturating because a whole block's traceback sets the window to
+        // everything, and releases nothing until it is asked.
+        if self.decisions.len() >= self.depth.saturating_add(self.block) {
             self.release(self.block, Ends::Anywhere, out);
         }
     }
@@ -509,6 +610,36 @@ mod tests {
 
     /// A channel that flips one coded bit in forty, with no soft information
     /// to say which, is corrected completely at rate 1/2.
+    #[test]
+    fn the_wide_butterfly_reads_what_the_scalar_one_does() {
+        if !wide_available() {
+            eprintln!("no avx2 here, the wide path is not the one running");
+            return;
+        }
+        // Noisy, so the two paths are compared where they have to choose,
+        // not where every survivor is obvious.
+        let want = bits(8_000, 7);
+        let mut soft = encode(K7_X_FIRST, &want);
+        let mut s = 99u32;
+        for v in soft.iter_mut() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *v += (s >> 16) as f32 / 32_768.0 - 1.0;
+        }
+        for code in [K7_X_FIRST, M17, TETRA_1_3] {
+            let soft = if code == K7_X_FIRST { soft.clone() } else { encode(code, &want) };
+            let run = |wide: bool| {
+                let mut v = Viterbi::new(code);
+                assert!(v.wide, "{code:?} should take the wide path");
+                v.wide = wide;
+                let mut out = Vec::new();
+                v.push(&soft, &vec![1u8; code.rate()], &mut out);
+                v.finish(&mut out);
+                out
+            };
+            assert_eq!(run(true), run(false), "{code:?} decoded differently eight at a time");
+        }
+    }
+
     #[test]
     fn a_noisy_half_rate_stream_is_corrected() {
         let want = bits(20_000, 3);
