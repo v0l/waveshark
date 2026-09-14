@@ -79,7 +79,11 @@ hound = "3"
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
 # the Windows build is made without this. Everything else here works with the
 # driver absent: the device simply never appears in the list.
-default = ["limesdr", "stt", "cuda", "tea", "ambe", "mcp"]
+default = ["limesdr", "stt", "cuda", "tea", "ambe", "mcp", "ffmpeg"]
+# Pictures off a broadcast multiplex, through the system ffmpeg libraries.
+# On by default; a build without it decodes the transport stream and its
+# tables and shows no picture.
+ffmpeg = ["nodes/ffmpeg"]
 # The MCP server behind --mcp-listen, which hands an agent the same receiver
 # the operator is looking at. On by default and shipped in the release
 # binaries: nothing listens until an address is given on the command line.

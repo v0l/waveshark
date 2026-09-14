@@ -920,11 +920,12 @@ impl Receiver {
                     .iter()
                     .all(|w| reused.contains(&chan_stage_id(w, spec, plan.eff_rate()))),
                 key: ChanKey::new(spec, plan.eff_rate()),
-                // A decode channel is read at its voice port when it has
-                // one, which is the output the strip listens to; its packets
-                // leave on port 0 and go to the bus like any front end's.
+                // A decode channel is read at the port it is heard on when
+                // it has one, which is the output the strip listens to; its
+                // packets leave on port 0 and go to the bus like any front
+                // end's.
                 tail: match &spec.mode {
-                    ChanMode::Decode(kind) => tail.out(voice_port(kind).unwrap_or(0)),
+                    ChanMode::Decode(kind) => tail.out(heard_port(kind).unwrap_or(0)),
                     ChanMode::Auto => tail.out(voice_port("auto").unwrap_or(0)),
                     ChanMode::Audio(_) => tail.o(),
                 },
@@ -2186,6 +2187,21 @@ fn voice_port(kind: &str) -> Option<usize> {
     }
 }
 
+/// The port a stage of this kind puts audio on, if it has one.
+///
+/// Speech and audio both end at the bus and differ in what the bus does with
+/// them. A decoded call is a conversation, mixed on the calls fader and
+/// listed as one; a broadcast is a channel an operator opened, with that
+/// channel's own fader, mute and meter, the same as an FM station.
+fn audio_port(kind: &str) -> Option<usize> {
+    nodes::protocol::by_id(kind)?.outputs().iter().position(|k| *k == PortKind::Real)
+}
+
+/// Where a channel of this kind is heard from, whichever of the two it is.
+fn heard_port(kind: &str) -> Option<usize> {
+    voice_port(kind).or_else(|| audio_port(kind))
+}
+
 /// The port a stage of this kind puts pictures on, if it has one. Read the
 /// way [`voice_port`] is, and for the same reason.
 fn video_port(kind: &str) -> Option<usize> {
@@ -2820,7 +2836,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             // packet in analogue speech, so there is nothing to put anywhere
             // else.
             ChanMode::Audio(_) => Some(0),
-            ChanMode::Decode(kind) => voice_port(kind),
+            ChanMode::Decode(kind) => heard_port(kind),
             ChanMode::Auto => voice_port("auto"),
         };
         if let Some(port) = port {
@@ -4549,6 +4565,38 @@ pub(crate) mod tests {
     /// rather than a line in a list. Wired to the bus it was rejected at
     /// negotiation, and the whole graph came down with it: no spectrum, no
     /// audio, no picture, and a message about the packet log.
+    /// The sound of a television service reaches the speaker, on the
+    /// channel's own fader.
+    ///
+    /// A multiplex puts out three things: a transport stream for a stage
+    /// above, pictures for the video pane, and the sound that goes with the
+    /// pictures. The sound is the channel's, not a conversation: it is mixed
+    /// through the strip an operator opened, which is where its level, its
+    /// mute and its meter are.
+    #[test]
+    fn a_multiplex_is_heard_through_the_audio_bus() {
+        let mut p = plan(9_142_857.0, Hz::mhz(429));
+        p.fronts.clear();
+        let mut tv = chan(1, 0.0, Demod::Nfm);
+        tv.mode = ChanMode::Decode("dvbt".into());
+        p.channels = vec![tv];
+
+        let patch = derived_patch(&p);
+        let dvbt = patch.stages().iter().find(|s| s.kind == "dvbt").expect("the multiplex");
+        let port = heard_port("dvbt").expect("a dvbt channel has sound on it");
+        assert!(
+            patch.links().iter().any(|l| {
+                l.to.0 == derived::AUDIO
+                    && matches!(l.from, crate::patch::Source::Stage(f, o) if f == dvbt.id && o == port)
+            }),
+            "the sound never reaches the bus"
+        );
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+        let ch = rx.channels().first().expect("the channel");
+        assert!(ch.port.is_some(), "the strip has no input on the bus to meter");
+    }
+
     #[test]
     fn a_channel_that_puts_out_bytes_is_kept_off_the_packet_bus() {
         let mut p = plan(9_142_857.0, Hz::mhz(429));

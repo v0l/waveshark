@@ -15,6 +15,9 @@ hmac.workspace = true
 wgpu = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 poll-promise = { workspace = true, optional = true }
+ffmpeg-rs-raw = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
 
 [features]
 # TETRA air-interface decryption and TEA1 key recovery: the recovered
@@ -22,6 +25,10 @@ poll-promise = { workspace = true, optional = true }
 # default, so a stock build carries none of it and links no GPU stack; the
 # source stays in the tree for anyone who builds with `--features tea`.
 tea = ["dep:wgpu", "dep:bytemuck", "dep:poll-promise"]
+# Pictures and sound off a broadcast multiplex, through the system ffmpeg
+# libraries. On by default: without it the receiver reads the transport
+# stream and its tables but decodes no picture.
+ffmpeg = ["dep:ffmpeg-rs-raw", "dep:anyhow", "dep:parking_lot"]
 
 [dev-dependencies]
 sources.workspace = true

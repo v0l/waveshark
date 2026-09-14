@@ -19,7 +19,6 @@ use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
 use common::{C32, Result};
 use decode::dvbt::{Outer, OuterTx, TsPacket};
-use decode::mpeg2;
 use decode::mpegts::{self, Mux};
 use dsp::conv;
 use dsp::dvbt::{self, Inner, Mode, Params, Symbol};
@@ -150,6 +149,121 @@ impl DvbtReceiver {
     }
 }
 
+/// The receiver on a thread of its own.
+///
+/// Reading a multiplex costs about six tenths of a second for every second
+/// of signal: the trellis alone runs at two and a half times real time and
+/// nothing above it is free. On the graph's own thread that is six tenths of
+/// every block's budget spent before anything else in the receiver has run,
+/// which is what a spectrum stuttering while a multiplex decodes looks like.
+/// Here it is one core's work beside the graph rather than inside it.
+struct Offloaded {
+    iq: Option<crossbeam_channel::Sender<Vec<C32>>>,
+    /// Buffers coming back to be filled again, so a block is not a fresh
+    /// half megabyte every seven milliseconds.
+    spare: crossbeam_channel::Receiver<Vec<C32>>,
+    give_back: crossbeam_channel::Sender<Vec<C32>>,
+    packets: crossbeam_channel::Receiver<Vec<TsPacket>>,
+    heard: std::sync::Arc<std::sync::Mutex<Heard>>,
+    /// Blocks the thread was too far behind to take. Not silent: a receiver
+    /// that cannot keep up says so rather than reporting a bad signal.
+    pub dropped: u64,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What the thread has to say about the multiplex, for the stages that ask
+/// between blocks.
+#[derive(Clone, Copy, Default)]
+struct Heard {
+    params: Option<Params>,
+    snr_db: Option<f32>,
+    stats: decode::dvbt::Stats,
+}
+
+/// Blocks of samples waiting to be read. About a tenth of a second at the
+/// standard's rate.
+const QUEUE: usize = 16;
+
+/// How long the graph will wait on a full queue before giving the block up.
+const WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
+impl Offloaded {
+    fn new() -> Self {
+        let (iq, work) = crossbeam_channel::bounded::<Vec<C32>>(QUEUE);
+        let (give_back, spare) = crossbeam_channel::bounded::<Vec<C32>>(QUEUE + 2);
+        let (send, packets) = crossbeam_channel::bounded::<Vec<TsPacket>>(QUEUE);
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Heard::default()));
+        let mine = heard.clone();
+        let back = give_back.clone();
+        let thread = std::thread::Builder::new()
+            .name("dvbt".into())
+            .spawn(move || {
+                let mut rx = DvbtReceiver::new();
+                let mut out = Vec::new();
+                while let Ok(block) = work.recv() {
+                    out.clear();
+                    rx.push(&block, &mut out);
+                    let _ = back.try_send(block);
+                    *mine.lock().expect("the reading") =
+                        Heard { params: rx.params(), snr_db: rx.snr_db(), stats: rx.stats() };
+                    if send.send(std::mem::take(&mut out)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        Self { iq: Some(iq), spare, give_back, packets, heard, dropped: 0, thread }
+    }
+
+    /// Hand over a block.
+    ///
+    /// Waits while the thread is behind, but not for long: a recording read
+    /// faster than it can be decoded is held back here, which is what keeps
+    /// a replay whole, while a radio that cannot be held back at all loses
+    /// the block instead of the samples piling up behind it.
+    fn push(&mut self, iq: &[C32]) {
+        let mut block = self.spare.try_recv().unwrap_or_default();
+        block.clear();
+        block.extend_from_slice(iq);
+        let Some(tx) = &self.iq else { return };
+        if tx.send_timeout(block, WAIT).is_err() {
+            self.dropped += 1;
+        }
+    }
+
+    /// Whatever has been decoded since the last call.
+    fn take(&mut self, out: &mut Vec<TsPacket>) {
+        while let Ok(mut packets) = self.packets.try_recv() {
+            out.append(&mut packets);
+            let _ = self.give_back.try_send(Vec::new());
+        }
+    }
+
+    /// Stop feeding it and take everything it has left.
+    fn finish(&mut self, out: &mut Vec<TsPacket>) {
+        self.iq = None;
+        while let Ok(mut packets) = self.packets.recv() {
+            out.append(&mut packets);
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+
+    fn heard(&self) -> Heard {
+        *self.heard.lock().expect("the reading")
+    }
+}
+
+impl Drop for Offloaded {
+    fn drop(&mut self) {
+        self.iq = None;
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 /// A whole DVB-T transmitter: transport packets in, samples out.
 ///
 /// It is here so the receiver can be tested against a multiplex whose every
@@ -221,7 +335,7 @@ pub struct DvbtNode {
     mixer: Mixer,
     decim: FirDecim,
     resample: Rational,
-    rx: DvbtReceiver,
+    rx: Offloaded,
     mux: Mux,
     mixed: Vec<C32>,
     narrow: Vec<C32>,
@@ -232,12 +346,32 @@ pub struct DvbtNode {
     told: Option<Params>,
     named: Vec<u16>,
     at: f64,
-    /// The video decoder, and which stream it is being fed.
-    video: mpeg2::Decoder,
+    /// The container decoder, which reads the whole multiplex: the
+    /// programmes, their codecs and the clock that puts them together. None
+    /// in a build without ffmpeg, which reads the transport stream and its
+    /// tables and decodes no picture.
+    #[cfg(feature = "ffmpeg")]
+    media: decode::media::Media,
+    /// The packet identifier the pictures are on, once the tables have named
+    /// the service being watched.
     watching: Option<u16>,
     /// The service an operator asked for.
     wanted: Want,
-    pictures: Vec<mpeg2::Picture>,
+    #[cfg(feature = "ffmpeg")]
+    decoded: Vec<decode::media::Out>,
+    /// Sound decoded and not yet handed to the bus.
+    #[cfg(feature = "ffmpeg")]
+    pcm: std::collections::VecDeque<f32>,
+    /// Where the sound has got to on the stream's own clock, which is what
+    /// says when a picture is shown.
+    #[cfg(feature = "ffmpeg")]
+    heard_s: Option<f64>,
+    /// Pictures decoded and waiting for their moment, with the moment.
+    #[cfg(feature = "ffmpeg")]
+    queue: Vec<(Option<f64>, common::VideoFrame)>,
+    /// Whether enough sound has been decoded to start playing it.
+    #[cfg(feature = "ffmpeg")]
+    playing: bool,
     sequence: u64,
 }
 
@@ -254,7 +388,7 @@ impl DvbtNode {
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(RATE_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             resample: Rational::with_ratio(1, 1),
-            rx: DvbtReceiver::new(),
+            rx: Offloaded::new(),
             mux: Mux::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
@@ -263,10 +397,20 @@ impl DvbtNode {
             told: None,
             named: Vec::new(),
             at: 0.0,
-            video: mpeg2::Decoder::new(),
+            #[cfg(feature = "ffmpeg")]
+            media: decode::media::Media::new(),
             watching: None,
             wanted: Want::Any,
-            pictures: Vec::new(),
+            #[cfg(feature = "ffmpeg")]
+            decoded: Vec::new(),
+            #[cfg(feature = "ffmpeg")]
+            pcm: std::collections::VecDeque::new(),
+            #[cfg(feature = "ffmpeg")]
+            heard_s: None,
+            #[cfg(feature = "ffmpeg")]
+            queue: Vec::new(),
+            #[cfg(feature = "ffmpeg")]
+            playing: false,
             sequence: 0,
         }
     }
@@ -282,7 +426,23 @@ impl DvbtNode {
         if self.wanted != want {
             self.wanted = want;
             self.watching = None;
-            self.video = mpeg2::Decoder::new();
+            self.tell_media();
+        }
+    }
+
+    /// Tell the decoder which programme to read, by the number the
+    /// multiplex's tables and the container both call it.
+    fn tell_media(&mut self) {
+        #[cfg(feature = "ffmpeg")]
+        {
+            let id = match &self.wanted {
+                Want::Any => None,
+                Want::Id(id) => Some(*id),
+                Want::Named(_) => {
+                    self.mux.services.iter().find(|s| self.wanted.matches(s)).map(|s| s.id)
+                }
+            };
+            self.media.watch(id);
         }
     }
 
@@ -296,6 +456,12 @@ impl DvbtNode {
     /// yet.
     pub fn wanted(&self) -> &Want {
         &self.wanted
+    }
+
+    /// What stopped the container decoder, if anything did.
+    #[cfg(feature = "ffmpeg")]
+    pub fn media_fault(&self) -> Option<String> {
+        self.media.fault()
     }
 
     /// Every service the multiplex has described, in the order its table
@@ -339,33 +505,170 @@ impl DvbtNode {
         self.watching = Some(pid);
     }
 
+    /// Take everything the decoder has ready.
+    ///
+    /// Everything, always: leaving it there stalls the decoding thread,
+    /// which stalls the demuxer reading from it, which fills the queue of
+    /// transport packets waiting to be read and starts dropping them. A
+    /// dropped transport packet is a hole in the middle of a coded picture,
+    /// so the sound breaks up rather than merely arriving late. What is
+    /// bounded instead is how far behind the sound may fall: see
+    /// [`DvbtNode::sound_for`].
+    #[cfg(feature = "ffmpeg")]
+    fn gather(&mut self) {
+        let mut decoded = std::mem::take(&mut self.decoded);
+        decoded.clear();
+        self.media.take(&mut decoded);
+        for d in &decoded {
+            match d {
+                decode::media::Out::Picture(p) => {
+                    let at = p.at_s;
+                    let frame = self.frame(p);
+                    self.queue.push((at, frame));
+                }
+                decode::media::Out::Sound(s) => {
+                    if self.pcm.is_empty() {
+                        self.heard_s = s.at_s;
+                    }
+                    self.pcm.extend(s.pcm.iter().copied());
+                }
+            }
+        }
+        self.decoded = decoded;
+    }
+
+    /// One block's worth of sound, and the clock moved on by it.
+    ///
+    /// Exactly what the block covers, because the bus mixes a block at a
+    /// time: handing it four seconds of sound in one block does not play
+    /// four seconds, it throws most of it away. Short is silence, which is
+    /// what a service that has not started yet sounds like.
+    #[cfg(feature = "ffmpeg")]
+    fn sound_for(&mut self, block_s: f64) -> Vec<f32> {
+        let rate = decode::media::SOUND_HZ as f64;
+        let want = (block_s * rate).round() as usize;
+        if want == 0 {
+            return Vec::new();
+        }
+        // Decoded further ahead than this and the receiver is not keeping
+        // up: the oldest sound goes and the clock jumps with it, so the
+        // pictures stay with the sound instead of the pair drifting apart
+        // for as long as the channel is open.
+        let most = (rate * BEHIND_S) as usize;
+        if self.pcm.len() > most {
+            let drop = self.pcm.len() - most;
+            self.pcm.drain(..drop);
+            if let Some(at) = &mut self.heard_s {
+                *at += drop as f64 / rate;
+            }
+        }
+        // Nothing is played until there is enough in hand to play through
+        // the next hiccup. A decoder is not a steady producer: a picture and
+        // its sound arrive when the multiplex sends them.
+        if !self.playing {
+            if self.pcm.len() < (rate * PRIME_S) as usize {
+                return vec![0.0; want];
+            }
+            self.playing = true;
+        }
+        let n = want.min(self.pcm.len());
+        let mut pcm: Vec<f32> = self.pcm.drain(..n).collect();
+        pcm.resize(want, 0.0);
+        // Run dry and it fills again before playing rather than stuttering
+        // a block at a time for as long as the decoder is behind.
+        if n < want {
+            self.playing = false;
+        }
+        // The clock only moves on sound that was really heard. A gap in the
+        // sound holds the picture rather than running past it.
+        if let Some(at) = &mut self.heard_s {
+            *at += n as f64 / rate;
+        }
+        pcm
+    }
+
+    /// The pictures whose moment has come.
+    ///
+    /// Sound is the clock, as it is in every player: the ear hears a
+    /// discontinuity that the eye does not see. A picture stamped earlier
+    /// than the sound now playing is late and goes out at once; one stamped
+    /// later waits. With no sound at all, or a stream that stamps nothing,
+    /// every picture goes out as it is decoded.
+    #[cfg(feature = "ffmpeg")]
+    fn due(&mut self) -> Vec<common::VideoFrame> {
+        let Some(now) = self.heard_s else {
+            return self.queue.drain(..).map(|(_, f)| f).collect();
+        };
+        let mut out = Vec::new();
+        self.queue.retain(|(at, f)| match at {
+            Some(at) if *at > now => true,
+            _ => {
+                out.push(f.clone());
+                false
+            }
+        });
+        out
+    }
+
     /// Decode whatever picture is still held back, for a recording that has
     /// run out rather than a transmission that has stopped.
     ///
     /// A picture ends where the next one starts, so the last picture of a
-    /// stream is still inside the decoder when the samples run out. On the
-    /// air the next picture is forty milliseconds away and nothing needs
-    /// this; at the end of a capture it is the difference between a picture
-    /// and none.
-    pub fn flush(&mut self, out: &mut Vec<common::VideoFrame>) {
-        let mut pictures = std::mem::take(&mut self.pictures);
-        pictures.clear();
-        self.video.flush(&mut pictures);
-        for p in &pictures {
-            let frame = self.frame(p);
-            out.push(frame);
+    /// stream is still inside the decoder when the samples run out, and a
+    /// recording played faster than real time finishes with most of a
+    /// second of sound still in flight. On the air the next picture is forty
+    /// milliseconds away and nothing needs this; at the end of a capture it
+    /// is the difference between a picture and none. What is returned is the
+    /// sound that was still held, which has no port left to go to.
+    pub fn flush(&mut self, out: &mut Vec<common::VideoFrame>) -> Tail {
+        // The receiver is on a thread, so the last blocks of samples are
+        // still being read when the recording ends.
+        let mut packets = Vec::new();
+        self.rx.finish(&mut packets);
+        let mut bytes = Vec::with_capacity(packets.len() * 188);
+        for p in &packets {
+            self.mux.push(&p.bytes);
+            bytes.extend_from_slice(&p.bytes);
         }
-        self.pictures = pictures;
+        #[cfg(feature = "ffmpeg")]
+        self.media.push(&bytes);
+        let mut pcm = Vec::new();
+        #[cfg(feature = "ffmpeg")]
+        {
+            out.extend(self.queue.drain(..).map(|(_, f)| f));
+            pcm.extend(self.pcm.drain(..));
+            let mut decoded = std::mem::take(&mut self.decoded);
+            decoded.clear();
+            self.media.finish(&mut decoded);
+            for d in &decoded {
+                match d {
+                    decode::media::Out::Picture(p) => {
+                        let frame = self.frame(p);
+                        out.push(frame);
+                    }
+                    decode::media::Out::Sound(s) => pcm.extend_from_slice(&s.pcm),
+                }
+            }
+            self.decoded = decoded;
+        }
+        #[cfg(not(feature = "ffmpeg"))]
+        let _ = out;
+        Tail { bytes, pcm }
     }
 
     /// A decoded picture as the video bus carries it.
-    fn frame(&mut self, p: &mpeg2::Picture) -> common::VideoFrame {
+    #[cfg(feature = "ffmpeg")]
+    fn frame(&mut self, p: &decode::media::Picture) -> common::VideoFrame {
         self.sequence += 1;
+        // Named by the service the container says it came from, which is the
+        // same number the multiplex's own tables use.
         let name = self
             .mux
             .services
             .iter()
-            .find(|s| s.video().is_some_and(|v| Some(v.pid) == self.watching))
+            .find(|s| {
+                Some(s.id) == p.service || s.video().is_some_and(|v| Some(v.pid) == self.watching)
+            })
             .and_then(|s| s.name.clone());
         common::VideoFrame {
             system: DVB,
@@ -377,12 +680,12 @@ impl DvbtNode {
             // this size, so the grid is the shape.
             aspect: p.width as f32 / p.height as f32,
             pixels: common::Pixels::Rgb8,
-            samples: std::sync::Arc::new(p.rgb()),
+            samples: std::sync::Arc::new(p.rgb.clone()),
             lines_seen: p.height,
             sequence: self.sequence,
             update: common::Update::Whole,
-            // A picture every half second or so, each superseding the last,
-            // which is what an intra picture out of a broadcast is.
+            // Twenty-five a second off a broadcast, each superseding the
+            // last.
             cadence: common::Cadence::Live,
         }
     }
@@ -395,7 +698,7 @@ impl DvbtNode {
 
     /// The multiplex itself, once the TPS has said what it is.
     fn announce(&mut self, params: Params, c: &mut NodeCtx<'_>) {
-        let snr = self.rx.snr_db().unwrap_or(0.0);
+        let snr = self.rx.heard().snr_db.unwrap_or(0.0);
         let mut fields = vec![
             ("mode".into(), common::Value::Text(params.mode.label().into())),
             ("guard".into(), common::Value::Text(params.guard.label().into())),
@@ -455,8 +758,34 @@ impl DvbtNode {
     }
 }
 
+/// What was still in flight when the samples ran out: transport packets the
+/// decoding thread had not finished reading, and the sound that had no block
+/// left to go out in. A live receiver never sees either; a recording that
+/// ends does.
+pub struct Tail {
+    pub bytes: Vec<u8>,
+    pub pcm: Vec<f32>,
+}
+
 /// What the video bus calls a picture off the television multiplex.
 pub const DVB: &str = "DVB-T";
+
+/// How much sound to have in hand before any of it is played, so a gap in
+/// the decoding is not a gap in the sound.
+#[cfg(feature = "ffmpeg")]
+const PRIME_S: f64 = 0.3;
+
+/// How far ahead of what is being played the decoder may get before the
+/// receiver admits it is behind and throws the oldest sound away.
+#[cfg(feature = "ffmpeg")]
+const BEHIND_S: f64 = 1.5;
+
+/// What the sound of a service comes out at, which is what the audio bus
+/// mixes at.
+#[cfg(feature = "ffmpeg")]
+const SOUND_RATE_HZ: f64 = decode::media::SOUND_HZ as f64;
+#[cfg(not(feature = "ffmpeg"))]
+const SOUND_RATE_HZ: f64 = 48_000.0;
 
 /// Which service the pictures are read from.
 pub const SERVICE: &str = "service";
@@ -525,9 +854,9 @@ impl pipeline::node::Node for DvbtNode {
         1
     }
 
-    /// The transport stream, and the pictures read out of it.
+    /// The transport stream, the pictures read out of it, and their sound.
     fn num_outputs(&self) -> usize {
-        2
+        3
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -551,7 +880,7 @@ impl pipeline::node::Node for DvbtNode {
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.resample = Rational::approx(rate / factor as f64, RATE_HZ, 4096);
-        self.rx = DvbtReceiver::new();
+        self.rx = Offloaded::new();
         self.mux = Mux::new();
         self.told = None;
         self.named.clear();
@@ -561,12 +890,21 @@ impl pipeline::node::Node for DvbtNode {
         out.bandwidth = CHANNEL_WIDTH_HZ;
         // The stream this puts out is transport packets, at whatever rate the
         // multiplex carries them.
-        out.rate = self.rx.params().map(|p| p.bitrate() / 8.0).unwrap_or(RATE_HZ);
+        out.rate = self.rx.heard().params.map(|p| p.bitrate() / 8.0).unwrap_or(RATE_HZ);
         let mut video = out.with_kind(PortKind::Video);
         // A picture is not a sampled stream: it carries its own geometry and
         // arrives when the multiplex sends one.
         video.rate = 0.0;
-        Ok(vec![out, video])
+        // The sound of whichever service is being watched, one channel at
+        // the rate the bus mixes at. Audio rather than speech: a broadcast
+        // belongs to the channel an operator opened, with that channel's
+        // fader, its mute and its meter, and it is not a conversation for
+        // the call list.
+        let mut sound = out.with_kind(PortKind::Real);
+        sound.rate = SOUND_RATE_HZ;
+        sound.channels = 1;
+        sound.bandwidth = 0.0;
+        Ok(vec![out, video, sound])
     }
 
     fn process(
@@ -586,30 +924,32 @@ impl pipeline::node::Node for DvbtNode {
 
         self.packets.clear();
         let mut packets = std::mem::take(&mut self.packets);
-        self.rx.push(&self.at_rate, &mut packets);
+        self.rx.push(&self.at_rate);
+        self.rx.take(&mut packets);
         let out = outputs[0].bytes_mut();
         for p in &packets {
             self.mux.push(&p.bytes);
             out.extend_from_slice(&p.bytes);
         }
+        #[cfg(feature = "ffmpeg")]
+        self.media.push(&out[out.len() - packets.len() * 188..]);
         self.packets = packets;
         self.follow_video();
 
-        // The pictures, where the demux is pointed at a service's video.
-        let mut pictures = std::mem::take(&mut self.pictures);
-        pictures.clear();
-        for pes in self.mux.take_pes() {
-            if Some(pes.pid) == self.watching {
-                self.video.push(&pes.data, &mut pictures);
+        // The pictures. The whole multiplex goes to the container decoder,
+        // programmes, codecs, clocks and all, and what comes back is already
+        // the programme that was asked for.
+        #[cfg(feature = "ffmpeg")]
+        {
+            self.gather();
+            let pcm = self.sound_for(c.block_seconds);
+            for frame in self.due() {
+                outputs[1].video_mut().push(frame);
             }
+            outputs[2].real_mut().extend_from_slice(&pcm);
         }
-        for p in &pictures {
-            let frame = self.frame(p);
-            outputs[1].video_mut().push(frame);
-        }
-        self.pictures = pictures;
 
-        if let Some(params) = self.rx.params() {
+        if let Some(params) = self.rx.heard().params {
             if self.told != Some(params) {
                 self.told = Some(params);
                 self.announce(params, c);
@@ -632,9 +972,17 @@ impl pipeline::node::Node for DvbtNode {
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
-        self.rx = DvbtReceiver::new();
+        self.rx = Offloaded::new();
         self.mux = Mux::new();
-        self.video = mpeg2::Decoder::new();
+        #[cfg(feature = "ffmpeg")]
+        {
+            self.media = decode::media::Media::new();
+            self.tell_media();
+            self.pcm.clear();
+            self.queue.clear();
+            self.heard_s = None;
+            self.playing = false;
+        }
         self.watching = None;
         self.told = None;
         self.named.clear();
@@ -725,11 +1073,12 @@ impl Protocol for Dvbt {
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.0} DVB-T", hz / 1e6)
     }
-    /// A transport stream and the pictures in it. The stream is 24 megabits
-    /// a second of packets, which is for a stage above to read rather than a
-    /// list for a person; the pictures go to the video pane.
+    /// A transport stream, the pictures in it and their sound. The stream is
+    /// 24 megabits a second of packets, which is for a stage above to read
+    /// rather than a list for a person; the pictures go to the video pane and
+    /// the sound to the audio bus.
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Bytes, PortKind::Video]
+        &[PortKind::Bytes, PortKind::Video, PortKind::Real]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -932,7 +1281,11 @@ mod node_tests {
         let mut stream = Vec::new();
         for block in span.chunks(65_536) {
             let payload = Payload::Iq(block.to_vec());
-            let mut out = [Payload::empty_of(PortKind::Bytes), Payload::empty_of(PortKind::Video)];
+            let mut out = [
+                Payload::empty_of(PortKind::Bytes),
+                Payload::empty_of(PortKind::Video),
+                Payload::empty_of(PortKind::Real),
+            ];
             let ins = [spec];
             let tags = Vec::new();
             let mut new_tags = Vec::new();
@@ -940,8 +1293,11 @@ mod node_tests {
             Node::process(&mut node, &[&payload], &mut out, &mut ctx).expect("the stage runs");
             stream.extend_from_slice(out[0].as_bytes().unwrap_or(&[]));
         }
+        // The decoding thread is still reading when the samples run out.
+        let mut frames = Vec::new();
+        stream.extend_from_slice(&node.flush(&mut frames).bytes);
 
-        assert_eq!(node.rx.params(), Some(params), "the TPS came through the resampler");
+        assert_eq!(node.rx.heard().params, Some(params), "the TPS came through the resampler");
         assert_eq!(stream.len() % 188, 0, "whole transport packets");
         assert!(stream.len() >= 188 * 900, "{} bytes of transport stream", stream.len());
         // Two announcements for the multiplex and none for a service: the

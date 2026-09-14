@@ -1064,6 +1064,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clang"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2ed30b30e1e17966b55ddd0b9dd2758fd824f0a6da6875c8abb17e6aba47c28"
+dependencies = [
+ "clang-sys",
+ "libc",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1628,12 +1638,15 @@ name = "decode"
 version = "0.2.0"
 dependencies = [
  "aes",
+ "anyhow",
  "bytemuck",
  "common",
  "ctr",
  "dsp",
+ "ffmpeg-rs-raw",
  "hmac",
  "md-5",
+ "parking_lot",
  "poll-promise",
  "sha2 0.11.0",
  "sources",
@@ -2146,6 +2159,32 @@ name = "fearless_simd"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
+
+[[package]]
+name = "ffmpeg-rs-raw"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46e4544c444801cde2cbfb9f0d77f6bb19335ff7471f99fb71696bb3715be30"
+dependencies = [
+ "anyhow",
+ "ffmpeg-sys-the-third",
+ "libc",
+ "log",
+]
+
+[[package]]
+name = "ffmpeg-sys-the-third"
+version = "5.0.0+ffmpeg-8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b00c204bb97c2b6c0329104c3e8bcf58d4d13cc88a04233326570672e0c2c5c9"
+dependencies = [
+ "bindgen",
+ "cc",
+ "clang",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "find-msvc-tools"
