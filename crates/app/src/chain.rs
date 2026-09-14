@@ -433,6 +433,18 @@ pub struct StripState {
     pub channel: Option<u64>,
 }
 
+/// One television multiplex the receiver is decoding, and what is on it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Multiplex {
+    /// Where it is in the running graph, for setting its service.
+    pub node: usize,
+    /// What the stage is called: the frequency it is on.
+    pub label: String,
+    /// The service an operator asked for.
+    pub wanted: nodes::dvbt_nodes::Want,
+    pub services: Vec<decode::mpegts::Service>,
+}
+
 /// One input of the video bus, as a pane offers it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoInput {
@@ -1228,6 +1240,27 @@ impl Receiver {
     /// Pictures the receiver has written to disk, newest last.
     pub fn pictures_saved(&self) -> Option<Vec<std::path::PathBuf>> {
         self.stage::<crate::picsave::PictureSaveNode>(derived::PICTURES).map(|n| n.saved().to_vec())
+    }
+
+    /// The services of every television multiplex the receiver is decoding,
+    /// with the node they are on so one can be asked for.
+    ///
+    /// Read off the whole graph rather than from one hard-coded stage,
+    /// because a receiver can hold more than one multiplex at once and
+    /// neither the pane nor the agent should know where they sit.
+    pub fn multiplexes(&self) -> Vec<Multiplex> {
+        self.graph
+            .order()
+            .filter_map(|(id, _)| {
+                let n = downcast::<nodes::dvbt_nodes::DvbtNode>(&self.graph, id)?;
+                Some(Multiplex {
+                    node: id.0,
+                    label: self.graph.node(id).map_or_else(String::new, |n| n.name().to_string()),
+                    wanted: n.wanted().clone(),
+                    services: n.services().to_vec(),
+                })
+            })
+            .collect()
     }
 
     /// Every transmission the video bus has seen.

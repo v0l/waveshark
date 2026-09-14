@@ -36,6 +36,7 @@ the code is in the commit log.
 - DVB-T television multiplexes on the UHF and band III channels: the
   transmission parameters, the transport stream, and the services on it.
 - The band plan names UHF television and the Ku satellite band.
+- A service picker on the video pane, for the programmes of a DVB-T multiplex.
 - Television pictures on the video pane, one every second or so, from the
   standard definition services of a DVB-T multiplex.
 

@@ -228,3 +228,126 @@ fn the_stage_puts_a_picture_on_the_video_port() {
     // number and no name, and the frame says so rather than inventing one.
     assert_eq!(f.label, None);
 }
+
+/// The service is a parameter, so a menu, an agent or a saved patch can all
+/// say which programme of the multiplex to decode.
+///
+/// This capture carries one service, numbered 1 with no name, so what can be
+/// pinned here is the route rather than a choice between programmes: asking
+/// for it by number, by position and by name all land on the same video, and
+/// asking for one that is not there decodes nothing rather than quietly
+/// falling back to whatever is.
+#[test]
+fn the_service_can_be_asked_for_by_number_or_by_position() {
+    use nodes::dvbt_nodes::{DvbtNode, SERVICE, Want};
+    use pipeline::ParamValue;
+    use pipeline::node::{Node, NodeCtx, PortSpec};
+    use pipeline::port::{Payload, PortKind, StreamSpec};
+
+    let Some(samples) = samples() else { return skip() };
+    let spec = PortSpec {
+        spec: StreamSpec::iq(nodes::dvbt_nodes::RATE_HZ, common::Hz(429_000_000)),
+        latency: 0,
+    };
+    // The tables, and the pictures, for whatever the node was asked for.
+    let run = |want: Option<ParamValue>| -> (DvbtNode, usize) {
+        let mut node = DvbtNode::new(429_000_000.0);
+        node.negotiate(&[spec]).expect("the channel is the span");
+        if let Some(v) = want {
+            Node::set_param(&mut node, SERVICE, v).expect("the parameter");
+        }
+        let mut frames: Vec<common::VideoFrame> = Vec::new();
+        for block in samples.chunks(BLOCK) {
+            let input = Payload::Iq(block.to_vec());
+            let mut out = [Payload::empty_of(PortKind::Bytes), Payload::empty_of(PortKind::Video)];
+            let ins = [spec];
+            let tags = Vec::new();
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("the stage runs");
+            frames.extend(out[1].as_video().unwrap_or(&[]).iter().cloned());
+        }
+        node.flush(&mut frames);
+        (node, frames.len())
+    };
+
+    // Left alone, the node takes the first service with a picture on it.
+    let (node, pictures) = run(None);
+    assert_eq!(node.wanted(), &Want::Any);
+    assert_eq!(node.watching(), Some(49));
+    assert_eq!(pictures, 1);
+    // And says what it found, as a choice a menu can draw: the receiver's
+    // own entry first, then the one service this multiplex describes.
+    let params = Node::params(&node);
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].name, SERVICE);
+    let choices = match &params[0].range {
+        pipeline::param::ParamRange::Choices(c) => c.clone(),
+        other => panic!("a service is a choice, not {other:?}"),
+    };
+    assert_eq!(choices, vec![nodes::dvbt_nodes::ANY.to_string(), "service 1".to_string()]);
+    assert_eq!(params[0].value, ParamValue::Choice(0), "nothing was asked for");
+
+    // Asked for by its identifier, which is what survives the list growing.
+    let (node, pictures) = run(Some(ParamValue::Int(1)));
+    assert_eq!(node.wanted(), &Want::Id(1), "unnamed here, so it is asked for by number");
+    assert_eq!(node.watching(), Some(49), "the video of service 1");
+    assert_eq!(pictures, 1);
+    assert_eq!(Node::params(&node)[0].value, ParamValue::Choice(1), "second in the list");
+
+    // And by the name the list shows, which is what an agent has to hand.
+    // Both need the tables, so they are set on a node that has read them.
+    let (mut node, _) = run(None);
+    Node::set_param(&mut node, SERVICE, ParamValue::Text("service 1".into())).expect("by name");
+    assert_eq!(node.wanted(), &Want::Named("service 1".into()));
+    Node::set_param(&mut node, SERVICE, ParamValue::Choice(1)).expect("by position");
+    assert_eq!(node.wanted(), &Want::Id(1), "a position is kept as the identity it names");
+    Node::set_param(&mut node, SERVICE, ParamValue::Choice(0)).expect("back to the first");
+    assert_eq!(node.wanted(), &Want::Any);
+    Node::set_param(&mut node, SERVICE, ParamValue::Choice(2)).expect_err("there is no second");
+    Node::set_param(&mut node, SERVICE, ParamValue::Text("BBC One".into()))
+        .expect_err("nor a service of that name");
+
+    // A service the multiplex does not carry decodes nothing at all, rather
+    // than the picture of whichever service does.
+    let (node, pictures) = run(Some(ParamValue::Int(2)));
+    assert_eq!(node.wanted(), &Want::Id(2));
+    assert_eq!(node.watching(), None);
+    assert_eq!(pictures, 0);
+}
+
+/// The service outlives the rebuild that redraws the graph.
+///
+/// A retune, a zoom or an edit builds every derived stage again from the
+/// patch, and the patch holds what `set_param` was given. A position in a
+/// menu means nothing at that moment, because no table has arrived yet, so
+/// what is written down is a name or a number and `build` reads it back.
+#[test]
+fn a_chosen_service_survives_a_rebuild() {
+    use nodes::dvbt_nodes::{SERVICE, Want, build};
+    use pipeline::ParamValue;
+    use pipeline::registry::Settings;
+
+    let named = |v: ParamValue| {
+        let mut s = Settings::new();
+        s.insert("channel_hz".into(), ParamValue::Float(429e6));
+        s.insert(SERVICE.into(), v);
+        let node = build(&s).expect("the stage");
+        let dvbt = node
+            .as_any()
+            .downcast_ref::<nodes::dvbt_nodes::DvbtNode>()
+            .expect("a dvbt node")
+            .wanted()
+            .clone();
+        dvbt
+    };
+    assert_eq!(named(Want::Named("RTE One".into()).setting()), Want::Named("RTE One".into()));
+    assert_eq!(named(Want::Id(4).setting()), Want::Id(4));
+    assert_eq!(named(Want::Any.setting()), Want::Any);
+    // And a patch that says nothing about it watches whatever has a picture.
+    let mut bare = Settings::new();
+    bare.insert("channel_hz".into(), ParamValue::Float(429e6));
+    let node = build(&bare).expect("the stage");
+    let dvbt = node.as_any().downcast_ref::<nodes::dvbt_nodes::DvbtNode>().expect("a dvbt node");
+    assert_eq!(dvbt.wanted(), &Want::Any);
+}

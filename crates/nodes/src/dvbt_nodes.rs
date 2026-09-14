@@ -20,7 +20,7 @@ use crate::protocol::{Placed, Placement, Protocol, Shape};
 use common::{C32, Result};
 use decode::dvbt::{Outer, OuterTx, TsPacket};
 use decode::mpeg2;
-use decode::mpegts::Mux;
+use decode::mpegts::{self, Mux};
 use dsp::conv;
 use dsp::dvbt::{self, Inner, Mode, Params, Symbol};
 use dsp::resample::Rational;
@@ -235,9 +235,8 @@ pub struct DvbtNode {
     /// The video decoder, and which stream it is being fed.
     video: mpeg2::Decoder,
     watching: Option<u16>,
-    /// The service an operator asked for, or none to take the first one the
-    /// multiplex describes that has a picture in it.
-    wanted: Option<u16>,
+    /// The service an operator asked for.
+    wanted: Want,
     pictures: Vec<mpeg2::Picture>,
     sequence: u64,
 }
@@ -266,7 +265,7 @@ impl DvbtNode {
             at: 0.0,
             video: mpeg2::Decoder::new(),
             watching: None,
-            wanted: None,
+            wanted: Want::Any,
             pictures: Vec::new(),
             sequence: 0,
         }
@@ -275,8 +274,13 @@ impl DvbtNode {
     /// Watch one service by its identifier, or none to take whichever the
     /// multiplex describes first.
     pub fn watch(&mut self, service: Option<u16>) {
-        if self.wanted != service {
-            self.wanted = service;
+        self.want(service.map_or(Want::Any, Want::Id));
+    }
+
+    /// Watch whatever answers to this.
+    pub fn want(&mut self, want: Want) {
+        if self.wanted != want {
+            self.wanted = want;
             self.watching = None;
             self.video = mpeg2::Decoder::new();
         }
@@ -288,15 +292,45 @@ impl DvbtNode {
         self.watching
     }
 
+    /// The service an operator asked for, whether or not it is on the air
+    /// yet.
+    pub fn wanted(&self) -> &Want {
+        &self.wanted
+    }
+
+    /// Every service the multiplex has described, in the order its table
+    /// lists them.
+    pub fn services(&self) -> &[mpegts::Service] {
+        &self.mux.services
+    }
+
+    /// The services as a parameter's list of choices, the first of which is
+    /// the receiver choosing for itself.
+    fn choices(&self) -> Vec<String> {
+        let mut out = vec![ANY.to_string()];
+        out.extend(self.mux.services.iter().map(service_label));
+        out
+    }
+
+    /// Where the wanted service sits in that list. The first entry is the
+    /// receiver choosing, which is not the same as its choice landing on the
+    /// first service.
+    fn choice(&self) -> usize {
+        if self.wanted == Want::Any {
+            return 0;
+        }
+        self.mux.services.iter().position(|s| self.wanted.matches(s)).map_or(0, |n| n + 1)
+    }
+
     /// Point the demux at the video of whichever service is wanted, as soon
     /// as the programme map names it.
     fn follow_video(&mut self) {
         if self.watching.is_some() {
             return;
         }
-        let service = match self.wanted {
-            Some(id) => self.mux.service(id).cloned(),
-            None => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
+        let service = match &self.wanted {
+            Want::Any => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
+            w => self.mux.services.iter().find(|s| w.matches(s)).cloned(),
         };
         let Some(pid) = service.as_ref().and_then(|s| s.video()).map(|v| v.pid) else {
             return;
@@ -424,6 +458,64 @@ impl DvbtNode {
 /// What the video bus calls a picture off the television multiplex.
 pub const DVB: &str = "DVB-T";
 
+/// Which service the pictures are read from.
+pub const SERVICE: &str = "service";
+
+/// Which programme of the multiplex is decoded.
+///
+/// A name rather than a position wherever the multiplex gives one, because a
+/// rebuild draws the node again from the patch and a position is only true
+/// until the next table arrives. What is held here is what survives a
+/// retune.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Want {
+    /// Whichever service the multiplex describes first with a picture on it.
+    #[default]
+    Any,
+    Id(u16),
+    Named(String),
+}
+
+impl Want {
+    /// A service as something to ask for again: its name where it has one.
+    pub fn of(s: &mpegts::Service) -> Self {
+        match &s.name {
+            Some(n) => Want::Named(n.clone()),
+            None => Want::Id(s.id),
+        }
+    }
+
+    pub fn matches(&self, s: &mpegts::Service) -> bool {
+        match self {
+            Want::Any => s.video().is_some(),
+            Want::Id(id) => s.id == *id,
+            Want::Named(n) => s.name.as_deref() == Some(n.as_str()) || &service_label(s) == n,
+        }
+    }
+
+    /// How it is written into a patch, and read back by [`build`].
+    pub fn setting(&self) -> pipeline::ParamValue {
+        match self {
+            Want::Any => pipeline::ParamValue::Int(0),
+            Want::Id(id) => pipeline::ParamValue::Int(*id as i64),
+            Want::Named(n) => pipeline::ParamValue::Text(n.clone()),
+        }
+    }
+}
+
+/// The first entry of that parameter: whichever service carries a picture.
+pub const ANY: &str = "first with a picture";
+
+/// A service on a list for a person: its name where the multiplex gave one,
+/// and its number where it did not.
+pub fn service_label(s: &mpegts::Service) -> String {
+    match (&s.name, s.scrambled) {
+        (Some(n), true) => format!("{n} (scrambled)"),
+        (Some(n), false) => n.clone(),
+        (None, _) => format!("service {}", s.id),
+    }
+}
+
 impl pipeline::node::Node for DvbtNode {
     fn name(&self) -> &str {
         "dvbt"
@@ -547,6 +639,54 @@ impl pipeline::node::Node for DvbtNode {
         self.told = None;
         self.named.clear();
     }
+
+    /// The services, as a choice that grows as the multiplex describes them.
+    fn params(&self) -> Vec<pipeline::param::Param> {
+        vec![
+            pipeline::param::Param::choice(SERVICE, self.choice(), self.choices())
+                .label("Watching"),
+        ]
+    }
+
+    /// Set by position in the list this node just published, by service
+    /// identifier, or by name. A position is what a menu sends and an
+    /// identifier is what survives the list growing, so both are taken and
+    /// neither is guessed at: zero as a position is the first entry, zero as
+    /// an identifier is no service at all.
+    fn set_param(&mut self, name: &str, v: pipeline::ParamValue) -> Result<()> {
+        if name != SERVICE {
+            return Err(common::Error::other(format!("dvbt: unknown parameter {name:?}")));
+        }
+        let want = match v {
+            // A position in the list this node last published, which is what
+            // a menu sends. Resolved here and kept as an identity, because
+            // the list it indexes grows as the multiplex describes itself.
+            pipeline::ParamValue::Choice(n) => match n.checked_sub(1) {
+                None => Want::Any,
+                Some(i) => Want::of(
+                    self.mux
+                        .services
+                        .get(i)
+                        .ok_or_else(|| common::Error::other("dvbt: no such service"))?,
+                ),
+            },
+            pipeline::ParamValue::Int(id) => match u16::try_from(id).ok().filter(|id| *id != 0) {
+                None => Want::Any,
+                Some(id) => self.mux.service(id).map_or(Want::Id(id), Want::of),
+            },
+            pipeline::ParamValue::Text(ref t) if t == ANY || t.is_empty() => Want::Any,
+            pipeline::ParamValue::Text(ref t) => {
+                let known = self.mux.services.iter().any(|s| Want::Named(t.clone()).matches(s));
+                if !known && !self.mux.services.is_empty() {
+                    return Err(common::Error::other(format!("dvbt: no service {t:?}")));
+                }
+                Want::Named(t.clone())
+            }
+            _ => return Err(common::Error::other("dvbt: a service is a name or a number")),
+        };
+        self.want(want);
+        Ok(())
+    }
 }
 
 /// The middle of the first UK multiplex channel, which is as good a place to
@@ -607,7 +747,18 @@ pub const DESC: StageDesc = StageDesc {
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(DvbtNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+    let mut node = DvbtNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ));
+    // What was being watched before the rebuild. Nothing is checked here:
+    // the tables have not arrived yet, so a name is taken on trust and
+    // matched when the service turns up.
+    node.want(match s.get(SERVICE) {
+        Some(pipeline::ParamValue::Text(t)) if !t.is_empty() && t != ANY => Want::Named(t.clone()),
+        _ => match u16::try_from(s.i64_or(SERVICE, 0)).ok().filter(|id| *id != 0) {
+            Some(id) => Want::Id(id),
+            None => Want::Any,
+        },
+    });
+    Ok(Box::new(node))
 }
 
 #[cfg(test)]
