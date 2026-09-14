@@ -291,6 +291,10 @@ fn upload(
     old: Option<egui::TextureHandle>,
 ) -> egui::TextureHandle {
     let image = match f.pixels {
+        // Already the shape a texture is, so this is a copy rather than a
+        // pass over every pixel. A 1080 line picture is two million of them,
+        // fifty times a second, on the thread that draws everything else.
+        Pixels::Rgba8 => egui::ColorImage::from_rgba_unmultiplied([f.width, f.height], &f.samples),
         Pixels::Rgb8 => egui::ColorImage::from_rgb([f.width, f.height], &f.samples),
         Pixels::Luma8 => {
             let rgb: Vec<u8> = f.samples.iter().flat_map(|&v| [v, v, v]).collect();

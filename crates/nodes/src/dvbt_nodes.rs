@@ -679,7 +679,7 @@ impl DvbtNode {
             // Broadcast pictures are 16:9 and their samples are square at
             // this size, so the grid is the shape.
             aspect: p.width as f32 / p.height as f32,
-            pixels: common::Pixels::Rgb8,
+            pixels: common::Pixels::Rgba8,
             samples: std::sync::Arc::new(p.rgb.clone()),
             lines_seen: p.height,
             sequence: self.sequence,
