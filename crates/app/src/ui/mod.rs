@@ -110,6 +110,9 @@ pub struct App {
     dial: Dial,
     open: Option<Settings>,
     devices: Vec<crate::devices::Entry>,
+    /// The open-a-capture dialog, while it is up. It runs on its own thread
+    /// so the receiver keeps painting behind it.
+    picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
     device: Option<crate::devices::Entry>,
     /// Where the connected tuner reaches and whether it can be moved, from
     /// the radio thread's reading of the device.
@@ -547,6 +550,7 @@ impl Default for App {
             dial: Dial::new(),
             open: None,
             devices: Vec::new(),
+            picking: None,
             device: None,
             reach: (24e6, 1766e6),
             tunable: true,
@@ -2360,6 +2364,7 @@ impl eframe::App for App {
         // Who is talking and what they said, every frame and whichever view
         // is open. Both used to be read only under --soak, so the call list
         // and the transcript filled in a soak run and stayed empty in use.
+        self.poll_capture(ui.ctx());
         self.read_heard();
         self.read_said();
         self.soak_check(ui.ctx());
