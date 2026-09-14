@@ -160,23 +160,33 @@ impl Viterbi {
         steps: usize,
         out: &mut Vec<u8>,
     ) {
-        self.pending.extend_from_slice(soft);
+        // Taken out so the loop can hold the buffer and still call back into
+        // `self`. A Vec per puncturing period was thirteen million
+        // allocations a second on an 8K multiplex, and most of the decoder's
+        // time.
+        let mut pending = std::mem::take(&mut self.pending);
+        pending.extend_from_slice(soft);
         let period = pattern.len();
-        while self.pending.len() >= period {
-            let mut pair = vec![(0.0f32, 0.0f32); steps];
+        // The longest period the standard punctures to is seven steps.
+        let mut pair = [(0.0f32, 0.0f32); 8];
+        let mut at = 0;
+        while at + period <= pending.len() {
+            pair[..steps].fill((0.0, 0.0));
             for (i, &(step, which)) in pattern.iter().enumerate() {
-                let v = self.pending[i];
+                let v = pending[at + i];
                 if which == 0 {
                     pair[step].0 = v;
                 } else {
                     pair[step].1 = v;
                 }
             }
-            self.pending.drain(..period);
-            for (x, y) in pair {
+            at += period;
+            for &(x, y) in &pair[..steps] {
                 self.push_pair(x, y, out);
             }
         }
+        pending.drain(..at);
+        self.pending = pending;
     }
 
     /// Release `count` decoded bits, traced back from the best survivor.
