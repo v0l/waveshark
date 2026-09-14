@@ -16,14 +16,14 @@ pub mod qwen3;
 mod whisper;
 
 pub use catalogue::{
-    default_model_in, devices, installed, label_of, model, model_dir, repo_of, DeviceChoice,
-    DeviceEntry, Family, Model, DEFAULT_MODEL, MODELS,
+    DEFAULT_MODEL, DeviceChoice, DeviceEntry, Family, MODELS, Model, default_model_in, devices,
+    installed, label_of, model, model_dir, repo_of,
 };
 pub use engine::Engine;
 pub use model::{
-    ensure, ensure_with, fetch, fetch_with, Fetching, Files, Flavour, OnProgress, DEFAULT_REPO,
+    DEFAULT_REPO, Fetching, Files, Flavour, OnProgress, ensure, ensure_with, fetch, fetch_with,
 };
-pub use whisper::{Segment, Transcript, Whisper, WINDOW_S};
+pub use whisper::{Segment, Transcript, WINDOW_S, Whisper};
 
 /// What Whisper wants, and what the codecs give us.
 ///

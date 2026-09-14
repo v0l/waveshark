@@ -162,10 +162,6 @@ impl Param {
     }
 
     pub fn display_label(&self) -> &str {
-        if self.label.is_empty() {
-            &self.name
-        } else {
-            &self.label
-        }
+        if self.label.is_empty() { &self.name } else { &self.label }
     }
 }

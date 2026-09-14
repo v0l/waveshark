@@ -37,7 +37,7 @@ pub mod ofdm;
 pub mod tx;
 
 use common::C32;
-use ofdm::{Rate, CP, FFT, SYMBOL};
+use ofdm::{CP, FFT, Rate, SYMBOL};
 use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;

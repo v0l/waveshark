@@ -272,11 +272,7 @@ fn identity(b: &[u8]) -> Option<Identity> {
             if !plausible || digits.bytes().any(|c| !c.is_ascii_digit()) {
                 return None;
             }
-            if t == 1 {
-                Identity::Imsi(digits)
-            } else {
-                Identity::Imei(digits)
-            }
+            if t == 1 { Identity::Imsi(digits) } else { Identity::Imei(digits) }
         }
         t => Identity::Other(t),
     })

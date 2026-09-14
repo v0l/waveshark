@@ -144,22 +144,24 @@ impl Rotate {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn rotate_avx2(flat: &mut [f32], phasors: [f32; WIDTH * 2], step4: [f32; 2]) {
-    use std::arch::x86_64::*;
-    let mut p = _mm256_loadu_ps(phasors.as_ptr());
-    let r_re = _mm256_set1_ps(step4[0]);
-    let r_im = _mm256_set1_ps(step4[1]);
-    let mut i = 0;
-    while i + 8 <= flat.len() {
-        let x = _mm256_loadu_ps(flat.as_ptr().add(i));
-        let p_re = _mm256_moveldup_ps(p);
-        let p_im = _mm256_movehdup_ps(p);
-        let x_sw = _mm256_permute_ps(x, 0b10_11_00_01);
-        // even lanes: x.re*p.re - x.im*p.im; odd: x.im*p.re + x.re*p.im
-        let y = _mm256_fmaddsub_ps(x, p_re, _mm256_mul_ps(x_sw, p_im));
-        _mm256_storeu_ps(flat.as_mut_ptr().add(i), y);
-        let p_sw = _mm256_permute_ps(p, 0b10_11_00_01);
-        p = _mm256_fmaddsub_ps(p, r_re, _mm256_mul_ps(p_sw, r_im));
-        i += 8;
+    unsafe {
+        use std::arch::x86_64::*;
+        let mut p = _mm256_loadu_ps(phasors.as_ptr());
+        let r_re = _mm256_set1_ps(step4[0]);
+        let r_im = _mm256_set1_ps(step4[1]);
+        let mut i = 0;
+        while i + 8 <= flat.len() {
+            let x = _mm256_loadu_ps(flat.as_ptr().add(i));
+            let p_re = _mm256_moveldup_ps(p);
+            let p_im = _mm256_movehdup_ps(p);
+            let x_sw = _mm256_permute_ps(x, 0b10_11_00_01);
+            // even lanes: x.re*p.re - x.im*p.im; odd: x.im*p.re + x.re*p.im
+            let y = _mm256_fmaddsub_ps(x, p_re, _mm256_mul_ps(x_sw, p_im));
+            _mm256_storeu_ps(flat.as_mut_ptr().add(i), y);
+            let p_sw = _mm256_permute_ps(p, 0b10_11_00_01);
+            p = _mm256_fmaddsub_ps(p, r_re, _mm256_mul_ps(p_sw, r_im));
+            i += 8;
+        }
     }
 }
 

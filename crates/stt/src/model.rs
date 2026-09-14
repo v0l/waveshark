@@ -111,11 +111,7 @@ fn model_type(config: &Path) -> Option<String> {
 
 fn required(dir: &Path, name: &str) -> Result<PathBuf> {
     let p = dir.join(name);
-    if p.exists() {
-        Ok(p)
-    } else {
-        Err(Error::other(format!("{} has no {name}", dir.display())))
-    }
+    if p.exists() { Ok(p) } else { Err(Error::other(format!("{} has no {name}", dir.display()))) }
 }
 
 fn first_existing(dir: &Path, names: &[&str]) -> Option<PathBuf> {

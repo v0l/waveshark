@@ -1,6 +1,6 @@
 //! The pass and block filters, run as graph stages rather than as arithmetic.
 
-use common::{Hz, C32};
+use common::{C32, Hz};
 use nodes::{FirFilterNode, IirFilterNode};
 use pipeline::{Graph, StreamSpec};
 

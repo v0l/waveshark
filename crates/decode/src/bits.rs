@@ -265,7 +265,7 @@ pub fn even_parity(data: &[u8]) -> bool {
 /// Used by LaCrosse and several others in place of a CRC. Bytes are processed
 /// last to first and bits LSB first, the key rolling left through `gen` at
 /// every bit. It is not a CRC and cannot be computed with one.
-pub fn lfsr_digest8_reflect(data: &[u8], gen: u8, key: u8) -> u8 {
+pub fn lfsr_digest8_reflect(data: &[u8], r#gen: u8, key: u8) -> u8 {
     let mut sum = 0u8;
     let mut key = key;
     for &byte in data.iter().rev() {
@@ -273,7 +273,7 @@ pub fn lfsr_digest8_reflect(data: &[u8], gen: u8, key: u8) -> u8 {
             if byte >> i & 1 != 0 {
                 sum ^= key;
             }
-            key = if key & 0x80 != 0 { (key << 1) ^ gen } else { key << 1 };
+            key = if key & 0x80 != 0 { (key << 1) ^ r#gen } else { key << 1 };
         }
     }
     sum
@@ -284,7 +284,7 @@ pub fn lfsr_digest8_reflect(data: &[u8], gen: u8, key: u8) -> u8 {
 /// The same construction as [`lfsr_digest8_reflect`] with every direction
 /// turned around: bytes first to last, bits MSB first, and the key rolling
 /// right. Acurite's 606TX uses it where its siblings use a sum.
-pub fn lfsr_digest8(data: &[u8], gen: u8, key: u8) -> u8 {
+pub fn lfsr_digest8(data: &[u8], r#gen: u8, key: u8) -> u8 {
     let mut sum = 0u8;
     let mut key = key;
     for &byte in data {
@@ -292,7 +292,7 @@ pub fn lfsr_digest8(data: &[u8], gen: u8, key: u8) -> u8 {
             if byte >> i & 1 != 0 {
                 sum ^= key;
             }
-            key = if key & 1 != 0 { (key >> 1) ^ gen } else { key >> 1 };
+            key = if key & 1 != 0 { (key >> 1) ^ r#gen } else { key >> 1 };
         }
     }
     sum

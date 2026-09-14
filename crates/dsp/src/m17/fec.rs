@@ -411,11 +411,7 @@ mod tests {
         let soft: Vec<f32> = (0..368)
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                if seed >> 60 & 1 == 1 {
-                    1.0
-                } else {
-                    -1.0
-                }
+                if seed >> 60 & 1 == 1 { 1.0 } else { -1.0 }
             })
             .collect();
         let (_, ber) = viterbi(&soft, &P1, 240);

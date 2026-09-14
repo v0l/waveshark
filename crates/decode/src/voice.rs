@@ -19,11 +19,11 @@
 //! prove them against an independent implementation.
 
 #[cfg(feature = "tea")]
-use crate::tea::{keystream, Key, Timestamp};
+use crate::tea::{Key, Timestamp, keystream};
 use crate::vocoder::Decoder;
-use dsp::tetra::speech::FRAME_BITS;
 #[cfg(feature = "tea")]
 use dsp::tetra::TdmaTime;
+use dsp::tetra::speech::FRAME_BITS;
 
 /// PCM samples one STEC speech frame decodes to: 30 ms at 8 kHz.
 pub const FRAME_SAMPLES: usize = 240;

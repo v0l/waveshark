@@ -1,7 +1,7 @@
 //! Run the ExpressLRS front end over one dumped burst (interleaved f32 IQ,
 //! as SR_DUMP_BURSTS writes them) and say what it made of it.
 //!     elrs_burst <burst.c64> <rate> <center_hz> [uid_hex]
-use common::{Hz, C32};
+use common::{C32, Hz};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, StreamSpec};
 

@@ -4,7 +4,7 @@ use common::Hz;
 
 // The decode types live in `common` because a packet carries them; named
 // from here because that is where every stage already looks for them.
-pub use common::{media, Decoded, Link, Party, PartyKind};
+pub use common::{Decoded, Link, Party, PartyKind, media};
 
 /// Anything a stage wants to report that is not a sample.
 ///

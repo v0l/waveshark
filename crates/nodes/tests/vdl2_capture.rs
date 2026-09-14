@@ -12,7 +12,7 @@
 //! a symbol and the preamble search are all in the path. What it cannot show
 //! is acquisition on a real signal: the model has no fading and no doppler.
 
-use common::{Hz, C32};
+use common::{C32, Hz};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, StreamSpec};
 

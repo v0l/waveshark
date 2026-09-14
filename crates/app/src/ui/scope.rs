@@ -50,11 +50,7 @@ impl Scope<'_> {
     /// has no legal raster, and a band that does still carries signals off it.
     pub(super) fn hz_at_snapped(&self, rect: &Rect, x: f32, ui: &egui::Ui) -> f64 {
         let hz = self.hz_at(rect, x);
-        if ui.input(|i| i.modifiers.shift) {
-            bands::snap(hz)
-        } else {
-            hz
-        }
+        if ui.input(|i| i.modifiers.shift) { bands::snap(hz) } else { hz }
     }
 
     pub(super) fn hz_at(&self, rect: &Rect, x: f32) -> f64 {

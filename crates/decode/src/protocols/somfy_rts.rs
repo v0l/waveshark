@@ -24,7 +24,7 @@
 
 use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::slicer::{manchester_decode, slice_manchester_half, Coding, Timing};
+use crate::slicer::{Coding, Timing, manchester_decode, slice_manchester_half};
 use dsp::pulse::Package;
 
 pub struct SomfyRts;

@@ -7,10 +7,10 @@
 //! reach the packet bus as any other frame does, and the protocols node
 //! reads the address out of them; see [`decode::wmbus`].
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use dsp::wmbus::{Demod, CHIP_RATE};
+use dsp::wmbus::{CHIP_RATE, Demod};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};

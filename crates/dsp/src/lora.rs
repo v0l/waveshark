@@ -62,11 +62,7 @@ pub const SCANNED_SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 7..=12;
 /// is that noise gives three or four whatever the spreading factor. At SF7
 /// and above the gap is wide; at SF5 there is almost none left.
 pub fn peak_min_for(sf: u8) -> f32 {
-    if sf <= 5 {
-        4.0
-    } else {
-        10.0
-    }
+    if sf <= 5 { 4.0 } else { 10.0 }
 }
 
 /// Downchirps between the sync word and the first data symbol. The quarter
@@ -448,11 +444,7 @@ impl Demod {
             sum += d;
             count += 1.0;
         }
-        if count == 0.0 {
-            anchor
-        } else {
-            anchor + sum / count
-        }
+        if count == 0.0 { anchor } else { anchor + sum / count }
     }
 
     fn symbols(
@@ -592,11 +584,7 @@ pub fn modulate(sf: u8, preamble: usize, sync: u8, values: &[u16], inverted: boo
 
 /// A bin above half the span is a negative offset, not a large positive one.
 fn wrap(bin: f32, n: usize) -> f32 {
-    if bin > n as f32 / 2.0 {
-        bin - n as f32
-    } else {
-        bin
-    }
+    if bin > n as f32 / 2.0 { bin - n as f32 } else { bin }
 }
 
 /// Symbol period in seconds, which is what decides whether low data rate

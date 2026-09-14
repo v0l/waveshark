@@ -145,20 +145,12 @@ impl BitFrame {
     /// Bits from `start` through `end`, both inclusive. Returns `None` for
     /// the out-of-range cases where Java returns null.
     pub fn get_bits(&self, start: usize, end: usize) -> Option<Vec<bool>> {
-        if start < end && end < self.size {
-            Some(self.bits[start..=end].to_vec())
-        } else {
-            None
-        }
+        if start < end && end < self.size { Some(self.bits[start..=end].to_vec()) } else { None }
     }
 
     /// Bits from `start` through the end of the frame.
     pub fn get_bits_from(&self, start: usize) -> Option<Vec<bool>> {
-        if start < self.size {
-            Some(self.bits[start..self.size].to_vec())
-        } else {
-            None
-        }
+        if start < self.size { Some(self.bits[start..self.size].to_vec()) } else { None }
     }
 
     /// The right-most `bit_count` bits plus one, matching

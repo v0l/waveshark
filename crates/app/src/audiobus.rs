@@ -108,11 +108,7 @@ impl Subscription {
     }
 
     fn gain(&self) -> f32 {
-        if self.muted {
-            0.0
-        } else {
-            self.volume.clamp(0.0, 2.0)
-        }
+        if self.muted { 0.0 } else { self.volume.clamp(0.0, 2.0) }
     }
 }
 
@@ -183,11 +179,7 @@ impl Strip {
     }
 
     fn gain(&self) -> f32 {
-        if self.muted {
-            0.0
-        } else {
-            self.volume.clamp(0.0, 1.0)
-        }
+        if self.muted { 0.0 } else { self.volume.clamp(0.0, 1.0) }
     }
 
     /// Whether this input carries speech rather than audio.
@@ -370,11 +362,7 @@ impl AudioBus {
 
     /// What the gain control is adding right now, in decibels.
     pub fn agc_gain_db(&self) -> f32 {
-        if self.agc_on {
-            self.agc.gain_db()
-        } else {
-            0.0
-        }
+        if self.agc_on { self.agc.gain_db() } else { 0.0 }
     }
 
     /// The level the whole mix leaves at, and whether it leaves at all.
@@ -930,7 +918,7 @@ impl pipeline::node::Node for AudioBusNode {
                 other => {
                     return Err(Error::other(format!(
                         "the audio bus takes audio or speech, and input {k} carries {other:?}"
-                    )))
+                    )));
                 }
             };
             if let Some(s) = self.bus.strips.get_mut(k) {

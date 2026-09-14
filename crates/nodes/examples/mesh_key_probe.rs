@@ -47,5 +47,7 @@ fn main() {
             }
         }
     }
-    eprintln!("{n} meshtastic frames, {default} on the default key, {on_hash} on this channel's hash, {opened} opened");
+    eprintln!(
+        "{n} meshtastic frames, {default} on the default key, {on_hash} on this channel's hash, {opened} opened"
+    );
 }

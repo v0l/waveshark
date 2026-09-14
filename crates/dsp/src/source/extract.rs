@@ -1,11 +1,11 @@
 //! Cutting each source out: one mixer and two decimators per source, fed
 //! either from the wideband ring or from the shared bank.
 
-use super::bank::{bank_channel, Bank, BANK_IDLE_S};
+use super::bank::{BANK_IDLE_S, Bank, bank_channel};
 use super::{Source, SourceConfig, SourceEvent};
 use crate::fir::{self, FirDecim};
 use crate::mixer::Mixer;
-use common::{SourceBlock, SourceId, SourceState, C32};
+use common::{C32, SourceBlock, SourceId, SourceState};
 use rayon::prelude::*;
 
 /// [`design_stages`], with a cursor into what feeds it.
@@ -541,11 +541,7 @@ impl SourceExtractor {
         let state = if !c.opened {
             SourceState::Opened
         } else if c.end.is_some_and(|e| stop >= g.at(e)) {
-            if c.superseded {
-                SourceState::Superseded
-            } else {
-                SourceState::Closed
-            }
+            if c.superseded { SourceState::Superseded } else { SourceState::Closed }
         } else {
             SourceState::Running
         };

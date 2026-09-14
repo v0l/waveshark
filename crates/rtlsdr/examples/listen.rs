@@ -4,7 +4,7 @@
 
 use audio::AudioPlayer;
 use common::device::{Device, GainMode};
-use common::{Hz, Sps, C32};
+use common::{C32, Hz, Sps};
 use dsp::{Deemphasis, FirDecim, FmDemod, HighBlend, Mixer, NoiseMeter};
 
 /// 2.304 MS/s / 8 / 6 = exactly 48 kHz, so no resampling is needed anywhere.

@@ -10,7 +10,7 @@
 //! Usage: cargo run --release -p rtlsdr --example wfm -- [mhz] [secs]
 
 use common::device::{Device, GainMode};
-use common::{Hz, Sps, C32};
+use common::{C32, Hz, Sps};
 use dsp::{Deemphasis, FirDecim, FmDemod, Mixer};
 use std::f64::consts::TAU;
 

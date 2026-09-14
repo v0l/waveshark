@@ -34,8 +34,8 @@
 //! which is another demodulator on this same baseband. The line spectrum of
 //! the capture in `testdata` has it plainly at 6.5 MHz.
 
-use crate::fir::{FirDecim, FirDecimReal};
 use crate::FmDemod;
+use crate::fir::{FirDecim, FirDecimReal};
 use common::C32;
 
 /// Which set of timings the camera is using.

@@ -1,7 +1,7 @@
 //! Watching the band: the detector and extractor, what they are kept out
 //! of, and the span-wide decoders placed where the span reaches them.
 
-use common::{Result, SourceBlock, SourceId, C32};
+use common::{C32, Result, SourceBlock, SourceId};
 use dsp::{Owned, SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::port::StreamSpec;
 
@@ -328,10 +328,12 @@ impl AutoNode {
                 // and more rejection than a decoder can tell.
                 let pre: Vec<crate::NodeSpec> = match factor {
                     1 => Vec::new(),
-                    f => vec![crate::NodeSpec::new("decimate")
-                        .i("factor", f as i64)
-                        .f("passband", 0.8)
-                        .f("atten_db", 60.0)],
+                    f => vec![
+                        crate::NodeSpec::new("decimate")
+                            .i("factor", f as i64)
+                            .f("passband", 0.8)
+                            .f("atten_db", 60.0),
+                    ],
                 };
                 let mut m =
                     Member::place_behind(*p, spec, at, &pre, &Default::default(), &self.reg)?;

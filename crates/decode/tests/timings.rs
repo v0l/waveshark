@@ -436,11 +436,7 @@ fn a_long_noisy_burst_does_not_manufacture_a_sensor() {
         let pulses: Vec<(u32, u32)> = (0..150)
             .map(|_| {
                 let short = rand() & 1 == 0;
-                if short {
-                    (208, 417)
-                } else {
-                    (417, 208)
-                }
+                if short { (208, 417) } else { (417, 208) }
             })
             .collect();
         let claimed = Protocols::all().decode_all(&package(pulses));

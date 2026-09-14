@@ -15,7 +15,7 @@
 //! empty band's own spurs correlate across a plateau rather than at a point,
 //! which the localization ratio rejects.
 
-use super::hypothesis::{ramp, Evidence, Hypothesis};
+use super::hypothesis::{Evidence, Hypothesis, ramp};
 use super::{Features, Modulation};
 
 pub struct Ofdm;

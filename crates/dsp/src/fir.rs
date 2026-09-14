@@ -227,27 +227,38 @@ impl Dot {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_avx2(w: &[f32], h: &[f32]) -> [f32; LANES] {
-    use std::arch::x86_64::*;
-    let n = w.len();
-    let (wp, hp) = (w.as_ptr(), h.as_ptr());
-    let (mut a0, mut a1, mut a2, mut a3) =
-        (_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps());
-    let mut i = 0;
-    while i + 32 <= n {
-        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i)), _mm256_loadu_ps(hp.add(i)), a0);
-        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i + 8)), _mm256_loadu_ps(hp.add(i + 8)), a1);
-        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i + 16)), _mm256_loadu_ps(hp.add(i + 16)), a2);
-        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i + 24)), _mm256_loadu_ps(hp.add(i + 24)), a3);
-        i += 32;
+    unsafe {
+        use std::arch::x86_64::*;
+        let n = w.len();
+        let (wp, hp) = (w.as_ptr(), h.as_ptr());
+        let (mut a0, mut a1, mut a2, mut a3) =
+            (_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps());
+        let mut i = 0;
+        while i + 32 <= n {
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i)), _mm256_loadu_ps(hp.add(i)), a0);
+            a1 =
+                _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i + 8)), _mm256_loadu_ps(hp.add(i + 8)), a1);
+            a2 = _mm256_fmadd_ps(
+                _mm256_loadu_ps(wp.add(i + 16)),
+                _mm256_loadu_ps(hp.add(i + 16)),
+                a2,
+            );
+            a3 = _mm256_fmadd_ps(
+                _mm256_loadu_ps(wp.add(i + 24)),
+                _mm256_loadu_ps(hp.add(i + 24)),
+                a3,
+            );
+            i += 32;
+        }
+        while i + 8 <= n {
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i)), _mm256_loadu_ps(hp.add(i)), a0);
+            i += 8;
+        }
+        let s = _mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3));
+        let mut out = [0.0f32; LANES];
+        _mm256_storeu_ps(out.as_mut_ptr(), s);
+        out
     }
-    while i + 8 <= n {
-        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(wp.add(i)), _mm256_loadu_ps(hp.add(i)), a0);
-        i += 8;
-    }
-    let s = _mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3));
-    let mut out = [0.0f32; LANES];
-    _mm256_storeu_ps(out.as_mut_ptr(), s);
-    out
 }
 
 #[inline]

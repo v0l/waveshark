@@ -19,7 +19,7 @@
 //!   the first seven nibbles right-padded with a zero nibble, then the CRC
 //!   itself. Not a plain CRC over the frame: the padding matters
 
-use crate::bits::{crc8, BitBuffer};
+use crate::bits::{BitBuffer, crc8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::protocols::find_frame_bits;
 use crate::slicer::Timing;

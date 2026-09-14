@@ -44,7 +44,7 @@
 //!   --rate-in N      input rate, when the filename does not say
 //!   --center-in-hz N input centre, when the filename does not say
 //! ```
-use common::{SampleFormat, C32};
+use common::{C32, SampleFormat};
 use sources::parse_filename;
 use std::io::Read;
 use std::path::Path;

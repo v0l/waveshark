@@ -64,11 +64,11 @@ use egui::{
     TextureOptions, Vec2,
 };
 use settings::RemoteEdit;
-use settings_rows::{mhz_field, ScannerRow};
+use settings_rows::{ScannerRow, mhz_field};
 use state::{Channel, Logged};
 use widgets::{
-    bin_hint, check_help, cog, cog_rect, help, hint, legend_help, modal_title, reading, row,
-    row_help, Fader, Squelch,
+    Fader, Squelch, bin_hint, check_help, cog, cog_rect, help, hint, legend_help, modal_title,
+    reading, row, row_help,
 };
 
 pub struct App {

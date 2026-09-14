@@ -22,7 +22,7 @@
 //!
 //! The fixture is absent from a fresh clone, so this skips when it is missing.
 
-use decode::acars::{parse, Framer, Message};
+use decode::acars::{Framer, Message, parse};
 use dsp::msk::{MskConfig, MskDemod};
 
 /// One channel's worth of the recording, at the rate the file was made at.

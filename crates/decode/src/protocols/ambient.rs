@@ -26,7 +26,7 @@
 //! polarities are searched, because which half of a Manchester symbol carries
 //! the bit depends on where the detector triggered.
 
-use crate::bits::{lfsr_digest8, BitBuffer};
+use crate::bits::{BitBuffer, lfsr_digest8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 

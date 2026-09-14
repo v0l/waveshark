@@ -10,8 +10,8 @@
 //! 16384 default, `PHASES=1` prints where the node's time went, and
 //! `NO_BANK=1` reads every source from the wideband ring for comparison.
 
-use common::{Hz, C32};
-use nodes::{build_chain, registry, NodeSpec};
+use common::{C32, Hz};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 
 fn noise(n: usize, amp: f32, seed: &mut u64) -> Vec<C32> {

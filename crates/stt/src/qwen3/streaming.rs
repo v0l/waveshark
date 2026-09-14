@@ -2,9 +2,9 @@ use anyhow::Result;
 use candle_core::Tensor;
 use tracing::{debug, info};
 
+use super::AsrError;
 use super::encoder::EncoderCache;
 use super::inference::{AsrInference, AsrInferenceInner, TranscribeResult};
-use super::AsrError;
 
 /// Options for streaming transcription.
 #[non_exhaustive]
@@ -294,11 +294,7 @@ pub(crate) fn build_prefix(inner: &AsrInferenceInner, state: &StreamingState) ->
     let prefix_ids = compute_prefix_ids(state)?;
     let prefix_text = inner.tokenizer_decode(prefix_ids).ok()?;
 
-    if prefix_text.is_empty() {
-        None
-    } else {
-        Some(prefix_text)
-    }
+    if prefix_text.is_empty() { None } else { Some(prefix_text) }
 }
 
 /// Try to drain one full chunk from the buffer into the audio accumulator.

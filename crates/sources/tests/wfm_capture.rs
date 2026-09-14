@@ -58,7 +58,7 @@ fn receive() -> Option<(Vec<f32>, f64)> {
 }
 
 macro_rules! need_fixture {
-    ($e:expr) => {
+    ($e:expr_2021) => {
         match $e {
             Some(v) => v,
             None => {

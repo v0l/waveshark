@@ -17,14 +17,14 @@
 //! drawn from cannot be checked or read again later.
 
 use common::{Error, Hz, Packet, Result};
+use pipeline::StreamSpec;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-use pipeline::StreamSpec;
 use std::io::Read;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::Arc;
 
 /// One wire format, as a table entry.
 ///

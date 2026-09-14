@@ -12,7 +12,7 @@
 //! and a decoder that turns those into a position has invented evidence. See
 //! `testdata/fixtures.toml` for what else this capture is and is not.
 
-use common::{Hz, C32};
+use common::{C32, Hz};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, StreamSpec};
 

@@ -19,7 +19,7 @@
 //! burst that belongs to something else, which is the nature of a protocol
 //! with four check bits.
 
-use crate::bits::{crc8, BitBuffer};
+use crate::bits::{BitBuffer, crc8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::Timing;
 

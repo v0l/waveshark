@@ -16,7 +16,7 @@
 
 use super::state::TranscriptState;
 use super::*;
-use crate::transcripts::{Engine, ModelState, Utterance, LIVE};
+use crate::transcripts::{Engine, LIVE, ModelState, Utterance};
 
 /// The transcript, over what was said and what read it.
 pub(super) struct Transcript<'a> {

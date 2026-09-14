@@ -15,10 +15,10 @@
 //! a front end that quietly follows the tuning is one that says it heard a
 //! cell where there is none.
 
-use crate::protocol::{FrameClaim, Mark, Origin, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Origin, Placed, Placement, Protocol, Shape};
 use common::Result;
-use dsp::gsm::{self, sch, GsmConfig, Hit, SchDetector};
+use dsp::gsm::{self, GsmConfig, Hit, SchDetector, sch};
 use pipeline::event::{Decoded, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -287,9 +287,11 @@ impl Simple for GsmNode {
     }
 
     fn params(&self) -> Vec<Param> {
-        vec![Param::float(CHANNEL_HZ, self.channel_hz, 100e6..=2_000e6)
-            .unit("Hz")
-            .label("Which carrier to watch")]
+        vec![
+            Param::float(CHANNEL_HZ, self.channel_hz, 100e6..=2_000e6)
+                .unit("Hz")
+                .label("Which carrier to watch"),
+        ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
@@ -631,7 +633,7 @@ impl Protocol for Gsm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Hz, C32};
+    use common::{C32, Hz};
     use dsp::gsm::Sch;
 
     fn spec(rate: f64, center: f64) -> PortSpec {

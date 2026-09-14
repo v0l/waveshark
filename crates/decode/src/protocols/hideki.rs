@@ -22,9 +22,9 @@
 //! direction is a four bit code through a table that is not in order, because
 //! it is the output of a reed switch ring rather than a number.
 
-use crate::bits::{crc8, xor8, BitBuffer};
+use crate::bits::{BitBuffer, crc8, xor8};
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::slicer::{differential_manchester_decode, slice_manchester_half, Coding, Timing};
+use crate::slicer::{Coding, Timing, differential_manchester_decode, slice_manchester_half};
 use dsp::pulse::Package;
 
 pub struct Hideki;

@@ -37,11 +37,11 @@
 //! channel raster, and the 2 MHz hops of a connection are not among what it
 //! finds. A capture that does hold them is what would be needed to say more.
 
-use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::ble as pdu;
-use dsp::ble::{BleConfig, BleDetector, BleFrame, ADV_CHANNELS};
+use dsp::ble::{ADV_CHANNELS, BleConfig, BleDetector, BleFrame};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -129,7 +129,7 @@ impl Simple for BleNode {
             [] => {
                 return Err(common::Error::other(
                     "ble needs an advertising channel (2402, 2426 or 2480 MHz) inside the span",
-                ))
+                ));
             }
             [one] => ADV_CHANNELS.iter().find(|(c, _)| c == one).map(|(_, hz)| *hz).unwrap(),
             _ => BAND_CENTER_HZ,

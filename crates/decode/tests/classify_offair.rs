@@ -22,7 +22,7 @@
 //! The fixtures are absent from a fresh clone, so this skips when they are
 //! missing.
 
-use common::{SampleFormat, C32};
+use common::{C32, SampleFormat};
 use dsp::{Classifier, ClassifyConfig, Modulation};
 use std::path::{Path, PathBuf};
 

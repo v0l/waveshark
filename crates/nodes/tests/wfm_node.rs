@@ -2,10 +2,10 @@
 //! produces audio, RDS and status without the graph having to know that the
 //! pilot, the difference subcarrier and RDS all share a PLL.
 
-use common::{Hz, C32};
-use dsp::rds::block::{encode, Offset};
+use common::{C32, Hz};
+use dsp::rds::block::{Offset, encode};
 use nodes::wfm::WfmDemodNode;
-use pipeline::event::{media, Event};
+use pipeline::event::{Event, media};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag};
 use std::f64::consts::TAU;

@@ -3,7 +3,7 @@
 use candle_core::Device;
 use common::{Error, Result};
 
-use crate::{qwen3, Family, Files, Segment, Transcript, Whisper};
+use crate::{Family, Files, Segment, Transcript, Whisper, qwen3};
 
 /// A loaded model of whichever family the files were.
 pub enum Engine {

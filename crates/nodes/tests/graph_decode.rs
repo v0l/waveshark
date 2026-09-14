@@ -7,7 +7,7 @@
 //! the registry the way a user-configured chain would be.
 
 use common::Hz;
-use nodes::{build_chain, registry, NodeSpec};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::event::Event;
 use pipeline::{ParamValue, StreamSpec};
 use sources::FileSource;
@@ -23,7 +23,7 @@ fn fixture() -> Option<common::IqBuf> {
 }
 
 macro_rules! need_fixture {
-    ($e:expr) => {
+    ($e:expr_2021) => {
         match $e {
             Some(v) => v,
             None => {

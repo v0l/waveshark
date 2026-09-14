@@ -2,7 +2,7 @@
 //! way the inspector does, to a PPM for looking at.
 //!     burst_png <file.cu8> <rate> <centre_hz> <out.ppm>
 use common::C32;
-use nodes::{build_chain, registry, NodeSpec};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 
 fn main() {

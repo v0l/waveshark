@@ -3,11 +3,11 @@
 
 use crate::chain::Plan;
 use audio::AudioPlayer;
-use common::{GainMode, Hz, Sps, C32};
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use common::{C32, GainMode, Hz, Sps};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
 /// What a strip channel does with the band it is tuned to.

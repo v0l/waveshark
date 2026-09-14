@@ -22,7 +22,7 @@
 //! - `D`  4-bit wind direction index
 //! - `CC` CRC-8, polynomial 0x31, init 0xff, over all 11 bytes
 
-use crate::bits::{checksum8, crc8, BitBuffer};
+use crate::bits::{BitBuffer, checksum8, crc8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 

@@ -275,8 +275,12 @@ mod tests {
         assert!(
             !m.update(&rec("M17-Voice", 433.475e6, &[("from", Value::Text("M0ABC".into()))]), t(0))
         );
-        assert!(!m
-            .update(&rec("M17-Packet", 433.475e6, &[("message", Value::Text("  ".into()))]), t(0)));
+        assert!(
+            !m.update(
+                &rec("M17-Packet", 433.475e6, &[("message", Value::Text("  ".into()))]),
+                t(0)
+            )
+        );
         assert!(m.is_empty());
     }
 
@@ -372,8 +376,12 @@ mod tests {
             &not_text("GSM-CCCH", 947.4e6, &[("message", Value::Text("Paging1".into()))]),
             t(0)
         ));
-        assert!(!m
-            .update(&not_text("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]), t(0)));
+        assert!(
+            !m.update(
+                &not_text("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]),
+                t(0)
+            )
+        );
         assert!(!m.update(
             &not_text("OpenDroneID", 2431e6, &[("message", Value::Text("Basic ID".into()))]),
             t(0)

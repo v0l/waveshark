@@ -7,7 +7,7 @@
 //! splits into a pair a symbol rate apart, which is how a TETRA carrier is
 //! told from plain QPSK.
 
-use super::hypothesis::{ramp, Evidence, Hypothesis};
+use super::hypothesis::{Evidence, Hypothesis, ramp};
 use super::{Features, Modulation};
 
 pub struct Psk2;

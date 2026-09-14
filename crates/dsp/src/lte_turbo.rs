@@ -488,27 +488,9 @@ fn bcjr(systematic: &[f32], parity: &[f32], apriori: &[f32], tail: &[[f32; 2]; 3
             emit[s][u] = if z == 0 { 1.0 } else { -1.0 };
         }
     }
-    let sys = |i: usize| -> f32 {
-        if i < k {
-            systematic[i]
-        } else {
-            tail[i - k][0]
-        }
-    };
-    let par = |i: usize| -> f32 {
-        if i < k {
-            parity[i]
-        } else {
-            tail[i - k][1]
-        }
-    };
-    let apri = |i: usize| -> f32 {
-        if i < k {
-            apriori[i]
-        } else {
-            0.0
-        }
-    };
+    let sys = |i: usize| -> f32 { if i < k { systematic[i] } else { tail[i - k][0] } };
+    let par = |i: usize| -> f32 { if i < k { parity[i] } else { tail[i - k][1] } };
+    let apri = |i: usize| -> f32 { if i < k { apriori[i] } else { 0.0 } };
 
     const NEG: f32 = -1e9;
     let mut alpha = vec![[NEG; 8]; n + 1];
@@ -785,11 +767,7 @@ mod noise_tests {
                     seed ^= seed << 5;
                     let flip = (seed % 100) < pct as u32;
                     let b = b ^ u8::from(flip);
-                    if b == 0 {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                    if b == 0 { 1.0 } else { -1.0 }
                 })
                 .collect();
             let back = rate_dematch(&soft, 1412);

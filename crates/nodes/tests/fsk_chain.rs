@@ -5,9 +5,9 @@
 //! featureless mark, so the same signal is run through both chains here: the
 //! FSK one must recover the bits, and the OOK one must recover nothing.
 
-use common::{Hz, C32};
-use decode::slicer::{slice, Coding, Timing};
-use nodes::{build_chain, registry, NodeSpec};
+use common::{C32, Hz};
+use decode::slicer::{Coding, Timing, slice};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::{PortKind, StreamSpec};
 
 const RATE: f64 = 250_000.0;

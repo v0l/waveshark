@@ -2,7 +2,7 @@
 //! every decoder on that stream shares, and the level every packet leaves
 //! with.
 
-use common::{Packet, Result, C32};
+use common::{C32, Packet, Result};
 use pipeline::event::Event;
 use pipeline::port::{PortKind, StreamSpec};
 use pipeline::registry::{Registry, Settings};
@@ -10,7 +10,7 @@ use pipeline::{Graph, Out};
 use std::collections::VecDeque;
 
 use crate::protocol::{Placed, Protocol};
-use crate::{build_chain, NodeSpec};
+use crate::{NodeSpec, build_chain};
 
 /// What a packet leaves a member measured at, where the front end that read
 /// it measured nothing itself.

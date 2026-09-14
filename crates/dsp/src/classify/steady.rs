@@ -1,6 +1,6 @@
 //! Signals with no keying structure: a bare carrier, and the noise-like case.
 
-use super::hypothesis::{ramp, Evidence, Hypothesis};
+use super::hypothesis::{Evidence, Hypothesis, ramp};
 use super::{Features, Modulation};
 
 /// Present, steady, and saying nothing.

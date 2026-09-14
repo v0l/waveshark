@@ -374,11 +374,7 @@ impl M17Demod {
             dt += b * b;
         }
         let den = (dx * dt).sqrt();
-        if den > 1e-12 {
-            num / den
-        } else {
-            0.0
-        }
+        if den > 1e-12 { num / den } else { 0.0 }
     }
 
     /// Collect the 184 payload symbols behind a sync burst at `n`.

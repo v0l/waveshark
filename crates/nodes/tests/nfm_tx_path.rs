@@ -8,9 +8,9 @@
 //! receiver would have delivered.
 
 use common::{Device, Hz, SampleFormat, Sps};
-use nodes::{FmModNode, ToneNode, TxSinkNode, NBFM_DEVIATION_HZ};
+use nodes::{FmModNode, NBFM_DEVIATION_HZ, ToneNode, TxSinkNode};
 use pipeline::port::{Flow, PortKind, StreamSpec};
-use pipeline::{chain, Graph};
+use pipeline::{Graph, chain};
 
 /// Audio and transmit rate. One rate throughout, because the modulator does
 /// not resample: an NFM channel is 12.5 kHz wide and 48 kS/s covers it with

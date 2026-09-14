@@ -20,7 +20,7 @@
 //! difference between streaming and not.
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
-use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps, TxStream, C32};
+use common::{C32, Error, Hz, IqBuf, Result, SampleFormat, Sps, TxStream};
 use limesdr_sys as ffi;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -104,11 +104,7 @@ const MAX_TIMEOUTS: u32 = 5;
 fn last_error() -> String {
     unsafe {
         let p = ffi::LMS_GetLastErrorMessage();
-        if p.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
+        if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
     }
 }
 
@@ -174,11 +170,7 @@ impl Enumerated {
     pub fn label(&self) -> String {
         let name = if self.name.is_empty() { "LimeSDR" } else { &self.name };
         let tail = short_serial(&self.serial);
-        if tail.is_empty() {
-            name.to_string()
-        } else {
-            format!("{name} {tail}")
-        }
+        if tail.is_empty() { name.to_string() } else { format!("{name} {tail}") }
     }
 }
 
@@ -200,11 +192,7 @@ pub fn enumerate() -> Vec<Enumerated> {
 /// Serial tails identify a unit; the leading zeros do not.
 fn short_serial(s: &str) -> String {
     let t = s.trim_start_matches('0');
-    if t.len() > 8 {
-        t[t.len() - 8..].to_string()
-    } else {
-        t.to_string()
-    }
+    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
 }
 
 /// Raw device pointer. LimeSuite has no thread affinity requirement, only a
@@ -539,11 +527,7 @@ impl LimeSdr {
         let rc = unsafe {
             ffi::LMS_GetLOFrequency(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, &mut f)
         };
-        if rc == ffi::LMS_SUCCESS {
-            Hz(f.round() as u64)
-        } else {
-            self.center
-        }
+        if rc == ffi::LMS_SUCCESS { Hz(f.round() as u64) } else { self.center }
     }
 
     pub fn actual_rate(&self) -> Sps {
@@ -551,11 +535,7 @@ impl LimeSdr {
         let rc = unsafe {
             ffi::LMS_GetSampleRate(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, &mut host, &mut rf)
         };
-        if rc == ffi::LMS_SUCCESS {
-            Sps(host.round() as u64)
-        } else {
-            self.rate
-        }
+        if rc == ffi::LMS_SUCCESS { Sps(host.round() as u64) } else { self.rate }
     }
 
     /// Temperature of the LMS7002M die in degrees Celsius.

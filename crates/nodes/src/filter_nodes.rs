@@ -12,8 +12,8 @@
 //! of a carrier is a mixer and one of these, which is how the channel chains
 //! do it.
 
-use common::{Result, C32};
-use dsp::filter::{design, Biquad, Response};
+use common::{C32, Result};
+use dsp::filter::{Biquad, Response, design};
 use dsp::fir::Fir;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -151,7 +151,9 @@ impl Simple for FirFilterNode {
             "width_hz" => self.width_hz = v.as_f64().unwrap_or(self.width_hz),
             "taps" => self.taps = v.as_i64().unwrap_or(self.taps as i64).clamp(3, 4095) as usize,
             _ => {
-                return Err(common::Error::other(format!("fir_filter: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!(
+                    "fir_filter: unknown parameter {name:?}"
+                )));
             }
         }
         // Designed again rather than at the next negotiation: a filter that
@@ -291,7 +293,9 @@ impl Simple for IirFilterNode {
             "freq_hz" => self.freq_hz = v.as_f64().unwrap_or(self.freq_hz),
             "q" => self.q = v.as_f64().unwrap_or(self.q).clamp(0.05, 200.0),
             _ => {
-                return Err(common::Error::other(format!("iir_filter: unknown parameter {name:?}")))
+                return Err(common::Error::other(format!(
+                    "iir_filter: unknown parameter {name:?}"
+                )));
             }
         }
         let n = self.sections.len();

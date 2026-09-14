@@ -358,7 +358,7 @@ mod tests {
         let est = estimate(&y, &v[20..60], 20).expect("a channel");
         let mut soft = vec![0.0f32; bits.len()];
         soft_bits(&y, &est, &mut soft);
-        let wrong = bits.iter().zip(&soft).filter(|(&b, &s)| (s > 0.0) != (b == 1)).count();
+        let wrong = bits.iter().zip(&soft).filter(|&(&b, &s)| (s > 0.0) != (b == 1)).count();
         assert_eq!(wrong, 0, "{wrong} bits wrong through the echo");
     }
 
@@ -394,7 +394,7 @@ mod tests {
             unsure(&b),
             unsure(&a)
         );
-        let wrong = bits.iter().zip(&b).filter(|(&x, &s)| (s > 0.0) != (x == 1)).count();
+        let wrong = bits.iter().zip(&b).filter(|&(&x, &s)| (s > 0.0) != (x == 1)).count();
         assert!(wrong <= 2, "{wrong} bits wrong under noise");
     }
 }

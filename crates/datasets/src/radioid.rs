@@ -355,7 +355,9 @@ oops,BADROW,x,y,z,w,v\n";
     #[test]
     fn an_empty_dump_is_an_error_rather_than_an_empty_registry() {
         assert!(parse_repeaters(br#"{"rptrs":[]}"#).is_err());
-        assert!(parse_nxdn(b"RADIO_ID,CALLSIGN,FIRST_NAME,LAST_NAME,CITY,STATE,COUNTRY\n").is_err());
+        assert!(
+            parse_nxdn(b"RADIO_ID,CALLSIGN,FIRST_NAME,LAST_NAME,CITY,STATE,COUNTRY\n").is_err()
+        );
     }
 
     #[test]

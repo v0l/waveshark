@@ -5,5 +5,5 @@
 pub mod file;
 pub mod sink;
 
-pub use file::{parse_filename, FileMeta, FileSource};
+pub use file::{FileMeta, FileSource, parse_filename};
 pub use sink::FileSink;

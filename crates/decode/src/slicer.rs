@@ -76,11 +76,7 @@ impl Timing {
     }
 
     fn tol(&self) -> u32 {
-        if self.tolerance_us > 0 {
-            self.tolerance_us
-        } else {
-            (self.short_us / 4).max(50)
-        }
+        if self.tolerance_us > 0 { self.tolerance_us } else { (self.short_us / 4).max(50) }
     }
 
     /// Midpoint between short and long, used to classify a width.

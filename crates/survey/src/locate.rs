@@ -20,7 +20,7 @@
 //! point does, and a long thin one is a drive that has not gone round the
 //! block yet.
 
-use crate::{metres, Sighting, MOVED_M};
+use crate::{MOVED_M, Sighting, metres};
 
 /// Where a transmitter is thought to be, and how sure that is.
 #[derive(Clone, Copy, Debug, PartialEq)]

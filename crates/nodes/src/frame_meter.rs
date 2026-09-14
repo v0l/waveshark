@@ -16,7 +16,7 @@
 //! every one of these front ends is fed, that is the level of the thing that
 //! was demodulated.
 
-use common::{IqBurst, C32};
+use common::{C32, IqBurst};
 use std::sync::Arc;
 
 pub struct FrameMeter {

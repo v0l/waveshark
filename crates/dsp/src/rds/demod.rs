@@ -11,7 +11,7 @@
 //! guaranteed mid-symbol transition, and the decoded value is the difference
 //! between successive symbols rather than their absolute level.
 
-use crate::fir::{lowpass, FirDecimReal};
+use crate::fir::{FirDecimReal, lowpass};
 use std::f64::consts::TAU;
 
 pub const CARRIER_HZ: f64 = 57_000.0;
@@ -386,11 +386,7 @@ impl RdsDemod {
                     // ahead first.
                     let (arg, top) =
                         self.arms.iter().enumerate().fold((0usize, f64::MIN), |acc, (i, a)| {
-                            if a.energy > acc.1 {
-                                (i, a.energy)
-                            } else {
-                                acc
-                            }
+                            if a.energy > acc.1 { (i, a.energy) } else { acc }
                         });
                     if top > self.arms[self.best].energy * SWITCH_MARGIN {
                         self.best = arg;

@@ -5,7 +5,7 @@
 //! happens to produce them. The detector lives in `dsp`; the shape of what it
 //! emits belongs to everybody.
 
-use crate::{Decoded, C32};
+use crate::{C32, Decoded};
 
 /// One mark/gap pair, in microseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -38,15 +38,15 @@ pub use ambient::AmbientF007th;
 pub use bresser::Bresser3Ch;
 pub use esl::Esl;
 pub use ev1527::Ev1527;
-pub use fineoffset::{FineOffsetWh1080, FineOffsetWh51};
+pub use fineoffset::{FineOffsetWh51, FineOffsetWh1080};
 pub use globaltronics::{GtWt02, GtWt03};
 pub use hanshow::Hanshow;
 pub use hideki::Hideki;
 pub use interlogix::InterlogixSecurity;
 pub use ism868_link::Ism868Link;
 pub use keyfob::{
-    came12_bit, came24_bit, Ansonic, Bett, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3,
-    NiceFlo, Princeton,
+    Ansonic, Bett, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3, NiceFlo, Princeton,
+    came12_bit, came24_bit,
 };
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
 pub use nexus::NexusTh;

@@ -28,7 +28,7 @@ pub struct ReedSolomon {
     /// Symbols the transmitter left off the front of a shortened codeword.
     pad: usize,
     /// The generator polynomial's coefficients, in index form.
-    gen: Vec<u16>,
+    r#gen: Vec<u16>,
 }
 
 /// The index of a zero element: not a power of alpha, so it sits one past the
@@ -88,9 +88,9 @@ impl ReedSolomon {
             iprim: iprim / prim,
             nroots,
             pad,
-            gen: Vec::new(),
+            r#gen: Vec::new(),
         };
-        me.gen = me.generator();
+        me.r#gen = me.generator();
         me
     }
 
@@ -140,15 +140,15 @@ impl ReedSolomon {
             let feedback = self.index_of[(d ^ parity[0]) as usize];
             if feedback != a0 {
                 let feedback =
-                    self.modnn(self.nn - self.gen[self.nroots] as usize + feedback as usize);
+                    self.modnn(self.nn - self.r#gen[self.nroots] as usize + feedback as usize);
                 for j in 1..self.nroots {
                     parity[j] ^= self.alpha_to
-                        [self.modnn(feedback + self.gen[self.nroots - j] as usize)]
+                        [self.modnn(feedback + self.r#gen[self.nroots - j] as usize)]
                         as u8;
                 }
                 parity.copy_within(1.., 0);
                 parity[self.nroots - 1] =
-                    self.alpha_to[self.modnn(feedback + self.gen[0] as usize)] as u8;
+                    self.alpha_to[self.modnn(feedback + self.r#gen[0] as usize)] as u8;
             } else {
                 parity.copy_within(1.., 0);
                 parity[self.nroots - 1] = 0;

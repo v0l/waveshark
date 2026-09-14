@@ -66,8 +66,17 @@ fn main() {
                         Some(decode::tetra::Event::Call(c)) => {
                             *tally.entry(c.name()).or_insert(0u32) += 1;
                             if shown < 60 {
-                                println!("  {:?} {head} {} {:?} aie {} id {:?} from {:?} group {:?} {:?}",
-                                    b.lchan, c.name(), c.address, c.aie, c.call_id, c.from, c.group, c.time);
+                                println!(
+                                    "  {:?} {head} {} {:?} aie {} id {:?} from {:?} group {:?} {:?}",
+                                    b.lchan,
+                                    c.name(),
+                                    c.address,
+                                    c.aie,
+                                    c.call_id,
+                                    c.from,
+                                    c.group,
+                                    c.time
+                                );
                                 shown += 1;
                             }
                         }

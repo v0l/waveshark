@@ -52,11 +52,7 @@ pub fn sature(l: i32) -> i16 {
 }
 
 pub fn abs_s(v: i16) -> i16 {
-    if v == MIN_16 {
-        MAX_16
-    } else {
-        v.abs()
-    }
+    if v == MIN_16 { MAX_16 } else { v.abs() }
 }
 
 pub fn add(a: i16, b: i16) -> i16 {
@@ -84,27 +80,15 @@ pub fn l_deposit_l(v: i16) -> i32 {
 }
 
 pub fn negate(v: i16) -> i16 {
-    if v == MIN_16 {
-        MAX_16
-    } else {
-        -v
-    }
+    if v == MIN_16 { MAX_16 } else { -v }
 }
 
 pub fn l_negate(l: i32) -> i32 {
-    if l == MIN_32 {
-        MAX_32
-    } else {
-        -l
-    }
+    if l == MIN_32 { MAX_32 } else { -l }
 }
 
 pub fn l_abs(l: i32) -> i32 {
-    if l == MIN_32 {
-        MAX_32
-    } else {
-        l.abs()
-    }
+    if l == MIN_32 { MAX_32 } else { l.abs() }
 }
 
 pub fn shr(v: i16, n: i16) -> i16 {
@@ -126,11 +110,7 @@ pub fn shl(v: i16, n: i16) -> i16 {
     let r = (v as i32) * (1i32 << n);
     if (n > 15 && v != 0) || r != (r as i16 as i32) {
         set_overflow();
-        if v > 0 {
-            MAX_16
-        } else {
-            MIN_16
-        }
+        if v > 0 { MAX_16 } else { MIN_16 }
     } else {
         extract_l(r)
     }
@@ -171,11 +151,7 @@ pub fn l_shr_r(l: i32, n: i16) -> i32 {
         return 0;
     }
     let out = l_shr(l, n);
-    if n > 0 && (l & (1i32 << (n - 1))) != 0 {
-        out + 1
-    } else {
-        out
-    }
+    if n > 0 && (l & (1i32 << (n - 1))) != 0 { out + 1 } else { out }
 }
 
 pub fn mult(a: i16, b: i16) -> i16 {

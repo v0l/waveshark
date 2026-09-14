@@ -30,7 +30,7 @@
 //! the latches, which is the manufacturer's own team misreading the patent,
 //! and the layout has to be read differently because of it.
 
-use crate::bits::{reflect8, BitBuffer};
+use crate::bits::{BitBuffer, reflect8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::protocols::rows_within;
 use crate::slicer::Timing;

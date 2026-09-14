@@ -35,11 +35,7 @@ const SCOPE_W: f32 = 250.0;
 const SCOPE_H: f32 = 210.0;
 
 fn box_size(node: &pipeline::graph::TopoNode) -> Vec2 {
-    if node.kind == "scope" {
-        Vec2::new(SCOPE_W, SCOPE_H)
-    } else {
-        Vec2::new(BOX_W, BOX_H)
-    }
+    if node.kind == "scope" { Vec2::new(SCOPE_W, SCOPE_H) } else { Vec2::new(BOX_W, BOX_H) }
 }
 
 /// Whether a stage can be dragged to another size.
@@ -511,11 +507,7 @@ pub fn inspector(
 }
 
 fn unit(p: &pipeline::param::Param) -> String {
-    if p.unit.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", p.unit)
-    }
+    if p.unit.is_empty() { String::new() } else { format!(" {}", p.unit) }
 }
 
 #[allow(clippy::too_many_arguments)]

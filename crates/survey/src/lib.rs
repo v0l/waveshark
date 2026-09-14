@@ -45,14 +45,14 @@
 //! the Artemis signal database, bundled, so this costs no new dependency.
 
 use common::{Error, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
 pub mod beacondb;
 mod locate;
 pub mod wigle;
-pub use locate::{locate, Estimate};
-pub use wigle::{write_wigle, Account, Receipt};
+pub use locate::{Estimate, locate};
+pub use wigle::{Account, Receipt, write_wigle};
 
 /// Schema version, written into the file. A file from a newer version is
 /// refused rather than half read.
@@ -233,7 +233,7 @@ impl Db {
                 return Err(Error::other(format!(
                     "survey at {} is version {v}, this build reads {VERSION}",
                     path.display()
-                )))
+                )));
             }
             Some(_) => {}
             None => {

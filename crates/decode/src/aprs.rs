@@ -103,11 +103,7 @@ fn position(info: &[u8], kind: char) -> Option<Report> {
     let body = if kind == '/' || kind == '@' { info.get(8..)? } else { info.get(1..)? };
     // A digit here is degrees, so the report is uncompressed. Anything else
     // is a compressed symbol table selector.
-    if body.first()?.is_ascii_digit() {
-        uncompressed(body)
-    } else {
-        compressed(body)
-    }
+    if body.first()?.is_ascii_digit() { uncompressed(body) } else { compressed(body) }
 }
 
 /// `4903.50N/07201.75W-comment`

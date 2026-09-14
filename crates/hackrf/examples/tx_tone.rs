@@ -9,7 +9,7 @@
 //! This radiates. Use a dummy load or a screened enclosure, keep the gain at
 //! the bottom of its range, and check what band you are pointing it at.
 
-use common::{Device, GainMode, Hz, IqBuf, Sps, C32};
+use common::{C32, Device, GainMode, Hz, IqBuf, Sps};
 
 fn main() -> common::Result<()> {
     tracing_subscriber::fmt()

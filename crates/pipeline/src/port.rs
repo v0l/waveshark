@@ -1,6 +1,6 @@
 //! What flows between stages, and how a stage advertises its rate.
 
-use common::{Hz, Package, SourceBlock, C32};
+use common::{C32, Hz, Package, SourceBlock};
 
 /// The data type carried on a port. Checked when a chain is built so a
 /// mis-ordered chain fails at construction rather than producing silence.

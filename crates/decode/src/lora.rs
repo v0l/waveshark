@@ -458,7 +458,7 @@ impl Received {
     /// matches the packet's before those that do not: the hash is one byte
     /// and collides, and a channel renamed but left on its key still reads.
     pub fn meshtastic_message_on(&self) -> Option<(crate::meshtastic::Decoded, Option<String>)> {
-        use crate::meshtastic::{Channel, Decoded, DEFAULT_KEY};
+        use crate::meshtastic::{Channel, DEFAULT_KEY, Decoded};
         let m = self.meshtastic()?;
         let ciphertext = self.payload.get(Meshtastic::HEADER..)?;
         if let Some(d) = Decoded::of(ciphertext, m.source, m.packet_id, &DEFAULT_KEY) {

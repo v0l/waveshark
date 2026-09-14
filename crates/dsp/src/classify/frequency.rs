@@ -1,6 +1,6 @@
 //! Frequency keying: two tones, four, and the minimum-shift case.
 
-use super::hypothesis::{band, ramp, Evidence, Hypothesis};
+use super::hypothesis::{Evidence, Hypothesis, band, ramp};
 use super::{Features, Modulation};
 
 /// Two tones, far enough apart to threshold.

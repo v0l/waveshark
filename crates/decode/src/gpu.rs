@@ -13,8 +13,8 @@
 use crate::tea::Collision;
 use bytemuck::{Pod, Zeroable};
 use poll_promise::Promise;
-use std::sync::mpsc::{channel, Sender};
 use std::sync::OnceLock;
+use std::sync::mpsc::{Sender, channel};
 use wgpu::util::DeviceExt;
 
 /// The message the crypto worker handles: the searchers to bring up, and the
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn gpu_recovers_the_ta61_secret() {
-        use crate::ta61::{encrypt_id, IdPair};
+        use crate::ta61::{IdPair, encrypt_id};
         let Some(gpu) = Ta61Gpu::new() else {
             eprintln!("no GPU adapter; skipping");
             return;

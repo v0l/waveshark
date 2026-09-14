@@ -2,7 +2,7 @@
 //! through the same cut the auto node would make.
 //!     dmr_probe <file.cu8> <rate> <centre_hz> <channel_hz>
 use common::C32;
-use nodes::{build_chain, registry, NodeSpec};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 
 fn run(label: &str, iq: &[C32], rate: f64, center: f64, channel: f64) {

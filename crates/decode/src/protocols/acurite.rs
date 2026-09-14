@@ -32,7 +32,7 @@
 //! - `K` sum of the preceding six bytes
 //! - `p` even parity over bytes 2 to 5
 
-use crate::bits::{checksum8, crc8le, even_parity, lfsr_digest8, BitBuffer};
+use crate::bits::{BitBuffer, checksum8, crc8le, even_parity, lfsr_digest8};
 use crate::protocol::{DecodeError, Protocol, Report};
 use crate::protocols::{find_frame, rows_of, rows_within};
 use crate::slicer::Timing;

@@ -19,9 +19,9 @@
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use rtlsdr_sys as ffi;
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -60,11 +60,7 @@ impl Drop for Handle {
 }
 
 fn check(rc: i32, what: &'static str) -> Result<()> {
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(Error::Other(format!("{what} failed (librtlsdr rc={rc})")))
-    }
+    if rc == 0 { Ok(()) } else { Err(Error::Other(format!("{what} failed (librtlsdr rc={rc})"))) }
 }
 
 /// One enumerated dongle, before it is opened.
@@ -535,28 +531,30 @@ struct CbCtx {
 /// # Safety
 /// `ctx` must point at a live `CbCtx` for the duration of `rtlsdr_read_async`.
 unsafe extern "C" fn rtlsdr_cb(buf: *mut u8, len: u32, ctx: *mut c_void) {
-    if ctx.is_null() || buf.is_null() || len == 0 {
-        return;
-    }
-    let ctx = &mut *ctx.cast::<CbCtx>();
-    let raw = std::slice::from_raw_parts(buf, len as usize);
-
-    let mut samples = Vec::with_capacity(len as usize / 2);
-    SampleFormat::Cu8.convert(raw, &mut samples);
-    let n = samples.len() as u64;
-
-    let buf = IqBuf::new(samples, ctx.center, ctx.rate, ctx.seq);
-    ctx.seq += n;
-
-    // Never block the USB callback. Blocking here stalls the transfer queue
-    // and causes librtlsdr to drop transfers wholesale, which is worse than
-    // dropping one buffer deliberately.
-    match ctx.tx.try_send(buf) {
-        Ok(()) => {}
-        Err(TrySendError::Full(_)) => {
-            ctx.dropped.fetch_add(n, Ordering::Relaxed);
+    unsafe {
+        if ctx.is_null() || buf.is_null() || len == 0 {
+            return;
         }
-        Err(TrySendError::Disconnected(_)) => {}
+        let ctx = &mut *ctx.cast::<CbCtx>();
+        let raw = std::slice::from_raw_parts(buf, len as usize);
+
+        let mut samples = Vec::with_capacity(len as usize / 2);
+        SampleFormat::Cu8.convert(raw, &mut samples);
+        let n = samples.len() as u64;
+
+        let buf = IqBuf::new(samples, ctx.center, ctx.rate, ctx.seq);
+        ctx.seq += n;
+
+        // Never block the USB callback. Blocking here stalls the transfer queue
+        // and causes librtlsdr to drop transfers wholesale, which is worse than
+        // dropping one buffer deliberately.
+        match ctx.tx.try_send(buf) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                ctx.dropped.fetch_add(n, Ordering::Relaxed);
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
     }
 }
 

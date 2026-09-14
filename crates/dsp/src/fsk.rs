@@ -31,7 +31,7 @@
 //! detector, which has the same problem with amplitudes that this one has with
 //! frequencies.
 
-use crate::pulse::{dbfs, LevelGate, Package, PulseStats};
+use crate::pulse::{LevelGate, Package, PulseStats, dbfs};
 use common::C32;
 
 #[derive(Clone, Copy, Debug)]

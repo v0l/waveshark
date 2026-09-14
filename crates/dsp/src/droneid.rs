@@ -21,7 +21,7 @@
 
 use common::C32;
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 /// Subcarrier spacing, which fixes the FFT size for a given rate.
 pub const CARRIER_SPACING_HZ: f64 = 15_000.0;
@@ -650,11 +650,7 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
             .zip(want)
             .map(|(&k, w)| {
                 let got = freq[sym - 1][k];
-                if got.norm_sqr() > 0.0 {
-                    w * got.conj() / got.norm_sqr()
-                } else {
-                    C32::default()
-                }
+                if got.norm_sqr() > 0.0 { w * got.conj() / got.norm_sqr() } else { C32::default() }
             })
             .collect()
     };

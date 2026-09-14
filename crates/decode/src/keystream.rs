@@ -109,7 +109,7 @@ impl ReuseWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tea::{keystream, Key};
+    use crate::tea::{Key, keystream};
 
     fn ts(frame: u8) -> Timestamp {
         Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false }

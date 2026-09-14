@@ -5,9 +5,9 @@
 //! within range can read which door in which house just opened, which is worth
 //! knowing about a technology sold as security.
 
-use crate::bits::{crc16, BitBuffer};
+use crate::bits::{BitBuffer, crc16};
 use crate::protocol::{DecodeError, Protocol, Report};
-use crate::slicer::{manchester_decode, Coding, Timing};
+use crate::slicer::{Coding, Timing, manchester_decode};
 
 /// Honeywell (Ademco) door and window sensors: the 5811 and 5816, 2Gig's DW10
 /// and DW11, the RE208 repeater and the 2GIG-GB1 glass break detector.

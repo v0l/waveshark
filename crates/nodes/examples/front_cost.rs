@@ -9,7 +9,7 @@
 //! hands it.
 //!
 //!     cargo run --release -p nodes --example front_cost -- 20000000
-use common::{Hz, C32};
+use common::{C32, Hz};
 
 fn noise(n: usize, amp: f32, seed: &mut u64) -> Vec<C32> {
     (0..n)
@@ -43,10 +43,12 @@ fn main() {
         };
         let mut chain = match factor {
             1 => Vec::new(),
-            f => vec![nodes::NodeSpec::new("decimate")
-                .i("factor", f as i64)
-                .f("passband", 0.8)
-                .f("atten_db", 60.0)],
+            f => vec![
+                nodes::NodeSpec::new("decimate")
+                    .i("factor", f as i64)
+                    .f("passband", 0.8)
+                    .f("atten_db", 60.0),
+            ],
         };
         let at = nodes::Placed {
             center_hz: p.default_hz(),

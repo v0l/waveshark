@@ -166,7 +166,9 @@ mod tests {
     #[test]
     fn a_diehl_water_meter_reads_as_rtl_433_reads_it() {
         // rtl_433's mode T recording of a Diehl Hydrus, CRCs removed.
-        let f = unhex("5344a5112901858476078c00ae900f002c25f00c2f005d8c2c1dac2ca7c07a3a80310710a7f26ca73e8a384744684fe6a79dd0844ebe8c89debb0615906f9f9581b60dbf73e59f525cbc0182172ac76923f254d4");
+        let f = unhex(
+            "5344a5112901858476078c00ae900f002c25f00c2f005d8c2c1dac2ca7c07a3a80310710a7f26ca73e8a384744684fe6a79dd0844ebe8c89debb0615906f9f9581b60dbf73e59f525cbc0182172ac76923f254d4",
+        );
         let r = parse(&f, Some("T")).unwrap();
         assert_eq!(r.get("M"), Some(&Value::Text("DME".into())));
         assert_eq!(r.get("id"), Some(&Value::Int(84850129)));
@@ -182,7 +184,9 @@ mod tests {
 
     #[test]
     fn a_meter_behind_a_repeater_has_the_long_header() {
-        let f = unhex("4644b42571550210050e7287545505b42501079a003025403e848957876e48759da51bd3f945751967d301a2254d6a2851fd29931b624681f21e8106633cc25a6e3e8a06812405");
+        let f = unhex(
+            "4644b42571550210050e7287545505b42501079a003025403e848957876e48759da51bd3f945751967d301a2254d6a2851fd29931b624681f21e8106633cc25a6e3e8a06812405",
+        );
         let r = parse(&f, Some("T")).unwrap();
         assert_eq!(r.get("M"), Some(&Value::Text("IMT".into())));
         assert_eq!(r.get("id"), Some(&Value::Int(10025571)));
@@ -198,7 +202,9 @@ mod tests {
     fn a_kamstrup_heat_meter_in_mode_c() {
         // Format B, so the CRCs the recording carried inside the length are
         // gone here and the length field is left as it was sent.
-        let f = unhex("41442d2c32839760190c8d20bb901f3522d30883bdbfd4eac25b78dcb20a964d8fa3a27b9efe2a38d6a160cc2bdfb310f64faaa672b37d7ad91c9aa244111a78");
+        let f = unhex(
+            "41442d2c32839760190c8d20bb901f3522d30883bdbfd4eac25b78dcb20a964d8fa3a27b9efe2a38d6a160cc2bdfb310f64faaa672b37d7ad91c9aa244111a78",
+        );
         let mut without = f[..10].to_vec();
         without.extend_from_slice(&f[12..f.len() - 2]);
         let r = parse(&without, Some("C")).unwrap();

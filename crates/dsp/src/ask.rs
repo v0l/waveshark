@@ -25,7 +25,7 @@
 //! receiver whose AGC is compressing, and, most often, an adjacent channel
 //! bleeding into a narrow channelizer bin and filling in the gaps.
 
-use crate::pulse::{dbfs, LevelGate, Package, PulseStats};
+use crate::pulse::{LevelGate, Package, PulseStats, dbfs};
 
 #[derive(Clone, Copy, Debug)]
 pub struct AskConfig {

@@ -10,8 +10,8 @@
 //! not a performance target. Real numbers come from running it with
 //! `--nocapture` on the machine in question.
 
-use common::{Hz, C32};
-use nodes::{build_chain, registry, NodeSpec};
+use common::{C32, Hz};
+use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 
 /// `count` transmitters keying on and off at random across the span, each a

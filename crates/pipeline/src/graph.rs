@@ -1063,7 +1063,7 @@ mod tests {
     use super::*;
     use crate::node::Simple;
     use crate::port::{PortKind, TagValue};
-    use common::{Hz, C32};
+    use common::{C32, Hz};
 
     /// Decimate by 2 and add a declared group delay, so latency bookkeeping
     /// has something to accumulate.

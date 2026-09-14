@@ -64,5 +64,13 @@ fn main() {
         .take(6)
         .map(|b| format!("{:.0}k@{:.0}k", b.bandwidth_hz / 1e3, b.rate / 1e3))
         .collect();
-    println!("{:.1} MS/s, {transmitters} tx, fft {} bins, {} frames/s: detector {:.2}x real time, detector+extractor {:.2}x; {opened} sources opened, e.g. {}", rate / 1e6, d.fft_size(), d.frame_rate() as u64, secs / det, secs / both, widths.join(" "));
+    println!(
+        "{:.1} MS/s, {transmitters} tx, fft {} bins, {} frames/s: detector {:.2}x real time, detector+extractor {:.2}x; {opened} sources opened, e.g. {}",
+        rate / 1e6,
+        d.fft_size(),
+        d.frame_rate() as u64,
+        secs / det,
+        secs / both,
+        widths.join(" ")
+    );
 }

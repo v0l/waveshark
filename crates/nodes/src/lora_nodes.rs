@@ -25,14 +25,14 @@
 //! sync word the first sixteen bytes of the payload are read as its packet
 //! header, which is as far as anyone without the channel key gets.
 
-use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use crate::NodeSpec;
-use common::{Result, C32};
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
+use common::{C32, Result};
 use decode::lora::{self, Received};
 use decode::lorawan;
 use decode::meshtastic;
-use dsp::lora::{Demod, OVERSAMPLE};
 use dsp::FirDecim;
+use dsp::lora::{Demod, OVERSAMPLE};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
