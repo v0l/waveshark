@@ -315,6 +315,11 @@ impl ChainState {
         }
     }
 
+    /// Whether the graph is unlocked for editing.
+    pub fn manual(&self) -> bool {
+        self.edit.manual
+    }
+
     /// Unlock the graph for editing, or lock it again.
     ///
     /// Nothing about what runs changes with it: the edits already made stay
