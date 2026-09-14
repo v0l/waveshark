@@ -132,7 +132,7 @@ impl DvbtReceiver {
         inner.demodulate(&symbol.cells, &symbol.csi, index, &mut self.soft);
         self.bits.clear();
         let rate = params.code_rate_hp;
-        self.viterbi.push_punctured(&self.soft, rate.pattern(), rate.k(), &mut self.bits);
+        self.viterbi.push(&self.soft, rate.mask(), &mut self.bits);
 
         self.bytes.clear();
         let (mut acc, mut have) = self.partial;
@@ -192,18 +192,11 @@ impl DvbtModulator {
                 self.pending.push((byte >> i) & 1);
             }
         }
-        let rate = self.params.code_rate_hp;
-        while self.pending.len() >= rate.k() {
-            let mut pairs = Vec::with_capacity(rate.k());
-            for &bit in &self.pending[..rate.k()] {
-                pairs.push(self.encoder.push(bit));
-            }
-            self.pending.drain(..rate.k());
-            for &(step, which) in rate.pattern() {
-                let (x, y) = pairs[step];
-                self.coded.push(if which == 0 { x } else { y });
-            }
-        }
+        let mask = self.params.code_rate_hp.mask();
+        let whole = self.pending.len() - self.pending.len() % (mask.len() / 2);
+        let sent = self.encoder.punctured(&self.pending[..whole], mask, conv::First::X);
+        self.coded.extend_from_slice(&sent);
+        self.pending.drain(..whole);
         let per_symbol = self.inner.bits_per_symbol();
         while self.coded.len() >= per_symbol {
             let index = self.ofdm.symbol_index();

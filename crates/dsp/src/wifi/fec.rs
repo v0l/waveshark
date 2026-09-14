@@ -73,121 +73,37 @@ pub fn pilot_polarity(symbol: usize) -> f32 {
     seq[symbol % 127]
 }
 
-/// The generator polynomials, as masks over the shift register below.
-///
-/// The standard's are 133 and 171 octal, written with the tap on the newest
-/// input bit at the top. The register here holds the newest bit at the
-/// bottom, so the masks are those two reversed: 155 and 117. That is not a
-/// cosmetic difference. Neither polynomial is a palindrome, so an encoder
-/// with the standard's numbers written straight into this register is a
-/// different code that decodes its own output perfectly and reads nothing
-/// off the air, which cost an afternoon and is why the loopback test is not
-/// on its own enough.
-const G: [u8; 2] = [0o155, 0o117];
-
-const fn parity(v: u8) -> u8 {
-    (v.count_ones() & 1) as u8
-}
-
-/// The two output bits for input `u` from state `s`, where the state is the
-/// six previous input bits with the oldest at the top.
-fn outputs(u: u8, s: u8) -> (u8, u8) {
-    let sr = (s << 1 | u) & 0x7f;
-    (parity(sr & G[0]), parity(sr & G[1]))
-}
-
 /// Puncturing patterns, one entry per coded bit, in transmission order.
+///
+/// The code itself is [`crate::conv`]: 802.11 and DVB-T use the same rate
+/// 1/2, constraint length 7 code, and the only differences are which output
+/// goes first and how the two standards puncture it. 802.11 sends the 133
+/// octal output first and calls it A.
 pub const P_1_2: &[u8] = &[1, 1];
 pub const P_2_3: &[u8] = &[1, 1, 1, 0];
 pub const P_3_4: &[u8] = &[1, 1, 1, 0, 0, 1];
 /// The rate an HT frame adds at MCS 7.
 pub const P_5_6: &[u8] = &[1, 1, 1, 0, 0, 1, 1, 0, 0, 1];
 
+/// Which of the mother code's outputs 802.11 sends first.
+const ORDER: crate::conv::First = crate::conv::First::Y;
+
 /// Encode and puncture. `bits` must already carry its six zero tail bits.
 pub fn encode(bits: &[u8], pattern: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bits.len() * 2);
-    let mut state = 0u8;
-    let mut p = 0usize;
-    for &u in bits {
-        let (a, b) = outputs(u, state);
-        for g in [a, b] {
-            if pattern[p] == 1 {
-                out.push(g);
-            }
-            p = (p + 1) % pattern.len();
-        }
-        state = (state << 1 | u) & 0x3f;
-    }
-    out
+    crate::conv::Encoder::new().punctured(bits, pattern, ORDER)
 }
 
 /// Soft-decision Viterbi over the terminated code, depuncturing as it goes.
 ///
-/// `soft` is positive for a one. A punctured bit is fed in as exactly 0.0,
-/// which is the whole reason one decoder serves all three rates. Returns the
-/// decoded bits including the tail, and the fraction of received bits that
-/// disagree with re-encoding the survivor, which is the only measure of
-/// confidence available once the trellis has spoken.
+/// `soft` is positive for a one, which is this module's convention and the
+/// opposite of [`crate::conv`]'s, so the signs are turned over on the way in.
+/// A punctured bit is fed in as exactly 0.0. Returns the decoded bits
+/// including the tail, and the fraction of received bits that disagree with
+/// re-encoding the survivor, which is the only measure of confidence
+/// available once the trellis has spoken.
 pub fn viterbi(soft: &[f32], pattern: &[u8], count: usize) -> (Vec<u8>, f32) {
-    const STATES: usize = 64;
-    let mut metric = [f32::NEG_INFINITY; STATES];
-    metric[0] = 0.0;
-    let mut next = [f32::NEG_INFINITY; STATES];
-    let mut decisions = vec![0u64; count];
-
-    let mut p = 0usize;
-    let mut read = 0usize;
-    let take = |p: &mut usize, read: &mut usize| -> f32 {
-        let v = if pattern[*p] == 1 {
-            let v = soft.get(*read).copied().unwrap_or(0.0);
-            *read += 1;
-            v
-        } else {
-            0.0
-        };
-        *p = (*p + 1) % pattern.len();
-        v
-    };
-
-    for step in decisions.iter_mut() {
-        let (s1, s2) = (take(&mut p, &mut read), take(&mut p, &mut read));
-        next.fill(f32::NEG_INFINITY);
-        let mut choice = 0u64;
-        for t in 0..STATES {
-            let u = (t & 1) as u8;
-            for from in [t >> 1, (t >> 1) | 32] {
-                if metric[from] == f32::NEG_INFINITY {
-                    continue;
-                }
-                let (g1, g2) = outputs(u, from as u8);
-                let m =
-                    metric[from] + if g1 == 1 { s1 } else { -s1 } + if g2 == 1 { s2 } else { -s2 };
-                if m > next[t] {
-                    next[t] = m;
-                    choice = choice & !(1 << t) | u64::from(from >= 32) << t;
-                }
-            }
-        }
-        *step = choice;
-        metric.copy_from_slice(&next);
-    }
-
-    // Traceback from whichever state ends best rather than from zero. The
-    // tail terminates the code at the end of the PSDU, but the pad bits that
-    // follow it to fill the last symbol are encoded too, so the block does
-    // not end in state zero and a receiver that assumes it does loses the
-    // last handful of bits of every frame that needed padding.
-    let mut bits = vec![0u8; count];
-    let mut state = metric
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    for k in (0..count).rev() {
-        bits[k] = (state & 1) as u8;
-        state = state >> 1 | ((decisions[k] >> state & 1) as usize) << 5;
-    }
+    let flipped: Vec<f32> = soft.iter().map(|v| -v).collect();
+    let bits = crate::conv::Viterbi::decode_block(&flipped, pattern, count, ORDER);
 
     let check = encode(&bits, pattern);
     let mut wrong = 0usize;
