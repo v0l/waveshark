@@ -69,10 +69,64 @@ pub const TETRA_1_3: Code = Code { constraint: 5, polys: &[0b1_1111, 0b1_1011, 0
 /// No puncturing: every mother bit is sent.
 pub const P_1_2: &[u8] = &[1, 1];
 
+/// The most coded bits any code here puts out per bit in, which is TETRA's
+/// rate 1/4. A step is that wide at most, so it is an array rather than a
+/// buffer.
+const MAX_RATE: usize = 4;
+
+/// A puncturing mask, read once: what a step starting at each place in the
+/// period takes from the stream, and where the next step starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Punct {
+    mask: Vec<u8>,
+    places: Vec<Place>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Place {
+    /// Coded values this step takes off the stream: the rest were never
+    /// sent.
+    sent: usize,
+    /// Which of the step's outputs are among them.
+    take: [bool; MAX_RATE],
+    /// Where in the period the next step starts.
+    next: usize,
+}
+
+impl Punct {
+    fn of(mask: &[u8], rate: usize) -> Self {
+        let places = (0..mask.len())
+            .map(|phase| {
+                let mut take = [false; MAX_RATE];
+                let mut sent = 0;
+                for (k, t) in take.iter_mut().take(rate).enumerate() {
+                    *t = mask[(phase + k) % mask.len()] == 1;
+                    sent += *t as usize;
+                }
+                Place { sent, take, next: (phase + rate) % mask.len() }
+            })
+            .collect();
+        Self { mask: mask.to_vec(), places }
+    }
+}
+
 /// How far back the survivors are traced before a bit is believed. Five
 /// constraint lengths is the usual rule; DVB-T at rate 7/8 wants more, so
 /// this is the depth every rate is decoded at.
 pub const DEPTH: usize = 96;
+
+/// The largest a quantised branch metric may be. Two of them are added to a
+/// path cost between one normalising pass and the next, so this and
+/// [`NORMALISE_WHOLE`] together have to stay inside what an `i16` holds.
+const METRIC_FULL: f32 = 512.0;
+
+/// Trellis steps between pulling the whole-number costs back to zero. Sixteen
+/// steps of two metrics apiece is 16384 at most, half of what an `i16` holds,
+/// and the other half is the room the costs spread over.
+const NORMALISE_WHOLE: usize = 16;
+
+/// How fast the quantising scale forgets a loud soft value.
+const SCALE_DECAY: f32 = 0.999;
 
 /// Trellis steps between one pass that pulls the costs back towards zero.
 /// A branch metric is bounded by the soft values, so the costs can only climb
@@ -154,7 +208,7 @@ unsafe fn avx2_pair_step(
         let (ms, md) = (_mm256_set1_ps(m_sum), _mm256_set1_ps(m_diff));
         #[target_feature(enable = "avx2")]
         unsafe fn sort(v: __m256) -> __m256 {
-            unsafe { _mm256_castpd_ps(_mm256_permute4x64_pd::<0b11_01_10_00>(_mm256_castps_pd(v))) }
+            _mm256_castpd_ps(_mm256_permute4x64_pd::<0b11_01_10_00>(_mm256_castps_pd(v)))
         }
         for k in (0..half).step_by(8) {
             let v0 = _mm256_loadu_ps(cost.as_ptr().add(2 * k));
@@ -186,6 +240,83 @@ unsafe fn avx2_pair_step(
         _mm256_storeu_ps(lanes.as_mut_ptr(), least);
         (decision, lanes.iter().copied().fold(f32::INFINITY, f32::min))
     }
+}
+
+/// The butterfly in whole numbers, sixteen state pairs at a time.
+///
+/// The shape is [`avx2_pair_step`]'s: two costs read next to each other, two
+/// written half the trellis apart, and the comparison that picks the
+/// survivor read back as the decision. What differs is the width, because
+/// sixteen bit lanes fit twice over, and the deinterleave, which takes a
+/// byte shuffle and a pair of lane permutes rather than one shuffle.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_whole_step(
+    cost: &[i16],
+    sum: &[i16],
+    diff: &[i16],
+    m_sum: i16,
+    m_diff: i16,
+    next: &mut [i16],
+    half: usize,
+) -> (u64, i16) {
+    use std::arch::x86_64::*;
+
+    let mut decision = 0u64;
+    // SAFETY: the caller has checked for avx2; `cost` is `2 * half` long and
+    // `sum`, `diff` and `next` are `half`, a whole number of sixteens.
+    unsafe {
+        let mut least = _mm256_set1_epi16(i16::MAX);
+        let (ms, md) = (_mm256_set1_epi16(m_sum), _mm256_set1_epi16(m_diff));
+        // Even sixteen bit lanes to the low half of each 128 bit lane, odd
+        // ones to the high half.
+        let split = _mm256_setr_epi8(
+            0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15, 0, 1, 4, 5, 8, 9, 12, 13, 2, 3,
+            6, 7, 10, 11, 14, 15,
+        );
+        for k in (0..half).step_by(16) {
+            let v0 = _mm256_loadu_si256(cost.as_ptr().add(2 * k) as *const __m256i);
+            let v1 = _mm256_loadu_si256(cost.as_ptr().add(2 * k + 16) as *const __m256i);
+            let s0 = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_shuffle_epi8(v0, split));
+            let s1 = _mm256_permute4x64_epi64::<0b11_01_10_00>(_mm256_shuffle_epi8(v1, split));
+            let a = _mm256_permute2x128_si256::<0x20>(s0, s1);
+            let b = _mm256_permute2x128_si256::<0x31>(s0, s1);
+            let m = _mm256_add_epi16(
+                _mm256_mullo_epi16(_mm256_loadu_si256(sum.as_ptr().add(k) as *const __m256i), ms),
+                _mm256_mullo_epi16(_mm256_loadu_si256(diff.as_ptr().add(k) as *const __m256i), md),
+            );
+
+            let c0 = _mm256_adds_epi16(a, m);
+            let c1 = _mm256_subs_epi16(b, m);
+            let lo = _mm256_min_epi16(c0, c1);
+            decision |= (bits_of(_mm256_cmpgt_epi16(c0, c1)) as u64) << k;
+            _mm256_storeu_si256(next.as_mut_ptr().add(k) as *mut __m256i, lo);
+
+            let d0 = _mm256_subs_epi16(a, m);
+            let d1 = _mm256_adds_epi16(b, m);
+            let hi = _mm256_min_epi16(d0, d1);
+            decision |= (bits_of(_mm256_cmpgt_epi16(d0, d1)) as u64) << (k + half);
+            _mm256_storeu_si256(next.as_mut_ptr().add(k + half) as *mut __m256i, hi);
+
+            least = _mm256_min_epi16(least, _mm256_min_epi16(lo, hi));
+        }
+        let mut lanes = [0i16; 16];
+        _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, least);
+        (decision, lanes.into_iter().min().unwrap_or(0))
+    }
+}
+
+/// A sixteen lane comparison as sixteen bits.
+///
+/// `movemask` works a byte at a time, so the lanes are packed to bytes
+/// first. Packing is within each 128 bit half, which is why the halves are
+/// picked out of the thirty-two bits separately rather than masked as one.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bits_of(cmp: std::arch::x86_64::__m256i) -> u32 {
+    use std::arch::x86_64::*;
+    let packed = _mm256_movemask_epi8(_mm256_packs_epi16(cmp, cmp)) as u32;
+    (packed & 0x00ff) | ((packed >> 8) & 0xff00)
 }
 
 /// The same, for a rate 1/2 code, with the metrics made from the two
@@ -234,7 +365,7 @@ unsafe fn avx2_step(cost: &[f32], row: &[f32], next: &mut [f32], half: usize) ->
         // as two pairs of pairs and one 64 bit permute puts them in order.
         #[target_feature(enable = "avx2")]
         unsafe fn sort(v: __m256) -> __m256 {
-            unsafe { _mm256_castpd_ps(_mm256_permute4x64_pd::<0b11_01_10_00>(_mm256_castps_pd(v))) }
+            _mm256_castpd_ps(_mm256_permute4x64_pd::<0b11_01_10_00>(_mm256_castps_pd(v)))
         }
         for k in (0..half).step_by(8) {
             let v0 = _mm256_loadu_ps(cost.as_ptr().add(2 * k));
@@ -332,6 +463,8 @@ pub struct Viterbi {
     pending: Vec<f32>,
     /// Where in the puncturing mask the next coded bit sits.
     phase: usize,
+    /// The mask read once, as what each place in its period means.
+    punct: Punct,
     /// Steps since the costs were last pulled back towards zero.
     since_normal: usize,
     ends: Ends,
@@ -355,6 +488,23 @@ pub struct Viterbi {
     /// Those metrics gathered for the step being worked, one per butterfly,
     /// so the wide path loads them rather than chasing the index.
     row: Vec<f32>,
+    /// Whether the butterflies run sixteen at a time, in whole numbers.
+    ///
+    /// A path cost is a comparison, not a measurement: only the differences
+    /// between the survivors decide anything, and those are small. Sixteen
+    /// bits hold them with room to spare and fit twice as many lanes in a
+    /// register as a float does.
+    narrow: bool,
+    /// The costs again, as whole numbers, for the narrow path.
+    cost16: Vec<i16>,
+    next16: Vec<i16>,
+    /// The two sign vectors again, as whole numbers.
+    sum16: Vec<i16>,
+    diff16: Vec<i16>,
+    /// What a soft value is multiplied by to become a whole number, from the
+    /// loudest value seen lately. Quantising against a fixed scale would
+    /// clip one receiver's soft values and flatten another's to nothing.
+    scale: f32,
 }
 
 impl Viterbi {
@@ -398,10 +548,27 @@ impl Viterbi {
             block: DEPTH,
             pending: Vec::new(),
             phase: 0,
+            punct: Punct::of(P_1_2, code.rate()),
             since_normal: 0,
             ends: Ends::Anywhere,
             butterfly,
             wide: butterfly && half >= 8 && half % 8 == 0 && wide_available(),
+            // Sixteen states either side of the butterfly, which K=7 has and
+            // the K=5 codes do not.
+            narrow: butterfly
+                && code.rate() == 2
+                && half >= 16
+                && half % 16 == 0
+                && wide_available(),
+            cost16: {
+                let mut c = vec![i16::MAX; states];
+                c[0] = 0;
+                c
+            },
+            next16: vec![i16::MAX; states],
+            sum16: Vec::new(),
+            diff16: Vec::new(),
+            scale: 0.0,
             pair: (0..half).map(|k| table[2 * k][0]).collect(),
             sum: (0..half)
                 .map(|k| match table[2 * k][0] {
@@ -423,6 +590,34 @@ impl Viterbi {
             table,
             code,
         }
+        .with_whole_numbers()
+    }
+
+    /// The sign vectors as whole numbers, for the narrow path.
+    fn with_whole_numbers(mut self) -> Self {
+        self.sum16 = self.sum.iter().map(|v| *v as i16).collect();
+        self.diff16 = self.diff.iter().map(|v| *v as i16).collect();
+        self
+    }
+
+    /// Which of the inner loops this decoder will run, for a test or a
+    /// measurement that has to know.
+    pub fn paths(&self) -> (bool, bool, bool) {
+        (self.narrow, self.wide, self.butterfly)
+    }
+
+    /// Turn the wider inner loops off, for a test that compares them against
+    /// the plain one or a measurement that prices them.
+    pub fn only_scalar(mut self) -> Self {
+        self.narrow = false;
+        self.wide = false;
+        self
+    }
+
+    /// Turn the whole-number loop off, leaving the eight lane float one.
+    pub fn only_floats(mut self) -> Self {
+        self.narrow = false;
+        self
     }
 
     /// How far back the survivors are traced before a bit is released.
@@ -443,6 +638,9 @@ impl Viterbi {
     pub fn reset(&mut self) {
         self.cost.iter_mut().for_each(|c| *c = f32::INFINITY);
         self.cost[0] = 0.0;
+        self.cost16.iter_mut().for_each(|c| *c = i16::MAX);
+        self.cost16[0] = 0;
+        self.scale = 0.0;
         self.decisions.clear();
         self.pending.clear();
         self.phase = 0;
@@ -450,7 +648,11 @@ impl Viterbi {
     }
 
     /// One step of the trellis over one bit's worth of coded soft values.
+    #[inline]
     pub fn push_step(&mut self, soft: &[f32], out: &mut Vec<u8>) {
+        if self.narrow {
+            return self.push_step_whole(soft, out);
+        }
         // Every branch metric of this step: a coded zero is expected at +1
         // and a one at -1, and the cost is the negative correlation with what
         // arrived.
@@ -542,6 +744,61 @@ impl Viterbi {
         }
     }
 
+    /// One step of the trellis in whole numbers, sixteen butterflies a pass.
+    ///
+    /// The same arithmetic as [`Viterbi::push_step`] with the costs
+    /// quantised: only differences between survivors decide anything, and
+    /// they are small, so sixteen bits hold them and a register holds twice
+    /// as many. The costs are pulled back to zero often enough that they
+    /// cannot climb into the saturation the adds would otherwise clip at.
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    fn push_step_whole(&mut self, soft: &[f32], out: &mut Vec<u8>) {
+        let (x, y) = (soft[0], soft[1]);
+        // Quantised against the loudest soft value lately rather than a
+        // fixed scale, which would clip one receiver's numbers and flatten
+        // another's. It decays so a burst of noise does not deafen it for
+        // the rest of the stream.
+        let loudest = x.abs().max(y.abs());
+        self.scale = self.scale.max(loudest) * SCALE_DECAY + loudest * (1.0 - SCALE_DECAY);
+        let q = if self.scale > 0.0 { METRIC_FULL / (2.0 * self.scale) } else { 0.0 };
+        let m_sum = ((x + y) * q).clamp(-METRIC_FULL, METRIC_FULL) as i16;
+        let m_diff = ((x - y) * q).clamp(-METRIC_FULL, METRIC_FULL) as i16;
+
+        let half = self.code.states() >> 1;
+        // SAFETY: `narrow` is only set when avx2 was detected, and the
+        // slices are the trellis's own: `cost16` of `2 * half`, `sum16`,
+        // `diff16` and `next16` of `half`.
+        let (decision, best) = unsafe {
+            avx2_whole_step(
+                &self.cost16,
+                &self.sum16,
+                &self.diff16,
+                m_sum,
+                m_diff,
+                &mut self.next16,
+                half,
+            )
+        };
+        self.since_normal += 1;
+        if self.since_normal >= NORMALISE_WHOLE {
+            self.since_normal = 0;
+            for c in self.next16.iter_mut() {
+                *c -= best;
+            }
+        }
+        std::mem::swap(&mut self.cost16, &mut self.next16);
+        self.decisions.push(decision);
+        if self.decisions.len() >= self.depth.saturating_add(self.block) {
+            self.release(self.block, Ends::Anywhere, out);
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn push_step_whole(&mut self, _soft: &[f32], _out: &mut Vec<u8>) {
+        unreachable!("the narrow path is x86_64 only")
+    }
+
     /// Feed a punctured stream, taking the mask up where the last call left
     /// it. One entry of the mask is one coded bit in transmission order, and
     /// a zero is a bit the transmitter left out.
@@ -552,27 +809,35 @@ impl Viterbi {
         // time.
         let mut pending = std::mem::take(&mut self.pending);
         pending.extend_from_slice(soft);
+        if self.punct.mask != mask {
+            self.punct = Punct::of(mask, self.code.rate());
+        }
         let rate = self.code.rate();
-        let mut step = vec![0.0f32; rate];
+        // What a mask says about a step depends only on where in the period
+        // the step starts, and a period is a handful of places. Worked out
+        // once, the loop is a lookup and an add where it was four remainders
+        // and a branch a coded bit, which was as much of the decoder's time
+        // as the trellis itself.
+        let plan = std::mem::take(&mut self.punct);
+        let mut step = [0.0f32; MAX_RATE];
         let mut at = 0usize;
         loop {
-            let sent: usize = (0..rate).map(|k| mask[(self.phase + k) % mask.len()] as usize).sum();
-            if at + sent > pending.len() {
+            let place = &plan.places[self.phase];
+            if at + place.sent > pending.len() {
                 break;
             }
-            for (k, s) in step.iter_mut().enumerate() {
-                *s = if mask[(self.phase + k) % mask.len()] == 1 {
+            for (k, s) in step.iter_mut().take(rate).enumerate() {
+                *s = if place.take[k] {
                     at += 1;
                     pending[at - 1]
                 } else {
                     0.0
                 };
             }
-            self.phase = (self.phase + rate) % mask.len();
-            let taken = std::mem::take(&mut step);
-            self.push_step(&taken, out);
-            step = taken;
+            self.phase = place.next;
+            self.push_step(&step[..rate], out);
         }
+        self.punct = plan;
         pending.drain(..at);
         self.pending = pending;
     }
@@ -584,8 +849,17 @@ impl Viterbi {
             return;
         }
         let half = self.code.states() >> 1;
+        // Whichever costs this decoder is keeping. Reading the float ones
+        // while the whole-number loop was running started the traceback at
+        // a state nothing had written: a stream converges on the right path
+        // within a constraint length or two and hid it, a frame that ends
+        // does not and lost its last bits.
+        let best = |cost: &[i16]| {
+            cost.iter().enumerate().min_by_key(|(_, c)| **c).map(|(s, _)| s).unwrap_or(0)
+        };
         let mut state = match ends {
             Ends::Zero => 0,
+            Ends::Anywhere if self.narrow => best(&self.cost16),
             Ends::Anywhere => self
                 .cost
                 .iter()
@@ -740,6 +1014,41 @@ mod tests {
     /// A channel that flips one coded bit in forty, with no soft information
     /// to say which, is corrected completely at rate 1/2.
     #[test]
+    fn the_whole_number_butterfly_reads_what_the_floats_do() {
+        let (narrow, ..) = Viterbi::new(K7_X_FIRST).paths();
+        if !narrow {
+            eprintln!("no avx2 here, the narrow path is not the one running");
+            return;
+        }
+        // Noisy enough that the two have to agree about close calls, and
+        // long enough that a cost quantised into sixteen bits has to survive
+        // every normalising pass along the way.
+        let want = bits(40_000, 11);
+        let mut soft = encode(K7_X_FIRST, &want);
+        let mut s = 4242u32;
+        for v in soft.iter_mut() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *v += (s >> 16) as f32 / 65_536.0 - 0.5;
+        }
+        // A gain of a hundred and a gain of a hundredth decode the same:
+        // the scale the numbers arrive at is not the decoder's business.
+        for gain in [1.0, 0.01, 100.0] {
+            let soft: Vec<f32> = soft.iter().map(|v| v * gain).collect();
+            let run = |mut v: Viterbi| {
+                let mut out = Vec::new();
+                v.push(&soft, P_1_2, &mut out);
+                v.finish(&mut out);
+                out
+            };
+            let whole = run(Viterbi::new(K7_X_FIRST));
+            let floats = run(Viterbi::new(K7_X_FIRST).only_floats());
+            let wrong = whole.iter().zip(&want).filter(|(a, b)| a != b).count();
+            assert_eq!(wrong, 0, "gain {gain}: {wrong} bits wrong in whole numbers");
+            assert_eq!(whole, floats, "gain {gain}: the two widths disagree");
+        }
+    }
+
+    #[test]
     fn the_wide_butterfly_reads_what_the_scalar_one_does() {
         if !wide_available() {
             eprintln!("no avx2 here, the wide path is not the one running");
@@ -757,7 +1066,7 @@ mod tests {
         for code in [K7_X_FIRST, M17, TETRA_1_3] {
             let soft = if code == K7_X_FIRST { soft.clone() } else { encode(code, &want) };
             let run = |wide: bool| {
-                let mut v = Viterbi::new(code);
+                let mut v = Viterbi::new(code).only_floats();
                 assert!(v.wide, "{code:?} should take the wide path");
                 v.wide = wide;
                 let mut out = Vec::new();
