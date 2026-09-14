@@ -1569,15 +1569,37 @@ impl App {
     /// plugged in. The filename has to carry the sample rate and the format,
     /// because a guessed rate rescales every pulse width downstream and the
     /// receiver then decodes nothing for a reason nobody can see.
+    ///
+    /// The dialog runs on a thread of its own. Asking for it on the one that
+    /// paints stops the receiver painting for as long as it is open, and a
+    /// window that does not paint is a window the compositor puts a "not
+    /// responding" dialog over.
     pub(super) fn open_capture(&mut self, ctx: &egui::Context) {
+        if self.picking.is_some() {
+            return;
+        }
         let start = crate::chain::default_capture_dir();
         let _ = std::fs::create_dir_all(&start);
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Replay a capture")
-            .set_directory(&start)
-            .add_filter("IQ captures", &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-data"])
-            .pick_file()
-        else {
+        let ctx = ctx.clone();
+        self.picking = Some(poll_promise::Promise::spawn_thread("open capture", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Replay a capture")
+                .set_directory(&start)
+                .add_filter("IQ captures", &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-data"])
+                .pick_file();
+            // Nothing is drawing while the dialog is up, so the frame that
+            // reads this has to be asked for.
+            ctx.request_repaint();
+            picked
+        }));
+    }
+
+    /// Take the capture the dialog came back with, once it has.
+    pub(super) fn poll_capture(&mut self, ctx: &egui::Context) {
+        if self.picking.as_ref().is_none_or(|p| p.ready().is_none()) {
+            return;
+        }
+        let Some(path) = self.picking.take().and_then(|p| p.block_and_take()) else {
             return;
         };
         let Some(c) = crate::devices::add_capture(path.clone()) else {
