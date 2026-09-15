@@ -1141,18 +1141,6 @@ impl App {
         // without it a fix arriving while nothing else is moving would sit
         // unshown until the pointer did.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-
-        // The survey is what a position is for, and the switch belongs beside
-        // it rather than three panes away.
-        let mut on = self.survey.path.is_some();
-        let survey_help = "One row per transmitter heard, with the places it was heard from. \
-                           The packet log keeps the transmissions; this keeps the transmitters.";
-        if switch(ui, "survey", &mut on, "record a device database", survey_help) {
-            self.set_survey(!on, None);
-        }
-        if let Some(p) = self.survey.path.as_ref() {
-            reading(ui, "written to", p.display().to_string());
-        }
     }
 
     /// What is in the dataset cache, and the buttons that go and ask.
