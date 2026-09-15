@@ -956,9 +956,12 @@ impl Receiver {
                     pool = parts.into_iter().filter_map(|p| p.tag.map(|t| (t, p))).collect();
                     ring = pool.remove(&derived::RING).and_then(|p| RecordRing::from_part(p.node));
                     // The radio goes to the transmit thread rather than into
-                    // this graph, so there is nothing of it to recover. The
-                    // microphone is held here and is handed in again.
-                    sinks_tx = self.mic.clone().map(|mic| TxSinks { stream: None, mic: Some(mic) });
+                    // this graph, so there is nothing of it to recover. What
+                    // feeds the source stage is handed in again, and it is
+                    // whichever the plan says: an agent channel rebuilt round
+                    // a refusal must not come back reading the room.
+                    sinks_tx =
+                        self.tx_source_of(plan).map(|src| TxSinks { stream: None, mic: Some(src) });
                 }
             }
         }
@@ -4493,6 +4496,46 @@ pub(crate) mod tests {
         plan.channels.push(chan(2, -25_000.0, Demod::Nfm));
         rx.rebuild(&plan).expect("a rebuild");
         assert_eq!(rx.transcriber().expect("a transcriber").enabled, true);
+    }
+
+    /// The switch survives a restart, not merely a rebuild.
+    ///
+    /// It is written to `~/.config/waveshark/edits` as an override on the
+    /// derived stage, and read back at start. Everything between those two is
+    /// what this checks: the file's text, the edit it parses to, and a
+    /// receiver built with it coming up transcribing.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn the_transcriber_comes_back_on_after_a_restart() {
+        let mut plan = plan(2_400_000.0, Hz::mhz(145));
+        plan.fronts.clear();
+        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
+
+        // Switched on, and what that writes down.
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let id = rx.node_of_stage(derived::TRANSCRIBE).expect("the transcriber's node");
+        rx.set_node_param(id.0, "enabled", pipeline::ParamValue::Bool(true)).expect("the switch");
+        rx.set_node_param(id.0, "model", pipeline::ParamValue::Text("whisper-tiny.en".into()))
+            .expect("the model");
+        rx.set_node_param(id.0, "device", pipeline::ParamValue::Text("cuda:0".into()))
+            .expect("the device");
+        let written = rx.edits().render(&Default::default());
+        for want in ["enabled b true", "model t whisper-tiny.en", "device t cuda:0"] {
+            assert!(
+                written.contains(&format!("override {} {want}", derived::TRANSCRIBE)),
+                "the file would say {written:?}"
+            );
+        }
+
+        // The next start: the file read back, and a receiver built with it.
+        let (edits, _places) = crate::patch::Edits::parse(&written);
+        assert_eq!(edits, rx.edits(), "the file does not round trip");
+        plan.edits = edits;
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let back = rx.transcriber().expect("a transcriber");
+        assert!(back.enabled, "it came up off, so the switch is found again at every start");
+        assert_eq!(back.model, "whisper-tiny.en", "the model picked is not the model");
+        assert_eq!(back.device_choice, "cuda:0", "the card picked is not the card");
     }
 
     /// Without the mark it is audio and nothing else, which is what an
