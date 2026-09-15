@@ -226,6 +226,14 @@ pub(super) struct ChainState {
     /// saved on disk. Applied whether or not manual mode is on: the mode is
     /// a lock on editing, not a different receiver.
     pub edits: crate::patch::Edits,
+    /// Whether the edits read off disk have been seen in a running graph.
+    ///
+    /// The receiver publishes its first graph before it has been handed the
+    /// edits, and what is read off that is an empty set. Adopted, it replaced
+    /// what had just been loaded and wrote an empty file over it: every
+    /// setting changed by parameter, the transcriber's switch among them, was
+    /// lost at the next start and had to be found again.
+    pub edits_landed: bool,
     /// Where the stages were when the graph was last written out, so that
     /// dragging one is saved without writing the file on every frame.
     pub places: crate::patch::Places,
@@ -287,6 +295,28 @@ impl ChainState {
         self.patch_sent = Some(self.patch.clone());
         cmds.push(Cmd::Edits(self.edits.clone()));
         self.save_patch();
+    }
+
+    /// Take what the running graph says the edits are.
+    ///
+    /// A setting changed by parameter, from the chain inspector or the
+    /// transcript card, is an edit the receiver made on the interface's
+    /// behalf: it comes back as the running graph and has to be written out
+    /// like one drawn by hand, or the model picked is the model until the
+    /// program is restarted.
+    ///
+    /// Not before what was read off disk has been seen running, though. The
+    /// receiver publishes its first graph before it has been handed the
+    /// edits, and what is read off that is an empty set: adopted, it wrote an
+    /// empty file over the one just loaded, and the transcriber's switch had
+    /// to be found again at every start.
+    pub fn take_edits_from_the_running_graph(&mut self) {
+        let edits = crate::patch::Edits::diff(&self.patch, &self.base, crate::chain::operator_owns);
+        self.edits_landed |= !edits.is_empty() || self.edits.is_empty();
+        if edits != self.edits && self.edits_landed {
+            self.edits = edits;
+            self.save_patch();
+        }
     }
 
     /// Write the edits out, with where the stages were put.
@@ -842,5 +872,74 @@ impl FilePick {
             param,
             pipeline::param::ParamValue::Text(path.display().to_string()),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::derived;
+    use pipeline::ParamValue as V;
+
+    /// The graph the receiver draws before it has been handed anything.
+    fn drawn() -> crate::patch::Patch {
+        let mut p = crate::patch::Patch::default();
+        let mut s = pipeline::registry::Settings::new();
+        s.insert("enabled".into(), V::Bool(false));
+        p.add_derived(derived::TRANSCRIBE, "transcribe_live", s);
+        p
+    }
+
+    /// What was saved is not thrown away by the first graph the receiver
+    /// publishes.
+    ///
+    /// The receiver comes up, draws a graph and publishes it before the
+    /// interface has handed it the edits read off disk. Reading that graph
+    /// gives an empty set, and adopting it wrote an empty file over the one
+    /// just loaded: the transcriber's switch, the model picked, every setting
+    /// changed by parameter, all of it had to be found again at the next
+    /// start.
+    #[test]
+    fn a_saved_edit_survives_the_graph_published_before_it_lands() {
+        let mut c = ChainState { edits: crate::patch::Edits::default(), ..Default::default() };
+        // As `App::new` leaves it: read off disk, not yet seen running.
+        c.edits.settings.push((derived::TRANSCRIBE, "enabled".into(), V::Bool(true)));
+        assert!(!c.edits_landed);
+
+        // The first publish: the receiver's own graph, without them.
+        c.base = drawn();
+        c.patch = drawn();
+        c.take_edits_from_the_running_graph();
+        assert_eq!(c.edits.settings.len(), 1, "the switch was thrown away before it was applied");
+
+        // The next one, once the receiver has them: the same edits, still
+        // there, and now known to have landed.
+        let mut running = drawn();
+        running
+            .stage_mut(derived::TRANSCRIBE)
+            .unwrap()
+            .settings
+            .insert("enabled".into(), V::Bool(true));
+        c.patch = running;
+        c.take_edits_from_the_running_graph();
+        assert!(c.edits_landed);
+        assert_eq!(c.edits.settings.len(), 1);
+
+        // And now the operator switching it off is taken, because what it
+        // reads is the graph they are actually looking at.
+        c.patch = drawn();
+        c.take_edits_from_the_running_graph();
+        assert!(c.edits.settings.is_empty(), "the switch cannot be turned off again");
+    }
+
+    /// A receiver with nothing saved adopts what it reads straight away.
+    #[test]
+    fn with_nothing_saved_the_first_graph_is_taken_as_it_is() {
+        let mut c = ChainState::default();
+        assert!(c.edits.is_empty());
+        c.base = drawn();
+        c.patch = drawn();
+        c.take_edits_from_the_running_graph();
+        assert!(c.edits_landed, "there was nothing to wait for");
     }
 }
