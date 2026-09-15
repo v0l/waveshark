@@ -119,6 +119,8 @@ the code is in the commit log.
 
 - The transcriber loads its model as the receiver starts, not at the first over.
 
+- The agent keys a moment before it speaks and holds a moment after, so a squelch opens in time.
+
 - Radiotext and aircraft datalink filled the message view with nobody's words.
 
 - Every device published to Home Assistant read as made by "unknown".
