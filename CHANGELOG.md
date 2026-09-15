@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- Scanner blocks that are one region's allocation run only in that region.
+
 - Saved channels keep their repeater shift and what they transmit.
 
 - A transmitted multiplex carries a network table and a service name, so a television finds it.
@@ -63,6 +65,10 @@ the code is in the commit log.
 - SSTV holds up better on a weak signal.
 
 ### Fixed
+
+- ACARS and VDL Mode 2 decoded one channel of the several the table lists.
+
+- The keys tab lit its dot on every start for anybody with a key saved.
 
 - Keying a channel just added or recalled: it said there was no transmit side.
 

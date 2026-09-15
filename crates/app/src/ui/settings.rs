@@ -221,6 +221,26 @@ impl App {
                                 .desired_width(112.0)
                                 .hint_text("name"),
                         );
+                        // A block that is somebody else's allocation says so,
+                        // and says it in the red it is not running in: a
+                        // block gated to another region looks exactly like a
+                        // block the span does not cover, and the difference
+                        // is one the operator cannot guess.
+                        if !r.regions.is_empty() {
+                            let here = r.regions.contains(&crate::bands::plan());
+                            let names: Vec<&str> =
+                                r.regions.iter().map(|p| p.id()).collect();
+                            let mut line = theme::Line::new().legend("region");
+                            line = match here {
+                                true => line.value(names.join(", ")),
+                                false => line.value(names.join(", ")).tint(theme::FAULT),
+                            };
+                            line.size(11.0).show(ui).on_hover_text(match here {
+                                true => "this block is for the region in the settings",
+                                false => "another region's allocation, so it does not run here. \
+                                          Drop the region line in the scanners file to run it anyway",
+                            });
+                        }
                         ui.add_space(4.0);
                         ui.label(legend("front"));
                         egui::ComboBox::from_id_salt(("front", i))
