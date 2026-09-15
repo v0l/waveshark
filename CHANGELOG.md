@@ -11,6 +11,14 @@ the code is in the commit log.
 
 ### Added
 
+- An Agent view: ask a model for something and it drives the receiver.
+- Talk to the agent over the air: set a channel's transmit source to AGENT.
+- The agent speaks with a model on this machine, or with a speech server.
+
+- The agent answers to a name you choose, and waits for the channel to be clear.
+
+- Agents can key the transmitter, set the tone or microphone, and set transmit gain.
+
 - Scanner blocks that are one region's allocation run only in that region.
 
 - A decoder that cannot read the span is left out instead of stopping the receiver.

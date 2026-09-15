@@ -271,6 +271,83 @@ impl AudioSource for Canned {
     }
 }
 
+/// Speech waiting to be transmitted, written by whatever produced it and
+/// read by the transmit chain.
+///
+/// The queue is the whole of the interlock: the transmitter keys while there
+/// is something in it and lets go when it runs dry, so an over is exactly as
+/// long as what there is to say. Nothing here decides when to key.
+///
+/// One rate, fixed when the queue is made: a producer that changes rate makes
+/// a new queue rather than resampling into this one, because the resampler
+/// that matters is the one in front of the modulator and it reads [`rate`]
+/// once, when the graph is built.
+///
+/// [`rate`]: AudioSource::rate
+pub struct Speaker {
+    queue: Mutex<std::collections::VecDeque<f32>>,
+    rate: f64,
+    /// Samples handed over since the queue was made, so a caller can tell a
+    /// queue that has not started from one that has finished.
+    spoken: AtomicU64,
+}
+
+impl Speaker {
+    pub fn new(rate: f64) -> Self {
+        Self {
+            queue: Mutex::new(std::collections::VecDeque::new()),
+            rate,
+            spoken: AtomicU64::new(0),
+        }
+    }
+
+    /// Add something to say. Appended, so two sentences run together as one
+    /// over rather than interrupting each other.
+    pub fn say(&self, samples: &[f32]) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.extend(samples.iter().copied());
+        }
+    }
+
+    /// Samples still to go out.
+    pub fn waiting(&self) -> usize {
+        self.queue.lock().map(|q| q.len()).unwrap_or(0)
+    }
+
+    /// How long what is queued would take to transmit.
+    pub fn seconds(&self) -> f64 {
+        self.waiting() as f64 / self.rate.max(1.0)
+    }
+
+    pub fn spoken(&self) -> u64 {
+        self.spoken.load(Ordering::Relaxed)
+    }
+
+    /// Throw away what has not gone out yet, which is what stopping an over
+    /// part way through means.
+    pub fn cut(&self) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.clear();
+        }
+    }
+}
+
+impl AudioSource for Speaker {
+    fn rate(&self) -> f64 {
+        self.rate
+    }
+
+    /// What is queued, and no silence: a short read is the chain's cue that
+    /// the over is over, and filling it would key the transmitter on hiss.
+    fn take(&self, out: &mut Vec<f32>, want: usize) -> usize {
+        let Ok(mut q) = self.queue.lock() else { return 0 };
+        let n = want.min(q.len());
+        out.extend(q.drain(..n));
+        self.spoken.fetch_add(n as u64, Ordering::Relaxed);
+        n
+    }
+}
+
 /// Whether a name cpal reported is a sound card rather than one of ALSA's
 /// plugins.
 ///
@@ -393,5 +470,42 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(src.take(&mut out, 10), 10);
         assert_eq!(out.len(), 10);
+    }
+
+    /// The queue is the interlock, so what it reports has to be exact: how
+    /// much is left, how long that is, and nothing invented to fill a read.
+    #[test]
+    fn a_speaker_hands_over_what_is_queued_and_no_silence() {
+        let s = Speaker::new(16_000.0);
+        assert_eq!(s.waiting(), 0);
+        assert_eq!(s.seconds(), 0.0);
+        s.say(&[0.5; 8_000]);
+        assert_eq!(s.waiting(), 8_000);
+        assert!((s.seconds() - 0.5).abs() < 1e-9, "half a second at 16 kHz");
+
+        let mut out = Vec::new();
+        assert_eq!(s.take(&mut out, 3_000), 3_000);
+        assert_eq!(s.waiting(), 5_000);
+        assert_eq!(s.spoken(), 3_000);
+        // A short read rather than silence: the chain reads that as the end
+        // of the over.
+        assert_eq!(s.take(&mut out, 9_000), 5_000);
+        assert_eq!(s.take(&mut out, 100), 0);
+        assert_eq!(out.len(), 8_000);
+        assert_eq!(s.spoken(), 8_000);
+    }
+
+    /// Two sentences run together as one over, and cutting leaves nothing
+    /// half said in the queue for the next one.
+    #[test]
+    fn a_speaker_joins_what_it_is_given_and_can_be_cut() {
+        let s = Speaker::new(8_000.0);
+        s.say(&[1.0; 100]);
+        s.say(&[-1.0; 50]);
+        assert_eq!(s.waiting(), 150);
+        s.cut();
+        assert_eq!(s.waiting(), 0);
+        let mut out = Vec::new();
+        assert_eq!(s.take(&mut out, 10), 0);
     }
 }

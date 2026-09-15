@@ -173,14 +173,18 @@ const REBUILD_WAIT: std::time::Duration = std::time::Duration::from_millis(2500)
 impl App {
     /// Take everything an agent has queued since the last frame.
     pub(super) fn agent_serve(&mut self, ctx: &egui::Context) {
-        if self.agent.is_none() {
-            return;
+        if !self.desk_rung {
+            // The interface draws when something happens, and a tool call
+            // arriving over a socket or from a model is not something egui
+            // knows about.
+            let ctx = ctx.clone();
+            self.desk.bell().answered_by(move || ctx.request_repaint());
+            self.desk_rung = true;
         }
         // Before this frame's actions, so an edit is judged against the
         // rebuild that followed it rather than one it caused.
         self.agent_settle_edits();
-        let Some(asks) = self.agent.as_ref() else { return };
-        let jobs: Vec<Ask> = asks.try_iter().collect();
+        let jobs: Vec<Ask> = self.agent.try_iter().collect();
         for job in jobs {
             let Ask { action, reply } = job;
             // A screenshot is answered by a later frame, since the image
@@ -580,6 +584,18 @@ impl App {
                 self.listen(i);
                 Ok(ok())
             }
+            Action::Key(a) => self.agent_key(a.id),
+            Action::Unkey => {
+                self.audio.keying = Default::default();
+                self.send(Cmd::Key(None));
+                Ok(ok())
+            }
+            Action::Transmit(a) => self.agent_transmit(a),
+            Action::TxGain(a) => {
+                self.radio_settings.tx_gain_db = a.db;
+                self.send(Cmd::TxGain(a.db));
+                Ok(json!({ "tx_gain_db": a.db }))
+            }
             Action::Volume(a) => {
                 if let Some(v) = a.volume {
                     self.audio.volume = v.clamp(0.0, 1.0);
@@ -616,6 +632,7 @@ impl App {
                     args::ViewName::Video => View::Video,
                     args::ViewName::Keys => View::Keys,
                     args::ViewName::Control => View::Control,
+                    args::ViewName::Agent => View::Agent,
                 });
                 Ok(ok())
             }
@@ -716,6 +733,83 @@ impl App {
         }
         self.send_channels();
         Ok(ok())
+    }
+
+    /// Put a channel on air, as the key on the strip does.
+    ///
+    /// Everything that would make the key refuse is checked here rather than
+    /// left to the radio thread, which answers a key it cannot honour by
+    /// doing nothing: an agent needs the reason, not the silence.
+    fn agent_key(&mut self, id: u64) -> Result<Value, String> {
+        let can = self
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.status.can_transmit.load(std::sync::atomic::Ordering::Relaxed));
+        if !can {
+            return Err("this radio cannot transmit".into());
+        }
+        let c = self
+            .audio
+            .channels
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| format!("no channel {id}"))?;
+        if crate::radio::tx_mode_for(&c.mode).is_none() {
+            return Err(format!(
+                "channel {id} is {}, which has no modulator behind it",
+                c.mode.label()
+            ));
+        }
+        let spec = c.tx.unwrap_or_default();
+        // Half duplex: a key while another channel is up lets that one go
+        // first, the same order the strip sends them in.
+        if self.audio.keying.at.is_some_and(|at| at != id) {
+            self.send(Cmd::Key(None));
+        }
+        if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == id) {
+            c.tx = Some(spec);
+        }
+        self.send_channels();
+        self.audio.keying = super::state::Keying { at: Some(id), latched: true };
+        self.send(Cmd::Key(Some(id)));
+        Ok(json!({ "keyed": id, "source": spec.source.label() }))
+    }
+
+    /// What a channel puts through the modulator when it is keyed.
+    fn agent_transmit(&mut self, a: args::Transmit) -> Result<Value, String> {
+        let c = self
+            .audio
+            .channels
+            .iter_mut()
+            .find(|c| c.id == a.id)
+            .ok_or_else(|| format!("no channel {}", a.id))?;
+        let mut spec = c.tx.unwrap_or_default();
+        if let Some(s) = a.source {
+            spec.source = match s {
+                args::Source::Tone => crate::radio::TxSource::Tone,
+                args::Source::Mic => crate::radio::TxSource::Mic,
+            };
+        }
+        if let Some(hz) = a.tone_hz {
+            if !(100.0..=5_000.0).contains(&hz) {
+                return Err("a tone is between 100 and 5000 Hz".into());
+            }
+            spec.tone_hz = f64::from(hz);
+        }
+        if let Some(g) = a.mic_gain {
+            spec.mic_gain = g.clamp(0.0, nodes::MIC_GAIN_MAX);
+        }
+        if let Some(db) = a.trim_db {
+            spec.trim_db = db.clamp(0.0, 20.0);
+        }
+        c.tx = Some(spec);
+        self.send_channels();
+        Ok(json!({
+            "source": spec.source.label(),
+            "tone_hz": spec.tone_hz,
+            "mic_gain": spec.mic_gain,
+            "trim_db": spec.trim_db,
+        }))
     }
 
     /// Whether a frequency is inside the span the receiver is working in.
@@ -922,10 +1016,20 @@ impl App {
                     "squelch_reading_db": st.map(|s| s.squelch_db),
                     "agc_gain_db": st.map(|s| s.agc_gain_db),
                     "level": st.map(|s| s.level),
+                    // What keying this channel would do, and whether it is
+                    // doing it. A mode with no modulator behind it cannot be
+                    // keyed at all, which is worth saying before it is tried.
+                    "can_key": crate::radio::tx_mode_for(&c.mode).is_some(),
+                    "keyed": self.audio.keying.at == Some(c.id),
+                    "tx_source": c.tx.map(|t| t.source.label()),
                 })
             })
             .collect();
-        json!({ "channels": list })
+        let can_transmit = self
+            .radio
+            .as_ref()
+            .is_some_and(|r| r.status.can_transmit.load(std::sync::atomic::Ordering::Relaxed));
+        json!({ "channels": list, "radio_can_transmit": can_transmit })
     }
 
     fn agent_packets(&self, a: &args::Packets) -> Value {
@@ -1458,6 +1562,81 @@ mod tests {
         assert!(err.contains("99.0000"), "{err}");
         assert!(err.contains("101.0000"), "{err}");
         assert_eq!(a.audio.channels.len(), 0);
+    }
+
+    /// Keying says why it will not, rather than doing nothing.
+    ///
+    /// Three different refusals, and the radio thread answers all three the
+    /// same way, which is by ignoring the command: without these an agent
+    /// keying an unlicensed receiver reads success and hears silence.
+    #[test]
+    fn a_key_that_cannot_go_on_air_says_which_reason() {
+        let mut a = app();
+        // No radio at all.
+        let err = call(&mut a, Action::Key(args::Channel { id: 1 })).unwrap_err();
+        assert!(err.contains("cannot transmit"), "{err}");
+
+        // A radio that can, but a channel that is not there, then one whose
+        // mode has no modulator behind it.
+        a.radio = None;
+        let id = call(
+            &mut a,
+            Action::AddChannel(args::AddChannel {
+                mhz: 100.4,
+                mode: Some("usb".into()),
+                bandwidth_khz: None,
+                label: None,
+            }),
+        )
+        .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(a.audio.channels.len(), 1);
+        assert_eq!(a.audio.keying.at, None, "nothing was keyed");
+        // Changing what a channel transmits does not need a radio, so the
+        // spec is settable before one is open and survives to the key.
+        let set = call(
+            &mut a,
+            Action::Transmit(args::Transmit {
+                id,
+                source: Some(args::Source::Mic),
+                tone_hz: Some(1_200.0),
+                mic_gain: Some(2.0),
+                trim_db: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(set["source"], "MIC");
+        assert_eq!(set["tone_hz"], 1_200.0);
+        assert_eq!(set["mic_gain"], 2.0);
+        let tx = a.audio.channels[0].tx.expect("a transmit spec");
+        assert_eq!(tx.source, crate::radio::TxSource::Mic);
+        assert_eq!(tx.tone_hz, 1_200.0);
+
+        let err = call(
+            &mut a,
+            Action::Transmit(args::Transmit {
+                id,
+                source: None,
+                tone_hz: Some(20.0),
+                mic_gain: None,
+                trim_db: None,
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("100 and 5000"), "{err}");
+        assert_eq!(a.audio.channels[0].tx.expect("unchanged").tone_hz, 1_200.0);
+    }
+
+    /// Unkeying is safe from anywhere: an agent that has lost track of what
+    /// it keyed must be able to say stop without knowing the channel.
+    #[test]
+    fn unkeying_takes_the_transmitter_off_air() {
+        let mut a = app();
+        a.audio.keying = super::state::Keying { at: Some(7), latched: true };
+        call(&mut a, Action::Unkey).unwrap();
+        assert_eq!(a.audio.keying.at, None);
+        assert!(!a.audio.keying.latched);
     }
 
     /// Opening, changing and closing a channel, counted at every step.

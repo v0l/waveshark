@@ -59,6 +59,8 @@ pub enum Icon {
     /// What was said, written down: a bubble with words in it, against the
     /// empty bubble that means text somebody typed.
     Transcript,
+    /// A model driving the receiver.
+    Agent,
 }
 
 /// Side of the clickable square, in points.
@@ -110,6 +112,10 @@ impl Icon {
             // Lines of writing rather than a bubble: `Messages` is the empty
             // bubble, and here the point is that speech came out as words.
             Icon::Transcript => ph::ARTICLE,
+            // A head with circuitry in it. Not a chat bubble, which the
+            // messages tab already is, and not a star, which reads as a
+            // favourite.
+            Icon::Agent => ph::ROBOT,
         }
     }
 
@@ -239,7 +245,7 @@ mod tests {
     /// Every icon in the top bar and the view strip, in the order they are
     /// drawn. Listed rather than derived so a new variant has to be added
     /// here, which is where the tests below then check it.
-    const ALL: [Icon; 23] = [
+    const ALL: [Icon; 24] = [
         Icon::Play,
         Icon::Stop,
         Icon::Sliders,
@@ -263,6 +269,7 @@ mod tests {
         Icon::Devices,
         Icon::Satellite,
         Icon::Key,
+        Icon::Agent,
     ];
 
     #[test]
