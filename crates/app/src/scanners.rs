@@ -516,11 +516,8 @@ impl Scanners {
         let mut list = Vec::new();
         let mut version = 0u32;
         let mut cur: Option<Scanner> = None;
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() {
-                continue;
-            }
+        for line in joined(text) {
+            let line = line.as_str();
             if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
                 if let Some(mut s) = cur.take().filter(|s| !s.channels_unset()) {
                     s.settle();
@@ -568,9 +565,7 @@ impl Scanners {
                         s.front = f;
                     }
                 }
-                "channels" => {
-                    s.channels = v.split(',').filter_map(hz).collect();
-                }
+                "channels" => s.channels = list_hz(v),
                 "margin" => s.margin_hz = hz(v).unwrap_or(0.0),
                 // A known set of values, read once into the enum the rest of
                 // the receiver decides by. A word nobody recognises is left
@@ -682,6 +677,48 @@ pub(crate) fn unit_of(s: &str) -> f64 {
 }
 
 /// `162.025 MHz`, `150 kHz`, or a bare number in hertz.
+/// The lines of the file, with a wrapped one joined to the line it belongs
+/// to, comments stripped and blanks dropped.
+///
+/// A long list of channels does not fit on one line and a reader will wrap
+/// it. The continuation used to be a line with no `=` in it, which was
+/// skipped in silence: ten frequencies were written, five were read, and
+/// nothing said which five.
+fn joined(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A heading or a `key = value` starts a line; anything else carries
+        // on the one before it, which is what an indented wrap looks like.
+        let starts = line.starts_with('[') || line.contains('=');
+        match (starts, out.last_mut()) {
+            (false, Some(prev)) => {
+                if !prev.ends_with(',') {
+                    prev.push(',');
+                }
+                prev.push(' ');
+                prev.push_str(line);
+            }
+            _ => out.push(line.to_string()),
+        }
+    }
+    out
+}
+
+/// A comma separated list of frequencies, where the unit may be written on
+/// every one or once at the end.
+///
+/// "136.1, 136.65 MHz" is ten megahertz written the way a person writes it,
+/// and reading the first as 136.1 Hz drops it out of the band silently. The
+/// same rule the `range` key already follows.
+fn list_hz(v: &str) -> Vec<f64> {
+    let unit = v.rsplit(',').next().map(unit_of).unwrap_or(1.0);
+    v.split(',').filter_map(|p| hz_with(p, unit)).collect()
+}
+
 pub(crate) fn hz(s: &str) -> Option<f64> {
     hz_with(s, unit_of(s))
 }
@@ -812,14 +849,28 @@ channels = 144.500 MHz
 margin   = 12.5 kHz
 
 [VDL2]
-# The VHF datalink sub-band, which is the same plan everywhere: 136.975 is
-# the common signalling channel every ground station carries, and the four
-# below it are the ones European traffic moved onto as ACARS emptied out.
-range    = 136.65 - 137.0 MHz
+# Every VDL Mode 2 channel in use. 136.975 is the common signalling channel
+# every ground station carries, worldwide; the rest are split between ARINC
+# and SITA and between regions, and are listed here under both so a receiver
+# picks up whichever its span reaches. European traffic moved onto these as
+# ACARS emptied out.
+range    = 136.6 - 137.0 MHz
 span     = 400 kHz
 front    = vdl2
-channels = 136.725 MHz, 136.775 MHz, 136.825 MHz, 136.875 MHz, 136.975 MHz
+channels = 136.675, 136.725, 136.775, 136.825, 136.875, 136.975 MHz
 margin   = 25 kHz
+region   = europe, asia-pacific
+
+[VDL2 Americas]
+# The ARINC and SITA channels of North America. 136.1 is nearly a megahertz
+# below the others, so it is only ever in the span on its own or on a wide
+# one.
+range    = 136.05 - 137.0 MHz
+span     = 400 kHz
+front    = vdl2
+channels = 136.1, 136.65, 136.7, 136.8, 136.975 MHz
+margin   = 25 kHz
+region   = americas
 
 [POCSAG]
 # The amateur DAPNET network, which runs POCSAG at 1200 baud and is the one
@@ -1076,9 +1127,30 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ADS-B", "AIS", "APRS", "ACARS", "SSTV", "VDL2", "POCSAG", "GSM", "GSM 850",
-                "GSM 900", "DCS 1800", "PCS 1900", "TETRA", "ISM 27", "ISM 40", "ISM 169",
-                "ISM 315", "SLP 426", "ISM 433", "ISM 868", "ISM 915", "ISM 920", "ISM 2.4",
+                "ADS-B",
+                "AIS",
+                "APRS",
+                "ACARS",
+                "SSTV",
+                "VDL2",
+                "VDL2 Americas",
+                "POCSAG",
+                "GSM",
+                "GSM 850",
+                "GSM 900",
+                "DCS 1800",
+                "PCS 1900",
+                "TETRA",
+                "ISM 27",
+                "ISM 40",
+                "ISM 169",
+                "ISM 315",
+                "SLP 426",
+                "ISM 433",
+                "ISM 868",
+                "ISM 915",
+                "ISM 920",
+                "ISM 2.4",
                 "ISM 5.8"
             ]
         );
@@ -1235,9 +1307,16 @@ mod tests {
             "the airband channels the table lists"
         );
         assert_eq!(
-            on("vdl2", 136_850_000.0, 400_000.0),
-            [136_725_000.0, 136_775_000.0, 136_825_000.0, 136_875_000.0, 136_975_000.0],
-            "the VHF datalink channels the table lists"
+            on("vdl2", 136_825_000.0, 400_000.0),
+            [
+                136_675_000.0,
+                136_725_000.0,
+                136_775_000.0,
+                136_825_000.0,
+                136_875_000.0,
+                136_975_000.0
+            ],
+            "the European VHF datalink channels the table lists"
         );
         // Only the ones the span reaches, with their margin: a channel on the
         // edge is demodulated through the anti-alias skirt and reads as
@@ -1288,6 +1367,89 @@ mod tests {
             "[X]\nrange = 1 - 2 MHz\nspan = 1 kHz\nfront = auto\nregion = narnia\n",
         );
         assert_eq!(typo.list[0].regions, []);
+    }
+
+    /// A list too long for a line, and a unit written once at the end.
+    ///
+    /// Both are how a person writes ten frequencies, and both used to be read
+    /// wrong in silence: the wrapped half was skipped as a line with no `=`
+    /// in it, and everything before the unit was read as hertz and fell out
+    /// of the band. Ten channels in, five out, nothing saying which five.
+    #[test]
+    fn a_wrapped_line_and_a_unit_at_the_end_are_read_whole() {
+        let t = Scanners::parse(
+            "[VDL2]\n\
+             range    = 136.05 - 137 MHz\n\
+             span     = 400 kHz\n\
+             front    = vdl2\n\
+             channels = 136.1 MHz, 136.65 MHz, 136.675 MHz, 136.7 MHz, 136.725 MHz,\n\
+                        136.775 MHz, 136.8 MHz, 136.825 MHz, 136.875 MHz, 136.975 MHz\n\
+             margin   = 25 kHz\n",
+        );
+        assert_eq!(t.list.len(), 1);
+        let mhz: Vec<f64> = t.list[0].channels.iter().map(|c| (c / 1e3).round() / 1e3).collect();
+        assert_eq!(
+            mhz,
+            [136.1, 136.65, 136.675, 136.7, 136.725, 136.775, 136.8, 136.825, 136.875, 136.975]
+        );
+
+        // The unit once at the end, the way `range` already takes it.
+        let terse = Scanners::parse(
+            "[X]\nrange = 136.05 - 137 MHz\nspan = 400 kHz\nfront = vdl2\n\
+             channels = 136.1, 136.65, 136.975 MHz\n",
+        );
+        assert_eq!(terse.list[0].channels, [136_100_000.0, 136_650_000.0, 136_975_000.0]);
+
+        // And a wrap with the comma at the start of the next line, which is
+        // the other way a person breaks a list.
+        let other = Scanners::parse(
+            "[X]\nrange = 136.05 - 137 MHz\nspan = 400 kHz\nfront = vdl2\n\
+             channels = 136.1 MHz\n             , 136.975 MHz\n",
+        );
+        assert_eq!(other.list[0].channels, [136_100_000.0, 136_975_000.0]);
+    }
+
+    /// Every VDL Mode 2 channel in use, under the regulator that uses it.
+    ///
+    /// The wiki lists ten: five European, four North American and the common
+    /// signalling channel every ground station carries. Five were shipped and
+    /// the rest of the plan was not written down anywhere, so an American
+    /// receiver decoded one channel of the five it has.
+    #[test]
+    fn the_vdl2_plan_is_written_down_for_both_sides_of_the_atlantic() {
+        use crate::bands::Plan;
+        let s = Scanners::default();
+        let on = |plan: Plan, c: f64, r: f64| -> Vec<f64> {
+            let mut out: Vec<f64> = s
+                .fronts_in(plan, c, r)
+                .into_iter()
+                .filter_map(|f| match f.front {
+                    Front::Protocol { id, hz } if id == "vdl2" => Some((hz / 1e3).round() / 1e3),
+                    _ => None,
+                })
+                .collect();
+            out.sort_by(f64::total_cmp);
+            out.dedup();
+            out
+        };
+        // A wide span over the whole plan, in each region.
+        assert_eq!(
+            on(Plan::Europe, 136_800_000.0, 1_000_000.0),
+            [136.675, 136.725, 136.775, 136.825, 136.875, 136.975]
+        );
+        assert_eq!(
+            on(Plan::Americas, 136_500_000.0, 1_800_000.0),
+            [136.1, 136.65, 136.7, 136.8, 136.975]
+        );
+        // The common signalling channel is in both, so it is decoded
+        // wherever the receiver is.
+        for plan in [Plan::Europe, Plan::Americas, Plan::AsiaPacific] {
+            assert!(on(plan, 136_975_000.0, 400_000.0).contains(&136.975), "{plan:?}");
+        }
+        // 136.1 is nearly a megahertz below the rest and is only ever reached
+        // on its own or on a wide span.
+        assert_eq!(on(Plan::Americas, 136_100_000.0, 400_000.0), [136.1]);
+        assert!(on(Plan::Europe, 136_100_000.0, 400_000.0).is_empty(), "not a European channel");
     }
 
     /// The point of the change: a band nobody declared runs nothing, instead

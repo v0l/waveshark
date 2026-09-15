@@ -30,6 +30,13 @@ pub const DEFAULT_HZ: f64 = 136_975_000.0;
 /// An airband channel on the 25 kHz grid.
 pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
 
+/// Where VDL Mode 2 is allocated, which is wider than the European group.
+///
+/// 136.100 is an ARINC channel in North America and sits nearly a megahertz
+/// below the rest, so a band that started at 136.65 was a band that could not
+/// decode it however it was tuned.
+pub const BAND_HZ: (f64, f64) = (136_050_000.0, 137_000_000.0);
+
 pub struct Vdl2Node {
     channel_hz: f64,
     mixer: Mixer,
@@ -186,13 +193,13 @@ impl Protocol for Vdl2 {
     /// The VHF datalink sub-band, which is the same everywhere: 136.65 is a
     /// guard channel and the datalink channels run up from it.
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![(136_650_000.0, 137_000_000.0)])
+        Placement::Bands(vec![BAND_HZ])
     }
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 400_000 }
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        if !(136_650_000.0..137_000_000.0).contains(&(p.center_hz() as f64)) {
+        if !(BAND_HZ.0..BAND_HZ.1).contains(&(p.center_hz() as f64)) {
             return None;
         }
         let f = vdl2::parse_frame(bytes)?;
@@ -240,7 +247,13 @@ mod tests {
     /// The same rates, against the 105 kHz the demodulator runs at.
     #[test]
     fn an_awkward_radio_rate_is_still_accepted() {
-        for rate in [2_048_000.0, 2_400_000.0, 2_880_000.0, 8_000_000.0, 20_000_000.0] {
+        // 9142857 is the DVB-T rate rounded to hertz, which a HackRF will sit
+        // at after a television span. It has no small exact ratio to 105 kHz,
+        // so this node refused its input and the whole receiver's graph went
+        // down with it: "cannot build the chain: node 5 (136.975 VDL2)
+        // rejected its input".
+        for rate in [2_048_000.0, 2_400_000.0, 2_880_000.0, 8_000_000.0, 9_142_857.0, 20_000_000.0]
+        {
             let mut n = Vdl2Node::new(DEFAULT_HZ);
             let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(136_975_000)), latency: 0 };
             n.negotiate(&spec).unwrap_or_else(|e| panic!("{rate} refused: {e}"));

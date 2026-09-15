@@ -560,7 +560,13 @@ impl Receiver {
         };
         // Nothing is in the pool to be reused, so whether the span moved is
         // not a question anything asks of this build.
-        rx.assemble(plan, HashMap::new(), sinks.recorder.map(RecordRing::new), sinks.tx, false)?;
+        rx.assemble_without_refusals(
+            plan,
+            HashMap::new(),
+            sinks.recorder.map(RecordRing::new),
+            sinks.tx,
+            false,
+        )?;
         Ok(rx)
     }
 
@@ -825,7 +831,7 @@ impl Receiver {
                 None => tx = Some(TxSinks { stream: None, mic: Some(mic.clone()) }),
             }
         }
-        self.assemble(plan, pool, ring, tx, retuned)?;
+        self.assemble_without_refusals(plan, pool, ring, tx, retuned)?;
         // The stages are keyed by mode and rate, so a channel moved to
         // another frequency comes back holding the nodes it had. The dial
         // moving under every channel is not that: their offsets change and
@@ -875,6 +881,63 @@ impl Receiver {
             .unwrap_or(0)
     }
 
+    /// Build the graph, leaving out any stage that will not take the stream
+    /// it is wired to.
+    ///
+    /// A decoder refuses at negotiation, which is after the graph is drawn
+    /// and wired, so there is no asking in advance: the node is the only
+    /// thing that knows. Before this the refusal came back out of the
+    /// rebuild, the radio thread had no last-good patch to fall back to, and
+    /// the receiver stopped dead because one front end could not reach the
+    /// rate it wanted from an awkward span.
+    ///
+    /// The nodes come back from the failed attempt, so the next one starts
+    /// from the pool it just made: the recorder keeps its open file and the
+    /// banks keep their channels.
+    fn assemble_without_refusals(
+        &mut self,
+        plan: &Plan,
+        pool: HashMap<u64, NodePart>,
+        ring: Option<RecordRing>,
+        sinks_tx: Option<TxSinks>,
+        retuned: bool,
+    ) -> Result<()> {
+        let (mut pool, mut ring, mut sinks_tx) = (pool, ring, sinks_tx);
+        let mut leave_out: Vec<u64> = Vec::new();
+        let mut said: Vec<String> = Vec::new();
+        loop {
+            match self.assemble(plan, pool, ring, sinks_tx, retuned, &leave_out) {
+                Ok(()) => {
+                    if !said.is_empty() {
+                        self.refused = Some(said.join("; "));
+                    }
+                    return Ok(());
+                }
+                Err((parts, e)) => {
+                    let common::Error::Refused { tag: Some(tag), label, why } = &e else {
+                        return Err(e);
+                    };
+                    // A stage that refuses twice would loop, and a stage the
+                    // patch cannot do without is not one to drop: either way
+                    // the fault goes out rather than round again.
+                    if leave_out.contains(tag) || leave_out.len() > 16 {
+                        return Err(e);
+                    }
+                    said.push(format!("{label} was left out: {why}"));
+                    leave_out.push(*tag);
+                    // What the attempt built, back into the pool under the
+                    // names it went in under.
+                    pool = parts.into_iter().filter_map(|p| p.tag.map(|t| (t, p))).collect();
+                    ring = pool.remove(&derived::RING).and_then(|p| RecordRing::from_part(p.node));
+                    // The radio goes to the transmit thread rather than into
+                    // this graph, so there is nothing of it to recover. The
+                    // microphone is held here and is handed in again.
+                    sinks_tx = self.mic.clone().map(|mic| TxSinks { stream: None, mic: Some(mic) });
+                }
+            }
+        }
+    }
+
     /// Build the graph the plan describes, reusing what `pool` holds.
     /// `retuned` says the span moved under those nodes, which is one of the
     /// two things each of them is asked before it is reused.
@@ -885,7 +948,8 @@ impl Receiver {
         ring: Option<RecordRing>,
         sinks_tx: Option<TxSinks>,
         retuned: bool,
-    ) -> Result<()> {
+        leave_out: &[u64],
+    ) -> std::result::Result<(), (Vec<NodePart>, common::Error)> {
         let input = StreamSpec::iq(plan.rate, plan.center);
         let mut b = Graph::builder(input);
 
@@ -902,6 +966,13 @@ impl Receiver {
         let base = derived_patch(plan);
         let mut patch = base.clone();
         plan.edits.apply(&mut patch);
+        // Stages a previous attempt found could not take the stream they were
+        // wired to. Left out rather than built, with what they said kept for
+        // the interface: a decoder that refuses its input is one decoder
+        // missing, not a receiver that will not start.
+        for id in leave_out {
+            patch.remove(*id);
+        }
         sync_audio(&mut patch, plan);
         sync_video(&mut patch);
         let mut tx_sinks = sinks_tx;
@@ -1114,7 +1185,7 @@ impl Receiver {
             .filter(|(_, id)| Some(*id) != spectrum)
             .collect();
         let spectrum_src = spectrum.map(|s| s.o());
-        let mut graph = b.build()?;
+        let mut graph = b.build_keeping_nodes()?;
         // What the spectrum is actually seeing, which is the head unless a
         // patch stage was put in front of it. The axis is drawn from this, so
         // a decimator between the two has to narrow the span on screen as
@@ -6103,6 +6174,73 @@ mod tx_tests {
         let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
         assert!(g.output_spec().is_tx());
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    use crate::radio::{ChanMode, ChannelSpec, Demod};
+    use common::Hz;
+
+    /// One front end that cannot take its stream costs itself and nothing
+    /// else.
+    ///
+    /// A decoder refuses at negotiation, which is after the graph is drawn:
+    /// the node is the only thing that knows whether it can reach the rate it
+    /// wants from the span it was handed. That refusal used to come back out
+    /// of the rebuild and stop the radio thread, so a VDL Mode 2 channel on a
+    /// television span took the whole receiver down: no waterfall, no audio,
+    /// no channels, one line of red.
+    #[test]
+    fn a_stage_that_refuses_its_input_does_not_take_the_receiver_with_it() {
+        // The span in the photograph: a HackRF left at the DVB-T rate.
+        let mut plan = tests::plan(9_142_857.0, Hz(136_825_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "AIRBAND".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Audio(Demod::Am),
+            bandwidth_hz: None,
+            volume: 0.8,
+            muted: true,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: None,
+        }];
+        // A stage that will not take anything, wired to the head, standing in
+        // for the decoder that cannot reach its own rate. Built as an edit,
+        // since that is the one way a stage nobody derived gets into the
+        // graph.
+        let mut drawn = derived_patch(&plan);
+        let base = drawn.clone();
+        // A bank asked for a channel width wider than the span it is given
+        // refuses, which is a refusal the receiver can actually produce.
+        let bad = drawn.add("vdl2");
+        drawn
+            .stage_mut(bad)
+            .unwrap()
+            .settings
+            .insert("channel_hz".into(), pipeline::ParamValue::Float(500_000_000.0));
+        drawn.connect(crate::patch::Source::Stage(derived::DC, 0), (bad, 0));
+        plan.edits = crate::patch::Edits::diff(&drawn, &base, operator_owns);
+
+        let rx = Receiver::build(&plan, Sinks::default()).expect("the receiver still builds");
+        // The stage that refused is not in the graph, and everything else is.
+        let topo = rx.topology();
+        assert!(
+            !topo.nodes.iter().any(|n| n.tag == Some(bad)),
+            "the stage that refused was built anyway"
+        );
+        for want in ["dc_block", "spectrum"] {
+            assert!(topo.nodes.iter().any(|n| n.kind == want), "{want} went with it");
+        }
+        assert_eq!(rx.channels().len(), 1, "the channel on the strip went with it");
+        // And the operator is told, rather than left with a decoder that is
+        // quietly missing.
+        let said = rx.refused.clone().expect("nothing said why it is not there");
+        assert!(said.contains("rejected") || said.contains("left out"), "it said {said:?}");
     }
 }
 

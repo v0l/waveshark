@@ -40,6 +40,14 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// A node would not take the stream it was wired to.
+    ///
+    /// Carries the tag the caller built it under, so whoever drew the graph
+    /// can take that one stage out and build the rest: one badly placed front
+    /// end should cost its own decoder, not the receiver.
+    #[error("{label} rejected its input: {why}")]
+    Refused { tag: Option<u64>, label: String, why: String },
+
     #[error("{0}")]
     Other(String),
 }
