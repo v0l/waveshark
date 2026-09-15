@@ -16,8 +16,15 @@
 //! Not in the graph, and it keys nothing: this crate turns a sentence into
 //! samples. What is done with them is `agent::channel`'s business.
 
+mod catalogue;
+mod engine;
 mod voice;
 
+pub use catalogue::{
+    DEFAULT_MODEL, DeviceChoice, Family, MODELS, Model, Precision, devices, dir_for, family_of,
+    installed, label_of, model, model_dir, repo_of,
+};
+pub use engine::Engine;
 pub use hfmodel::{Fetching, OnProgress};
 pub use voice::{Files, Voice};
 

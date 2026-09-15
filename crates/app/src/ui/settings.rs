@@ -11,11 +11,57 @@ use crate::agent::config::Speech;
 fn voice_defaults() -> (&'static str, &'static str, String) {
     #[cfg(feature = "tts")]
     {
-        (tts::DEFAULT_DESCRIPTION, tts::DEFAULT_REPO, tts::default_dir().display().to_string())
+        (tts::DEFAULT_DESCRIPTION, tts::DEFAULT_MODEL, tts::default_dir().display().to_string())
     }
     #[cfg(not(feature = "tts"))]
     {
         ("", "", "this build has no speech model".to_string())
+    }
+}
+
+/// Every voice that can be picked: the catalogue, with what each costs and
+/// whether its weights are already here, plus anything found on disc beside
+/// them. A closed list for the same reason the transcriber has one: a
+/// repository name is a thing most operators do not know, and what they do
+/// know is how big it is and whether it is downloaded.
+#[cfg(feature = "tts")]
+fn voice_models(dir: &str) -> Vec<(String, String)> {
+    let root = match dir.trim() {
+        "" => tts::default_dir(),
+        d => std::path::PathBuf::from(d),
+    };
+    let here = tts::installed(&root);
+    let mut out: Vec<(String, String)> = tts::MODELS
+        .iter()
+        .map(|m| {
+            let mark = match here.iter().any(|h| h == m.id) {
+                true => "on disc".to_string(),
+                false => format!("{:.1} GB", f64::from(m.mb) / 1000.0),
+            };
+            (m.id.to_string(), format!("{} ({mark})", m.label))
+        })
+        .collect();
+    // A model somebody put there by hand, or one from a later build.
+    for id in here {
+        if tts::model(&id).is_none() {
+            out.push((id.clone(), format!("{id} (on disc)")));
+        }
+    }
+    out
+}
+
+/// What a model says about itself, for the line under the picker.
+#[cfg(feature = "tts")]
+fn voice_note(id: &str) -> String {
+    let id = match id.trim() {
+        "" => tts::DEFAULT_MODEL,
+        i => i,
+    };
+    match tts::model(id) {
+        Some(m) => m.note.to_string(),
+        None => {
+            format!("Fetched from {}, read as {}.", tts::repo_of(id), tts::family_of(id).label())
+        }
     }
 }
 
@@ -504,13 +550,74 @@ impl App {
                         );
                     },
                 );
-                row_help(ui, "model", "A Hugging Face repository. Empty for the default.", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut c.voice_repo)
-                            .desired_width(300.0)
-                            .hint_text(voice_defaults().1),
+                #[cfg(feature = "tts")]
+                {
+                    let chosen = match c.voice_repo.trim() {
+                        "" => tts::DEFAULT_MODEL.to_string(),
+                        id => id.to_string(),
+                    };
+                    row_help(
+                        ui,
+                        "model",
+                        "What it costs is the weights it reads for every frame of speech, \
+                         which on a CPU is the whole of the speed.",
+                        |ui| {
+                            egui::ComboBox::from_id_salt("voice_model")
+                                .selected_text(tts::label_of(&chosen))
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    for (id, label) in voice_models(&c.voice_dir) {
+                                        let on = chosen == id;
+                                        if ui.selectable_label(on, label).clicked() {
+                                            c.voice_repo = id;
+                                        }
+                                    }
+                                });
+                        },
                     );
-                });
+                    hint(ui, &voice_note(&chosen));
+                    row_help(
+                        ui,
+                        "run on",
+                        "Auto takes the fastest that will hold the weights and falls back to \
+                         the CPU, saying so. A card picked by name fails rather than falling \
+                         back.",
+                        |ui| {
+                            let want = tts::DeviceChoice::parse(&c.voice_device).id();
+                            egui::ComboBox::from_id_salt("voice_device")
+                                .selected_text(
+                                    tts::devices()
+                                        .into_iter()
+                                        .find(|(id, _)| *id == want)
+                                        .map(|(_, l)| l)
+                                        .unwrap_or_else(|| want.clone()),
+                                )
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    for (id, label) in tts::devices() {
+                                        if ui.selectable_label(want == id, label).clicked() {
+                                            c.voice_device = id;
+                                        }
+                                    }
+                                });
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "precision",
+                        "Half reads half the bytes for every frame, which is most of the cost \
+                         of a model making one frame at a time. On a card it is close to \
+                         twice the speed for no audible difference.",
+                        |ui| {
+                            let want = tts::Precision::parse(&c.voice_precision);
+                            for p in [tts::Precision::Full, tts::Precision::Half] {
+                                if ui.selectable_label(want == p, p.label()).clicked() {
+                                    c.voice_precision = p.id().to_string();
+                                }
+                            }
+                        },
+                    );
+                }
                 row_help(ui, "weights", "Where they are kept. Empty for the usual place.", |ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut c.voice_dir)

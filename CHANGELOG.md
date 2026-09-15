@@ -15,6 +15,8 @@ the code is in the commit log.
 - Talk to the agent over the air: set a channel's transmit source to AGENT.
 - The agent speaks with a model on this machine, or with a speech server.
 
+- A voice picker: which model, where it runs, and at what precision.
+
 - The agent says what it is doing: asking, making speech, or downloading a voice.
 
 - The agent channel shows the last over it heard and why it did not answer.

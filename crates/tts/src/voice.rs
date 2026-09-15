@@ -90,7 +90,12 @@ pub struct Voice {
 
 impl Voice {
     /// Load `files` onto `device`, speaking as `description` says.
-    pub fn load(files: &Files, device: Device, description: &str) -> Result<Self> {
+    pub fn load(
+        files: &Files,
+        device: Device,
+        precision: crate::Precision,
+        description: &str,
+    ) -> Result<Self> {
         let text = std::fs::read_to_string(&files.config)?;
         let config: parler_tts::Config =
             serde_json::from_str(&text).map_err(|e| Error::other(format!("config: {e}")))?;
@@ -101,11 +106,12 @@ impl Voice {
                 v.into_iter().map(|s| dir.join(s)).collect()
             }
         };
-        // Float32 everywhere: the DAC decoder is convolutional and half
-        // precision on a CPU is slower than single, while a card has room
-        // for three and a half gigabytes either way.
+        // What the operator asked for. Half precision halves the bytes every
+        // frame reads, and an autoregressive decoder making one frame at a
+        // time is bound by exactly that; on a CPU whether it is faster
+        // depends on the kernels candle has, which is why it is a setting.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&shards, DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(&shards, precision.dtype(), &device)
                 .map_err(|e| Error::other(format!("weights: {e}")))?
         };
         let model = parler_tts::Model::new(&config, vb)
@@ -127,28 +133,6 @@ impl Voice {
         };
         voice.describe(description)?;
         Ok(voice)
-    }
-
-    /// Load onto the fastest device that will take it, and say which.
-    ///
-    /// A card shared with something else is the common case on a machine that
-    /// has one, and three and a half gigabytes is what will not fit: measured
-    /// against a card already holding a language model, the load fails with
-    /// `CUDA_ERROR_OUT_OF_MEMORY`. The CPU is slower than the speech it makes,
-    /// which is worth saying and better than not speaking at all.
-    pub fn load_best(files: &Files, description: &str) -> Result<(Self, String)> {
-        let device = crate::best_device();
-        let label = crate::device_label(&device);
-        let on_gpu = !matches!(device, Device::Cpu);
-        match Self::load(files, device, description) {
-            Ok(v) => Ok((v, label)),
-            Err(e) if on_gpu => {
-                tracing::warn!("{label} could not load the speech model ({e}); using the CPU");
-                let v = Self::load(files, Device::Cpu, description)?;
-                Ok((v, crate::device_label(&Device::Cpu)))
-            }
-            Err(e) => Err(e),
-        }
     }
 
     /// How much the audio tokens are sampled rather than taken at their

@@ -2,17 +2,21 @@
 //!
 //! `cargo run --release -p tts --example say -- "radio check, how do you read"`
 //!
-//! The first run fetches the model, which is about three and a half
-//! gigabytes, into `~/.local/share/waveshark/models/parler` or the directory
-//! given as the second argument.
+//! The first run fetches the model into
+//! `~/.local/share/waveshark/models/parler/<id>`. Which model, where it runs
+//! and at what precision are the environment: `TTS_MODEL=parler-large-v1`,
+//! `TTS_DEVICE=cuda:0`, `TTS_PRECISION=half`. `tts::MODELS` is the list.
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let text = args.next().unwrap_or_else(|| "radio check, how do you read me".to_string());
-    let dir = args.next().map(std::path::PathBuf::from).unwrap_or_else(tts::default_dir);
+    let root = args.next().map(std::path::PathBuf::from).unwrap_or_else(tts::default_dir);
+    let id = std::env::var("TTS_MODEL").unwrap_or_else(|_| tts::DEFAULT_MODEL.to_string());
+    let dir = tts::dir_for(&root, &id);
+    println!("{} ({})", tts::label_of(&id), tts::repo_of(&id));
 
     let start = std::time::Instant::now();
-    let files = tts::Files::ensure(tts::DEFAULT_REPO, &dir, &mut |f| {
+    let files = tts::Files::ensure(&tts::repo_of(&id), &dir, &mut |f| {
         if f.total > 0 && f.done == f.total {
             println!("{} {:.0} MB", f.file, f.total as f64 / 1e6);
         }
@@ -24,10 +28,21 @@ fn main() -> anyhow::Result<()> {
         start.elapsed()
     );
 
-    let device = tts::best_device();
-    println!("loading onto {}", tts::device_label(&device));
+    let choice = tts::DeviceChoice::parse(&std::env::var("TTS_DEVICE").unwrap_or_default());
+    let precision = tts::Precision::parse(&std::env::var("TTS_PRECISION").unwrap_or_default());
+    println!("asking for {} at {}", choice.id(), precision.label());
     let start = std::time::Instant::now();
-    let mut voice = tts::Voice::load(&files, device, tts::DEFAULT_DESCRIPTION)?;
+    let (mut voice, on, note) = tts::Engine::load_on(
+        &files,
+        tts::family_of(&id),
+        choice,
+        precision,
+        tts::DEFAULT_DESCRIPTION,
+    )?;
+    println!("loaded onto {on}");
+    if !note.is_empty() {
+        println!("note: {note}");
+    }
     if let Some(t) = std::env::var("TTS_TEMP").ok().and_then(|v| v.parse().ok()) {
         voice.set_temperature(t);
     }
