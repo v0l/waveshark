@@ -112,14 +112,20 @@ async fn server_speak(config: &Config, text: &str) -> Result<Said, String> {
     if config.voice_model.trim().is_empty() {
         return Err("no speech model: the Agent settings take one".into());
     }
+    if config.voice.trim().is_empty() {
+        return Err("no voice: the Agent settings take one".into());
+    }
     let client = httpc::client(PATIENCE).map_err(|e| e.to_string())?;
     let body = json!({
         "model": config.voice_model,
-        "voice": config.voice,
+        "voice": config.voice.trim(),
         "input": text,
-        // WAV rather than the default mp3: no decoder in this program, and
-        // a header that says what rate it came back at.
-        "response_format": "wav",
+        // Raw PCM rather than the default mp3: no decoder in this program.
+        // Every server offers pcm where not all offer wav, and OpenAI's and
+        // OpenRouter's is 16-bit at 24 kHz, which is what `decode` assumes
+        // of anything without a RIFF header. A server that sends a WAV
+        // anyway is read by it.
+        "response_format": "pcm",
     });
     let mut req = client.post(url).json(&body);
     if !key.is_empty() {

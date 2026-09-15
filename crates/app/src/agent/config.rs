@@ -275,6 +275,9 @@ impl Config {
         if self.speech == Speech::Chat && self.voice_model.trim().is_empty() {
             return Some("no speech model");
         }
+        if self.speech.is_remote() && self.voice.trim().is_empty() {
+            return Some("no voice");
+        }
         if self.speech == Speech::Local && !cfg!(feature = "tts") {
             return Some("this build has no speech model");
         }
@@ -427,6 +430,9 @@ mod tests {
             "the chat's address and key, not the speech server's"
         );
         assert_eq!(c.voice_fault(), None);
+        c.voice.clear();
+        assert_eq!(c.voice_fault(), Some("no voice"), "a server refuses an empty voice");
+        c.voice = "af_sky".into();
         c.voice_model.clear();
         assert_eq!(c.voice_fault(), Some("no speech model"));
         // The speech server's own, when that is what is asked for; its key
