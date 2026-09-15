@@ -645,6 +645,7 @@ impl Strip<'_> {
                                                     freq: ch.freq,
                                                     mode: ch.mode.clone(),
                                                     bandwidth_hz: ch.bandwidth_hz,
+                                                    tx: ch.tx,
                                                 });
                                                 let _ = self.memory.save();
                                                 ui.close();

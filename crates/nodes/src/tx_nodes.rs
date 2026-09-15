@@ -571,6 +571,12 @@ impl TxMonitorNode {
         self.enabled
     }
 
+    /// Where the transmitter is against the receiver's centre.
+    pub fn set_shift(&mut self, hz: f64) {
+        self.shift_hz = hz;
+        self.mixer.set_shift(hz, self.rate.max(1.0));
+    }
+
     /// Where to put what went out, for whoever is transmitting.
     pub fn sent(&self) -> Sent {
         self.sent.clone()

@@ -385,6 +385,23 @@ pub struct TxPlan {
     pub on_air: Hz,
 }
 
+impl TxPlan {
+    /// Whether these two draw the same transmit chain.
+    ///
+    /// The frequency does not enter into it: where an over goes out is the
+    /// radio's business and the monitor's, and the stages in between are the
+    /// same stages. Two channels of one mode are therefore one chain, and
+    /// keying between them neither rebuilds the graph nor restarts whatever
+    /// the source has open.
+    pub fn same_chain(&self, other: &Self) -> bool {
+        let (a, b) = (&self.spec, &other.spec);
+        self.mode == other.mode
+            && a.source == b.source
+            && a.mic_gain == b.mic_gain
+            && a.tone_hz == b.tone_hz
+    }
+}
+
 /// The levels on the bus that belong to no one channel: the master every
 /// strip runs into, and the one level every call is heard at.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -576,6 +593,28 @@ impl Receiver {
         self.tx.keyed()
     }
 
+    /// Whether the radio is on a chain that can carry what it makes, which
+    /// is what ON AIR means. [`Self::keyed`] is only the key being down.
+    pub fn tx_on_air(&self) -> bool {
+        self.tx.on_air()
+    }
+
+    /// Whether the transmit chain already running is the shape a key-up
+    /// wants, so the radio can go on it without a rebuild.
+    pub fn tx_ready(&self, mic: bool) -> bool {
+        self.tx.ready(mic)
+    }
+
+    /// Where the monitor draws the transmission, against the receiver's own
+    /// centre. A setting rather than a rebuild: two channels of one mode
+    /// differ only in this, and rebuilding between them would restart the
+    /// spectrum's averaging on every key.
+    pub fn set_tx_shift(&mut self, hz: f64) {
+        if let Some(n) = self.stage_mut::<nodes::TxMonitorNode>(derived::TX_MONITOR) {
+            n.set_shift(hz);
+        }
+    }
+
     /// Whether the transmitter gave up an over because the radio went away.
     /// News once: reading it clears it.
     pub fn tx_lost(&self) -> bool {
@@ -658,6 +697,7 @@ impl Receiver {
         plan: &Plan,
         transmit: crate::patch::Patch,
         sinks: Option<TxSinks>,
+        stream: Option<Box<dyn common::TxStream>>,
         idle: bool,
     ) {
         if transmit.stages().is_empty() {
@@ -666,6 +706,14 @@ impl Receiver {
         }
         let mic = sinks.as_ref().is_some_and(|s| s.mic.is_some());
         if self.tx.is_running(&transmit, mic) {
+            // A key waiting on a rebuild that turned out to change nothing
+            // about the transmit chain, which is every key-up moving between
+            // two channels of one mode: the frequency is the radio's and the
+            // monitor's, not the chain's. Returning without this dropped the
+            // open stream and nothing went on air.
+            if let Some(stream) = stream {
+                self.tx.key(stream);
+            }
             return;
         }
         // Its clock is a length of time rather than a signal: the chain is
@@ -706,6 +754,9 @@ impl Receiver {
                     sink.send_to(sent);
                 }
                 self.tx.set_chain(transmit, graph, idle, mic);
+                if let Some(stream) = stream {
+                    self.tx.key(stream);
+                }
             }
             Err(e) => {
                 self.refused = Some(format!("the transmit chain cannot be built: {e}"));
@@ -854,6 +905,12 @@ impl Receiver {
         sync_audio(&mut patch, plan);
         sync_video(&mut patch);
         let mut tx_sinks = sinks_tx;
+        // The radio never goes into a graph as it is built. It is handed to
+        // the thread that transmits, which holds it until there is a chain to
+        // put it on and carries it across a rebuild, so there is one way on
+        // air rather than two that have to agree about which rebuild the key
+        // belonged to.
+        let tx_stream = tx_sinks.as_mut().and_then(|s| s.stream.take());
         // The transmit chain is drawn here with everything else and run on a
         // thread of its own, so it comes out of the patch before the
         // receiver's graph is built. What crosses between the two is the
@@ -1111,7 +1168,7 @@ impl Receiver {
         self.head = head;
         self.patch = whole;
         self.base = base;
-        self.hand_over_transmitter(plan, transmit, tx_sinks, idle_tx);
+        self.hand_over_transmitter(plan, transmit, tx_sinks, tx_stream, idle_tx);
         // The nodes a rebuild replaced come back empty: no subscriptions, no
         // account, no survey file. What the plan says they are doing goes
         // back onto them here.
@@ -6443,6 +6500,174 @@ mod tx_in_graph_tests {
             assert!(std::time::Instant::now() < until, "waited five seconds for {what}");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// Counts what reaches the antenna, for a test that has to know the
+    /// difference between a chain that is running and one that is on air.
+    #[derive(Clone, Default)]
+    struct Counted(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+    impl Counted {
+        fn samples(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl common::TxStream for Counted {
+        fn write(&mut self, buf: &common::IqBuf) -> Result<()> {
+            self.0.fetch_add(buf.samples.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn underruns(&self) -> u64 {
+            0
+        }
+        fn drain(&mut self, _timeout: std::time::Duration) -> bool {
+            true
+        }
+        fn stop(&mut self) {}
+    }
+
+    /// A key-up whose rebuild changes nothing still reaches the antenna.
+    ///
+    /// Two channels of one mode are one transmit chain: the frequency is the
+    /// radio's and the monitor's, and no stage between them reads it. So the
+    /// rebuild a key on the second channel asks for hands the same chain
+    /// back. The radio used to go in as the graph was built, which meant a
+    /// build that reused the chain dropped the open stream on the floor and
+    /// the key lit over a transmitter with no radio on it.
+    #[test]
+    fn the_radio_reaches_a_chain_that_did_not_have_to_be_rebuilt() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+        assert!(rx.tx_topology().is_some(), "the chain is drawn before anything is keyed");
+        assert!(!rx.tx_on_air(), "nothing is keyed and it says it is on air");
+
+        // The channel beside it: same mode, same source, 25 kHz up, which is
+        // the second channel recalled from a bank.
+        plan.channels[0].offset_hz += 25_000.0;
+        plan.tx.as_mut().unwrap().on_air = Hz(446_074_000);
+        let radio = Counted::default();
+        rx.set_transmitter(Some(TxSinks { stream: Some(Box::new(radio.clone())), mic: None }));
+        rx.rebuild(&plan).unwrap();
+
+        assert!(rx.tx_on_air(), "the radio never reached the chain");
+        until("the first block on air", || radio.samples() > 0);
+        rx.unkey();
+        assert!(!rx.tx_on_air());
+    }
+
+    /// Two channels of one mode, worked one after the other, both go out.
+    ///
+    /// The case a bank makes: recall a second repeater beside the first and
+    /// work them in turn. The chain is the same chain, so nothing is rebuilt
+    /// between them and the radio moves from one to the other; every over
+    /// after the first has to reach the antenna just as the first did.
+    #[test]
+    fn two_channels_worked_in_turn_each_reach_the_antenna() {
+        let plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+
+        for over in 0..3 {
+            let radio = Counted::default();
+            assert!(rx.key(Box::new(radio.clone())), "over {over} was not taken");
+            assert!(rx.tx_on_air(), "over {over} never reached the chain");
+            until(&format!("over {over} on the air"), || radio.samples() > 0);
+            rx.unkey();
+            assert!(!rx.tx_on_air(), "over {over} did not end");
+            // The queue is let out before the carrier stops, so writing ends
+            // a block or so after the key does rather than at once. What
+            // matters is that it ends: the radio this over was given is not
+            // the radio the next one gets.
+            assert!(rx.tx_settled());
+            let sent = radio.samples();
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            assert_eq!(radio.samples(), sent, "over {over} went on transmitting after it ended");
+        }
+    }
+
+    /// A rebuild in the middle of an over does not end the over.
+    ///
+    /// The graph is redrawn whenever a channel moves, and an operator moving
+    /// a level mid-transmission must not drop the carrier: the radio is
+    /// carried from the chain being replaced to the one replacing it.
+    #[test]
+    fn a_rebuild_mid_over_keeps_the_radio() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())));
+        until("the first block on air", || radio.samples() > 0);
+
+        // A change that redraws the whole transmit chain: a different tone is
+        // a different source stage.
+        plan.tx.as_mut().unwrap().spec.tone_hz = 1_750.0;
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+        assert!(rx.tx_on_air(), "the rebuild dropped the carrier");
+        let carried = radio.samples();
+        until("the over to carry on", || radio.samples() > carried);
+        rx.unkey();
+    }
+
+    /// A key that arrives before the chain it needs is not lost.
+    ///
+    /// Keying is what asks for the chain to be built, so about half the time
+    /// the radio reaches the transmitter first. Held rather than dropped: the
+    /// alternative is a lit key over a transmitter with nothing on it, which
+    /// nothing on the screen would say.
+    #[test]
+    fn a_key_that_beats_its_own_chain_still_goes_on_air() {
+        // Nothing to transmit yet, so there is no chain to key.
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let wanted = plan.tx.take();
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+        assert!(rx.tx_topology().is_none(), "there should be no chain yet");
+
+        let radio = Counted::default();
+        rx.key(Box::new(radio.clone()));
+        assert!(!rx.tx_on_air(), "there is no chain for it to be on air with");
+        plan.tx = wanted;
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_on_air(), "the chain arrived and the radio was not put on it");
+        until("the over that was waiting for its chain", || radio.samples() > 0);
+        rx.unkey();
+    }
+
+    /// A transmitter told there is nothing to transmit stops transmitting.
+    ///
+    /// The chain lives on a thread, so dropping the handle's copy is not
+    /// dropping it. Left running it goes on drawing itself into the chain
+    /// view a block after it was taken out of it, and the next key-up puts
+    /// the radio on the chain the receiver believes it no longer has.
+    #[test]
+    fn a_transmitter_with_nothing_to_send_drops_its_chain() {
+        // A microphone chain, because that is the one that runs before it is
+        // keyed, so that it has a meter to set a level against: a chain left
+        // on the thread goes on running and draws itself back into the view
+        // a block after the rebuild took it out.
+        let mut plan = plan_with_tx(TxSource::Mic);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let src: std::sync::Arc<dyn audio::AudioSource> =
+            std::sync::Arc::new(audio::Canned::new(vec![0.0; 4_800], 48_000.0, true));
+        rx.set_microphone(Some(src));
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+        assert!(rx.tx_topology().is_some_and(|t| t.nodes.iter().any(|n| n.kind == "mic")));
+
+        plan.channels[0].tx = None;
+        plan.tx = None;
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+        // Looked at after a block's worth of time, because a chain still
+        // running republishes its topology every block and would put back
+        // what the rebuild took away.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(rx.tx_topology().is_none(), "it is still running the chain it was told to drop");
+        assert!(!rx.keyed());
     }
 
     /// A radio unplugged mid-over ends the over.

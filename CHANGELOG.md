@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- Saved channels keep their repeater shift and what they transmit.
+
 - A transmitted multiplex carries a network table and a service name, so a television finds it.
 
 - Channel numbers beside the band: UHF TV, DAB blocks, PMR446, marine, CB,
@@ -61,6 +63,12 @@ the code is in the commit log.
 - SSTV holds up better on a weak signal.
 
 ### Fixed
+
+- Keying a channel just added or recalled: it said there was no transmit side.
+
+- A second channel keying up but putting nothing on the air.
+
+- Keying a second transmit channel put nothing on air.
 
 - Watching your own transmission on a half duplex radio: the picture came and went.
 
