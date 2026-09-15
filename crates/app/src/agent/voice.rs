@@ -170,6 +170,7 @@ fn pcm_shape(content_type: &str) -> (f64, usize) {
 /// Written here rather than taken from a crate because it is one header: the
 /// program has no other use for an audio file reader, and a server that sends
 /// raw PCM anyway has to be handled in either case.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn decode(bytes: &[u8]) -> Result<Said, String> {
     decode_as(bytes, PCM_RATE, 1)
 }
