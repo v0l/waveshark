@@ -39,6 +39,8 @@ the code is in the commit log.
 
 - The agent's voice can come from the model's own server, with a speech model named there.
 
+- The Agent settings list the server's models and voices, and say when what is set is not among them.
+
 - Every settings dialog is a column of cards, with a lamp saying whether it will work.
 
 - `--settings NAME` opens with a settings dialog up.

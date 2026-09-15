@@ -21,6 +21,7 @@ pub mod catalog;
 pub mod channel;
 pub mod chat;
 pub mod config;
+pub mod served;
 #[cfg(feature = "mcp")]
 mod tools;
 pub mod voice;
