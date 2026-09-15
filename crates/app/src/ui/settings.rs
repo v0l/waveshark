@@ -476,8 +476,23 @@ impl App {
     /// saying whether that part will work as it is set, because the only
     /// other way to find out is to close the dialog and try.
     fn agent_settings(&mut self, ui: &mut egui::Ui) {
+        use crate::agent::served;
         let before = self.chat.config.clone();
         let c = &mut self.chat.config;
+        // What the servers offer, asked once per address and again on the
+        // button: a model id and a voice name are strings only the server
+        // can check.
+        served::fetch(&c.url, &c.key, false);
+        if c.speech == Speech::Server {
+            let key = if c.voice_key.trim().is_empty() { &c.key } else { &c.voice_key };
+            served::fetch(&c.voice_url, key, false);
+        }
+        let chat = served::served(&c.url);
+        // The listing arrives on a thread of its own, so the dialog has to
+        // come back and look.
+        if matches!(chat, Some(served::Served { state: served::State::Fetching })) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        }
 
         section(ui, "model", "any server speaking the OpenAI chat API with tool calls", |ui| {
             row_help(
@@ -486,11 +501,18 @@ impl App {
                 "The base address, without /chat/completions. A server on this machine \
                      needs no key and sends nothing anywhere.",
                 |ui| {
-                    field(ui, &mut c.url, crate::agent::config::DEFAULT_URL);
+                    let mut ask = false;
+                    field_then(ui, &mut c.url, crate::agent::config::DEFAULT_URL, 60.0, |ui| {
+                        ask = ui.small_button("ASK").on_hover_text("List what it serves").clicked();
+                    });
+                    if ask {
+                        served::fetch(&c.url, &c.key, true);
+                    }
                 },
             );
             row_help(ui, "model", "As the server names it.", |ui| {
-                field(ui, &mut c.model, "qwen3:8b");
+                let offered = chat.as_ref().map(|s| s.chat_models()).unwrap_or_default();
+                pick_or_type(ui, "chat-model", &mut c.model, offered, "qwen3:8b");
             });
             row_help(ui, "key", "Sent as a bearer token. Leave empty for a local server.", |ui| {
                 secret(ui, &mut c.key);
@@ -518,9 +540,22 @@ impl App {
                 },
             );
             ui.add_space(4.0);
-            match c.fault() {
-                None => lamp(ui, true, &format!("{} at {}", c.model.trim(), host_of(&c.url))),
-                Some(why) => lamp(ui, false, why),
+            let at = format!("{} at {}", c.model.trim(), host_of(&c.url));
+            match (c.fault(), chat.as_ref().map(|s| &s.state)) {
+                (Some(why), _) => lamp(ui, false, why),
+                (None, Some(served::State::Failed(e))) => {
+                    lamp(ui, false, &format!("{}: {e}", host_of(&c.url)))
+                }
+                (None, Some(served::State::Fetching)) => {
+                    lamp(ui, true, &format!("asking {} what it serves", host_of(&c.url)))
+                }
+                (None, Some(served::State::Ready(m))) => {
+                    match m.iter().any(|x| x.id == c.model.trim()) {
+                        true => lamp(ui, true, &at),
+                        false => lamp(ui, false, &format!("{at}, which it does not list")),
+                    }
+                }
+                (None, None) => lamp(ui, true, &at),
             }
         });
         ui.add_space(8.0);
@@ -576,34 +611,60 @@ impl App {
             match c.speech {
                 Speech::Local => Self::local_voice_rows(ui, c),
                 Speech::Chat => {
+                    let models = chat.as_ref().map(|s| s.speech_models()).unwrap_or_default();
+                    let voices =
+                        chat.as_ref().map(|s| s.voices_of(&c.voice_model)).unwrap_or_default();
                     row_help(
                         ui,
                         "model",
                         "As the model's server names it: tts-1 on OpenAI, \
-                         openrouter/hexgrad/kokoro-82m on OpenRouter.",
+                         hexgrad/kokoro-82m on OpenRouter.",
                         |ui| {
-                            field(ui, &mut c.voice_model, "openrouter/hexgrad/kokoro-82m");
+                            pick_or_type(ui, "speech-model", &mut c.voice_model, models, "tts-1");
                         },
                     );
-                    row_help(ui, "voice", "As the model's server names it.", |ui| {
-                        field(ui, &mut c.voice, "alloy");
+                    row_help(ui, "voice", "As that model names them.", |ui| {
+                        pick_or_type(ui, "speech-voice", &mut c.voice, voices, "alloy");
                     });
                 }
                 Speech::Server => {
+                    let own = served::served(&c.voice_url);
+                    let models = own.as_ref().map(|s| s.speech_models()).unwrap_or_default();
+                    let voices =
+                        own.as_ref().map(|s| s.voices_of(&c.voice_model)).unwrap_or_default();
                     row_help(
                         ui,
                         "server",
                         "An OpenAI-compatible /v1/audio/speech. Often not the same server as \
                          the model.",
                         |ui| {
-                            field(ui, &mut c.voice_url, "https://api.openai.com/v1");
+                            let mut ask = false;
+                            field_then(
+                                ui,
+                                &mut c.voice_url,
+                                "https://api.openai.com/v1",
+                                60.0,
+                                |ui| {
+                                    ask = ui
+                                        .small_button("ASK")
+                                        .on_hover_text("List what it serves")
+                                        .clicked();
+                                },
+                            );
+                            if ask {
+                                let key = match c.voice_key.trim() {
+                                    "" => c.key.clone(),
+                                    k => k.to_string(),
+                                };
+                                served::fetch(&c.voice_url, &key, true);
+                            }
                         },
                     );
                     row_help(ui, "model", "As that server names it.", |ui| {
-                        field(ui, &mut c.voice_model, "tts-1");
+                        pick_or_type(ui, "own-speech-model", &mut c.voice_model, models, "tts-1");
                     });
-                    row_help(ui, "voice", "As that server names it.", |ui| {
-                        field(ui, &mut c.voice, "alloy");
+                    row_help(ui, "voice", "As that model names them.", |ui| {
+                        pick_or_type(ui, "own-speech-voice", &mut c.voice, voices, "alloy");
                     });
                     row_help(ui, "key", "Leave empty to use the model's key.", |ui| {
                         secret(ui, &mut c.voice_key);
@@ -2197,4 +2258,25 @@ fn host_of(url: &str) -> String {
 /// points, leaving room for the reading and the "?" after it.
 fn wide_slider(ui: &mut egui::Ui) {
     ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+}
+
+/// A field that becomes a picker once the server has said what it offers.
+///
+/// What is typed stays typed: a model the listing has not caught up with,
+/// or a server that lists nothing, is still reachable by name, which is
+/// why the picker keeps whatever is set even when it is not on the list.
+fn pick_or_type(ui: &mut egui::Ui, id: &str, value: &mut String, offered: Vec<String>, hint: &str) {
+    if offered.is_empty() {
+        field(ui, value, hint);
+        return;
+    }
+    let mut options: Vec<(String, String)> =
+        offered.iter().map(|o| (o.clone(), o.clone())).collect();
+    if !value.trim().is_empty() && !offered.iter().any(|o| o == value.trim()) {
+        options.insert(0, (value.clone(), format!("{} (not listed)", value.trim())));
+    }
+    if value.trim().is_empty() {
+        options.insert(0, (String::new(), "choose".into()));
+    }
+    choice(ui, id, value, options);
 }

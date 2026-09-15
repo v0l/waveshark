@@ -133,12 +133,36 @@ async fn server_speak(config: &Config, text: &str) -> Result<Said, String> {
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
         let said = String::from_utf8_lossy(&bytes);
         return Err(format!("{status}: {}", said.trim()));
     }
-    decode(&bytes)
+    let (rate, channels) = pcm_shape(&content_type);
+    decode_as(&bytes, rate, channels)
+}
+
+/// What raw PCM came back as, from `audio/pcm;rate=24000;channels=1`. The
+/// header is the only place a server says, and without it a voice made at
+/// another rate plays at the wrong pitch.
+fn pcm_shape(content_type: &str) -> (f64, usize) {
+    let mut rate = PCM_RATE;
+    let mut channels = 1;
+    for part in content_type.split(';').map(str::trim) {
+        if let Some(v) = part.strip_prefix("rate=") {
+            rate = v.trim().parse().unwrap_or(PCM_RATE);
+        }
+        if let Some(v) = part.strip_prefix("channels=") {
+            channels = v.trim().parse().unwrap_or(1);
+        }
+    }
+    (rate, channels)
 }
 
 /// A WAV, or headerless 16-bit PCM, as mono `f32`.
@@ -147,8 +171,13 @@ async fn server_speak(config: &Config, text: &str) -> Result<Said, String> {
 /// program has no other use for an audio file reader, and a server that sends
 /// raw PCM anyway has to be handled in either case.
 pub fn decode(bytes: &[u8]) -> Result<Said, String> {
+    decode_as(bytes, PCM_RATE, 1)
+}
+
+/// [`decode`], with the shape headerless PCM is known to have.
+fn decode_as(bytes: &[u8], pcm_rate: f64, pcm_channels: usize) -> Result<Said, String> {
     if bytes.len() < 4 || &bytes[..4] != b"RIFF" {
-        return Ok(Said { samples: pcm16(bytes, 1), rate: PCM_RATE });
+        return Ok(Said { samples: pcm16(bytes, pcm_channels), rate: pcm_rate });
     }
     if bytes.len() < 12 || &bytes[8..12] != b"WAVE" {
         return Err("not a WAV".into());
@@ -219,6 +248,19 @@ fn pcm32f(data: &[u8], channels: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_pcm_is_read_at_the_rate_the_header_says() {
+        // OpenAI's is 24 kHz; another server's may not be, and the only
+        // place it is said is the content type.
+        assert_eq!(pcm_shape("audio/pcm;rate=24000;channels=1"), (24_000.0, 1));
+        assert_eq!(pcm_shape("audio/pcm; rate=48000; channels=2"), (48_000.0, 2));
+        assert_eq!(pcm_shape("audio/pcm"), (PCM_RATE, 1));
+        assert_eq!(pcm_shape(""), (PCM_RATE, 1));
+        let said = decode_as(&[0, 0x40, 0, 0x40, 0, 0x40, 0, 0x40], 16_000.0, 2).unwrap();
+        assert_eq!(said.rate, 16_000.0);
+        assert_eq!(said.samples.len(), 2, "two channels folded to one");
+    }
 
     /// A WAV as a server would send one: header, format, data.
     fn wav(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
