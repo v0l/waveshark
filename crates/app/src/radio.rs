@@ -438,11 +438,6 @@ const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 /// nothing beside the DSP.
 const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Largest sample in a buffer, which is what a meter reads.
-fn peak_of(pcm: &[f32]) -> f32 {
-    pcm.iter().fold(0.0f32, |a, v| a.max(v.abs()))
-}
-
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
@@ -456,11 +451,6 @@ pub enum Cmd {
     Rate(Sps),
     /// The complete set of channels to demodulate and mix.
     Channels(Vec<ChannelSpec>),
-    /// Master volume, and whether the mix leaves the bus at all.
-    Volume {
-        volume: f32,
-        muted: bool,
-    },
     Fft(usize),
     /// Spectrum frames per second delivered to the UI.
     Refresh(f32),
@@ -476,6 +466,12 @@ pub enum Cmd {
     Choice(String, String),
     /// Set one parameter on one node of the running graph, by node id.
     NodeParam(usize, String, pipeline::param::ParamValue),
+    /// Set one parameter on a stage the receiver draws for itself, by the
+    /// id it is drawn under, which the interface knows without asking the
+    /// graph: the master on the speaker, the calls level on the bus. The
+    /// same route as `NodeParam` once it lands, so the setting is an edit
+    /// and survives a rebuild.
+    StageParam(u64, String, pipeline::param::ParamValue),
     /// Reference oscillator correction, in parts per million.
     Ppm(f64),
     /// What to add to the tuner's frequency to get the frequency at the
@@ -494,18 +490,11 @@ pub enum Cmd {
     /// What to listen to on the call bus, as the whole set of standing
     /// instructions rather than an edit to them: the same bargain the
     /// scanner table and the feeds make.
-    CallSubs(Vec<crate::audiobus::Subscription>),
+    CallSubs(Vec<crate::mix::calls::Subscription>),
     /// Which picture to watch, as a whole set of rules like `CallSubs`: an
     /// input of the video bus, or everything, which is what a receiver
     /// watching one channel wants and what a receiver scanning several does.
     WatchVideo(Vec<crate::videobus::Rule>),
-    /// The level all call audio is heard at, from the channel strip.
-    CallVolume {
-        volume: f32,
-        muted: bool,
-    },
-    /// Whether the call bus levels what it passes on.
-    CallAgc(bool),
     /// Play a transmission that has already been decoded, once.
     ///
     /// The sink belongs to this thread, so replaying from the packet list is
@@ -628,8 +617,6 @@ pub struct ChannelSpec {
     /// operator picked off the spectrum rather than one a scanner block was
     /// written about.
     pub bandwidth_hz: Option<f64>,
-    pub volume: f32,
-    pub muted: bool,
     /// None leaves the mode's own default.
     pub squelch_db: Option<f32>,
     pub agc: bool,
@@ -1024,7 +1011,6 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         smoothing: crate::chain::DEFAULT_SMOOTHING,
         fft: 1024,
         channels: Vec::new(),
-        audio: crate::chain::AudioPlan::default(),
         fronts,
         feeds: Vec::new(),
         tx: None,
@@ -1155,15 +1141,14 @@ pub const SPEED_HISTORY: usize = 96;
 #[derive(Clone, Debug, Default)]
 pub struct Levels {
     pub rev: u64,
-    pub audio: crate::chain::AudioPlan,
-    pub channels: Vec<ChannelSpec>,
+    pub audio: crate::chain::MixLevels,
+    pub channels: Vec<crate::chain::ChannelLevels>,
 }
 
-/// Every input of the audio bus, and where the bus sits in the running
-/// graph so a level can be set by the same route the chain view uses.
+/// Every fader in the running graph, as the strip draws them. A level is
+/// set on one by its stage id, the same route the chain view uses.
 #[derive(Clone, Debug, Default)]
 pub struct Strips {
-    pub bus_node: Option<usize>,
     pub inputs: Vec<crate::chain::StripState>,
 }
 
@@ -1318,11 +1303,13 @@ pub struct Status {
     /// separates "nothing was decoded" from "it was decoded and you still
     /// cannot hear it": two different faults that sound identical.
     call_levels: parking_lot::Mutex<Vec<(common::ConversationKey, f32)>>,
+    /// What the bus mixed last block, labelled: what is being heard now.
+    playing: parking_lot::Mutex<Vec<crate::mix::bus::Playing>>,
     /// Who the bus is hearing, and who it has just stopped hearing, since the
     /// interface last took them. Appended by the radio thread every block
     /// and drained by the interface every frame: the ending of a call is
     /// reported once and must not be lost between two frames.
-    pub heard: parking_lot::Mutex<Vec<crate::audiobus::LiveCall>>,
+    pub heard: parking_lot::Mutex<Vec<crate::mix::heard::LiveCall>>,
     /// The TETRA cells heard and their key state, for the key manager.
     tetra_keys: parking_lot::Mutex<Vec<nodes::tetra_nodes::KeyStatus>>,
     /// Peak of the whole mix as it left for the speaker, and of the call
@@ -1459,6 +1446,7 @@ impl Default for Status {
             homeassistant: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new(Strips::default()),
             call_levels: parking_lot::Mutex::new(Vec::new()),
+            playing: parking_lot::Mutex::new(Vec::new()),
             heard: parking_lot::Mutex::new(Vec::new()),
             tetra_keys: parking_lot::Mutex::new(Vec::new()),
             out_level: AtomicU32::new(0),
@@ -1537,7 +1525,11 @@ impl Status {
         self.levels.lock().clone()
     }
 
-    fn set_levels(&self, audio: crate::chain::AudioPlan, channels: Vec<ChannelSpec>) {
+    fn set_levels(
+        &self,
+        audio: crate::chain::MixLevels,
+        channels: Vec<crate::chain::ChannelLevels>,
+    ) {
         let mut held = self.levels.lock();
         *held = Levels { rev: held.rev + 1, audio, channels };
     }
@@ -1562,19 +1554,25 @@ impl Status {
         self.call_levels.lock().clone()
     }
 
-    /// Every input of the bus as the strip draws it, and the bus's node id.
+    /// What is being heard now: everything the bus mixed last block, by
+    /// system, frequency, group and caller, with its level.
+    pub fn playing(&self) -> Vec<crate::mix::bus::Playing> {
+        self.playing.lock().clone()
+    }
+
+    /// Every fader as the strip draws it.
     pub fn strips(&self) -> Strips {
         self.strips.lock().clone()
     }
 
-    fn set_strips(&self, bus_node: Option<usize>, mut inputs: Vec<crate::chain::StripState>) {
+    fn set_strips(&self, mut inputs: Vec<crate::chain::StripState>) {
         let mut held = self.strips.lock();
         for s in &mut inputs {
-            if let Some(prev) = held.inputs.iter().find(|p| p.port == s.port) {
+            if let Some(prev) = held.inputs.iter().find(|p| p.stage == s.stage) {
                 s.level = s.level.max(prev.level * METER_FALL);
             }
         }
-        *held = Strips { bus_node, inputs };
+        *held = Strips { inputs };
     }
 
     /// The mix's own level, and the call bus's share of it.
@@ -1903,8 +1901,6 @@ impl Audio {
             offset_hz: offset,
             mode: ChanMode::Audio(mode),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             squelch_db: None,
             voice: false,
             agc: true,
@@ -1919,7 +1915,6 @@ impl Audio {
             smoothing: crate::chain::DEFAULT_SMOOTHING,
             fft: 1024,
             channels: vec![spec],
-            audio: crate::chain::AudioPlan::default(),
             fronts: Vec::new(),
             edits: Default::default(),
             record: false,
@@ -2014,7 +2009,6 @@ struct AudioIo {
     /// Held only so the output stream stays open: dropping it closes the
     /// device the sink writes to.
     _player: Option<AudioPlayer>,
-    sink: Option<audio::AudioSink>,
     /// Open for as long as the receiver runs, so the strip's meter is live
     /// and anything that wants speech can take a tap.
     mic: Option<audio::AudioCapture>,
@@ -2162,7 +2156,6 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             smoothing: crate::chain::DEFAULT_SMOOTHING,
             fft,
             channels: Vec::new(),
-            audio: crate::chain::AudioPlan::default(),
             // Resolved from the scanner table below, once the tuning is known.
             fronts: Vec::new(),
             edits: Default::default(),
@@ -2181,7 +2174,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         };
         let scanners = crate::scanners::Scanners::load();
         plan.fronts = fronts_here(&scanners, &plan, true);
-        let rx = crate::chain::Receiver::build(&plan, Default::default())?;
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default())?;
+        rx.set_speaker(sink);
         publish_chain(status, &rx);
         *status.transcript.lock() = rx.transcript().clone();
         status.can_transmit.store(dev.info().can_transmit(), Ordering::Relaxed);
@@ -2195,13 +2189,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             plan,
             rx,
             scanners,
-            audio: AudioIo {
-                out: String::new(),
-                input: String::new(),
-                _player: player,
-                sink,
-                mic: None,
-            },
+            audio: AudioIo { out: String::new(), input: String::new(), _player: player, mic: None },
             tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None, last_keyed: None },
             voice: None,
             status,
@@ -2289,7 +2277,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
             {
                 let _a = tracing::info_span!("audio").entered();
-                self.play();
+                self.meter_audio();
             }
             {
                 let _s = tracing::info_span!("stations").entered();
@@ -2348,14 +2336,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::Key(Some(id)) => self.key(id),
             Cmd::Rate(r) => return self.set_rate(r),
             Cmd::NodeParam(id, name, value) => self.set_node_param(id, &name, value),
-            Cmd::Channels(specs) => self.set_channels(specs),
-            Cmd::Volume { volume, muted } => {
-                self.plan.audio.master = volume;
-                self.plan.audio.muted = muted;
-                if let Some(b) = self.rx.audio_mut() {
-                    b.bus_mut().set_master(volume, muted);
+            Cmd::StageParam(stage, name, value) => match self.rx.node_of_stage(stage) {
+                Some(id) => self.set_node_param(id.0, &name, value),
+                None => {
+                    *self.status.error.lock() = Some(format!("{name}: no such stage is running"))
                 }
-            }
+            },
+            Cmd::Channels(specs) => self.set_channels(specs),
             Cmd::Fft(n) => {
                 self.plan.fft = n;
                 self.needs_rebuild = true;
@@ -2512,22 +2499,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 self.plan.settings.watching = rules;
                 self.rx.apply_settings(&self.plan);
             }
-            Cmd::CallVolume { volume, muted } => {
-                self.plan.audio.calls = volume;
-                self.plan.audio.calls_muted = muted;
-                if let Some(b) = self.rx.audio_mut() {
-                    b.bus_mut().set_calls(volume, muted);
-                }
-            }
-            Cmd::CallAgc(on) => {
-                self.plan.audio.agc = on;
-                if let Some(b) = self.rx.audio_mut() {
-                    b.bus_mut().set_agc(on);
-                }
-            }
             Cmd::Play(speech) => {
-                if let Some(b) = self.rx.audio_mut() {
-                    b.bus_mut().play(&speech);
+                if let Some(r) = self.rx.replay_mut() {
+                    r.play(&speech);
                 }
             }
         }
@@ -2580,20 +2554,16 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.audio.out = out;
         // Dropping the old player first: a host that only allows one stream
         // per device refuses the second one while the first is still open.
-        let level = self.audio.sink.as_ref().map(|s: &audio::AudioSink| (s.volume(), s.muted()));
         self.audio._player = None;
-        self.audio.sink = None;
+        self.rx.set_speaker(None);
         let opened = match self.audio.out.is_empty() {
             true => AudioPlayer::open(48_000),
             false => AudioPlayer::open_named(&self.audio.out, 48_000),
         };
         match opened {
-            Ok((p, mut s)) => {
-                if let Some((v, m)) = level {
-                    s.set_output(v, m);
-                }
+            Ok((p, s)) => {
                 self.audio._player = Some(p);
-                self.audio.sink = Some(s);
+                self.rx.set_speaker(Some(s));
             }
             Err(e) => *self.status.error.lock() = Some(format!("cannot open that speaker: {e}")),
         }
@@ -2943,6 +2913,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // read against.
         self.status.set_patch(&self.rx);
         publish_chain(self.status, &self.rx);
+        // The edits brought the levels with them, and the strip has to be
+        // shown what the nodes now hold.
+        pull_levels(&self.rx, &mut self.plan, self.status);
         self.needs_rebuild = false;
         Flow::Go
     }
@@ -3229,16 +3202,17 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         Flow::Go
     }
 
-    /// Hand the block the bus mixed to the speaker, and read the meters back.
+    /// Read the meters back off the audio path.
     ///
-    /// Everything that is heard was mixed on the bus, in the graph: every
-    /// channel at its fader, every subscribed call, a replay.
-    fn play(&mut self) {
+    /// Everything that is heard was mixed on the bus and played by the
+    /// speaker, in the graph: every channel at its fader, every subscribed
+    /// call, a replay. Nothing here touches the sound card.
+    fn meter_audio(&mut self) {
         self.status.set_channel_states(self.rx.channel_states());
-        self.status.set_strips(self.rx.audio_node_id(), self.rx.strips());
+        self.status.set_strips(self.rx.strips());
         *self.status.tetra_keys.lock() = self.rx.tetra_key_status();
-        if let Some(b) = self.rx.audio_mut().map(|n| n.bus_mut()) {
-            let calls = b.take_calls();
+        if let Some(h) = self.rx.heard_mut() {
+            let calls = h.take_calls();
             if !calls.is_empty() {
                 let mut heard = self.status.heard.lock();
                 // A running call replaces its last report; an ended one is
@@ -3251,39 +3225,19 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 }
             }
         }
-        if let Some(b) = self.rx.audio().map(|n| n.bus()) {
-            Status::set_level(&self.status.call_level, b.voice_peak());
-            *self.status.call_levels.lock() = b.levels();
-            self.status.call_gain_db.store(b.agc_gain_db().to_bits(), Ordering::Relaxed);
+        if let Some(h) = self.rx.heard() {
+            Status::set_level(&self.status.call_level, h.peak());
+            *self.status.call_levels.lock() = h.levels();
         }
-        let Some(s) = self.audio.sink.as_mut() else { return };
-        // Silent while transmitting, whatever the strip says. The receiver is
-        // being shown the transmission so the operator can see it, and playing
-        // it as well is a radio talking over itself: with desktop audio as the
-        // microphone it is worse than that, because what comes out of the
-        // speaker goes back in and is transmitted again.
-        //
-        // Applied here rather than once at key-up because this line runs every
-        // block and would put the operator's setting straight back.
-        let muted = self.plan.audio.muted || self.rx.keyed();
-        // The master governs the device, not the mix: anything a stage
-        // downstream of the bus adds is under it too, and a mute takes the
-        // fifth of a second already queued at the sound card with it.
-        s.set_output(self.plan.audio.master, muted);
-        let (out, rate) = self.rx.audio_out();
-        if muted {
-            Status::set_level(&self.status.out_level, 0.0);
-            if !out.is_empty() {
-                // Still written, so the drift loop stays converged and
-                // unmuting does not open with a burst of resampling.
-                s.write_adaptive_stereo(out, rate);
-            }
-        } else if !out.is_empty() {
-            Status::set_level(&self.status.out_level, peak_of(out) * self.plan.audio.master);
-            s.write_adaptive_stereo(out, rate);
+        if let Some(c) = self.rx.calls() {
+            self.status.call_gain_db.store(c.agc_gain_db().to_bits(), Ordering::Relaxed);
+        }
+        if let Some(b) = self.rx.audio() {
+            *self.status.playing.lock() = b.playing().to_vec();
+        }
+        if let Some(s) = self.rx.speaker() {
+            Status::set_level(&self.status.out_level, s.peak());
             self.status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
-        } else {
-            Status::set_level(&self.status.out_level, 0.0);
         }
     }
 
@@ -3321,34 +3275,27 @@ fn run(
         .run()
 }
 
-/// Take the levels the nodes hold into the plan, and tell the strip when
-/// they differ from what it last said.
+/// Tell the strip what the nodes hold, when it differs from what it was
+/// last told.
 ///
-/// A fader or a squelch set through the chain view lands on the node. The
-/// plan is what the next rebuild draws from, so it has to follow; and the
-/// strip is what the operator reads, so it has to follow too. A revision
-/// moves only when something changed, so what the strip sends itself does
-/// not come back to it.
+/// A fader or a squelch set through the chain view lands on the node, and
+/// the strip is what the operator reads, so it has to follow. A squelch or
+/// a gain control is also a plan value, which the next rebuild draws from,
+/// so the plan follows too; a level is not, since the fader keeps it. A
+/// revision moves only when something changed, so what the strip sends
+/// itself does not come back to it.
 fn pull_levels(rx: &crate::chain::Receiver, plan: &mut Plan, status: &Status) {
     let (audio, chans) = rx.levels();
-    let mut changed = audio != plan.audio;
-    plan.audio = audio;
-    for c in chans {
-        let Some(have) = plan.channels.iter_mut().find(|h| h.id == c.id) else { continue };
-        if (&have.label, have.volume, have.muted, have.squelch_db, have.agc)
-            == (&c.label, c.volume, c.muted, c.squelch_db, c.agc)
-        {
-            continue;
+    let was = status.levels();
+    for c in &chans {
+        if let Some(have) = plan.channels.iter_mut().find(|h| h.id == c.id) {
+            have.label = c.label.clone();
+            have.squelch_db = c.squelch_db;
+            have.agc = c.agc;
         }
-        have.label = c.label;
-        have.volume = c.volume;
-        have.muted = c.muted;
-        have.squelch_db = c.squelch_db;
-        have.agc = c.agc;
-        changed = true;
     }
-    if changed {
-        status.set_levels(plan.audio, plan.channels.clone());
+    if audio != was.audio || chans != was.channels {
+        status.set_levels(audio, chans);
     }
 }
 
@@ -3393,7 +3340,6 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         smoothing: crate::chain::DEFAULT_SMOOTHING,
         fft: 1024,
         channels: Vec::new(),
-        audio: crate::chain::AudioPlan::default(),
         fronts: vec![crate::scanners::FrontAt {
             front: crate::scanners::Front::Banks(crate::scanners::DEFAULT_WIDTHS.to_vec()),
             // The whole span: these tests are about the shape of the
@@ -3438,8 +3384,6 @@ pub(crate) mod tests {
             offset_hz: offset,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             squelch_db: None,
             voice: false,
             agc: true,
@@ -3476,8 +3420,6 @@ pub(crate) mod tests {
             offset_hz: offset,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
-            volume: 0.8,
-            muted: true,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -3776,8 +3718,6 @@ pub(crate) mod tests {
             offset_hz: -400_000.0,
             mode: ChanMode::Audio(Demod::Wfm),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             squelch_db: None,
             voice: false,
             agc: true,
@@ -4967,8 +4907,6 @@ pub(crate) mod tests {
             offset_hz: 433_475_000.0 - buf.center.as_f64(),
             mode: ChanMode::Decode("m17".into()),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             squelch_db: None,
             voice: false,
             agc: true,
@@ -5012,8 +4950,6 @@ pub(crate) mod tests {
             offset_hz: 433_475_000.0 - buf.center.as_f64(),
             mode: ChanMode::Auto,
             bandwidth_hz: Some(100_000.0),
-            volume: 1.0,
-            muted: false,
             squelch_db: None,
             voice: false,
             agc: true,
@@ -5050,11 +4986,10 @@ pub(crate) mod tests {
             return;
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
-        let bus = rx.audio_mut().expect("the bus is always there");
-        bus.bus_mut().set_subscriptions(vec![crate::audiobus::Subscription::new(
-            crate::audiobus::Rule::Everything,
+        let calls = rx.calls_mut().expect("the calls are always there");
+        calls.set_subscriptions(vec![crate::mix::calls::Subscription::new(
+            crate::mix::calls::Rule::Everything,
         )]);
-        bus.bus_mut().set_master(1.0, false);
 
         let mut pcm: Vec<f32> = Vec::new();
         let mut heard = None;
@@ -5064,14 +4999,13 @@ pub(crate) mod tests {
             }
             // One side of the stereo mix, which carries speech on both.
             pcm.extend(rx.audio_out().0.iter().step_by(2));
-            heard =
-                heard.or_else(|| rx.audio().and_then(|c| c.bus().last_heard()).map(str::to_string));
+            heard = heard.or_else(|| rx.audio().and_then(|b| b.last_heard()).map(str::to_string));
         }
         assert_eq!(heard.as_deref(), Some("OPNRTX to BROADCAST"), "nobody was heard");
         // The bus resamples to its output rate, and the over is seconds
         // long. Half a second of it is enough to say the vocoder ran on live
         // frames and the mix reached the far end.
-        let seconds = pcm.len() as f64 / rx.audio().unwrap().bus().out_rate();
+        let seconds = pcm.len() as f64 / rx.audio().unwrap().out_rate();
         assert!(seconds > 0.5, "only {seconds:.2} s of speech");
         // Speech, not a run of zeros: a decoder that returns silence for
         // every frame would pass every assertion above.
@@ -5355,8 +5289,6 @@ pub(crate) mod tests {
             offset_hz: CHANNEL_HZ - buf.center.as_f64(),
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             // Open: the transmission is what the file holds, and a squelch
             // decision is not what this test is about.
             squelch_db: Some(-200.0),
@@ -5427,15 +5359,12 @@ pub(crate) mod tests {
         };
         let mut plan = replay_plan(&buf, false);
         plan.fronts.clear();
-        plan.audio.master = 1.0;
         plan.channels = vec![ChannelSpec {
             id: 1,
             label: "PMR1".into(),
             offset_hz: 446_049_100.0 - buf.center.as_f64(),
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             squelch_db: None,
             agc: true,
             voice: true,
@@ -5448,7 +5377,7 @@ pub(crate) mod tests {
         );
 
         let mut calls = crate::calls::Calls::new();
-        let mut heard: Vec<crate::audiobus::LiveCall> = Vec::new();
+        let mut heard: Vec<crate::mix::heard::LiveCall> = Vec::new();
         let mut pcm: Vec<f32> = Vec::new();
         let mut silent_blocks = 0;
         for block in buf.samples.chunks(16_384) {
@@ -5461,7 +5390,7 @@ pub(crate) mod tests {
             }
             pcm.extend(out.iter().step_by(2));
             assert!(rx.decodes(std::time::Instant::now()).is_empty(), "speech is not a packet");
-            for c in rx.audio_mut().expect("the bus").bus_mut().take_calls() {
+            for c in rx.heard_mut().expect("the tap").take_calls() {
                 calls.hear(&c);
                 heard.push(c);
             }
@@ -5655,8 +5584,6 @@ mod zoom_tests {
             offset_hz: 0.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: false,
             squelch_db: Some(-200.0),
             agc: false,
             voice: false,

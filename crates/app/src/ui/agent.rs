@@ -597,13 +597,24 @@ impl App {
                 Ok(json!({ "tx_gain_db": a.db }))
             }
             Action::Volume(a) => {
+                use crate::chain::derived;
+                use pipeline::param::ParamValue;
                 if let Some(v) = a.volume {
                     self.audio.volume = v.clamp(0.0, 1.0);
+                    self.send(Cmd::StageParam(
+                        derived::SPEAKER,
+                        "master".into(),
+                        ParamValue::Float(self.audio.volume as f64),
+                    ));
                 }
                 if let Some(m) = a.muted {
                     self.audio.muted = m;
+                    self.send(Cmd::StageParam(
+                        derived::SPEAKER,
+                        "muted".into(),
+                        ParamValue::Bool(m),
+                    ));
                 }
-                self.send(Cmd::Volume { volume: self.audio.volume, muted: self.audio.muted });
                 Ok(json!({ "volume": self.audio.volume, "muted": self.audio.muted }))
             }
 
@@ -716,11 +727,25 @@ impl App {
         if let Some(on) = a.on {
             c.on = on;
         }
+        // The level is the fader stage's, set there; the channel here
+        // mirrors it.
+        let fader = crate::chain::fader_id(c.id);
+        let mut level_cmds = Vec::new();
         if let Some(v) = a.volume {
             c.volume = v.clamp(0.0, 1.0);
+            level_cmds.push(Cmd::StageParam(
+                fader,
+                "vol".into(),
+                pipeline::param::ParamValue::Float(c.volume as f64),
+            ));
         }
         if let Some(m) = a.muted {
             c.muted = m;
+            level_cmds.push(Cmd::StageParam(
+                fader,
+                "mute".into(),
+                pipeline::param::ParamValue::Bool(m),
+            ));
         }
         if let Some(s) = a.squelch_db {
             c.squelch_db = Some(s);
@@ -732,6 +757,9 @@ impl App {
             c.voice = v;
         }
         self.send_channels();
+        for c in level_cmds {
+            self.send(c);
+        }
         Ok(ok())
     }
 

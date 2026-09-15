@@ -189,7 +189,7 @@ impl Calls {
     /// What only a decoder knows, the cipher, the codec, the kind of call,
     /// arrives by [`Self::update`] from the packet side and lands on the same
     /// row, because the two are keyed the same way.
-    pub fn hear(&mut self, c: &crate::audiobus::LiveCall) {
+    pub fn hear(&mut self, c: &crate::mix::heard::LiveCall) {
         let key = c.key();
         let same = |k: &Call| k.key().same_conversation(&key);
         let found = self
@@ -649,7 +649,7 @@ mod tests {
             Airtime { codec: Some("Codec 2 3200"), ..over(3.0) },
         );
         c.update(&packet, at);
-        let live = |seconds: f64, over: bool| crate::audiobus::LiveCall {
+        let live = |seconds: f64, over: bool| crate::mix::heard::LiveCall {
             system: "M17".into(),
             channel_hz: 433.475e6,
             to: "BROADCAST".into(),
@@ -699,6 +699,7 @@ mod tests {
             to: Some("9".into()),
             from: Some("1234567".into()),
             rate: 8_000.0,
+            channels: 1,
             pcm: vec![0.2; 8],
         });
         assert_eq!(call.key(), spoken);

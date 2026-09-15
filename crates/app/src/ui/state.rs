@@ -234,6 +234,10 @@ pub(super) struct ChainState {
     /// setting changed by parameter, the transcriber's switch among them, was
     /// lost at the next start and had to be found again.
     pub edits_landed: bool,
+    /// Edits changed and not yet written. A fader drag changes them on
+    /// every frame, and a file written sixty times a second to record where
+    /// a level ended up is a lot of writes for one level.
+    pub edits_dirty: bool,
     /// Where the stages were when the graph was last written out, so that
     /// dragging one is saved without writing the file on every frame.
     pub places: crate::patch::Places,
@@ -315,6 +319,19 @@ impl ChainState {
         self.edits_landed |= !edits.is_empty() || self.edits.is_empty();
         if edits != self.edits && self.edits_landed {
             self.edits = edits;
+            self.edits_dirty = true;
+        }
+        self.flush_edits(false);
+    }
+
+    /// Write the edits out once they have settled, or now.
+    pub fn flush_edits(&mut self, now: bool) {
+        if !self.edits_dirty {
+            return;
+        }
+        let due = now || self.saved_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0);
+        if due {
+            self.edits_dirty = false;
             self.save_patch();
         }
     }
@@ -609,10 +626,10 @@ pub(super) struct CallsState {
     pub list: crate::calls::Calls,
     /// What the call bus is subscribed to, as the interface holds it. The
     /// radio thread is sent the whole set whenever it changes.
-    pub subs: Vec<crate::audiobus::Subscription>,
+    pub subs: Vec<crate::mix::calls::Subscription>,
     /// Groups switched off by hand, so one that was turned off does not
     /// subscribe itself again the next time somebody transmits on it.
-    pub optout: Vec<crate::audiobus::Rule>,
+    pub optout: Vec<crate::mix::calls::Rule>,
 }
 
 impl CallsState {
@@ -629,11 +646,11 @@ impl CallsState {
     ) {
         let mut added = false;
         for c in calls {
-            let rule = crate::audiobus::Rule::Group(c.to.clone());
+            let rule = crate::mix::calls::Rule::Group(c.to.clone());
             if self.optout.contains(&rule) || self.subs.iter().any(|s| s.rule == rule) {
                 continue;
             }
-            self.subs.push(crate::audiobus::Subscription::new(rule));
+            self.subs.push(crate::mix::calls::Subscription::new(rule));
             added = true;
         }
         if added {
@@ -642,7 +659,7 @@ impl CallsState {
     }
 
     /// Subscribe to a rule, or drop it if it is already there.
-    pub fn toggle(&mut self, rule: crate::audiobus::Rule, cmds: &mut Vec<crate::radio::Cmd>) {
+    pub fn toggle(&mut self, rule: crate::mix::calls::Rule, cmds: &mut Vec<crate::radio::Cmd>) {
         match self.subs.iter().position(|s| s.rule == rule) {
             Some(i) => {
                 self.subs.remove(i);
@@ -650,7 +667,7 @@ impl CallsState {
             }
             None => {
                 self.optout.retain(|r| r != &rule);
-                self.subs.push(crate::audiobus::Subscription::new(rule));
+                self.subs.push(crate::mix::calls::Subscription::new(rule));
             }
         }
         cmds.push(crate::radio::Cmd::CallSubs(self.subs.clone()));

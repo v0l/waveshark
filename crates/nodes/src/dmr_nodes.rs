@@ -1344,6 +1344,7 @@ impl Node for DmrNode {
             to,
             from,
             rate: VOICE_HZ,
+            channels: 1,
             pcm: std::mem::take(&mut self.voice_now),
         });
         outputs[OUT_PACKETS].packets_mut().extend(packets);

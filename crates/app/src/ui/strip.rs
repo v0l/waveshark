@@ -3,7 +3,7 @@
 
 use super::state::AudioState;
 use super::*;
-use crate::audiobus::StripParam;
+use crate::chain::derived;
 use crate::radio::TxSource;
 use pipeline::param::ParamValue;
 
@@ -639,8 +639,11 @@ impl Strip<'_> {
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("master").show(ui);
                     if ui.add(Fader::new(&mut self.st.volume, out_level).width(VU_W)).changed() {
-                        self.cmds
-                            .push(Cmd::Volume { volume: self.st.volume, muted: self.st.muted });
+                        self.cmds.push(Cmd::StageParam(
+                            derived::SPEAKER,
+                            "master".into(),
+                            ParamValue::Float(self.st.volume as f64),
+                        ));
                     }
                     // The master mute is the bus's own, not a sweep over the
                     // channel mutes: muting every channel left calls, replays
@@ -660,11 +663,21 @@ impl Strip<'_> {
                     .clicked()
                     {
                         self.st.muted = !self.st.muted;
-                        self.cmds
-                            .push(Cmd::Volume { volume: self.st.volume, muted: self.st.muted });
+                        self.cmds.push(Cmd::StageParam(
+                            derived::SPEAKER,
+                            "muted".into(),
+                            ParamValue::Bool(self.st.muted),
+                        ));
                     }
                 });
-
+                // What the speaker is playing now, off the bus: who, to
+                // whom, on what frequency. A mix that could not say was a
+                // receiver that could not tell an operator why they were
+                // hearing two conversations at once.
+                let playing = self.radio.map(|r| r.status.playing()).unwrap_or_default();
+                for p in playing.iter().filter(|p| p.peak > 0.002) {
+                    theme::Line::new().heard(describe_playing(&p.key)).size(11.0).elided(ui);
+                }
 
                 ui.add_space(8.0);
 
@@ -905,18 +918,30 @@ impl Strip<'_> {
                                     tune = Some(i);
                                 }
                                 // Its own level, which runs into the master,
-                                // read against what it is contributing.
+                                // read against what it is contributing. The
+                                // level is the fader stage's, set by the
+                                // same route the chain view uses; what is
+                                // held here is a mirror of it.
                                 let st = states.iter().find(|s| s.id == ch.id).copied();
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
                                     theme::Line::new().legend("vol").show(ui);
                                     let level = st.map(|s| s.level).unwrap_or(0.0);
+                                    let fader = crate::chain::fader_id(ch.id);
                                     if ui.add(Fader::new(&mut ch.volume, level).width(VU_W)).changed() {
-                                        tune = Some(i);
+                                        self.cmds.push(Cmd::StageParam(
+                                            fader,
+                                            "vol".into(),
+                                            ParamValue::Float(ch.volume as f64),
+                                        ));
                                     }
                                     if Self::mute_button(ui, ch.muted, "Mute this channel").clicked() {
                                         ch.muted = !ch.muted;
-                                        tune = Some(i);
+                                        self.cmds.push(Cmd::StageParam(
+                                            fader,
+                                            "mute".into(),
+                                            ParamValue::Bool(ch.muted),
+                                        ));
                                     }
                                 });
                                 if ch.mode == ChanMode::Audio(Demod::Wfm) {
@@ -958,14 +983,13 @@ impl Strip<'_> {
                     ui.add_space(6.0);
                 }
 
-                // Chains the operator drew and wired into the bus are strips
-                // too: nobody tuned them, so there is no dial or mode to
-                // show, but each has a level and a meter like everything
-                // else that reaches the speaker. Set by the same route the
-                // chain view uses, since the level is the bus's parameter.
+                // Faders the operator placed are strips too: nobody tuned
+                // them, so there is no dial or mode to show, but each has a
+                // level and a meter like everything else that reaches the
+                // speaker. Set by the same route the chain view uses.
                 let strips = self.radio.map(|r| r.status.strips()).unwrap_or_default();
-                if let Some(bus) = strips.bus_node {
-                    for s in strips.inputs.iter().filter(|s| s.channel.is_none() && !s.voice) {
+                {
+                    for s in strips.inputs.iter().filter(|s| s.channel.is_none()) {
                         egui::Frame::NONE
                             .fill(theme::PANEL)
                             .stroke(Stroke::new(1.0, theme::ETCH))
@@ -989,16 +1013,16 @@ impl Strip<'_> {
                                     theme::Line::new().legend("vol").show(ui);
                                     let mut v = s.volume;
                                     if ui.add(Fader::new(&mut v, s.level).width(VU_W)).changed() {
-                                        self.cmds.push(Cmd::NodeParam(
-                                            bus,
-                                            StripParam::Vol.name(s.port),
+                                        self.cmds.push(Cmd::StageParam(
+                                            s.stage,
+                                            "vol".into(),
                                             ParamValue::Float(v as f64),
                                         ));
                                     }
                                     if Self::mute_button(ui, s.muted, "Mute this input").clicked() {
-                                        self.cmds.push(Cmd::NodeParam(
-                                            bus,
-                                            StripParam::Mute.name(s.port),
+                                        self.cmds.push(Cmd::StageParam(
+                                            s.stage,
+                                            "mute".into(),
                                             ParamValue::Bool(!s.muted),
                                         ));
                                     }
@@ -1044,4 +1068,17 @@ fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, St
         })
         .unwrap_or_default();
     Some((node.id.0, path))
+}
+
+/// One line for what the bus is mixing: "M0ABC to ALL, M17 433.475 MHz", or
+/// the channel's own name for audio nobody decoded.
+fn describe_playing(k: &common::ConversationKey) -> String {
+    let hz = k.channel_hz as f64;
+    let on = if hz > 0.0 { format!(" {:.3} MHz", hz / 1e6) } else { String::new() };
+    match (&k.to, &k.from) {
+        (Some(to), Some(from)) => format!("{from} to {to}, {}{on}", k.system),
+        (Some(to), None) if k.system == crate::mix::fader::ANALOGUE => format!("{to}{on}"),
+        (Some(to), None) => format!("{to}, {}{on}", k.system),
+        (None, _) => format!("{}{on}", k.system),
+    }
 }

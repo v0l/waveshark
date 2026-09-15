@@ -24,7 +24,6 @@ fn window_icon() -> Option<egui::IconData> {
 }
 
 mod agent;
-mod audiobus;
 mod bands;
 mod beacondb;
 mod calls;
@@ -43,6 +42,7 @@ mod map;
 mod memory;
 mod meshnode;
 mod messages;
+mod mix;
 mod packetlog;
 mod patch;
 mod picsave;
@@ -89,15 +89,18 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         offset_hz: 0.0,
         mode: radio::ChanMode::Audio(mode),
         bandwidth_hz: None,
-        volume: 1.0,
-        // Measuring, not listening: the numbers are the same either way and
-        // this can be run over ssh.
-        muted: true,
         squelch_db: None,
         voice: false,
         agc: true,
         tx: None,
     }]));
+    // Measuring, not listening: the numbers are the same either way and
+    // this can be run over ssh.
+    r.send(radio::Cmd::StageParam(
+        chain::derived::SPEAKER,
+        "muted".into(),
+        pipeline::param::ParamValue::Bool(true),
+    ));
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     let mut readings = Vec::new();
@@ -155,13 +158,16 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
             offset_hz: 0.0,
             mode: radio::ChanMode::Audio(radio::Demod::Wfm),
             bandwidth_hz: None,
-            volume: 1.0,
-            muted: true,
             squelch_db: None,
             voice: false,
             agc: true,
             tx: None,
         }]));
+        r.send(radio::Cmd::StageParam(
+            chain::derived::SPEAKER,
+            "muted".into(),
+            pipeline::param::ParamValue::Bool(true),
+        ));
         println!("decoding a WFM channel while measuring");
     }
     let start = std::time::Instant::now();

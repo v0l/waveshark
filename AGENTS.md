@@ -59,8 +59,12 @@ or moved by an operator, and the chain view is then wrong.
   reads `PortKind::Voice`, rather than reaching into `self.m17`.
 - No behaviour keyed on a protocol name where a capability will do.
 - A composite node reports its inner graphs through `Node::subgraphs`.
-- Audio is summed on `AudioBusNode` (`crates/app/src/audiobus.rs`), which owns
-  every level, mute, subscription, the master and the clip. Nowhere else.
+- The audio path is `crates/app/src/mix/`, one node per job and every level
+  on the node that applies it: a `fader` per input, `calls` for the
+  subscriptions, `heard` for the tap, `audio_bus` for the sum, `speaker` for
+  the master. Audio crosses the bus as labelled `Voice`, never bare `Real`,
+  so the bus can say what it is playing. Nothing about audio lives in the
+  plan, the radio loop or a numbered bus setting.
 
 Reading state back by downcasting is fine, and is how the spectrum, the
 recorder and the capture are read.
@@ -157,9 +161,11 @@ Anything the receiver does regardless of mode goes in `derived_patch` or
 - A derived stage's settings are reapplied every rebuild, so a hand-set value
   survives only as an edit; `Receiver::set_node_param` writes it into the
   running patch.
-- A setting the strip owns (squelch, gain, bus level) is a plan value, not an
-  edit, pulled back into the plan and published as `Status::levels`.
-  `chain::operator_owns` draws that line.
+- A setting the strip owns (squelch, gain control) is a plan value, not an
+  edit, pulled back into the plan and published as `Status::levels`. A level
+  or a mute is never a plan value: it is a setting on a `fader`, `calls` or
+  `speaker` stage, set with `Cmd::StageParam` by its derived id and kept as
+  an edit. `chain::operator_owns` draws that line.
 - A node's identity across rebuilds is its derived id, keyed by mode and rate
   and never by offset; the mixer's shift is a setting.
 
