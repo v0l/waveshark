@@ -17,6 +17,8 @@ the code is in the commit log.
 
 - The agent says what it is doing: asking, making speech, or downloading a voice.
 
+- The agent channel shows the last over it heard and why it did not answer.
+
 - The agent answers to a name you choose, and waits for the channel to be clear.
 
 - Agents can key the transmitter, set the tone or microphone, and set transmit gain.

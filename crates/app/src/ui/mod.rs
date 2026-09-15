@@ -1554,6 +1554,7 @@ impl App {
             chain: self.chain.topo.as_ref(),
             files: &mut self.pick_file,
             air: &self.air,
+            air_fault: self.chat.config.voice_fault(),
         }
         .show(ui);
         for a in acts {
@@ -1844,11 +1845,15 @@ impl App {
     /// Draw the conversation, then do what it asked for.
     fn agent_view(&mut self, ui: &mut egui::Ui) {
         let running = self.radio.is_some();
+        let air_fault = self.chat.config.voice_fault();
+        let wake = self.chat.config.wake.clone();
         let act = agent_pane::AgentView {
             chat: &mut self.chat,
             running,
             air: &self.air,
             voice: crate::agent::voice::health(),
+            air_fault,
+            wake,
         }
         .show(ui);
         match act {
