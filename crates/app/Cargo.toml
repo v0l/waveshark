@@ -42,6 +42,7 @@ pipeline.workspace = true
 crossbeam-channel.workspace = true
 stt = { workspace = true, optional = true }
 tts = { workspace = true, optional = true }
+chrono.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

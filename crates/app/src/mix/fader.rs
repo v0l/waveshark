@@ -173,6 +173,9 @@ impl Node for FaderNode {
                         channel_hz: center_hz,
                         to: self.speech.then(|| self.label.clone()),
                         from: None,
+                        // A fader in front of a channel with no identity
+                        // stage has nothing to say about the group.
+                        code: None,
                         rate,
                         channels,
                         pcm: pcm.clone(),
@@ -286,6 +289,7 @@ mod tests {
             channel_hz: 433_475_000.0,
             to: Some("ALL".into()),
             from: Some("M0ABC".into()),
+            code: None,
             rate: 8_000.0,
             channels: 1,
             pcm: vec![0.8, -0.8],

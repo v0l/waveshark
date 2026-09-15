@@ -49,7 +49,6 @@ impl ReplayNode {
     }
 
     /// Seconds left to play.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn left(&self) -> f64 {
         self.queue.len() as f64 / self.out_rate.max(1.0)
     }
@@ -106,6 +105,7 @@ impl Node for ReplayNode {
                 channel_hz: 0.0,
                 to: None,
                 from: None,
+                code: None,
                 rate: self.out_rate,
                 channels: 1,
                 pcm: block,

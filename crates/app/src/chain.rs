@@ -1506,6 +1506,10 @@ impl Receiver {
         self.stage_mut::<crate::mix::replay::ReplayNode>(derived::REPLAY)
     }
 
+    pub fn replay(&self) -> Option<&crate::mix::replay::ReplayNode> {
+        self.stage::<crate::mix::replay::ReplayNode>(derived::REPLAY)
+    }
+
     /// One channel's fader, by the channel.
     fn fader(&self, channel: u64) -> Option<&crate::mix::fader::FaderNode> {
         self.stage::<crate::mix::fader::FaderNode>(fader_id(channel))
@@ -2657,6 +2661,9 @@ pub mod derived {
     pub const HEARD: u64 = Patch::DERIVED_BASE + 25;
     /// A decoded transmission played back once.
     pub const REPLAY: u64 = Patch::DERIVED_BASE + 26;
+    /// The replay's own level and mute, so a playback is a strip like
+    /// everything else that reaches the speaker.
+    pub const REPLAY_FADER: u64 = Patch::DERIVED_BASE + 29;
     /// Every over the receiver hears, on its way to disk as Opus.
     pub const CALL_LOG: u64 = Patch::DERIVED_BASE + 27;
     /// Everything somebody wrote, on its way to a file a day.
@@ -3024,6 +3031,17 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // same reason and in the same place.
     sync_video(&mut p);
 
+    // The house, whether or not anything decodes. Drawn with no broker set,
+    // because pointing it at one is a setting on a stage that is already
+    // there rather than a rebuild under the packets, and drawn outside the
+    // bus below because a call is audio: on the packet bus alone the call bus
+    // and the on-air lamp were silent on a receiver listening to an analogue
+    // channel, which is a receiver with no packet bus at all.
+    {
+        let ha = p.add_derived(derived::HOMEASSISTANT, "homeassistant", Settings::new());
+        p.connect(Source::Stage(derived::HEARD, 0), (ha, 1));
+    }
+
     // Everything that produces packets meets at the bus, and everything that
     // consumes them hangs off the far side. One input per source: the bus is
     // the only stage whose shape follows the rest of the graph rather than
@@ -3086,11 +3104,8 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         let beacondb = p.add_derived(derived::BEACONDB, "beacondb", Settings::new());
         p.connect(Source::Stage(rows, 0), (beacondb, 0));
 
-        // And the house is a fourth. Drawn with no broker set for the same
-        // reason again: pointing it at one is a setting on a stage that is
-        // already there, not a rebuild under the packets.
-        let ha = p.add_derived(derived::HOMEASSISTANT, "homeassistant", Settings::new());
-        p.connect(Source::Stage(rows, 0), (ha, 0));
+        // And the house is a fourth, on the packets half of its feed.
+        p.connect(Source::Stage(rows, 0), (derived::HOMEASSISTANT, 0));
 
         // And what somebody wrote is a fifth. On, like the packet log: the
         // bursts these were decoded from are already being written down, and
@@ -3238,6 +3253,24 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             ChanMode::Auto => voice_port("auto").map(|k| (k, true)),
         };
         if let Some((port, voice)) = heard {
+            // A channel somebody marked as voice gets the identity stage,
+            // which reads a radio's PTT-ID off the audio and publishes the
+            // audio as speech with the unit on it. It labels the channel too,
+            // so a marked channel is named here rather than by the fader:
+            // one stage says who is talking, and the call list, the
+            // transcript, the recorder and the agent all read the label.
+            let mut from = Source::Stage(tail, port);
+            if matches!(spec.mode, ChanMode::Audio(_)) && spec.voice {
+                let id = chan_stage_id("chan_ident", spec, rate);
+                let mut s = p.stage(id).map(|s| s.settings.clone()).unwrap_or_default();
+                s.insert("channel".into(), V::Int(spec.id as i64));
+                s.insert("label".into(), V::Text(spec.label.clone()));
+                s.entry("enabled".into()).or_insert(V::Bool(true));
+                p.add_derived(id, "ident", s);
+                p.connect(from, (id, 0));
+                want.push(id);
+                from = Source::Stage(id, 0);
+            }
             // The fader is the channel's, under an id that is the channel's
             // alone: a channel that changes mode or width keeps its level.
             let id = fader_id(spec.id);
@@ -3248,7 +3281,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             s.entry("vol".into()).or_insert(V::Float(0.8));
             s.entry("mute".into()).or_insert(V::Bool(false));
             p.add_derived(id, mix::fader::KIND, s);
-            p.connect(Source::Stage(tail, port), (id, 0));
+            p.connect(from, (id, 0));
             want.push(id);
             faders.push((id, voice));
         }
@@ -3353,19 +3386,31 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     to_heard.extend(loose.iter().copied());
     gather(p, derived::HEARD, mix::heard::KIND, "Heard", &to_heard);
 
-    // The replay, with nothing feeding it.
+    // The replay, with nothing feeding it, and a fader of its own: a
+    // playback is something coming out of the speaker, so it has a level, a
+    // mute and a meter like a channel. Not on the tap, because a recording
+    // played back is not something the receiver heard: on the tap it was
+    // transcribed again and logged as a fresh call.
     p.add_derived(derived::REPLAY, mix::replay::KIND, {
         let mut s = pipeline::registry::Settings::new();
         s.insert("label".into(), V::Text("Replay".into()));
         s
     });
+    {
+        let mut s = p.stage(derived::REPLAY_FADER).map(|s| s.settings.clone()).unwrap_or_default();
+        s.insert("label".into(), V::Text("Replay".into()));
+        s.entry("vol".into()).or_insert(V::Float(0.8));
+        s.entry("mute".into()).or_insert(V::Bool(false));
+        let id = p.add_derived(derived::REPLAY_FADER, mix::fader::KIND, s);
+        p.connect(Source::Stage(derived::REPLAY, 0), (id, 0));
+    }
 
     // The bus: every audio fader, the calls and the replay. Whatever the
     // operator wired into the spare stays.
     let mut to_bus: Vec<Source> =
         faders.iter().filter(|(_, v)| !*v).map(|(f, _)| Source::Stage(*f, 0)).collect();
     to_bus.push(Source::Stage(derived::CALLS, 0));
-    to_bus.push(Source::Stage(derived::REPLAY, 0));
+    to_bus.push(Source::Stage(derived::REPLAY_FADER, 0));
     gather(p, derived::AUDIO, mix::bus::KIND, "Audio", &to_bus);
 
     // The speaker, on the end of the bus: the master level and the mute are
@@ -4521,6 +4566,7 @@ pub(crate) mod tests {
         plan.fronts.clear();
         let mut ch = chan(1, 25_000.0, Demod::Nfm);
         ch.voice = true;
+        ch.agc = false;
         plan.channels = vec![ch];
         let rx = Receiver::build(&plan, Default::default()).expect("a voice channel");
         let topo = rx.topology();
@@ -4530,8 +4576,11 @@ pub(crate) mod tests {
             "an analogue channel puts nothing on the packet bus"
         );
         let strips = rx.strips();
-        assert_eq!(strips.len(), 1);
+        // The channel, and the replay's own level: a playback reaches the
+        // speaker through a fader like everything else.
+        assert_eq!(strips.len(), 2, "{strips:?}");
         assert_eq!(strips[0].label, "CH1");
+        assert_eq!(strips[1].stage, derived::REPLAY_FADER);
         assert!(rx.fader(1).expect("a fader").speech(), "the strip is named as a conversation");
     }
 
@@ -5264,6 +5313,197 @@ pub(crate) mod tests {
         );
     }
 
+    /// A channel marked as voice reads a radio's PTT-ID and says who is
+    /// talking.
+    ///
+    /// An FM carrier carries a voice and no identity, so radios send their
+    /// unit number as DTMF when the key goes down. The stage that reads it is
+    /// also what labels the channel, so the caller reaches the call list, the
+    /// transcript and the agent without any of them knowing about tones.
+    #[test]
+    fn a_voice_channel_reads_the_unit_that_keyed_it() {
+        let mut p = plan(2_400_000.0, Hz::mhz(145));
+        p.fronts.clear();
+        let mut ch = chan(1, 12_500.0, Demod::Nfm);
+        ch.voice = true;
+        ch.label = "CH1".into();
+        p.channels = vec![ch.clone()];
+        let mut rx = Receiver::build(&p, Sinks::default()).expect("a voice channel");
+        let topo = rx.topology();
+        let ptt = topo
+            .nodes
+            .iter()
+            .find(|n| n.kind == "ident")
+            .expect("a channel marked as voice reads identities");
+        assert_eq!(ptt.outputs[0].1.kind, PortKind::Voice, "it publishes speech, labelled");
+        // The channel's own fader, not the replay's: both are faders.
+        let fader = topo
+            .nodes
+            .iter()
+            .find(|n| n.kind == crate::mix::fader::KIND && n.tag == Some(fader_id(1)))
+            .expect("the channel's fader");
+        assert!(
+            fader.inputs.iter().any(|(o, _)| *o == ptt.outputs[0].0),
+            "the identity stage is not in front of the fader"
+        );
+
+        // A carrier with the tones of 123 on it, then a second of speech, and
+        // the tap knows who keyed up.
+        let rate = 2_400_000.0;
+        let audio = {
+            let mut v: Vec<f32> = Vec::new();
+            let at = 8_000.0;
+            for key in "123".chars() {
+                let (row, col) = match key {
+                    '1' => (0, 0),
+                    '2' => (0, 1),
+                    _ => (0, 2),
+                };
+                let n = (at * 0.06) as usize;
+                v.extend((0..n).map(|i| {
+                    let t = i as f64 / at;
+                    let a = (std::f64::consts::TAU * dsp::dtmf::LOW[row] * t).sin();
+                    let b = (std::f64::consts::TAU * dsp::dtmf::HIGH[col] * t).sin();
+                    ((a + b) * 0.3) as f32
+                }));
+                v.extend(vec![0.0f32; (at * 0.05) as usize]);
+            }
+            // Then somebody talking, long enough for the run to settle.
+            let n = (at * 1.2) as usize;
+            v.extend((0..n).map(|i| {
+                let t = i as f64 / at;
+                (0..6).fold(0.0f32, |s, h| {
+                    s + ((std::f64::consts::TAU * 180.0 * (h + 1) as f64 * t).sin() as f32)
+                        / (h + 1) as f32
+                }) * 0.2
+            }));
+            v
+        };
+        // The audio on an FM carrier at the channel's own frequency.
+        let mut phase = 0.0f64;
+        let iq: Vec<C32> = audio
+            .iter()
+            .flat_map(|s| {
+                // Each audio sample held for the ratio of the two rates, so
+                // one second of audio is one second of span.
+                let hold = (rate / 8_000.0) as usize;
+                (0..hold)
+                    .map(|_| {
+                        phase +=
+                            std::f64::consts::TAU * (12_500.0 + f64::from(*s) * 2_500.0) / rate;
+                        C32::new(phase.cos() as f32 * 0.5, phase.sin() as f32 * 0.5)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for block in iq.chunks(65_536) {
+            rx.process(block).unwrap();
+        }
+        let unit = rx.heard_mut().expect("the tap").take_calls();
+        assert_eq!(unit.len(), 1, "one over: {unit:?}");
+        assert_eq!(unit[0].to, "CH1");
+        assert_eq!(unit[0].from.as_deref(), Some("123"), "the unit that keyed up");
+
+        // A channel nobody marked as voice has no identity stage: an airband
+        // channel and a repeater's idle hiss are not conversations.
+        let mut quiet = ch.clone();
+        quiet.voice = false;
+        p.channels = vec![quiet];
+        let rx = Receiver::build(&p, Sinks::default()).expect("a plain channel");
+        assert!(
+            !rx.topology().nodes.iter().any(|n| n.kind == "ident"),
+            "an unmarked channel reads identities it was not asked for"
+        );
+    }
+
+    /// The house hears calls with no decoder running at all.
+    ///
+    /// Home Assistant hung off the packet bus, and a receiver listening to a
+    /// repeater on the strip has no packet bus: the node was not in the graph
+    /// and the call bus, the on-air lamp and the messages were silent for the
+    /// whole session. A call is audio, so it is fed from the tap, which every
+    /// voice passes whatever produced it.
+    #[test]
+    fn the_house_is_fed_by_the_tap_and_not_only_by_the_packet_bus() {
+        let mut p = plan(2_400_000.0, Hz::mhz(145));
+        p.fronts.clear();
+        let mut ch = chan(1, 25_000.0, Demod::Nfm);
+        ch.voice = true;
+        p.channels = vec![ch];
+        let rx = Receiver::build(&p, Sinks::default()).expect("a receiver with no decoder");
+        let topo = rx.topology();
+        assert!(
+            !topo.nodes.iter().any(|n| n.kind == "packet_bus"),
+            "this receiver decodes nothing, which is the point of the test"
+        );
+        let ha = topo
+            .nodes
+            .iter()
+            .find(|n| n.kind == "homeassistant")
+            .expect("the house is in the graph whatever is running");
+        let heard = topo.nodes.iter().find(|n| n.kind == "heard").expect("the tap");
+        assert!(
+            ha.inputs.iter().any(|(o, s)| *o == heard.outputs[0].0 && s.kind == PortKind::Voice),
+            "the house is not fed from the tap: {:?}",
+            ha.inputs
+        );
+        assert!(rx.homeassistant_status().is_some(), "and the pane can read it");
+
+        // And with a decoder running it is fed by both, the packets for
+        // devices and messages and the tap for who is talking.
+        p.fronts = vec![crate::scanners::FrontAt {
+            front: Front::protocol("m17", 433_475_000.0),
+            band: (0.0, f64::INFINITY),
+        }];
+        p.center = Hz::mhz(433);
+        let rx = Receiver::build(&p, Sinks::default()).expect("a receiver that decodes");
+        let topo = rx.topology();
+        let ha = topo.nodes.iter().find(|n| n.kind == "homeassistant").expect("the house");
+        let kinds: Vec<PortKind> = ha.inputs.iter().map(|(_, s)| s.kind).collect();
+        assert_eq!(kinds, vec![PortKind::Packets, PortKind::Voice], "{kinds:?}");
+    }
+
+    /// A played-back over has a level, a mute and an end, like a channel.
+    ///
+    /// It went straight into the bus, so the only control over a playback
+    /// was the master: a recording played at the wrong level could not be
+    /// turned down and could not be stopped.
+    #[test]
+    fn a_played_back_over_has_a_level_of_its_own() {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts.clear();
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let strip = rx
+            .strips()
+            .into_iter()
+            .find(|s| s.stage == derived::REPLAY_FADER)
+            .expect("the replay has a strip");
+        assert_eq!(strip.label, "Replay");
+        assert_eq!(strip.volume, 0.8);
+        assert!(!strip.muted);
+
+        // Two seconds of tone, played once.
+        let pcm: Vec<f32> = (0..96_000).map(|i| (i as f32 / 8.0).sin() * 0.5).collect();
+        let speech = std::sync::Arc::new(common::Speech { pcm, rate: 48_000.0 });
+        rx.replay_mut().expect("the replay stage").play(&speech);
+        assert!(rx.replay().expect("the replay stage").left() > 1.9);
+        rx.process(&carrier(2_400_000.0, 0.0, 65_536)).unwrap();
+        let loud = rms(rx.audio_out().0);
+        assert!(loud > 0.05, "the playback is silent at the speaker: {loud:e}");
+
+        // Its own fader turns it down, and nothing else is playing to hear.
+        let fader = rx.node_of_stage(derived::REPLAY_FADER).expect("the replay's fader").0;
+        rx.set_node_param(fader, "mute", pipeline::ParamValue::Bool(true)).unwrap();
+        rx.process(&carrier(2_400_000.0, 0.0, 65_536)).unwrap();
+        assert_eq!(rms(rx.audio_out().0), 0.0, "muted and still audible");
+
+        // And stopping it drops what was left rather than playing it out.
+        let before = rx.replay().expect("the replay stage").left();
+        assert!(before > 0.5, "{before} s left");
+        rx.replay_mut().expect("the replay stage").stop();
+        assert_eq!(rx.replay().expect("the replay stage").left(), 0.0);
+    }
+
     /// A carrier at `offset` from the centre, at full deviation of nothing:
     /// enough for an AM chain to produce a level and an FM chain to open.
     fn carrier(rate: f64, offset: f64, n: usize) -> Vec<C32> {
@@ -5291,7 +5531,7 @@ pub(crate) mod tests {
         let fader = rx.node_of_stage(fader_id(1)).expect("the channel has a fader").0;
         rx.set_node_param(fader, "vol", pipeline::ParamValue::Float(0.5)).unwrap();
         let strips = rx.strips();
-        assert_eq!(strips.len(), 1);
+        assert_eq!(strips.len(), 2, "the channel and the replay: {strips:?}");
         assert_eq!(strips[0].channel, Some(1));
         assert_eq!(strips[0].volume, 0.5);
         assert_eq!(strips[0].label, "CH1");
@@ -5381,10 +5621,10 @@ pub(crate) mod tests {
         p.edits = crate::patch::Edits::diff(&patch, &derived_patch(&p), operator_owns);
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
         let strips = rx.strips();
-        assert_eq!(strips.len(), 1, "{strips:?}");
-        assert_eq!(strips[0].channel, None, "it is nobody's channel");
-        assert!(!strips[0].voice);
-        assert_eq!(strips[0].label, "Envelope");
+        assert_eq!(strips.len(), 2, "the drawn chain and the replay: {strips:?}");
+        let drawn = strips.iter().find(|s| s.label == "Envelope").expect("the drawn chain");
+        assert_eq!(drawn.channel, None, "it is nobody's channel");
+        assert!(!drawn.voice);
         for _ in 0..4 {
             rx.process(&carrier(2_400_000.0, 200_000.0, 65_536)).unwrap();
         }
@@ -5406,7 +5646,9 @@ pub(crate) mod tests {
         p.edits = rx.edits();
         p.center = Hz::mhz(434);
         rx.rebuild(&p).unwrap();
-        assert_eq!(rx.strips()[0].volume, 0.25);
+        let strips = rx.strips();
+        let drawn = strips.iter().find(|s| s.label == "Envelope").expect("the drawn chain");
+        assert_eq!(drawn.volume, 0.25);
     }
 
     #[test]

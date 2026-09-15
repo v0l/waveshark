@@ -655,6 +655,41 @@ pub(super) struct CallsState {
     /// Groups switched off by hand, so one that was turned off does not
     /// subscribe itself again the next time somebody transmits on it.
     pub optout: Vec<crate::mix::calls::Rule>,
+    /// The recordings table under the live list: what the folder holds, and
+    /// whether it is open at all. Headers only, so a week of a busy
+    /// talkgroup lists in a few milliseconds; the audio is read when a row
+    /// is played.
+    pub recordings: Vec<crate::calllog::Entry>,
+    /// When the folder was last walked, so the table refreshes itself
+    /// without doing so on every frame.
+    pub read_at: Option<Instant>,
+    pub log_open: bool,
+    /// Where the divider between the live list and the recordings sits.
+    pub log_frac: f32,
+    pub log_splitting: bool,
+}
+
+/// The most the recordings table holds. Beyond a few thousand rows nobody is
+/// reading a list, and the folder is minutes of walking rather than
+/// milliseconds.
+pub(super) const RECORDINGS_MAX: usize = 2_000;
+
+/// How often the folder is walked while the table is open. Long enough that
+/// a receiver recording every over is not reading its own folder back
+/// continuously, short enough that an over appears while somebody is still
+/// looking for it.
+pub(super) const RECORDINGS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+
+impl CallsState {
+    /// Walk the folder again if it is time to, or if something asked.
+    pub fn read_recordings(&mut self, dir: &std::path::Path, force: bool) {
+        let due = self.read_at.is_none_or(|at| at.elapsed() >= RECORDINGS_EVERY);
+        if !force && !due {
+            return;
+        }
+        self.recordings = crate::calllog::browse(dir, RECORDINGS_MAX);
+        self.read_at = Some(Instant::now());
+    }
 }
 
 impl CallsState {
@@ -701,7 +736,16 @@ impl CallsState {
 
 impl Default for CallsState {
     fn default() -> Self {
-        Self { list: crate::calls::Calls::new(), subs: Vec::new(), optout: Vec::new() }
+        Self {
+            list: crate::calls::Calls::new(),
+            subs: Vec::new(),
+            optout: Vec::new(),
+            recordings: Vec::new(),
+            read_at: None,
+            log_open: false,
+            log_frac: 0.6,
+            log_splitting: false,
+        }
     }
 }
 

@@ -663,8 +663,7 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
     let protocols = decode::Protocols::all();
     let (mut decoded, mut silent) = (0, 0);
     for p in &bursts {
-        let secs = p.at_us / 1_000_000 % 86_400;
-        let when = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+        let when = crate::segments::when(p.at_us).format("%H:%M:%S").to_string();
         let mhz = p.center_hz() as f64 / 1e6;
         let Some(pkg) = p.package() else {
             let bytes = p.frame().unwrap_or_default();
@@ -810,8 +809,7 @@ fn list_calls(path: &std::path::Path, wavs: Option<&std::path::Path>) -> anyhow:
     }
     let mut seconds = 0.0;
     for (k, c) in calls.iter().enumerate() {
-        let secs = c.at_us / 1_000_000 % 86_400;
-        let when = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+        let when = crate::segments::when(c.at_us).format("%H:%M:%S").to_string();
         seconds += c.seconds();
         println!(
             "{when}  {:10.4} MHz  {:<8} {:>12} -> {:<12} {:>6.1} s  peak {:>5.2}",

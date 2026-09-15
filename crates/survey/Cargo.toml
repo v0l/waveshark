@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono.workspace = true
 common.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true

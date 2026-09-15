@@ -305,6 +305,7 @@ impl Node for M17Node {
             channel_hz: self.channel_hz,
             to,
             from,
+            code: None,
             rate: VOICE_HZ,
             channels: 1,
             pcm: std::mem::take(&mut self.voice_now),

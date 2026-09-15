@@ -46,7 +46,7 @@
 //! busy trunked network is a house nobody can read.
 
 use common::Result;
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 use std::collections::{HashMap, HashSet};
@@ -70,6 +70,10 @@ const MIN_INTERVAL_S: f64 = 10.0;
 /// city centre holds thousands of BLE addresses, and filling Home Assistant
 /// with them is a mistake that takes an afternoon to undo.
 const MAX_DEVICES: usize = 250;
+
+/// Below this peak a block off the tap is silence rather than somebody
+/// talking. The same floor the tap itself uses to decide who is on air.
+const VOICE_FLOOR: f32 = 0.004;
 
 /// What the bridge device is called, and the identifier every other device
 /// points at with `via_device`.
@@ -439,13 +443,16 @@ struct OnAir {
     channel_hz: f64,
     to: String,
     from: Option<String>,
+    /// The coded squelch an analogue channel's users are set to, where the
+    /// audio said: "141.3" or "D023".
+    code: Option<String>,
     encrypted: bool,
     codec: Option<&'static str>,
     started: Instant,
     last: Instant,
 }
 
-/// The feed to Home Assistant, on the packet bus.
+/// The feed to Home Assistant, on the packet bus and on the tap.
 pub struct HomeAssistantNode {
     publisher: Arc<Publisher>,
     known: HashMap<(String, String), Known>,
@@ -714,6 +721,7 @@ impl HomeAssistantNode {
                 "talkgroup": c.to,
                 "system": c.system,
                 "channel_mhz": (c.channel_hz / 1e6 * 10_000.0).round() / 10_000.0,
+                "code": c.code.clone().unwrap_or_default(),
             }),
             // The last caller stays: what a scanner is asked when it is quiet
             // is who that was, not who nobody is.
@@ -732,6 +740,7 @@ impl HomeAssistantNode {
             "channel_mhz": (c.channel_hz / 1e6 * 10_000.0).round() / 10_000.0,
             "encrypted": c.encrypted,
             "codec": c.codec.unwrap_or_default(),
+            "code": c.code.clone().unwrap_or_default(),
             "seconds": (now.saturating_duration_since(c.started).as_secs_f64() * 10.0).round() / 10.0,
         });
         self.publisher.send(&format!("{}/calls/event", broker.topic()), event.to_string(), false);
@@ -754,13 +763,30 @@ impl HomeAssistantNode {
         let found = self.on_air.iter_mut().find(|c| {
             c.system == system && c.to == to && (c.channel_hz - channel_hz).abs() < 500.0
         });
+        let encrypted =
+            !matches!(airtime.secrecy, common::Secrecy::Clear | common::Secrecy::Unsaid);
         if let Some(c) = found {
             c.last = now;
-            if c.from.is_none() {
+            // What the decode knows and the row did not. Audio names nobody
+            // and says nothing about a cipher, so a call opened off the tap
+            // is filled in here, and the house is told once rather than on
+            // every frame of the over.
+            let mut news = false;
+            if c.from.is_none() && from.is_some() {
                 c.from = from;
+                news = true;
             }
-            if c.codec.is_none() {
+            if c.codec.is_none() && airtime.codec.is_some() {
                 c.codec = airtime.codec;
+                news = true;
+            }
+            if encrypted && !c.encrypted {
+                c.encrypted = true;
+                news = true;
+            }
+            if news {
+                let call = c.clone();
+                self.publish_call_state(Some(&call));
             }
             return;
         }
@@ -769,8 +795,70 @@ impl HomeAssistantNode {
             channel_hz,
             to,
             from,
-            encrypted: !matches!(airtime.secrecy, common::Secrecy::Clear | common::Secrecy::Unsaid),
+            // A decode names its own group; coded squelch is what the
+            // analogue side has instead, and it arrives off the tap.
+            code: None,
+            encrypted,
             codec: airtime.codec,
+            started: now,
+            last: now,
+        };
+        self.publish_call_event("call_started", &call, now);
+        self.publish_call_state(Some(&call));
+        self.on_air.push(call);
+    }
+
+    /// A block of speech off the tap, which is where every conversation the
+    /// receiver hears passes, analogue or decoded.
+    ///
+    /// Audio says who is talking to whom and on what, and nothing else: no
+    /// codec, and no word on whether it was enciphered. A decode of the same
+    /// call fills those in.
+    ///
+    /// Silence is not a call. A squelched channel and a vocoder between overs
+    /// both deliver blocks of nothing, and publishing them would light the
+    /// on-air lamp for the length of the session.
+    fn hear_voice(&mut self, v: &common::Voice, now: Instant) {
+        if !self.buses {
+            return;
+        }
+        let Some(to) = v.to.as_deref().map(str::trim).filter(|t| !t.is_empty()) else { return };
+        if v.pcm.iter().all(|s| s.abs() <= VOICE_FLOOR) {
+            return;
+        }
+        let system = v.system.to_string();
+        let channel_hz = v.channel_hz;
+        let found = self.on_air.iter_mut().find(|c| {
+            c.system == system && c.to == to && (c.channel_hz - channel_hz).abs() < 500.0
+        });
+        if let Some(c) = found {
+            c.last = now;
+            let mut news = false;
+            if c.from.is_none() && v.from.is_some() {
+                c.from = v.from.clone();
+                news = true;
+            }
+            // The group takes half a second of audio to read, so it lands
+            // after the call was published, and a code changed on the radio
+            // replaces it: the house is told once, not per block.
+            if v.code.is_some() && c.code != v.code {
+                c.code = v.code.clone();
+                news = true;
+            }
+            if news {
+                let call = c.clone();
+                self.publish_call_state(Some(&call));
+            }
+            return;
+        }
+        let call = OnAir {
+            system,
+            channel_hz,
+            to: to.to_string(),
+            from: v.from.clone(),
+            code: v.code.clone(),
+            encrypted: false,
+            codec: None,
             started: now,
             last: now,
         };
@@ -915,7 +1003,7 @@ impl HomeAssistantNode {
     }
 }
 
-impl Simple for HomeAssistantNode {
+impl Node for HomeAssistantNode {
     fn name(&self) -> &str {
         "homeassistant"
     }
@@ -924,11 +1012,40 @@ impl Simple for HomeAssistantNode {
         true
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
-        if i.spec.kind != PortKind::Packets {
-            return Err(common::Error::other("homeassistant reads the packet bus"));
+    /// The packet bus, and the tap every voice passes.
+    ///
+    /// Two inputs because a call and a device are heard by different halves
+    /// of the receiver: a meter is a packet, and a conversation is audio. On
+    /// the packet bus alone the call bus was silent on a receiver with no
+    /// decoder running, which is every receiver listening to an analogue
+    /// channel.
+    fn num_inputs(&self) -> usize {
+        2
+    }
+
+    /// Either input on its own is a receiver worth publishing: a span with no
+    /// decoder has no packet bus, and a span with no voice channel has no
+    /// tap.
+    fn optional_inputs(&self) -> bool {
+        true
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        for (k, i) in inputs.iter().enumerate() {
+            let ok = match k {
+                0 => i.spec.kind == PortKind::Packets,
+                _ => i.spec.kind == PortKind::Voice,
+            };
+            if !ok && !i.spec.is_silence() {
+                return Err(common::Error::other(format!(
+                    "homeassistant reads the packet bus and the tap, and input {k} carries {:?}",
+                    i.spec.kind
+                )));
+            }
         }
-        Ok(i.spec)
+        // A sink, so what it declares is silence: the graph gives every node
+        // a slot whether or not anything reads it.
+        Ok(vec![StreamSpec::silence()])
     }
 
     fn params(&self) -> Vec<pipeline::param::Param> {
@@ -971,18 +1088,30 @@ impl Simple for HomeAssistantNode {
         }
     }
 
-    fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        _o: &mut [Payload],
+        _c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
         if !self.is_on() {
             return Ok(());
         }
         let now = Instant::now();
         self.announce_buses();
-        for p in i.as_packets().unwrap_or(&[]) {
+        for p in inputs.first().and_then(|i| i.as_packets()).unwrap_or(&[]) {
             for d in p.decodes.iter() {
                 self.hear_call(d, now);
                 self.hear_message(d);
                 self.publish(p, d, now);
             }
+        }
+        // Every conversation the receiver hears, decoded or analogue, arrives
+        // here as audio. A decoded call is on both inputs and is one call:
+        // whichever reaches it first opens the row, and the decode fills in
+        // what audio cannot say.
+        for v in inputs.get(1).and_then(|i| i.as_voice()).unwrap_or(&[]) {
+            self.hear_voice(v, now);
         }
         // Called every block whether or not anything arrived: a call ends
         // when nothing more is heard on it, and silence is not a packet.
@@ -1275,13 +1404,50 @@ mod tests {
     fn run(node: &mut HomeAssistantNode, packets: Vec<Packet>) {
         let mut packets = packets;
         crate::PacketDecodeNode::default().annotate(&mut packets);
+        feed(node, Payload::Packets(packets), Payload::Voice(Vec::new()));
+    }
+
+    /// One block of each input, the way the graph hands them over: the
+    /// packet bus and the tap.
+    fn feed(node: &mut HomeAssistantNode, packets: Payload, voice: Payload) {
         let mut s = pipeline::StreamSpec::iq(0.0, Hz(2_426_000_000));
         s.kind = PortKind::Packets;
-        let ins = [PortSpec { spec: s, latency: 0 }];
+        let mut v = s;
+        v.kind = PortKind::Voice;
+        let ins = [PortSpec { spec: s, latency: 0 }, PortSpec { spec: v, latency: 0 }];
         let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
-        let mut out = Payload::Packets(Vec::new());
+        let mut out = [Payload::empty_of(PortKind::Real)];
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-        node.process(&Payload::Packets(packets), &mut out, &mut ctx).unwrap();
+        ctx.block_seconds = 0.1;
+        node.process(&[&packets, &voice], &mut out, &mut ctx).unwrap();
+    }
+
+    /// A block of speech as a fader's tap or a voice front end delivers it:
+    /// who is talking, to whom, on what, and the audio.
+    fn voice(system: &'static str, hz: f64, to: &str, from: Option<&str>, peak: f32) -> Payload {
+        coded(system, hz, to, from, None, peak)
+    }
+
+    /// The same, with the coded squelch an analogue channel's users are set
+    /// to.
+    fn coded(
+        system: &'static str,
+        hz: f64,
+        to: &str,
+        from: Option<&str>,
+        code: Option<&str>,
+        peak: f32,
+    ) -> Payload {
+        Payload::Voice(vec![common::Voice {
+            system,
+            channel_hz: hz,
+            to: Some(to.to_string()),
+            from: from.map(str::to_string),
+            code: code.map(str::to_string),
+            rate: 8_000.0,
+            channels: 1,
+            pcm: vec![peak; 800],
+        }])
     }
 
     /// Configuration messages the bridge, the call bus and the message bus
@@ -1427,6 +1593,124 @@ mod tests {
         let state: serde_json::Value =
             serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
         assert_eq!(state["on_air"], "OFF");
+    }
+
+    /// A call off the tap, which is the only place an analogue one exists.
+    ///
+    /// A receiver listening to a repeater on the strip runs no decoder, so
+    /// it has no packet bus at all: fed only from packets, the call bus and
+    /// the on-air lamp said nothing for the whole session.
+    #[test]
+    fn an_analogue_over_is_a_call_with_no_decoder_running() {
+        let mut n = node();
+        let quiet = Payload::Packets(Vec::new());
+
+        // A squelched channel delivers blocks of nothing, and nothing is not
+        // a call: the lamp would be lit for the session.
+        feed(&mut n, quiet.clone(), voice("Audio", 145_500_000.0, "CH1", None, 0.0));
+        assert!(
+            !said(&n).iter().any(|(t, _)| t == "waveshark/calls/event"),
+            "silence became a call"
+        );
+
+        // Somebody keys up on it.
+        feed(&mut n, quiet.clone(), voice("Audio", 145_500_000.0, "CH1", None, 0.2));
+        let s = said(&n);
+        let event: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/event")).unwrap();
+        assert_eq!(event["event_type"], "call_started");
+        assert_eq!(event["talkgroup"], "CH1");
+        assert_eq!(event["system"], "Audio");
+        assert_eq!(event["channel_mhz"], 145.5);
+        assert_eq!(event["encrypted"], false);
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["on_air"], "ON");
+
+        // More of the same over is the same call.
+        feed(&mut n, quiet.clone(), voice("Audio", 145_500_000.0, "CH1", None, 0.2));
+        let started = said(&n)
+            .iter()
+            .filter(|(t, p)| t == "waveshark/calls/event" && p.contains("call_started"))
+            .count();
+        assert_eq!(started, 1, "one over, one event");
+
+        // And it ends on the hang, the way a decoded one does.
+        n.age_calls(Instant::now() + Duration::from_secs_f64(CALL_HANG_S + 1.0));
+        let s = said(&n);
+        assert!(payload(&s, "waveshark/calls/event").contains("call_ended"));
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["on_air"], "OFF");
+    }
+
+    /// The coded squelch reaches the house, so an automation can tell one
+    /// group on a shared frequency from another.
+    #[test]
+    fn a_call_carries_the_coded_squelch_into_the_house() {
+        let mut n = node();
+        let quiet = Payload::Packets(Vec::new());
+        // The over starts before the group has been read: half a second of
+        // audio is what a tone or a code costs.
+        feed(&mut n, quiet.clone(), coded("Audio", 446_049_100.0, "PMR1", None, None, 0.2));
+        let s = said(&n);
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["on_air"], "ON");
+        assert_eq!(state["code"], "");
+
+        // It lands, on the same call.
+        feed(&mut n, quiet, coded("Audio", 446_049_100.0, "PMR1", None, Some("141.3"), 0.2));
+        let s = said(&n);
+        let started = s
+            .iter()
+            .filter(|(t, p)| t == "waveshark/calls/event" && p.contains("call_started"))
+            .count();
+        assert_eq!(started, 1, "the group made a second call");
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["code"], "141.3");
+
+        // And it is on the event that ends the call.
+        n.age_calls(Instant::now() + Duration::from_secs_f64(CALL_HANG_S + 1.0));
+        let s = said(&n);
+        let event: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/event")).unwrap();
+        assert_eq!(event["event_type"], "call_ended");
+        assert_eq!(event["code"], "141.3");
+    }
+
+    /// A decoded call arrives twice, as audio on the tap and as frames on
+    /// the bus, and is one call. Whichever half opens the row, the decode
+    /// fills in what audio cannot say: the codec, and whether it was
+    /// enciphered.
+    #[test]
+    fn one_call_heard_both_ways_is_one_call() {
+        let mut n = node();
+        let mut d = over("10223295", "Control 1");
+        d.airtime.as_mut().unwrap().secrecy = common::Secrecy::Encrypted(None);
+        // The audio first, which is the order a vocoder delivers in.
+        feed(
+            &mut n,
+            Payload::Packets(Vec::new()),
+            voice("TETRA", 391_035_600.0, "Control 1", None, 0.2),
+        );
+        run(&mut n, vec![with_decode(d)]);
+        let started = said(&n)
+            .iter()
+            .filter(|(t, p)| t == "waveshark/calls/event" && p.contains("call_started"))
+            .count();
+        assert_eq!(started, 1, "the same call was published twice");
+        let s = said(&n);
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["caller"], "10223295", "the decode named who audio could not");
+        n.age_calls(Instant::now() + Duration::from_secs_f64(CALL_HANG_S + 1.0));
+        let s = said(&n);
+        let event: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/event")).unwrap();
+        assert_eq!(event["event_type"], "call_ended");
+        assert_eq!(event["encrypted"], true, "audio cannot say, and the decode did");
     }
 
     /// A decode with no airtime, or with airtime that is not speech, is not a

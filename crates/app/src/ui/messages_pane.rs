@@ -33,11 +33,20 @@ impl Msgs<'_> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new()
-                .legend("messages")
-                .value(format!("{} received", msgs.len()))
-                .size(11.0)
-                .show(ui);
+            // Read back from the file and heard just now are counted apart.
+            // The list is loaded at start so an overnight watch is readable
+            // in the morning, and a page from a band the receiver is no
+            // longer pointed at reads as traffic arriving now unless the
+            // header says otherwise.
+            let logged = msgs.iter().filter(|m| m.logged).count();
+            let live = msgs.len() - logged;
+            let mut head = theme::Line::new().legend("messages");
+            head = match (live, logged) {
+                (n, 0) => head.value(format!("{n} received")),
+                (0, k) => head.value(format!("{k} from the log")),
+                (n, k) => head.value(format!("{n} received, {k} from the log")),
+            };
+            head.size(11.0).show(ui);
             if !self.st.list.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
@@ -114,8 +123,10 @@ impl Msgs<'_> {
 fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui::Response {
     let inner = widgets::card(
         ui,
-        // Cyan: everything on this card came off the air.
-        Some(theme::TRACE),
+        // Cyan for what the receiver heard, and no rail for what it read
+        // back off the file: the traffic on the screen now is what is on
+        // the air now.
+        if m.logged { None } else { Some(theme::TRACE) },
         |ui| {
             let mut head = theme::Line::new()
                 .legend(&m.system)
@@ -132,7 +143,18 @@ fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui
             }
             head.show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::Line::new().legend(&age(m.age(now))).show(ui);
+                // A message off the file says when it was heard rather than
+                // how long ago, and says that it came off the file: the
+                // receiver was somewhere else then, possibly on another
+                // band, and an age alone reads as something arriving now.
+                // Every message carries the clock time it was heard at, so
+                // one off the file says that rather than an age: the
+                // receiver was somewhere else then, possibly on another
+                // band, and an age alone reads as something arriving now.
+                match m.logged {
+                    true => theme::Line::new().legend("logged").value(m.when()).size(11.0).show(ui),
+                    false => theme::Line::new().legend(&age(m.age(now))).show(ui),
+                };
             });
         },
         |ui| {

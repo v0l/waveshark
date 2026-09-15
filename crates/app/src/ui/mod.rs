@@ -1790,12 +1790,7 @@ impl App {
     /// looking at the Agent pane is not a station.
     fn agent_air(&mut self) {
         use crate::agent::channel::Move;
-        let agent = self
-            .audio
-            .channels
-            .iter()
-            .find(|c| c.tx.is_some_and(|t| t.source == crate::radio::TxSource::Agent))
-            .map(|c| (c.id, c.freq));
+        let agent = self.agent_tx_channel();
         match (agent, self.air.on) {
             (None, None) => return,
             // The channel was closed or given back to a person mid-over.
@@ -1814,7 +1809,7 @@ impl App {
         // What was said on that channel, by frequency: the transcript files
         // speech under the conversation it was heard in, and an analogue
         // channel's conversation is its frequency.
-        let heard: Vec<(std::time::Instant, String)> = self
+        let heard: Vec<(std::time::Instant, Option<String>, String)> = self
             .transcript
             .log
             .recent(16)
@@ -1824,12 +1819,15 @@ impl App {
                     && u.credible
                     && (u.key.channel_hz as f64 - freq).abs() < common::CHANNEL_MATCH_HZ
             })
-            .map(|u| (u.at, u.text.clone()))
+            // Who said it, where the radio said so: an analogue PTT-ID or a
+            // digital call's own caller. The agent is told, so it can answer
+            // a station by number and know when the other side changed.
+            .map(|u| (u.at, u.key.from.clone(), u.text.clone()))
             .collect();
         let config = self.chat.config.clone();
-        for (at, text) in heard {
+        for (at, from, text) in heard {
             let desk = self.desk.clone();
-            self.air.heard(&config, &desk, self.rt.handle(), at, &text);
+            self.air.heard(&config, &desk, self.rt.handle(), at, from.as_deref(), &text);
         }
 
         let busy = self
@@ -1850,6 +1848,20 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// The channel the agent answers on, and where it is: the one whose
+    /// transmit source is the agent.
+    ///
+    /// Read off the strip rather than held, because giving a channel to the
+    /// agent is a transmit setting like any other and can be changed on the
+    /// strip, in a bank recall or by a tool.
+    pub(crate) fn agent_tx_channel(&self) -> Option<(u64, f64)> {
+        self.audio
+            .channels
+            .iter()
+            .find(|c| c.tx.is_some_and(|t| t.source == crate::radio::TxSource::Agent))
+            .map(|c| (c.id, c.freq))
     }
 
     /// Draw the conversation, then do what it asked for.
@@ -2872,6 +2884,50 @@ impl App {
         self.send(Cmd::Center(Hz(self.center as u64)));
         self.reset_waterfall();
     }
+}
+
+/// The handle between two halves of a pane, and the drag that moves it.
+///
+/// The same gesture wherever a pane is split two ways and which half matters
+/// changes with what is being watched: the map over its tracks, the call list
+/// over its recordings. Follows the pointer rather than accumulating deltas,
+/// so a long drag cannot leave the divider behind the cursor, and a double
+/// click puts it back where it started.
+fn split_divider(
+    ui: &mut egui::Ui,
+    top: f32,
+    usable: f32,
+    frac: f32,
+    splitting: &mut bool,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+) -> f32 {
+    let (grip, resp) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SPLIT_GRIP_H),
+        Sense::click_and_drag(),
+    );
+    let hot = *splitting || resp.hovered();
+    split_grip(&ui.painter_at(grip), &grip, hot);
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if resp.drag_started() {
+        *splitting = true;
+    }
+    let mut frac = frac;
+    if *splitting {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let f = (pos.y - top - SPLIT_GRIP_H / 2.0) / usable;
+            frac = f.clamp(*range.start(), *range.end());
+        }
+    }
+    if resp.drag_stopped() {
+        *splitting = false;
+    }
+    if resp.double_clicked() {
+        frac = default;
+    }
+    frac
 }
 
 /// The handle between the spectrum and the waterfall.

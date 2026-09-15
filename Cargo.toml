@@ -67,6 +67,10 @@ rust-version = "1.85"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
+# Calendars are not worth writing twice: the civil-from-days arithmetic was
+# hand-rolled in three places. `std` and no clock, because everything here
+# formats a timestamp somebody else measured.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # `common` rather than `core`: a workspace crate named `core` collides with the
 # Rust sysroot crate and makes every `use core::..` path ambiguous.
 common = { path = "crates/common" }

@@ -116,14 +116,28 @@ impl AgentView<'_> {
                     None => "answering".to_string(),
                     Some(p) => p.label().to_string(),
                 };
+                let mut line = theme::Line::new().legend("heard");
+                // Who said it, where the radio said so: an analogue PTT-ID
+                // or a decoded call's caller. The model is told the same.
+                if let Some(from) = &h.from {
+                    line = line.value(from.clone()).size(11.0);
+                }
+                line.heard(h.text.clone()).size(11.0).gap(10.0).legend(&note).size(11.0).elided(ui);
+            });
+        }
+        // Whether the next over has to say the name. An operator who has just
+        // been answered can carry on talking, and nothing else on the screen
+        // says for how long.
+        if self.air.on.is_some()
+            && let Some(left) = self.air.following(&self.chat.config, std::time::Instant::now())
+        {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
                 theme::Line::new()
-                    .legend("heard")
-                    .heard(h.text.clone())
+                    .legend("open")
+                    .value(format!("no name needed for {left:.0} s"))
                     .size(11.0)
-                    .gap(10.0)
-                    .legend(&note)
-                    .size(11.0)
-                    .elided(ui);
+                    .show(ui);
             });
         }
         ui.add_space(6.0);

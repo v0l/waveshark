@@ -591,6 +591,12 @@ impl App {
                 Ok(ok())
             }
             Action::Transmit(a) => self.agent_transmit(a),
+            Action::Say(a) => self.agent_say(a),
+            Action::TransmitModes => {
+                Ok(agent_transmit_modes(self.radio.as_ref().is_some_and(|r| {
+                    r.status.can_transmit.load(std::sync::atomic::Ordering::Relaxed)
+                })))
+            }
             Action::TxGain(a) => {
                 self.radio_settings.tx_gain_db = a.db;
                 self.send(Cmd::TxGain(a.db));
@@ -803,8 +809,61 @@ impl App {
         Ok(json!({ "keyed": id, "source": spec.source.label() }))
     }
 
+    /// Say something over the air in the agent's own voice.
+    ///
+    /// The words go to the same queue an answer does, so the channel waits
+    /// for the squelch and the hang and lets go when they run out: a tool
+    /// that keyed and pushed audio would transmit over whoever was talking.
+    fn agent_say(&mut self, a: args::Say) -> Result<Value, String> {
+        if let Some(id) = a.channel {
+            let c = self
+                .audio
+                .channels
+                .iter_mut()
+                .find(|c| c.id == id)
+                .ok_or_else(|| format!("no channel {id}"))?;
+            match crate::radio::tx_mode_for(&c.mode) {
+                None => {
+                    return Err(format!(
+                        "channel {id} is {}, which has no modulator behind it",
+                        c.mode.label()
+                    ));
+                }
+                Some(m) if m.is_digital() => {
+                    return Err(format!("{} carries data, not a voice", m.label()));
+                }
+                Some(_) => {}
+            }
+            let mut spec = c.tx.unwrap_or_default();
+            spec.source = crate::radio::TxSource::Agent;
+            c.tx = Some(spec);
+            self.send_channels();
+        }
+        // Taken off the strip rather than from what the last frame found, so
+        // a channel handed over in this same call is the one it speaks on.
+        self.air.on = self.agent_tx_channel().map(|(id, _)| id);
+        let mut config = self.chat.config.clone();
+        if let Some(v) = a.voice.filter(|v| !v.trim().is_empty()) {
+            // A server names its voices; the model here is given a sentence
+            // describing how to sound instead.
+            match config.speech.is_remote() {
+                true => config.voice = v,
+                false => config.voice_description = v,
+            }
+        }
+        let said = self.air.say(&config, self.rt.handle(), &a.text)?;
+        Ok(json!({ "saying": said, "channel": self.air.on, "state": self.air.state.label() }))
+    }
+
     /// What a channel puts through the modulator when it is keyed.
     fn agent_transmit(&mut self, a: args::Transmit) -> Result<Value, String> {
+        // Before the channel is borrowed: a file is a setting on the stage
+        // that reads it, not on the channel.
+        if let Some(path) = a.file.clone() {
+            let (node, _) = super::strip::tx_source_file(self.chain.topo.as_ref())
+                .ok_or("nothing in the running graph transmits a file")?;
+            self.send(Cmd::NodeParam(node, "path".into(), pipeline::param::ParamValue::Text(path)));
+        }
         let c = self
             .audio
             .channels
@@ -816,6 +875,7 @@ impl App {
             spec.source = match s {
                 args::Source::Tone => crate::radio::TxSource::Tone,
                 args::Source::Mic => crate::radio::TxSource::Mic,
+                args::Source::Agent => crate::radio::TxSource::Agent,
             };
         }
         if let Some(hz) = a.tone_hz {
@@ -837,6 +897,7 @@ impl App {
             "tone_hz": spec.tone_hz,
             "mic_gain": spec.mic_gain,
             "trim_db": spec.trim_db,
+            "file": a.file,
         }))
     }
 
@@ -1123,6 +1184,9 @@ impl App {
                     "encrypted": c.encrypted,
                     "cipher": c.cipher,
                     "codec": c.codec,
+                    // The coded squelch an analogue channel's users are set
+                    // to, which is the only group most of them have.
+                    "code": c.code,
                     "overs": c.overs,
                     "airtime_s": c.seconds,
                     "last_seconds_ago": secs(c.last, now),
@@ -1473,6 +1537,43 @@ fn agent_stage_kinds() -> Value {
     json!({ "kinds": kinds })
 }
 
+/// Every mode this build can transmit, as a channel to open and a source to
+/// feed it.
+///
+/// A channel transmits in the mode it receives, so what can go on the air is
+/// decided by the receive modes with a modulator behind them and by the
+/// protocols carrying an encoder. Asked of both rather than listed here: a
+/// protocol that grows a transmit chain appears without this being touched.
+fn agent_transmit_modes(can_transmit: bool) -> Value {
+    let mut rows: Vec<Value> = Vec::new();
+    for d in [Demod::Nfm, Demod::Wfm, Demod::Am, Demod::Cw, Demod::Usb, Demod::Lsb] {
+        let mode = ChanMode::Audio(d);
+        let Some(tx) = crate::radio::tx_mode_for(&mode) else { continue };
+        rows.push(json!({
+            "mode": mode_name(&mode),
+            "label": tx.label(),
+            "bandwidth_hz": mode.bandwidth(),
+            "carries": "audio",
+            "sources": match tx {
+                // A carrier is the modulator with nothing in it: what is fed
+                // to it changes nothing.
+                crate::radio::TxMode::Carrier => vec!["none"],
+                _ => vec!["tone", "mic", "agent"],
+            },
+        }));
+    }
+    for p in nodes::protocol::all().iter().filter(|p| p.transmit().is_some()) {
+        rows.push(json!({
+            "mode": p.id(),
+            "label": p.label(),
+            "bandwidth_hz": ChanMode::Decode(p.id().to_string()).bandwidth(),
+            "carries": "data",
+            "sources": ["file"],
+        }));
+    }
+    json!({ "can_transmit": can_transmit, "modes": rows })
+}
+
 fn agent_protocols() -> Value {
     let rows: Vec<Value> = nodes::protocol::all()
         .iter()
@@ -1632,6 +1733,7 @@ mod tests {
                 tone_hz: Some(1_200.0),
                 mic_gain: Some(2.0),
                 trim_db: None,
+                file: None,
             }),
         )
         .unwrap();
@@ -1650,11 +1752,131 @@ mod tests {
                 tone_hz: Some(20.0),
                 mic_gain: None,
                 trim_db: None,
+                file: None,
             }),
         )
         .unwrap_err();
         assert!(err.contains("100 and 5000"), "{err}");
         assert_eq!(a.audio.channels[0].tx.expect("unchanged").tone_hz, 1_200.0);
+    }
+
+    /// Saying something over the air: the channel is handed to the agent,
+    /// the words are cut to one over, and the channel keys itself.
+    ///
+    /// The words go through the agent's own queue rather than a tool keying
+    /// and pushing audio, so a line handed over while somebody is talking
+    /// waits for them instead of transmitting on top of them.
+    #[test]
+    fn a_line_is_said_over_the_air() {
+        let mut a = app();
+        a.chat.config = crate::agent::config::Config {
+            model: "m".into(),
+            speech: crate::agent::config::Speech::Server,
+            voice_url: "http://127.0.0.1:1/v1".into(),
+            voice_model: "tts-1".into(),
+            voice: "alloy".into(),
+            // No wake word: saying a line nobody asked for on the air needs
+            // a voice, not a name to answer to.
+            wake: String::new(),
+            ..Default::default()
+        };
+
+        // With no channel given to the agent, it says where to start.
+        let err = call(
+            &mut a,
+            Action::Say(args::Say { text: "radio check".into(), channel: None, voice: None }),
+        )
+        .unwrap_err();
+        assert!(err.contains("transmit source"), "{err}");
+
+        let id = call(
+            &mut a,
+            Action::AddChannel(args::AddChannel {
+                mhz: 100.4,
+                mode: Some("nfm".into()),
+                bandwidth_khz: None,
+                label: None,
+            }),
+        )
+        .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+
+        // A mode with no modulator is refused before anything is generated.
+        let ssb = call(
+            &mut a,
+            Action::AddChannel(args::AddChannel {
+                mhz: 100.6,
+                mode: Some("usb".into()),
+                bandwidth_khz: None,
+                label: None,
+            }),
+        )
+        .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let err = call(
+            &mut a,
+            Action::Say(args::Say { text: "radio check".into(), channel: Some(ssb), voice: None }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no modulator"), "{err}");
+
+        // Named, the channel becomes the agent's and the line is taken.
+        let said = call(
+            &mut a,
+            Action::Say(args::Say {
+                text: "  radio check, how do you read  ".into(),
+                channel: Some(id),
+                voice: Some("af_sky".into()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(said["saying"], "radio check, how do you read");
+        assert_eq!(said["channel"], id);
+        assert_eq!(said["state"], "making speech");
+        assert_eq!(
+            a.audio.channels[0].tx.expect("a transmit spec").source,
+            crate::radio::TxSource::Agent
+        );
+        assert_eq!(a.audio.keying.at, None, "nothing is keyed until there is speech to send");
+
+        // And not two at once: the second would go out as one over with the
+        // first.
+        let err = call(
+            &mut a,
+            Action::Say(args::Say { text: "again".into(), channel: None, voice: None }),
+        )
+        .unwrap_err();
+        assert!(err.contains("making speech"), "{err}");
+    }
+
+    /// What can go on the air is asked of the receive modes and of the
+    /// protocols, so a mode with no modulator is not offered.
+    #[test]
+    fn the_transmit_modes_are_what_has_a_modulator() {
+        let modes = agent_transmit_modes(true);
+        assert_eq!(modes["can_transmit"], true);
+        let rows = modes["modes"].as_array().expect("a list of modes").clone();
+        let names: Vec<&str> = rows.iter().filter_map(|m| m["mode"].as_str()).collect();
+        assert!(names.contains(&"nfm"), "{names:?}");
+        assert!(names.contains(&"am"));
+        assert!(names.contains(&"wfm"));
+        assert!(names.contains(&"cw"));
+        assert!(!names.contains(&"usb"), "single sideband has no modulator yet: {names:?}");
+        assert!(!names.contains(&"lsb"));
+        assert!(!names.contains(&"auto"));
+        // Four audio modes and every protocol carrying an encoder.
+        let digital = nodes::protocol::all().iter().filter(|p| p.transmit().is_some()).count();
+        assert_eq!(rows.len(), 4 + digital, "{names:?}");
+        assert!(digital >= 1, "this build transmits no data mode at all");
+        let nfm = rows.iter().find(|m| m["mode"] == "nfm").expect("nfm");
+        assert_eq!(nfm["carries"], "audio");
+        assert_eq!(nfm["sources"][2], "agent");
+        let cw = rows.iter().find(|m| m["mode"] == "cw").expect("cw");
+        assert_eq!(cw["sources"][0], "none", "a carrier has nothing fed to it");
+        let data = rows.iter().find(|m| m["carries"] == "data").expect("a data mode");
+        assert_eq!(data["sources"][0], "file");
     }
 
     /// Unkeying is safe from anywhere: an agent that has lost track of what

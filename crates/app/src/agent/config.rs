@@ -31,6 +31,16 @@ pub const DEFAULT_STEPS: usize = 20;
 /// squelch closing is the other half of this: the wait starts from there.
 pub const DEFAULT_HANG_S: f64 = 1.5;
 
+/// How long after it has spoken the agent goes on answering without being
+/// named, in seconds.
+///
+/// Saying the name on every over is how a conversation opens, not how it is
+/// held. Once it has answered, the next over on the channel is more of the
+/// same conversation, and the window runs again from the end of each of its
+/// own transmissions. Zero means the name is wanted every time, which is
+/// what to set on a channel other people are using.
+pub const DEFAULT_FOLLOW_S: f64 = 30.0;
+
 /// Where the agent's voice is made.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Speech {
@@ -82,6 +92,84 @@ impl Speech {
     }
 }
 
+/// Where speech heard on the air is read back into words.
+///
+/// The same three places the voice comes from, and for the same reasons: a
+/// model on this machine needs nothing running and wants a card, and a
+/// machine without one can hand the audio to whatever is already answering
+/// the chat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reading {
+    /// The local model in `crates/stt`, chosen and fetched on the Transcript
+    /// pane. What the receiver has always done.
+    #[default]
+    Local,
+    /// The chat's own server, at its `/audio/transcriptions`.
+    Chat,
+    /// A transcription server with an address and a key of its own.
+    Server,
+}
+
+impl Reading {
+    pub const ALL: [Reading; 3] = [Reading::Local, Reading::Chat, Reading::Server];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Chat => "chat",
+            Self::Server => "server",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Local => "a model here",
+            Self::Chat => "the model's server",
+            Self::Server => "a reading server",
+        }
+    }
+
+    /// Whether the audio goes out over HTTP rather than into a model here.
+    pub fn is_remote(self) -> bool {
+        !matches!(self, Self::Local)
+    }
+
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_lowercase().as_str() {
+            "chat" | "same" | "model" => Self::Chat,
+            "server" | "remote" | "openai" => Self::Server,
+            _ => Self::Local,
+        }
+    }
+}
+
+/// Where the transcriber sends audio, or nothing for the model here.
+///
+/// A snapshot rather than a parameter on the stage: `derived_patch` draws the
+/// transcriber from the plan, which is the radio's, and a key has no business
+/// in the graph or in the edits file beside it. Published by whoever holds the
+/// settings, read by the worker thread when it starts.
+pub fn reading_server() -> Option<(String, String, String)> {
+    published().lock().clone()
+}
+
+/// Say where speech is read, for the transcriber to pick up on its next read.
+pub fn publish_reading(config: &Config) {
+    let want = match config.reading_endpoint() {
+        Some((url, key)) if !config.read_model.trim().is_empty() => {
+            Some((url, config.read_model.trim().to_string(), key.to_string()))
+        }
+        _ => None,
+    };
+    *published().lock() = want;
+}
+
+fn published() -> &'static parking_lot::Mutex<Option<(String, String, String)>> {
+    static P: std::sync::OnceLock<parking_lot::Mutex<Option<(String, String, String)>>> =
+        std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// The base, without `/chat/completions`.
@@ -128,6 +216,19 @@ pub struct Config {
     pub wake: String,
     /// How long after the channel goes quiet before it keys, in seconds.
     pub hang_s: f64,
+    /// How long after its own over it answers without being named, in
+    /// seconds. Zero for the name on every over.
+    pub follow_s: f64,
+
+    /// Where speech off the air is read back into words.
+    pub reading: Reading,
+    /// A transcription server of its own, for [`Reading::Server`]. Under
+    /// [`Reading::Chat`] the chat's `url` and `key` serve instead.
+    pub read_url: String,
+    /// What to ask that server for: `whisper-1` on OpenAI.
+    pub read_model: String,
+    /// A key for the transcription server, or empty to use the chat's.
+    pub read_key: String,
 }
 
 impl Default for Config {
@@ -150,6 +251,11 @@ impl Default for Config {
             voice_key: String::new(),
             wake: String::new(),
             hang_s: DEFAULT_HANG_S,
+            follow_s: DEFAULT_FOLLOW_S,
+            reading: Reading::Local,
+            read_url: String::new(),
+            read_model: String::new(),
+            read_key: String::new(),
         }
     }
 }
@@ -207,6 +313,11 @@ impl Config {
                 "voice_key" => c.voice_key = value.to_string(),
                 "wake" => c.wake = value.to_string(),
                 "hang_s" => c.hang_s = value.parse().unwrap_or(DEFAULT_HANG_S),
+                "follow_s" => c.follow_s = value.parse().unwrap_or(DEFAULT_FOLLOW_S),
+                "reading" => c.reading = Reading::parse(value),
+                "read_url" => c.read_url = value.to_string(),
+                "read_model" => c.read_model = value.to_string(),
+                "read_key" => c.read_key = value.to_string(),
                 _ => {}
             }
         }
@@ -241,7 +352,18 @@ impl Config {
              voice = {}\n\
              voice_key = {}\n\
              wake = {}\n\
-             hang_s = {}\n",
+             hang_s = {}\n\
+             follow_s = {}\n\
+             \n\
+             # Reading what is heard on the air. local is the model on the \
+             Transcript\n\
+             # pane; chat asks the model's own server and server one of its own, \
+             both\n\
+             # at /audio/transcriptions for read_model (whisper-1 on OpenAI).\n\
+             reading = {}\n\
+             read_url = {}\n\
+             read_model = {}\n\
+             read_key = {}\n",
             self.url,
             self.model,
             self.key,
@@ -258,7 +380,12 @@ impl Config {
             self.voice,
             self.voice_key,
             self.wake,
-            self.hang_s
+            self.hang_s,
+            self.follow_s,
+            self.reading.id(),
+            self.read_url,
+            self.read_model,
+            self.read_key
         )
     }
 
@@ -267,6 +394,21 @@ impl Config {
         if self.fault().is_some() {
             return self.fault();
         }
+        if let Some(why) = self.speech_fault() {
+            return Some(why);
+        }
+        if self.wake.trim().is_empty() {
+            return Some("no wake word");
+        }
+        None
+    }
+
+    /// Why nothing can be turned into speech, or nothing.
+    ///
+    /// Apart from the wake word and the chat model: saying a line somebody
+    /// handed over needs a voice and nothing else, and refusing it for want
+    /// of a name to answer to is refusing it for the wrong reason.
+    pub fn speech_fault(&self) -> Option<&'static str> {
         if self.speech == Speech::Server
             && (self.voice_url.trim().is_empty() || self.voice_model.trim().is_empty())
         {
@@ -281,15 +423,47 @@ impl Config {
         if self.speech == Speech::Local && !cfg!(feature = "tts") {
             return Some("this build has no speech model");
         }
-        if self.wake.trim().is_empty() {
-            return Some("no wake word");
-        }
         None
     }
 
     /// Where the request goes.
     pub fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.url.trim_end_matches('/'))
+    }
+
+    /// Where audio is sent to be read and what key to send with it, or
+    /// `None` for the model on this machine.
+    pub fn reading_endpoint(&self) -> Option<(String, &str)> {
+        let (base, key) = match self.reading {
+            Reading::Local => return None,
+            Reading::Chat => (self.url.trim(), self.key.trim()),
+            Reading::Server => (
+                self.read_url.trim(),
+                match self.read_key.trim() {
+                    "" => self.key.trim(),
+                    k => k,
+                },
+            ),
+        };
+        if base.is_empty() {
+            return None;
+        }
+        Some((format!("{}/audio/transcriptions", base.trim_end_matches('/')), key))
+    }
+
+    /// Why speech cannot be read on a server, or nothing. `None` also for
+    /// the model here, which the Transcript pane answers for.
+    pub fn reading_fault(&self) -> Option<&'static str> {
+        if !self.reading.is_remote() {
+            return None;
+        }
+        if self.reading_endpoint().is_none() {
+            return Some("no reading server");
+        }
+        if self.read_model.trim().is_empty() {
+            return Some("no reading model");
+        }
+        None
     }
 
     /// Where speech is asked for and what key to send, for a voice that
@@ -349,6 +523,11 @@ mod tests {
             voice_key: "another".into(),
             wake: "shark".into(),
             hang_s: 2.0,
+            follow_s: 12.0,
+            reading: Reading::Chat,
+            read_url: "http://127.0.0.1:9000/v1".into(),
+            read_model: "whisper-1".into(),
+            read_key: "third".into(),
         };
         assert_eq!(Config::parse(&c.render()), c);
     }
@@ -444,6 +623,53 @@ mod tests {
         assert_eq!(c.speech_endpoint().map(|(_, k)| k), Some("sk-chat"));
         c.speech = Speech::Local;
         assert_eq!(c.speech_endpoint(), None);
+    }
+
+    /// Where speech is read is one setting, in one place, and the address
+    /// and key are the chat's or its own.
+    #[test]
+    fn reading_can_be_handed_to_the_model_s_own_server() {
+        let mut c = Config {
+            url: "https://api.example.com/v1/".into(),
+            key: "sk-chat".into(),
+            model: "m".into(),
+            reading: Reading::Local,
+            ..Config::default()
+        };
+        assert_eq!(c.reading_endpoint(), None, "the model here is not a server");
+        assert_eq!(c.reading_fault(), None, "the Transcript pane answers for the local model");
+
+        c.reading = Reading::Chat;
+        assert_eq!(c.reading_fault(), Some("no reading model"));
+        c.read_model = "whisper-1".into();
+        assert_eq!(
+            c.reading_endpoint(),
+            Some(("https://api.example.com/v1/audio/transcriptions".into(), "sk-chat"))
+        );
+        assert_eq!(c.reading_fault(), None);
+
+        // Its own server, with its own key, falling back to the chat's.
+        c.reading = Reading::Server;
+        assert_eq!(c.reading_fault(), Some("no reading server"));
+        c.read_url = "http://127.0.0.1:9000/v1".into();
+        c.read_key = "sk-read".into();
+        assert_eq!(
+            c.reading_endpoint(),
+            Some(("http://127.0.0.1:9000/v1/audio/transcriptions".into(), "sk-read"))
+        );
+        c.read_key.clear();
+        assert_eq!(c.reading_endpoint().map(|(_, k)| k), Some("sk-chat"));
+
+        // And what the transcriber picks up is the whole of it, or nothing
+        // for the model here.
+        publish_reading(&c);
+        let (url, model, key) = reading_server().expect("a server to read on");
+        assert_eq!(url, "http://127.0.0.1:9000/v1/audio/transcriptions");
+        assert_eq!(model, "whisper-1");
+        assert_eq!(key, "sk-chat");
+        c.reading = Reading::Local;
+        publish_reading(&c);
+        assert_eq!(reading_server(), None);
     }
 
     #[test]

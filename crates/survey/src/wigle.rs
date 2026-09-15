@@ -75,36 +75,10 @@ fn cell_key(ident: &str) -> Option<(String, String)> {
 /// `YYYY-MM-DD HH:MM:SS`, which is what the format's readers expect.
 fn stamp(us: u64) -> String {
     let secs = (us / 1_000_000) as i64;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (mut y, mut d) = (1970i64, days);
-    let leap = |y: i64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    loop {
-        let len = if leap(y) { 366 } else { 365 };
-        if d < len {
-            break;
-        }
-        d -= len;
-        y += 1;
-    }
-    const LENGTHS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut m = 0usize;
-    while m < 12 {
-        let len = LENGTHS[m] + i64::from(m == 1 && leap(y));
-        if d < len {
-            break;
-        }
-        d -= len;
-        m += 1;
-    }
-    format!(
-        "{y:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        m + 1,
-        d + 1,
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
+    chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 /// A CSV field: quoted when it holds anything that would break the row.

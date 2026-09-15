@@ -26,6 +26,7 @@ pub mod filter_nodes;
 pub mod frame_meter;
 pub mod gsm_nodes;
 pub mod homeassistant_nodes;
+pub mod ident_nodes;
 pub mod keyed;
 pub mod lora_nodes;
 pub mod m17_nodes;
@@ -173,6 +174,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (sstv_nodes::DESC, sstv_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),
+    (ident_nodes::DESC, ident_nodes::build),
     (dvbt_nodes::TS_SOURCE, dvbt_nodes::build_ts_source),
     (dvbt_nodes::DVBT_MOD, dvbt_nodes::build_dvbt_mod),
     (video_nodes::DESC, video_nodes::build),

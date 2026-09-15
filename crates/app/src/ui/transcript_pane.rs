@@ -207,7 +207,8 @@ impl Transcript<'_> {
                     // The model by its short name. What is on disc is what
                     // runs, and where a directory holds something other
                     // than the pick, the files line below says so.
-                    let mut head = theme::Line::new().legend("model").set(e.label.clone());
+                    let name = e.reading_on.clone().unwrap_or_else(|| e.label.clone());
+                    let mut head = theme::Line::new().legend("model").set(name);
                     head = head.legend("state").value(e.health.state.label()).tint(rail);
                     if !e.health.device.is_empty() {
                         head = head.legend("on").value(&e.health.device);
@@ -230,6 +231,16 @@ impl Transcript<'_> {
                     // Sent as ids rather than positions, so what the patch
                     // records survives the list growing.
                     let small = |t: &str| egui::RichText::new(t).size(11.0);
+                    // Read on a server, so the pick, the device and the
+                    // files here are not what is running: one line saying
+                    // where instead, and the setting stays where it is set.
+                    if let Some(on) = &e.reading_on {
+                        widgets::row(ui, "read on", |ui| {
+                            theme::Line::new().value(on.clone()).size(11.0).show(ui);
+                        });
+                        hint(ui, "Set in Agent settings, under reading.");
+                        return;
+                    }
                     widgets::row(ui, "model", |ui| {
                         egui::ComboBox::from_id_salt("stt-model")
                             .selected_text(small(&e.label))

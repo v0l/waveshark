@@ -721,6 +721,7 @@ impl TetraNode {
                     channel_hz: self.channel_hz,
                     to,
                     from,
+                    code: None,
                     rate: VOICE_HZ,
                     channels: 1,
                     pcm: pcm.remove(&tn).unwrap_or_default(),

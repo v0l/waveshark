@@ -425,6 +425,13 @@ impl Speech {
 /// whole over once it is finished. Every front end that carries voice reports
 /// it the same way, so a listener is written once rather than once per
 /// protocol.
+/// What audio nobody decoded is called on the bus.
+///
+/// A demodulated channel is a system like any other as far as a
+/// subscription, a call row or the transcript is concerned, and every one of
+/// them has to name it the same way.
+pub const ANALOGUE: &str = "Audio";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Voice {
     /// The system it belongs to: "M17", "DMR". What a subscription names.
@@ -435,6 +442,16 @@ pub struct Voice {
     pub to: Option<String>,
     /// Who is talking, when the system says.
     pub from: Option<String>,
+    /// The coded squelch the traffic is using, as a radio names it: a CTCSS
+    /// tone as "141.3" or a DCS code as "D023".
+    ///
+    /// Analogue only, and beside the labels rather than part of them: it
+    /// takes half a second of audio to read, and the conversation key is
+    /// what the call list, the recorder and the transcriber file by, so a
+    /// name that gained it part way through an over split the over three
+    /// ways. It says which group is using the channel, which for most
+    /// analogue traffic is the only identity there is.
+    pub code: Option<String>,
     pub rate: f64,
     /// How many channels `pcm` interleaves. One for every codec; a
     /// broadcast in stereo keeps its sides through the bus.

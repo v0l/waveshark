@@ -299,42 +299,151 @@ pub fn parse(buf: &[u8]) -> Vec<Call> {
         }
         let r = &buf[at..at + len];
         at += len;
-        // An unknown kind or codec is skipped by its length rather than
-        // guessed at, which is the whole reason the length comes first.
-        if r[0] != KIND_CALL || r[1] != CODEC_OPUS {
-            continue;
+        if let Some(c) = record(r, true) {
+            out.push(c);
         }
-        let frames = u16::from_le_bytes(r[2..4].try_into().unwrap()) as usize;
-        let mut p = HEAD_LEN;
-        let (Some(system), Some(from), Some(to)) =
-            (take_str(r, &mut p), take_str(r, &mut p), take_str(r, &mut p))
-        else {
-            continue;
-        };
-        let mut audio = Vec::with_capacity(frames);
-        for _ in 0..frames {
-            let Some(n) =
-                r.get(p..p + 2).map(|b| u16::from_le_bytes(b.try_into().unwrap()) as usize)
-            else {
-                break;
-            };
-            p += 2;
-            let Some(f) = r.get(p..p + n) else { break };
-            p += n;
-            audio.push(f.to_vec());
-        }
-        out.push(Call {
-            at_us: u64::from_le_bytes(r[4..12].try_into().unwrap()),
-            channel_hz: u64::from_le_bytes(r[12..20].try_into().unwrap()),
-            duration_ms: u32::from_le_bytes(r[20..24].try_into().unwrap()),
-            peak: f32::from_le_bytes(r[24..28].try_into().unwrap()),
-            system,
-            from: (!from.is_empty()).then_some(from),
-            to: (!to.is_empty()).then_some(to),
-            frames: audio,
-        });
     }
     out
+}
+
+/// One record's body, with the audio only where it is asked for.
+///
+/// An unknown kind or codec is skipped by its length rather than guessed at,
+/// which is the whole reason the length comes first.
+fn record(r: &[u8], audio: bool) -> Option<Call> {
+    if r.len() < HEAD_LEN || r[0] != KIND_CALL || r[1] != CODEC_OPUS {
+        return None;
+    }
+    let frames = u16::from_le_bytes(r[2..4].try_into().unwrap()) as usize;
+    let mut p = HEAD_LEN;
+    let system = take_str(r, &mut p)?;
+    let from = take_str(r, &mut p)?;
+    let to = take_str(r, &mut p)?;
+    let mut packets = Vec::new();
+    if audio {
+        packets.reserve(frames);
+        for _ in 0..frames {
+            let n = r.get(p..p + 2).map(|b| u16::from_le_bytes(b.try_into().unwrap()) as usize)?;
+            p += 2;
+            let f = r.get(p..p + n)?;
+            p += n;
+            packets.push(f.to_vec());
+        }
+    }
+    Some(Call {
+        at_us: u64::from_le_bytes(r[4..12].try_into().unwrap()),
+        channel_hz: u64::from_le_bytes(r[12..20].try_into().unwrap()),
+        duration_ms: u32::from_le_bytes(r[20..24].try_into().unwrap()),
+        peak: f32::from_le_bytes(r[24..28].try_into().unwrap()),
+        system,
+        from: (!from.is_empty()).then_some(from),
+        to: (!to.is_empty()).then_some(to),
+        frames: packets,
+    })
+}
+
+/// One record in the folder: what its header says, and where the audio is.
+///
+/// The list a view draws is headers; the audio is a megabyte an over and is
+/// read only when somebody plays one. So a browse walks the files and keeps
+/// the position of each record rather than its speech.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    /// The call, with `frames` empty: [`speech_of`] fetches those.
+    pub call: Call,
+    pub file: PathBuf,
+    /// Where the record's body starts in the file, and how long it is.
+    pub at: u64,
+    pub len: u32,
+}
+
+/// The newest `most` calls in a folder, newest first.
+///
+/// Files are read one header at a time and seeked over the audio, so a folder
+/// holding a week of a busy talkgroup costs a few hundred kilobytes to list
+/// rather than the gigabyte it is.
+pub fn browse(dir: &std::path::Path, most: usize) -> Vec<Entry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    // Named for the day they hold, so the newest file is the last name.
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == EXT))
+        .collect();
+    files.sort();
+    let mut out: Vec<Entry> = Vec::new();
+    for f in files.iter().rev() {
+        out.extend(headers(f));
+        if out.len() >= most {
+            break;
+        }
+    }
+    out.sort_by(|a, b| b.call.at_us.cmp(&a.call.at_us));
+    out.truncate(most);
+    out
+}
+
+/// Every record in one file, headers only.
+pub fn headers(path: &std::path::Path) -> Vec<Entry> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut out = Vec::new();
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return out;
+    };
+    let mut head = [0u8; MAGIC.len() + 2];
+    if f.read_exact(&mut head).is_err() || segments::after_magic(&head, MAGIC).is_none() {
+        return out;
+    }
+    let mut at = head.len() as u64;
+    let mut buf = vec![0u8; HEAD_LEN + 3 * (1 + u8::MAX as usize)];
+    loop {
+        let mut len = [0u8; 4];
+        if f.read_exact(&mut len).is_err() {
+            break;
+        }
+        let len = u32::from_le_bytes(len);
+        at += 4;
+        if (len as usize) < HEAD_LEN {
+            break;
+        }
+        // The header and the three strings, which is all a row needs. What a
+        // short read leaves in the buffer is the tail of the record before
+        // it, so the length parsed from is the length read.
+        let want = (len as usize).min(buf.len());
+        let Ok(got) = read_upto(&mut f, &mut buf[..want]) else { break };
+        if let Some(call) = record(&buf[..got], false) {
+            out.push(Entry { call, file: path.to_path_buf(), at, len });
+        }
+        if f.seek(SeekFrom::Start(at + u64::from(len))).is_err() {
+            break;
+        }
+        at += u64::from(len);
+    }
+    out
+}
+
+fn read_upto(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    use std::io::Read;
+    let mut got = 0;
+    while got < buf.len() {
+        match f.read(&mut buf[got..])? {
+            0 => break,
+            n => got += n,
+        }
+    }
+    Ok(got)
+}
+
+/// The speech of one listed call, read from the file it is in.
+pub fn speech_of(e: &Entry) -> Option<common::Speech> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(&e.file).ok()?;
+    f.seek(SeekFrom::Start(e.at)).ok()?;
+    let mut buf = vec![0u8; e.len as usize];
+    f.read_exact(&mut buf).ok()?;
+    record(&buf, true)?.speech()
 }
 
 /// Kind, codec, frame count, time, channel, duration and peak.
@@ -748,6 +857,7 @@ mod tests {
             channel_hz: 434_000_000.0,
             to: Some("ALL".into()),
             from: Some(from.into()),
+            code: None,
             rate,
             channels: 1,
             pcm,
@@ -881,6 +991,53 @@ mod tests {
         let calls = read(&files[0]).unwrap();
         let rate = bytes as f64 / calls[0].seconds();
         assert!((1_700.0..2_400.0).contains(&rate), "ten seconds of speech cost {rate} B/s");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What the calls pane's log table draws from: headers without the
+    /// audio, newest first, and the speech fetched for the one played.
+    #[test]
+    fn a_folder_lists_newest_first_and_fetches_one_over() {
+        let d = dir("browse");
+        let mut n = CallLogNode::new(d.clone());
+        Node::set_param(&mut n, "enabled", ParamValue::Bool(true)).unwrap();
+        for who in ["M0ABC", "M0XYZ", "M0QRP"] {
+            for _ in 0..5 {
+                run(&mut n, &[voice(0.2, 0.3, who)], 0.2);
+            }
+            for _ in 0..10 {
+                run(&mut n, &[silence(0.2, who)], 0.2);
+            }
+        }
+        drop(n);
+
+        let listed = browse(&d, 100);
+        assert_eq!(listed.len(), 3);
+        // Newest first, which is the opposite of the order they were
+        // written: the row worth reading is the one that just happened.
+        let who: Vec<&str> =
+            listed.iter().filter_map(|e| e.call.from.as_deref()).collect::<Vec<_>>();
+        assert_eq!(who, ["M0QRP", "M0XYZ", "M0ABC"]);
+        assert_eq!(listed[0].call.system, "M17");
+        assert_eq!(listed[0].call.to.as_deref(), Some("ALL"));
+        assert_eq!(listed[0].call.channel_hz, 434_000_000);
+        assert_eq!(listed[0].call.duration_ms, 980);
+        assert!(
+            listed.iter().all(|e| e.call.frames.is_empty()),
+            "a listing carried the audio it exists to avoid reading"
+        );
+
+        let speech = speech_of(&listed[0]).expect("the over reads back");
+        assert_eq!(speech.rate, RATE);
+        assert!((speech.seconds() - 0.98).abs() < 0.05, "{} s", speech.seconds());
+        let peak = speech.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(peak > 0.15, "the over came back at {peak}");
+
+        // A cap keeps the newest, so a week of a busy talkgroup lists as
+        // fast as an empty folder.
+        let two = browse(&d, 2);
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].call.from.as_deref(), Some("M0QRP"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

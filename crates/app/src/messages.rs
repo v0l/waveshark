@@ -55,11 +55,31 @@ pub struct Message {
     pub at_us: u64,
     /// Times it was heard, which for a pager is usually two.
     pub heard: u64,
+    /// Read back from the log rather than heard in this session.
+    ///
+    /// The list is loaded from the file at start so an overnight watch is
+    /// readable in the morning, which means the view holds messages this
+    /// receiver never heard on a band it is not pointed at. Unmarked, that
+    /// reads as traffic arriving now.
+    pub logged: bool,
 }
 
 impl Message {
     pub fn age(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.last)
+    }
+
+    /// When it was heard, on the clock, as a person reads it.
+    ///
+    /// The log carries the real timestamp, so this is that and not an
+    /// estimate: `14:32` in UTC for a message from today, and the date in
+    /// front of it for one that is not.
+    pub fn when(&self) -> String {
+        let at = crate::segments::when(self.at_us);
+        match crate::segments::day_of(self.at_us) == crate::segments::day_of(now_us()) {
+            true => at.format("%H:%M").to_string(),
+            false => at.format("%Y-%m-%d %H:%M").to_string(),
+        }
     }
 
     /// The header a row shows above the text.
@@ -198,6 +218,7 @@ impl Message {
             last: at,
             at_us: now_us(),
             heard: 1,
+            logged: false,
         })
     }
 }
@@ -225,6 +246,50 @@ fn text(fields: &[(String, Value)], keys: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A message read back off the file is marked as such, and says when it
+    /// was heard rather than how long ago.
+    ///
+    /// The list is loaded at start so an overnight watch is readable in the
+    /// morning, which means it holds traffic from a band the receiver is no
+    /// longer pointed at. Unmarked, that reads as something arriving now:
+    /// mesh nodes from another session appeared to be on the air.
+    #[test]
+    fn a_message_off_the_log_says_so() {
+        let now = std::time::Instant::now();
+        let heard = super::Message::of(
+            "Meshtastic",
+            869_519_700.0,
+            &[("text".into(), common::Value::Text("Hi".into()))],
+            now,
+        )
+        .expect("a message");
+        assert!(!heard.logged, "something heard now is not from the log");
+
+        let dir = std::env::temp_dir().join(format!("waveshark-msg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::messagelog::append(&dir, &heard);
+        let back = crate::messagelog::recent(&dir, 2);
+        assert_eq!(back.len(), 1, "the message did not come back: {back:?}");
+        assert!(back[0].logged, "a message off the file is not marked as read back");
+        assert_eq!(back[0].text, "Hi");
+        // The log carries the real timestamp, so the card shows the clock
+        // time it was heard at rather than a guess from an age.
+        assert_eq!(back[0].at_us, heard.at_us, "the timestamp did not survive the file");
+        assert_eq!(
+            back[0].when(),
+            crate::segments::when(heard.at_us).format("%H:%M").to_string(),
+            "a message from today reads as a time of day"
+        );
+        // And one from another day says which.
+        let yesterday = super::Message { at_us: heard.at_us - 86_400_000_000, ..heard.clone() };
+        assert!(
+            yesterday.when().starts_with(&crate::segments::day_of(yesterday.at_us)),
+            "{}",
+            yesterday.when()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// A decode that says somebody wrote it, which is what this view reads.

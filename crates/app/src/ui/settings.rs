@@ -4,7 +4,7 @@
 //! anybody else depends on, which is what makes them separable from the panes.
 
 use super::*;
-use crate::agent::config::Speech;
+use crate::agent::config::{Reading, Speech};
 use crate::ui::widgets::{
     card, choice, field, field_then, footer, lamp, prose, secret, section, switch,
 };
@@ -565,7 +565,7 @@ impl App {
                 ui,
                 "name",
                 "What it answers to. An over that does not start with this is heard and \
-                 ignored. Empty means it never keys.",
+                 ignored, unless it is already in a conversation. Empty means it never keys.",
                 |ui| {
                     field(ui, &mut c.wake, "shark");
                 },
@@ -580,14 +580,34 @@ impl App {
                     theme::Line::new().legend("s").show(ui);
                 },
             );
+            row_help(
+                ui,
+                "follow",
+                "Seconds after its own over that it keeps answering without being named, so a \
+                 conversation does not need the name every time. Zero wants the name on every \
+                 over, which is what to set on a busy channel.",
+                |ui| {
+                    ui.add(egui::DragValue::new(&mut c.follow_s).speed(1.0).range(0.0..=600.0));
+                    theme::Line::new().legend("s").show(ui);
+                },
+            );
             ui.add_space(4.0);
             match c.wake.trim() {
                 "" => lamp(ui, false, "no name: it will listen and never answer"),
-                name => lamp(
-                    ui,
-                    true,
-                    &format!("answers to {name}, {:.1} s after the channel clears", c.hang_s),
-                ),
+                name => {
+                    let follow = match c.follow_s > 0.0 {
+                        true => format!(", then anything for {:.0} s", c.follow_s),
+                        false => String::new(),
+                    };
+                    lamp(
+                        ui,
+                        true,
+                        &format!(
+                            "answers to {name}, {:.1} s after the channel clears{follow}",
+                            c.hang_s
+                        ),
+                    )
+                }
             }
         });
         ui.add_space(8.0);
@@ -699,8 +719,96 @@ impl App {
             }
         });
 
+        ui.add_space(8.0);
+
+        section(ui, "reading", "how speech heard on the air is read back into words", |ui| {
+            row_help(
+                ui,
+                "on",
+                "A model on this machine reads everything locally and wants the card and the \
+                 weights, chosen on the Transcript pane. The model's server, or one of its \
+                 own, reads it on an /audio/transcriptions instead, which is what a machine \
+                 with no card should use. Audio leaves this machine either way it is not local.",
+                |ui| {
+                    for how in Reading::ALL {
+                        if ui.selectable_label(c.reading == how, how.label()).clicked() {
+                            c.reading = how;
+                        }
+                    }
+                },
+            );
+            match c.reading {
+                Reading::Local => {
+                    hint(ui, "Which model and which device are on the Transcript pane.");
+                }
+                Reading::Chat => {
+                    let models = chat.as_ref().map(|s| s.reading_models()).unwrap_or_default();
+                    row_help(
+                        ui,
+                        "model",
+                        "As the model's server names it: whisper-1 on OpenAI.",
+                        |ui| {
+                            pick_or_type(ui, "read-model", &mut c.read_model, models, "whisper-1");
+                        },
+                    );
+                }
+                Reading::Server => {
+                    let own = served::served(&c.read_url);
+                    let models = own.as_ref().map(|s| s.reading_models()).unwrap_or_default();
+                    row_help(
+                        ui,
+                        "server",
+                        "An OpenAI-compatible /v1/audio/transcriptions: a hosted one, or a \
+                         whisper.cpp or faster-whisper server on the network.",
+                        |ui| {
+                            let mut ask = false;
+                            field_then(
+                                ui,
+                                &mut c.read_url,
+                                "http://127.0.0.1:9000/v1",
+                                60.0,
+                                |ui| {
+                                    ask = ui
+                                        .small_button("ASK")
+                                        .on_hover_text("List what it serves")
+                                        .clicked();
+                                },
+                            );
+                            if ask {
+                                let key = match c.read_key.trim() {
+                                    "" => c.key.clone(),
+                                    k => k.to_string(),
+                                };
+                                served::fetch(&c.read_url, &key, true);
+                            }
+                        },
+                    );
+                    row_help(ui, "model", "As that server names it.", |ui| {
+                        pick_or_type(ui, "own-read-model", &mut c.read_model, models, "whisper-1");
+                    });
+                    row_help(ui, "key", "Leave empty to use the model's key.", |ui| {
+                        secret(ui, &mut c.read_key);
+                    });
+                }
+            }
+            ui.add_space(4.0);
+            match (c.reading, c.reading_fault()) {
+                (_, Some(why)) => lamp(ui, false, why),
+                (Reading::Local, _) => lamp(ui, true, "a model here, on the Transcript pane"),
+                (Reading::Chat, _) => {
+                    lamp(ui, true, &format!("{} at {}", c.read_model.trim(), host_of(&c.url)))
+                }
+                (Reading::Server, _) => {
+                    lamp(ui, true, &format!("{} at {}", c.read_model.trim(), host_of(&c.read_url)))
+                }
+            }
+        });
+
         if *c != before {
             let _ = c.save();
+            // The transcriber is a stage in a graph that knows nothing about
+            // the agent, and it reads where this says.
+            crate::agent::config::publish_reading(c);
         }
     }
 
@@ -873,7 +981,7 @@ impl App {
             let mut on = rec.on;
             let help = "Every transmission on a voice channel or a voice front end, as it \
                         was heard, before any fader: about 2 kB a second of speech. The \
-                        Calls view plays them back.";
+                        Recordings table in the Calls view plays them back.";
             if switch(ui, "record", &mut on, "every over", help) {
                 self.cmds.push(Cmd::StageParam(
                     crate::chain::derived::CALL_LOG,

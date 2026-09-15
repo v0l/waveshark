@@ -28,9 +28,25 @@ pub const KIND: &str = "audio_bus";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Playing {
     pub key: common::ConversationKey,
-    /// Peak this block, after the faders.
+    /// Peak of the last block that had anything in it, after the faders.
     pub peak: f32,
+    /// How long since it last had anything in it, so a row can be drawn
+    /// through a pause without saying it is loud.
+    pub quiet_s: f64,
 }
+
+/// Below this peak a block is nothing: a squelched channel and a replay
+/// between words both deliver blocks of silence, and listing them is
+/// listing everything the graph has.
+const FLOOR: f32 = 0.002;
+
+/// How long something stays in the list after its last block of audio.
+///
+/// Speech pauses between words and between sentences, and a row that came
+/// and went with every pause moved everything under it on the strip. Long
+/// enough to cover a breath, short enough that the list is still what is
+/// playing now.
+const HOLD_S: f64 = 1.5;
 
 /// What one input carries, as negotiated.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -271,6 +287,7 @@ impl Node for BusNode {
                         channel_hz: center_hz,
                         to: None,
                         from: None,
+                        code: None,
                         rate,
                         channels,
                         pcm: pcm.clone(),
@@ -300,14 +317,28 @@ impl Node for BusNode {
         };
         out.real_mut().extend_from_slice(self.render(frames));
         self.mix.clear();
-        self.playing = self
-            .played
-            .iter()
-            .map(|v| Playing {
-                key: common::ConversationKey::of(v),
-                peak: v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs())),
-            })
-            .collect();
+        // Held rather than rebuilt each block: what is playing is a list of
+        // conversations, not of blocks, and the pauses in speech are not
+        // gaps in it. A row keeps its place in the list, so nothing moves
+        // under the pointer while somebody is talking.
+        for p in self.playing.iter_mut() {
+            p.quiet_s += ctx.block_seconds.max(0.0);
+        }
+        for v in &self.played {
+            let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+            if peak <= FLOOR {
+                continue;
+            }
+            let key = common::ConversationKey::of(v);
+            match self.playing.iter_mut().find(|p| p.key == key) {
+                Some(p) => {
+                    p.peak = peak;
+                    p.quiet_s = 0.0;
+                }
+                None => self.playing.push(Playing { key, peak, quiet_s: 0.0 }),
+            }
+        }
+        self.playing.retain(|p| p.quiet_s < HOLD_S);
         played.voice_mut().append(&mut self.played);
         Ok(())
     }
@@ -349,6 +380,7 @@ mod tests {
             channel_hz: 145_500_000.0,
             to: Some("CH1".into()),
             from: None,
+            code: None,
             rate,
             channels,
             pcm: pcm.to_vec(),
@@ -426,6 +458,7 @@ mod tests {
             channel_hz: 433_475_000.0,
             to: Some("ALL".into()),
             from: Some("M0ABC".into()),
+            code: None,
             rate: 48_000.0,
             channels: 1,
             pcm: vec![0.25; 48],
@@ -439,12 +472,28 @@ mod tests {
         assert_eq!(keys, vec!["Audio:145500000:CH1:", "M17:433475000:ALL:M0ABC"]);
         assert_eq!(n.playing()[1].peak, 0.25);
         assert_eq!(n.last_heard(), Some("M0ABC to ALL"));
-        // And nothing is reported for a block in which nothing played.
-        let (out, played) =
-            run(&mut n, &ins, &[Payload::Voice(vec![]), Payload::Voice(vec![])], 0.001);
+
+        // A block with nothing in it played nothing, but the two are still
+        // what is playing: speech pauses, and a list that emptied at every
+        // pause moved everything under it on the strip.
+        let silence = [Payload::Voice(vec![]), Payload::Voice(vec![])];
+        let (out, played) = run(&mut n, &ins, &silence, 0.001);
         assert_eq!(out.len(), 96, "a block's worth of silence");
         assert!(played.is_empty());
-        assert!(n.playing().is_empty());
+        assert_eq!(n.playing().len(), 2, "held through a pause");
+        assert!(n.playing()[0].quiet_s > 0.0);
+
+        // The pause runs on, and they go.
+        for _ in 0..16 {
+            run(&mut n, &ins, &silence, 0.1);
+        }
+        assert!(n.playing().is_empty(), "nothing has played for over a second and a half");
+
+        // A block of silence is not something playing either: every
+        // squelched channel on the strip delivers one.
+        let quiet = [Payload::Voice(vec![voice(48e3, 1, &[0.0005; 48])]), Payload::Voice(vec![])];
+        run(&mut n, &ins, &quiet, 0.001);
+        assert!(n.playing().is_empty(), "a block under the floor is not playing");
     }
 
     #[test]
