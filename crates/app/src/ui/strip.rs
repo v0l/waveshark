@@ -36,6 +36,10 @@ pub(super) struct Strip<'a> {
     /// The agent on the air, so the channel it answers on shows what it is
     /// doing where the key would be.
     pub air: &'a crate::agent::channel::AgentChannel,
+    /// Why the agent cannot answer, when it cannot: a wake word nobody set,
+    /// no speech server, a build with no model. Without it the channel says
+    /// "listening" and means "it will never answer you".
+    pub air_fault: Option<&'static str>,
 }
 
 impl Strip<'_> {
@@ -238,7 +242,12 @@ impl Strip<'_> {
     /// gigabytes, a chat server not answering and a card making speech take
     /// wildly different lengths of time, and one word covering all of them is
     /// a readout that cannot be used to decide whether to wait.
-    fn agent_key(ui: &mut egui::Ui, id: u64, air: &crate::agent::channel::AgentChannel) {
+    fn agent_key(
+        ui: &mut egui::Ui,
+        id: u64,
+        air: &crate::agent::channel::AgentChannel,
+        fault: Option<&'static str>,
+    ) {
         use crate::agent::channel::State;
         let mine = air.on == Some(id);
         let state = mine.then_some(air.state);
@@ -250,6 +259,9 @@ impl Strip<'_> {
         let voice = crate::agent::voice::health();
         let word = match (state, &voice.state) {
             (None, _) => "not the agent's channel".to_string(),
+            // It is listening and it will never answer, which is the one
+            // state the old readout could not tell from working.
+            (Some(State::Listening), _) if fault.is_some() => fault.unwrap_or_default().to_string(),
             (Some(State::Speaking), crate::transcripts::ModelState::Fetching) => {
                 match voice.fetch.fraction() {
                     Some(f) => format!("fetching the voice {:.0}%", f * 100.0),
@@ -293,12 +305,34 @@ impl Strip<'_> {
                 ink,
             );
         }
-        let why = match (&voice.state, mine) {
-            (crate::transcripts::ModelState::Failed(e), _) => {
+        // What it last heard on this channel, so an operator can see it is
+        // being read at all and see how it was read: the name has to survive
+        // a squelched FM channel and a small speech model, and "shark" comes
+        // back as "sharp" often enough to be worth showing.
+        if mine
+            && !on_air
+            && let Some(h) = &air.last
+        {
+            let note = match h.passed {
+                None => "taken".to_string(),
+                Some(p) => p.label().to_string(),
+            };
+            theme::Line::new()
+                .legend("heard")
+                .heard(h.text.clone())
+                .size(11.0)
+                .gap(8.0)
+                .legend(&note)
+                .size(11.0)
+                .elided(ui);
+        }
+        let why = match (fault, &voice.state, mine) {
+            (Some(f), _, _) => format!("the agent cannot answer: {f}. Set it in Agent settings"),
+            (_, crate::transcripts::ModelState::Failed(e), _) => {
                 format!("the agent cannot speak: {e}")
             }
-            (_, false) => "Give this channel to the agent in the Agent settings".to_string(),
-            (_, true) => "The agent keys this channel itself when it has an answer".to_string(),
+            (_, _, false) => "Give this channel to the agent in the Agent settings".to_string(),
+            (_, _, true) => "The agent keys this channel itself when it has an answer".to_string(),
         };
         r.on_hover_text(why);
     }
@@ -321,6 +355,7 @@ impl Strip<'_> {
         source: Option<(usize, String)>,
         files: &mut super::state::FilePick,
         air: &crate::agent::channel::AgentChannel,
+        air_fault: Option<&'static str>,
     ) -> bool {
         let mut changed = false;
         // Nothing to draw for a mode with no modulator behind it. A dead key
@@ -501,7 +536,7 @@ impl Strip<'_> {
         // place is what the agent is doing, which is the thing an operator
         // watching this channel actually wants to know.
         if tx.source == TxSource::Agent {
-            Self::agent_key(ui, ch.id, air);
+            Self::agent_key(ui, ch.id, air, air_fault);
             return changed;
         }
         let keyed_here = keyed == Some(ch.id);
@@ -919,6 +954,7 @@ impl Strip<'_> {
                                     tx_source_file(self.chain),
                                     self.files,
                                     self.air,
+                                    self.air_fault,
                                 )
                             {
                                 tune = Some(i);

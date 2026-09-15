@@ -55,6 +55,10 @@ pub(super) struct AgentView<'a> {
     /// What the speech model is doing, which the state alone cannot say: a
     /// download, a load and a card generating all look like "making speech".
     pub voice: crate::transcripts::Health,
+    /// Why the agent cannot answer over the air, when it cannot.
+    pub air_fault: Option<&'static str>,
+    /// The name it answers to.
+    pub wake: String,
     /// Whether a radio is running, which is most of what a model can do
     /// anything about.
     pub running: bool,
@@ -88,18 +92,28 @@ impl AgentView<'_> {
                 .show(ui);
             if let Some(id) = self.air.on {
                 ui.add_space(12.0);
-                let tint = match self.air.state {
-                    State::Listening => theme::LEGEND,
-                    State::Asking | State::Speaking | State::Holding => theme::READOUT,
-                    State::OnAir => theme::FAULT,
+                let (word, tint) = match (self.air.state, self.air_fault) {
+                    // Listening and unable to answer is not listening. This
+                    // is the state a wake word nobody set leaves it in, and
+                    // it looked identical to working.
+                    (State::Listening, Some(f)) => (f.to_string(), theme::FAULT),
+                    (State::Listening, None) => ("listening".into(), theme::LEGEND),
+                    (State::OnAir, _) => ("on air".into(), theme::FAULT),
+                    (s, _) => (s.label().into(), theme::READOUT),
                 };
-                let word = self.air.state.label();
                 theme::Line::new()
                     .legend(&format!("channel {id}"))
                     .value(word)
                     .size(11.0)
                     .tint(tint)
                     .show(ui);
+                // The name it answers to, which has to survive the speech
+                // model: an operator saying it and getting nothing needs to
+                // see what the receiver is listening for.
+                if !self.wake.trim().is_empty() {
+                    ui.add_space(12.0);
+                    theme::Line::new().legend("name").set(self.wake.trim()).size(11.0).show(ui);
+                }
             }
             // The speech model, which is the slow half of an answer and the
             // one with gigabytes to fetch. Only drawn once a channel has been
@@ -124,6 +138,29 @@ impl AgentView<'_> {
                 }
             });
         });
+        // The last over on the channel and what became of it. Most overs are
+        // not for the agent, and an operator who has just spoken needs to see
+        // that it was read and how it was read before they can tell whether
+        // the name got through.
+        if self.air.on.is_some()
+            && let Some(h) = &self.air.last
+        {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let note = match h.passed {
+                    None => "answering".to_string(),
+                    Some(p) => p.label().to_string(),
+                };
+                theme::Line::new()
+                    .legend("heard")
+                    .heard(h.text.clone())
+                    .size(11.0)
+                    .gap(10.0)
+                    .legend(&note)
+                    .size(11.0)
+                    .elided(ui);
+            });
+        }
         ui.add_space(6.0);
 
         if let Some(why) = fault {

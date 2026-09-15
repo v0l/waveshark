@@ -107,6 +107,45 @@ pub enum Move {
     Unkey,
 }
 
+/// The last over offered to the agent, and what became of it.
+///
+/// Every over on the channel is read and most are not for the agent. Without
+/// this the readout says "listening" whether nobody has spoken, somebody has
+/// spoken and not used the name, or the agent cannot answer at all, and the
+/// three are the same picture: an operator talking into a channel that never
+/// replies has nothing to go on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heard {
+    pub at: Instant,
+    pub text: String,
+    /// Why it was not taken, or `None` when it was.
+    pub passed: Option<Passed>,
+}
+
+/// Why an over the agent heard was not answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Passed {
+    /// It does not start with the agent's name.
+    NotAddressed,
+    /// The name and nothing after it.
+    NothingAsked,
+    /// It is still working on the one before.
+    Busy,
+    /// It cannot answer at all: see `Config::voice_fault`.
+    Mute,
+}
+
+impl Passed {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotAddressed => "not addressed to it",
+            Self::NothingAsked => "nothing asked",
+            Self::Busy => "still on the last one",
+            Self::Mute => "it cannot answer",
+        }
+    }
+}
+
 /// What the agent heard and what it said, for the pane.
 pub struct Exchange {
     pub at: Instant,
@@ -140,6 +179,8 @@ pub struct AgentChannel {
     answered: Option<Instant>,
     /// Which half of the pending work is running.
     stage: Stage,
+    /// The last over offered to it, taken or not.
+    pub last: Option<Heard>,
     stop: Arc<AtomicBool>,
 }
 
@@ -175,6 +216,7 @@ impl Default for AgentChannel {
             keyed_at: None,
             answered: None,
             stage: Stage::default(),
+            last: None,
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -253,16 +295,34 @@ impl AgentChannel {
         at: Instant,
         text: &str,
     ) -> bool {
-        if self.on.is_none() || self.state.busy() || config.voice_fault().is_some() {
+        if self.on.is_none() {
             return false;
+        }
+        // Said once per over rather than per frame: the same reading is
+        // offered again every frame it stays in the transcript, and a note
+        // that rewrote itself sixty times a second is the same note.
+        let mut pass = |a: &mut Self, why: Passed| {
+            if a.last.as_ref().map(|h| h.at) != Some(at) {
+                a.last = Some(Heard { at, text: text.to_string(), passed: Some(why) });
+            }
+            false
+        };
+        if config.voice_fault().is_some() {
+            return pass(self, Passed::Mute);
         }
         if self.answered == Some(at) {
             return false;
         }
-        let Some(question) = Self::addressed(&config.wake, text) else { return false };
-        if question.is_empty() {
-            return false;
+        if self.state.busy() {
+            return pass(self, Passed::Busy);
         }
+        let Some(question) = Self::addressed(&config.wake, text) else {
+            return pass(self, Passed::NotAddressed);
+        };
+        if question.is_empty() {
+            return pass(self, Passed::NothingAsked);
+        }
+        self.last = Some(Heard { at, text: text.to_string(), passed: None });
         self.answered = Some(at);
         self.asked = question.to_string();
         self.stage = Stage::default();
@@ -483,6 +543,54 @@ mod tests {
         // The same over read again, and a second question while it is busy.
         assert!(!a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
         assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), "shark again"));
+    }
+
+    /// Every over the agent hears is accounted for, taken or not.
+    ///
+    /// The readout used to say "listening" whether nobody had spoken,
+    /// somebody had spoken without using the name, or the agent could not
+    /// answer at all because no wake word had ever been set. All three are an
+    /// operator talking into a channel that never replies, and nothing on the
+    /// screen told them apart.
+    #[test]
+    fn an_over_that_is_not_answered_says_why() {
+        use super::Passed;
+        let c = config();
+        let (desk, _asks) = Desk::new();
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let mut a = AgentChannel { on: Some(1), ..Default::default() };
+        let mut clock = Instant::now();
+        let mut say = |a: &mut AgentChannel, c: &Config, text: &str| {
+            clock += Duration::from_secs(1);
+            a.heard(c, &desk, rt.handle(), clock, text)
+        };
+
+        // Somebody talking on the channel, to somebody else.
+        assert!(!say(&mut a, &c, "uh, hey, can you hear that?"));
+        let h = a.last.clone().expect("it heard the over");
+        assert_eq!(h.text, "uh, hey, can you hear that?");
+        assert_eq!(h.passed, Some(Passed::NotAddressed));
+
+        // The name and nothing after it.
+        assert!(!say(&mut a, &c, "shark"));
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::NothingAsked));
+
+        // A question, taken.
+        assert!(say(&mut a, &c, "shark what is on the air"));
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), None, "it was taken");
+        assert_eq!(a.state, State::Asking);
+
+        // And another while it is working on the first.
+        assert!(!say(&mut a, &c, "shark are you there"));
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::Busy));
+
+        // A receiver whose wake word nobody ever set hears everything and can
+        // answer none of it, and says so rather than saying "listening".
+        let mut mute = AgentChannel { on: Some(1), ..Default::default() };
+        let no_name = Config { wake: String::new(), ..config() };
+        assert_eq!(no_name.voice_fault(), Some("no wake word"));
+        assert!(!say(&mut mute, &no_name, "shark what is on the air"));
+        assert_eq!(mute.last.as_ref().and_then(|h| h.passed), Some(Passed::Mute));
     }
 
     /// The state says which half of the work is running.
