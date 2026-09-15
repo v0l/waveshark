@@ -29,6 +29,12 @@ the code is in the commit log.
 
 - The agent says what it is doing: asking, making speech, or downloading a voice.
 
+- The agent's voice can come from the model's own server, with a speech model named there.
+
+- Every settings dialog is a column of cards, with a lamp saying whether it will work.
+
+- `--settings NAME` opens with a settings dialog up.
+
 - The agent channel shows the last over it heard and why it did not answer.
 
 - The agent answers to a name you choose, and waits for the channel to be clear.

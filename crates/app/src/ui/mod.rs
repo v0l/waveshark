@@ -67,8 +67,7 @@ use settings::RemoteEdit;
 use settings_rows::{ScannerRow, mhz_field};
 use state::{Channel, Logged};
 use widgets::{
-    Fader, Squelch, bin_hint, check_help, cog, cog_rect, help, hint, legend_help, modal_title,
-    reading, row, row_help,
+    Fader, Squelch, bin_hint, cog, cog_rect, help, hint, modal_title, reading, row, row_help,
 };
 
 pub struct App {
@@ -272,6 +271,24 @@ pub enum Settings {
     /// Everything about where this receiver is rather than what it is doing:
     /// language, country, band plan, station position.
     App,
+}
+
+impl Settings {
+    /// A dialog by the name the command line gives it.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "spectrum" => Self::Spectrum,
+            "waterfall" => Self::Waterfall,
+            "radio" => Self::Radio,
+            "log" | "packet_log" => Self::PacketLog,
+            "scanners" => Self::Scanners,
+            "memory" => Self::Memory,
+            "data" => Self::Data,
+            "agent" => Self::Agent,
+            "app" => Self::App,
+            _ => return None,
+        })
+    }
 }
 
 const FFTS: [usize; 6] = [512, 1024, 2048, 4096, 8192, 16384];
@@ -1032,6 +1049,11 @@ impl App {
 
     /// Start the radio without waiting for the play button, which is what a
     /// capture being replayed usually wants and what a screenshot needs.
+    /// Open with a settings dialog up, for a screenshot of it.
+    pub fn open_settings(&mut self, which: Settings) {
+        self.open = Some(which);
+    }
+
     pub fn start_on_open(&mut self) {
         self.autostart = true;
     }

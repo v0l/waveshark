@@ -5,6 +5,7 @@
 
 use super::state::ScopeState;
 use super::*;
+use crate::ui::widgets::{choice, section, switch};
 
 /// What the panels want done that they cannot do themselves.
 pub(super) enum Action {
@@ -27,67 +28,51 @@ impl ScopeSettings<'_> {
     /// The spectrum panel: what the transform is doing, and the scale it is
     /// drawn against.
     pub(super) fn spectrum(&mut self, ui: &mut egui::Ui) {
-        let bins = "How finely the span is divided. More bins tell closer signals apart, and \
-                    cost time to transform.";
-        row_help(ui, "FFT bins", bins, |ui| {
-            let mut n = self.st.fft_size;
-            egui::ComboBox::from_id_salt("fft").selected_text(n.to_string()).width(120.0).show_ui(
+        section(ui, "transform", "how the span is divided and how often", |ui| {
+            let bins = "How finely the span is divided. More bins tell closer signals apart, \
+                        and cost time to transform.";
+            row_help(ui, "bins", bins, |ui| {
+                let mut n = self.st.fft_size;
+                let opts = FFTS.iter().map(|v| (*v, v.to_string()));
+                if choice(ui, "fft", &mut n, opts) {
+                    self.st.fft_size = n;
+                    // The same value the session saves and the radio starts
+                    // with, so a chosen FFT size survives a restart rather
+                    // than only living in the running spectrum.
+                    self.st.fft = n;
+                    self.cmds.push(Cmd::Fft(n));
+                    self.acts.push(Action::ResetWaterfall);
+                }
+            });
+            reading(ui, "resolution", bin_hint(self.rate, self.st.fft_size));
+            row_help(ui, "refresh", "Frames a second the spectrum is worth producing.", |ui| {
+                let mut v = self.st.refresh;
+                let opts = REFRESH.iter().map(|(n, f)| (*f, format!("{n} fps")));
+                if choice(ui, "fps", &mut v, opts) {
+                    self.st.refresh = v;
+                    self.cmds.push(Cmd::Refresh(v));
+                }
+            });
+            row_help(ui, "averaging", "How much of the last frame the next one keeps.", |ui| {
+                ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+                let slider = egui::Slider::new(&mut self.st.smoothing, 0.02..=1.0);
+                if ui.add(slider.show_value(false)).changed() {
+                    self.cmds.push(Cmd::Smoothing(self.st.smoothing));
+                }
+                let text = if self.st.smoothing > 0.95 {
+                    "off".to_string()
+                } else {
+                    format!("{:.0}%", (1.0 - self.st.smoothing) * 100.0)
+                };
+                theme::Line::new().set(text).size(11.0).show(ui);
+            });
+            if switch(
                 ui,
-                |ui| {
-                    for v in FFTS {
-                        ui.selectable_value(&mut n, v, v.to_string());
-                    }
-                },
-            );
-            if n != self.st.fft_size {
-                self.st.fft_size = n;
-                // The same value the session saves and the radio starts with,
-                // so a chosen FFT size survives a restart rather than only
-                // living in the running spectrum.
-                self.st.fft = n;
-                self.cmds.push(Cmd::Fft(n));
-                self.acts.push(Action::ResetWaterfall);
-            }
-        });
-        ui.label(
-            egui::RichText::new(bin_hint(self.rate, self.st.fft_size)).small().color(theme::LEGEND),
-        );
-        ui.add_space(8.0);
-
-        row(ui, "Refresh", |ui| {
-            let mut v = self.st.refresh;
-            egui::ComboBox::from_id_salt("fps")
-                .selected_text(format!("{} fps", v as i32))
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for (n, f) in REFRESH {
-                        ui.selectable_value(&mut v, f, format!("{n} fps"));
-                    }
-                });
-            if (v - self.st.refresh).abs() > 0.01 {
-                self.st.refresh = v;
-                self.cmds.push(Cmd::Refresh(v));
-            }
-        });
-        ui.add_space(8.0);
-
-        row(ui, "Averaging", |ui| {
-            if ui
-                .add(egui::Slider::new(&mut self.st.smoothing, 0.02..=1.0).show_value(false))
-                .changed()
-            {
-                self.cmds.push(Cmd::Smoothing(self.st.smoothing));
-            }
-            ui.label(value(if self.st.smoothing > 0.95 {
-                "off".to_string()
-            } else {
-                format!("{:.0}%", (1.0 - self.st.smoothing) * 100.0)
-            }));
-        });
-        ui.add_space(8.0);
-
-        row_help(ui, "Centre spur", "LO leakage at the tuned frequency.", |ui| {
-            if ui.checkbox(&mut *self.dc_block, "Remove").changed() {
+                "centre spur",
+                self.dc_block,
+                "remove",
+                "LO leakage at the tuned frequency.",
+            ) {
                 self.cmds.push(Cmd::DcBlock(*self.dc_block));
             }
         });
@@ -97,50 +82,41 @@ impl ScopeSettings<'_> {
 
     /// The waterfall panel: how fast it scrolls, and how much it keeps.
     pub(super) fn waterfall(&mut self, ui: &mut egui::Ui) {
-        row(ui, "Scroll rate", |ui| {
-            let mut v = self.st.rows_per_sec;
-            egui::ComboBox::from_id_salt("rows")
-                .selected_text(format!("{} rows/s", v as i32))
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    for (n, f) in SPEEDS {
-                        ui.selectable_value(&mut v, f, format!("{n} rows/s"));
-                    }
-                });
-            self.st.rows_per_sec = v;
-        });
-        ui.add_space(8.0);
-
-        row(ui, "History", |ui| {
-            let mut n = self.st.wf_rows;
-            egui::ComboBox::from_id_salt("hist")
-                .selected_text(format!("{n} rows"))
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    for v in [256usize, 512, 1024, 2048] {
-                        ui.selectable_value(&mut n, v, format!("{v} rows"));
-                    }
-                });
-            if n != self.st.wf_rows {
-                self.st.wf_rows = n;
-                self.st.wf.set_height(n);
-            }
-        });
-        ui.label(
-            egui::RichText::new(format!(
-                "{:.0} s of history at {:.0} rows/s",
-                self.st.wf.height() as f32 / self.st.rows_per_sec,
-                self.st.rows_per_sec
-            ))
-            .small()
-            .color(theme::LEGEND),
-        );
-        ui.add_space(8.0);
-
-        let contrast = "How far below the trace ceiling the hottest colour sits.";
-        row_help(ui, "Contrast", contrast, |ui| {
-            ui.add(egui::Slider::new(&mut self.st.wf_top_offset, 0.0..=20.0).show_value(false));
-            ui.label(value(format!("{:.0} dB", self.st.wf_top_offset)));
+        section(ui, "scroll", "how fast it moves and how much it keeps", |ui| {
+            row_help(ui, "rate", "Rows a second.", |ui| {
+                let mut v = self.st.rows_per_sec;
+                let opts = SPEEDS.iter().map(|(n, f)| (*f, format!("{n} rows/s")));
+                if choice(ui, "rows", &mut v, opts) {
+                    self.st.rows_per_sec = v;
+                }
+            });
+            row_help(ui, "history", "Rows kept, scrolled back to with the wheel.", |ui| {
+                let mut n = self.st.wf_rows;
+                let opts = [256usize, 512, 1024, 2048].map(|v| (v, format!("{v} rows")));
+                if choice(ui, "hist", &mut n, opts) {
+                    self.st.wf_rows = n;
+                    self.st.wf.set_height(n);
+                }
+            });
+            reading(
+                ui,
+                "holds",
+                format!(
+                    "{:.0} s at {:.0} rows/s",
+                    self.st.wf.height() as f32 / self.st.rows_per_sec,
+                    self.st.rows_per_sec
+                ),
+            );
+            let contrast = "How far below the trace ceiling the hottest colour sits.";
+            row_help(ui, "contrast", contrast, |ui| {
+                ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+                let slider = egui::Slider::new(&mut self.st.wf_top_offset, 0.0..=20.0);
+                ui.add(slider.show_value(false));
+                theme::Line::new()
+                    .set(format!("{:.0} dB", self.st.wf_top_offset))
+                    .size(11.0)
+                    .show(ui);
+            });
         });
         ui.add_space(8.0);
         self.scale(ui);
@@ -148,15 +124,23 @@ impl ScopeSettings<'_> {
 
     /// The decibel scale both of them are drawn against.
     fn scale(&mut self, ui: &mut egui::Ui) {
-        row(ui, "Scale", |ui| {
-            ui.checkbox(&mut self.st.auto_scale, "Auto");
-        });
-        ui.add_enabled_ui(!self.st.auto_scale, |ui| {
-            row(ui, "Floor", |ui| {
-                ui.add(egui::Slider::new(&mut self.st.floor, -140.0..=0.0).suffix(" dB"));
-            });
-            row(ui, "Ceiling", |ui| {
-                ui.add(egui::Slider::new(&mut self.st.ceil, -140.0..=20.0).suffix(" dB"));
+        section(ui, "scale", "the decibels the trace and the colours are drawn against", |ui| {
+            switch(
+                ui,
+                "auto",
+                &mut self.st.auto_scale,
+                "follow the floor and the peaks",
+                "Fitted to what is arriving. Off keeps the floor and ceiling set below.",
+            );
+            ui.add_enabled_ui(!self.st.auto_scale, |ui| {
+                row(ui, "floor", |ui| {
+                    ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+                    ui.add(egui::Slider::new(&mut self.st.floor, -140.0..=0.0).suffix(" dB"));
+                });
+                row(ui, "ceiling", |ui| {
+                    ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+                    ui.add(egui::Slider::new(&mut self.st.ceil, -140.0..=20.0).suffix(" dB"));
+                });
             });
         });
     }
