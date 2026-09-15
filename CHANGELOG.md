@@ -19,6 +19,10 @@ the code is in the commit log.
 
 - Say again: send one of the agent's answers over the air a second time.
 
+- The agent's reply was cut off at the first pause in it.
+
+- The agent's voice sounded like whispering.
+
 - The agent says what it is doing: asking, making speech, or downloading a voice.
 
 - The agent channel shows the last over it heard and why it did not answer.

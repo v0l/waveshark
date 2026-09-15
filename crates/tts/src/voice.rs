@@ -161,7 +161,7 @@ impl Voice {
         if text.is_empty() {
             return Ok(Vec::new());
         }
-        let prompt = self.encode(text)?;
+        let prompt = self.encode(&speakable(text))?;
         let want = (text.split_whitespace().count() as f64 / WORDS_PER_S + 1.5).min(max_s.max(1.0));
         let steps = (want * self.frame_rate).ceil() as usize;
         let lp = LogitsProcessor::new(self.seed, Some(self.temperature), None);
@@ -201,32 +201,48 @@ impl Voice {
     }
 }
 
+/// Punctuation a speaker cannot say, as something it can.
+///
+/// A model writes dashes however it is asked not to, and Parler reads one as
+/// a pause rather than as nothing: long enough to sound like the end of the
+/// reply, and long enough that what used to trim the tail cut the sentence
+/// there. A comma is the pause a person would actually make.
+fn speakable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{2014}' | '\u{2013}' | '\u{2012}' => out.push(','),
+            '\u{2026}' => out.push_str(", "),
+            '\u{201c}' | '\u{201d}' => {}
+            '\u{2018}' | '\u{2019}' => out.push('\''),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Cut the silence a generation runs on into after the words stop.
 ///
 /// The model does not always emit its stop token: it can fall into producing
 /// frames that decode to nothing, and every one of those is a frame the
-/// transmitter would hold the channel for. Half a second of quiet is the end
-/// of the sentence, and a little is left on so the last consonant is not
-/// clipped.
+/// transmitter would hold the channel for. A little is left on so the last
+/// consonant is not clipped.
+///
+/// From the end, not from the first gap. Cutting at the first half second of
+/// quiet cut at pauses inside the reply: a dash, a clause, or a frequency
+/// read out digit by digit all leave one, and an answer that began "Sorry
+/// about that" went on the air as those three words and nothing else. What
+/// runs on after the words is silence at the end, and the end is where to
+/// look for it.
 fn trim(mut pcm: Vec<f32>, rate: f64) -> Vec<f32> {
     const QUIET: f32 = 0.005;
-    let window = (rate * 0.5) as usize;
     let tail = (rate * 0.1) as usize;
-    if pcm.len() <= window {
+    let Some(last) = pcm.iter().rposition(|s| s.abs() >= QUIET) else {
+        // Nothing was said at all. Left as it is: what to make of a reply the
+        // model produced no sound for is the caller's to decide.
         return pcm;
-    }
-    let mut quiet_for = 0usize;
-    for (i, s) in pcm.iter().enumerate() {
-        if s.abs() < QUIET {
-            quiet_for += 1;
-            if quiet_for >= window {
-                pcm.truncate((i - window + tail).min(pcm.len()));
-                return pcm;
-            }
-        } else {
-            quiet_for = 0;
-        }
-    }
+    };
+    pcm.truncate((last + 1 + tail).min(pcm.len()));
     pcm
 }
 
@@ -288,6 +304,41 @@ mod tests {
         speech.extend(std::iter::repeat_n(0.0, 200));
         speech.extend(std::iter::repeat_n(0.5, 300));
         assert_eq!(trim(speech.clone(), rate).len(), speech.len());
+
+        // And neither is a pause of a second and a half. A dash, a clause, or
+        // a frequency read out digit by digit leaves one, and cutting there
+        // put three words of a sentence on the air and threw the rest away.
+        let mut broken = vec![0.5f32; 300];
+        broken.extend(std::iter::repeat_n(0.0, 1_500));
+        broken.extend(std::iter::repeat_n(0.5, 2_000));
+        broken.extend(std::iter::repeat_n(0.0, 3_000));
+        let cut = trim(broken, rate);
+        assert!(cut.len() >= 3_800, "the rest of the sentence went missing: {}", cut.len());
+        assert!(cut.len() <= 4_000, "the silence after it was kept: {}", cut.len());
+
+        // All silence is left alone rather than cut to nothing.
+        assert_eq!(trim(vec![0.0f32; 900], rate).len(), 900);
+    }
+
+    /// Punctuation the model writes and a speaker cannot say.
+    ///
+    /// Parler reads a dash as a pause long enough to sound like the end of
+    /// the reply. Asked not to write them the model writes them anyway, so
+    /// they are taken out on the way in: a comma is the pause a person makes
+    /// there.
+    #[test]
+    fn what_a_speaker_cannot_say_is_written_as_something_it_can() {
+        assert_eq!(
+            speakable("on the bus \u{2014} both came through"),
+            "on the bus , both came through"
+        );
+        assert_eq!(speakable("a pause \u{2013} here"), "a pause , here");
+        assert_eq!(speakable("well \u{2026} maybe"), "well ,  maybe");
+        assert_eq!(speakable("it\u{2019}s four"), "it's four");
+        assert_eq!(speakable("\u{201c}say again\u{201d}"), "say again");
+        // A plain hyphen is a hyphen: it is inside words and inside call
+        // signs, and reading it as a comma would break both.
+        assert_eq!(speakable("one-nine, M0-ABC"), "one-nine, M0-ABC");
     }
 
     /// A model that is not on disc says which file is missing, rather than
