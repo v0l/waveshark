@@ -32,6 +32,29 @@ pub const MAX_OVER_S: f64 = 30.0;
 /// the stage would go on resampling at the old one.
 pub const VOICE_RATE: f64 = 24_000.0;
 
+/// Silence keyed before the first word and after the last, in seconds.
+///
+/// A receiving radio's squelch takes a moment to open once the carrier
+/// arrives, and a repeater longer still; speech that starts with the key
+/// loses its first syllable at the far end. The tail is for the same gap
+/// on the way out, and for a listener's squelch tail not to chop the last
+/// word. Measured against a handheld on PMR446: a quarter second in front
+/// was still clipping the first word through a repeater, and half a second
+/// after was the least that sounded finished.
+pub const LEAD_S: f64 = 0.4;
+pub const TAIL_S: f64 = 0.5;
+
+/// Speech as it goes to the transmitter: the lead, the words, the tail.
+fn keyed(pcm: &[f32]) -> Vec<f32> {
+    let lead = (LEAD_S * VOICE_RATE) as usize;
+    let tail = (TAIL_S * VOICE_RATE) as usize;
+    let mut out = Vec::with_capacity(lead + pcm.len() + tail);
+    out.resize(lead, 0.0);
+    out.extend_from_slice(pcm);
+    out.resize(out.len() + tail, 0.0);
+    out
+}
+
 /// Words a second, for guessing how long a reply will take to say.
 ///
 /// Measured against the usual synthetic voices reading plain sentences: a
@@ -351,7 +374,7 @@ impl AgentChannel {
         if pcm.is_empty() {
             return false;
         }
-        self.speaker.say(&pcm);
+        self.speaker.say(&keyed(&pcm));
         self.state = State::Holding;
         true
     }
@@ -461,7 +484,7 @@ impl AgentChannel {
             let spoke = match &answer.speech {
                 Some(s) if !s.samples.is_empty() => {
                     let pcm = Arc::new(at_voice_rate(s));
-                    self.speaker.say(&pcm);
+                    self.speaker.say(&keyed(&pcm));
                     self.state = State::Holding;
                     Some(pcm)
                 }
@@ -964,8 +987,16 @@ mod tests {
 
         // The chain drains the queue, and the over ends when it is empty.
         let mut out = Vec::new();
-        audio::AudioSource::take(a.speaker.as_ref(), &mut out, VOICE_RATE as usize);
-        assert_eq!(out.len(), VOICE_RATE as usize / 4, "a quarter of a second was queued");
+        audio::AudioSource::take(a.speaker.as_ref(), &mut out, 2 * VOICE_RATE as usize);
+        let (lead, tail) = ((LEAD_S * VOICE_RATE) as usize, (TAIL_S * VOICE_RATE) as usize);
+        assert_eq!(
+            out.len(),
+            lead + VOICE_RATE as usize / 4 + tail,
+            "a quarter of a second was queued, keyed with silence either side"
+        );
+        assert!(out[..lead].iter().all(|s| *s == 0.0), "silence before the first word");
+        assert!(out[out.len() - tail..].iter().all(|s| *s == 0.0), "and after the last");
+        assert!(out[lead..lead + 100].iter().any(|s| *s != 0.0), "the words are in between");
         assert_eq!(a.poll(&c, now, false), Some(Move::Unkey));
 
         // The model was asked the question with the wake word taken off, and
