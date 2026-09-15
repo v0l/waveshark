@@ -1863,6 +1863,12 @@ impl App {
             }
             Some(agent_pane::Action::Clear) => self.chat.clear(),
             Some(agent_pane::Action::Interrupt) => self.chat.interrupt(),
+            // The key follows the queue, so this is the whole of it: the
+            // samples go back into the speaker and the channel is taken when
+            // it next goes quiet, exactly as the first over was.
+            Some(agent_pane::Action::SayAgain(nth)) => {
+                self.air.repeat(nth);
+            }
             Some(agent_pane::Action::Settings) => self.open = Some(Settings::Agent),
             None => {}
         }
