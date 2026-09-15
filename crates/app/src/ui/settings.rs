@@ -862,6 +862,39 @@ impl App {
         });
         ui.add_space(8.0);
 
+        // The call log, beside the packet log: the same decision about the
+        // same disc, for speech rather than packets. Off until asked for.
+        let rec = self.radio.as_ref().and_then(|r| r.status.recorder.lock().clone());
+        section(ui, "calls", "every over heard, kept as Opus", |ui| {
+            let Some(rec) = rec else {
+                lamp(ui, false, "no receiver running");
+                return;
+            };
+            let mut on = rec.on;
+            let help = "Every transmission on a voice channel or a voice front end, as it \
+                        was heard, before any fader: about 2 kB a second of speech. The \
+                        Calls view plays them back.";
+            if switch(ui, "record", &mut on, "every over", help) {
+                self.cmds.push(Cmd::StageParam(
+                    crate::chain::derived::CALL_LOG,
+                    "enabled".into(),
+                    pipeline::param::ParamValue::Bool(on),
+                ));
+            }
+            reading(ui, "folder", rec.dir.clone());
+            reading(ui, "folder holds", human_bytes(rec.bytes));
+            reading(ui, "this session", format!("{} calls", rec.calls));
+            match (rec.full, rec.on, rec.recording) {
+                (true, ..) => lamp(ui, false, "stopped: the folder is at its limit"),
+                (_, true, 0) => lamp(ui, true, "recording, nobody talking"),
+                (_, true, n) => {
+                    lamp(ui, true, &format!("recording {n} over{}", if n == 1 { "" } else { "s" }))
+                }
+                (_, false, _) => lamp(ui, false, "off: nothing is kept"),
+            }
+        });
+        ui.add_space(8.0);
+
         let status = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
         let mut remove = None;
         section(ui, "feeds", "packets from another receiver, over TCP", |ui| {
