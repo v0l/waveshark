@@ -720,6 +720,12 @@ impl App {
         app.log_dir = app.log.path.clone();
         app.log_dir_edit =
             app.log_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+        // What was already there when the window opened did not arrive while
+        // you were somewhere else, so no tab lights for it. Without this the
+        // keys tab was lit on every start for anybody with a key saved: its
+        // list is read off disk and is the only one that is not empty on the
+        // first frame.
+        app.forget_what_was_already_here();
         app.connect(&cc.egui_ctx);
         app
     }
@@ -2588,6 +2594,17 @@ impl App {
         self.view_mark(v) > self.view_seen[v.slot()]
     }
 
+    /// Take every view as read, whatever is in it.
+    ///
+    /// For the moment the window opens. A dot means a view grew while you
+    /// were elsewhere, and you were not elsewhere before the program was
+    /// running: a key saved last week is not news this morning.
+    fn forget_what_was_already_here(&mut self) {
+        for v in View::ROWS.into_iter().flatten().copied() {
+            self.view_seen[v.slot()] = self.view_mark(v);
+        }
+    }
+
     /// Mark the open view as read, and follow a list that shrank down so a
     /// call forgotten and heard again still lights its tab.
     fn read_views(&mut self) {
@@ -3479,6 +3496,36 @@ mod tests {
         a.set_view(a.prev_view);
         assert_eq!(a.view, View::Spectrum);
         assert_eq!(a.prev_view, View::Map);
+    }
+
+    /// A key saved last week is not news this morning.
+    ///
+    /// Every other list starts empty and fills as things arrive, so a tab
+    /// that lights for "has anything" is only ever wrong about the keys:
+    /// theirs is read off disk before the first frame is drawn. Anybody with
+    /// one key saved got the dot on every single start, which is a lamp that
+    /// is always lit and tells nobody anything.
+    #[test]
+    fn a_tab_does_not_light_for_what_was_already_there_when_the_window_opened() {
+        let key = |name: &str| decode::channel_keys::ChannelKey {
+            system: decode::channel_keys::System::Meshtastic,
+            name: name.into(),
+            key: vec![0x01; 16],
+        };
+        let mut a = app();
+        // As the store comes back from disk, before anybody has looked.
+        a.keys.store = crate::keystore::KeyStore::default();
+        a.keys.store.insert_channel(key("LongFast"));
+        a.forget_what_was_already_here();
+        assert!(!a.view_live(View::Keys), "a key saved before the window opened is not news");
+
+        // And one that turns up while you are looking elsewhere still lights
+        // the tab, which is the whole point of the dot.
+        a.keys.store.insert_channel(key("PrivateRoom"));
+        assert!(a.view_live(View::Keys));
+        a.set_view(View::Keys);
+        a.read_views();
+        assert!(!a.view_live(View::Keys), "the tab has been looked at");
     }
 
     /// The dot is worth its ink only while it means "this grew since you

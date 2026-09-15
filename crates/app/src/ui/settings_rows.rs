@@ -19,6 +19,9 @@ pub struct ScannerRow {
     pub(super) front: crate::scanners::Front,
     pub(super) channels: String,
     pub(super) widths: String,
+    /// The regions the block is about, carried through the editor untouched:
+    /// a row rewritten here must not quietly make a regional block worldwide.
+    pub(super) regions: Vec<crate::bands::Plan>,
     pub(super) enabled: bool,
 }
 
@@ -39,6 +42,7 @@ impl ScannerRow {
             front: s.front.clone(),
             channels: s.channels.iter().map(|c| trim_num(c / 1e6)).collect::<Vec<_>>().join(", "),
             widths,
+            regions: s.regions.clone(),
             enabled: s.enabled,
         }
     }
@@ -61,6 +65,10 @@ impl ScannerRow {
                 .map(|x| trim_num(x / 1e3))
                 .collect::<Vec<_>>()
                 .join(", "),
+            // A block somebody adds in front of the radio they are sitting at
+            // is about where they are, so it is not gated to a region they
+            // would then have to find and change.
+            regions: Vec::new(),
             enabled: true,
         }
     }
@@ -93,6 +101,7 @@ impl ScannerRow {
             channels: parse_list(&self.channels, 1e6),
             margin_hz: self.margin_khz * 1e3,
             front,
+            regions: self.regions.clone(),
             enabled: self.enabled,
         };
         // What the channels field says is where the front end goes, exactly

@@ -147,17 +147,30 @@ impl Front {
     /// Whether this front end demodulates one named channel, so a block
     /// listing several means one of these per channel.
     ///
-    /// The others are about a band: `auto` searches it, a bank channelizes it,
-    /// and a protocol placed by band, such as AIS with its two channels, is
-    /// one decoder over all of it.
-    pub fn per_channel(&self) -> bool {
-        self.proto().is_some_and(|p| !matches!(p.placement(), nodes::Placement::Bands(_)))
+    /// The shape answers it, because the shape is what the chain is built
+    /// from: a decoder that is not span wide is placed at a frequency and
+    /// reads that channel and no other. The others are about a band. `auto`
+    /// searches it, a bank channelizes it, and AIS mixes its two channels
+    /// itself, so each of those is one decoder over the whole of it.
+    ///
+    /// Asked of the placement before, which is a different question: where in
+    /// the world the protocol is allowed to be. ACARS and VDL Mode 2 are
+    /// licensed by band and read one channel at a time, so both blocks listed
+    /// their channels and got a single decoder on whichever frequency the
+    /// registry called the default. Four ACARS channels in the table, one
+    /// demodulated.
+    pub fn reads_one_channel(&self) -> bool {
+        self.proto().is_some_and(|p| !p.shape().span_wide)
     }
 
-    /// The same front end moved to another channel.
+    /// The same front end moved to another frequency.
+    ///
+    /// Every protocol front end has one, span wide or not: a camera reads
+    /// twenty megahertz and still has to be told which twenty. `auto` and the
+    /// banks are about a band and have none, so they do not move.
     fn at(&self, hz: f64) -> Front {
         match self {
-            Front::Protocol { id, .. } if self.per_channel() => Front::Protocol { id, hz },
+            Front::Protocol { id, .. } => Front::Protocol { id, hz },
             other => other.clone(),
         }
     }
@@ -220,6 +233,16 @@ pub struct Scanner {
     /// skirt, which reads as silence and looks exactly like an empty band.
     pub margin_hz: f64,
     pub front: Front,
+    /// The regions this block is about, or empty for everywhere.
+    ///
+    /// The spectrum is divided differently by each regulator, so a block can
+    /// be right in Dublin and wrong in Denver: 902 to 928 is the American
+    /// licence-free band and the European GSM uplink, and 315 MHz is key fobs
+    /// in the Americas and Japan and nothing in Europe. A block naming its
+    /// regions runs only under the plan the operator picked, so nobody has to
+    /// go through the table turning off what their regulator gave to somebody
+    /// else.
+    pub regions: Vec<crate::bands::Plan>,
     /// Whether this block runs. A block switched off stays in the table with
     /// everything it was configured with, so turning `auto` off once a few
     /// channels are pinned does not mean losing it: it is one click back.
@@ -236,7 +259,19 @@ impl Scanner {
     /// the pager channel in front of it whether or not the dial is parked on
     /// it, and a front end that waits to be tuned to a frequency it is
     /// already sampling is throwing the signal away.
+    /// Whether this block is about where the operator says they are.
+    pub fn here_in(&self, plan: crate::bands::Plan) -> bool {
+        self.regions.is_empty() || self.regions.contains(&plan)
+    }
+
     pub fn applies(&self, center: f64, rate: f64) -> bool {
+        self.applies_in(crate::bands::plan(), center, rate)
+    }
+
+    pub fn applies_in(&self, plan: crate::bands::Plan, center: f64, rate: f64) -> bool {
+        if !self.here_in(plan) {
+            return false;
+        }
         if rate < self.min_rate {
             return false;
         }
@@ -255,7 +290,7 @@ impl Scanner {
         // whichever channels are in the span. AIS is the other case, where
         // both channels are one front end and half of them is half the
         // traffic, so there it is all of them or none.
-        if self.front.per_channel() {
+        if self.front.reads_one_channel() {
             return self.channels.iter().any(|c| (c - center).abs() <= edge);
         }
         self.channels.iter().all(|c| (c - center).abs() <= edge)
@@ -275,7 +310,7 @@ impl Scanner {
 /// block up. Without it the file is written once, on the first run, and a
 /// front end added later never runs for anybody who already had one: BLE
 /// shipped, and every existing installation quietly had no Bluetooth.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The scanners, in the order they are consulted.
 #[derive(Clone, PartialEq, Debug)]
@@ -364,7 +399,11 @@ impl Scanners {
     /// expensive one, and they are still bounded by the block's own range
     /// overlapping the span at all.
     pub fn active(&self, center: f64, rate: f64) -> Vec<&Scanner> {
-        self.list.iter().filter(|s| s.enabled && s.applies(center, rate)).collect()
+        self.active_in(crate::bands::plan(), center, rate)
+    }
+
+    pub fn active_in(&self, plan: crate::bands::Plan, center: f64, rate: f64) -> Vec<&Scanner> {
+        self.list.iter().filter(|s| s.enabled && s.applies_in(plan, center, rate)).collect()
     }
 
     /// The front ends the span covers, deduplicated.
@@ -373,14 +412,22 @@ impl Scanners {
     /// would be a second demodulator on the same channel producing the same
     /// packets twice.
     pub fn fronts(&self, center: f64, rate: f64) -> Vec<FrontAt> {
+        self.fronts_in(crate::bands::plan(), center, rate)
+    }
+
+    /// The same, under a plan named rather than the one in force. The band
+    /// tables are read this way too: what runs where is a fact about a
+    /// regulator, and a test should not have to move the whole receiver to
+    /// another continent to ask about it.
+    pub fn fronts_in(&self, plan: crate::bands::Plan, center: f64, rate: f64) -> Vec<FrontAt> {
         let mut out: Vec<FrontAt> = Vec::new();
-        for s in self.active(center, rate) {
+        for s in self.active_in(plan, center, rate) {
             let band = (s.lo, s.hi);
             let touching = |a: (f64, f64), b: (f64, f64)| a.0 <= b.1 && b.0 <= a.1;
             // One demodulator per listed channel, which is what lets a block
             // watch a calling channel and the two repeaters beside it rather
             // than only whichever was written first.
-            if s.front.per_channel() && s.channels.len() > 1 {
+            if s.front.reads_one_channel() && s.channels.len() > 1 {
                 for hz in s.covered(center, rate) {
                     let front = s.front.at(hz);
                     if !out.iter().any(|e| e.front == front) {
@@ -438,6 +485,10 @@ impl Scanners {
             if sc.margin_hz > 0.0 {
                 s.push_str(&format!("margin = {} kHz\n", num(sc.margin_hz / 1e3)));
             }
+            if !sc.regions.is_empty() {
+                let r: Vec<&str> = sc.regions.iter().map(|p| p.id()).collect();
+                s.push_str(&format!("region = {}\n", r.join(", ")));
+            }
             // Only written when off: the absence of the key is the common
             // case and reads as running, so a file stays terse.
             if !sc.enabled {
@@ -483,6 +534,7 @@ impl Scanners {
                     channels: Vec::new(),
                     margin_hz: 0.0,
                     front: Front::Auto,
+                    regions: Vec::new(),
                     enabled: true,
                 });
                 continue;
@@ -520,6 +572,14 @@ impl Scanners {
                     s.channels = v.split(',').filter_map(hz).collect();
                 }
                 "margin" => s.margin_hz = hz(v).unwrap_or(0.0),
+                // A known set of values, read once into the enum the rest of
+                // the receiver decides by. A word nobody recognises is left
+                // out rather than kept as text, so a typo means the block
+                // runs everywhere instead of nowhere.
+                "region" | "regions" => {
+                    s.regions =
+                        v.split(',').filter_map(|w| crate::bands::Plan::from_id(w.trim())).collect()
+                }
                 "enabled" => {
                     s.enabled =
                         !matches!(v.to_ascii_lowercase().as_str(), "false" | "no" | "0" | "off")
@@ -589,7 +649,11 @@ impl Scanner {
         let Some(&c) = self.channels.first() else {
             return;
         };
-        if self.front.per_channel() {
+        // A decoder that reads one channel goes on the first listed, and a
+        // span wide one goes where it was asked only when one channel was
+        // asked for: AIS covers both of its and belongs between them, not on
+        // the lower one.
+        if self.channels.len() == 1 || self.front.reads_one_channel() {
             self.front = self.front.at(c);
         }
     }
@@ -655,6 +719,8 @@ pub const HEADER: &str = "\
 #             channel the span covers; ais needs both of its, so it runs only
 #             when the span holds both
 #   margin    how far inside the span edge they must fall (optional)
+#   region    europe | americas | asia-pacific, for a block that is only
+#             right in some of them; absent means everywhere
 #   widths    channel widths, for front = banks
 #   version   which shipped table this file was written from; blocks added
 #             by a later one are taken in on load
@@ -682,6 +748,8 @@ pub const DEFAULT_TEXT: &str = "\
 #             channel the span covers; ais needs both of its, so it runs only
 #             when the span holds both
 #   margin    how far inside the span edge they must fall (optional)
+#   region    europe | americas | asia-pacific, for a block that is only
+#             right in some of them; absent means everywhere
 #   widths    channel widths, for front = banks
 #   version   which shipped table this file was written from; blocks added
 #             by a later one are taken in on load
@@ -794,26 +862,30 @@ enabled  = false
 
 [GSM 850]
 # The Americas, ARFCN 128 up from 869.2 MHz.
-range = 869 - 894 MHz
-span  = 1 MHz
-front = auto
+range  = 869 - 894 MHz
+span   = 1 MHz
+front  = auto
+region = americas
 
 [GSM 900]
 # Europe and most of the world: GSM-R from 921, then E-GSM and P-GSM to 960.
-range = 921 - 960 MHz
-span  = 1 MHz
-front = auto
+range  = 921 - 960 MHz
+span   = 1 MHz
+front  = auto
+region = europe, asia-pacific
 
 [DCS 1800]
-range = 1805 - 1880 MHz
-span  = 1 MHz
-front = auto
+range  = 1805 - 1880 MHz
+span   = 1 MHz
+front  = auto
+region = europe, asia-pacific
 
 [PCS 1900]
 # The American 1900 downlink, which reuses the DCS channel numbers.
-range = 1930 - 1990 MHz
-span  = 1 MHz
-front = auto
+range  = 1930 - 1990 MHz
+span   = 1 MHz
+front  = auto
+region = americas
 
 [TETRA]
 # Base station downlinks, which is the half of a TETRA network a listener
@@ -833,11 +905,11 @@ front = auto
 # The licence-free allocations, one block each, so a receiver tuned into any
 # of them decodes what is there without being told. They are all shipped
 # enabled because a block only costs anything when the span covers it, and a
-# span covers at most one or two of these at a time. Several are regional and
-# mean something else elsewhere: 902-928 is the American licence-free band and
-# the European GSM uplink, and 315 is key fobs in the Americas and Japan and
-# nothing in Europe. Turn off the ones your regulator gave to somebody else if
-# you would rather not have `auto` measuring carriers you cannot use.
+# span covers at most one or two of these at a time. The ones that mean
+# something else elsewhere name their region and run only under the plan in
+# the settings: 902-928 is the American licence-free band and the European GSM
+# uplink, and 315 is key fobs in the Americas and Japan and nothing in Europe.
+# Drop the region line from a block to run it wherever you are.
 
 [ISM 27]
 # RC models, telemetry and CB data, under the amateur 10 m band. Needs a radio
@@ -854,21 +926,24 @@ front = auto
 
 [ISM 169]
 # European wireless M-Bus, which is where smart meters report at long range.
-range = 169.4 - 169.475 MHz
-span  = 250 kHz
-front = auto
+range  = 169.4 - 169.475 MHz
+span   = 250 kHz
+front  = auto
+region = europe
 
 [ISM 315]
 # Key fobs and tyre pressure sensors in the Americas and Japan.
-range = 314 - 316 MHz
-span  = 250 kHz
-front = auto
+range  = 314 - 316 MHz
+span   = 250 kHz
+front  = auto
+region = americas, asia-pacific
 
 [SLP 426]
 # Japan's specified low power band: telemetry, alarms and short range voice.
-range = 426 - 426.1 MHz
-span  = 250 kHz
-front = auto
+range  = 426 - 426.1 MHz
+span   = 250 kHz
+front  = auto
+region = asia-pacific
 
 [ISM 433]
 range = 433.05 - 434.79 MHz
@@ -878,23 +953,26 @@ front = auto
 [ISM 868]
 # The European short range band, 863 up: LoRaWAN, wireless M-Bus, alarms and
 # most of what a weather sensor here transmits on.
-range = 862 - 876 MHz
-span  = 250 kHz
-front = auto
+range  = 862 - 876 MHz
+span   = 250 kHz
+front  = auto
+region = europe
 
 [ISM 915]
 # The American licence-free band. In Europe this is the GSM 900 uplink and in
 # Japan the top of it is the 920 band below, so what runs here is a handset
 # rather than a sensor unless the FCC is your regulator.
-range = 902 - 928 MHz
-span  = 250 kHz
-front = auto
+range  = 902 - 928 MHz
+span   = 250 kHz
+front  = auto
+region = americas
 
 [ISM 920]
 # Japan and much of Region 3, inside the American band above.
-range = 920 - 928 MHz
-span  = 250 kHz
-front = auto
+range  = 920 - 928 MHz
+span   = 250 kHz
+front  = auto
+region = asia-pacific
 
 [ISM 2.4]
 # Wi-Fi, Bluetooth, video links and RC. Crowded, wide, and mostly signals far
@@ -1032,23 +1110,37 @@ mod tests {
     /// Tuning into a licence-free band runs `auto` over it and nothing else.
     #[test]
     fn the_ism_blocks_run_where_they_belong() {
+        use crate::bands::Plan;
         let s = Scanners::default();
-        for hz in [
-            40_680_000.0,
-            169_437_500.0,
-            315_000_000.0,
-            426_050_000.0,
-            433_920_000.0,
-            868_300_000.0,
-            915_000_000.0,
-            2_437_000_000.0,
-            5_800_000_000.0,
-        ] {
-            assert_eq!(kinds(&s.fronts(hz, 2_400_000.0)), [Front::Auto], "nothing runs at {hz}");
+        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, hz, 2_400_000.0));
+        // The allocations that are the same the world over.
+        for hz in [40_680_000.0, 433_920_000.0, 2_437_000_000.0, 5_800_000_000.0] {
+            for plan in Plan::ALL {
+                assert_eq!(at(plan, hz), [Front::Auto], "nothing runs at {hz} in {plan:?}");
+            }
         }
-        // 920 sits inside 902-928, and two auto blocks over bands that meet
-        // are one front end rather than the same sources decoded twice.
-        assert_eq!(kinds(&s.fronts(923_000_000.0, 2_400_000.0)), [Front::Auto]);
+        // And the ones that are somebody else's band elsewhere. 169 and 868
+        // are European, 315 is key fobs in the Americas and Japan, 426 is
+        // Japan's, and 902-928 is American licence-free and the European GSM
+        // uplink: a European pointed at 915 is hearing a handset, and running
+        // a sensor scanner over it measures carriers they cannot use.
+        assert_eq!(at(Plan::Europe, 169_437_500.0), [Front::Auto]);
+        assert_eq!(at(Plan::Americas, 169_437_500.0), []);
+        assert_eq!(at(Plan::Americas, 315_000_000.0), [Front::Auto]);
+        assert_eq!(at(Plan::AsiaPacific, 315_000_000.0), [Front::Auto]);
+        assert_eq!(at(Plan::Europe, 315_000_000.0), []);
+        assert_eq!(at(Plan::AsiaPacific, 426_050_000.0), [Front::Auto]);
+        assert_eq!(at(Plan::Europe, 426_050_000.0), []);
+        assert_eq!(at(Plan::Europe, 868_300_000.0), [Front::Auto]);
+        // On a narrow span, because a 2.4 MHz one at 868.3 clips the bottom
+        // of GSM 850, which an American is entitled to scan.
+        assert_eq!(kinds(&s.fronts_in(Plan::Americas, 868_300_000.0, 250_000.0)), []);
+        assert_eq!(at(Plan::Americas, 915_000_000.0), [Front::Auto]);
+        assert_eq!(at(Plan::Europe, 915_000_000.0), [], "that is the GSM uplink here");
+        // 920 sits inside 902-928, and in Region 3 both blocks are about the
+        // same band: two auto blocks over bands that meet are one front end
+        // rather than the same sources decoded twice.
+        assert_eq!(at(Plan::AsiaPacific, 923_000_000.0), [Front::Auto]);
     }
 
     /// Every GSM downlink is scanned, and no uplink is.
@@ -1058,21 +1150,31 @@ mod tests {
     /// only arrangement that decodes a cell nobody typed in.
     #[test]
     fn the_gsm_downlinks_are_scanned_and_the_uplinks_are_not() {
+        use crate::bands::Plan;
         let s = Scanners::default();
-        for hz in [
-            881_000_000.0,   // GSM 850, ARFCN 190 or so
-            923_000_000.0,   // GSM-R
-            947_400_000.0,   // E-GSM / P-GSM 900
-            1_842_000_000.0, // DCS 1800
-            1_960_000_000.0, // PCS 1900
+        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, hz, 2_400_000.0));
+        // Each allocation under the regulator that granted it. 850 and 1900
+        // are the American pair; 900 and 1800 are used across Europe and
+        // Region 3.
+        for (plan, hz) in [
+            (Plan::Americas, 881_000_000.0),   // GSM 850, ARFCN 190 or so
+            (Plan::Americas, 1_960_000_000.0), // PCS 1900
+            (Plan::Europe, 923_000_000.0),     // GSM-R
+            (Plan::Europe, 947_400_000.0),     // E-GSM / P-GSM 900
+            (Plan::Europe, 1_842_000_000.0),   // DCS 1800
+            (Plan::AsiaPacific, 947_400_000.0),
         ] {
-            assert_eq!(kinds(&s.fronts(hz, 2_400_000.0)), [Front::Auto], "nothing runs at {hz}");
+            assert_eq!(at(plan, hz), [Front::Auto], "nothing runs at {hz} in {plan:?}");
         }
+        // And not under one that gave the band to somebody else: 881 is the
+        // American downlink and inside nothing European at all.
+        assert_eq!(at(Plan::Europe, 881_000_000.0), []);
+        assert_eq!(at(Plan::Americas, 1_842_000_000.0), []);
         // The halves the handsets transmit in, where there is no beacon.
-        assert!(s.fronts(897_000_000.0, 2_400_000.0).is_empty(), "GSM 900 uplink");
-        assert!(s.fronts(1_750_000_000.0, 2_400_000.0).is_empty(), "DCS 1800 uplink");
+        assert_eq!(at(Plan::Europe, 897_000_000.0), [], "GSM 900 uplink");
+        assert_eq!(at(Plan::Europe, 1_750_000_000.0), [], "DCS 1800 uplink");
         // And a span too narrow for the carrier's own rate does not match.
-        assert!(s.fronts(947_400_000.0, 500_000.0).is_empty());
+        assert!(s.fronts_in(Plan::Europe, 947_400_000.0, 500_000.0).is_empty());
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.
@@ -1100,6 +1202,92 @@ mod tests {
         // auto node gives each one the decoder that reads its identity.
         assert_eq!(fronts(395_000_000.0, 2_400_000.0), [Front::Auto]);
         assert_eq!(fronts(380_000_000.0, 250_000.0), [], "the uplink half is not covered");
+    }
+
+    /// A block that lists channels gets a decoder on each one in the span.
+    ///
+    /// ACARS and VDL Mode 2 are the two blocks with more than one channel and
+    /// a decoder that reads one channel at a time. Both listed their
+    /// frequencies and both got a single decoder, on whichever one the
+    /// registry called the default, because whether a front end is
+    /// per-channel was asked of the protocol's placement: they are licensed
+    /// by band, so they were treated as one decoder over the band, which is
+    /// what AIS is and what they are not. Four ACARS channels in the table,
+    /// one demodulated, and nothing anywhere saying so.
+    #[test]
+    fn every_channel_a_block_lists_gets_its_own_decoder() {
+        let s = Scanners::default();
+        let on = |id: &str, c: f64, r: f64| -> Vec<f64> {
+            let mut out: Vec<f64> = s
+                .fronts(c, r)
+                .into_iter()
+                .filter_map(|f| match f.front {
+                    Front::Protocol { id: got, hz } if got == id => Some(hz.round()),
+                    _ => None,
+                })
+                .collect();
+            out.sort_by(f64::total_cmp);
+            out
+        };
+        assert_eq!(
+            on("acars", 131_675_000.0, 400_000.0),
+            [131_525_000.0, 131_550_000.0, 131_725_000.0, 131_825_000.0],
+            "the airband channels the table lists"
+        );
+        assert_eq!(
+            on("vdl2", 136_850_000.0, 400_000.0),
+            [136_725_000.0, 136_775_000.0, 136_825_000.0, 136_875_000.0, 136_975_000.0],
+            "the VHF datalink channels the table lists"
+        );
+        // Only the ones the span reaches, with their margin: a channel on the
+        // edge is demodulated through the anti-alias skirt and reads as
+        // silence.
+        assert_eq!(on("acars", 131_537_500.0, 400_000.0), [131_525_000.0, 131_550_000.0]);
+
+        // AIS is the other case and is unchanged: its two channels are one
+        // decoder, which mixes both itself, so there is one of it and it
+        // needs both channels in the span.
+        assert_eq!(on("ais", 162_000_000.0, 150_000.0).len(), 1);
+        assert_eq!(on("ais", 161_975_000.0, 40_000.0).len(), 0, "half the traffic is not enough");
+    }
+
+    /// A block naming its region runs only there, and survives a rewrite.
+    ///
+    /// The table is rewritten from the interface's own rows, so a field the
+    /// editor drops is a field an operator loses the moment they touch any
+    /// block: a regional block would quietly become a worldwide one.
+    #[test]
+    fn a_block_is_gated_by_the_region_and_keeps_it_through_a_rewrite() {
+        use crate::bands::Plan;
+        let t = Scanners::parse(
+            "[Fobs]\nrange = 314 - 316 MHz\nspan = 250 kHz\nfront = auto\nregion = americas, asia-pacific\n\
+             [Meters]\nrange = 169.4 - 169.475 MHz\nspan = 250 kHz\nfront = auto\nregion = europe\n\
+             [Everywhere]\nrange = 433.05 - 434.79 MHz\nspan = 250 kHz\nfront = auto\n",
+        );
+        assert_eq!(t.list.len(), 3);
+        assert_eq!(t.list[0].regions, [Plan::Americas, Plan::AsiaPacific]);
+        assert_eq!(t.list[1].regions, [Plan::Europe]);
+        assert_eq!(t.list[2].regions, [], "absent means everywhere");
+
+        let runs = |plan: Plan, hz: f64| !t.fronts_in(plan, hz, 250_000.0).is_empty();
+        assert!(runs(Plan::Americas, 315e6));
+        assert!(runs(Plan::AsiaPacific, 315e6));
+        assert!(!runs(Plan::Europe, 315e6));
+        assert!(runs(Plan::Europe, 169.4375e6));
+        assert!(!runs(Plan::AsiaPacific, 169.4375e6));
+        for plan in Plan::ALL {
+            assert!(runs(plan, 433.92e6), "an ungated block runs in {plan:?}");
+        }
+
+        // Through the file and back, which is what the interface does every
+        // time a row is edited.
+        assert_eq!(Scanners::parse(&t.render()).list, t.list);
+        // A region nobody recognises is left out rather than kept as text, so
+        // a typo runs the block everywhere instead of nowhere.
+        let typo = Scanners::parse(
+            "[X]\nrange = 1 - 2 MHz\nspan = 1 kHz\nfront = auto\nregion = narnia\n",
+        );
+        assert_eq!(typo.list[0].regions, []);
     }
 
     /// The point of the change: a band nobody declared runs nothing, instead

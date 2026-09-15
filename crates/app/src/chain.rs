@@ -5554,6 +5554,7 @@ pub(crate) mod tests {
             channels: Vec::new(),
             margin_hz: 0.0,
             front: Front::Banks(vec![OOK_CHANNEL_HZ]),
+            regions: Vec::new(),
             enabled: true,
         });
         scan_marks(&s, p.center.as_f64(), p.eff_rate())
