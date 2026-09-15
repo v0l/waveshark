@@ -327,6 +327,21 @@ impl Strip<'_> {
                     {
                         files.ask(ui.ctx(), node, "path", "Choose what to transmit");
                     }
+                    // Putting it back to nothing is a transmission too: the
+                    // test card, which is what an empty setting means.
+                    if !path.is_empty()
+                        && ui
+                            .button("CLEAR")
+                            .on_hover_text("Transmit the test card instead")
+                            .clicked()
+                        && let Some(node) = node
+                    {
+                        cmds.push(Cmd::NodeParam(
+                            node,
+                            "path".into(),
+                            pipeline::param::ParamValue::Text(String::new()),
+                        ));
+                    }
                     // Cut short: a file name is as long as somebody else
                     // made it, and a strip as wide as the longest one is a
                     // strip nobody can use.
@@ -473,6 +488,9 @@ impl Strip<'_> {
     pub(super) fn show(mut self, ui: &mut egui::Ui) -> Vec<Action> {
         Panel::right("channels")
             .default_size(285.0)
+            // The strip is a fixed column of controls, not a pane that grows
+            // to fit a reading: a long name belongs cut short inside it.
+            .max_size(360.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::PANEL)
@@ -662,7 +680,7 @@ impl Strip<'_> {
                             // tuning leaves several of these, and they are
                             // waiting for the dial, not wrong.
                             let reach = (ch.freq - self.center).abs() <= self.rate / 2.0;
-                            let mut line = theme::Line::new().legend(bands::name_at(ch.freq));
+                            let mut line = theme::Line::new().legend(&bands::where_at(ch.freq));
                             if !reach {
                                 line = line.gap(12.0).legend("outside span").tint(theme::FAULT);
                             }

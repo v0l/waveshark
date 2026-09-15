@@ -414,6 +414,12 @@ pub fn inspector(
             );
         }
     }
+    if !node.readings.is_empty() {
+        ui.add_space(6.0);
+        for (what, value) in &node.readings {
+            theme::Line::new().legend(what).gap(6.0).value(value.clone()).size(11.0).elided(ui);
+        }
+    }
     if let Some(text) = cost_label(&node.cost) {
         ui.add_space(6.0);
         ui.label(
@@ -489,10 +495,7 @@ pub fn inspector(
                 // with no file manager behind the dialog.
                 let file = prm.name == "path";
                 ui.horizontal(|ui| {
-                    let w = match file {
-                        true => (ui.available_width() - 30.0).max(40.0),
-                        false => f32::INFINITY,
-                    };
+                    let w = (ui.available_width() - if file { 30.0 } else { 0.0 }).max(40.0);
                     let r = ui.add(egui::TextEdit::singleline(&mut t).desired_width(w));
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         out = Some((node.id.0, prm.name.clone(), ParamValue::Text(t)));
@@ -1620,6 +1623,7 @@ mod tests {
             params: Vec::new(),
             cost: Default::default(),
             phases: Vec::new(),
+            readings: Vec::new(),
         }
     }
 

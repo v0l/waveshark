@@ -1156,9 +1156,6 @@ pub struct TsSourceNode {
     /// Bytes owed from the last block, kept as a fraction so a byte rate
     /// that does not divide the block size still comes out right.
     owed: f64,
-    /// Where in a packet the file's next byte belongs, so a file that does
-    /// not start on a sync byte is cut into packets the same way twice.
-    at: usize,
     packet: Vec<u8>,
     loops: u64,
 }
@@ -1171,7 +1168,6 @@ impl Default for TsSourceNode {
             rate: 0.0,
             file: None,
             owed: 0.0,
-            at: 0,
             packet: vec![0u8; mpegts::PACKET],
             loops: 0,
         }
@@ -1213,7 +1209,16 @@ impl TsSourceNode {
         use std::io::Read;
         let mut head = [0u8; 2 * mpegts::PACKET + 1];
         let mut probe = std::io::BufReader::new(f);
-        let n = probe.read(&mut head).unwrap_or(0);
+        // Filled, not read once: a short read is a read, and a transport
+        // stream sniffed from the first sixty bytes of itself looks like
+        // something else and goes through the encoder.
+        let mut n = 0;
+        while n < head.len() {
+            match probe.read(&mut head[n..]) {
+                Ok(0) | Err(_) => break,
+                Ok(got) => n += got,
+            }
+        }
         #[cfg(feature = "ffmpeg")]
         if !decode::transcode::is_transport_stream(&head[..n]) {
             tracing::info!("ts_source: re-encoding {} as a multiplex", self.path);
@@ -1280,6 +1285,21 @@ impl TsSourceNode {
 impl pipeline::node::Simple for TsSourceNode {
     fn name(&self) -> &str {
         TS_SOURCE.name
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let what = match self.path.is_empty() {
+            true => "the test card".to_string(),
+            false => std::path::Path::new(&self.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.path.clone()),
+        };
+        let mut out = vec![("sending".into(), what)];
+        if self.loops > 0 {
+            out.push(("times round".into(), self.loops.to_string()));
+        }
+        out
     }
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
@@ -1392,16 +1412,113 @@ impl Source {
 /// a real one does between programmes rather than leaving a hole.
 pub struct DvbtModNode {
     params: Params,
-    tx: DvbtModulator,
-    resample: Rational,
+    tx: Modulating,
     level: f32,
     out_rate: f64,
     /// Bytes that did not make a whole packet last block.
     pending: Vec<u8>,
-    baseband: Vec<C32>,
-    stuffed: u64,
     clipped: u64,
 }
+
+/// The modulator on a thread of its own: packets in, samples at the radio's
+/// rate out.
+///
+/// A multiplex costs about a third of a processor to build, and the thread
+/// the graph runs on has a radio to keep fed: with the modulation on it, a
+/// transmission stutters and everything else the receiver draws stutters
+/// with it. The queue either side is what smooths a block arriving late.
+struct Modulating {
+    packets: Option<crossbeam_channel::Sender<Vec<u8>>>,
+    air: crossbeam_channel::Receiver<Vec<C32>>,
+    give_back: crossbeam_channel::Sender<Vec<C32>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// Packets the queue could not take, which is a hole in the multiplex.
+    dropped: u64,
+}
+
+impl Modulating {
+    fn new(params: Params, out_rate: f64) -> Self {
+        let (packets, work) = crossbeam_channel::bounded::<Vec<u8>>(TX_QUEUE);
+        let (send, air) = crossbeam_channel::bounded::<Vec<C32>>(TX_QUEUE);
+        let (give_back, spare) = crossbeam_channel::bounded::<Vec<C32>>(TX_QUEUE + 2);
+        let back: crossbeam_channel::Receiver<Vec<C32>> = spare.clone();
+        let thread = std::thread::Builder::new()
+            .name("dvbt-mod".into())
+            .spawn(move || {
+                let mut tx = DvbtModulator::new(params);
+                let mut resample = Rational::approx(dvbt::RATE_HZ, out_rate.max(1.0), 1 << 14);
+                let mut baseband = Vec::new();
+                while let Ok(bytes) = work.recv() {
+                    baseband.clear();
+                    for packet in bytes.chunks_exact(mpegts::PACKET) {
+                        tx.push(packet, &mut baseband);
+                    }
+                    if baseband.is_empty() {
+                        continue;
+                    }
+                    let mut out = back.try_recv().unwrap_or_default();
+                    out.clear();
+                    resample.process(&baseband, &mut out);
+                    if send.send(out).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        Self { packets: Some(packets), air, give_back, thread, dropped: 0 }
+    }
+
+    /// Hand over whole packets, waiting only as long as a transmission can
+    /// afford to.
+    fn push(&mut self, bytes: Vec<u8>) {
+        let Some(tx) = &self.packets else { return };
+        if tx.send_timeout(bytes, WAIT).is_err() {
+            self.dropped += 1;
+        }
+    }
+
+    /// Whatever the thread has finished, onto the air.
+    fn take(&mut self, out: &mut Vec<C32>) {
+        while let Ok(block) = self.air.try_recv() {
+            out.extend_from_slice(&block);
+            let _ = self.give_back.try_send(block);
+        }
+    }
+
+    /// Drain what is still being modulated. For a test, which has an end.
+    ///
+    /// Taking as it goes rather than joining first: the thread is blocked on
+    /// handing over a block, so waiting for it without emptying the queue
+    /// waits for ever.
+    fn finish(&mut self, out: &mut Vec<C32>) {
+        self.packets = None;
+        while self.thread.as_ref().is_some_and(|t| !t.is_finished()) {
+            self.take(out);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        self.take(out);
+    }
+}
+
+impl Drop for Modulating {
+    fn drop(&mut self) {
+        self.packets = None;
+        while self.thread.as_ref().is_some_and(|t| !t.is_finished()) {
+            while self.air.try_recv().is_ok() {}
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Blocks of packets waiting to be modulated, and blocks of samples waiting
+/// to go out.
+const TX_QUEUE: usize = 8;
 
 impl Default for DvbtModNode {
     fn default() -> Self {
@@ -1412,22 +1529,19 @@ impl Default for DvbtModNode {
 impl DvbtModNode {
     pub fn new(params: Params, level: f32) -> Self {
         Self {
-            tx: DvbtModulator::new(params),
-            resample: Rational::approx(dvbt::RATE_HZ, dvbt::RATE_HZ, 1 << 14),
+            tx: Modulating::new(params, dvbt::RATE_HZ),
             level,
             out_rate: 0.0,
             pending: Vec::new(),
-            baseband: Vec::new(),
-            stuffed: 0,
             clipped: 0,
             params,
         }
     }
 
-    /// Null packets sent because the source had nothing ready. A steady
-    /// count is a source at the wrong bit rate.
-    pub fn stuffed(&self) -> u64 {
-        self.stuffed
+    /// Packets the modulating thread could not be given in time, which is a
+    /// hole in the multiplex.
+    pub fn dropped(&self) -> u64 {
+        self.tx.dropped
     }
 
     /// Samples the level held back from clipping. OFDM peaks about ten
@@ -1443,14 +1557,44 @@ impl DvbtModNode {
     }
 
     fn rebuild(&mut self) {
-        self.tx = DvbtModulator::new(self.params);
+        self.tx = Modulating::new(self.params, self.out_rate.max(dvbt::RATE_HZ));
         self.pending.clear();
+    }
+
+    /// Everything still being modulated, for a test or an example that has
+    /// an end to reach.
+    pub fn flush(&mut self, out: &mut Vec<C32>) {
+        let at = out.len();
+        self.tx.finish(out);
+        self.scale(&mut out[at..]);
+    }
+
+    /// The transmit level, and the clip an OFDM peak runs into.
+    fn scale(&mut self, out: &mut [C32]) {
+        for v in out.iter_mut() {
+            *v *= self.level;
+            if v.norm() > 1.0 {
+                *v /= v.norm();
+                self.clipped += 1;
+            }
+        }
     }
 }
 
 impl pipeline::node::Simple for DvbtModNode {
     fn name(&self) -> &str {
         DVBT_MOD.name
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let mut out = vec![("multiplex".into(), format!("{:.2} Mbit/s", self.bitrate() / 1e6))];
+        if self.tx.dropped > 0 {
+            out.push(("packets lost".into(), self.tx.dropped.to_string()));
+        }
+        if self.clipped > 0 {
+            out.push(("clipped".into(), self.clipped.to_string()));
+        }
+        out
     }
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
@@ -1471,7 +1615,7 @@ impl pipeline::node::Simple for DvbtModNode {
             );
         }
         self.out_rate = input.spec.rate;
-        self.resample = Rational::approx(dvbt::RATE_HZ, self.out_rate, 1 << 14);
+        self.tx = Modulating::new(self.params, self.out_rate);
         Ok(StreamSpec {
             kind: PortKind::Iq,
             rate: self.out_rate,
@@ -1493,24 +1637,15 @@ impl pipeline::node::Simple for DvbtModNode {
             return Ok(());
         };
         self.pending.extend_from_slice(bytes);
-        self.baseband.clear();
-        while self.pending.len() >= mpegts::PACKET {
-            let packet: Vec<u8> = self.pending.drain(..mpegts::PACKET).collect();
-            self.tx.push(&packet, &mut self.baseband);
-        }
-        if self.baseband.is_empty() {
-            return Ok(());
+        let whole = self.pending.len() - self.pending.len() % mpegts::PACKET;
+        if whole > 0 {
+            let packets: Vec<u8> = self.pending.drain(..whole).collect();
+            self.tx.push(packets);
         }
         let out = output.iq_mut();
         let at = out.len();
-        self.resample.process(&self.baseband, out);
-        for v in out[at..].iter_mut() {
-            *v *= self.level;
-            if v.norm() > 1.0 {
-                *v /= v.norm();
-                self.clipped += 1;
-            }
-        }
+        self.tx.take(out);
+        self.scale(&mut out[at..]);
         Ok(())
     }
 
@@ -1533,8 +1668,11 @@ impl pipeline::node::Simple for DvbtModNode {
     }
 
     fn set_param(&mut self, name: &str, value: pipeline::ParamValue) -> Result<()> {
+        // Read as a whole number, not as a float: a choice arrives as
+        // `Choice`, which is not a float, and reading it as one took every
+        // setting from the menu as position zero. Picking 64-QAM set QPSK.
         let pick = |value: &pipeline::ParamValue, n: usize| {
-            value.as_f64().map(|v| (v as usize).min(n - 1)).unwrap_or(0)
+            value.as_i64().map(|v| (v.max(0) as usize).min(n - 1)).unwrap_or(0)
         };
         match name {
             MODE => {
@@ -1569,7 +1707,6 @@ impl pipeline::node::Simple for DvbtModNode {
 
     fn reset(&mut self) {
         self.rebuild();
-        self.stuffed = 0;
         self.clipped = 0;
     }
 }
@@ -1875,6 +2012,9 @@ mod node_tests {
             Simple::process(&mut modulator, &ts, &mut iq, &mut ctx).expect("the modulator runs");
             span.extend_from_slice(iq.as_iq().unwrap_or(&[]));
         }
+        // The modulator is a thread behind the graph, so the last blocks of
+        // an over are still being built when the samples run out.
+        modulator.flush(&mut span);
         // The bit rate is the multiplex's, so the bytes taken off the file
         // and the samples put on the air are both what that much time holds.
         let seconds = blocks as f64 * block as f64 / radio_hz;

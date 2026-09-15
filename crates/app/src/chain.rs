@@ -202,6 +202,10 @@ pub struct Receiver {
     /// is what an edited copy of `patch` is read against to find them.
     base: crate::patch::Patch,
     banks: Vec<Bank>,
+    /// The transmitter, on a thread of its own. Built here with everything
+    /// else and run there, because the two chains have two clocks: samples
+    /// arriving and samples being taken away.
+    tx: crate::transmit::Transmitter,
     /// The source detectors, one per band watched.
     sources: Vec<NodeId>,
     chans: Vec<Chan>,
@@ -515,6 +519,7 @@ impl Receiver {
             patch: crate::patch::Patch::default(),
             base: crate::patch::Patch::default(),
             banks: Vec::new(),
+            tx: crate::transmit::Transmitter::new(),
             sources: Vec::new(),
             chans: Vec::new(),
             pending_record: None,
@@ -559,29 +564,44 @@ impl Receiver {
     /// rebuild would restart the spectrum's averaging and every decoder
     /// mid-frame, twice per over.
     pub fn key(&mut self, stream: Box<dyn common::TxStream>) -> bool {
-        match self.tx_sink_mut() {
-            Some(s) => {
-                s.attach(stream);
-                true
-            }
-            None => false,
-        }
+        self.tx.key(stream)
     }
 
     /// Unkey: let the queue out and give the radio back.
     pub fn unkey(&mut self) -> u64 {
-        match self.tx_sink_mut() {
-            Some(s) => {
-                let idle = s.underruns();
-                s.finish(std::time::Duration::from_secs(1));
-                idle
-            }
-            None => 0,
-        }
+        self.tx.unkey()
     }
 
     pub fn keyed(&self) -> bool {
-        self.tx_sink().is_some_and(|s| s.keyed())
+        self.tx.keyed()
+    }
+
+    /// Whether the transmitter gave up an over because the radio went away.
+    /// News once: reading it clears it.
+    pub fn tx_lost(&self) -> bool {
+        self.tx.lost()
+    }
+
+    /// The transmit chain as it is running, for the chain view to draw
+    /// beside the receiver's.
+    pub fn tx_topology(&self) -> Option<pipeline::graph::Topology> {
+        self.tx.topology()
+    }
+
+    /// Wait for the transmitter to be running everything it has been told,
+    /// for a test that then looks at what went out.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tx_settled(&self) -> bool {
+        self.tx.settled(std::time::Duration::from_secs(5))
+    }
+
+    /// The node a transmit stage became, named so the interface and a test
+    /// can reach it: its id with the transmit side's base already on it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn tx_node_of_stage(&self, stage: u64) -> Option<usize> {
+        let topo = self.tx.topology()?;
+        let node = topo.nodes.iter().find(|n| n.tag == Some(stage))?;
+        Some(node.id.0 + crate::transmit::TX_ID_BASE)
     }
 
     /// A stage of the running graph, read as what it is.
@@ -600,27 +620,21 @@ impl Receiver {
         self.graph.node_mut(id)?.as_any_mut().downcast_mut::<T>()
     }
 
-    fn tx_sink_mut(&mut self) -> Option<&mut nodes::TxSinkNode> {
-        self.stage_mut::<nodes::TxSinkNode>(derived::TX_RADIO)
-    }
-
-    /// What the transmitter has done, for the interface.
+    /// What the transmitter has done, for the interface. Read off the
+    /// readings it publishes rather than out of its graph, which is on
+    /// another thread.
     pub fn tx_state(&self) -> Option<TxState> {
-        let sink = self.tx_sink()?;
+        let r = self.tx.readings();
         Some(TxState {
-            written: sink.written(),
-            underruns: sink.underruns(),
-            mic_peak: self.tx_mic().map(|m| m.peak()).unwrap_or(0.0),
+            written: r.written.load(std::sync::atomic::Ordering::Relaxed),
+            underruns: r.underruns.load(std::sync::atomic::Ordering::Relaxed),
+            mic_peak: r.mic_peak(),
         })
     }
 
     /// Whether the microphone's signal is arriving already clipped.
     pub fn mic_clipped(&self) -> bool {
-        self.tx_mic().is_some_and(|m| m.input_clipped())
-    }
-
-    fn tx_mic(&self) -> Option<&nodes::MicNode> {
-        self.stage::<nodes::MicNode>(derived::TX_SOURCE)
+        self.tx.readings().mic_clipped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Draw what is going out on the receiver's own span, or stop.
@@ -634,8 +648,70 @@ impl Receiver {
         }
     }
 
-    fn tx_sink(&self) -> Option<&nodes::TxSinkNode> {
-        self.stage::<nodes::TxSinkNode>(derived::TX_RADIO)
+    /// Build the transmit chain and give it to the thread that runs it.
+    ///
+    /// Only when it changed: a rebuild happens whenever a channel moves, and
+    /// building this again would restart whatever the source has open, which
+    /// for a film is a decoder half a second into it.
+    fn hand_over_transmitter(
+        &mut self,
+        plan: &Plan,
+        transmit: crate::patch::Patch,
+        sinks: Option<TxSinks>,
+        idle: bool,
+    ) {
+        if transmit.stages().is_empty() {
+            self.tx.clear();
+            return;
+        }
+        let mic = sinks.as_ref().is_some_and(|s| s.mic.is_some());
+        if self.tx.is_running(&transmit, mic) {
+            return;
+        }
+        // Its clock is a length of time rather than a signal: the chain is
+        // handed a block of nothing and fills it.
+        let input = StreamSpec {
+            kind: PortKind::Real,
+            rate: plan.rate,
+            center: plan.center,
+            channels: 1,
+            flow: pipeline::port::Flow::Tx,
+            ..Default::default()
+        };
+        let mut b = Graph::builder(input);
+        let mut pool = HashMap::new();
+        let mut ring = None;
+        let mut sinks = sinks;
+        let was = crate::patch::Patch::default();
+        let built = add_patch(
+            &mut b,
+            &mut pool,
+            &was,
+            pipeline::graph::GRAPH_INPUT,
+            &transmit,
+            &mut ring,
+            &mut sinks,
+            false,
+        )
+        .and_then(|_| b.build());
+        match built {
+            Ok(mut graph) => {
+                if let Some(sent) =
+                    self.stage::<nodes::TxMonitorNode>(derived::TX_MONITOR).map(|m| m.sent())
+                    && let Some(sink) = graph
+                        .by_tag(derived::TX_RADIO)
+                        .and_then(|id| graph.node_mut(id))
+                        .and_then(|n| n.as_any_mut().downcast_mut::<nodes::TxSinkNode>())
+                {
+                    sink.send_to(sent);
+                }
+                self.tx.set_chain(transmit, graph, idle, mic);
+            }
+            Err(e) => {
+                self.refused = Some(format!("the transmit chain cannot be built: {e}"));
+                self.tx.clear();
+            }
+        }
     }
 
     /// Change what the receiver is doing, keeping every node that still means
@@ -778,6 +854,23 @@ impl Receiver {
         sync_audio(&mut patch, plan);
         sync_video(&mut patch);
         let mut tx_sinks = sinks_tx;
+        // The transmit chain is drawn here with everything else and run on a
+        // thread of its own, so it comes out of the patch before the
+        // receiver's graph is built. What crosses between the two is the
+        // monitor's queue, not a wire. See `crate::transmit`.
+        // The whole patch is what the interface reads and what its edits are
+        // measured against, so the split is of a copy: what the receiver's
+        // own graph is built from.
+        let whole = patch.clone();
+        // Whatever the operator hung off the transmit chain goes with it: a
+        // scope on the modulator's output has to run where the modulator
+        // runs, and left behind it is a stage in the receiver's patch whose
+        // input no longer exists.
+        let transmit = patch.split_off(&whole.attached_to(derived::TRANSMIT));
+        let idle_tx = plan
+            .tx
+            .as_ref()
+            .is_some_and(|t| t.spec.source == crate::radio::TxSource::Mic && !t.mode.is_digital());
         // `self.patch` is still the one the pooled nodes were built from,
         // which is what says whether a stage that kept its id still asks for
         // the same kind of node.
@@ -1016,8 +1109,9 @@ impl Receiver {
         }
         self.graph = graph;
         self.head = head;
-        self.patch = patch;
+        self.patch = whole;
         self.base = base;
+        self.hand_over_transmitter(plan, transmit, tx_sinks, idle_tx);
         // The nodes a rebuild replaced come back empty: no subscriptions, no
         // account, no survey file. What the plan says they are doing goes
         // back onto them here.
@@ -1545,6 +1639,12 @@ impl Receiver {
                 out.push((id.0, frame.clone()));
             }
         }
+        // A scope on the transmit chain runs on the transmitter's thread and
+        // hands its frames across; it carries the same id offset everything
+        // else on that chain does.
+        out.extend(
+            self.tx.scope_frames().into_iter().map(|(id, f)| (id + crate::transmit::TX_ID_BASE, f)),
+        );
         out
     }
 
@@ -1559,6 +1659,23 @@ impl Receiver {
         name: &str,
         value: pipeline::param::ParamValue,
     ) -> Result<bool> {
+        // A transmit stage is on the other thread, so the setting is sent
+        // rather than applied, and written into the patch here so a rebuild
+        // does not put it back.
+        if let Some(node) = id.checked_sub(crate::transmit::TX_ID_BASE) {
+            let tag = self
+                .tx
+                .topology()
+                .and_then(|t| t.nodes.iter().find(|n| n.id.0 == node).and_then(|n| n.tag));
+            if let Some(tag) = tag {
+                if let Some(st) = self.patch.stage_mut(tag) {
+                    st.settings.insert(name.to_string(), value.clone());
+                }
+                self.tx.note_param(tag, name, value.clone());
+            }
+            self.tx.set_param(node, name, value);
+            return Ok(false);
+        }
         let node = self
             .graph
             .node_mut(pipeline::graph::NodeId(id))
@@ -2288,6 +2405,8 @@ pub mod derived {
     pub const TX_SOURCE: u64 = Patch::DERIVED_BASE + 11;
     pub const TX_MOD: u64 = Patch::DERIVED_BASE + 12;
     pub const TX_RADIO: u64 = Patch::DERIVED_BASE + 13;
+    /// The stages that transmit, which are run on a thread of their own.
+    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, TX_MOD, TX_RADIO];
     /// What is going out, drawn on the span the receiver is deaf to while it
     /// goes out. In front of the head, so everything downstream sees it.
     pub const TX_MONITOR: u64 = Patch::DERIVED_BASE + 19;
@@ -2474,9 +2593,10 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 
         p.add_derived(derived::TX_RADIO, TX_RADIO, Settings::new());
         p.connect(Source::Stage(derived::TX_MOD, 0), (derived::TX_RADIO, 0));
-        // What went to the antenna, back to the monitor at the head of the
-        // receive chain. This is the only place holding those samples.
-        p.connect(Source::Stage(derived::TX_RADIO, 0), (derived::TX_MONITOR, 1));
+        // What went to the antenna reaches the monitor at the head of the
+        // receive chain through a queue rather than a wire, because a wire
+        // cannot cross a thread and the transmitter is on its way to one.
+        // See `Receiver::watch_transmitter`.
     }
 
     // The raw capture is always in the graph and usually switched off,
@@ -5957,6 +6077,39 @@ mod tx_in_graph_tests {
         p
     }
 
+    /// A stage the operator hangs off the transmit chain runs there.
+    ///
+    /// The two halves are two graphs on two threads, and a wire cannot cross
+    /// between them. A scope dropped on the modulator's output and left in
+    /// the receiver's patch is a stage whose input no longer exists: it
+    /// builds nowhere, draws nothing, and shows in both views as a stage
+    /// waiting to be wired up to something it is already wired to.
+    #[test]
+    fn a_scope_on_the_transmit_chain_runs_on_the_transmit_chain() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let mut drawn = derived_patch(&plan);
+        let base = drawn.clone();
+        let scope = drawn.add("scope");
+        drawn.connect(crate::patch::Source::Stage(derived::TX_MOD, 0), (scope, 0));
+        plan.edits = crate::patch::Edits::diff(&drawn, &base, operator_owns);
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+
+        let on_tx = rx.tx_topology().expect("a transmit chain");
+        assert!(
+            on_tx.nodes.iter().any(|n| n.tag == Some(scope)),
+            "the scope is not on the transmit side"
+        );
+        assert!(
+            !rx.topology().nodes.iter().any(|n| n.tag == Some(scope)),
+            "the scope is on the receive side as well"
+        );
+        // And it is wired, rather than sitting there unconnected: the one
+        // thing the operator was told was that it had no input.
+        let node = on_tx.nodes.iter().find(|n| n.tag == Some(scope)).unwrap();
+        assert_eq!(node.inputs.len(), 1, "the wire to the modulator did not come with it");
+    }
+
     #[test]
     fn the_transmit_chain_is_built_and_idle_before_anything_is_keyed() {
         // The reason it is in the graph when the key is up: so it can be
@@ -5965,9 +6118,9 @@ mod tx_in_graph_tests {
         // nothing handed in at all.
         let plan = plan_with_tx(TxSource::Tone);
         let rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        assert!(rx.tx_sink().is_some(), "no transmitter stage in the graph");
+        assert!(rx.tx_node_of_stage(derived::TX_RADIO).is_some(), "no transmitter in the chain");
         assert!(!rx.keyed());
-        let topo = rx.topology();
+        let topo = crate::transmit::merged(&rx.topology(), rx.tx_topology().as_ref());
         let kinds: Vec<&str> = topo.nodes.iter().map(|n| n.kind.as_str()).collect();
         for want in ["tx_clock", "tone", "fm_mod", "radio_tx"] {
             assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
@@ -6002,19 +6155,37 @@ mod tx_in_graph_tests {
         plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(474_000_000) });
 
         let rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        let topo = rx.topology();
-        let kinds: Vec<&str> = topo.nodes.iter().map(|n| n.kind.as_str()).collect();
-        for want in ["tx_clock", "ts_source", "dvbt_mod", "radio_tx"] {
-            assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
-        }
-        assert!(!kinds.contains(&"tone"), "a multiplex is not a test tone: {kinds:?}");
+        let tx = rx.tx_topology().expect("a transmit chain");
+        let kinds: Vec<&str> = tx.nodes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds, ["tx_clock", "ts_source", "dvbt_mod", "radio_tx"]);
+        // The transmitter is a chain of its own and the receiver's has none
+        // of it: the two are run by different threads.
+        let running = rx.topology();
+        let rx_kinds: Vec<&str> = running.nodes.iter().map(|n| n.kind.as_str()).collect();
+        assert!(!rx_kinds.contains(&"radio_tx"), "the transmitter is in both: {rx_kinds:?}");
         // The modulator puts out the radio's own rate, whatever the
         // standard's 64/7 megasamples the multiplex is built at.
-        let port = rx
-            .node_of_stage(derived::TX_MOD)
-            .and_then(|id| rx.graph.topology().nodes.iter().find(|n| n.id == id).cloned());
-        let spec = port.and_then(|n| n.outputs.first().cloned()).expect("the modulator has a port");
+        let spec = tx
+            .nodes
+            .iter()
+            .find(|n| n.kind == "dvbt_mod")
+            .and_then(|n| n.outputs.first().cloned())
+            .expect("the modulator has a port");
         assert_eq!(spec.1.rate, 20_000_000.0);
+
+        // Drawn, and idle. Building a multiplex costs a third of a processor
+        // and none of it can reach a radio with the key up.
+        let mut rx = rx;
+        let block = vec![C32::new(0.0, 0.0); 65_536];
+        for _ in 0..8 {
+            rx.process(&block).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            rx.tx_state().map(|s| s.written),
+            Some(0),
+            "the transmitter is modulating with nothing keyed"
+        );
     }
 
     /// A transport packet that says which packet it is in every payload
@@ -6103,8 +6274,9 @@ mod tx_in_graph_tests {
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
         // The multiplex is 2k QPSK 1/2 here, which locks in fewer frames
         // than the 8k the stage starts at and so keeps the test short.
-        let modulator = rx.node_of_stage(derived::TX_MOD).expect("the modulator is in the graph");
-        let source = rx.node_of_stage(derived::TX_SOURCE).expect("the source is in the graph");
+        let modulator =
+            rx.tx_node_of_stage(derived::TX_MOD).expect("the modulator is in the chain");
+        let source = rx.tx_node_of_stage(derived::TX_SOURCE).expect("the source is in the chain");
         let params = dsp::dvbt::Params {
             mode: dsp::dvbt::Mode::M2k,
             guard: dsp::dvbt::Guard::G1_32,
@@ -6114,21 +6286,25 @@ mod tx_in_graph_tests {
             code_rate_lp: dsp::dvbt::CodeRate::R1_2,
             cell_id: None,
         };
-        rx.set_node_param(modulator.0, "mode", pipeline::ParamValue::Choice(0)).unwrap();
-        rx.set_node_param(modulator.0, "constellation", pipeline::ParamValue::Choice(0)).unwrap();
-        rx.set_node_param(modulator.0, "code_rate", pipeline::ParamValue::Choice(0)).unwrap();
-        rx.set_node_param(source.0, "path", pipeline::ParamValue::Text(path.display().to_string()))
+        rx.set_node_param(modulator, "mode", pipeline::ParamValue::Choice(0)).unwrap();
+        rx.set_node_param(modulator, "constellation", pipeline::ParamValue::Choice(0)).unwrap();
+        rx.set_node_param(modulator, "code_rate", pipeline::ParamValue::Choice(0)).unwrap();
+        rx.set_node_param(source, "path", pipeline::ParamValue::Text(path.display().to_string()))
             .unwrap();
-        rx.set_node_param(source.0, "bitrate", pipeline::ParamValue::Float(params.bitrate()))
+        rx.set_node_param(source, "bitrate", pipeline::ParamValue::Float(params.bitrate()))
             .unwrap();
 
+        // The transmitter is a thread: what it has been told is not what it
+        // is doing until it has caught up.
+        assert!(rx.tx_settled(), "the transmitter did not take its settings");
         let (mut dev, captured) =
             sources::FileSink::in_memory(Sps(20_000_000), common::SampleFormat::Cs8);
         assert!(rx.key(dev.start_tx().unwrap()));
-        let block = vec![C32::new(0.0, 0.0); 65_536];
-        for _ in 0..((0.45 * rate / 65_536.0).ceil() as usize) {
-            rx.process(&block).unwrap();
-        }
+        // The transmitter runs on its own clock, so the over lasts as long
+        // as it takes to put that much on the air rather than as long as the
+        // receiver is fed.
+        let want = (0.45 * rate) as usize * 2;
+        until("half a second of multiplex on the air", || captured.lock().len() >= want);
         rx.unkey();
 
         // Off the radio's own bytes, not off the graph: what is read back is
@@ -6142,9 +6318,11 @@ mod tx_in_graph_tests {
         assert_eq!(heard, Some(params), "the TPS says what the transmitter was set to");
         let packets = stream.len() / 188;
         assert!(packets >= 900, "only {packets} packets came off the air");
-        let first = (0..240u16)
-            .find(|n| stream[..188] == ts_packet(*n))
-            .expect("the first packet back is one of the file's");
+        let first = (0..240u16).find(|n| stream[..188] == ts_packet(*n)).unwrap_or_else(|| {
+            let heads: Vec<String> =
+                stream.chunks_exact(188).take(6).map(|p| format!("{:02x?}", &p[..4])).collect();
+            panic!("not the file's: {heads:?}")
+        });
         let wrong = stream
             .chunks_exact(188)
             .enumerate()
@@ -6152,6 +6330,222 @@ mod tx_in_graph_tests {
             .count();
         assert_eq!(wrong, 0, "{wrong} of {packets} packets are not the ones in the file");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// What a television transmission costs the thread the radio runs on.
+    ///
+    /// The whole receiver, keyed, with a file for a radio: no USB, no
+    /// window, so what it measures is the graph's own work. Prints the cost
+    /// of every stage, which is what the chain view draws, and fails if the
+    /// graph cannot keep up with the stream it is being handed.
+    ///
+    /// `cargo test --release -p app what_a_television_transmission_costs -- --nocapture`
+    #[test]
+    fn what_a_television_transmission_costs() {
+        let rate = 10_000_000.0;
+        let mut plan = tests::plan(rate, Hz(770_000_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("dvbt".into()),
+            bandwidth_hz: None,
+            volume: 0.8,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: Some(TxSpec::default()),
+        }];
+        plan.tx = Some(TxPlan {
+            spec: TxSpec::default(),
+            mode: crate::radio::tx_mode_for(&plan.channels[0].mode).expect("it transmits"),
+            on_air: Hz(770_000_000),
+        });
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        // And with a real file when asked for, since re-encoding a 4K film
+        // into a multiplex is a different load from the test card:
+        // `SR_TX_FILE=film.mkv`.
+        if let Some(path) = std::env::var_os("SR_TX_FILE") {
+            let source =
+                rx.tx_node_of_stage(derived::TX_SOURCE).expect("the source is in the chain");
+            rx.set_node_param(
+                source,
+                "path",
+                pipeline::ParamValue::Text(path.to_string_lossy().into_owned()),
+            )
+            .unwrap();
+        }
+        // With a real radio when asked for, which is the only way to tell a
+        // graph that cannot keep up from a device that will not take what it
+        // is given: `SR_TX_RADIO=1 cargo test --release -p app
+        // what_a_television_transmission_costs -- --nocapture`.
+        let mut file = None;
+        let stream = match std::env::var_os("SR_TX_RADIO").is_some() {
+            true => {
+                let mut dev = hackrf::HackRfDevice::open_first().expect("a HackRF to transmit on");
+                dev.set_rate(Sps(rate as u64)).unwrap();
+                dev.set_center(Hz(770_000_000)).unwrap();
+                dev.set_tx_gain("amp", common::GainMode::Manual(0.0)).unwrap();
+                dev.set_tx_gain("txvga", common::GainMode::Manual(0.0)).unwrap();
+                let stream = dev.start_tx().unwrap();
+                file = Some(Box::new(dev) as Box<dyn Device>);
+                stream
+            }
+            false => {
+                let (mut dev, _captured) =
+                    sources::FileSink::in_memory(Sps(10_000_000), common::SampleFormat::Cs8);
+                let stream = dev.start_tx().unwrap();
+                file = Some(Box::new(dev) as Box<dyn Device>);
+                stream
+            }
+        };
+        assert!(rx.key(stream));
+        let _keep = file;
+
+        // Twenty millisecond blocks, which is what the driver hands over
+        // while a half duplex radio is deaf.
+        let block = vec![C32::new(0.0, 0.0); (rate * 0.02) as usize];
+        let seconds = 3.0;
+        let blocks = (seconds / 0.02) as usize;
+        let start = std::time::Instant::now();
+        for _ in 0..blocks {
+            rx.process(&block).unwrap();
+        }
+        let took = start.elapsed().as_secs_f64();
+
+        let topo = rx.topology();
+        let mut rows: Vec<(f32, String, u32, f32)> = topo
+            .nodes
+            .iter()
+            .map(|n| (n.cost.load().unwrap_or(0.0), n.kind.clone(), n.cost.p95_us, n.cost.mean_us))
+            .collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        println!("{seconds:.1} s of air in {took:.2} s, {:.2}x real time", seconds / took);
+        for (share, kind, p95, mean) in rows.iter().take(12) {
+            println!(
+                "  {share:6.1}%  {kind:<16} p95 {p95:>7} us  mean {mean:>9.1} us",
+                share = share * 100.0
+            );
+        }
+        assert!(
+            took < seconds,
+            "the graph runs at {:.2}x real time with a television transmission on it",
+            seconds / took
+        );
+    }
+
+    /// Wait for the transmitter, which is a thread: what it has done is
+    /// read rather than made to happen. Fails the test rather than hanging.
+    fn until(what: &str, mut ready: impl FnMut() -> bool) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready() {
+            assert!(std::time::Instant::now() < until, "waited five seconds for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// A radio unplugged mid-over ends the over.
+    ///
+    /// There is nothing else to notice it by: the stream reports every write
+    /// failing and no key comes up on its own, so the interface went on
+    /// showing a transmission that had stopped.
+    #[test]
+    fn a_radio_that_goes_away_ends_the_transmission() {
+        struct Gone;
+        impl common::TxStream for Gone {
+            fn write(&mut self, _buf: &common::IqBuf) -> Result<()> {
+                Err(common::Error::Disconnected)
+            }
+            fn underruns(&self) -> u64 {
+                0
+            }
+            fn drain(&mut self, _timeout: std::time::Duration) -> bool {
+                true
+            }
+            fn stop(&mut self) {}
+        }
+
+        let plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.key(Box::new(Gone)));
+        until("the transmitter to give up", || !rx.keyed());
+        assert!(rx.tx_lost(), "nothing said why the over ended");
+        assert!(!rx.tx_lost(), "the news was still there after it had been read");
+    }
+
+    /// A transmit setting changes what the chain is running and comes back
+    /// through the topology the interface reads.
+    ///
+    /// It is a message now rather than a call, so a control whose value does
+    /// not come back is a control that springs back to where it was, which
+    /// is what an operator reads as "it will not let me change it".
+    #[test]
+    fn a_transmit_setting_is_taken_and_read_back() {
+        let mut plan = tests::plan(20_000_000.0, Hz(474_000_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("dvbt".into()),
+            bandwidth_hz: None,
+            volume: 0.8,
+            muted: false,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: Some(TxSpec::default()),
+        }];
+        plan.tx = Some(TxPlan {
+            spec: TxSpec::default(),
+            mode: crate::radio::tx_mode_for(&plan.channels[0].mode).expect("it transmits"),
+            on_air: Hz(474_000_000),
+        });
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let modulator = rx.tx_node_of_stage(derived::TX_MOD).expect("the modulator");
+
+        let read = |rx: &Receiver, name: &str| -> Option<pipeline::param::ParamValue> {
+            let topo = crate::transmit::merged(&rx.topology(), rx.tx_topology().as_ref());
+            let node = topo.nodes.iter().find(|n| n.id.0 == modulator)?;
+            node.params.iter().find(|p| p.name == name).map(|p| p.value.clone())
+        };
+        assert_eq!(read(&rx, "constellation"), Some(pipeline::ParamValue::Choice(2)), "64-QAM");
+
+        rx.set_node_param(modulator, "constellation", pipeline::ParamValue::Choice(0)).unwrap();
+        assert!(rx.tx_settled());
+        assert_eq!(read(&rx, "constellation"), Some(pipeline::ParamValue::Choice(0)), "QPSK");
+
+        // And the source follows it: QPSK carries a third of what 64-QAM
+        // does, and a source still sending the old rate fills the queue
+        // until packets fall out of the middle of the multiplex.
+        let source = rx.tx_node_of_stage(derived::TX_SOURCE).expect("the source");
+        let topo = crate::transmit::merged(&rx.topology(), rx.tx_topology().as_ref());
+        let node = topo.nodes.iter().find(|n| n.id.0 == source).expect("in the chain");
+        let rate = node
+            .params
+            .iter()
+            .find(|p| p.name == "bitrate")
+            .and_then(|p| p.value.as_f64())
+            .expect("a bit rate");
+        assert!(
+            (rate - 8_042_780.0).abs() < 1000.0,
+            "QPSK 2/3 carries 8.04 Mbit/s, the source is sending {rate:.0}"
+        );
+
+        // And it is in the running patch, which is what the interface reads
+        // its edits off: a derived stage's settings are drawn again on every
+        // rebuild, so a hand-set value survives as an edit or not at all.
+        let stage = rx.patch().stage(derived::TX_MOD).expect("the modulator is in the patch");
+        assert_eq!(
+            stage.settings.get("constellation").and_then(|v| v.as_i64()),
+            Some(0),
+            "the change is not in the patch the interface diffs"
+        );
+        let mut plan = plan;
+        plan.edits = rx.edits();
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+        assert_eq!(read(&rx, "constellation"), Some(pipeline::ParamValue::Choice(0)));
     }
 
     #[test]
@@ -6163,28 +6557,19 @@ mod tx_in_graph_tests {
         assert!(rx.key(dev.start_tx().unwrap()), "the transmitter stage was not found");
         assert!(rx.keyed());
 
-        let block = vec![C32::new(0.0, 0.0); 40_000];
-        for _ in 0..3 {
-            rx.process(&block).unwrap();
-        }
-        // What went to the radio is on the transmitter's own port, which is
-        // what the monitor at the head of the receive chain reads.
-        let sent = rx
-            .node_of_stage(derived::TX_RADIO)
-            .and_then(|id| rx.graph.buf(id.o()))
-            .and_then(|b| b.as_iq());
-        assert_eq!(sent.map(<[C32]>::len), Some(40_000), "the monitor port is empty while keyed");
+        // The transmitter has its own clock now, so samples reach the radio
+        // because time passed rather than because the receiver was fed.
+        until("the first samples to reach the radio", || captured.lock().len() >= 4 * 40_000 * 2);
+        let sent = captured.lock().len();
         rx.unkey();
         assert!(!rx.keyed());
-        assert_eq!(captured.lock().len(), 3 * 40_000 * 2, "not every block reached the radio");
-        // And nothing leaves that port once the key is up, so the monitor
-        // stops drawing a transmission that has ended.
-        rx.process(&block).unwrap();
-        let sent = rx
-            .node_of_stage(derived::TX_RADIO)
-            .and_then(|id| rx.graph.buf(id.o()))
-            .and_then(|b| b.as_iq());
-        assert_eq!(sent.map(<[C32]>::len), Some(0));
+        // And nothing more once the key is up.
+        until("the transmitter to stop", || {
+            let now = captured.lock().len();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            now == captured.lock().len()
+        });
+        assert!(captured.lock().len() >= sent, "the radio lost what was already written");
     }
 
     #[test]
@@ -6195,9 +6580,11 @@ mod tx_in_graph_tests {
         // above the centre, so that is where it has to land.
         let plan = plan_with_tx(TxSource::Tone);
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        let (mut dev, _c) = sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
+        let (mut dev, captured) =
+            sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
         assert!(rx.key(dev.start_tx().unwrap()));
         let quiet = vec![C32::new(0.0, 0.0); 40_000];
+        until("a transmission to draw", || captured.lock().len() >= 4 * 40_000 * 2);
 
         // Off, which is what a full duplex radio wants: the span is what the
         // radio delivered and nothing else.
@@ -6233,13 +6620,19 @@ mod tx_in_graph_tests {
         // microphone in at the rebuild is what completes it.
         let plan = plan_with_tx(TxSource::Mic);
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
-        assert!(rx.tx_mic().is_none(), "a mic stage was built with no microphone");
+        let mic = |rx: &Receiver| {
+            rx.tx_topology().is_some_and(|t| t.nodes.iter().any(|n| n.kind == "mic"))
+        };
+        assert!(!mic(&rx), "a mic stage was built with no microphone");
 
         let src: std::sync::Arc<dyn audio::AudioSource> =
             std::sync::Arc::new(audio::Canned::new(vec![0.0; 4_800], 48_000.0, true));
         rx.set_transmitter(Some(TxSinks { stream: None, mic: Some(src) }));
         rx.rebuild(&plan).unwrap();
-        assert!(rx.tx_mic().is_some(), "the microphone stage did not appear");
-        assert!(rx.tx_sink().is_some(), "the transmitter stage is missing with a microphone");
+        assert!(mic(&rx), "the microphone stage did not appear");
+        assert!(
+            rx.tx_node_of_stage(derived::TX_RADIO).is_some(),
+            "the transmitter stage is missing with a microphone"
+        );
     }
 }

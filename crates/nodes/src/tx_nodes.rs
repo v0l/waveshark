@@ -326,12 +326,28 @@ pub struct TxSinkNode {
     written: u64,
     /// Blocks the device could not take, because the radio went away.
     failed: u64,
+    /// Where what went out goes to be drawn, which is the receiver's own
+    /// span. Handed over rather than wired, so the transmitter can move to a
+    /// thread of its own without the monitor losing sight of it.
+    sent: Option<Sent>,
 }
 
 impl TxSinkNode {
     /// A transmitter with no radio yet: in the graph, and off.
     pub fn idle() -> Self {
-        Self { stream: None, rate: common::Sps(0), center: common::Hz(0), written: 0, failed: 0 }
+        Self {
+            stream: None,
+            rate: common::Sps(0),
+            center: common::Hz(0),
+            written: 0,
+            failed: 0,
+            sent: None,
+        }
+    }
+
+    /// Where to leave what went to the antenna, for the monitor to draw.
+    pub fn send_to(&mut self, sent: Sent) {
+        self.sent = Some(sent);
     }
 
     /// Hand it a radio: the key going down.
@@ -354,6 +370,7 @@ impl TxSinkNode {
             center: common::Hz(0),
             written: 0,
             failed: 0,
+            sent: None,
         }
     }
 
@@ -372,6 +389,12 @@ impl TxSinkNode {
         self.failed
     }
 
+    /// Take the radio back without ending the over, for a chain being
+    /// replaced by another that will go on transmitting.
+    pub fn detach(&mut self) -> Option<Box<dyn common::TxStream>> {
+        self.stream.take()
+    }
+
     /// Let everything written reach the radio, then stop transmitting.
     ///
     /// The stage stays in the graph: what it loses is the radio, which is
@@ -388,6 +411,24 @@ impl TxSinkNode {
 impl Simple for TxSinkNode {
     fn name(&self) -> &str {
         "radio_tx"
+    }
+
+    /// What an operator has to know about a transmission in progress: how
+    /// much has gone out, and how much of it was silence the radio sent
+    /// because nothing was queued in time. A count that climbs is a
+    /// transmission with holes in it, which nothing else on the screen
+    /// would show.
+    fn readings(&self) -> Vec<(String, String)> {
+        let sent = self.written as f64 / self.rate.as_f64().max(1.0);
+        let mut out = vec![("on air".into(), format!("{sent:.1} s"))];
+        let idle = self.underruns();
+        if idle > 0 {
+            out.push(("gaps".into(), idle.to_string()));
+        }
+        if self.failed > 0 {
+            out.push(("refused".into(), self.failed.to_string()));
+        }
+        out
     }
 
     /// Not a sink: what went to the antenna leaves here as well, for
@@ -436,6 +477,11 @@ impl Simple for TxSinkNode {
             return Ok(());
         };
         output.iq_mut().extend_from_slice(iq);
+        if let Some(sent) = &self.sent
+            && let Ok(mut q) = sent.lock()
+        {
+            q.extend(iq.iter().copied());
+        }
         let buf = common::IqBuf::new(iq.to_vec(), self.center, self.rate, self.written);
         match s.write(&buf) {
             Ok(()) => self.written += iq.len() as u64,
@@ -482,7 +528,22 @@ pub struct TxMonitorNode {
     mixer: dsp::Mixer,
     rate: f64,
     scratch: Vec<C32>,
+    /// What was taken off the queue this block.
+    taken: Vec<C32>,
+    /// What went to the antenna, waiting to be drawn. Handed over rather
+    /// than wired, because the transmitter runs on a thread of its own and a
+    /// wire cannot cross one.
+    sent: Sent,
 }
+
+/// How much of the transmission may wait to be drawn. The transmitter holds
+/// itself a fifth of a second ahead of the radio, so the queue sits at about
+/// that much in the steady state; this is the point at which the receiver is
+/// so far behind that catching up matters more than continuity.
+const BACKLOG_S: f64 = 1.0;
+
+/// Samples on their way from the transmitter to the receiver's own span.
+pub type Sent = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<C32>>>;
 
 impl Default for TxMonitorNode {
     fn default() -> Self {
@@ -492,6 +553,8 @@ impl Default for TxMonitorNode {
             mixer: dsp::Mixer::new(0.0, 1.0),
             rate: 0.0,
             scratch: Vec::new(),
+            taken: Vec::new(),
+            sent: Sent::default(),
         }
     }
 }
@@ -507,29 +570,16 @@ impl TxMonitorNode {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
+
+    /// Where to put what went out, for whoever is transmitting.
+    pub fn sent(&self) -> Sent {
+        self.sent.clone()
+    }
 }
 
 impl Node for TxMonitorNode {
     fn name(&self) -> &str {
         "tx_monitor"
-    }
-
-    fn num_inputs(&self) -> usize {
-        2
-    }
-
-    /// The transmitter's input is allowed to be empty, and usually is: a
-    /// receiver with no transmit chain still has a head, and this stage sits
-    /// in front of it. Refusing the wire would drop the stage, and with it
-    /// everything downstream of the head.
-    fn optional_inputs(&self) -> bool {
-        true
-    }
-
-    /// The whole point of this stage: what went out of the antenna, back onto
-    /// what came in.
-    fn joins_flows(&self) -> bool {
-        true
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -555,12 +605,34 @@ impl Node for TxMonitorNode {
         };
         let out = outputs[0].iq_mut();
         out.extend_from_slice(span);
-        let sent = inputs.get(1).and_then(|p| p.as_iq()).unwrap_or(&[]);
-        if !self.enabled || sent.is_empty() {
+        self.taken.clear();
+        if let Ok(mut sent) = self.sent.lock() {
+            if !self.enabled {
+                // Nothing is going out, so nothing is waiting to be drawn.
+                sent.clear();
+            } else {
+                // Whole blocks only, and a backlog rather than a trim. On a
+                // half duplex radio this is not a picture of the
+                // transmission, it is the only thing the receiver is given,
+                // and a decoder reads it: every sample thrown away and every
+                // part filled block is a splice in the middle of a symbol,
+                // which costs the lock and takes a super frame to get back.
+                // The transmitter runs a fifth of a second ahead of the
+                // radio to keep the stream fed, so a queue trimmed to a
+                // block or two is trimmed on every single block.
+                let keep = ((self.rate * BACKLOG_S) as usize).max(4 * span.len());
+                let over = sent.len().saturating_sub(keep);
+                sent.drain(..over);
+                if sent.len() >= span.len() {
+                    self.taken.extend(sent.drain(..span.len()));
+                }
+            }
+        }
+        if !self.enabled || self.taken.is_empty() {
             return Ok(());
         }
         self.scratch.clear();
-        self.mixer.process(sent, &mut self.scratch);
+        self.mixer.process(&self.taken, &mut self.scratch);
         for (dst, src) in out.iter_mut().zip(self.scratch.iter()) {
             *dst += *src;
         }
@@ -1231,8 +1303,7 @@ impl Simple for TxClockNode {
         output: &mut Payload,
         _ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let n = input.len();
-        output.real_mut().resize(n, 0.0);
+        output.real_mut().resize(input.len(), 0.0);
         Ok(())
     }
 }
@@ -1310,4 +1381,88 @@ pub const MORSE_KEY: StageDesc = StageDesc {
 
 pub fn build_morse_key(s: &Settings) -> Result<Box<dyn Node>> {
     Ok(Box::new(MorseKeyNode::new(s.f64_or(WPM, DEFAULT_WPM as f64) as f32)))
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    /// On a half duplex radio the loopback is not a picture of the
+    /// transmission, it is the whole of what the receiver is given, and a
+    /// decoder reads it. So it has to come back unbroken: one sample thrown
+    /// away in the middle of an OFDM symbol costs the lock, and the picture
+    /// comes and goes.
+    ///
+    /// The transmitter holds itself ahead of the radio, so the queue always
+    /// carries a lead. Trimming that lead every block, which is what a queue
+    /// kept to a block or two does, drops samples continuously while the
+    /// spectrum still looks exactly right.
+    #[test]
+    fn the_loopback_comes_back_unbroken() {
+        const BLOCK: usize = 4096;
+        const RATE: f64 = 9_142_857.0;
+        let mut node = TxMonitorNode::default();
+        let spec = StreamSpec {
+            kind: PortKind::Iq,
+            rate: RATE,
+            center: common::Hz(474_000_000),
+            ..Default::default()
+        };
+        Node::negotiate(&mut node, &[PortSpec { spec, latency: 0 }]).unwrap();
+        node.set_enabled(true);
+        let sent = node.sent();
+
+        // A counted stream, so a hole in what comes back is a jump in the
+        // numbers rather than something to be eyeballed.
+        let mut wrote = 0u32;
+        let mut read: Vec<u32> = Vec::new();
+        // The transmitter's lead: a fifth of a second before the first block.
+        let lead = (RATE * 0.2) as u32;
+        for _ in 0..lead {
+            sent.lock().unwrap().push_back(C32::new(wrote as f32, 0.0));
+            wrote += 1;
+        }
+        for _ in 0..64 {
+            for _ in 0..BLOCK {
+                sent.lock().unwrap().push_back(C32::new(wrote as f32, 0.0));
+                wrote += 1;
+            }
+            let input = Payload::Iq(vec![C32::new(0.0, 0.0); BLOCK]);
+            let mut out = Payload::Iq(Vec::new());
+            let (mut ev, mut tg) = (Vec::new(), Vec::new());
+            let ins = [PortSpec { spec, latency: 0 }];
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Node::process(&mut node, &[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
+            let Payload::Iq(v) = out else { unreachable!() };
+            assert_eq!(v.len(), BLOCK, "the span is passed through whole");
+            read.extend(v.iter().map(|s| s.re.round() as u32));
+        }
+
+        assert_eq!(read.len(), 64 * BLOCK, "every block carried the transmission");
+        assert_eq!(read[0], 0, "the transmission is drawn from its start");
+        for (i, v) in read.iter().enumerate() {
+            assert_eq!(*v, i as u32, "a hole in the loopback at sample {i}");
+        }
+    }
+
+    /// With the key up there is nothing going out, and what was queued
+    /// behind it is stale: drawn later it would be a splice of an old over
+    /// onto a new one.
+    #[test]
+    fn what_was_queued_behind_an_over_does_not_outlive_it() {
+        let mut node = TxMonitorNode::default();
+        let spec = StreamSpec { kind: PortKind::Iq, rate: 1_000_000.0, ..Default::default() };
+        Node::negotiate(&mut node, &[PortSpec { spec, latency: 0 }]).unwrap();
+        let sent = node.sent();
+        sent.lock().unwrap().extend((0..4096).map(|i| C32::new(i as f32, 0.0)));
+        let input = Payload::Iq(vec![C32::new(0.0, 0.0); 1024]);
+        let mut out = Payload::Iq(Vec::new());
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let ins = [PortSpec { spec, latency: 0 }];
+        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+        Node::process(&mut node, &[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
+        assert!(sent.lock().unwrap().is_empty(), "the queue outlived the over");
+        let Payload::Iq(v) = out else { unreachable!() };
+        assert!(v.iter().all(|s| s.norm() == 0.0), "a stale over was drawn on the span");
+    }
 }

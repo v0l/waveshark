@@ -77,6 +77,13 @@ pub struct Inner {
     levels: Vec<f32>,
     cells: Vec<f32>,
     permuted: Vec<f32>,
+    /// Where each bit of a block of 126 cells goes, worked out once: the
+    /// demultiplexing and the rotation are fixed by the constellation, and
+    /// recomputing them a bit at a time was a third of the transmitter.
+    places: Vec<u32>,
+    /// The bits of a symbol in transmission order, kept so a symbol is not
+    /// an allocation.
+    words: Vec<u8>,
 }
 
 impl Inner {
@@ -90,6 +97,8 @@ impl Inner {
             levels,
             cells: Vec::new(),
             permuted: Vec::new(),
+            places: places(constellation.bits()),
+            words: Vec::new(),
         }
     }
 
@@ -133,13 +142,9 @@ impl Inner {
 
         // Bit deinterleaver, within each block of 126 cells.
         for block in 0..n / BLOCK {
-            let base = block * BLOCK;
-            for i in 0..BLOCK {
-                for k in 0..v {
-                    let e = demux(k, v);
-                    let w = (i + BLOCK - ROTATE[e] % BLOCK) % BLOCK;
-                    out.push(self.permuted[(base + w) * v + e]);
-                }
+            let base = block * BLOCK * v;
+            for &at in &self.places {
+                out.push(self.permuted[base + at as usize]);
             }
         }
     }
@@ -162,17 +167,15 @@ impl Inner {
         let v = self.constellation.bits();
         let n = self.mode.cells();
         assert_eq!(bits.len(), n * v, "a symbol takes exactly its bits");
-        let mut words = vec![0u8; n * v];
+        self.words.clear();
+        self.words.resize(n * v, 0);
         for block in 0..n / BLOCK {
-            let base = block * BLOCK;
-            for i in 0..BLOCK {
-                for k in 0..v {
-                    let e = demux(k, v);
-                    let w = (i + BLOCK - ROTATE[e] % BLOCK) % BLOCK;
-                    words[(base + w) * v + e] = bits[(base + i) * v + k];
-                }
+            let base = block * BLOCK * v;
+            for (at, bit) in self.places.iter().zip(&bits[base..base + BLOCK * v]) {
+                self.words[base + *at as usize] = *bit;
             }
         }
+        let words = &self.words;
         out.reserve(n);
         let start = out.len();
         out.resize(start + n, C32::default());
@@ -182,6 +185,22 @@ impl Inner {
             out[start + to] = super::map(&words[from * v..from * v + v], self.constellation);
         }
     }
+}
+
+/// Where each of a block's bits sits after the bit interleaver, as an index
+/// into the block: the demultiplexing to one of the `v` streams and the
+/// rotation that stream is delayed by, which depend on nothing but the
+/// constellation.
+fn places(v: usize) -> Vec<u32> {
+    let mut places = Vec::with_capacity(BLOCK * v);
+    for i in 0..BLOCK {
+        for k in 0..v {
+            let e = demux(k, v);
+            let w = (i + BLOCK - ROTATE[e] % BLOCK) % BLOCK;
+            places.push((w * v + e) as u32);
+        }
+    }
+    places
 }
 
 #[cfg(test)]

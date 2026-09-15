@@ -147,6 +147,67 @@ impl Patch {
         self.links.retain(|l| l.to.0 != id && !matches!(l.from, Source::Stage(f, _) if f == id));
     }
 
+    /// Take a set of stages out into a patch of their own, wires and all.
+    ///
+    /// For the transmit chain, which is built here with everything else and
+    /// run somewhere else. A wire between the two halves is dropped: the two
+    /// graphs cannot share one, and what does cross between them crosses as
+    /// a queue rather than as an edge.
+    /// The stages that belong with `seed` because the operator hung them
+    /// off it: a scope dropped on the modulator's output is part of the
+    /// transmit chain, not of the receiver, and has to be built and run
+    /// where the thing it is watching runs.
+    ///
+    /// A stage joins when everything it reads comes from the set. A stage
+    /// reading the span or a receive stage as well stays where it is: it
+    /// cannot be in two graphs, and the half that has the span is the half
+    /// that can still feed it.
+    pub fn attached_to(&self, seed: &[u64]) -> Vec<u64> {
+        let mut set: Vec<u64> = seed.to_vec();
+        loop {
+            let next = self.stages.iter().map(|st| st.id).find(|id| {
+                if set.contains(id) || Patch::is_derived(*id) {
+                    return false;
+                }
+                let mut from = self.links.iter().filter(|l| l.to.0 == *id).map(|l| l.from);
+                let mut fed = false;
+                let all = from.all(|f| match f {
+                    Source::Stage(f, _) => {
+                        fed = set.contains(&f);
+                        fed
+                    }
+                    Source::Span => false,
+                });
+                all && fed
+            });
+            match next {
+                Some(id) => set.push(id),
+                None => return set,
+            }
+        }
+    }
+
+    pub fn split_off(&mut self, ids: &[u64]) -> Patch {
+        let mut out = Patch { next: self.next, ..Default::default() };
+        let mine = |id: u64| ids.contains(&id);
+        out.stages = self.stages.extract_if(.., |s| mine(s.id)).collect();
+        self.links.retain(|l| {
+            let to = mine(l.to.0);
+            let from_elsewhere = matches!(l.from, Source::Stage(f, _) if !mine(f));
+            if to {
+                // The span feeds the chain's clock, and that wire goes with
+                // it: what the other half cannot give it is a wire from one
+                // of its own stages.
+                if !from_elsewhere {
+                    out.links.push(l.clone());
+                }
+                return false;
+            }
+            !matches!(l.from, Source::Stage(f, _) if mine(f))
+        });
+        out
+    }
+
     /// Feed an input port. An input takes one producer, so this replaces
     /// whatever was there, which is also what the graph builder does.
     pub fn connect(&mut self, from: Source, to: (u64, usize)) {

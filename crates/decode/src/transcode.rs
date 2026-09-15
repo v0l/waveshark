@@ -172,6 +172,35 @@ impl Write for Sink {
 /// The crate's own transcoder cannot do this one: MPEG audio takes exactly
 /// 1152 samples a frame and a decoder hands over whatever the input was cut
 /// into, so the sound goes through a FIFO on the way to the encoder.
+/// What the multiplex is called and how it is stuffed.
+///
+/// `muxrate` is the constant rate: the multiplex carries the same bits a
+/// second whatever the picture is doing, which is what the modulator is
+/// expecting to be handed. The rest is what a television set reads before it
+/// will offer the service at all: a network information table, which a scan
+/// on many sets will not finish without, and a name to put in the list
+/// rather than ffmpeg's own default.
+fn mpegts_options(muxrate: f64) -> HashMap<String, String> {
+    HashMap::from([
+        ("muxrate".to_string(), (muxrate as i64).to_string()),
+        ("mpegts_flags".to_string(), "nit".to_string()),
+    ])
+}
+
+/// The service's name, which is metadata rather than a muxer setting and so
+/// cannot go in with the rest: a set shows it in the list where a
+/// broadcaster's name would be, instead of ffmpeg's own default.
+fn name_the_service(ctx: *mut ffmpeg_rs_raw::ffmpeg_sys_the_third::AVFormatContext) {
+    use ffmpeg_rs_raw::ffmpeg_sys_the_third::av_dict_set;
+    unsafe {
+        for (key, value) in [("service_provider", "WaveShark"), ("service_name", "WaveShark TV")] {
+            let k = std::ffi::CString::new(key).unwrap();
+            let v = std::ffi::CString::new(value).unwrap();
+            av_dict_set(&mut (*ctx).metadata, k.as_ptr(), v.as_ptr(), 0);
+        }
+    }
+}
+
 unsafe fn pass(
     path: &str,
     muxrate: f64,
@@ -183,6 +212,7 @@ unsafe fn pass(
         let info = demuxer.probe_input()?;
         let mut muxer = Muxer::builder()
             .with_output_write(Sink { tx: tx.clone(), stop: stop.clone() }, Some("mpegts"))?
+            .with_custom_options(name_the_service)
             .build()?;
         let mut decoder = Decoder::new();
 
@@ -207,11 +237,12 @@ unsafe fn pass(
                     let (num, den) = mpeg2_framerate(s.fps);
                     (*ctx).framerate = AVRational { num, den };
                     (*ctx).time_base = AVRational { num: den, den: num };
+                    (*ctx).thread_count = crate::media::THREADS as i32;
                 })
                 .open(None)?;
             let stream = muxer.add_stream_encoder(&encoder)?;
             encoder = encoder.with_stream_index((*stream).index);
-            decoder.setup_decoder(s, None)?;
+            decoder.setup_decoder(s, Some(crate::media::threads()))?;
             picture = Some((s.index as i32, encoder, Scaler::new(), w as u16, h as u16, 0i64));
         }
 
@@ -247,7 +278,7 @@ unsafe fn pass(
         // Constant rate, stuffed by the muxer: the multiplex carries the
         // same bits a second whatever the picture is doing, which is what
         // the modulator is expecting to be handed.
-        muxer.open(Some(HashMap::from([("muxrate".to_string(), (muxrate as i64).to_string())])))?;
+        muxer.open(Some(mpegts_options(muxrate)))?;
 
         loop {
             let (pkt, stream) = demuxer.get_packet()?;
@@ -324,6 +355,7 @@ unsafe fn bars(
     unsafe {
         let mut muxer = Muxer::builder()
             .with_output_write(Sink { tx: tx.clone(), stop: stop.clone() }, Some("mpegts"))?
+            .with_custom_options(name_the_service)
             .build()?;
         let mut video = Encoder::new(AVCodecID::MPEG2VIDEO)?
             .with_bitrate(((muxrate * (1.0 - OVERHEAD)) as i64 - SOUND_BITS).max(500_000))
@@ -333,6 +365,7 @@ unsafe fn bars(
             .with_options(|ctx| {
                 (*ctx).framerate = AVRational { num: CARD_FPS, den: 1 };
                 (*ctx).time_base = AVRational { num: 1, den: CARD_FPS };
+                (*ctx).thread_count = crate::media::THREADS as i32;
             })
             .open(None)?;
         let stream = muxer.add_stream_encoder(&video)?;
@@ -351,7 +384,7 @@ unsafe fn bars(
             n => n as usize,
         };
 
-        muxer.open(Some(HashMap::from([("muxrate".to_string(), (muxrate as i64).to_string())])))?;
+        muxer.open(Some(mpegts_options(muxrate)))?;
 
         let mut fifo = AudioFifo::new(AVSampleFormat::S16, CHANNELS as u16)?;
         let (mut frame_at, mut sample_at, mut sent) = (0i64, 0i64, 0i64);
@@ -527,4 +560,46 @@ pub fn is_transport_stream(head: &[u8]) -> bool {
         && head[0] == 0x47
         && head[packet] == 0x47
         && head[2 * packet] == 0x47
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A television set reads the tables before it reads the picture.
+    ///
+    /// The programme association and map tables are what carry the service;
+    /// the service description gives it a name in the list and the network
+    /// information is what a scan on many sets waits for before it will say
+    /// it found anything. ffmpeg emits the first three by default and the
+    /// last only when asked.
+    #[test]
+    fn the_multiplex_carries_the_tables_a_television_scans_for() {
+        use std::io::Read;
+        let mut ts = ToTs::bars(4_000_000.0);
+        let mut seen = std::collections::HashSet::new();
+        let mut packets = 0usize;
+        let mut buf = vec![0u8; crate::mpegts::PACKET * 64];
+        let mut named = false;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < until && packets < 20_000 {
+            let n = ts.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            named |= buf[..n].windows(12).any(|w| w == b"WaveShark TV");
+            for p in buf[..n].chunks_exact(crate::mpegts::PACKET) {
+                if p[0] != 0x47 {
+                    continue;
+                }
+                packets += 1;
+                seen.insert(u16::from_be_bytes([p[1] & 0x1f, p[2]]));
+            }
+        }
+        assert!(packets > 1000, "only {packets} packets came out");
+        for (pid, what) in [(0x00u16, "PAT"), (0x10, "NIT"), (0x11, "SDT")] {
+            assert!(seen.contains(&pid), "no {what} in {packets} packets");
+        }
+        assert!(named, "the service is not named in the description table");
+    }
 }

@@ -97,7 +97,7 @@ impl App {
                             // colour. Cyan is what the radio heard, and a
                             // band plan is not heard: it is looked up from
                             // the number above it.
-                            theme::Line::new().legend(bands::name_at(self.center)).show(ui);
+                            theme::Line::new().legend(&bands::where_at(self.center)).show(ui);
                         });
                     });
 

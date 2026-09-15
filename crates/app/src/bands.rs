@@ -466,6 +466,25 @@ pub const AMERICAS: &[Band] = &[
     },
     Band { lo: 28.0e6, hi: 29.7e6, name: "10 m", demod: Demod::Nfm, color: AMATEUR, raster: None },
     Band { lo: 50.0e6, hi: 54.0e6, name: "6 m", demod: Demod::Nfm, color: AMATEUR, raster: None },
+    // Television channels 2 to 6, either side of the FM band: almost nobody
+    // broadcasts there since the digital switch, and the space is full of
+    // wireless microphones and translators instead.
+    Band {
+        lo: 54.0e6,
+        hi: 72.0e6,
+        name: "VHF TV low",
+        demod: Demod::Nfm,
+        color: BROADCAST,
+        raster: None,
+    },
+    Band {
+        lo: 76.0e6,
+        hi: 88.0e6,
+        name: "VHF TV 5-6",
+        demod: Demod::Nfm,
+        color: BROADCAST,
+        raster: None,
+    },
     // The American FM raster is the odd tenths, 88.1 upward, so a plan
     // aligned to 100 kHz would snap every station onto a guard channel.
     Band {
@@ -1019,6 +1038,396 @@ pub const ASIA_PACIFIC: &[Band] = &[
     },
 ];
 
+/// A service's own channel numbers, which is what an operator says out loud.
+///
+/// Nobody asks for 474 MHz or 446.09375: they ask for channel 21 and channel
+/// 8. The band table says what a frequency is for; this says what it is
+/// called, which is the number printed on the transmitter list, the radio's
+/// display and the licence.
+pub struct Numbering {
+    /// Where the numbering applies. Narrower than the band where a band
+    /// holds more than one plan.
+    pub lo: f64,
+    pub hi: f64,
+    /// What a channel is called, with the number after it: "ch" gives
+    /// "ch 21", "block" gives "block 12B".
+    pub word: &'static str,
+    pub what: Numbers,
+    /// The width one channel occupies, for a caller that wants to tune to
+    /// the whole of it rather than to its centre.
+    pub width: f64,
+}
+
+/// How the numbers run.
+pub enum Numbers {
+    /// An even series: channel `first` sits at `at`, and each one after it a
+    /// `step` further up.
+    Steps { first: i32, at: f64, step: f64, count: i32 },
+    /// Numbered individually, because the series has holes in it or the
+    /// names are not numbers at all: the citizens' band skips the radio
+    /// control frequencies, and a DAB block is called 12B.
+    Named(&'static [(&'static str, f64)]),
+}
+
+impl Numbering {
+    /// What the channel at `hz` is called, if it is close enough to one to
+    /// be that one rather than the gap beside it.
+    pub fn at(&self, hz: f64) -> Option<String> {
+        if hz < self.lo || hz >= self.hi {
+            return None;
+        }
+        // A quarter of the width: a receiver a little off a channel is
+        // still on it, and one half a channel away is between two and is
+        // neither.
+        let near = self.width / 4.0;
+        match &self.what {
+            Numbers::Steps { first, at, step, count } => {
+                let n = ((hz - at) / step).round();
+                let i = n as i32;
+                if i < 0 || i >= *count || (hz - (at + n * step)).abs() > near {
+                    return None;
+                }
+                Some(format!("{} {}", self.word, first + i))
+            }
+            Numbers::Named(list) => list
+                .iter()
+                .find(|(_, f)| (hz - f).abs() <= near)
+                .map(|(name, _)| format!("{} {name}", self.word)),
+        }
+    }
+
+    /// The centre of a named channel, for tuning to one by name.
+    pub fn hz_of(&self, name: &str) -> Option<f64> {
+        match &self.what {
+            Numbers::Steps { first, at, step, count } => {
+                let n: i32 = name.trim().parse().ok()?;
+                let i = n - first;
+                (i >= 0 && i < *count).then(|| at + i as f64 * step)
+            }
+            Numbers::Named(list) => {
+                list.iter().find(|(n, _)| n.eq_ignore_ascii_case(name.trim())).map(|(_, f)| *f)
+            }
+        }
+    }
+}
+
+/// The UHF television channels, which are the same numbers everywhere they
+/// are 8 MHz wide: channel 21 is centred on 474 MHz and each one after it is
+/// 8 MHz up. Ireland's transmitter list is written in these, and so is
+/// everybody else's in Region 1.
+const UHF_TV_8: Numbering = Numbering {
+    lo: 470.0e6,
+    hi: 694.0e6,
+    word: "ch",
+    // 21 to 48. Above that was cleared for mobile: 49 to 60 were in the
+    // 2019 lists and 61 to 69 before that.
+    what: Numbers::Steps { first: 21, at: 474.0e6, step: 8.0e6, count: 28 },
+    width: 8.0e6,
+};
+
+/// Band III as DAB divides it: not an even series, because the blocks are
+/// grouped four or six to a television channel with a gap between groups.
+const DAB_BLOCKS: Numbering = Numbering {
+    lo: 174.0e6,
+    hi: 240.0e6,
+    word: "block",
+    what: Numbers::Named(&[
+        ("5A", 174.928e6),
+        ("5B", 176.640e6),
+        ("5C", 178.352e6),
+        ("5D", 180.064e6),
+        ("6A", 181.936e6),
+        ("6B", 183.648e6),
+        ("6C", 185.360e6),
+        ("6D", 187.072e6),
+        ("7A", 188.928e6),
+        ("7B", 190.640e6),
+        ("7C", 192.352e6),
+        ("7D", 194.064e6),
+        ("8A", 195.936e6),
+        ("8B", 197.648e6),
+        ("8C", 199.360e6),
+        ("8D", 201.072e6),
+        ("9A", 202.928e6),
+        ("9B", 204.640e6),
+        ("9C", 206.352e6),
+        ("9D", 208.064e6),
+        ("10A", 209.936e6),
+        ("10B", 211.648e6),
+        ("10C", 213.360e6),
+        ("10D", 215.072e6),
+        ("11A", 216.928e6),
+        ("11B", 218.640e6),
+        ("11C", 220.352e6),
+        ("11D", 222.064e6),
+        ("12A", 223.936e6),
+        ("12B", 225.648e6),
+        ("12C", 227.360e6),
+        ("12D", 229.072e6),
+        ("13A", 230.784e6),
+        ("13B", 232.496e6),
+        ("13C", 234.208e6),
+        ("13D", 235.776e6),
+        ("13E", 237.488e6),
+        ("13F", 239.200e6),
+    ]),
+    width: 1.712e6,
+};
+
+/// PMR446, all sixteen: the first eight are the original analogue channels
+/// and the rest were added when the band went to 12.5 kHz throughout.
+const PMR446: Numbering = Numbering {
+    lo: 446.0e6,
+    hi: 446.2e6,
+    word: "ch",
+    what: Numbers::Steps { first: 1, at: 446.00625e6, step: 12_500.0, count: 16 },
+    width: 12_500.0,
+};
+
+/// The citizens' band's forty channels, which are a 10 kHz grid with five
+/// holes in it: 26.995, 27.045, 27.095, 27.145 and 27.195 are radio control
+/// and were never CB channels, so the numbers step over them.
+const CB_40: Numbering = Numbering {
+    lo: 26.9e6,
+    hi: 27.5e6,
+    word: "ch",
+    what: Numbers::Named(&[
+        ("1", 26.965e6),
+        ("2", 26.975e6),
+        ("3", 26.985e6),
+        ("4", 27.005e6),
+        ("5", 27.015e6),
+        ("6", 27.025e6),
+        ("7", 27.035e6),
+        ("8", 27.055e6),
+        ("9", 27.065e6),
+        ("10", 27.075e6),
+        ("11", 27.085e6),
+        ("12", 27.105e6),
+        ("13", 27.115e6),
+        ("14", 27.125e6),
+        ("15", 27.135e6),
+        ("16", 27.155e6),
+        ("17", 27.165e6),
+        ("18", 27.175e6),
+        ("19", 27.185e6),
+        ("20", 27.205e6),
+        ("21", 27.215e6),
+        ("22", 27.225e6),
+        ("23", 27.255e6),
+        ("24", 27.235e6),
+        ("25", 27.245e6),
+        ("26", 27.265e6),
+        ("27", 27.275e6),
+        ("28", 27.285e6),
+        ("29", 27.295e6),
+        ("30", 27.305e6),
+        ("31", 27.315e6),
+        ("32", 27.325e6),
+        ("33", 27.335e6),
+        ("34", 27.345e6),
+        ("35", 27.355e6),
+        ("36", 27.365e6),
+        ("37", 27.375e6),
+        ("38", 27.385e6),
+        ("39", 27.395e6),
+        ("40", 27.405e6),
+    ]),
+    width: 10_000.0,
+};
+
+/// Marine VHF as a ship transmits it. The coast station's half of a duplex
+/// pair is 4.6 MHz up and is not named here: a receiver hearing 160.8 MHz is
+/// hearing the shore side of channel 16's pair, and calling that "channel
+/// 16" would be wrong on the half of the band that is simplex.
+const MARINE_SHIP: Numbering = Numbering {
+    lo: 156.0e6,
+    hi: 157.5e6,
+    word: "ch",
+    what: Numbers::Named(&[
+        ("60", 156.025e6),
+        ("1", 156.050e6),
+        ("61", 156.075e6),
+        ("2", 156.100e6),
+        ("62", 156.125e6),
+        ("3", 156.150e6),
+        ("63", 156.175e6),
+        ("4", 156.200e6),
+        ("64", 156.225e6),
+        ("5", 156.250e6),
+        ("65", 156.275e6),
+        ("6", 156.300e6),
+        ("66", 156.325e6),
+        ("7", 156.350e6),
+        ("67", 156.375e6),
+        ("8", 156.400e6),
+        ("68", 156.425e6),
+        ("9", 156.450e6),
+        ("69", 156.475e6),
+        ("10", 156.500e6),
+        ("70", 156.525e6),
+        ("11", 156.550e6),
+        ("71", 156.575e6),
+        ("12", 156.600e6),
+        ("72", 156.625e6),
+        ("13", 156.650e6),
+        ("73", 156.675e6),
+        ("14", 156.700e6),
+        ("74", 156.725e6),
+        ("15", 156.750e6),
+        ("75", 156.775e6),
+        ("16", 156.800e6),
+        ("76", 156.825e6),
+        ("17", 156.850e6),
+        ("77", 156.875e6),
+        ("18", 156.900e6),
+        ("19", 156.950e6),
+        ("20", 157.000e6),
+        ("21", 157.050e6),
+        ("22", 157.100e6),
+        ("23", 157.150e6),
+        ("24", 157.200e6),
+        ("25", 157.250e6),
+        ("26", 157.300e6),
+        ("27", 157.350e6),
+        ("28", 157.400e6),
+    ]),
+    width: 25_000.0,
+};
+
+/// The 433 MHz low power device channels, which a keyfob or a sensor names
+/// by number in its own documentation.
+const LPD433: Numbering = Numbering {
+    lo: 433.05e6,
+    hi: 434.8e6,
+    word: "ch",
+    what: Numbers::Steps { first: 1, at: 433.075e6, step: 25_000.0, count: 69 },
+    width: 25_000.0,
+};
+
+/// American television: channels 2 to 6 and 7 to 13 on VHF, each 6 MHz, with
+/// the FM broadcast band in the gap.
+const VHF_TV_LOW: Numbering = Numbering {
+    lo: 54.0e6,
+    hi: 72.0e6,
+    word: "ch",
+    what: Numbers::Named(&[("2", 57.0e6), ("3", 63.0e6), ("4", 69.0e6)]),
+    width: 6.0e6,
+};
+
+const VHF_TV_MID: Numbering = Numbering {
+    lo: 76.0e6,
+    hi: 88.0e6,
+    word: "ch",
+    what: Numbers::Named(&[("5", 79.0e6), ("6", 85.0e6)]),
+    width: 6.0e6,
+};
+
+const VHF_TV_HIGH: Numbering = Numbering {
+    lo: 174.0e6,
+    hi: 216.0e6,
+    word: "ch",
+    what: Numbers::Steps { first: 7, at: 177.0e6, step: 6.0e6, count: 7 },
+    width: 6.0e6,
+};
+
+/// American UHF television: channel 14 at 473 MHz, 6 MHz apart, up to 36
+/// since the 600 MHz repack.
+const UHF_TV_6: Numbering = Numbering {
+    lo: 470.0e6,
+    hi: 608.0e6,
+    word: "ch",
+    what: Numbers::Steps { first: 14, at: 473.0e6, step: 6.0e6, count: 23 },
+    width: 6.0e6,
+};
+
+/// The family radio and general mobile channels, which share numbers: 1 to 7
+/// are shared, 8 to 14 are FRS only and 15 to 22 are the GMRS high power
+/// pairs' downlink.
+const FRS_GMRS: Numbering = Numbering {
+    lo: 462.0e6,
+    hi: 468.0e6,
+    word: "ch",
+    what: Numbers::Named(&[
+        ("1", 462.5625e6),
+        ("2", 462.5875e6),
+        ("3", 462.6125e6),
+        ("4", 462.6375e6),
+        ("5", 462.6625e6),
+        ("6", 462.6875e6),
+        ("7", 462.7125e6),
+        ("8", 467.5625e6),
+        ("9", 467.5875e6),
+        ("10", 467.6125e6),
+        ("11", 467.6375e6),
+        ("12", 467.6625e6),
+        ("13", 467.6875e6),
+        ("14", 467.7125e6),
+        ("15", 462.5500e6),
+        ("16", 462.5750e6),
+        ("17", 462.6000e6),
+        ("18", 462.6250e6),
+        ("19", 462.6500e6),
+        ("20", 462.6750e6),
+        ("21", 462.7000e6),
+        ("22", 462.7250e6),
+    ]),
+    width: 12_500.0,
+};
+
+/// Japanese television: channel 13 at 473 1/7 MHz, 6 MHz apart, which is the
+/// same offset the standard's own sample rate comes from.
+const UHF_TV_JP: Numbering = Numbering {
+    lo: 470.0e6,
+    hi: 710.0e6,
+    word: "ch",
+    what: Numbers::Steps { first: 13, at: 473_142_857.0, step: 6.0e6, count: 40 },
+    width: 6.0e6,
+};
+
+const EUROPE_CHANNELS: &[Numbering] = &[CB_40, MARINE_SHIP, DAB_BLOCKS, LPD433, PMR446, UHF_TV_8];
+
+const AMERICAS_CHANNELS: &[Numbering] =
+    &[CB_40, MARINE_SHIP, VHF_TV_LOW, VHF_TV_MID, VHF_TV_HIGH, LPD433, FRS_GMRS, UHF_TV_6];
+
+const ASIA_PACIFIC_CHANNELS: &[Numbering] = &[CB_40, MARINE_SHIP, LPD433, UHF_TV_JP];
+
+impl Plan {
+    pub const fn channels(self) -> &'static [Numbering] {
+        match self {
+            Plan::Europe => EUROPE_CHANNELS,
+            Plan::Americas => AMERICAS_CHANNELS,
+            Plan::AsiaPacific => ASIA_PACIFIC_CHANNELS,
+        }
+    }
+}
+
+/// What the frequency is called where its service numbers its channels:
+/// "ch 21", "block 12B", or nothing where it has no number or sits between
+/// two of them.
+pub fn channel_at(hz: f64) -> Option<String> {
+    channel_at_in(plan(), hz)
+}
+
+/// The band and the channel together, which is how a person says where they
+/// are: "UHF TV ch 21", or just the band where the service numbers nothing.
+pub fn where_at(hz: f64) -> String {
+    match channel_at(hz) {
+        Some(ch) => format!("{} {ch}", name_at(hz)),
+        None => name_at(hz).to_string(),
+    }
+}
+
+pub fn channel_at_in(plan: Plan, hz: f64) -> Option<String> {
+    plan.channels().iter().find_map(|n| n.at(hz))
+}
+
+/// The centre of a channel named in this plan, for tuning to one by name.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn channel_hz_in(plan: Plan, lo: f64, hi: f64, name: &str) -> Option<f64> {
+    plan.channels().iter().filter(|n| n.hi > lo && n.lo < hi).find_map(|n| n.hz_of(name))
+}
+
 /// The narrowest band containing `hz` in a given plan, so ISM 433 wins over
 /// the 70 cm band it sits inside.
 pub fn at_in(plan: Plan, hz: f64) -> Option<&'static Band> {
@@ -1074,6 +1483,99 @@ pub fn in_span_of(plan: Plan, lo: f64, hi: f64) -> impl Iterator<Item = &'static
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The numbers a person says out loud, against the frequencies they mean.
+    ///
+    /// The television channels are what a transmitter list is written in:
+    /// 2RN's network is published as channel numbers, and Saorview's
+    /// multiplexes are on 21 up. The rest are the numbers printed on the
+    /// radios themselves.
+    #[test]
+    fn a_channel_is_called_what_its_service_calls_it() {
+        use Plan::*;
+        let cases: &[(Plan, f64, &str)] = &[
+            // UHF television, 8 MHz: channel 21 is 474 MHz, and each one
+            // after it 8 MHz up.
+            (Europe, 474.0e6, "ch 21"),
+            (Europe, 482.0e6, "ch 22"),
+            (Europe, 690.0e6, "ch 48"),
+            // DAB, which is blocks rather than channels.
+            (Europe, 225.648e6, "block 12B"),
+            (Europe, 174.928e6, "block 5A"),
+            (Europe, 239.200e6, "block 13F"),
+            // The two that are offset from a round grid.
+            (Europe, 446.00625e6, "ch 1"),
+            (Europe, 446.09375e6, "ch 8"),
+            (Europe, 446.19375e6, "ch 16"),
+            (Europe, 156.800e6, "ch 16"),
+            (Europe, 156.525e6, "ch 70"),
+            // The citizens' band steps over the radio control frequencies,
+            // so channel 23 is above 24 and 25.
+            (Europe, 27.005e6, "ch 4"),
+            (Europe, 27.255e6, "ch 23"),
+            (Europe, 27.235e6, "ch 24"),
+            (Europe, 433.075e6, "ch 1"),
+            // American television, 6 MHz, and the handheld channels.
+            (Americas, 473.0e6, "ch 14"),
+            (Americas, 605.0e6, "ch 36"),
+            (Americas, 57.0e6, "ch 2"),
+            (Americas, 213.0e6, "ch 13"),
+            (Americas, 462.5625e6, "ch 1"),
+            (Americas, 467.7125e6, "ch 14"),
+            // Japan's are offset by a seventh of a megahertz, which is where
+            // the standard's own sample rate comes from.
+            (AsiaPacific, 473_142_857.0, "ch 13"),
+            (AsiaPacific, 503_142_857.0, "ch 18"),
+        ];
+        for (plan, hz, want) in cases {
+            assert_eq!(
+                channel_at_in(*plan, *hz).as_deref(),
+                Some(*want),
+                "{:.6} MHz in {}",
+                hz / 1e6,
+                plan.id()
+            );
+        }
+    }
+
+    /// Between two channels is not either of them: a signal 2 MHz off a
+    /// television channel is not that channel, and saying so would put the
+    /// wrong number beside every off-air reading.
+    #[test]
+    fn a_frequency_between_channels_is_not_one() {
+        assert_eq!(channel_at_in(Plan::Europe, 478.0e6).as_deref(), None);
+        assert_eq!(channel_at_in(Plan::Europe, 446.0e6).as_deref(), None);
+        assert_eq!(channel_at_in(Plan::Europe, 26.995e6).as_deref(), None, "radio control");
+        assert_eq!(channel_at_in(Plan::Europe, 100.0e6).as_deref(), None);
+    }
+
+    /// A channel numbering sits inside the band it belongs to: the two
+    /// tables are written apart and would otherwise drift.
+    #[test]
+    fn every_numbering_is_inside_a_band() {
+        for plan in Plan::ALL {
+            for n in plan.channels() {
+                let middle = (n.lo + n.hi) / 2.0;
+                assert!(
+                    at_in(plan, middle).is_some(),
+                    "{} {:.3} MHz is numbered and unallocated",
+                    plan.id(),
+                    middle / 1e6
+                );
+            }
+        }
+    }
+
+    /// Naming a channel and asking for it back are the same table read both
+    /// ways.
+    #[test]
+    fn a_channel_named_is_a_channel_found() {
+        let tv = channel_hz_in(Plan::Europe, 470.0e6, 694.0e6, "42").expect("channel 42");
+        assert_eq!(tv, 642.0e6);
+        assert_eq!(channel_at_in(Plan::Europe, tv).as_deref(), Some("ch 42"));
+        let dab = channel_hz_in(Plan::Europe, 174.0e6, 240.0e6, "12B").expect("block 12B");
+        assert_eq!(dab, 225.648e6);
+    }
 
     #[test]
     fn every_table_is_sane() {
@@ -1159,9 +1661,12 @@ mod tests {
         assert_eq!(name_at_in(Plan::Europe, 914.0e6), "GSM 900 up");
         assert_eq!(name_at_in(Plan::AsiaPacific, 923.0e6), "ISM 920");
         assert_eq!(name_at_in(Plan::Europe, 923.0e6), "GSM-R down");
-        // And 80 MHz is broadcast radio in Japan and nothing anywhere else.
+        // And 80 MHz is broadcast radio in Japan, television channel 5 in
+        // the Americas, and nothing in Europe.
         assert_eq!(name_at_in(Plan::AsiaPacific, 80.0e6), "FM broadcast (JP)");
-        assert_eq!(name_at_in(Plan::Americas, 80.0e6), "unallocated");
+        assert_eq!(name_at_in(Plan::Americas, 80.0e6), "VHF TV 5-6");
+        assert_eq!(channel_at_in(Plan::Americas, 79.0e6).as_deref(), Some("ch 5"));
+        assert_eq!(name_at_in(Plan::Europe, 80.0e6), "Band II low");
     }
 
     #[test]

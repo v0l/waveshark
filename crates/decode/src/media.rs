@@ -304,9 +304,16 @@ fn pick(
 /// time on this machine, which is no margin at all once the radio and the
 /// demodulator are on the same processor. Frame threading costs a picture or
 /// two of latency and nothing else.
-fn threads() -> std::collections::HashMap<String, String> {
-    std::collections::HashMap::from([("threads".into(), "auto".into())])
+///
+/// Four, not "auto": auto is a thread a core, which on a large machine is
+/// forty-odd threads for a picture that four keep up with, and a test run
+/// with several receivers in it then has hundreds of them.
+pub fn threads() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("threads".into(), THREADS.to_string())])
 }
+
+/// How many threads a picture is worth.
+pub const THREADS: usize = 4;
 
 /// When a frame is shown or heard, in seconds on the stream's own clock.
 fn stamp(frame: &ffmpeg_rs_raw::AvFrameRef) -> Option<f64> {
