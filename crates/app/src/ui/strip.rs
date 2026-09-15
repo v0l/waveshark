@@ -417,15 +417,9 @@ impl Strip<'_> {
         });
 
         match tx.source {
-            TxSource::Agent => {
-                ui.horizontal(|ui| {
-                    ui.add_space(28.0);
-                    theme::Line::new()
-                        .value("the agent keys this channel to answer")
-                        .size(11.0)
-                        .show(ui);
-                });
-            }
+            // Nothing: the panel where the key would be says what the agent
+            // is doing, which is the same thing said better.
+            TxSource::Agent => {}
             _ if digital => {
                 let (node, path) = source.unzip();
                 let path = path.unwrap_or_default();
