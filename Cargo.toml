@@ -135,6 +135,23 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# The interface crate is fifty thousand lines in one compilation unit, and
+# one unit is one thread: a one line change to a pane took over a minute of
+# which most was a single core finishing the binary. Sixteen units cost a
+# little speed in code that is not on the signal path (the DSP crates keep
+# their single unit) and give the change back in build time.
+[profile.release.package.app]
+codegen-units = 16
+
+# A profile for running the receiver while working on it: no link time
+# optimisation and a unit per thread everywhere, which is another ten
+# seconds off a rebuild at a few per cent of throughput. `cargo run
+# --profile quick`. Releases are built with `--release`.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 # Debug builds still need usable DSP throughput.
 [profile.dev.package."*"]
 opt-level = 3

@@ -317,6 +317,8 @@ pub struct TopoNode {
     /// Where the time inside the node goes, for a node that does more than
     /// one thing per call and can say which. Empty for most.
     pub phases: Vec<(String, crate::cost::Cost)>,
+    /// What the node says it has been doing, as caption and value.
+    pub readings: Vec<(String, String)>,
 }
 
 /// The built graph's shape, in execution order.
@@ -745,6 +747,7 @@ impl Graph {
                 params: e.node.params(),
                 cost: e.ring.cost(),
                 phases: e.node.phases(),
+                readings: e.node.readings(),
             });
         }
         Topology {
@@ -1002,6 +1005,17 @@ impl Graph {
     /// Fill the input buffer from IQ and run.
     pub fn feed_iq(&mut self, samples: &[common::C32]) -> Result<&[Emitted]> {
         let b = self.bufs[INPUT_SLOT].iq_mut();
+        b.clear();
+        b.extend_from_slice(samples);
+        self.run()
+    }
+
+    /// Fill the input buffer with real samples and run.
+    ///
+    /// For a graph whose clock is a length of time rather than a signal: a
+    /// transmit chain is handed a block of nothing and fills it.
+    pub fn feed_real(&mut self, samples: &[f32]) -> Result<&[Emitted]> {
+        let b = self.bufs[INPUT_SLOT].real_mut();
         b.clear();
         b.extend_from_slice(samples);
         self.run()

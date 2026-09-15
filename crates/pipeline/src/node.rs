@@ -95,6 +95,15 @@ macro_rules! node_options {
             Vec::new()
         }
 
+        /// What the node has to say about what it has been doing, as
+        /// caption and value: transfers a transmitter sent as silence,
+        /// packets a source had to stuff. Not settings, which are
+        /// [`Node::params`], and not a measurement of time, which the graph
+        /// takes itself. Read by whatever draws the chain.
+        fn readings(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+
         /// Whether this node ends the stream rather than passing one on.
         ///
         /// A spectrum display, a recorder and a channel bank all consume
@@ -191,6 +200,9 @@ macro_rules! forward_node_options {
         }
         fn phases(&self) -> Vec<(String, crate::cost::Cost)> {
             Simple::phases(self)
+        }
+        fn readings(&self) -> Vec<(String, String)> {
+            Simple::readings(self)
         }
         fn is_sink(&self) -> bool {
             Simple::is_sink(self)

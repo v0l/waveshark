@@ -22,16 +22,21 @@ fn main() {
 
     // 2k QPSK 1/2, which locks in fewer frames than the 8k a broadcaster
     // sends and so says what happened sooner.
-    let params = Params {
-        mode: Mode::M2k,
-        guard: Guard::G1_32,
-        constellation: Constellation::Qpsk,
-        hierarchy: Hierarchy::None,
-        code_rate_hp: CodeRate::R1_2,
-        code_rate_lp: CodeRate::R1_2,
-        cell_id: None,
+    let params = match std::env::var("BROADCAST").is_ok() {
+        // What a broadcaster sends, which is what the stage starts at.
+        true => Params::typical(),
+        false => Params {
+            mode: Mode::M2k,
+            guard: Guard::G1_32,
+            constellation: Constellation::Qpsk,
+            hierarchy: Hierarchy::None,
+            code_rate_hp: CodeRate::R1_2,
+            code_rate_lp: CodeRate::R1_2,
+            cell_id: None,
+        },
     };
-    let radio_hz = 20_000_000.0;
+    let radio_hz: f64 =
+        std::env::var("RADIO_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000.0);
     let block = 65_536;
 
     let mut source = TsSourceNode::new(&path, params.bitrate());
@@ -55,18 +60,29 @@ fn main() {
 
     let mut air = Vec::new();
     let mut sent = 0usize;
+    let (mut in_source, mut in_mod) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     for _ in 0..((seconds * radio_hz / block as f64).ceil() as usize) {
         let mut ts = Payload::empty_of(PortKind::Bytes);
         let mut iq = Payload::empty_of(PortKind::Iq);
         let ins = [clock];
         let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+        let t = std::time::Instant::now();
         Simple::process(&mut source, &Payload::Real(vec![0.0; block]), &mut ts, &mut ctx)
             .expect("the source runs");
+        in_source += t.elapsed();
         sent += ts.as_bytes().map(<[u8]>::len).unwrap_or(0);
+        let t = std::time::Instant::now();
         Simple::process(&mut modulator, &ts, &mut iq, &mut ctx).expect("the modulator runs");
+        in_mod += t.elapsed();
         air.extend_from_slice(iq.as_iq().unwrap_or(&[]));
     }
+    modulator.flush(&mut air);
+    println!(
+        "transmit: the source {:.2}x real time, the modulator {:.2}x",
+        seconds / in_source.as_secs_f64(),
+        seconds / in_mod.as_secs_f64()
+    );
     println!(
         "{:.2} s: {} packets out of the source, {} samples on the air",
         seconds,

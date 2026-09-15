@@ -62,6 +62,7 @@ mod tracks;
 /// reached.
 #[cfg_attr(not(feature = "stt"), allow(dead_code))]
 mod transcripts;
+mod transmit;
 mod ui;
 mod update;
 mod videobus;

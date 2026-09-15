@@ -774,15 +774,14 @@ impl Scope<'_> {
                 );
             }
         }
+        let here = bands::where_at(hz);
         let text = match (shift, raster) {
-            (true, Some(r)) => {
-                format!("{} {} snap {}", fmt_hz(hz), bands::name_at(hz), fmt_hz(r.step))
-            }
-            (true, None) => format!("{} {} no channel plan", fmt_hz(hz), bands::name_at(hz)),
+            (true, Some(r)) => format!("{} {here} snap {}", fmt_hz(hz), fmt_hz(r.step)),
+            (true, None) => format!("{} {here} no channel plan", fmt_hz(hz)),
             _ => match raster {
                 // Advertise the gesture only where it would do something.
-                Some(_) => format!("{} {} shift to snap", fmt_hz(hz), bands::name_at(hz)),
-                None => format!("{} {}", fmt_hz(hz), bands::name_at(hz)),
+                Some(_) => format!("{} {here} shift to snap", fmt_hz(hz)),
+                None => format!("{} {here}", fmt_hz(hz)),
             },
         };
         let g = p.layout_no_wrap(

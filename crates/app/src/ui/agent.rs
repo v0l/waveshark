@@ -1172,6 +1172,13 @@ impl App {
                         .collect::<Vec<_>>(),
                     "inner_graphs": n.inner_count,
                     "cost_us_per_block": n.cost.mean_us,
+                    // What the stage has been doing, as against what it is
+                    // set to: seconds on air, packets lost, gaps.
+                    "readings": n
+                        .readings
+                        .iter()
+                        .map(|(name, value)| json!({ "name": name, "value": value }))
+                        .collect::<Vec<_>>(),
                     "params": n
                         .params
                         .iter()

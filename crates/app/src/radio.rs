@@ -779,6 +779,13 @@ pub fn tx_mode_for(mode: &ChanMode) -> Option<TxMode> {
 }
 
 impl TxMode {
+    /// Whether what it transmits is data rather than audio, which decides
+    /// what its chain is made of and whether it has a meter to show before
+    /// the key goes down.
+    pub fn is_digital(self) -> bool {
+        matches!(self, Self::Digital(_))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Nfm => "NFM",
@@ -2134,6 +2141,14 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // it twice.
             let silent = self.stream.as_ref().is_some_and(|s| s.silent());
             self.rx.set_tx_monitor(self.rx.keyed() && silent);
+            // A radio unplugged mid-over ends the over itself, and the key
+            // has to come up with it: a lit key over a transmitter that
+            // stopped transmitting is worse than no key at all.
+            if self.rx.tx_lost() {
+                *self.status.error.lock() =
+                    Some("the radio stopped taking samples: the transmission ended".into());
+                self.unkey();
+            }
 
             if let Flow::Stop = self.process(&buf.samples) {
                 return Ok(());
@@ -2463,7 +2478,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
     /// Take the radio back off the transmit stage.
     fn unkey(&mut self) {
-        if !self.rx.keyed() {
+        if !self.rx.keyed() && self.status.keyed.load(Ordering::Relaxed) == 0 {
             return;
         }
         tracing::info!("unkeyed");
@@ -3203,7 +3218,12 @@ fn fronts_here(
 /// There is one graph and it holds everything, so this is no longer a choice
 /// between chains: what is drawn is what runs.
 fn publish_chain(status: &Status, rx: &crate::chain::Receiver) {
-    status.set_chain(Some(rx.topology()), rx.latency_ms(0));
+    // Both chains as one: the receiver's, and the transmitter's from the
+    // thread that runs it, with its ids moved out of the way.
+    status.set_chain(
+        Some(crate::transmit::merged(&rx.topology(), rx.tx_topology().as_ref())),
+        rx.latency_ms(0),
+    );
 }
 
 /// A plan that only scans, for tests about the shape of the receiver.

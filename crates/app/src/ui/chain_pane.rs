@@ -51,6 +51,10 @@ impl Chain<'_> {
         if self.st.sel.is_some() {
             Panel::right("chain-inspector")
                 .default_size(260.0)
+                // Capped, because the panel takes its width from what is in
+                // it: one stage with a long file name in a box otherwise
+                // pushes the chain itself off the screen.
+                .max_size(340.0)
                 .frame(
                     egui::Frame::NONE
                         .fill(theme::PANEL)

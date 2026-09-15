@@ -11,9 +11,18 @@ the code is in the commit log.
 
 ### Added
 
+- A transmitted multiplex carries a network table and a service name, so a television finds it.
+
+- Channel numbers beside the band: UHF TV, DAB blocks, PMR446, marine, CB,
+  LPD433, FRS and GMRS.
+
+- Stages say what they have been doing in the chain view: seconds on air, gaps,
+  what is being sent.
+
 - Transmit a DVB-T multiplex from a transport stream file.
 - Transmit any file ffmpeg can open: it is re-encoded as a multiplex.
-- Choose what to transmit with a file dialog, on the strip or in the chain view.
+- Choose what to transmit with a file dialog, on the strip or in the chain view,
+  and clear it again to go back to the test card.
 - Colour bars and a tone go on the air when no file is chosen.
 - SSTV pictures on the video pane: Martin 1 and 2, Scottie 1, 2 and DX, Robot
   36 and 72, on 144.500 or any chain with audio.
@@ -53,6 +62,18 @@ the code is in the commit log.
 
 ### Fixed
 
+- Watching your own transmission on a half duplex radio: the picture came and went.
+
+- Changing the modulation left the source sending the old rate, so packets were lost.
+
+- A scope dropped on the transmit chain drew nothing and said it was not connected.
+
+- Every choice on the modulator set its first option: picking 64-QAM sent QPSK.
+
+- A radio unplugged mid-transmission left the key lit and the chain running.
+
+- The transmitter built a multiplex even with nothing keyed.
+- A long file name made the channel strip and the chain inspector too wide.
 - A DVB-T channel on the strip built no decoder, so no picture ever came.
 - A DVB-T channel took the whole graph down over the packet log.
 - Restarting a source switched decoding back on, whatever the switch said.

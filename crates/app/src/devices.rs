@@ -335,6 +335,11 @@ pub fn spans_for(range: &std::ops::RangeInclusive<Sps>) -> Vec<(String, f64)> {
         2_400_000.0,
         4_000_000.0,
         8_000_000.0,
+        // The television rate: 64/7 megasamples, which is what a DVB-T
+        // multiplex is built at. A span on it is a transmission with no
+        // resampler in front of the radio and the fewest bytes an 8 MHz
+        // multiplex can be sent over USB in.
+        dsp::dvbt::RATE_HZ,
         10_000_000.0,
         12_500_000.0,
         16_000_000.0,
