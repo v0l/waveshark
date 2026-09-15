@@ -17,6 +17,8 @@ the code is in the commit log.
 
 - A voice picker: which model, where it runs, and at what precision.
 
+- Say again: send one of the agent's answers over the air a second time.
+
 - The agent says what it is doing: asking, making speech, or downloading a voice.
 
 - The agent channel shows the last over it heard and why it did not answer.

@@ -46,6 +46,8 @@ pub(super) enum Action {
     Ask(String),
     Clear,
     Interrupt,
+    /// Send an answer over the air again, by its place in the log.
+    SayAgain(usize),
     /// Open the settings that say which model this is.
     Settings,
 }
@@ -214,7 +216,8 @@ impl AgentView<'_> {
                     // agent, two ways in, and an operator needs to see what
                     // it has been telling people on the channel.
                     let now = std::time::Instant::now();
-                    for x in &self.air.log {
+                    let quiet = !self.air.state.busy();
+                    for (nth, x) in self.air.log.iter().enumerate() {
                         let ago = now.duration_since(x.at).as_secs();
                         theme::Line::new()
                             .legend("heard")
@@ -227,7 +230,34 @@ impl AgentView<'_> {
                         theme::Line::new().heard(x.heard.clone()).wrapped(ui);
                         match &x.said {
                             Ok(said) => {
-                                theme::Line::new().legend("said").size(11.0).show(ui);
+                                // "Say again" is the commonest thing anybody
+                                // says on a channel, and the answer is
+                                // already made: this sends the same over
+                                // rather than asking for another.
+                                ui.horizontal(|ui| {
+                                    theme::Line::new().legend("said").size(11.0).show(ui);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let can = quiet && x.can_repeat();
+                                            let b = egui::Button::new("SAY AGAIN").small();
+                                            if ui
+                                                .add_enabled(can, b)
+                                                .on_hover_text(
+                                                    "Send this answer over the air again, \
+                                                     the same words and the same voice",
+                                                )
+                                                .on_disabled_hover_text(match x.can_repeat() {
+                                                    true => "it is answering something else",
+                                                    false => "this one never went out",
+                                                })
+                                                .clicked()
+                                            {
+                                                act = Some(Action::SayAgain(nth));
+                                            }
+                                        },
+                                    );
+                                });
                                 theme::Line::new().words(said.clone()).wrapped(ui);
                             }
                             Err(e) => {

@@ -151,6 +151,21 @@ pub struct Exchange {
     pub at: Instant,
     pub heard: String,
     pub said: Result<String, String>,
+    /// The speech itself, at the queue's rate, so it can be sent again.
+    ///
+    /// "Say again" is the commonest thing anybody says on a radio channel,
+    /// and the model has nothing to add to it: the words are already decided
+    /// and remaking them costs the whole of a generation, which on a CPU is
+    /// the best part of a minute. Kept rather than regenerated, and kept as
+    /// samples rather than text so the second over is the same over.
+    spoke: Option<Arc<Vec<f32>>>,
+}
+
+impl Exchange {
+    /// Whether there is something to send again.
+    pub fn can_repeat(&self) -> bool {
+        self.spoke.as_ref().is_some_and(|s| !s.is_empty())
+    }
 }
 
 pub struct AgentChannel {
@@ -286,6 +301,27 @@ impl AgentChannel {
         )
     }
 
+    /// Send an answer again, exactly as it went out the first time.
+    ///
+    /// The words are already decided, so this neither asks the model nor
+    /// makes the speech again: it queues the samples and waits for the
+    /// channel the way the first over did. Refused while it is busy, because
+    /// two answers queued at once would be transmitted as one.
+    pub fn repeat(&mut self, nth: usize) -> bool {
+        if self.on.is_none() || self.state.busy() {
+            return false;
+        }
+        let Some(pcm) = self.log.get(nth).and_then(|x| x.spoke.clone()) else {
+            return false;
+        };
+        if pcm.is_empty() {
+            return false;
+        }
+        self.speaker.say(&pcm);
+        self.state = State::Holding;
+        true
+    }
+
     /// Something was said on the channel. Returns whether it was taken.
     pub fn heard(
         &mut self,
@@ -301,7 +337,7 @@ impl AgentChannel {
         // Said once per over rather than per frame: the same reading is
         // offered again every frame it stays in the transcript, and a note
         // that rewrote itself sixty times a second is the same note.
-        let mut pass = |a: &mut Self, why: Passed| {
+        let pass = |a: &mut Self, why: Passed| {
             if a.last.as_ref().map(|h| h.at) != Some(at) {
                 a.last = Some(Heard { at, text: text.to_string(), passed: Some(why) });
             }
@@ -378,17 +414,23 @@ impl AgentChannel {
             if !answer.history.is_empty() {
                 self.history = answer.history;
             }
-            match &answer.speech {
+            let spoke = match &answer.speech {
                 Some(s) if !s.samples.is_empty() => {
-                    self.speaker.say(&at_voice_rate(s));
+                    let pcm = Arc::new(at_voice_rate(s));
+                    self.speaker.say(&pcm);
                     self.state = State::Holding;
+                    Some(pcm)
                 }
-                _ => self.state = State::Listening,
-            }
+                _ => {
+                    self.state = State::Listening;
+                    None
+                }
+            };
             self.log.push(Exchange {
                 at: now,
                 heard: std::mem::take(&mut self.asked),
                 said: answer.said,
+                spoke,
             });
         }
         match self.state {
@@ -543,6 +585,50 @@ mod tests {
         // The same over read again, and a second question while it is busy.
         assert!(!a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
         assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), "shark again"));
+    }
+
+    /// An answer can be sent again without asking for another.
+    ///
+    /// "Say again" is the commonest thing anybody says on a channel, and the
+    /// words are already decided: remaking them costs a whole generation,
+    /// which on a CPU is the best part of a minute, and would come back
+    /// worded differently. The same samples go out again.
+    #[test]
+    fn an_answer_can_be_sent_again() {
+        let mut a = AgentChannel { on: Some(1), ..Default::default() };
+        // As `poll` files one: an answer that went out, and one that did not.
+        a.log.push(Exchange {
+            at: Instant::now(),
+            heard: "shark what is on the air".into(),
+            said: Ok("nothing is on the air".into()),
+            spoke: Some(Arc::new(vec![0.2f32; 4_800])),
+        });
+        a.log.push(Exchange {
+            at: Instant::now(),
+            heard: "shark again".into(),
+            said: Err("the model said nothing".into()),
+            spoke: None,
+        });
+        assert!(a.log[0].can_repeat());
+        assert!(!a.log[1].can_repeat(), "nothing went out, so there is nothing to repeat");
+
+        assert!(a.repeat(0), "the first answer is there to send again");
+        assert_eq!(a.state, State::Holding, "it waits for the channel, as the first over did");
+        assert!(!a.repeat(1), "an answer that never went out");
+        assert!(!a.repeat(9), "an exchange that is not there");
+
+        // And not while it is working on something else: two answers queued
+        // at once go out as one over.
+        assert!(!a.repeat(0), "it is already holding one");
+        // Nor on a channel nobody gave it.
+        let mut off = AgentChannel::default();
+        off.log.push(Exchange {
+            at: Instant::now(),
+            heard: String::new(),
+            said: Ok("hello".into()),
+            spoke: Some(Arc::new(vec![0.2f32; 64])),
+        });
+        assert!(!off.repeat(0));
     }
 
     /// Every over the agent hears is accounted for, taken or not.
