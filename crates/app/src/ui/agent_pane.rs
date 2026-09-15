@@ -14,10 +14,15 @@ const ASK_H: f32 = 76.0;
 
 /// What to print about the speech model, or `None` when there is nothing
 /// worth saying: a model that is loaded and idle is not news.
-fn speech_line(h: &crate::transcripts::Health) -> Option<(String, egui::Color32)> {
+///
+/// A fault is one word here and the whole message on hover: the message
+/// is a server's JSON and as long as it likes, and on this line it pushed
+/// the buttons off the edge of the window.
+fn speech_line(h: &crate::transcripts::Health) -> Option<(String, egui::Color32, Option<String>)> {
     use crate::transcripts::ModelState;
+    let plain = |w: &str, c| Some((w.to_string(), c, None));
     match &h.state {
-        ModelState::Cold => Some(("not loaded yet".into(), theme::LEGEND)),
+        ModelState::Cold => plain("not loaded yet", theme::LEGEND),
         ModelState::Fetching => {
             let what = match h.fetch.fraction() {
                 Some(f) => format!("downloading {:.0}%", f * 100.0),
@@ -27,16 +32,18 @@ fn speech_line(h: &crate::transcripts::Health) -> Option<(String, egui::Color32)
                 0 => String::new(),
                 n => format!(" ({} of {n})", h.fetch.files_done + 1),
             };
-            Some((format!("{what}{of}"), theme::READOUT))
+            Some((format!("{what}{of}"), theme::READOUT, None))
         }
-        ModelState::Loading => Some(("loading".into(), theme::READOUT)),
-        ModelState::Failed(e) => Some((e.clone(), theme::FAULT)),
+        ModelState::Loading => plain("loading", theme::READOUT),
+        ModelState::Failed(e) => Some(("failed".into(), theme::FAULT, Some(e.clone()))),
         // Once it has spoken, how long the last reply took to make. A model
         // slower than the over it is answering is the fault that otherwise
         // shows only as an agent that never seems to reply.
-        ModelState::Ready if h.reads > 0 => {
-            Some((format!("{} in {:.1}s", h.device, h.last_ms as f64 / 1000.0), theme::LEGEND))
-        }
+        ModelState::Ready if h.reads > 0 => Some((
+            format!("{} in {:.1}s", h.device, h.last_ms as f64 / 1000.0),
+            theme::LEGEND,
+            None,
+        )),
         ModelState::Ready => None,
     }
 }
@@ -76,56 +83,9 @@ impl AgentView<'_> {
         let fault = self.chat.config.fault();
 
         ui.add_space(8.0);
+        // The buttons take their width off the right first, so nothing the
+        // status line says can push them off the edge of the window.
         ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            theme::Line::new()
-                .legend("model")
-                .set(match model.is_empty() {
-                    true => "none".to_string(),
-                    false => model,
-                })
-                .size(11.0)
-                .show(ui);
-            ui.add_space(12.0);
-            theme::Line::new()
-                .legend("radio")
-                .value(if self.running { "running" } else { "stopped" })
-                .size(11.0)
-                .show(ui);
-            if let Some(id) = self.air.on {
-                ui.add_space(12.0);
-                let (word, tint) = match (self.air.state, self.air_fault) {
-                    // Listening and unable to answer is not listening. This
-                    // is the state a wake word nobody set leaves it in, and
-                    // it looked identical to working.
-                    (State::Listening, Some(f)) => (f.to_string(), theme::FAULT),
-                    (State::Listening, None) => ("listening".into(), theme::LEGEND),
-                    (State::OnAir, _) => ("on air".into(), theme::FAULT),
-                    (s, _) => (s.label().into(), theme::READOUT),
-                };
-                theme::Line::new()
-                    .legend(&format!("channel {id}"))
-                    .value(word)
-                    .size(11.0)
-                    .tint(tint)
-                    .show(ui);
-                // The name it answers to, which has to survive the speech
-                // model: an operator saying it and getting nothing needs to
-                // see what the receiver is listening for.
-                if !self.wake.trim().is_empty() {
-                    ui.add_space(12.0);
-                    theme::Line::new().legend("name").set(self.wake.trim()).size(11.0).show(ui);
-                }
-            }
-            // The speech model, which is the slow half of an answer and the
-            // one with gigabytes to fetch. Only drawn once a channel has been
-            // given to the agent, since nothing else here speaks.
-            if self.air.on.is_some()
-                && let Some((word, tint)) = speech_line(&self.voice)
-            {
-                ui.add_space(12.0);
-                theme::Line::new().legend("voice").value(word).size(11.0).tint(tint).show(ui);
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
                 if ui.button("Model").clicked() {
@@ -138,6 +98,9 @@ impl AgentView<'_> {
                 if busy && ui.button("Stop").clicked() {
                     act = Some(Action::Interrupt);
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    self.status_line(ui, model.clone());
+                });
             });
         });
         // The last over on the channel and what became of it. Most overs are
@@ -281,6 +244,63 @@ impl AgentView<'_> {
             },
         );
         act
+    }
+
+    /// Where the agent is: the model, the radio, the channel it answers on,
+    /// its name, and the state of its voice.
+    fn status_line(&self, ui: &mut egui::Ui, model: String) {
+        ui.add_space(12.0);
+        theme::Line::new()
+            .legend("model")
+            .set(match model.is_empty() {
+                true => "none".to_string(),
+                false => model,
+            })
+            .size(11.0)
+            .show(ui);
+        ui.add_space(12.0);
+        theme::Line::new()
+            .legend("radio")
+            .value(if self.running { "running" } else { "stopped" })
+            .size(11.0)
+            .show(ui);
+        if let Some(id) = self.air.on {
+            ui.add_space(12.0);
+            let (word, tint) = match (self.air.state, self.air_fault) {
+                // Listening and unable to answer is not listening. This
+                // is the state a wake word nobody set leaves it in, and
+                // it looked identical to working.
+                (State::Listening, Some(f)) => (f.to_string(), theme::FAULT),
+                (State::Listening, None) => ("listening".into(), theme::LEGEND),
+                (State::OnAir, _) => ("on air".into(), theme::FAULT),
+                (s, _) => (s.label().into(), theme::READOUT),
+            };
+            theme::Line::new()
+                .legend(&format!("channel {id}"))
+                .value(word)
+                .size(11.0)
+                .tint(tint)
+                .show(ui);
+            // The name it answers to, which has to survive the speech
+            // model: an operator saying it and getting nothing needs to
+            // see what the receiver is listening for.
+            if !self.wake.trim().is_empty() {
+                ui.add_space(12.0);
+                theme::Line::new().legend("name").set(self.wake.trim()).size(11.0).show(ui);
+            }
+        }
+        // The speech model, which is the slow half of an answer and the
+        // one with gigabytes to fetch. Only drawn once a channel has been
+        // given to the agent, since nothing else here speaks.
+        if self.air.on.is_some()
+            && let Some((word, tint, detail)) = speech_line(&self.voice)
+        {
+            ui.add_space(12.0);
+            let r = theme::Line::new().legend("voice").value(word).size(11.0).tint(tint).elided(ui);
+            if let Some(d) = detail {
+                r.on_hover_text(d);
+            }
+        }
     }
 
     /// The box at the foot, and the two ways of sending what is in it.
