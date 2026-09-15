@@ -133,6 +133,8 @@ pub enum Passed {
     Busy,
     /// It cannot answer at all: see `Config::voice_fault`.
     Mute,
+    /// The agent's own transmission, heard back.
+    ItsOwn,
 }
 
 impl Passed {
@@ -142,6 +144,7 @@ impl Passed {
             Self::NothingAsked => "nothing asked",
             Self::Busy => "still on the last one",
             Self::Mute => "it cannot answer",
+            Self::ItsOwn => "its own transmission",
         }
     }
 }
@@ -188,9 +191,23 @@ pub struct AgentChannel {
     last_busy: Option<Instant>,
     /// When the key went down, so an over that will not end can be ended.
     keyed_at: Option<Instant>,
-    /// Utterances already answered, by the instant they started: the
-    /// transcript replaces a partial with a settled reading of the same over,
-    /// and answering both would be answering twice.
+    /// When it was last transmitting, from key down to key up.
+    ///
+    /// A half duplex radio feeds the receiver its own transmission for the
+    /// length of the over, so what the agent says is demodulated, transcribed
+    /// and offered back to it as something somebody said. Its replies name
+    /// it, because a station says who it is, so it answered itself: every
+    /// answer became a question and the channel filled with the agent talking
+    /// to nobody.
+    spoke: Option<(Instant, Instant)>,
+    /// The newest over already dealt with, by the instant it started.
+    ///
+    /// A mark rather than the last one answered. The interface offers the
+    /// whole of the recent transcript on every frame, so with two overs in it
+    /// the agent answered one, saw the other was not the one it had just
+    /// answered, answered that, and then found the first one new again: two
+    /// questions asked once each came back round and round for as long as
+    /// they stayed in the window.
     answered: Option<Instant>,
     /// Which half of the pending work is running.
     stage: Stage,
@@ -229,6 +246,7 @@ impl Default for AgentChannel {
             asked: String::new(),
             last_busy: None,
             keyed_at: None,
+            spoke: None,
             answered: None,
             stage: Stage::default(),
             last: None,
@@ -249,9 +267,14 @@ impl AgentChannel {
         self.stop.store(true, Ordering::Relaxed);
         self.speaker.cut();
         self.pending = None;
-        let keyed = self.keyed_at.take().is_some();
+        // The half of an over that did go out is still its own voice on the
+        // channel, so the window closes here as well as at a clean unkey.
+        let keyed = self.keyed_at.take();
+        if let Some(from) = keyed {
+            self.spoke = Some((from, Instant::now()));
+        }
         self.state = State::Listening;
-        keyed.then_some(Move::Unkey)
+        keyed.map(|_| Move::Unkey)
     }
 
     /// Whether this over is addressed to the agent, and what is left of it
@@ -301,6 +324,17 @@ impl AgentChannel {
         )
     }
 
+    /// Whether `at` falls inside the last over the agent transmitted.
+    fn was_speaking(&self, at: Instant, hang_s: f64) -> bool {
+        // Keyed now, with no end yet: everything from the key down is its own.
+        if let Some(from) = self.keyed_at {
+            return at >= from;
+        }
+        self.spoke.is_some_and(|(from, to)| {
+            at >= from && at <= to + Duration::from_secs_f64(hang_s.max(0.0))
+        })
+    }
+
     /// Send an answer again, exactly as it went out the first time.
     ///
     /// The words are already decided, so this neither asks the model nor
@@ -346,7 +380,17 @@ impl AgentChannel {
         if config.voice_fault().is_some() {
             return pass(self, Passed::Mute);
         }
-        if self.answered == Some(at) {
+        // An over that started while it was transmitting is its own, coming
+        // back off a radio that hears itself. The hang is added on because
+        // the transcript times an utterance from where the speech begins, and
+        // a reading that began on the tail of the over is still the tail.
+        if self.was_speaking(at, config.hang_s) {
+            return pass(self, Passed::ItsOwn);
+        }
+        // Anything at or before the mark has had its turn. The transcript
+        // also replaces a partial reading with a settled one of the same
+        // over, which arrives under the same instant and is the same over.
+        if self.answered.is_some_and(|mark| at <= mark) {
             return false;
         }
         if self.state.busy() {
@@ -454,7 +498,9 @@ impl AgentChannel {
                     return None;
                 }
                 self.speaker.cut();
-                self.keyed_at = None;
+                if let Some(from) = self.keyed_at.take() {
+                    self.spoke = Some((from, now));
+                }
                 self.state = State::Listening;
                 Some(Move::Unkey)
             }
@@ -585,6 +631,79 @@ mod tests {
         // The same over read again, and a second question while it is busy.
         assert!(!a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
         assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), "shark again"));
+    }
+
+    /// Two overs in the window are answered once each, not round and round.
+    ///
+    /// The interface offers the whole of the recent transcript on every
+    /// frame. Remembering only the last over answered, the agent took the
+    /// first, saw the second was not the one it had just taken, took that,
+    /// and then found the first new again: two questions asked once each came
+    /// back for as long as they stayed in the window, and the channel filled
+    /// with answers to things nobody had said twice.
+    #[test]
+    fn an_over_is_answered_once_however_often_it_is_offered() {
+        let c = config();
+        let (desk, _asks) = Desk::new();
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let mut a = AgentChannel { on: Some(1), ..Default::default() };
+        let t0 = Instant::now();
+        let first = t0;
+        let second = t0 + Duration::from_secs(20);
+
+        // The first is taken; the agent is busy, so the second waits.
+        assert!(a.heard(&c, &desk, rt.handle(), first, "shark how is it going"));
+        assert!(!a.heard(&c, &desk, rt.handle(), second, "shark how is it going"));
+
+        // Free again, and the window offered whole on the next frame. The
+        // second is new, the first is not.
+        a.state = State::Listening;
+        a.pending = None;
+        assert!(!a.heard(&c, &desk, rt.handle(), first, "shark how is it going"), "answered twice");
+        assert!(a.heard(&c, &desk, rt.handle(), second, "shark how is it going"));
+
+        // And round again: neither is new now.
+        a.state = State::Listening;
+        a.pending = None;
+        for _ in 0..3 {
+            assert!(!a.heard(&c, &desk, rt.handle(), first, "shark how is it going"));
+            assert!(!a.heard(&c, &desk, rt.handle(), second, "shark how is it going"));
+        }
+    }
+
+    /// The agent does not answer itself.
+    ///
+    /// A half duplex radio feeds the receiver its own transmission for the
+    /// length of the over, so what the agent says is demodulated, transcribed
+    /// and offered back as something somebody said. Its replies name it,
+    /// because a station says who it is, so every answer became a question.
+    #[test]
+    fn what_it_transmitted_is_not_a_question() {
+        let c = config();
+        let (desk, _asks) = Desk::new();
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let mut a = AgentChannel { on: Some(1), state: State::Holding, ..Default::default() };
+        let t0 = Instant::now();
+
+        // On air from t0.
+        assert_eq!(a.poll(&c, t0, false), Some(Move::Key(1)));
+        assert_eq!(a.state, State::OnAir);
+        let mid = t0 + Duration::from_secs(2);
+        assert!(
+            !a.heard(&c, &desk, rt.handle(), mid, "shark here, the receiver is idle and ready"),
+            "it answered its own voice"
+        );
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::ItsOwn));
+
+        // The key comes up, and the tail of the over is still its own: the
+        // transcript times an utterance from where the speech began.
+        let up = t0 + Duration::from_secs(4);
+        assert_eq!(a.poll(&c, up, false), Some(Move::Unkey));
+        assert!(!a.heard(&c, &desk, rt.handle(), up, "shark here, standing by"), "the tail of it");
+
+        // And somebody speaking after the hang is a question again.
+        let after = up + Duration::from_secs_f64(c.hang_s + 1.0);
+        assert!(a.heard(&c, &desk, rt.handle(), after, "shark how is it going"));
     }
 
     /// An answer can be sent again without asking for another.

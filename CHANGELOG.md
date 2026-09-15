@@ -19,6 +19,10 @@ the code is in the commit log.
 
 - Say again: send one of the agent's answers over the air a second time.
 
+- The agent answering its own transmission, over and over.
+
+- The transcript filling with what the receiver had just transmitted.
+
 - The agent's reply was cut off at the first pause in it.
 
 - The agent's voice sounded like whispering.

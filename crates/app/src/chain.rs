@@ -710,6 +710,22 @@ impl Receiver {
     /// Only while the radio is deaf, which is the radio thread's to know: a
     /// full duplex radio hears its own transmission for real and mirroring on
     /// top of that would draw it twice.
+    /// Stop the transcriber reading while the transmitter is on air.
+    ///
+    /// Its own voice is not something it heard: the loopback that keeps the
+    /// waterfall and the decoders alive through an over is audio on a channel
+    /// like any other, and the transcript filled with what the receiver had
+    /// just said.
+    pub fn set_transcriber_deaf(&mut self, deaf: bool) {
+        let _ = deaf;
+        #[cfg(feature = "stt")]
+        if let Some(n) =
+            self.stage_mut::<crate::transcripts::LiveTranscribeNode>(derived::TRANSCRIBE)
+        {
+            n.set_deaf(deaf);
+        }
+    }
+
     pub fn set_tx_monitor(&mut self, on: bool) {
         if let Some(n) = self.stage_mut::<nodes::TxMonitorNode>(derived::TX_MONITOR) {
             n.set_enabled(on);

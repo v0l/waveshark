@@ -439,6 +439,15 @@ pub struct LiveTranscribeNode {
     log: SharedLog,
     talking: HashMap<common::ConversationKey, Talking>,
     enabled: bool,
+    /// Set by the radio thread while the transmitter is on air.
+    ///
+    /// A half duplex radio is fed its own transmission so the waterfall and
+    /// the decoders are not blind for the length of an over. That loopback is
+    /// audio on a channel like any other, so it was demodulated and read: the
+    /// transcript filled with the receiver's own voice, and the agent, which
+    /// reads the transcript, answered itself. What the receiver said is not
+    /// what the receiver heard.
+    deaf: bool,
     /// Shortest run of speech worth reading. A squelch tail transcribes as
     /// "Thank you." with high confidence.
     min_speech_s: f64,
@@ -493,11 +502,18 @@ impl Default for LiveTranscribeNode {
 }
 
 impl LiveTranscribeNode {
+    /// Whether it is being kept from reading, which the radio thread sets
+    /// while the transmitter is on air.
+    pub fn set_deaf(&mut self, deaf: bool) {
+        self.deaf = deaf;
+    }
+
     pub fn new() -> Self {
         Self {
             log: SharedLog::default(),
             talking: HashMap::new(),
             enabled: true,
+            deaf: false,
             min_speech_s: 0.6,
             #[cfg(feature = "stt")]
             worker: None,
@@ -1040,7 +1056,7 @@ impl Simple for LiveTranscribeNode {
     fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         #[cfg(feature = "stt")]
         self.drain(_c);
-        if !self.enabled {
+        if !self.enabled || self.deaf {
             self.talking.clear();
             return Ok(());
         }
@@ -1101,6 +1117,7 @@ impl Simple for LiveTranscribeNode {
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
             "enabled" => self.enabled = v.as_bool().unwrap_or(self.enabled),
+            "deaf" => self.deaf = v.as_bool().unwrap_or(self.deaf),
             "min_speech_s" => self.min_speech_s = v.as_f64().unwrap_or(self.min_speech_s),
             #[cfg(feature = "stt")]
             "root" => {
@@ -1547,6 +1564,50 @@ mod tests {
             n.collect(key.clone(), &noise, 0.1, Instant::now());
         }
         assert!(n.held_seconds(&key) > 1.0);
+    }
+
+    /// Nothing is read while the transmitter is on air.
+    ///
+    /// A half duplex radio is fed its own transmission so the waterfall and
+    /// the decoders are not blind through an over, and that loopback is audio
+    /// on a channel like any other: the transcript filled with the
+    /// receiver's own voice, and the agent, which reads the transcript,
+    /// heard itself say its own name and answered.
+    #[test]
+    fn what_the_receiver_said_is_not_what_it_heard() {
+        let mut n = LiveTranscribeNode::new();
+        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 446_050_000.0);
+        let speech = voice(crate::audiobus::ANALOGUE, 446_050_000.0, None, None, 0.3, 800);
+        let heard = |n: &mut LiveTranscribeNode| {
+            let payload = pipeline::port::Payload::Voice(vec![speech.clone()]);
+            let mut out = pipeline::port::Payload::Voice(Vec::new());
+            let specs = Vec::new();
+            let tags = Vec::new();
+            let mut events = Vec::new();
+            let mut new_tags = Vec::new();
+            let mut c = pipeline::node::NodeCtx::new(0, &specs, &tags, &mut events, &mut new_tags)
+                .with_block_seconds(0.1);
+            let _ = pipeline::node::Simple::process(n, &payload, &mut out, &mut c);
+        };
+        for _ in 0..20 {
+            heard(&mut n);
+        }
+        assert!(n.held_seconds(&key) > 1.0, "it is listening");
+
+        // On air: what it says is its own, and what it was holding goes with
+        // the key rather than being read as half an over.
+        n.set_deaf(true);
+        for _ in 0..20 {
+            heard(&mut n);
+        }
+        assert_eq!(n.held_seconds(&key), 0.0, "the loopback was collected as speech");
+
+        // And it listens again the moment the key comes up.
+        n.set_deaf(false);
+        for _ in 0..20 {
+            heard(&mut n);
+        }
+        assert!(n.held_seconds(&key) > 1.0, "it never started listening again");
     }
 
     #[test]
