@@ -975,6 +975,7 @@ mod tests {
         assert!(asked.contains("radio channel"), "the voice brief is sent: {asked}");
         let spoken = voice_seen.recv_timeout(Duration::from_secs(2)).expect("speech was asked for");
         assert!(spoken.contains(said), "{spoken}");
+        assert!(spoken.contains("\"pcm\""), "asked for raw PCM, which every server has: {spoken}");
     }
 
     /// With nowhere to send the speech, it stays off the air rather than
