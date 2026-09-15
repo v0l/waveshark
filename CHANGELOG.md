@@ -90,6 +90,8 @@ the code is in the commit log.
 
 - The keys tab lit its dot on every start for anybody with a key saved.
 
+- The agent keyed up and transmitted the microphone instead of its reply.
+
 - Blank lines at the top and bottom of every agent reply.
 
 - A transmit key on the agent's channel, which the agent keys itself.

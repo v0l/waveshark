@@ -2321,7 +2321,15 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // frequencies already superseded.
             Cmd::Center(f) => self.want_center = Some(f),
             Cmd::Audio { out, input } => self.set_audio_devices(out, input),
-            Cmd::Voice(src) => self.voice = Some(src),
+            // Held by the receiver as well, because the transmit chain is
+            // drawn on every rebuild and its source stage has to be built
+            // from something: handed in only at key-up, the chain that was
+            // rebuilt in between came back reading the microphone.
+            Cmd::Voice(src) => {
+                self.voice = Some(src.clone());
+                self.rx.set_agent_voice(Some(src));
+                self.needs_rebuild = true;
+            }
             Cmd::TxGain(db) => {
                 self.tx.gain_db = db.max(0.0);
                 self.status.tx_gain_db.store(self.tx.gain_db.to_bits(), Ordering::Relaxed);
