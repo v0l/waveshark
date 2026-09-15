@@ -172,6 +172,14 @@ impl Rational {
 /// and 51200 to 44100 is 512 over 441. So try every factor from the largest
 /// down and take the first whose remainder is a ratio worth filtering.
 ///
+/// Where no factor leaves an exact ratio at all, the largest one is taken and
+/// the remainder approximated. A radio's rate is not always a whole number of
+/// convenient hertz: DVB-T asks for 64/7 megasamples a second, and 9142857
+/// over any integer has no small exact ratio to 105000, so VDL Mode 2 refused
+/// the span it was handed and took the graph down with it. The approximation
+/// lands parts per billion out, which a decoder's own timing recovery carries
+/// the way it carries a crystal.
+///
 /// Returns the factor and the resampler, the latter `None` where the
 /// decimation alone lands on the wanted rate.
 pub fn stage(
@@ -192,7 +200,10 @@ pub fn stage(
             return Some((factor, Some(r)));
         }
     }
-    None
+    // Decimating the most leaves the resampler running at the lowest rate,
+    // where its phases are cheapest.
+    let mid = rate_in / most as f64;
+    Some((most, Some(Rational::approx(mid, rate_out, max_denominator))))
 }
 
 /// The best rational approximation to `x` with a denominator no larger than
@@ -239,6 +250,52 @@ fn gcd(a: u64, b: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::Rational;
+
+    /// Every rate a radio runs at reaches every rate a decoder wants.
+    ///
+    /// The exact search finds a small ratio where one exists, and where none
+    /// does the remainder is approximated rather than refused. 9142857 is the
+    /// DVB-T rate rounded to hertz and has no small exact ratio to anything:
+    /// VDL Mode 2 asked for 105 kHz of it, got nothing, refused its input and
+    /// took the whole receiver's graph down. What is asserted here is the
+    /// rate that comes out, since that is what a demodulator's clock recovery
+    /// has to carry.
+    #[test]
+    fn an_awkward_span_still_reaches_the_rate_a_decoder_wants() {
+        let cases = [
+            // The span in the photograph, into VDL Mode 2 and into SSTV's
+            // audio rate.
+            (9_142_857.0, 105_000.0),
+            (9_142_857.0, 44_100.0),
+            // And the ordinary ones, which must not get worse.
+            (2_400_000.0, 105_000.0),
+            (2_048_000.0, 44_100.0),
+            (250_000.0, 105_000.0),
+            (20_000_000.0, 105_000.0),
+            (61_440_000.0, 44_100.0),
+        ];
+        for (rate_in, want) in cases {
+            let (factor, r) = super::stage(rate_in, want, 4096)
+                .unwrap_or_else(|| panic!("{rate_in} cannot reach {want}"));
+            let mid = rate_in / factor as f64;
+            assert!(mid >= want, "{rate_in} decimated by {factor} is below {want}");
+            let got = r.as_ref().map(|r| mid * r.ratio()).unwrap_or(mid);
+            let ppm = (got - want) / want * 1e6;
+            // Ten parts per million, which is what the exact search already
+            // allows: it matches on the rates rounded to whole hertz, so
+            // 2.048 MS/s into 44.1 kHz has always landed 9.8 ppm out through
+            // a ratio it calls exact. Every demodulator here recovers its own
+            // symbol clock and carries that the way it carries a crystal.
+            assert!(ppm.abs() < 10.0, "{rate_in} into {want} lands {ppm:.3} ppm out");
+        }
+    }
+
+    /// A rate below what is wanted is the one case with no answer: there are
+    /// not enough samples, and inventing them is not resampling.
+    #[test]
+    fn a_span_narrower_than_the_rate_has_no_answer() {
+        assert!(super::stage(44_100.0, 105_000.0, 4096).is_none());
+    }
 
     /// DVB-T runs at 64/7 megasamples a second, which no radio rate divides
     /// into and which is not a whole number of hertz. Against the rates the

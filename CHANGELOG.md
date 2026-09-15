@@ -13,7 +13,13 @@ the code is in the commit log.
 
 - Scanner blocks that are one region's allocation run only in that region.
 
+- A decoder that cannot read the span is left out instead of stopping the receiver.
+
+- VDL Mode 2 and SSTV on a span whose rate is an awkward number.
+
 - Saved channels keep their repeater shift and what they transmit.
+
+- Every VDL Mode 2 channel in use, European and North American.
 
 - A transmitted multiplex carries a network table and a service name, so a television finds it.
 
@@ -67,6 +73,8 @@ the code is in the commit log.
 ### Fixed
 
 - ACARS and VDL Mode 2 decoded one channel of the several the table lists.
+
+- A wrapped line in the scanners file dropped half the channels it listed.
 
 - The keys tab lit its dot on every start for anybody with a key saved.
 

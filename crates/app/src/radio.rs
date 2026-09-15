@@ -3546,6 +3546,96 @@ pub(crate) mod tests {
         );
     }
 
+    /// The dial and the span move under a running receiver.
+    ///
+    /// Both go through the radio thread and both redraw the graph: a retune
+    /// is a device call and a rebuild with every channel at a new offset, and
+    /// a span change may take the device down and open it again. Neither was
+    /// under test, and a receiver that stops when somebody turns the dial is
+    /// the one fault nobody would report as a bug in a decoder.
+    #[test]
+    fn the_dial_and_the_span_move_without_stopping_the_receiver() {
+        let dev = sources::FileRadio::silent(Hz(145_000_000), Sps(2_400_000)).as_fast_as_it_can();
+        let radio = Radio::on_device(Box::new(dev), Hz(145_000_000), Sps(2_400_000), 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        radio.send(Cmd::Channels(vec![strip_channel(1, 25_000.0), strip_channel(2, -50_000.0)]));
+
+        // Read off the spectrum frames, because that is what the window
+        // draws: a dial that moved and a waterfall that did not is the fault
+        // this would be reported as.
+        let seen = |what: f64, pick: fn(&Frame) -> f64| -> bool {
+            radio.frames.try_iter().any(|f| (pick(&f) - what).abs() < 1.0)
+        };
+        for hz in [433_920_000.0, 136_825_000.0, 95_800_000.0, 145_000_000.0] {
+            radio.send(Cmd::Center(Hz(hz as u64)));
+            until(&format!("the spectrum to arrive at {hz}"), || seen(hz, |f| f.center));
+            assert!(radio.status.running.load(Ordering::Relaxed), "the radio stopped at {hz}");
+        }
+        for rate in [2_048_000.0, 9_142_857.0, 250_000.0, 2_400_000.0] {
+            radio.send(Cmd::Rate(Sps(rate as u64)));
+            until(&format!("the spectrum to arrive at {rate}"), || seen(rate, |f| f.rate));
+            assert!(radio.status.running.load(Ordering::Relaxed), "the radio stopped at {rate}");
+        }
+        // Still alive, still hearing, and still holding both channels.
+        assert!(radio.status.running.load(Ordering::Relaxed));
+        assert_eq!(radio.status.error.lock().clone(), None);
+    }
+
+    /// A full duplex radio hears the band through its own transmission.
+    ///
+    /// The half duplex case is the one every test uses, because it is what a
+    /// HackRF is. On a radio with a synthesiser per direction the receiver
+    /// must not retune to transmit, must not draw the loopback over the span,
+    /// and must go on decoding while the key is down.
+    #[test]
+    fn a_full_duplex_radio_keeps_receiving_through_an_over() {
+        let dev = sources::FileRadio::hearing(
+            Hz(145_000_000),
+            Sps(2_400_000),
+            vec![common::C32::new(0.25, 0.0); 4_096],
+        )
+        .half_duplex(false)
+        .as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device(Box::new(dev), Hz(145_000_000), Sps(2_400_000), 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+        radio.send(Cmd::Channels(vec![strip_channel(1, 25_000.0)]));
+        radio.send(Cmd::Key(Some(1)));
+        until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        until("something on the antenna", || watch.transmitted_len() > 0);
+
+        // The dial has not moved: that is what the second synthesiser is for,
+        // and the spectrum is still arriving from where it was.
+        let moved = radio.frames.try_iter().any(|f| (f.center - 145_000_000.0).abs() > 1.0);
+        assert!(!moved, "a full duplex radio retuned itself to transmit");
+        radio.send(Cmd::Key(None));
+        until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+        assert!(radio.status.running.load(Ordering::Relaxed));
+    }
+
+    /// Several channels decode at once through the radio thread.
+    #[test]
+    fn every_channel_on_the_strip_is_built_by_the_radio_thread() {
+        let dev = sources::FileRadio::silent(Hz(145_000_000), Sps(2_400_000)).as_fast_as_it_can();
+        let radio = Radio::on_device(Box::new(dev), Hz(145_000_000), Sps(2_400_000), 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        let want: Vec<ChannelSpec> =
+            (1..=4).map(|i| strip_channel(i, i as f64 * 100_000.0 - 250_000.0)).collect();
+        radio.send(Cmd::Channels(want));
+        // The inputs of the audio bus, which is where a built channel shows
+        // up: the levels are only republished when one of them changed.
+        let built = || radio.status.strips().inputs.iter().filter(|s| s.channel.is_some()).count();
+        until("all four channels to be built", || built() == 4);
+        assert_eq!(radio.status.error.lock().clone(), None);
+        // And closing one leaves the other three.
+        radio.send(Cmd::Channels(vec![strip_channel(1, -150_000.0)]));
+        until("three to go", || built() == 1);
+        assert!(radio.status.running.load(Ordering::Relaxed));
+    }
+
     /// A capture through the whole receiver, on the radio thread.
     ///
     /// Every other replay test drives `chain::Receiver` directly, which is

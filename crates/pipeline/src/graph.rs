@@ -259,6 +259,16 @@ impl GraphBuilder {
     }
 
     pub fn build(self) -> Result<Graph> {
+        Graph::assemble(self).map_err(|(_, e)| e)
+    }
+
+    /// The same, handing the nodes back when negotiation refuses one.
+    ///
+    /// A caller that drew the graph can then take the offending stage out and
+    /// build the rest from the very nodes it just made, rather than starting
+    /// again from nothing: one front end the span cannot hold should cost its
+    /// own decoder, not the recorder's open file and every bank's state.
+    pub fn build_keeping_nodes(self) -> std::result::Result<Graph, (Vec<NodePart>, Error)> {
         Graph::assemble(self)
     }
 }
@@ -528,10 +538,11 @@ impl Graph {
         GraphBuilder::new(input)
     }
 
-    fn assemble(b: GraphBuilder) -> Result<Graph> {
+    fn assemble(b: GraphBuilder) -> std::result::Result<Graph, (Vec<NodePart>, Error)> {
         let n = b.nodes.len();
-        let wiring = Wiring::resolve(&b)?;
-        let order = toposort(&b, &wiring)?;
+        let nothing = |e: Error| (Vec::new(), e);
+        let wiring = Wiring::resolve(&b).map_err(nothing)?;
+        let order = toposort(&b, &wiring).map_err(nothing)?;
         let levels = levels(&order, &wiring);
 
         let mut g = Graph {
@@ -582,7 +593,9 @@ impl Graph {
         for s in wiring.silent {
             g.specs[s] = StreamSpec::silence();
         }
-        g.negotiate()?;
+        if let Err(e) = g.negotiate() {
+            return Err((g.into_parts(), e));
+        }
         g.bufs = g.specs.iter().map(|s| Payload::empty_of(s.kind)).collect();
         Ok(g)
     }
@@ -612,11 +625,10 @@ impl Graph {
                 }
             }
 
-            let outs = self.entries[k].node.negotiate(&ins).map_err(|e| {
-                Error::other(format!(
-                    "node {k} ({}) rejected its input: {e}",
-                    self.entries[k].label
-                ))
+            let outs = self.entries[k].node.negotiate(&ins).map_err(|e| Error::Refused {
+                tag: self.entries[k].tag,
+                label: format!("node {k} ({})", self.entries[k].label),
+                why: e.to_string(),
             })?;
 
             let expect = self.entries[k].out_slots.len();
