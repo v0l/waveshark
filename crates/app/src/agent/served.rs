@@ -120,6 +120,14 @@ pub fn fetch(url: &str, key: &str, again: bool) {
     }
 }
 
+/// OpenRouter's own listing of what speaks, which carries the voices. A
+/// proxy in front of it (routstr, for one) lists ids alone, under an
+/// `openrouter/` prefix, so the voices for those are looked up here.
+const OPENROUTER_SPEECH: &str = "https://openrouter.ai/api/v1/models?output_modalities=speech";
+
+/// The prefix such a proxy puts on what it relays.
+const RELAYED: &str = "openrouter/";
+
 async fn ask(base: &str, key: &str) -> Result<Vec<Model>, String> {
     let client = httpc::client(std::time::Duration::from_secs(15)).map_err(|e| e.to_string())?;
     let mut req = client.get(format!("{base}/models"));
@@ -133,7 +141,31 @@ async fn ask(base: &str, key: &str) -> Result<Vec<Model>, String> {
         return Err(format!("{status}: {}", text.trim()));
     }
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(parse(&v))
+    let mut models = parse(&v);
+    // Relayed models with no voices of their own: ask upstream. Not a
+    // fault if upstream cannot be reached; the ids still work typed.
+    let relayed = models.iter().any(|m| m.id.starts_with(RELAYED) && m.voices.is_empty());
+    if relayed
+        && let Ok(resp) = client.get(OPENROUTER_SPEECH).send().await
+        && let Ok(text) = resp.text().await
+        && let Ok(v) = serde_json::from_str::<Value>(&text)
+    {
+        fill_relayed(&mut models, &parse(&v));
+    }
+    Ok(models)
+}
+
+/// Give every `openrouter/<id>` in `models` what OpenRouter says of `<id>`.
+fn fill_relayed(models: &mut [Model], upstream: &[Model]) {
+    for m in models.iter_mut() {
+        let Some(id) = m.id.strip_prefix(RELAYED) else { continue };
+        if let Some(u) = upstream.iter().find(|u| u.id == id) {
+            m.speech = true;
+            if m.voices.is_empty() {
+                m.voices = u.voices.clone();
+            }
+        }
+    }
 }
 
 /// The models in a `/models` answer, as OpenAI, OpenRouter, Ollama and
@@ -210,6 +242,26 @@ mod tests {
         let v = json!({"models": [{"name": "llama3:8b"}]});
         assert_eq!(parse(&v)[0].id, "llama3:8b");
         assert!(parse(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_proxy_that_relays_openrouter_gets_its_voices_from_upstream() {
+        // routstr lists `openrouter/hexgrad/kokoro-82m` with no voices and
+        // no modality; OpenRouter's own listing has both.
+        let mut mine = parse(&json!({"data": [
+            {"id": "openrouter/hexgrad/kokoro-82m"},
+            {"id": "openrouter/openai/gpt-4o"},
+            {"id": "agent"},
+        ]}));
+        let upstream = parse(&json!({"data": [
+            {"id": "hexgrad/kokoro-82m", "architecture": {"output_modalities": ["speech"]},
+             "supported_voices": ["af_sky"]},
+        ]}));
+        fill_relayed(&mut mine, &upstream);
+        let s = Served { state: State::Ready(mine) };
+        assert_eq!(s.speech_models(), vec!["openrouter/hexgrad/kokoro-82m"]);
+        assert_eq!(s.voices_of("openrouter/hexgrad/kokoro-82m"), vec!["af_sky"]);
+        assert_eq!(s.chat_models(), vec!["agent", "openrouter/openai/gpt-4o"]);
     }
 
     #[test]
