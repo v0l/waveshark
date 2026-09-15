@@ -2166,7 +2166,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             channels: Vec::new(),
             // Resolved from the scanner table below, once the tuning is known.
             fronts: Vec::new(),
-            edits: Default::default(),
+            // Read off disc here as well as sent by the interface: the first
+            // graph is built before any command has arrived, and a switch
+            // that only reached the graph on the rebuild after was off for
+            // however long that took, or for good when nothing else asked
+            // for a rebuild.
+            edits: crate::patch::Edits::load().map(|(e, _)| e).unwrap_or_default(),
             record: false,
             capture: false,
             capture_dir: crate::chain::default_capture_dir(),

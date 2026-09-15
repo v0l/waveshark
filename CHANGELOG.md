@@ -119,6 +119,8 @@ the code is in the commit log.
 
 - The transcriber loads its model as the receiver starts, not at the first over.
 
+- The transcriber and the call recorder came up switched off, whatever was saved.
+
 - The agent keys a moment before it speaks and holds a moment after, so a squelch opens in time.
 
 - A long answer from the agent was cut off at thirty seconds, mid-sentence.
