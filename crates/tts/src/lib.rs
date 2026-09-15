@@ -43,14 +43,12 @@ pub const DEFAULT_REPO: &str = "parler-tts/parler-tts-mini-v1";
 /// background noise, came out as a man whispering: taken together those are
 /// how an intimate recording is described, and that is what it made.
 ///
-/// So: one of the named speakers the v1 models were trained with, and the
-/// phrasing from Parler's own prompt guide, with "confident" and "projects"
-/// doing the work "level" was meant to do. What matters on the far end of a
-/// 2.5 kHz deviation link is that it is close and dry, which the high
-/// quality recording asks for.
+/// So: one of the named speakers the v1 models were trained with, and nothing
+/// about the recording. Parler's own guide asks for a line about the audio
+/// quality, but a clean take is what it makes when nobody says otherwise, and
+/// asking for one is what produced the whispering.
 pub const DEFAULT_DESCRIPTION: &str = "Jon speaks in a clear and confident voice at a moderate pace, projecting as if \
-     reading a message aloud. The recording is of very high quality, with his \
-     voice sounding close up and free of background noise.";
+     reading a message aloud.";
 
 /// Where a downloaded or hand-placed model lives.
 pub fn default_dir() -> std::path::PathBuf {

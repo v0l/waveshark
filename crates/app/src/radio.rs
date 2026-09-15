@@ -2252,6 +2252,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             let silent = self.stream.as_ref().is_some_and(|s| s.silent());
             let on_air = self.rx.tx_on_air();
             self.rx.set_tx_monitor(on_air && silent);
+            // And nothing reads that loopback as speech: what the receiver
+            // said is not what the receiver heard.
+            self.rx.set_transcriber_deaf(on_air);
             // A radio unplugged mid-over ends the over itself, and the key
             // has to come up with it: a lit key over a transmitter that
             // stopped transmitting is worse than no key at all.
