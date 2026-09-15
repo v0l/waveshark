@@ -73,6 +73,9 @@ enum Job {
     Chain(Box<Graph>, bool),
     Key(Box<dyn TxStream>),
     Unkey,
+    /// Nothing left to transmit: the chain goes, and with it anything that
+    /// was waiting to be put on it.
+    Drop,
     Param(usize, String, ParamValue),
     /// Answered once everything sent before it has been done, for a caller
     /// that has to know the chain is running what it just asked for.
@@ -91,6 +94,10 @@ pub struct Transmitter {
     built: Option<crate::patch::Patch>,
     /// Whether the chain it is running was built with a microphone to hand.
     mic: bool,
+    /// Whether a radio has been handed over and not taken back. Kept here
+    /// rather than read off the thread because whoever keyed has to know
+    /// before the thread has run again, and `keyed` is only the intent.
+    armed: bool,
 }
 
 impl Default for Transmitter {
@@ -106,7 +113,7 @@ impl Transmitter {
         let mine = readings.clone();
         let thread =
             std::thread::Builder::new().name("transmit".into()).spawn(move || run(work, mine)).ok();
-        Self { to, thread, readings, built: None, mic: false }
+        Self { to, thread, readings, built: None, mic: false, armed: false }
     }
 
     pub fn readings(&self) -> &Arc<Readings> {
@@ -115,6 +122,23 @@ impl Transmitter {
 
     pub fn keyed(&self) -> bool {
         self.readings.keyed.load(Ordering::Relaxed)
+    }
+
+    /// Whether the radio is on a chain that can carry what it makes.
+    ///
+    /// [`Self::keyed`] is the key being down, true from the moment it is
+    /// pressed; this is there being somewhere to put the result. A key lit
+    /// over a transmitter with no chain is the one state an operator must
+    /// never be shown, because nothing on the screen would say it is not on
+    /// air.
+    pub fn on_air(&self) -> bool {
+        self.armed && self.built.is_some()
+    }
+
+    /// Whether a chain of this shape is already running, so a key-up can go
+    /// straight on it without waiting for a rebuild.
+    pub fn ready(&self, mic: bool) -> bool {
+        self.built.is_some() && self.mic == mic
     }
 
     /// Whether the last over ended because the radio went away. Cleared by
@@ -153,21 +177,34 @@ impl Transmitter {
     }
 
     /// Nothing to transmit: whatever it was running is dropped.
+    ///
+    /// The chain goes on the thread as well as here. Left there it would go
+    /// on running whenever it runs idle, republishing the topology this just
+    /// blanked, and a later key would attach the radio to it and transmit
+    /// the chain the receiver believes it no longer has.
     pub fn clear(&mut self) {
-        if self.built.take().is_some() {
+        if self.built.take().is_some() || self.armed {
+            self.armed = false;
             *self.readings.topo.lock() = None;
-            let _ = self.to.send(Job::Unkey);
+            let _ = self.to.send(Job::Drop);
         }
     }
 
-    pub fn key(&self, stream: Box<dyn TxStream>) -> bool {
+    /// Hand it the radio.
+    ///
+    /// Held until there is a chain to put it on, so a key that arrives while
+    /// the graph is being rebuilt for it is not lost, and carried across a
+    /// rebuild that happens mid-over.
+    pub fn key(&mut self, stream: Box<dyn TxStream>) -> bool {
+        self.armed = true;
         self.readings.keyed.store(true, Ordering::Relaxed);
         self.to.send(Job::Key(stream)).is_ok()
     }
 
     /// Let the queue out and give the radio back, reporting the idle
     /// transfers the over cost.
-    pub fn unkey(&self) -> u64 {
+    pub fn unkey(&mut self) -> u64 {
+        self.armed = false;
         // Marked up here rather than on the thread: the interface asks
         // whether it is still transmitting in the same breath as telling it
         // to stop, and an answer that lags the key by a block reads as a key
@@ -216,6 +253,9 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
     let mut graph: Option<Graph> = None;
     let mut idle = false;
     let mut clock = Clock::default();
+    // A radio waiting for a chain. Keying is what asks for the chain to be
+    // built, so the two arrive in that order about half the time.
+    let mut waiting: Option<Box<dyn TxStream>> = None;
     loop {
         let running = graph.is_some() && (idle || readings.keyed.load(Ordering::Relaxed));
         // Parked when there is nothing to do, so an idle receiver does not
@@ -233,6 +273,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                 if let Some(old) = graph.take() {
                     hand_back(old, &mut g);
                 }
+                arm(&mut g, &mut waiting);
                 graph = Some(g);
                 idle = runs_idle;
                 clock = Clock::default();
@@ -242,13 +283,13 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                 readings.lost.store(false, Ordering::Relaxed);
                 readings.written.store(0, Ordering::Relaxed);
                 clock = Clock::default();
-                if let Some(g) = graph.as_mut()
-                    && let Some(sink) = sink_of(g)
-                {
-                    sink.attach(stream);
+                waiting = Some(stream);
+                if let Some(g) = graph.as_mut() {
+                    arm(g, &mut waiting);
                 }
             }
             Some(Job::Unkey) => {
+                waiting = None;
                 if let Some(g) = graph.as_mut()
                     && let Some(sink) = sink_of(g)
                 {
@@ -256,6 +297,18 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                     sink.finish(Duration::from_secs(1));
                 }
                 readings.keyed.store(false, Ordering::Relaxed);
+            }
+            Some(Job::Drop) => {
+                waiting = None;
+                if let Some(mut g) = graph.take()
+                    && let Some(sink) = sink_of(&mut g)
+                {
+                    readings.underruns.store(sink.underruns(), Ordering::Relaxed);
+                    sink.finish(Duration::from_secs(1));
+                }
+                readings.keyed.store(false, Ordering::Relaxed);
+                *readings.topo.lock() = None;
+                *readings.scopes.lock() = Vec::new();
             }
             Some(Job::Param(node, name, value)) => {
                 if let Some(g) = graph.as_mut() {
@@ -386,6 +439,18 @@ fn scope_frames(g: &mut Graph) -> Vec<(usize, nodes::ScopeFrame)> {
 /// than one, because a single failure could be a stall; a device that has
 /// been unplugged refuses every one.
 const REFUSALS: u64 = 3;
+
+/// Put the radio on the chain, if both are to hand.
+fn arm(g: &mut Graph, waiting: &mut Option<Box<dyn TxStream>>) {
+    let Some(stream) = waiting.take() else { return };
+    match sink_of(g) {
+        Some(sink) => sink.attach(stream),
+        // A chain with no transmit stage is not one a radio can go on. Held
+        // for the next chain rather than dropped, since the key is still
+        // down.
+        None => *waiting = Some(stream),
+    }
+}
 
 /// Move the radio from the chain being replaced to the one replacing it, so
 /// a rebuild during an over does not end the over.

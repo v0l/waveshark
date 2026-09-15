@@ -9,7 +9,7 @@
 //! wide, and what it is called. Levels and squelch are the strip's and are
 //! set against the signal on the day.
 
-use crate::radio::ChanMode;
+use crate::radio::{ChanMode, TxSource, TxSpec};
 use crate::scanners::{hz, num};
 use std::path::PathBuf;
 
@@ -21,6 +21,13 @@ pub struct Saved {
     pub mode: ChanMode,
     /// `None` for the mode's own width.
     pub bandwidth_hz: Option<f64>,
+    /// What it puts on the air, or `None` for the mode's own default.
+    ///
+    /// A repeater channel is one channel that listens on the output and
+    /// transmits on the input, so its shift is as much a part of it as its
+    /// frequency: recalled without one it is a channel that works simplex
+    /// on a repeater's output, which nobody hears.
+    pub tx: Option<TxSpec>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -137,8 +144,9 @@ impl Memory {
                 }
                 _ => (None, 0),
             };
+            let (tx, label_from) = transmit(&rest[label_from..], label_from);
             let label = rest[label_from..].join(" ");
-            list.push(Saved { group: group.clone(), label, freq, mode, bandwidth_hz });
+            list.push(Saved { group: group.clone(), label, freq, mode, bandwidth_hz, tx });
         }
         Self { list }
     }
@@ -157,12 +165,70 @@ impl Memory {
                     Some(bw) => s.push_str(&format!("{:<12}", format!("{} kHz", num(bw / 1e3)))),
                     None => s.push_str(&format!("{:<12}", "")),
                 }
+                for token in transmit_tokens(c.tx.as_ref()) {
+                    s.push_str(&format!("{token:<16}"));
+                }
                 s.push_str(c.label.trim());
                 s.push('\n');
             }
         }
         s
     }
+}
+
+/// The transmit side, read off the `key:value` tokens in front of the label,
+/// and how many tokens that took.
+///
+/// Only what differs from the mode's own default is written, so a plain
+/// simplex channel reads and writes exactly as it did before any of this.
+fn transmit(rest: &[&str], from: usize) -> (Option<TxSpec>, usize) {
+    let mut tx: Option<TxSpec> = None;
+    let mut n = 0;
+    for token in rest {
+        let Some((key, value)) = token.split_once(':') else { break };
+        let spec = tx.get_or_insert_with(TxSpec::default);
+        match key.to_ascii_lowercase().as_str() {
+            "shift" => match hz(value) {
+                Some(v) => spec.shift_hz = v,
+                None => break,
+            },
+            "src" => match value.to_ascii_lowercase().as_str() {
+                "mic" => spec.source = TxSource::Mic,
+                "tone" => spec.source = TxSource::Tone,
+                _ => break,
+            },
+            "trim" => match value.trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse() {
+                Ok(v) => spec.trim_db = v,
+                Err(_) => break,
+            },
+            // A label may hold a colon. Anything not named here ends the
+            // tokens and starts it.
+            _ => break,
+        }
+        n += 1;
+    }
+    // Every token was refused, so nothing was said about transmitting.
+    if n == 0 {
+        return (None, from);
+    }
+    (tx, from + n)
+}
+
+fn transmit_tokens(tx: Option<&TxSpec>) -> Vec<String> {
+    let (Some(tx), default) = (tx, TxSpec::default()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if tx.shift_hz != default.shift_hz {
+        out.push(format!("shift:{}kHz", num(tx.shift_hz / 1e3)));
+    }
+    if tx.source != default.source {
+        out.push(format!("src:{}", tx.source.label().to_ascii_lowercase()));
+    }
+    if tx.trim_db != default.trim_db {
+        out.push(format!("trim:{}dB", num(tx.trim_db as f64)));
+    }
+    out
 }
 
 fn is_unit(s: &str) -> bool {
@@ -197,6 +263,9 @@ const HEADER: &str = "\
 #
 #   modes   WFM NFM AM USB LSB CW AUTO, or a front end such as M17 or POCSAG
 #   width   e.g. 25 kHz; leave it out for the mode's own
+#   shift:  what it transmits away from its own frequency, e.g. shift:-600kHz
+#   src:    what it transmits, mic or tone; tone unless it says otherwise
+#   trim:   this channel's own offset from the transmit gain, e.g. trim:-6dB
 ";
 
 #[cfg(test)]
@@ -221,7 +290,52 @@ mod tests {
         assert_eq!(m.list[2].label, "");
         assert_eq!(m.list[3].mode, ChanMode::Auto);
         assert_eq!(m.groups(), ["Airband", "Repeaters"]);
+        assert_eq!(m.list.iter().filter(|c| c.tx.is_some()).count(), 0);
         assert_eq!(Memory::parse(&m.render()), m);
+    }
+
+    /// A repeater channel keeps its shift.
+    ///
+    /// It is one channel that listens on the output and transmits on the
+    /// input, so a bank that saves only the frequency saves half of it: the
+    /// channel comes back simplex on a repeater's output, where nobody is
+    /// listening. The source and the trim go with it for the same reason,
+    /// since they belong to the channel and not to the day.
+    #[test]
+    fn a_repeater_channel_keeps_what_it_transmits() {
+        let m = Memory::parse(
+            "[Repeaters]\n\
+             145.7375 MHz NFM 12.5 kHz shift:-600kHz src:mic GB3XX\n\
+             430.875 MHz NFM shift:-7.6MHz trim:-6dB GB7YY\n\
+             446.05 MHz NFM PMR5\n\
+             144.8 MHz NFM 3:1 odds\n",
+        );
+        assert_eq!(m.list.len(), 4);
+
+        let gb3xx = m.list[0].tx.expect("the repeater transmits");
+        assert_eq!(gb3xx.shift_hz, -600_000.0);
+        assert_eq!(gb3xx.source, TxSource::Mic);
+        assert_eq!(m.list[0].label, "GB3XX");
+
+        let gb7yy = m.list[1].tx.expect("the repeater transmits");
+        assert_eq!(gb7yy.shift_hz, -7_600_000.0);
+        assert_eq!(gb7yy.trim_db, -6.0);
+        assert_eq!(gb7yy.source, TxSource::Tone, "nothing was said, so the default");
+        assert_eq!(m.list[1].label, "GB7YY");
+
+        // Nothing said about transmitting is not a transmit side, so the
+        // channel comes back on whatever the mode's default is.
+        assert_eq!(m.list[2].tx, None);
+        assert_eq!(m.list[2].label, "PMR5");
+        // And a label may hold a colon: only the names above are tokens.
+        assert_eq!(m.list[3].tx, None);
+        assert_eq!(m.list[3].label, "3:1 odds");
+
+        assert_eq!(Memory::parse(&m.render()), m);
+        let written = m.render();
+        assert!(written.contains("shift:-600kHz"), "{written}");
+        assert!(written.contains("src:mic"), "{written}");
+        assert!(written.contains("trim:-6dB"), "{written}");
     }
 
     #[test]
@@ -233,6 +347,7 @@ mod tests {
             freq: 145_600_000.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: bw,
+            tx: None,
         };
         m.add(s("first", None));
         m.add(s("second", Some(25_000.0)));

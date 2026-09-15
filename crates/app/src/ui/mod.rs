@@ -2146,11 +2146,10 @@ impl App {
         if (s.freq - self.center).abs() > self.rate / 2.0 {
             self.retune(s.freq);
         }
-        let label = if s.label.trim().is_empty() { None } else { Some(s.label.clone()) };
-        self.push_channel(s.freq, s.mode.clone(), label);
-        if let Some(c) = self.audio.channels.last_mut() {
-            c.bandwidth_hz = s.bandwidth_hz;
-        }
+        let id = self.audio.next_id;
+        self.audio.next_id += 1;
+        self.audio.channels.push(recalled(id as u64, s));
+        self.audio.listening = Some(self.audio.channels.len() - 1);
         self.send_channels();
     }
 
@@ -2158,21 +2157,7 @@ impl App {
     fn push_channel(&mut self, freq: f64, mode: ChanMode, label: Option<String>) {
         let id = self.audio.next_id;
         self.audio.next_id += 1;
-        self.audio.channels.push(Channel {
-            id: id as u64,
-            freq,
-            voice: speaks(&mode),
-            mode,
-            bandwidth_hz: None,
-            label: label.unwrap_or_else(|| format!("CH{id}")),
-            on: true,
-            volume: 0.8,
-            muted: false,
-            squelch_db: None,
-            agc: true,
-            tx: None,
-            doppler: false,
-        });
+        self.audio.channels.push(fresh(id as u64, freq, mode, label));
         self.audio.listening = Some(self.audio.channels.len() - 1);
         self.send_channels();
     }
@@ -2195,25 +2180,7 @@ impl App {
     }
 
     fn channel_specs(&self) -> Vec<ChannelSpec> {
-        let center = self.center;
-        self.audio
-            .channels
-            .iter()
-            .filter(|c| c.on)
-            .map(|c| ChannelSpec {
-                id: c.id,
-                label: c.label.clone(),
-                offset_hz: c.freq - center,
-                mode: c.mode.clone(),
-                bandwidth_hz: c.bandwidth_hz,
-                volume: c.volume,
-                muted: c.muted,
-                squelch_db: c.squelch_db,
-                agc: c.agc,
-                voice: c.voice,
-                tx: c.tx,
-            })
-            .collect()
+        specs_of(&self.audio.channels, self.center)
     }
 
     fn listen(&mut self, idx: usize) {
@@ -2273,6 +2240,64 @@ fn apply_locale(s: &mut crate::session::Session) {
 /// is not audio: a decoder's channel produces its own calls.
 fn speaks(mode: &ChanMode) -> bool {
     matches!(mode, ChanMode::Audio(Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb))
+}
+
+/// A channel nobody has touched yet.
+fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
+    Channel {
+        id,
+        freq,
+        voice: speaks(&mode),
+        mode,
+        bandwidth_hz: None,
+        label: label.unwrap_or_else(|| format!("CH{id}")),
+        on: true,
+        volume: 0.8,
+        muted: false,
+        squelch_db: None,
+        agc: true,
+        tx: None,
+        doppler: false,
+    }
+}
+
+/// A channel out of the memory bank.
+///
+/// Everything the bank kept comes with it, the transmit side included: a
+/// repeater recalled without its shift is a channel working simplex on the
+/// repeater's output, where nobody is listening. Levels and squelch are the
+/// strip's and are set against the signal on the day.
+fn recalled(id: u64, s: &crate::memory::Saved) -> Channel {
+    let label = match s.label.trim().is_empty() {
+        true => None,
+        false => Some(s.label.clone()),
+    };
+    Channel { bandwidth_hz: s.bandwidth_hz, tx: s.tx, ..fresh(id, s.freq, s.mode.clone(), label) }
+}
+
+/// The whole channel list as the radio takes it: offsets from wherever the
+/// receiver is now, and nothing the strip keeps for itself.
+fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
+    channels
+        .iter()
+        .filter(|c| c.on)
+        .map(|c| ChannelSpec {
+            id: c.id,
+            label: c.label.clone(),
+            offset_hz: c.freq - center,
+            mode: c.mode.clone(),
+            bandwidth_hz: c.bandwidth_hz,
+            volume: c.volume,
+            muted: c.muted,
+            squelch_db: c.squelch_db,
+            agc: c.agc,
+            voice: c.voice,
+            // Only what an operator changed about transmitting. Whether the
+            // channel transmits at all is its mode's question, asked by the
+            // receiver: see `ChannelSpec::spec_to_transmit`.
+            tx: c.tx,
+        })
+        .collect()
 }
 
 fn front_for(model: &str) -> Option<&'static str> {
@@ -2756,6 +2781,90 @@ mod tests {
         // And an id that is not there is not a panic.
         a.close_channel(999);
         assert_eq!(a.audio.channels.len(), 1);
+    }
+
+    /// A channel recalled from the bank arrives at the radio able to key.
+    ///
+    /// This is the whole path a person takes to transmit on a saved channel:
+    /// the bank file, the strip, the spec sent to the radio thread, the plan,
+    /// and the chain drawn from it. Every part of it was right on its own and
+    /// the join was not, so the receiver drew no transmitter at all and the
+    /// first key was refused for want of one.
+    #[test]
+    fn a_recalled_repeater_arrives_at_the_radio_able_to_key() {
+        let bank = crate::memory::Memory::parse(
+            "[Repeaters]\n145.7375 MHz NFM 12.5 kHz shift:-600kHz src:mic GB3XX\n",
+        );
+        let saved = &bank.list[0];
+
+        let ch = recalled(7, saved);
+        assert_eq!(ch.freq, 145_737_500.0);
+        assert_eq!(ch.label, "GB3XX");
+        assert_eq!(ch.bandwidth_hz, Some(12_500.0));
+
+        let center = 145_500_000.0;
+        let specs = specs_of(&[ch], center);
+        assert_eq!(specs.len(), 1);
+        let spec = &specs[0];
+        assert_eq!(spec.offset_hz, 237_500.0);
+
+        // The radio's question, asked of the spec the strip actually sent.
+        let tx = spec.spec_to_transmit();
+        assert_eq!(tx.shift_hz, -600_000.0);
+        assert_eq!(tx.source, crate::radio::TxSource::Mic);
+
+        let mut plan = crate::chain::tests::plan(2_400_000.0, Hz(center as u64));
+        plan.channels = specs;
+        let drawn = crate::radio::tests::transmit_plan(&plan).expect("a transmit chain to draw");
+        assert_eq!(drawn.on_air, Hz(145_137_500), "it keys up on the repeater input");
+        assert_eq!(drawn.spec.source, crate::radio::TxSource::Mic);
+    }
+
+    /// A channel nobody has said anything about still transmits.
+    ///
+    /// Whether a channel can transmit is its mode's question: it transmits in
+    /// the mode it receives. Waiting for an operator to touch a control first
+    /// is what left a key on screen over a receiver with no transmitter in
+    /// its graph, because the panel that invented the transmit side was drawn
+    /// after the spec had already gone to the radio.
+    #[test]
+    fn a_channel_just_added_transmits_without_anybody_saying_so() {
+        let center = 446_000_000.0;
+        let nfm = fresh(1, 446_050_000.0, ChanMode::Audio(Demod::Nfm), None);
+        let usb = fresh(2, 446_050_000.0, ChanMode::Audio(Demod::Usb), None);
+        assert_eq!(nfm.tx, None, "nothing has been said about it yet");
+
+        let specs = specs_of(&[nfm, usb], center);
+        let mut plan = crate::chain::tests::plan(2_400_000.0, Hz(center as u64));
+
+        plan.channels = vec![specs[0].clone()];
+        let nfm = crate::radio::tests::transmit_plan(&plan).expect("NFM transmits");
+        assert_eq!(nfm.on_air, Hz(446_050_000), "simplex, on the channel's own frequency");
+        assert_eq!(nfm.spec.source, crate::radio::TxSource::Tone, "the safe default");
+
+        // And a mode with no modulator behind it does not, however much the
+        // radio can transmit.
+        plan.channels = vec![specs[1].clone()];
+        assert_eq!(crate::radio::tests::transmit_plan(&plan), None, "nothing transmits USB");
+    }
+
+    /// What an operator set on the strip is what goes out.
+    #[test]
+    fn what_the_operator_changed_about_transmitting_reaches_the_radio() {
+        let center = 145_000_000.0;
+        let mut ch = fresh(1, 145_600_000.0, ChanMode::Audio(Demod::Nfm), None);
+        ch.tx = Some(crate::radio::TxSpec {
+            source: crate::radio::TxSource::Mic,
+            shift_hz: -600_000.0,
+            trim_db: -6.0,
+            ..Default::default()
+        });
+        let mut plan = crate::chain::tests::plan(2_400_000.0, Hz(center as u64));
+        plan.channels = specs_of(&[ch], center);
+        let drawn = crate::radio::tests::transmit_plan(&plan).expect("it transmits");
+        assert_eq!(drawn.on_air, Hz(145_000_000));
+        assert_eq!(drawn.spec.trim_db, -6.0);
+        assert_eq!(drawn.spec.source, crate::radio::TxSource::Mic);
     }
 
     /// A mode with a demodulator here gets it, a mode with a front end here

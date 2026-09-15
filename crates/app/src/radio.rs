@@ -314,8 +314,8 @@ fn restart(
 /// channel's squelch and every decoder's part-built frame; a full duplex
 /// radio goes on hearing the band while it transmits.
 fn tx_plan_for(ch: &ChannelSpec, center: Hz) -> Option<crate::chain::TxPlan> {
-    let tx = ch.tx?;
     let mode = tx_mode_for(&ch.mode)?;
+    let tx = ch.spec_to_transmit();
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
     Some(crate::chain::TxPlan { spec: tx, mode, on_air })
 }
@@ -646,6 +646,18 @@ pub struct ChannelSpec {
 }
 
 impl ChannelSpec {
+    /// What this channel puts on the air, whether or not anybody has said.
+    ///
+    /// Whether a channel can transmit is its mode's question and not a switch
+    /// on the channel: it transmits in the mode it receives, so a mode with a
+    /// modulator behind it transmits and one without does not. [`Self::tx`]
+    /// is only what an operator changed about it, and asking for it before
+    /// they had is what left a channel just added or recalled with a key on
+    /// screen and no transmitter in the graph.
+    pub fn spec_to_transmit(&self) -> TxSpec {
+        self.tx.unwrap_or_default()
+    }
+
     /// The width this channel is really built at.
     pub fn bandwidth(&self) -> f64 {
         // A width below a hundred hertz is a mis-set control rather than a
@@ -1777,6 +1789,48 @@ impl Radio {
         Self { cmd: cmd_tx, frames: frame_rx, decodes: dec_rx, status, handle: Some(handle) }
     }
 
+    /// The whole receiver on a radio somebody else opened.
+    ///
+    /// For a test: `sources::FileRadio` hears a capture and keeps what it
+    /// transmits, so everything from a command arriving to a sample reaching
+    /// the antenna runs exactly as it does on a HackRF. Nothing above this is
+    /// test-only, which is the point.
+    #[cfg(test)]
+    pub fn on_device(dev: Box<dyn common::Device>, center: Hz, rate: Sps, fft: usize) -> Self {
+        let (cmd_tx, cmd_rx) = bounded(64);
+        let (frame_tx, frame_rx) = bounded(2);
+        let (dec_tx, dec_rx) = bounded(64);
+        let status = Arc::new(Status::default());
+        let st = status.clone();
+        let handle = std::thread::Builder::new()
+            .name("radio".into())
+            .spawn(move || {
+                let built = RadioThread::with_device(
+                    dev,
+                    None,
+                    center,
+                    rate,
+                    0.0,
+                    fft,
+                    cmd_rx,
+                    frame_tx,
+                    dec_tx,
+                    &st,
+                    || {},
+                );
+                let ran = match built {
+                    Ok(t) => t.run(),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = ran {
+                    *st.error.lock() = Some(e.to_string());
+                }
+                st.running.store(false, Ordering::Relaxed);
+            })
+            .expect("spawn radio thread");
+        Self { cmd: cmd_tx, frames: frame_rx, decodes: dec_rx, status, handle: Some(handle) }
+    }
+
     pub fn send(&self, c: Cmd) {
         let _ = self.cmd.try_send(c);
     }
@@ -1935,6 +1989,11 @@ struct Tx {
     /// The channel whose key is down but whose transmitter is still being
     /// built, so the strip is not told it is on air before it is.
     keying_for: Option<u64>,
+    /// The last channel that went on air, which is the one the drawn chain
+    /// stays on once the key comes up. Without it the chain view fell back
+    /// to whichever transmit channel comes first on the strip, so recalling
+    /// a second from a bank and working it left the chain showing the other.
+    last_keyed: Option<u64>,
 }
 
 /// The speaker and the microphone, and the devices they were asked for.
@@ -1957,8 +2016,10 @@ struct AudioIo {
 /// a retune if one is due, a rebuild if anything asked for one, a read, the
 /// graph, what is published from it, and the audio it produced.
 struct RadioThread<'a, R: Fn()> {
-    /// What the device was opened from, so it can be opened again.
-    entry: crate::devices::Entry,
+    /// What the device was opened from, so it can be opened again. Absent on
+    /// a radio handed in already open, which cannot be reopened and does not
+    /// need to be.
+    entry: Option<crate::devices::Entry>,
     dev: Box<dyn common::Device>,
     /// The stream the radio is delivering on. Absent only between letting one
     /// go and opening the next, which is a state the thread does not run in:
@@ -2015,7 +2076,41 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         status: &'a Status,
         repaint: R,
     ) -> anyhow::Result<Self> {
-        let mut dev = crate::devices::open(&entry)?;
+        let dev = crate::devices::open(&entry)?;
+        Self::with_device(
+            dev,
+            Some(entry),
+            center,
+            rate,
+            offset,
+            fft,
+            cmd,
+            frames,
+            decodes,
+            status,
+            repaint,
+        )
+    }
+
+    /// The same, on a radio somebody else opened.
+    ///
+    /// The one seam a test needs: everything above this line is a USB claim,
+    /// and everything below it is the receiver. `sources::FileRadio` is a
+    /// radio made of memory that hears a capture and keeps what it
+    /// transmits, which is what makes keying testable at all.
+    fn with_device(
+        mut dev: Box<dyn common::Device>,
+        entry: Option<crate::devices::Entry>,
+        center: Hz,
+        rate: Sps,
+        offset: f64,
+        fft: usize,
+        cmd: Receiver<Cmd>,
+        frames: Sender<Frame>,
+        decodes: Sender<Vec<DecodeRecord>>,
+        status: &'a Status,
+        repaint: R,
+    ) -> anyhow::Result<Self> {
         // What is on the cable is known before the radio is opened, and has
         // to be: with a converter the saved dial is in the Ku band, and a
         // tuner asked for that whole refuses, which used to stop the radio
@@ -2093,7 +2188,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 sink,
                 mic: None,
             },
-            tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None },
+            tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None, last_keyed: None },
             status,
             cmd,
             frames,
@@ -2140,7 +2235,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // transmission for real, and mirroring on top of that would draw
             // it twice.
             let silent = self.stream.as_ref().is_some_and(|s| s.silent());
-            self.rx.set_tx_monitor(self.rx.keyed() && silent);
+            let on_air = self.rx.tx_on_air();
+            self.rx.set_tx_monitor(on_air && silent);
             // A radio unplugged mid-over ends the over itself, and the key
             // has to come up with it: a lit key over a transmitter that
             // stopped transmitting is worse than no key at all.
@@ -2478,6 +2574,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
     /// Take the radio back off the transmit stage.
     fn unkey(&mut self) {
+        // A key let up before the rebuild it was waiting for: the rebuild
+        // must not go on to announce it on air.
+        self.tx.keying_for = None;
         if !self.rx.keyed() && self.status.keyed.load(Ordering::Relaxed) == 0 {
             return;
         }
@@ -2508,11 +2607,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     /// gap rather than stopping; on a full duplex one it goes on hearing the
     /// band.
     fn key(&mut self, id: u64) {
-        let spec = self.plan.channels.iter().find(|c| c.id == id).cloned();
-        let Some((ch, tx)) = spec.and_then(|c| c.tx.map(|t| (c, t))) else {
-            *self.status.error.lock() = Some("that channel has no transmit side".into());
+        let Some(ch) = self.plan.channels.iter().find(|c| c.id == id).cloned() else {
+            *self.status.error.lock() = Some("there is no such channel to key".into());
             return;
         };
+        let tx = ch.spec_to_transmit();
         let up =
             key_up(self.dev.as_mut(), &ch, &tx, self.plan.center, self.tx.gain_db, &self.audio.mic);
         let (tx_plan, mut sinks) = match up {
@@ -2525,28 +2624,35 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         };
         // The stages are already in the graph, so keying hands the transmit
         // stage a radio rather than building anything: a rebuild here would
-        // restart the spectrum's averaging twice an over.
-        let same = self.plan.tx == Some(tx_plan);
+        // restart the spectrum's averaging twice an over. Whether they are
+        // the stages this channel wants is a question about the chain and
+        // not about the channel, and asking it of the whole plan rebuilt for
+        // a frequency that no stage reads.
+        let same = self.plan.tx.is_some_and(|was| was.same_chain(&tx_plan))
+            && self.rx.tx_ready(sinks.mic.is_some());
         self.plan.tx = Some(tx_plan);
-        let mut on_air = false;
+        // What the monitor draws the over on. A setting, because it is the
+        // one thing two channels of a mode differ by.
+        self.rx.set_tx_shift(tx_plan.on_air.as_f64() - self.plan.center.as_f64());
+        let stream = sinks.stream.take();
         if same {
-            if let Some(s) = sinks.stream.take() {
-                on_air = self.rx.key(s);
+            if let Some(s) = stream {
+                self.rx.key(s);
             }
-        }
-        if !on_air {
-            // Either the chain in the graph is for another channel, or there
-            // is no transmit stage yet: build it, with the radio going in as
-            // it is built.
-            self.rx.set_transmitter(Some(sinks));
-            self.needs_rebuild = true;
-            // Said only once the radio is actually transmitting, so ON AIR
-            // means on air.
-            self.tx.keying_for = Some(ch.id);
-        } else {
             tracing::info!("keyed channel {}", ch.id);
             self.status.keyed.store(ch.id, Ordering::Relaxed);
+            self.tx.last_keyed = Some(ch.id);
+            return;
         }
+        // The chain in the graph is not the one this channel wants, or there
+        // is none yet. Build it, with the radio going to the transmitter to
+        // be put on it as it is built.
+        sinks.stream = stream;
+        self.rx.set_transmitter(Some(sinks));
+        self.needs_rebuild = true;
+        // Said only once the radio is actually transmitting, so ON AIR
+        // means on air.
+        self.tx.keying_for = Some(ch.id);
     }
 
     /// Stop the stream and let go of it.
@@ -2567,9 +2673,14 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // failure propagated out of this loop and killed the thread: changing
         // bandwidth stopped the receiver dead.
         if self.dev.rate_needs_restart() {
+            let Some(entry) = self.entry.clone() else {
+                *self.status.error.lock() =
+                    Some("this radio cannot change span without being reopened".into());
+                return Flow::Go;
+            };
             self.release_stream();
             match restart(
-                &self.entry,
+                &entry,
                 r,
                 self.plan.center,
                 self.gain,
@@ -2645,7 +2756,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         let want = derive_tx(
             &self.plan,
             self.status.can_transmit.load(Ordering::Relaxed),
-            self.tx.keying_for,
+            self.tx.keying_for.or(self.tx.last_keyed),
         );
         if want != self.plan.tx && !self.rx.keyed() {
             self.plan.tx = want;
@@ -2727,8 +2838,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // be drawn for the channel about to go on air rather than for
         // whichever one comes first on the strip.
         if !self.rx.keyed() {
-            self.plan.tx =
-                derive_tx(&self.plan, self.status.can_transmit.load(Ordering::Relaxed), keying_now);
+            self.plan.tx = derive_tx(
+                &self.plan,
+                self.status.can_transmit.load(Ordering::Relaxed),
+                keying_now.or(self.tx.last_keyed),
+            );
         }
         if let Err(e) = self.rx.rebuild(&self.plan) {
             // A patch is drawn wire by wire, so most of the time it is half a
@@ -2754,13 +2868,17 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // graph, so this is the moment it is actually on air, or the moment to
         // say it is not.
         if let Some(id) = keying_now {
-            if self.rx.keyed() {
+            if self.rx.tx_on_air() {
                 tracing::info!("keyed channel {id}");
                 self.status.keyed.store(id, Ordering::Relaxed);
+                self.tx.last_keyed = Some(id);
             } else {
                 *self.status.error.lock() =
                     Some("the transmit chain did not build; nothing is on air".into());
-                self.status.keyed.store(0, Ordering::Relaxed);
+                // Let the key back up with it. A key held down over a
+                // transmitter that never got a chain is a state nothing can
+                // leave: every further key is ignored as already keyed.
+                self.unkey();
             }
         }
         // Its own slot, not the fault line: a front end the span cannot hold
@@ -2816,10 +2934,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         tracing::warn!("receive stopped: {e}");
         *self.status.error.lock() = Some(format!("radio stopped: {e}; reopening"));
         let mut back = None;
-        for attempt in 1..=3 {
+        // A radio handed in already open has nowhere to be opened from, so
+        // one that stops has stopped.
+        let entry = self.entry.clone();
+        for attempt in entry.iter().flat_map(|_| 1..=3) {
             std::thread::sleep(std::time::Duration::from_millis(400 * attempt));
             match restart(
-                &self.entry,
+                entry.as_ref().expect("the loop runs only where there is one"),
                 Sps(self.plan.rate as u64),
                 self.plan.center,
                 self.gain,
@@ -3262,6 +3383,13 @@ pub(crate) mod tests {
     use super::*;
     use crate::chain::OOK_CHANNEL_HZ;
 
+    /// The transmit chain the receiver would draw for a plan, on a radio that
+    /// can transmit with nothing keyed. Named for what it is outside this
+    /// file: the strip asks what would go out, and this answers.
+    pub(crate) fn transmit_plan(plan: &Plan) -> Option<crate::chain::TxPlan> {
+        derive_tx(plan, true, None)
+    }
+
     /// Two transmit channels, which is what recalling one from the bank
     /// makes: the chain is drawn for the one going on air, not for whichever
     /// is first on the strip. Without this the rebuild that puts a key on air
@@ -3295,6 +3423,220 @@ pub(crate) mod tests {
         plan.channels.push(ChannelSpec { id: 3, tx: None, ..plan.channels[0].clone() });
         assert_eq!(derive_tx(&plan, true, Some(3)), Some(first));
         assert_eq!(derive_tx(&plan, false, Some(2)), None);
+    }
+
+    /// Wait for the radio thread, which runs on its own clock. Fails the
+    /// test rather than hanging.
+    fn until(what: &str, mut ready: impl FnMut() -> bool) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready() {
+            assert!(std::time::Instant::now() < until, "waited ten seconds for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn strip_channel(id: u64, offset: f64) -> ChannelSpec {
+        ChannelSpec {
+            id,
+            label: format!("CH{id}"),
+            offset_hz: offset,
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            volume: 0.8,
+            muted: true,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            // As the strip sends it: nobody has said anything about
+            // transmitting, and the mode decides.
+            tx: None,
+        }
+    }
+
+    /// A channel added and keyed, on a radio, end to end.
+    ///
+    /// Everything between a command arriving and a sample reaching the
+    /// antenna: the plan, the derived transmit chain, the graph, the
+    /// transmitter's thread and the device. This is the join that kept
+    /// breaking, and it could not be tested until there was a radio to test
+    /// it on.
+    #[test]
+    fn a_channel_added_and_keyed_reaches_the_antenna() {
+        let center = Hz(446_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+
+        radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
+        radio.send(Cmd::Key(Some(1)));
+        until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        // Enough of an over to read: a tenth of a second at the span's rate.
+        until("a tenth of a second on the antenna", || watch.transmitted_len() > 240_000);
+        assert!(watch.keyed(), "the device was never asked to transmit");
+        assert_eq!(radio.status.error.lock().clone(), None, "it went on air and still complained");
+
+        // What actually reached the antenna, rather than how much of it.
+        // The default source is a 1 kHz tone, so the whole pipeline is
+        // judged by whether a discriminator reads 1 kHz back off it at the
+        // narrow band deviation: the clock, the tone, the modulator, the
+        // sink and the executor that ran them.
+        let air = watch.transmitted();
+        let mut demod = dsp::FmDemod::new(rate.as_f64(), nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&air[4_800..], &mut audio);
+        let seg = &audio[1_000..];
+        let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let hz = crossings as f64 * rate.as_f64() / seg.len() as f64;
+        assert!((hz - 1_000.0).abs() < 20.0, "the air carried {hz:.0} Hz, not a 1 kHz tone");
+        let peak = seg.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.5, "the tone is there at {peak}, too quiet to be full deviation");
+        let level = air[4_800].norm();
+        assert!(
+            air[4_800..].iter().all(|s| (s.norm() - level).abs() < 0.05),
+            "an FM carrier holds its envelope"
+        );
+
+        radio.send(Cmd::Key(None));
+        until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+        until("the device to be given back", || !watch.keyed());
+        let sent = watch.transmitted_len();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(watch.transmitted_len(), sent, "it went on transmitting after the key came up");
+    }
+
+    /// Two channels, worked one after the other, on a radio.
+    ///
+    /// Recalling a second channel beside the first is what a bank is for, and
+    /// the second one has to key up as readily as the first. The two are one
+    /// transmit chain, so nothing between them is rebuilt and the failure is
+    /// silent: the key lights and nothing goes out.
+    #[test]
+    fn a_second_channel_keys_up_as_readily_as_the_first() {
+        let center = Hz(145_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+        radio.send(Cmd::Channels(vec![strip_channel(1, 25_000.0), strip_channel(2, -50_000.0)]));
+
+        let mut was = 0;
+        for id in [1, 2, 1, 2] {
+            radio.send(Cmd::Key(Some(id)));
+            until(&format!("channel {id} to go on air"), || {
+                radio.status.keyed.load(Ordering::Relaxed) == id
+            });
+            until(&format!("channel {id} on the antenna"), || watch.transmitted_len() > was);
+            radio.send(Cmd::Key(None));
+            until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+            was = watch.transmitted_len();
+        }
+        assert_eq!(
+            radio.status.error.lock().clone(),
+            None,
+            "every over went out and it complained"
+        );
+    }
+
+    /// A capture through the whole receiver, on the radio thread.
+    ///
+    /// Every other replay test drives `chain::Receiver` directly, which is
+    /// the graph but not the loop around it: the command queue, the retune,
+    /// the rebuild, the read, the harvest and the publish are the radio
+    /// thread's, and none of them was under test. This runs the same capture
+    /// through the real thread on a radio made of memory, and pins the same
+    /// sensor the replay test pins.
+    #[test]
+    fn a_capture_played_into_the_radio_thread_is_decoded() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/fineoffset_wh1080_433.92M_250k.cu8");
+        if !p.exists() {
+            eprintln!("skipping: fineoffset_wh1080_433.92M_250k.cu8 absent, run testdata/fetch.sh");
+            return;
+        }
+        let dev = sources::FileRadio::playing(&p).expect("the capture opens").as_fast_as_it_can();
+        let (center, rate) = (Hz(433_920_000), Sps(250_000));
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+
+        // What the scanner table puts on 433.92: the ISM banks, which is how
+        // the live receiver finds a sensor nobody tuned.
+        let mut heard = Vec::new();
+        until("the sensor to be read", || {
+            heard.extend(radio.decodes.try_iter().flatten());
+            heard.iter().any(|r| r.model.as_deref() == Some("Fineoffset-WHx080"))
+        });
+        let r = heard
+            .iter()
+            .find(|r| r.model.as_deref() == Some("Fineoffset-WHx080"))
+            .expect("the loop above found one");
+        // The same station the replay test reads off this capture, with the
+        // transmitter's own CRC rather than a plausibility argument.
+        assert_eq!(r.crc, Some(true), "{r:?}");
+        assert!(r.detail.contains("station_id=196"), "read as {}", r.detail);
+        assert!(r.detail.contains("temperature_c=16.2"), "read as {}", r.detail);
+        assert!(r.detail.contains("humidity_pct=89"), "read as {}", r.detail);
+        assert!((r.freq - 433_920_000.0).abs() < 100_000.0, "read at {:.4} MHz", r.freq / 1e6);
+        // Every packet reaching the bus carries what it was heard at.
+        assert!(r.rssi_dbfs.is_finite() && r.snr_db.is_finite(), "no measurement on {r:?}");
+    }
+
+    /// A radio unplugged mid-over ends the over, on the radio thread.
+    ///
+    /// The key has to come up with it. A lit key over a transmitter that
+    /// stopped is worse than no key: nothing else on the screen would say
+    /// the transmission had ended.
+    #[test]
+    fn a_radio_unplugged_mid_over_brings_the_key_up() {
+        let center = Hz(446_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+        radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
+        radio.send(Cmd::Key(Some(1)));
+        until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        until("something on the antenna", || watch.transmitted_len() > 0);
+
+        watch.unplug();
+        until("the key to come up on its own", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+        let said = radio.status.error.lock().clone().unwrap_or_default();
+        assert!(said.contains("the radio stopped taking samples"), "it said {said:?} instead");
+    }
+
+    /// Where an over goes out is not part of the chain that makes it.
+    ///
+    /// Two channels of one mode are the same stages, so keying between them
+    /// is the radio moving and nothing else: no rebuild, and so no restart of
+    /// the spectrum's averaging or of whatever the source has open. Comparing
+    /// whole plans instead made every such key-up a rebuild, and the rebuild
+    /// then found it had nothing to do.
+    #[test]
+    fn a_frequency_is_not_part_of_the_transmit_chain() {
+        use crate::chain::TxPlan;
+        let here = TxPlan { spec: TxSpec::default(), mode: TxMode::Nfm, on_air: Hz(145_500_000) };
+        let there = TxPlan { on_air: Hz(433_500_000), ..here };
+        assert!(here.same_chain(&there));
+        assert_ne!(here, there, "they are two plans still: the radio and the monitor read it");
+
+        let mic = TxPlan { spec: TxSpec { source: TxSource::Mic, ..here.spec }, ..here };
+        assert!(!here.same_chain(&mic), "a microphone is a different source stage");
+        let louder = TxPlan { spec: TxSpec { mic_gain: 9.0, ..mic.spec }, ..mic };
+        assert!(!mic.same_chain(&louder), "the gain is a setting on the source stage");
+        let shifted = TxPlan { spec: TxSpec { shift_hz: -600_000.0, ..here.spec }, ..here };
+        assert!(here.same_chain(&shifted), "a repeater shift only moves the radio");
     }
 
     #[test]
