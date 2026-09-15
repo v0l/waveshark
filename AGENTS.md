@@ -256,6 +256,19 @@ the same commit, under `Added`, `Changed`, `Fixed` or `Removed`. A refactor or
 a test does not. Write it for the person: "Bluetooth LE advertising", not "add
 BleNode".
 
+The sections describe the release against the last one, not the work that went
+into it. Nobody ran the half-finished thing, so nothing that happened to it on
+the way is a change to anybody: work on something already listed under
+`[Unreleased]`, or not yet pushed, amends the line that is there or adds none.
+`Fixed` is only for a fault in a version somebody could have been running, and
+`Changed` only for behaviour that shipped and is now different. Getting a
+feature working is part of adding it.
+
+Good: a follow-up window on an unreleased agent channel widens that feature's
+`Added` line to say a conversation needs the name once.
+Bad: `Fixed - an over answering the agent was thrown away as its own`, for an
+agent channel no release has.
+
 **One line, under about fifteen words, and no how.** The reader is scanning a
 list to find out whether to upgrade, not reading an account of the work. Name
 the protocol, the pane or the fault and stop. Never list the parts of a fix,

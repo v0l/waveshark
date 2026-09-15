@@ -338,6 +338,10 @@ pub struct Engine {
     pub speakers: usize,
     /// Whether the model has a window in front of it at this moment.
     pub busy: bool,
+    /// The server speech is read on, as "model at host", when the Agent
+    /// settings name one. The local model, its device and its files are then
+    /// not what is running and are not worth showing.
+    pub reading_on: Option<String>,
 }
 
 /// What the thread holding the model reports about it, written there and
@@ -453,6 +457,11 @@ pub struct LiveTranscribeNode {
     min_speech_s: f64,
     #[cfg(feature = "stt")]
     worker: Option<Worker>,
+    /// The transcription server the running worker posts to, or `None` when
+    /// it holds a model of its own. Kept so a change in the Agent settings
+    /// takes effect on the next over rather than at the next restart.
+    #[cfg(feature = "stt")]
+    reading_on: Option<String>,
     /// The models directory; each model has a directory of its own in it.
     #[cfg(feature = "stt")]
     root: std::path::PathBuf,
@@ -517,6 +526,8 @@ impl LiveTranscribeNode {
             min_speech_s: 0.6,
             #[cfg(feature = "stt")]
             worker: None,
+            #[cfg(feature = "stt")]
+            reading_on: None,
             #[cfg(feature = "stt")]
             root: std::path::PathBuf::new(),
             #[cfg(feature = "stt")]
@@ -605,6 +616,14 @@ impl LiveTranscribeNode {
         #[allow(unused_mut)]
         let mut e = Engine {
             enabled: self.enabled,
+            reading_on: crate::agent::config::reading_server().map(|(url, model, _)| {
+                let host = url
+                    .split_once("://")
+                    .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
+                    .unwrap_or(&url)
+                    .to_string();
+                format!("{model} at {host}")
+            }),
             speakers: self.talking.len(),
             holding_s: self.talking.values().map(|t| t.pcm.len() as f64 / t.rate).sum(),
             busy: self.talking.values().any(|t| t.waiting),
@@ -763,23 +782,44 @@ mod work {
     }
 
     impl LiveTranscribeNode {
-        /// The model thread, started by the first thing worth reading.
+        /// The thread that reads speech, started by the first thing worth
+        /// reading: a model here, or a server named in the Agent settings.
         pub(super) fn worker(&mut self) -> Option<&Worker> {
             if self.worker.is_none() {
                 let (jobs_tx, jobs_rx) = bounded::<Job>(32);
                 let (done_tx, done_rx) = bounded::<Done>(32);
-                let dir = self.dir();
-                let repo = stt::repo_of(&self.model_id);
-                let device = self.device;
                 let health = self.health.clone();
                 let log = self.log.clone();
-                std::thread::Builder::new()
-                    .name("whisper-live".into())
-                    .spawn(move || run(dir, repo, device, health, log, jobs_rx, done_tx))
-                    .ok()?;
+                let on_server = crate::agent::config::reading_server();
+                self.reading_on = on_server.as_ref().map(|(url, ..)| url.clone());
+                let thread = std::thread::Builder::new().name("transcribe".into());
+                match on_server {
+                    Some((url, model, key)) => {
+                        thread
+                            .spawn(move || {
+                                run_server(url, model, key, health, log, jobs_rx, done_tx)
+                            })
+                            .ok()?;
+                    }
+                    None => {
+                        let dir = self.dir();
+                        let repo = stt::repo_of(&self.model_id);
+                        let device = self.device;
+                        thread
+                            .spawn(move || run(dir, repo, device, health, log, jobs_rx, done_tx))
+                            .ok()?;
+                    }
+                }
                 self.worker = Some(Worker { jobs: jobs_tx, done: done_rx });
             }
             self.worker.as_ref()
+        }
+
+        /// Whether the worker is reading where the settings now say. A
+        /// picker moved while a model is loaded has to take effect, and the
+        /// two paths are two threads.
+        pub(super) fn reads_where_it_should(&self) -> bool {
+            self.reading_on == crate::agent::config::reading_server().map(|(url, ..)| url)
         }
 
         /// Take whatever the model has finished and put it in the log.
@@ -907,6 +947,136 @@ mod work {
                     t.asked_at_s = asked;
                 }
             }
+        }
+    }
+
+    /// How long one window may take to come back from a server. Generous:
+    /// a Whisper on somebody else's CPU is slower than the radio.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// Read speech on an OpenAI-compatible `/v1/audio/transcriptions`.
+    ///
+    /// The same jobs the local model gets, posted as a WAV. A receiver with
+    /// no card, or no three and a half gigabytes to spare, can then read what
+    /// it hears on whatever is already answering the chat.
+    ///
+    /// What comes back is words and nothing else: no log probability, so
+    /// nothing here can doubt a reading the way the local model's own
+    /// thresholds do. Every line is marked credible, because the alternative
+    /// is a transcript that shows nothing at all.
+    fn run_server(
+        url: String,
+        model: String,
+        key: String,
+        health: std::sync::Arc<parking_lot::Mutex<Health>>,
+        log: SharedLog,
+        jobs: Receiver<Job>,
+        done: Sender<Done>,
+    ) {
+        let host = url
+            .split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
+            .unwrap_or(&url)
+            .to_string();
+        let client = match httpc::blocking(PATIENCE) {
+            Ok(c) => c,
+            Err(e) => {
+                health.lock().state = ModelState::Failed(format!("{e}"));
+                return;
+            }
+        };
+        {
+            let mut h = health.lock();
+            h.state = ModelState::Ready;
+            h.device = format!("{model} at {host}");
+            h.present = true;
+        }
+        while let Ok(job) = jobs.recv() {
+            let seconds = job.pcm.len() as f64 / job.rate.max(1.0);
+            let wav =
+                crate::mix::wav_bytes(&common::Speech { pcm: job.pcm.clone(), rate: job.rate });
+            let started = Instant::now();
+            let read = read_on_server(&client, &url, &key, &model, wav);
+            let failed = read.as_ref().err().cloned();
+            {
+                let mut h = health.lock();
+                h.reads += 1;
+                h.last_ms = started.elapsed().as_millis() as u64;
+                h.last_audio_s = seconds;
+                h.state = match failed {
+                    None => ModelState::Ready,
+                    Some(e) => ModelState::Failed(e),
+                };
+            }
+            let verdict = match &read {
+                Ok(text) => {
+                    let text = text.trim().to_string();
+                    let speech = !text.is_empty();
+                    if speech {
+                        log.lock().push(Utterance {
+                            key: job.key.clone(),
+                            at: job.at,
+                            seconds,
+                            text,
+                            settled: job.settled,
+                            confidence: 0.0,
+                            credible: true,
+                        });
+                    }
+                    Ok(speech)
+                }
+                Err(e) => Err(common::Error::other(format!("{host}: {e}"))),
+            };
+            if done
+                .send(Done {
+                    key: job.key.clone(),
+                    at: job.at,
+                    settled: job.settled,
+                    result: verdict,
+                })
+                .is_err()
+            {
+                if !job.settled {
+                    log.lock().settle(&job.key, job.at);
+                }
+                break;
+            }
+        }
+    }
+
+    /// One window, posted as a file the way the API takes it.
+    pub(super) fn read_on_server(
+        client: &reqwest::blocking::Client,
+        url: &str,
+        key: &str,
+        model: &str,
+        wav: Vec<u8>,
+    ) -> std::result::Result<String, String> {
+        let part = reqwest::blocking::multipart::Part::bytes(wav)
+            .file_name("over.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| e.to_string())?;
+        let form = reqwest::blocking::multipart::Form::new()
+            .part("file", part)
+            .text("model", model.to_string())
+            // Words, not segments: nothing here reads timings, and a server
+            // that cannot do verbose_json still answers this.
+            .text("response_format", "json");
+        let mut req = client.post(url).multipart(form);
+        if !key.is_empty() {
+            req = req.bearer_auth(key);
+        }
+        let resp = req.send().map_err(|e| e.to_string())?;
+        let status = resp.status();
+        let body = resp.text().map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!("{status}: {}", body.trim()));
+        }
+        // `{"text": "..."}`, and a plain body from a server that ignored the
+        // format it was asked for.
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => Ok(v.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string()),
+            Err(_) => Ok(body.trim().to_string()),
         }
     }
 
@@ -1066,8 +1236,16 @@ impl Simple for LiveTranscribeNode {
         // come on at all. A model that is not here is still fetched only
         // when something is worth reading, or when asked.
         #[cfg(feature = "stt")]
-        if self.worker.is_none() && self.health.lock().present {
-            self.worker();
+        {
+            // Reading moved to or from a server: the two are two threads,
+            // and the picker has to take effect on the next over.
+            if self.worker.is_some() && !self.reads_where_it_should() {
+                self.reload();
+            }
+            let on_server = crate::agent::config::reading_server().is_some();
+            if self.worker.is_none() && (on_server || self.health.lock().present) {
+                self.worker();
+            }
         }
         let at = Instant::now();
         let block_s = _c.block_seconds;
@@ -1202,10 +1380,96 @@ mod tests {
             channel_hz: hz,
             to: to.map(|s| s.to_string()),
             from: from.map(|s| s.to_string()),
+            code: None,
             rate: 8_000.0,
             channels: 1,
             pcm: vec![level; n],
         }
+    }
+
+    /// A window read on a server: what is posted, and what is made of the
+    /// answer.
+    ///
+    /// The audio goes as a WAV under the field name the API takes, with the
+    /// model beside it, and the reading is the `text` of the reply. A server
+    /// that ignores the format it was asked for and sends the words as a
+    /// plain body is read too, because several of the local ones do.
+    #[cfg(feature = "stt")]
+    #[test]
+    fn speech_is_read_on_a_server_when_the_settings_say_so() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let url = format!("http://{}/v1/audio/transcriptions", listener.local_addr().unwrap());
+        let (seen, posted) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (nth, stream) in listener.incoming().take(2).enumerate() {
+                let Ok(mut s) = stream else { return };
+                // Head first, then the body by the length it declared: one
+                // read returns the headers and part of the audio, and the
+                // fields after it arrive in later packets.
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match s.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => return,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let len = text
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; len];
+                let _ = s.read_exact(&mut body);
+                let _ = seen.send(format!("{text}{}", String::from_utf8_lossy(&body)));
+                // The first as the API answers, the second as a server that
+                // ignored `response_format` does.
+                let body = match nth {
+                    0 => "{\"text\":\" mobile one, go ahead \"}".to_string(),
+                    _ => "  plain words  ".to_string(),
+                };
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = s.flush();
+            }
+        });
+
+        let client = httpc::blocking(std::time::Duration::from_secs(5)).expect("a client");
+        assert_eq!(
+            crate::mix::wav_bytes(&common::Speech { pcm: vec![0.25; 8_000], rate: 8_000.0 }).len(),
+            44 + 16_000,
+            "a second at 8 kHz, 16 bit mono, with its header"
+        );
+        let speech = common::Speech { pcm: vec![0.25; 200], rate: 8_000.0 };
+        let wav = crate::mix::wav_bytes(&speech);
+
+        let read = work::read_on_server(&client, &url, "sk-read", "whisper-1", wav.clone())
+            .expect("the server answered");
+        assert_eq!(read.trim(), "mobile one, go ahead");
+        let sent = posted.recv_timeout(std::time::Duration::from_secs(5)).expect("it posted");
+        assert!(sent.contains("multipart/form-data"), "{sent}");
+        assert!(sent.contains("name=\"file\""), "the audio goes under file: {sent}");
+        assert!(sent.contains("over.wav"));
+        assert!(sent.contains("whisper-1"), "the model is named: {sent}");
+        assert!(sent.contains("Bearer sk-read"), "the key is sent: {sent}");
+        assert!(sent.contains("RIFF"), "a WAV, not raw samples");
+
+        let plain =
+            work::read_on_server(&client, &url, "", "whisper-1", wav).expect("the second answer");
+        assert_eq!(plain, "plain words");
+        let sent = posted.recv_timeout(std::time::Duration::from_secs(5)).expect("it posted");
+        assert!(!sent.contains("Bearer"), "no key, no header: {sent}");
     }
 
     /// The key one block of speech belongs to, and what a person reads of
@@ -1333,6 +1597,7 @@ mod tests {
                 channel_hz: 145_500_000.0,
                 to: None,
                 from: None,
+                code: None,
                 rate,
                 channels: 1,
                 pcm: b,
@@ -1405,6 +1670,7 @@ mod tests {
                 channel_hz: 145_500_000.0,
                 to: None,
                 from: None,
+                code: None,
                 rate,
                 channels: 1,
                 pcm: b,

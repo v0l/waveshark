@@ -60,6 +60,13 @@ impl Served {
         self.models().iter().filter(|m| m.speech).map(|m| m.id.clone()).collect()
     }
 
+    /// What could read speech. No server marks a transcription model as
+    /// such, so this is everything it lists that is not a voice: the name is
+    /// typed anyway where the list is wrong.
+    pub fn reading_models(&self) -> Vec<String> {
+        self.models().iter().filter(|m| !m.speech).map(|m| m.id.clone()).collect()
+    }
+
     /// The voices one model takes.
     pub fn voices_of(&self, model: &str) -> Vec<String> {
         self.models()

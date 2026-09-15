@@ -10,6 +10,6 @@ license.workspace = true
 sgp4 = "2.4"
 # The epoch crosses the boundary as a timestamp; sgp4 holds it as a
 # `chrono` datetime, which is the crate it already depends on.
-chrono = { version = "0.4", default-features = false }
+chrono = { workspace = true }
 datasets.workspace = true
 tracing.workspace = true

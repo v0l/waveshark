@@ -374,19 +374,11 @@ impl IqCaptureNode {
 /// 1 Hz once already, in the burst recorder.
 fn stamp(at_us: u64) -> String {
     let secs = (at_us / 1_000_000) as i64;
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    // Howard Hinnant's civil_from_days, which is exact and fits here.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem / 60 % 60, rem % 60)
+    let nanos = (at_us % 1_000_000) as u32 * 1_000;
+    chrono::DateTime::from_timestamp(secs, nanos)
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+        .format("%Y%m%d-%H%M%S")
+        .to_string()
 }
 
 fn now_us() -> u64 {

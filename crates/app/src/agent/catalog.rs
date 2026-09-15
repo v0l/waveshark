@@ -85,8 +85,10 @@ pub const BRIEF: &str = "WaveShark, a wideband software radio receiver. The tool
      Levels are dBFS and are only meaningful against the noise floor `spectrum` reports. \
      Frequencies are MHz in, hertz out.\n\n\
      The receiver transmits where the radio can. `key` puts one channel on air and `unkey` \
-     takes it off, half duplex, and `set_transmit` chooses what the modulator is fed. Check \
-     that the operator is licensed for the frequency and that the channel's mode is one the \
+     takes it off, half duplex, and `set_transmit` chooses what the modulator is fed. \
+     `list_transmit_modes` says what can go out at all, and `say` is how to talk to \
+     somebody: it keys once the channel is clear and lets go when the words run out, which \
+     `key` does not. Check that the operator is licensed for the frequency and that the channel's mode is one the \
      other end can read before keying.\n\n\
      The graph can be drawn by hand. `patch` lists the stages and wires with the ids an edit \
      names them by, `list_stage_kinds` is what can be added, and `add_stage`, `connect`, \
@@ -281,11 +283,26 @@ fn build() -> Vec<Tool> {
         takes(
             "set_transmit",
             "What a keyed channel puts through the modulator: a tone for a deviation or power \
-             check, or the microphone. Also the tone's frequency and the level into the \
-             modulator.",
+             check, the microphone, or the agent's own voice. Also the tone's frequency, the \
+             level into the modulator, and the file a digital mode transmits.",
             Action::Transmit,
         ),
         takes("set_tx_gain", "The radio's transmit gain, in dB.", Action::TxGain),
+        takes(
+            "say",
+            "Say something over the air, in the agent's own voice. The channel keys itself once \
+             the channel is clear and lets go when the words run out, so this is the way to \
+             talk to somebody rather than `key`. One over: a long line is cut. Needs a channel \
+             whose transmit source is the agent, which this sets when given one.",
+            Action::Say,
+        ),
+        plain(
+            "list_transmit_modes",
+            "What this radio and this build can transmit: the mode to open a channel in, what \
+             feeds the modulator, and how wide each is. A channel transmits in the mode it \
+             receives, so this is the list `add_channel` takes a mode from before `key`.",
+            || Action::TransmitModes,
+        ),
         // What it watches, writes and shows.
         takes(
             "set_decode",
@@ -369,7 +386,7 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(names.len(), before, "a tool name is used twice");
-        assert_eq!(before, 53, "the catalogue changed size");
+        assert_eq!(before, 55, "the catalogue changed size");
     }
 
     /// Every schema is an object, because that is what both the protocol and

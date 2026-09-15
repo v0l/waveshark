@@ -50,6 +50,69 @@ impl Strip<'_> {
         crate::icons::icon_button_sized(ui, icon, tip, true, muted, 18.0)
     }
 
+    /// The over being played back, as a strip of its own.
+    ///
+    /// A playback comes out of the same speaker as a channel, so it gets the
+    /// same controls: a level against a meter, a mute, and the way to stop
+    /// it. It was a line of text, which said what was playing and gave an
+    /// operator nothing to do about it. Drawn only while something is
+    /// playing: a strip for a stage that is silent is a control for nothing.
+    fn playback(
+        ui: &mut egui::Ui,
+        left_s: f32,
+        st: Option<&crate::chain::StripState>,
+        cmds: &mut Vec<Cmd>,
+    ) {
+        egui::Frame::NONE
+            .fill(theme::PANEL)
+            .stroke(Stroke::new(1.0, theme::ETCH))
+            .corner_radius(2.0)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Cyan: something is running, not something the operator
+                    // set.
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
+                    ui.painter().rect_filled(r, 1.0, theme::TRACE);
+                    theme::Line::new().legend("playback").show(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("STOP").on_hover_text("Stop playing this over").clicked()
+                        {
+                            cmds.push(Cmd::StopPlaying);
+                        }
+                        theme::Line::new()
+                            .value(format!("{left_s:.1} s left"))
+                            .tint(theme::TRACE)
+                            .size(11.0)
+                            .show(ui);
+                    });
+                });
+                // The level is the replay's own fader, set the way every
+                // other level on the strip is. Absent only before the graph
+                // has been built, when there is nothing playing either.
+                let Some(st) = st else { return };
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("vol").show(ui);
+                    let mut v = st.volume;
+                    if ui.add(Fader::new(&mut v, st.level).width(VU_W)).changed() {
+                        cmds.push(Cmd::StageParam(
+                            st.stage,
+                            "vol".into(),
+                            ParamValue::Float(v as f64),
+                        ));
+                    }
+                    if Self::mute_button(ui, st.muted, "Mute playback").clicked() {
+                        cmds.push(Cmd::StageParam(
+                            st.stage,
+                            "mute".into(),
+                            ParamValue::Bool(!st.muted),
+                        ));
+                    }
+                });
+            });
+    }
+
     /// Gain and squelch, for the modes that have them.
     ///
     /// Worth a line of its own because on a weak signal these two are the
@@ -317,14 +380,11 @@ impl Strip<'_> {
                 None => "taken".to_string(),
                 Some(p) => p.label().to_string(),
             };
-            theme::Line::new()
-                .legend("heard")
-                .heard(h.text.clone())
-                .size(11.0)
-                .gap(8.0)
-                .legend(&note)
-                .size(11.0)
-                .elided(ui);
+            let mut line = theme::Line::new().legend("heard");
+            if let Some(from) = &h.from {
+                line = line.value(from.clone()).size(11.0);
+            }
+            line.heard(h.text.clone()).size(11.0).gap(8.0).legend(&note).size(11.0).elided(ui);
         }
         let why = match (fault, &voice.state, mine) {
             (Some(f), _, _) => format!("the agent cannot answer: {f}. Set it in Agent settings"),
@@ -670,13 +730,24 @@ impl Strip<'_> {
                         ));
                     }
                 });
-                // What the speaker is playing now, off the bus: who, to
-                // whom, on what frequency. A mix that could not say was a
-                // receiver that could not tell an operator why they were
-                // hearing two conversations at once.
-                let playing = self.radio.map(|r| r.status.playing()).unwrap_or_default();
-                for p in playing.iter().filter(|p| p.peak > 0.002) {
-                    theme::Line::new().heard(describe_playing(&p.key)).size(11.0).elided(ui);
+                // What the speaker is mixing is not listed here. Every
+                // conversation it carries is a row on the call list, with
+                // who, to whom, on what and for how long, and a channel is
+                // a strip below: a second list under the master said the
+                // same thing in fewer words and moved everything under it
+                // whenever somebody spoke.
+                let strips = self.radio.map(|r| r.status.strips()).unwrap_or_default();
+                // A playback is the one thing with nowhere else to appear,
+                // and it has controls rather than a line of text.
+                let left = self.radio.map(|r| r.status.replay_left_s()).unwrap_or(0.0);
+                if left > 0.0 {
+                    ui.add_space(6.0);
+                    Self::playback(
+                        ui,
+                        left,
+                        strips.inputs.iter().find(|s| s.stage == derived::REPLAY_FADER),
+                        self.cmds,
+                    );
                 }
 
                 ui.add_space(8.0);
@@ -987,9 +1058,12 @@ impl Strip<'_> {
                 // them, so there is no dial or mode to show, but each has a
                 // level and a meter like everything else that reaches the
                 // speaker. Set by the same route the chain view uses.
-                let strips = self.radio.map(|r| r.status.strips()).unwrap_or_default();
                 {
-                    for s in strips.inputs.iter().filter(|s| s.channel.is_none()) {
+                    for s in strips
+                        .inputs
+                        .iter()
+                        .filter(|s| s.channel.is_none() && s.stage != derived::REPLAY_FADER)
+                    {
                         egui::Frame::NONE
                             .fill(theme::PANEL)
                             .stroke(Stroke::new(1.0, theme::ETCH))
@@ -1056,7 +1130,7 @@ impl Strip<'_> {
 /// The stage a television channel transmits from, and what it is set to
 /// read: its node id and the file it has, or `None` where nothing in the
 /// running chain transmits a stream.
-fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, String)> {
+pub(super) fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, String)> {
     let node = topo?.nodes.iter().find(|n| n.kind == "ts_source")?;
     let path = node
         .params
@@ -1068,17 +1142,4 @@ fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, St
         })
         .unwrap_or_default();
     Some((node.id.0, path))
-}
-
-/// One line for what the bus is mixing: "M0ABC to ALL, M17 433.475 MHz", or
-/// the channel's own name for audio nobody decoded.
-fn describe_playing(k: &common::ConversationKey) -> String {
-    let hz = k.channel_hz as f64;
-    let on = if hz > 0.0 { format!(" {:.3} MHz", hz / 1e6) } else { String::new() };
-    match (&k.to, &k.from) {
-        (Some(to), Some(from)) => format!("{from} to {to}, {}{on}", k.system),
-        (Some(to), None) if k.system == crate::mix::fader::ANALOGUE => format!("{to}{on}"),
-        (Some(to), None) => format!("{to}, {}{on}", k.system),
-        (None, _) => format!("{}{on}", k.system),
-    }
 }

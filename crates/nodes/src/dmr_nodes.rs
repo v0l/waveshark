@@ -1343,6 +1343,9 @@ impl Node for DmrNode {
             channel_hz: self.channel_hz,
             to,
             from,
+            // Coded squelch is an analogue thing; a decoder names the group
+            // itself.
+            code: None,
             rate: VOICE_HZ,
             channels: 1,
             pcm: std::mem::take(&mut self.voice_now),

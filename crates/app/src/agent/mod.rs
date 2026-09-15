@@ -155,6 +155,8 @@ pub enum Action {
     Unkey,
     Transmit(args::Transmit),
     TxGain(args::TxGain),
+    Say(args::Say),
+    TransmitModes,
 
     // What it watches, writes and shows.
     Decode(args::Switch),
@@ -333,6 +335,10 @@ pub mod args {
         Tone,
         /// The microphone, opened while the channel is keyed.
         Mic,
+        /// What the agent says: the queue `say` fills, and the voice it
+        /// answers an over with. A channel set to this keys itself when
+        /// there is something to say.
+        Agent,
     }
 
     #[derive(Debug, Deserialize, JsonSchema)]
@@ -347,6 +353,25 @@ pub mod args {
         pub mic_gain: Option<f32>,
         /// Level into the modulator in dB, for trimming deviation.
         pub trim_db: Option<f32>,
+        /// What a digital mode transmits, as a path on this machine: a
+        /// transport stream for DVB-T, or anything ffmpeg can open, which is
+        /// re-encoded into one. Empty goes back to the test card.
+        pub file: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Say {
+        /// What to say, as a person would read it aloud. Cut to what fits in
+        /// one over.
+        pub text: String,
+        /// The channel to say it on, from `list_channels`. Its transmit
+        /// source is set to the agent. Omit to use the channel already set
+        /// to AGENT.
+        pub channel: Option<u64>,
+        /// The voice to say it in: a voice the speech server names, or, for
+        /// the model on this machine, a sentence describing how it should
+        /// sound. Omit for the one in the Agent settings.
+        pub voice: Option<String>,
     }
 
     #[derive(Debug, Deserialize, JsonSchema)]

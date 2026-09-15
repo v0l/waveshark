@@ -183,8 +183,7 @@ pub fn in_when(secs: i64) -> String {
 
 /// `14:32:05`, in UTC, which is the clock everything about an orbit is in.
 pub fn utc_hms(at_s: i64) -> String {
-    let s = at_s.rem_euclid(86_400);
-    format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
+    crate::segments::when(at_s.max(0) as u64 * 1_000_000).format("%H:%M:%S").to_string()
 }
 
 #[cfg(test)]

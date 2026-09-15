@@ -11,9 +11,19 @@ the code is in the commit log.
 
 ### Added
 
+- PTT-ID: the DTMF unit number a radio sends names who keyed up on an analogue
+  channel.
+
+- The coded squelch on an analogue channel is read and shown as the group: a
+  CTCSS tone or a DCS code, on the call list, in Home Assistant and to the
+  agent.
+
 - Call recording: every over kept as Opus, from the Record switch on the call list.
 
-- Messages are written down as they arrive, a file a day, and read back at start.
+- A Recordings table under the call list: every over on the disk, playable.
+
+- Messages are written down as they arrive, a file a day, and read back at
+  start, marked as being from the log.
 
 - A call bus and a message bus in Home Assistant, with an on-air lamp.
 
@@ -48,6 +58,12 @@ the code is in the commit log.
 - The agent channel shows the last over it heard and why it did not answer.
 
 - The agent answers to a name you choose, and waits for the channel to be clear.
+- The agent holds a conversation: once it has answered, the next 30 seconds need
+  no name.
+- Agents can say something over the air in the agent's voice, and ask what the
+  radio can transmit.
+- Speech heard on the air can be read on the model's server instead of on this
+  machine.
 
 - Agents can key the transmitter, set the tone or microphone, and set transmit gain.
 
@@ -113,9 +129,12 @@ the code is in the commit log.
   tap, the bus, the replay and the speaker.
 - Every level and mute is kept with the graph edits and survives a restart.
 - The strip shows what the speaker is playing: who, to whom, on what frequency.
+- A played-back over is a strip of its own, with a level, a mute and STOP.
 - A chain drawn by hand reaches the speaker through a fader stage of its own.
 
 ### Fixed
+
+- A channel marked as voice, the agent's own included, is listed as a call.
 
 - The transcriber loads its model as the receiver starts, not at the first over.
 

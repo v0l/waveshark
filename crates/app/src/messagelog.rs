@@ -129,6 +129,9 @@ fn message_of(line: &str, now: Instant, now_us: u64) -> Option<Message> {
         last: at,
         at_us,
         heard: 1,
+        // From the file: this receiver has not heard it in this session, and
+        // may not even be pointed at the band any more.
+        logged: true,
     })
 }
 

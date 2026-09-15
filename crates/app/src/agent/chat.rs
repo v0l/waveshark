@@ -68,8 +68,13 @@ pub struct Chat {
 
 impl Default for Chat {
     fn default() -> Self {
+        let config = Config::load();
+        // The transcriber reads where this says, and it is a stage in a graph
+        // that knows nothing about the agent: say so once, here, and again
+        // whenever the settings change.
+        super::config::publish_reading(&config);
         Self {
-            config: Config::load(),
+            config,
             turns: Vec::new(),
             draft: String::new(),
             history: Vec::new(),
@@ -491,7 +496,7 @@ mod tests {
         let list = tool_list();
         let list = list.as_array().expect("an array of tools");
         assert_eq!(list.len(), catalog::all().len());
-        assert_eq!(list.len(), 53);
+        assert_eq!(list.len(), 55);
         for t in list {
             let f = &t["function"];
             assert!(f["name"].as_str().is_some_and(|n| !n.is_empty()));

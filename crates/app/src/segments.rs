@@ -330,28 +330,24 @@ fn measure(dir: &Path, ext: &str, except: Option<&str>) -> u64 {
         .sum()
 }
 
-/// UTC date as `YYYY-MM-DD`, by civil-from-days rather than a calendar crate.
+/// UTC date as `YYYY-MM-DD`, which is what a segment file is named after.
 pub fn day_of(at_us: u64) -> String {
-    let days = (at_us / 1_000_000) as i64 / 86_400;
-    // Howard Hinnant's civil_from_days, which is exact and fits in a function.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    when(at_us).format("%Y-%m-%d").to_string()
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, for a log a person reads rather than a program.
 pub fn iso_of(at_us: u64) -> String {
-    let secs = at_us / 1_000_000;
-    let rest = secs % 86_400;
-    format!("{}T{:02}:{:02}:{:02}Z", day_of(at_us), rest / 3600, rest % 3600 / 60, rest % 60)
+    when(at_us).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// A timestamp in microseconds as a UTC date and time.
+///
+/// Anything before the epoch, which is a clock that has not been set, reads
+/// as the epoch rather than as a date in 1969.
+pub fn when(at_us: u64) -> chrono::DateTime<chrono::Utc> {
+    let secs = (at_us / 1_000_000) as i64;
+    let nanos = (at_us % 1_000_000) as u32 * 1_000;
+    chrono::DateTime::from_timestamp(secs, nanos).unwrap_or(chrono::DateTime::UNIX_EPOCH)
 }
 
 /// The header a reader checks before it parses anything, and where the first

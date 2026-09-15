@@ -189,38 +189,8 @@ impl Map<'_> {
     }
 
     /// The handle between the map and the table, and the drag that moves it.
-    ///
-    /// The same grip the scope pane uses, because it is the same gesture: a
-    /// pane split two ways where which half matters changes with what is
-    /// being watched. Follows the pointer rather than accumulating deltas,
-    /// so a long drag cannot leave the divider behind the cursor.
     fn divider(ui: &mut egui::Ui, top: f32, usable: f32, frac: f32, splitting: &mut bool) -> f32 {
-        let (grip, resp) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), SPLIT_GRIP_H),
-            Sense::click_and_drag(),
-        );
-        let hot = *splitting || resp.hovered();
-        split_grip(&ui.painter_at(grip), &grip, hot);
-        if hot {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        }
-        if resp.drag_started() {
-            *splitting = true;
-        }
-        let mut frac = frac;
-        if *splitting {
-            if let Some(pos) = resp.interact_pointer_pos() {
-                let f = (pos.y - top - SPLIT_GRIP_H / 2.0) / usable;
-                frac = f.clamp(*MAP_FRAC_RANGE.start(), *MAP_FRAC_RANGE.end());
-            }
-        }
-        if resp.drag_stopped() {
-            *splitting = false;
-        }
-        if resp.double_clicked() {
-            frac = DEFAULT_MAP_FRAC;
-        }
-        frac
+        split_divider(ui, top, usable, frac, splitting, MAP_FRAC_RANGE, DEFAULT_MAP_FRAC)
     }
 
     /// The station position, shown and editable.

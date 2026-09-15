@@ -500,6 +500,8 @@ pub enum Cmd {
     /// The sink belongs to this thread, so replaying from the packet list is
     /// a message rather than the interface opening its own audio device.
     Play(std::sync::Arc<common::Speech>),
+    /// Drop what is being played back, wherever it got to.
+    StopPlaying,
     /// Write every burst that decodes to this directory, with an optional
     /// budget in megabytes, or stop recording.
     Record(Option<(std::path::PathBuf, Option<u64>)>),
@@ -1325,6 +1327,9 @@ pub struct Status {
     call_level: AtomicU32,
     /// What the call bus's gain control is adding, in dB, as f32 bits.
     call_gain_db: AtomicU32,
+    /// Seconds of playback left in the replay stage, as f32 bits: what the
+    /// strip shows a playback by, since a replay is on no channel.
+    replay_left_s: AtomicU32,
 }
 
 /// Everything the radio itself can be set to, and what it is set to now.
@@ -1459,6 +1464,7 @@ impl Default for Status {
             out_level: AtomicU32::new(0),
             call_level: AtomicU32::new(0),
             call_gain_db: AtomicU32::new(0),
+            replay_left_s: AtomicU32::new(0),
             error: parking_lot::Mutex::new(None),
             refused: parking_lot::Mutex::new(None),
             blend: AtomicU32::new(0),
@@ -1564,6 +1570,10 @@ impl Status {
 
     /// What is being heard now: everything the bus mixed last block, by
     /// system, frequency, group and caller, with its level.
+    /// What the audio bus is mixing, for anything that wants to ask. No pane
+    /// draws it: the call list is where a conversation appears and the strip
+    /// is where a channel does.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn playing(&self) -> Vec<crate::mix::bus::Playing> {
         self.playing.lock().clone()
     }
@@ -1590,6 +1600,11 @@ impl Status {
 
     pub fn call_level(&self) -> f32 {
         f32::from_bits(self.call_level.load(Ordering::Relaxed))
+    }
+
+    /// Seconds of a played-back over still to come, or zero.
+    pub fn replay_left_s(&self) -> f32 {
+        f32::from_bits(self.replay_left_s.load(Ordering::Relaxed))
     }
 
     /// Rise instantly, fall slowly. A meter that tracked the block peak both
@@ -2008,7 +2023,18 @@ struct Tx {
     /// to whichever transmit channel comes first on the strip, so recalling
     /// a second from a bank and working it left the chain showing the other.
     last_keyed: Option<u64>,
+    /// When the transmitter was last on air, so the transcriber stays deaf a
+    /// moment past the key coming up: the audio already in the demodulator
+    /// when the key lifted is still the receiver's own voice.
+    last_on_air: Option<std::time::Instant>,
 }
+
+/// How long past the key coming up the transcriber stays deaf.
+///
+/// One demodulator's worth of audio in flight, not a hang time: what the
+/// receiver said must not be written down, and what somebody says straight
+/// after must be.
+const DEAF_TAIL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The speaker and the microphone, and the devices they were asked for.
 struct AudioIo {
@@ -2203,7 +2229,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             rx,
             scanners,
             audio: AudioIo { out: String::new(), input: String::new(), _player: player, mic: None },
-            tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None, last_keyed: None },
+            tx: Tx {
+                gain_db: 0.0,
+                blocks_since_key: 0,
+                keying_for: None,
+                last_keyed: None,
+                last_on_air: None,
+            },
             voice: None,
             status,
             cmd,
@@ -2255,7 +2287,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             self.rx.set_tx_monitor(on_air && silent);
             // And nothing reads that loopback as speech: what the receiver
             // said is not what the receiver heard.
-            self.rx.set_transcriber_deaf(on_air);
+            let now = std::time::Instant::now();
+            if on_air {
+                self.tx.last_on_air = Some(now);
+            }
+            let deaf =
+                on_air || self.tx.last_on_air.is_some_and(|t| now.duration_since(t) < DEAF_TAIL);
+            self.rx.set_transcriber_deaf(deaf);
             // A radio unplugged mid-over ends the over itself, and the key
             // has to come up with it: a lit key over a transmitter that
             // stopped transmitting is worse than no key at all.
@@ -2515,6 +2553,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::Play(speech) => {
                 if let Some(r) = self.rx.replay_mut() {
                     r.play(&speech);
+                }
+            }
+            Cmd::StopPlaying => {
+                if let Some(r) = self.rx.replay_mut() {
+                    r.stop();
                 }
             }
         }
@@ -3232,7 +3275,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 // A running call replaces its last report; an ended one is
                 // kept, since it is the only report that says so.
                 for c in calls {
-                    match heard.iter_mut().find(|h| !h.over && h.key() == c.key()) {
+                    // A call whose labels filled in part way through the
+                    // over updates the row it was reported under, rather
+                    // than appearing beside it as a second transmission.
+                    let under = c.was.clone().unwrap_or_else(|| c.key());
+                    match heard.iter_mut().find(|h| !h.over && h.key() == under) {
                         Some(h) => *h = c,
                         None => heard.push(c),
                     }
@@ -3249,6 +3296,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         if let Some(b) = self.rx.audio() {
             *self.status.playing.lock() = b.playing().to_vec();
         }
+        let left = self.rx.replay().map(|r| r.left()).unwrap_or(0.0);
+        self.status.replay_left_s.store((left as f32).to_bits(), Ordering::Relaxed);
         if let Some(s) = self.rx.speaker() {
             Status::set_level(&self.status.out_level, s.peak());
             self.status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
@@ -5355,24 +5404,14 @@ pub(crate) mod tests {
         assert_eq!(key.channel_hz, CHANNEL_HZ as u64, "read on {key}");
     }
 
-    /// A channel marked as voice is heard through its own fader, and nothing
-    /// of it reaches the packet bus or the call list.
-    ///
-    /// An analogue over used to be wrapped in an empty packet so the call
-    /// list, which read only the packet bus, would see it: that put a row
-    /// saying nothing into the packet log for every transmission, made the
-    /// channel inaudible until something subscribed to it, and was wrong in
-    /// principle, since there is no packet in analogue speech. It is not a
-    /// call either, because a mode and a frequency do not say whether what is
-    /// coming out is a conversation, a repeater idling or an airband loop.
-    /// What it is is audio on a strip, and what reads it is the tap.
-    #[test]
-    fn a_voice_channel_is_heard_and_is_not_a_call() {
-        let Some(buf) = pmr446_fixture() else {
-            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
-            return;
-        };
-        let mut plan = replay_plan(&buf, false);
+    /// The handheld on one analogue strip, with the channel's voice mark
+    /// either way. Returns what the tap heard, the calls it made and how many
+    /// blocks the speaker was handed nothing on.
+    fn pmr446_strip(
+        buf: &common::IqBuf,
+        voice: bool,
+    ) -> (Vec<crate::mix::heard::LiveCall>, crate::calls::Calls, usize, f32) {
+        let mut plan = replay_plan(buf, false);
         plan.fronts.clear();
         plan.channels = vec![ChannelSpec {
             id: 1,
@@ -5382,7 +5421,7 @@ pub(crate) mod tests {
             bandwidth_hz: None,
             squelch_db: None,
             agc: true,
-            voice: true,
+            voice,
             tx: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
@@ -5411,18 +5450,69 @@ pub(crate) mod tests {
             }
         }
 
+        let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
+        (heard, calls, silent_blocks, rms)
+    }
+
+    /// A channel marked as voice is heard through its own fader, and is a row
+    /// on the call list without anything of it reaching the packet bus.
+    ///
+    /// An analogue over used to be wrapped in an empty packet so the call
+    /// list, which read only the packet bus, would see it: that put a row
+    /// saying nothing into the packet log for every transmission, made the
+    /// channel inaudible until something subscribed to it, and was wrong in
+    /// principle, since there is no packet in analogue speech. The tap is
+    /// what reads it, and the voice mark is the operator saying people talk
+    /// here, which is the same statement a decoder makes with `Airtime::voice`
+    /// and the reason the agent's own channel is listed.
+    #[test]
+    fn a_voice_channel_is_heard_and_is_a_call() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let (heard, calls, silent_blocks, rms) = pmr446_strip(&buf, true);
+
         // Heard, with no subscription to anything: the fader is the strip's.
         assert_eq!(
             silent_blocks, 0,
             "the bus handed the speaker nothing on {silent_blocks} blocks"
         );
-        let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len() as f32).sqrt();
         assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
 
-        // Not listed: the strip is where a tuned channel is watched and
-        // heard, and the call list is for a front end that decoded a call and
-        // can say who was on it.
-        assert!(heard.is_empty(), "a tuned channel became a call: {heard:?}");
+        assert!(!heard.is_empty(), "a channel marked as voice made no call");
+        assert!(heard.iter().all(|c| c.to == "PMR1"), "a call not named for the strip");
+        let now = std::time::Instant::now();
+        let active = calls.active(now);
+        assert_eq!(active.len(), 1, "one channel, one row: {active:?}");
+        assert_eq!(active[0].to, "PMR1");
+        assert_eq!(active[0].system, crate::mix::fader::ANALOGUE);
+        assert_eq!(active[0].channel_hz, 446_049_100.0);
+        assert!(active[0].seconds > 1.0, "airtime of {}s", active[0].seconds);
+        // The coded squelch this handheld is set to, read off the audio: an
+        // FM carrier says nothing about who is on it, and for analogue
+        // traffic the tone is the only group there is.
+        assert_eq!(active[0].code.as_deref(), Some("141.3"), "the tone was not read");
+        assert!(
+            heard.iter().any(|c| c.code.as_deref() == Some("141.3")),
+            "the tone never reached the tap's call"
+        );
+    }
+
+    /// The same channel with the mark off: audible on the strip, written down
+    /// by the transcriber, and no row. A mode and a frequency do not say
+    /// whether what is coming out is a conversation, a repeater idling or an
+    /// airband loop, so nothing here guesses.
+    #[test]
+    fn a_channel_not_marked_as_voice_is_heard_and_is_not_a_call() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let (heard, calls, silent_blocks, rms) = pmr446_strip(&buf, false);
+        assert_eq!(silent_blocks, 0, "the bus handed the speaker nothing");
+        assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
+        assert!(heard.is_empty(), "an unmarked channel became a call: {heard:?}");
         assert!(calls.active(std::time::Instant::now()).is_empty());
     }
 

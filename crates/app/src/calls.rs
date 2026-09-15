@@ -72,6 +72,11 @@ pub struct Call {
     /// The vocoder the speech is in, as the front end names it: "AMBE+2
     /// 2450", "Codec 2 3200", "ACELP 4.6k". `None` when it did not say.
     pub codec: Option<&'static str>,
+    /// The coded squelch an analogue channel's traffic is using, as a radio
+    /// names it: "141.3" or "D023". For most analogue traffic it is the only
+    /// identity there is, since an FM carrier says nothing about who is on
+    /// it.
+    pub code: Option<String>,
     pub first: Instant,
     pub last: Instant,
     /// Separate keyings of the microphone, not packets.
@@ -203,6 +208,12 @@ impl Calls {
             if k.from.is_none() {
                 k.from = c.from.clone();
             }
+            // Read off the audio, so it arrives after the row exists, and
+            // the newest reading wins: a code changed on the radio has to
+            // change on the list.
+            if c.code.is_some() {
+                k.code = c.code.clone();
+            }
             // A gap longer than the hang time is a new conversation on the
             // same group, so the old one keeps its duration rather than
             // stretching across the silence.
@@ -241,6 +252,7 @@ impl Calls {
             encrypted: false,
             cipher: None,
             codec: None,
+            code: c.code.clone(),
             first: c.first,
             last: c.last,
             overs: u64::from(c.over),
@@ -362,6 +374,10 @@ impl Calls {
             encrypted,
             cipher,
             codec,
+            // A packet says which group it was for itself; coded squelch is
+            // what an analogue channel has instead, and it arrives on the
+            // bus rather than in a decode.
+            code: None,
             first: at,
             last: at,
             overs: u64::from(!live),
@@ -660,6 +676,8 @@ mod tests {
             peak: 0.3,
             quiet_s: 0.0,
             over,
+            was: None,
+            code: None,
         };
         c.hear(&live(1.0, false));
         c.hear(&live(2.9, false));
@@ -698,6 +716,7 @@ mod tests {
             channel_hz: 435.0e6,
             to: Some("9".into()),
             from: Some("1234567".into()),
+            code: None,
             rate: 8_000.0,
             channels: 1,
             pcm: vec![0.2; 8],

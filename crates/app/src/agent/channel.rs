@@ -8,9 +8,10 @@
 //! [`audio::Speaker`] the transmit chain reads.
 //!
 //! Two rules keep it off other people's overs. It answers nothing that does
-//! not address it by name, and it keys nothing until the squelch has been
-//! shut for a hang time: a station drawing breath mid-over must not be
-//! transmitted over, and the agent has no ears while it transmits.
+//! not address it by name, unless it is already in a conversation, and it
+//! keys nothing until the squelch has been shut for a hang time: a station
+//! drawing breath mid-over must not be transmitted over, and the agent has
+//! no ears while it transmits.
 
 use super::{Desk, chat, config::Config, voice};
 use std::sync::Arc;
@@ -148,6 +149,9 @@ pub enum Move {
 pub struct Heard {
     pub at: Instant,
     pub text: String,
+    /// Who said it, where the radio said: a unit number off an analogue
+    /// PTT-ID, or the caller of a decoded call.
+    pub from: Option<String>,
     /// Why it was not taken, or `None` when it was.
     pub passed: Option<Passed>,
 }
@@ -157,8 +161,6 @@ pub struct Heard {
 pub enum Passed {
     /// It does not start with the agent's name.
     NotAddressed,
-    /// The name and nothing after it.
-    NothingAsked,
     /// It is still working on the one before.
     Busy,
     /// It cannot answer at all: see `Config::voice_fault`.
@@ -171,7 +173,6 @@ impl Passed {
     pub fn label(self) -> &'static str {
         match self {
             Self::NotAddressed => "not addressed to it",
-            Self::NothingAsked => "nothing asked",
             Self::Busy => "still on the last one",
             Self::Mute => "it cannot answer",
             Self::ItsOwn => "its own transmission",
@@ -231,6 +232,9 @@ pub struct AgentChannel {
     /// it, because a station says who it is, so it answered itself: every
     /// answer became a question and the channel filled with the agent talking
     /// to nobody.
+    ///
+    /// The end of it is also where the follow window is measured from: an
+    /// over soon after the agent has spoken is more of the same conversation.
     spoke: Option<(Instant, Instant)>,
     /// The newest over already dealt with, by the instant it started.
     ///
@@ -333,6 +337,23 @@ impl AgentChannel {
         Some(rest.trim().to_string())
     }
 
+    /// The question as the model is given it, with whoever asked in front of
+    /// it.
+    ///
+    /// A channel carries more than one station, and an answer often depends
+    /// on which of them is talking: "say that again" and "tune to my
+    /// frequency" are about the station that said them. Where the radio does
+    /// not say who it was, the question goes on its own rather than with an
+    /// invented caller.
+    fn from_station(who: Option<&str>, question: &str) -> String {
+        match who {
+            Some(unit) if !unit.trim().is_empty() => {
+                format!("Station {} says: {question}", unit.trim())
+            }
+            _ => question.to_string(),
+        }
+    }
+
     /// A reply cut to what will fit in one over.
     fn to_the_point(text: &str) -> String {
         let words: Vec<&str> = text.split_whitespace().collect();
@@ -350,22 +371,58 @@ impl AgentChannel {
     fn brief(config: &Config) -> String {
         format!(
             "You are answering over a radio channel, by voice, to somebody who cannot see a \
-             screen. Keep it to one or two short sentences, no lists, no punctuation a \
+             screen. Talk like a radio operator: clipped, plain, one thought per over, the \
+             answer first and nothing after it. No greetings, no filler, no restating the \
+             question. Keep it to one or two short sentences, no lists, no punctuation a \
              speaker cannot say, and no dashes: write a full stop or a comma instead. Say \
-             numbers as words a listener can follow. You are called {}.",
+             numbers as words a listener can follow. Say so plainly if you do not know. \
+             You are called {}.\n\n\
+             What you are given is a speech model's reading of the channel, so it is not \
+             always words. Where the radio said who was talking, the over begins \
+             \"Station <number> says:\", which is that radio's own identity code and not \
+             part of what was said: answer the station, use the number if you need to name \
+             them, and never read the prefix back. An over with no number in front of it is \
+             from somebody whose radio does not send one, so do not guess who it was or \
+             assume it is the station before. Two stations may take turns on the channel, \
+             and the numbers are how you tell them apart.\n\n\
+             Text in asterisks, brackets or parentheses, such as *BANG*, [MUSIC] or \
+             (door slams), is the speech model describing a noise it heard rather than \
+             anything anybody said. Treat it as a sound on the channel: worth answering if \
+             somebody asks about it, worth mentioning if it matters, and never read aloud as \
+             if it were speech. An over that is only such a description is a noise and not a \
+             question.",
             config.wake.trim()
         )
     }
 
-    /// Whether `at` falls inside the last over the agent transmitted.
-    fn was_speaking(&self, at: Instant, hang_s: f64) -> bool {
-        // Keyed now, with no end yet: everything from the key down is its own.
-        if let Some(from) = self.keyed_at {
-            return at >= from;
+    /// Whether the agent is hearing itself: an over that began after the key
+    /// went down, while the key is still down.
+    ///
+    /// Nothing is judged by how long ago the agent spoke. The transcriber is
+    /// shut off for the whole over and a moment past it by the radio thread,
+    /// which is the only thing that knows when the transmitter is really on
+    /// air, so text the agent is offered at all is text somebody said. The
+    /// window this used to be, the over plus the hang, threw away an over
+    /// that began while the agent was still talking and was read once the
+    /// key came up, which is exactly a person answering as soon as they can.
+    fn was_speaking(&self, at: Instant) -> bool {
+        self.keyed_at.is_some_and(|from| at >= from)
+    }
+
+    /// How long it will go on answering without being named, or `None` when
+    /// the next over has to say it.
+    ///
+    /// Measured from the end of its own last over, so every answer starts the
+    /// window again and a conversation carries on as long as somebody keeps
+    /// talking. Naming the agent works throughout; this is only about not
+    /// having to.
+    pub fn following(&self, config: &Config, at: Instant) -> Option<f64> {
+        if config.follow_s <= 0.0 {
+            return None;
         }
-        self.spoke.is_some_and(|(from, to)| {
-            at >= from && at <= to + Duration::from_secs_f64(hang_s.max(0.0))
-        })
+        let (_, ended) = self.spoke?;
+        let since = at.saturating_duration_since(ended).as_secs_f64();
+        (since <= config.follow_s).then_some(config.follow_s - since)
     }
 
     /// Send an answer again, exactly as it went out the first time.
@@ -390,12 +447,17 @@ impl AgentChannel {
     }
 
     /// Something was said on the channel. Returns whether it was taken.
+    ///
+    /// `from` is whoever the radio says was talking, when it says: the agent
+    /// is told, because on a channel with more than one station on it the
+    /// answer to "say that again" depends on who asked.
     pub fn heard(
         &mut self,
         config: &Config,
         desk: &Desk,
         rt: &tokio::runtime::Handle,
         at: Instant,
+        from: Option<&str>,
         text: &str,
     ) -> bool {
         if self.on.is_none() {
@@ -404,20 +466,24 @@ impl AgentChannel {
         // Said once per over rather than per frame: the same reading is
         // offered again every frame it stays in the transcript, and a note
         // that rewrote itself sixty times a second is the same note.
+        let who = from.map(str::to_string);
         let pass = |a: &mut Self, why: Passed| {
             if a.last.as_ref().map(|h| h.at) != Some(at) {
-                a.last = Some(Heard { at, text: text.to_string(), passed: Some(why) });
+                a.last = Some(Heard {
+                    at,
+                    text: text.to_string(),
+                    from: who.clone(),
+                    passed: Some(why),
+                });
             }
             false
         };
         if config.voice_fault().is_some() {
             return pass(self, Passed::Mute);
         }
-        // An over that started while it was transmitting is its own, coming
-        // back off a radio that hears itself. The hang is added on because
-        // the transcript times an utterance from where the speech begins, and
-        // a reading that began on the tail of the over is still the tail.
-        if self.was_speaking(at, config.hang_s) {
+        // Nothing is taken while the key is down: the samples the transmitter
+        // is putting out are the only thing that can be on the channel.
+        if self.was_speaking(at) {
             return pass(self, Passed::ItsOwn);
         }
         // Anything at or before the mark has had its turn. The transcript
@@ -429,13 +495,21 @@ impl AgentChannel {
         if self.state.busy() {
             return pass(self, Passed::Busy);
         }
-        let Some(question) = Self::addressed(&config.wake, text) else {
-            return pass(self, Passed::NotAddressed);
+        // Named, or already talking to it: within the follow window the whole
+        // over is the question, name or no name.
+        let question = match Self::addressed(&config.wake, text) {
+            Some(q) => q,
+            None if self.following(config, at).is_some() => text.trim().to_string(),
+            None => return pass(self, Passed::NotAddressed),
         };
+        // The name on its own is a station calling, and a station answers a
+        // call: saying nothing looked like a receiver that had not heard.
+        // The model has nothing to add to "go ahead" and would take seconds
+        // to say it, so this one line is not put to it.
         if question.is_empty() {
-            return pass(self, Passed::NothingAsked);
+            return self.answer_the_call(config, rt, at, from, text);
         }
-        self.last = Some(Heard { at, text: text.to_string(), passed: None });
+        self.last = Some(Heard { at, text: text.to_string(), from: who.clone(), passed: None });
         self.answered = Some(at);
         self.asked = question.to_string();
         self.stage = Stage::default();
@@ -447,7 +521,8 @@ impl AgentChannel {
         if history.is_empty() {
             history.push(serde_json::json!({ "role": "system", "content": Self::brief(config) }));
         }
-        let (config, desk, question) = (config.clone(), desk.clone(), question.to_string());
+        let question = Self::from_station(who.as_deref(), &question);
+        let (config, desk) = (config.clone(), desk.clone());
         let stage = self.stage.clone();
         rt.spawn(async move {
             let answer = match chat::ask_once(config.clone(), history, desk, &question).await {
@@ -468,6 +543,90 @@ impl AgentChannel {
             let _ = tx.send(answer);
         });
         true
+    }
+
+    /// Answer a call that asked nothing: the name, and an invitation to go
+    /// on. The follow window opens behind it, so the question itself needs
+    /// no name.
+    fn answer_the_call(
+        &mut self,
+        config: &Config,
+        rt: &tokio::runtime::Handle,
+        at: Instant,
+        from: Option<&str>,
+        text: &str,
+    ) -> bool {
+        self.last = Some(Heard {
+            at,
+            text: text.to_string(),
+            from: from.map(str::to_string),
+            passed: None,
+        });
+        self.answered = Some(at);
+        let said = format!("{} here, go ahead.", config.wake.trim());
+        self.speak_line(config, rt, said, text.trim().to_string());
+        true
+    }
+
+    /// Say a line nothing on the air asked for: what a `say` tool hands over,
+    /// or an operator typing into the pane.
+    ///
+    /// The words are taken as given and only cut to one over. Everything
+    /// after that is the channel's: it waits for the squelch and the hang the
+    /// same way an answer does, so a line handed over mid-conversation does
+    /// not transmit on top of somebody.
+    pub fn say(
+        &mut self,
+        config: &Config,
+        rt: &tokio::runtime::Handle,
+        text: &str,
+    ) -> Result<String, String> {
+        if self.on.is_none() {
+            return Err(
+                "no channel is the agent's: set a channel's transmit source to AGENT".to_string()
+            );
+        }
+        if let Some(why) = config.speech_fault() {
+            return Err(format!("there is no voice to say it with: {why}"));
+        }
+        if self.state.busy() {
+            return Err(format!("it is {} already", self.state.label()));
+        }
+        let said = Self::to_the_point(text.trim());
+        if said.is_empty() {
+            return Err("nothing to say".to_string());
+        }
+        self.speak_line(config, rt, said.clone(), "asked to say this".to_string());
+        Ok(said)
+    }
+
+    /// Put one line of speech in hand: the words are already decided, so the
+    /// model is not asked and the conversation is left as it was.
+    fn speak_line(
+        &mut self,
+        config: &Config,
+        rt: &tokio::runtime::Handle,
+        said: String,
+        heard: String,
+    ) {
+        self.asked = heard;
+        self.stage = Stage::default();
+        // Straight to the speech: there is no model half to this one.
+        self.stage.speaking();
+        self.state = State::Speaking;
+        self.stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        self.pending = Some(rx);
+        let config = config.clone();
+        rt.spawn(async move {
+            // An empty history leaves the conversation as it was: the model
+            // was not asked and has not heard this.
+            let answer = match voice::speak(&config, &said).await {
+                Ok(speech) => Answer { said: Ok(said), history: Vec::new(), speech: Some(speech) },
+                Err(e) => Answer { said: Err(e), history: Vec::new(), speech: None },
+            };
+            let _ = tx.send(answer);
+        });
     }
 
     /// Take what the background work finished, and decide about the key.
@@ -557,6 +716,9 @@ mod tests {
             voice_url: "http://s/v1".into(),
             wake: "shark".into(),
             hang_s: 1.5,
+            // Off unless a test asks for it, so every other test is about
+            // the name.
+            follow_s: 0.0,
             ..Config::default()
         }
     }
@@ -575,6 +737,39 @@ mod tests {
         assert_eq!(f("nothing to do with it"), None);
         // No wake word set is no answering at all.
         assert_eq!(AgentChannel::addressed("", "shark hello"), None);
+    }
+
+    /// The model is told who is talking when the radio says.
+    ///
+    /// A PTT-ID off an analogue channel or a decoded call's caller both
+    /// arrive the same way, and on a channel with two stations on it the
+    /// answer to "say that again" depends on which of them asked.
+    #[test]
+    fn the_model_is_told_who_asked() {
+        let f = AgentChannel::from_station;
+        assert_eq!(f(Some("123"), "what is on the air"), "Station 123 says: what is on the air");
+        assert_eq!(f(Some(" 4321 "), "go ahead"), "Station 4321 says: go ahead");
+        // An over with nobody named is the ordinary case: PTT-ID is off by
+        // default on every radio that has it.
+        assert_eq!(f(None, "what is on the air"), "what is on the air");
+        assert_eq!(f(Some(""), "what is on the air"), "what is on the air");
+    }
+
+    /// The model is told what it is reading: a station's number in front of
+    /// an over, and a noise the speech model described rather than heard
+    /// somebody say.
+    ///
+    /// Without the first it read the prefix back on the air as though it were
+    /// part of the question. Without the second it answered *BANG* as a word
+    /// and apologised for not understanding.
+    #[test]
+    fn the_brief_explains_the_prefix_and_the_noises() {
+        let brief = AgentChannel::brief(&config());
+        assert!(brief.contains("called shark"), "{brief}");
+        assert!(brief.contains("Station <number> says:"));
+        assert!(brief.contains("never read the prefix back"));
+        assert!(brief.contains("*BANG*"));
+        assert!(brief.contains("describing a noise"));
     }
 
     /// A reply too long for one over is cut before it is paid for, and the
@@ -687,11 +882,11 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
         let mut a = AgentChannel { on: Some(1), ..Default::default() };
         let at = Instant::now();
-        assert!(a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
+        assert!(a.heard(&c, &desk, rt.handle(), at, None, "shark what is on the air"));
         assert_eq!(a.state, State::Asking, "it has the question and is asking the model");
         // The same over read again, and a second question while it is busy.
-        assert!(!a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
-        assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), "shark again"));
+        assert!(!a.heard(&c, &desk, rt.handle(), at, None, "shark what is on the air"));
+        assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), None, "shark again"));
     }
 
     /// Two overs in the window are answered once each, not round and round.
@@ -713,22 +908,25 @@ mod tests {
         let second = t0 + Duration::from_secs(20);
 
         // The first is taken; the agent is busy, so the second waits.
-        assert!(a.heard(&c, &desk, rt.handle(), first, "shark how is it going"));
-        assert!(!a.heard(&c, &desk, rt.handle(), second, "shark how is it going"));
+        assert!(a.heard(&c, &desk, rt.handle(), first, None, "shark how is it going"));
+        assert!(!a.heard(&c, &desk, rt.handle(), second, None, "shark how is it going"));
 
         // Free again, and the window offered whole on the next frame. The
         // second is new, the first is not.
         a.state = State::Listening;
         a.pending = None;
-        assert!(!a.heard(&c, &desk, rt.handle(), first, "shark how is it going"), "answered twice");
-        assert!(a.heard(&c, &desk, rt.handle(), second, "shark how is it going"));
+        assert!(
+            !a.heard(&c, &desk, rt.handle(), first, None, "shark how is it going"),
+            "answered twice"
+        );
+        assert!(a.heard(&c, &desk, rt.handle(), second, None, "shark how is it going"));
 
         // And round again: neither is new now.
         a.state = State::Listening;
         a.pending = None;
         for _ in 0..3 {
-            assert!(!a.heard(&c, &desk, rt.handle(), first, "shark how is it going"));
-            assert!(!a.heard(&c, &desk, rt.handle(), second, "shark how is it going"));
+            assert!(!a.heard(&c, &desk, rt.handle(), first, None, "shark how is it going"));
+            assert!(!a.heard(&c, &desk, rt.handle(), second, None, "shark how is it going"));
         }
     }
 
@@ -751,20 +949,113 @@ mod tests {
         assert_eq!(a.state, State::OnAir);
         let mid = t0 + Duration::from_secs(2);
         assert!(
-            !a.heard(&c, &desk, rt.handle(), mid, "shark here, the receiver is idle and ready"),
+            !a.heard(
+                &c,
+                &desk,
+                rt.handle(),
+                mid,
+                None,
+                "shark here, the receiver is idle and ready"
+            ),
             "it answered its own voice"
         );
         assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::ItsOwn));
 
-        // The key comes up, and the tail of the over is still its own: the
-        // transcript times an utterance from where the speech began.
+        // The key comes up, and an over read out of the transcript now is
+        // somebody's, however far back it began: they started talking while
+        // the agent was still going, which is a person coming back as soon
+        // as they can. Judged by how long ago the agent spoke, as it was,
+        // this over was thrown away.
         let up = t0 + Duration::from_secs(4);
         assert_eq!(a.poll(&c, up, false), Some(Move::Unkey));
-        assert!(!a.heard(&c, &desk, rt.handle(), up, "shark here, standing by"), "the tail of it");
+        assert!(a.heard(&c, &desk, rt.handle(), mid, None, "shark what about the decode settings"));
 
-        // And somebody speaking after the hang is a question again.
-        let after = up + Duration::from_secs_f64(c.hang_s + 1.0);
-        assert!(a.heard(&c, &desk, rt.handle(), after, "shark how is it going"));
+        // And promptly after the key, the same.
+        a.state = State::Listening;
+        a.pending = None;
+        let after = up + Duration::from_secs_f64(0.2);
+        assert!(a.heard(&c, &desk, rt.handle(), after, None, "shark how is it going"));
+    }
+
+    /// Having answered, it goes on answering without being named, until the
+    /// window since its own last over runs out.
+    #[test]
+    fn a_conversation_carries_on_without_the_name() {
+        let c = Config { follow_s: 30.0, ..config() };
+        let (desk, _asks) = Desk::new();
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let mut a = AgentChannel { on: Some(1), ..Default::default() };
+        let t0 = Instant::now();
+
+        // Nothing has been said yet, so the name is still wanted.
+        assert!(a.following(&c, t0).is_none());
+        assert!(!a.heard(&c, &desk, rt.handle(), t0, None, "what is on the air"));
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::NotAddressed));
+
+        // It says something, and the window opens at the key coming up.
+        a.state = State::Holding;
+        assert_eq!(a.poll(&c, t0, false), Some(Move::Key(1)));
+        let up = t0 + Duration::from_secs(3);
+        assert_eq!(a.poll(&c, up, false), Some(Move::Unkey));
+
+        // The next over is the question whole, name or no name.
+        let next = up + Duration::from_secs(4);
+        assert!(a.heard(&c, &desk, rt.handle(), next, None, "and what about 145.5"));
+        assert_eq!(a.asked, "and what about 145.5", "the whole over, with nothing taken off");
+        assert!(a.following(&c, next).is_some_and(|left| left > 20.0 && left < 30.0));
+
+        // The window is measured from its own over, so it runs out while
+        // nobody is talking to it.
+        a.state = State::Listening;
+        a.pending = None;
+        let late = up + Duration::from_secs_f64(31.0);
+        assert!(a.following(&c, late).is_none());
+        assert!(!a.heard(&c, &desk, rt.handle(), late, None, "anybody about on this channel"));
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::NotAddressed));
+        // And the name still works after it.
+        assert!(a.heard(
+            &c,
+            &desk,
+            rt.handle(),
+            late + Duration::from_secs(1),
+            None,
+            "shark you there"
+        ));
+
+        // With the window off, only the name does.
+        let named = Config { follow_s: 0.0, ..c.clone() };
+        let mut strict = AgentChannel { on: Some(1), ..Default::default() };
+        strict.spoke = Some((t0, up));
+        assert!(strict.following(&named, up + Duration::from_secs(1)).is_none());
+        assert!(!strict.heard(
+            &named,
+            &desk,
+            rt.handle(),
+            up + Duration::from_secs(1),
+            None,
+            "go on"
+        ));
+    }
+
+    /// The name on its own is a call, and a call is answered.
+    ///
+    /// It used to be read as an over with no question in it and passed over
+    /// in silence, which on the air is a receiver that did not hear: "hey
+    /// shark" is how anybody opens, and the question comes in the next over.
+    #[test]
+    fn the_name_on_its_own_is_answered() {
+        let c = config();
+        let (desk, _asks) = Desk::new();
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let mut a = AgentChannel { on: Some(1), ..Default::default() };
+        let at = Instant::now();
+
+        assert!(a.heard(&c, &desk, rt.handle(), at, None, "hey shark"));
+        assert_eq!(a.last.as_ref().and_then(|h| h.passed), None, "it was taken");
+        // Straight to the speech: the model is not asked to say go ahead.
+        assert_eq!(a.state, State::Speaking);
+        assert_eq!(a.asked, "hey shark");
+        assert!(a.history.is_empty(), "the model has not been told about it");
     }
 
     /// An answer can be sent again without asking for another.
@@ -828,7 +1119,7 @@ mod tests {
         let mut clock = Instant::now();
         let mut say = |a: &mut AgentChannel, c: &Config, text: &str| {
             clock += Duration::from_secs(1);
-            a.heard(c, &desk, rt.handle(), clock, text)
+            a.heard(c, &desk, rt.handle(), clock, None, text)
         };
 
         // Somebody talking on the channel, to somebody else.
@@ -836,10 +1127,6 @@ mod tests {
         let h = a.last.clone().expect("it heard the over");
         assert_eq!(h.text, "uh, hey, can you hear that?");
         assert_eq!(h.passed, Some(Passed::NotAddressed));
-
-        // The name and nothing after it.
-        assert!(!say(&mut a, &c, "shark"));
-        assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::NothingAsked));
 
         // A question, taken.
         assert!(say(&mut a, &c, "shark what is on the air"));
@@ -875,7 +1162,7 @@ mod tests {
         assert_eq!(a.state.label(), "listening");
         assert!(!a.state.busy());
 
-        assert!(a.heard(&c, &desk, rt.handle(), Instant::now(), "shark what is on the air"));
+        assert!(a.heard(&c, &desk, rt.handle(), Instant::now(), None, "shark what is on the air"));
         assert_eq!(a.state, State::Asking);
         assert!(a.state.busy(), "a second question must not be taken while one is running");
         assert_eq!(a.state.label(), "asking the model");
@@ -990,7 +1277,7 @@ mod tests {
         let (desk, _asks) = Desk::new();
         let mut a = AgentChannel { on: Some(4), ..Default::default() };
         let t0 = Instant::now();
-        assert!(a.heard(&c, &desk, rt.handle(), t0, "shark, what frequency are we on"));
+        assert!(a.heard(&c, &desk, rt.handle(), t0, None, "shark, what frequency are we on"));
 
         // The channel is busy while the other station finishes its over, so
         // nothing keys however quickly the answer comes back.
@@ -1060,7 +1347,7 @@ mod tests {
         let (desk, _asks) = Desk::new();
         let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
         let mut a = AgentChannel { on: Some(1), ..Default::default() };
-        assert!(!a.heard(&c, &desk, rt.handle(), Instant::now(), "shark hello"));
+        assert!(!a.heard(&c, &desk, rt.handle(), Instant::now(), None, "shark hello"));
         assert_eq!(a.state, State::Listening);
     }
 }

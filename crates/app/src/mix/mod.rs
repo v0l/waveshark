@@ -117,27 +117,33 @@ pub fn write_wav(path: &Path, speech: &Speech) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let rate = speech.rate.max(1.0) as u32;
-    let n = speech.pcm.len() as u32;
-    let data_len = n * 2;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    f.write_all(b"RIFF")?;
-    f.write_all(&(36 + data_len).to_le_bytes())?;
-    f.write_all(b"WAVEfmt ")?;
-    f.write_all(&16u32.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?; // PCM
-    f.write_all(&1u16.to_le_bytes())?; // mono
-    f.write_all(&rate.to_le_bytes())?;
-    f.write_all(&(rate * 2).to_le_bytes())?; // bytes per second
-    f.write_all(&2u16.to_le_bytes())?; // block align
-    f.write_all(&16u16.to_le_bytes())?;
-    f.write_all(b"data")?;
-    f.write_all(&data_len.to_le_bytes())?;
-    for s in &speech.pcm {
-        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-        f.write_all(&v.to_le_bytes())?;
-    }
+    f.write_all(&wav_bytes(speech))?;
     f.flush()
+}
+
+/// The same WAV, in memory: what a transcription server is posted.
+#[cfg_attr(not(any(feature = "stt", test)), allow(dead_code))]
+pub fn wav_bytes(speech: &Speech) -> Vec<u8> {
+    let rate = speech.rate.max(1.0) as u32;
+    let data_len = speech.pcm.len() as u32 * 2;
+    let mut v = Vec::with_capacity(44 + data_len as usize);
+    v.extend(b"RIFF");
+    v.extend((36 + data_len).to_le_bytes());
+    v.extend(b"WAVEfmt ");
+    v.extend(16u32.to_le_bytes());
+    v.extend(1u16.to_le_bytes()); // PCM
+    v.extend(1u16.to_le_bytes()); // mono
+    v.extend(rate.to_le_bytes());
+    v.extend((rate * 2).to_le_bytes()); // bytes per second
+    v.extend(2u16.to_le_bytes()); // block align
+    v.extend(16u16.to_le_bytes());
+    v.extend(b"data");
+    v.extend(data_len.to_le_bytes());
+    for s in &speech.pcm {
+        v.extend(((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+    }
+    v
 }
 
 /// Peak and RMS of a transmission, in dBFS.

@@ -322,6 +322,7 @@ impl pipeline::node::Node for VideoNode {
                         // channel it came from.
                         to: None,
                         from: None,
+                        code: None,
                         rate: sound.rate(),
                         channels: 1,
                         pcm: std::mem::take(&mut self.pcm),

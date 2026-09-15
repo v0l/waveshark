@@ -32,6 +32,9 @@ pub struct LiveCall {
     pub channel_hz: f64,
     pub to: String,
     pub from: Option<String>,
+    /// The coded squelch the traffic is using, where the channel has one:
+    /// "141.3" for a CTCSS tone, "D023" for a DCS code.
+    pub code: Option<String>,
     pub first: std::time::Instant,
     pub last: std::time::Instant,
     /// Seconds somebody was actually talking, not the span of the call.
@@ -41,6 +44,15 @@ pub struct LiveCall {
     /// The hang time has passed since the last speech: this is the last
     /// report of this call.
     pub over: bool,
+    /// The conversation this was reported under before its labels filled in.
+    ///
+    /// Analogue identity arrives late: a coded squelch takes half a second of
+    /// audio to read and a PTT-ID about the same, so the first blocks of an
+    /// over are heard under the bare channel name. The key carries the
+    /// labels, so this says which row to update rather than leaving a list
+    /// with the same transmission on two lines. Set once, on the report that
+    /// changed it.
+    pub was: Option<common::ConversationKey>,
 }
 
 impl LiveCall {
@@ -89,6 +101,11 @@ impl HeardNode {
     pub fn take_calls(&mut self) -> Vec<LiveCall> {
         let mut out: Vec<LiveCall> = self.live.values().cloned().collect();
         out.sort_by_key(|c| c.first);
+        // Said once: the row it was reported under has been updated by the
+        // time anybody asks again.
+        for c in self.live.values_mut() {
+            c.was = None;
+        }
         self.live.retain(|_, c| !c.over);
         out
     }
@@ -99,17 +116,16 @@ impl HeardNode {
     /// whether or not anybody is listening to it. Silence is what ends a
     /// call, after [`HANG_S`].
     ///
-    /// A channel on the strip does not: a mode and a frequency do not say
-    /// whether what is coming out is a conversation, a repeater's idle hiss
-    /// or the airband. Its audio is on the tap under the analogue name for
-    /// the transcriber, and that name is what keeps it off the list.
+    /// A channel on the strip counts only where somebody said it carries
+    /// people talking: a mode and a frequency do not say whether what is
+    /// coming out is a conversation, a repeater's idle hiss or the airband.
+    /// That is the channel's voice mark, which is what puts a label on the
+    /// analogue tap, so an unnamed party is what keeps a channel off the
+    /// list.
     pub fn track(&mut self, v: &common::Voice, block_s: f64) {
-        let Some(to) = v.to.as_deref() else {
+        let Some(to) = v.to.as_deref().filter(|t| !t.trim().is_empty()) else {
             return;
         };
-        if v.system == super::fader::ANALOGUE {
-            return;
-        }
         let key = common::ConversationKey::of(v);
         let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
         // Keyed with nobody talking, because a trunked carrier holds several
@@ -121,12 +137,55 @@ impl HeardNode {
         self.peak = self.peak.max(peak);
         let talking = peak > SPEECH_FLOOR;
         let now = std::time::Instant::now();
+        // An over whose labels fill in part way through is the same over.
+        // Analogue identity arrives late by nature: a PTT-ID is tones that
+        // take half a second to settle, a coded squelch tone needs half a
+        // second of window, and a DCS code needs two words of it. The key
+        // carries both labels, so without this the call list showed one
+        // transmission as two or three rows, the first of them nameless.
+        if !self.live.contains_key(&key) {
+            let vaguer = self
+                .live
+                .iter()
+                .find(|(k, _)| {
+                    k.system == v.system
+                        && k.channel_hz == key.channel_hz
+                        && k.from.as_ref().is_none_or(|f| Some(f) == v.from.as_ref())
+                        && k.to.as_ref().is_some_and(|t| to.starts_with(t.as_str()))
+                })
+                .map(|(k, _)| k.clone());
+            if let Some(old) = vaguer
+                && let Some(mut c) = self.live.remove(&old)
+            {
+                // The row the call was reported under has to be closed, or
+                // the list keeps a transmission that never ends beside the
+                // one it turned into.
+                c.was = Some(old);
+                c.to = to.to_string();
+                c.from = v.from.clone().or(c.from);
+                self.live.insert(key.clone(), c);
+            }
+        }
         match self.live.get_mut(&key) {
             Some(c) if talking => {
                 c.last = now;
                 c.quiet_s = 0.0;
                 c.seconds += block_s;
                 c.peak = c.peak.max(peak);
+                // A station that names itself part way through the over is
+                // the same call: an analogue radio sends its PTT-ID as tones
+                // that take half a second to settle, and some send it at the
+                // end of the over rather than the start.
+                if c.from.is_none() {
+                    c.from = v.from.clone();
+                }
+                // The group takes half a second of audio to read, so it
+                // arrives after the over has started, and the newest reading
+                // wins: an operator who changes the code on the radio is
+                // watching the list to see it change.
+                if v.code.is_some() {
+                    c.code = v.code.clone();
+                }
             }
             Some(c) => {
                 c.quiet_s += block_s;
@@ -142,12 +201,14 @@ impl HeardNode {
                         channel_hz: v.channel_hz,
                         to: to.to_string(),
                         from: v.from.clone(),
+                        code: v.code.clone(),
                         first: now,
                         last: now,
                         seconds: block_s,
                         peak,
                         quiet_s: 0.0,
                         over: false,
+                        was: None,
                     },
                 );
             }
@@ -257,6 +318,7 @@ mod tests {
             channel_hz: 433_475_000.0,
             to: Some(to.into()),
             from: Some(from.into()),
+            code: None,
             rate: 8_000.0,
             channels: 1,
             pcm: pcm.to_vec(),
@@ -298,23 +360,109 @@ mod tests {
         assert!(h.take_calls().is_empty(), "an ended call is reported once");
     }
 
-    #[test]
-    fn a_tuned_channel_is_heard_and_is_not_a_call() {
-        // Analogue speech is on the tap for the transcriber, under the
-        // strip's label. Nothing about a mode and a frequency says it is a
-        // conversation, so it is not a row in the call list.
-        let mut h = HeardNode::new();
-        let v = common::Voice {
+    /// Analogue audio off a channel, labelled as the fader labels it: with
+    /// the strip's name when the channel is marked as voice, and with
+    /// nothing when it is not.
+    fn tuned(to: Option<&str>) -> common::Voice {
+        common::Voice {
             system: super::super::fader::ANALOGUE,
             channel_hz: 145_500_000.0,
-            to: Some("CH1".into()),
+            to: to.map(str::to_string),
             from: None,
+            code: None,
             rate: 48_000.0,
             channels: 1,
             pcm: vec![0.5; 480],
-        };
-        h.track(&v, 0.01);
+        }
+    }
+
+    /// The coded squelch reaches the call beside the labels, and fills in
+    /// after the over has started because that is when it is read.
+    #[test]
+    fn a_call_carries_the_coded_squelch_the_group_is_using() {
+        let mut h = HeardNode::new();
+        let mut first = tuned(Some("CH1"));
+        first.code = None;
+        h.track(&first, 0.02);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].code, None, "half a second of audio has not been read yet");
+
+        // The detector settles and the group arrives, on the same over.
+        let mut coded = tuned(Some("CH1"));
+        coded.code = Some("D023".into());
+        h.track(&coded, 0.02);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1, "the group made a second row: {calls:?}");
+        assert_eq!(calls[0].code.as_deref(), Some("D023"));
+        assert_eq!(calls[0].to, "CH1", "the group is beside the name, not in it");
+
+        // And the newest reading wins: somebody changing the code on the
+        // radio is watching the list to see it change.
+        let mut again = tuned(Some("CH1"));
+        again.code = Some("D131".into());
+        h.track(&again, 0.02);
+        let calls = h.take_calls();
+        assert_eq!(calls[0].code.as_deref(), Some("D131"), "the group never changed");
+    }
+
+    /// A radio that names itself part way through the over is one call, not
+    /// two rows.
+    ///
+    /// An analogue PTT-ID is tones at the head of the over and they take half
+    /// a second to settle, so the first blocks of speech arrive with nobody
+    /// named and the rest with the unit on them. The key carries who is
+    /// talking, so the call moved to a key of its own and the list showed the
+    /// same over twice.
+    #[test]
+    fn a_station_that_names_itself_mid_over_is_one_call() {
+        let mut h = HeardNode::new();
+        let mut anonymous = tuned(Some("CH1"));
+        anonymous.from = None;
+        h.track(&anonymous, 0.02);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].from, None);
+
+        let mut named = tuned(Some("CH1"));
+        named.from = Some("123".into());
+        h.track(&named, 0.02);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1, "the same over became two rows: {calls:?}");
+        assert_eq!(calls[0].from.as_deref(), Some("123"));
+        assert!(calls[0].seconds >= 0.04, "the over it was already holding: {}", calls[0].seconds);
+
+        // And the next block of the same over adds to it rather than
+        // starting again.
+        h.track(&named, 0.02);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].from.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn a_tuned_channel_is_heard_and_is_not_a_call() {
+        // Unmarked analogue speech is on the tap for the transcriber only.
+        // Nothing about a mode and a frequency says it is a conversation, so
+        // it is not a row in the call list.
+        let mut h = HeardNode::new();
+        h.track(&tuned(None), 0.01);
         assert!(h.take_calls().is_empty());
         assert!(h.levels().is_empty());
+    }
+
+    #[test]
+    fn a_channel_marked_as_voice_is_a_call() {
+        // The voice mark is the operator saying people talk on this channel,
+        // which is exactly what the call list asks of a decoder. The agent's
+        // own channel is one of these.
+        let mut h = HeardNode::new();
+        h.track(&tuned(Some("CH1")), 0.01);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].to, "CH1");
+        assert_eq!(calls[0].system, super::super::fader::ANALOGUE);
+        assert_eq!(calls[0].channel_hz, 145_500_000.0);
+        assert_eq!(h.levels().len(), 1);
     }
 }
