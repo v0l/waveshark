@@ -121,6 +121,8 @@ the code is in the commit log.
 
 - The agent keys a moment before it speaks and holds a moment after, so a squelch opens in time.
 
+- A long answer from the agent was cut off at thirty seconds, mid-sentence.
+
 - Radiotext and aircraft datalink filled the message view with nobody's words.
 
 - Every device published to Home Assistant read as made by "unknown".
