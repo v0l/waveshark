@@ -36,11 +36,21 @@ pub const DEFAULT_REPO: &str = "parler-tts/parler-tts-mini-v1";
 
 /// How the voice is described to the model when nobody says otherwise.
 ///
-/// Parler is steered by a sentence rather than by a voice id, and this one is
-/// written for the channel it comes out of: close, dry and level, because
-/// reverberation and dynamics do not survive a 2.5 kHz deviation FM link.
-pub const DEFAULT_DESCRIPTION: &str = "A clear, level male voice speaking at a measured pace, very close to the microphone, \
-     with no background noise and no reverberation.";
+/// Parler is steered by a sentence rather than by a voice id, and it follows
+/// the shape of the sentences it was trained on rather than the meaning of
+/// any wording. A description written from first principles for a radio
+/// channel, asking for a level voice very close to the microphone with no
+/// background noise, came out as a man whispering: taken together those are
+/// how an intimate recording is described, and that is what it made.
+///
+/// So: one of the named speakers the v1 models were trained with, and the
+/// phrasing from Parler's own prompt guide, with "confident" and "projects"
+/// doing the work "level" was meant to do. What matters on the far end of a
+/// 2.5 kHz deviation link is that it is close and dry, which the high
+/// quality recording asks for.
+pub const DEFAULT_DESCRIPTION: &str = "Jon speaks in a clear and confident voice at a moderate pace, projecting as if \
+     reading a message aloud. The recording is of very high quality, with his \
+     voice sounding close up and free of background noise.";
 
 /// Where a downloaded or hand-placed model lives.
 pub fn default_dir() -> std::path::PathBuf {

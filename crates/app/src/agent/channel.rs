@@ -295,8 +295,8 @@ impl AgentChannel {
         format!(
             "You are answering over a radio channel, by voice, to somebody who cannot see a \
              screen. Keep it to one or two short sentences, no lists, no punctuation a \
-             speaker cannot say. Say numbers as words a listener can follow. You are called \
-             {}.",
+             speaker cannot say, and no dashes: write a full stop or a comma instead. Say \
+             numbers as words a listener can follow. You are called {}.",
             config.wake.trim()
         )
     }
