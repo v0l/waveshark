@@ -117,6 +117,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- The transcriber loads its model as the receiver starts, not at the first over.
+
 - Radiotext and aircraft datalink filled the message view with nobody's words.
 
 - Every device published to Home Assistant read as made by "unknown".

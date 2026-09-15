@@ -1060,6 +1060,15 @@ impl Simple for LiveTranscribeNode {
             self.talking.clear();
             return Ok(());
         }
+        // Switched on with the model already on disc, it is loaded now
+        // rather than at the first over: seconds of loading on top of the
+        // first transmission of the day read as a transcriber that had not
+        // come on at all. A model that is not here is still fetched only
+        // when something is worth reading, or when asked.
+        #[cfg(feature = "stt")]
+        if self.worker.is_none() && self.health.lock().present {
+            self.worker();
+        }
         let at = Instant::now();
         let block_s = _c.block_seconds;
         let mut seen: Vec<common::ConversationKey> = Vec::new();
