@@ -1553,6 +1553,7 @@ impl App {
             cmds: &mut self.cmds,
             chain: self.chain.topo.as_ref(),
             files: &mut self.pick_file,
+            air: &self.air,
         }
         .show(ui);
         for a in acts {
@@ -1843,7 +1844,13 @@ impl App {
     /// Draw the conversation, then do what it asked for.
     fn agent_view(&mut self, ui: &mut egui::Ui) {
         let running = self.radio.is_some();
-        let act = agent_pane::AgentView { chat: &mut self.chat, running, air: &self.air }.show(ui);
+        let act = agent_pane::AgentView {
+            chat: &mut self.chat,
+            running,
+            air: &self.air,
+            voice: crate::agent::voice::health(),
+        }
+        .show(ui);
         match act {
             Some(agent_pane::Action::Ask(text)) => {
                 let desk = self.desk.clone();

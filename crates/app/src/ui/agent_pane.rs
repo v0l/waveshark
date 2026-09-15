@@ -12,6 +12,35 @@ use crate::agent::chat::{Chat, Turn};
 /// The question box: two rows of text, and the margins around them.
 const ASK_H: f32 = 76.0;
 
+/// What to print about the speech model, or `None` when there is nothing
+/// worth saying: a model that is loaded and idle is not news.
+fn speech_line(h: &crate::transcripts::Health) -> Option<(String, egui::Color32)> {
+    use crate::transcripts::ModelState;
+    match &h.state {
+        ModelState::Cold => Some(("not loaded yet".into(), theme::LEGEND)),
+        ModelState::Fetching => {
+            let what = match h.fetch.fraction() {
+                Some(f) => format!("downloading {:.0}%", f * 100.0),
+                None => "downloading".to_string(),
+            };
+            let of = match h.fetch.files {
+                0 => String::new(),
+                n => format!(" ({} of {n})", h.fetch.files_done + 1),
+            };
+            Some((format!("{what}{of}"), theme::READOUT))
+        }
+        ModelState::Loading => Some(("loading".into(), theme::READOUT)),
+        ModelState::Failed(e) => Some((e.clone(), theme::FAULT)),
+        // Once it has spoken, how long the last reply took to make. A model
+        // slower than the over it is answering is the fault that otherwise
+        // shows only as an agent that never seems to reply.
+        ModelState::Ready if h.reads > 0 => {
+            Some((format!("{} in {:.1}s", h.device, h.last_ms as f64 / 1000.0), theme::LEGEND))
+        }
+        ModelState::Ready => None,
+    }
+}
+
 /// What the pane wants done that it cannot do itself.
 pub(super) enum Action {
     Ask(String),
@@ -23,6 +52,9 @@ pub(super) enum Action {
 
 pub(super) struct AgentView<'a> {
     pub chat: &'a mut Chat,
+    /// What the speech model is doing, which the state alone cannot say: a
+    /// download, a load and a card generating all look like "making speech".
+    pub voice: crate::transcripts::Health,
     /// Whether a radio is running, which is most of what a model can do
     /// anything about.
     pub running: bool,
@@ -56,18 +88,27 @@ impl AgentView<'_> {
                 .show(ui);
             if let Some(id) = self.air.on {
                 ui.add_space(12.0);
-                let (word, tint) = match self.air.state {
-                    State::Listening => ("listening", theme::LEGEND),
-                    State::Thinking => ("thinking", theme::READOUT),
-                    State::Holding => ("waiting for the channel", theme::READOUT),
-                    State::OnAir => ("on air", theme::FAULT),
+                let tint = match self.air.state {
+                    State::Listening => theme::LEGEND,
+                    State::Asking | State::Speaking | State::Holding => theme::READOUT,
+                    State::OnAir => theme::FAULT,
                 };
+                let word = self.air.state.label();
                 theme::Line::new()
                     .legend(&format!("channel {id}"))
                     .value(word)
                     .size(11.0)
                     .tint(tint)
                     .show(ui);
+            }
+            // The speech model, which is the slow half of an answer and the
+            // one with gigabytes to fetch. Only drawn once a channel has been
+            // given to the agent, since nothing else here speaks.
+            if self.air.on.is_some()
+                && let Some((word, tint)) = speech_line(&self.voice)
+            {
+                ui.add_space(12.0);
+                theme::Line::new().legend("voice").value(word).size(11.0).tint(tint).show(ui);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);

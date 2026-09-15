@@ -40,16 +40,62 @@ pub const VOICE_RATE: f64 = 24_000.0;
 const WORDS_PER_S: f64 = 2.6;
 
 /// What the agent on the air is doing.
+///
+/// Every step of it, because they take different lengths of time and fail in
+/// different ways: a model downloading three gigabytes, a chat server not
+/// answering and a card generating speech all used to read as "thinking",
+/// and an operator watching that word for two minutes cannot tell which of
+/// them is happening or whether anything is happening at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     /// Waiting for somebody to say its name.
     Listening,
-    /// Somebody did, and the model has the question.
-    Thinking,
+    /// Somebody did, and the chat model has the question.
+    Asking,
+    /// There is an answer, and it is being turned into speech.
+    Speaking,
     /// There is an answer to give, waiting for the channel to be free.
     Holding,
     /// Keyed, saying it.
     OnAir,
+}
+
+impl State {
+    /// What a pane prints for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Listening => "listening",
+            Self::Asking => "asking the model",
+            Self::Speaking => "making speech",
+            Self::Holding => "waiting for the channel",
+            Self::OnAir => "on air",
+        }
+    }
+
+    /// Whether the agent is working on an answer rather than waiting for a
+    /// question.
+    pub fn busy(self) -> bool {
+        !matches!(self, Self::Listening)
+    }
+}
+
+/// Which half of the background work is running, written by the task and
+/// read by whoever draws the state: the two are seconds and minutes apart
+/// and there is nothing else to tell them by.
+#[derive(Clone, Default)]
+struct Stage(Arc<AtomicBool>);
+
+impl Stage {
+    fn speaking(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn state(&self) -> State {
+        match self.0.load(Ordering::Relaxed) {
+            true => State::Speaking,
+            false => State::Asking,
+        }
+    }
 }
 
 /// What the interface should do about it this frame.
@@ -92,6 +138,8 @@ pub struct AgentChannel {
     /// transcript replaces a partial with a settled reading of the same over,
     /// and answering both would be answering twice.
     answered: Option<Instant>,
+    /// Which half of the pending work is running.
+    stage: Stage,
     stop: Arc<AtomicBool>,
 }
 
@@ -126,6 +174,7 @@ impl Default for AgentChannel {
             last_busy: None,
             keyed_at: None,
             answered: None,
+            stage: Stage::default(),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -204,7 +253,7 @@ impl AgentChannel {
         at: Instant,
         text: &str,
     ) -> bool {
-        if self.on.is_none() || self.state != State::Listening || config.voice_fault().is_some() {
+        if self.on.is_none() || self.state.busy() || config.voice_fault().is_some() {
             return false;
         }
         if self.answered == Some(at) {
@@ -216,7 +265,8 @@ impl AgentChannel {
         }
         self.answered = Some(at);
         self.asked = question.to_string();
-        self.state = State::Thinking;
+        self.stage = Stage::default();
+        self.state = State::Asking;
         self.stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = crossbeam_channel::unbounded();
         self.pending = Some(rx);
@@ -225,6 +275,7 @@ impl AgentChannel {
             history.push(serde_json::json!({ "role": "system", "content": Self::brief(config) }));
         }
         let (config, desk, question) = (config.clone(), desk.clone(), question.to_string());
+        let stage = self.stage.clone();
         rt.spawn(async move {
             let answer = match chat::ask_once(config.clone(), history, desk, &question).await {
                 Ok((said, history)) => {
@@ -232,6 +283,7 @@ impl AgentChannel {
                     if said.is_empty() {
                         Answer { said: Err("the model said nothing".into()), history, speech: None }
                     } else {
+                        stage.speaking();
                         match voice::speak(&config, &said).await {
                             Ok(speech) => Answer { said: Ok(said), history, speech: Some(speech) },
                             Err(e) => Answer { said: Err(e), history, speech: None },
@@ -253,6 +305,11 @@ impl AgentChannel {
         let channel = self.on?;
         if busy {
             self.last_busy = Some(now);
+        }
+        // Which half of the work is running, while it is running: the model
+        // has the question, or the answer is being made into speech.
+        if self.pending.is_some() && matches!(self.state, State::Asking | State::Speaking) {
+            self.state = self.stage.state();
         }
         if let Some(rx) = self.pending.as_ref()
             && let Ok(answer) = rx.try_recv()
@@ -422,10 +479,46 @@ mod tests {
         let mut a = AgentChannel { on: Some(1), ..Default::default() };
         let at = Instant::now();
         assert!(a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
-        assert_eq!(a.state, State::Thinking);
-        // The same over read again, and a second question while thinking.
+        assert_eq!(a.state, State::Asking, "it has the question and is asking the model");
+        // The same over read again, and a second question while it is busy.
         assert!(!a.heard(&c, &desk, rt.handle(), at, "shark what is on the air"));
         assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), "shark again"));
+    }
+
+    /// The state says which half of the work is running.
+    ///
+    /// Asking a model and making speech out of its answer are seconds and
+    /// minutes apart, and the speech half may be fetching gigabytes. One word
+    /// covering both is a readout an operator cannot use to decide whether to
+    /// wait or to go and look at the settings.
+    #[test]
+    fn the_state_says_whether_it_is_asking_or_speaking() {
+        let c = config();
+        let (desk, _asks) = Desk::new();
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let mut a = AgentChannel { on: Some(1), ..Default::default() };
+        assert_eq!(a.state, State::Listening);
+        assert_eq!(a.state.label(), "listening");
+        assert!(!a.state.busy());
+
+        assert!(a.heard(&c, &desk, rt.handle(), Instant::now(), "shark what is on the air"));
+        assert_eq!(a.state, State::Asking);
+        assert!(a.state.busy(), "a second question must not be taken while one is running");
+        assert_eq!(a.state.label(), "asking the model");
+
+        // The task reaches the speech half, and the next poll says so.
+        a.stage.speaking();
+        assert_eq!(a.poll(&c, Instant::now(), false), None);
+        assert_eq!(a.state, State::Speaking);
+        assert_eq!(a.state.label(), "making speech");
+
+        // And every state has a word of its own: a label shared between two
+        // of them is the readout this replaced.
+        let all = [State::Listening, State::Asking, State::Speaking, State::Holding, State::OnAir];
+        let mut words: Vec<&str> = all.iter().map(|s| s.label()).collect();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(words.len(), all.len());
     }
 
     /// A server that answers one request with a fixed body, and says what it

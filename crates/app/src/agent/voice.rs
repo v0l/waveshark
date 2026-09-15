@@ -12,7 +12,9 @@
 //! Nothing here keys anything. It produces samples.
 
 use super::config::{Config, Speech};
+use crate::transcripts::{Fetch, Health, ModelState};
 use serde_json::json;
+use std::sync::Mutex;
 
 #[cfg(feature = "tts")]
 mod local;
@@ -31,16 +33,58 @@ pub struct Said {
     pub rate: f64,
 }
 
+/// What the speech model is doing, reported the way the transcriber's is.
+///
+/// Three and a half gigabytes off the hub the first time, then seconds of
+/// arithmetic per reply. Without this the interface could say only that the
+/// agent was "thinking", which is the same picture for a download that has
+/// not started, one halfway through, a card generating, and a fetch that has
+/// hung: the operator has no way to tell whether to wait or to go and look.
+pub fn health() -> Health {
+    held().lock().map(|h| h.clone()).unwrap_or_default()
+}
+
+fn held() -> &'static Mutex<Health> {
+    static H: std::sync::OnceLock<Mutex<Health>> = std::sync::OnceLock::new();
+    H.get_or_init(Mutex::default)
+}
+
+pub(super) fn report(f: impl FnOnce(&mut Health)) {
+    if let Ok(mut h) = held().lock() {
+        f(&mut h);
+    }
+}
+
+/// The download, as the hub reports it.
+pub(super) fn fetching(file: &str, done: u64, total: u64, files_done: usize, files: usize) {
+    report(|h| {
+        h.state = ModelState::Fetching;
+        h.fetch = Fetch { file: file.to_string(), done, total, files_done, files };
+    });
+}
+
 /// Say `text`, however this receiver is set up to.
 ///
 /// The local model runs on a thread of its own rather than on the runtime:
 /// generation is seconds of arithmetic, and a runtime worker blocked in it is
 /// a runtime worker not answering the chat.
 pub async fn speak(config: &Config, text: &str) -> Result<Said, String> {
-    match config.speech {
+    let said = match config.speech {
         Speech::Local => local_speak(config.clone(), text.to_string()).await,
         Speech::Server => server_speak(config, text).await,
+    };
+    // A server is ready or it is not; there is nothing to download and no
+    // model to load, so its health is the last answer it gave.
+    if config.speech == Speech::Server {
+        report(|h| {
+            h.state = match &said {
+                Ok(_) => ModelState::Ready,
+                Err(e) => ModelState::Failed(e.clone()),
+            };
+            h.device = "speech server".into();
+        });
     }
+    said
 }
 
 #[cfg(feature = "tts")]

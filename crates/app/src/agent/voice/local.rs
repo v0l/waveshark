@@ -41,22 +41,47 @@ pub fn speak(config: &Config, text: &str) -> Result<Said, String> {
     let mut slot = held().lock().map_err(|_| "the speech model is poisoned".to_string())?;
     let stale = slot.as_ref().is_none_or(|h| h.dir != dir || h.description != description);
     if stale {
+        // Reported as it goes, because this is gigabytes over somebody's home
+        // connection and a silent wait of that length cannot be told from a
+        // fetch that has hung.
         let files = tts::Files::ensure(
             match config.voice_repo.trim() {
                 "" => tts::DEFAULT_REPO,
                 r => r,
             },
             &dir,
-            &mut |_| {},
+            &mut |f| super::fetching(&f.file, f.done, f.total, f.files_done, f.files),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| fault(e.to_string()))?;
+        super::report(|h| h.state = crate::transcripts::ModelState::Loading);
         let (voice, device) =
-            tts::Voice::load_best(&files, &description).map_err(|e| e.to_string())?;
+            tts::Voice::load_best(&files, &description).map_err(|e| fault(e.to_string()))?;
         tracing::info!("speech model on {device}");
+        super::report(|h| {
+            h.state = crate::transcripts::ModelState::Ready;
+            h.device = device.clone();
+            h.fetch = Default::default();
+        });
         *slot = Some(Held { voice, dir, description });
     }
     let held = slot.as_mut().expect("just loaded");
-    let samples =
-        held.voice.say(text, crate::agent::channel::MAX_OVER_S).map_err(|e| e.to_string())?;
-    Ok(Said { rate: held.voice.rate(), samples })
+    let at = std::time::Instant::now();
+    let samples = held
+        .voice
+        .say(text, crate::agent::channel::MAX_OVER_S)
+        .map_err(|e| fault(e.to_string()))?;
+    let rate = held.voice.rate();
+    super::report(|h| {
+        h.state = crate::transcripts::ModelState::Ready;
+        h.reads += 1;
+        h.last_ms = at.elapsed().as_millis() as u64;
+        h.last_audio_s = samples.len() as f64 / rate.max(1.0);
+    });
+    Ok(Said { rate, samples })
+}
+
+/// Say why it cannot speak, and hand the reason back.
+fn fault(why: String) -> String {
+    super::report(|h| h.state = crate::transcripts::ModelState::Failed(why.clone()));
+    why
 }

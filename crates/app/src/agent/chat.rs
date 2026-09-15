@@ -144,12 +144,28 @@ impl Chat {
                         && let Some(Turn::Said(s)) = self.turns.last_mut()
                     {
                         s.push_str(&text);
-                    } else {
-                        self.turns.push(Turn::Said(text));
-                        self.speaking = true;
+                        continue;
+                    }
+                    // Models open with a blank line or two more often than
+                    // not. Drawn, that is an empty gap under AGENT that reads
+                    // as a reply which has not arrived yet, and the turn is
+                    // not started until there are words in it.
+                    let text = text.trim_start();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.turns.push(Turn::Said(text.to_string()));
+                    self.speaking = true;
+                }
+                Update::Said => {
+                    self.speaking = false;
+                    // And the same at the end, where a model signs off with
+                    // a newline: a turn that ends in blank lines pushes
+                    // whatever comes next down the pane for no reason.
+                    if let Some(Turn::Said(s)) = self.turns.last_mut() {
+                        s.truncate(s.trim_end().len());
                     }
                 }
-                Update::Said => self.speaking = false,
                 Update::Calling { name, args } => {
                     self.speaking = false;
                     self.turns.push(Turn::Did { name, args, answer: None });
@@ -482,6 +498,38 @@ mod tests {
             assert!(f["description"].as_str().is_some_and(|d| d.len() > 10));
             assert_eq!(f["parameters"]["type"], "object");
         }
+    }
+
+    /// A reply arrives with blank lines round it and is drawn without them.
+    ///
+    /// Models open with a newline or two more often than not, and a chat pane
+    /// that prints them shows an empty gap under AGENT: an operator reads
+    /// that as a reply that has not come, and waits for one that already has.
+    #[test]
+    fn the_blank_lines_a_model_wraps_its_reply_in_are_not_drawn() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut chat = Chat { updates: Some(rx), ..Default::default() };
+        for d in ["\n\n", "\n", "Hey! I am driving the radio", " here.", "\n\n"] {
+            let _ = tx.send(Update::Delta(d.to_string()));
+        }
+        let _ = tx.send(Update::Said);
+        chat.poll();
+        assert_eq!(
+            chat.turns.iter().filter(|t| matches!(t, Turn::Said(_))).count(),
+            1,
+            "the blank deltas started turns of their own"
+        );
+        let Some(Turn::Said(said)) = chat.turns.last() else { panic!("no reply came out") };
+        assert_eq!(said, "Hey! I am driving the radio here.");
+
+        // A newline inside the reply is the model's own paragraph and stays.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut chat = Chat { updates: Some(rx), ..Default::default() };
+        let _ = tx.send(Update::Delta("\n first\n\nsecond \n".into()));
+        let _ = tx.send(Update::Said);
+        chat.poll();
+        let Some(Turn::Said(said)) = chat.turns.last() else { panic!("no reply") };
+        assert_eq!(said, "first\n\nsecond");
     }
 
     /// A tool call arrives a character at a time, and the name and the
