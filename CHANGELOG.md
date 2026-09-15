@@ -15,6 +15,8 @@ the code is in the commit log.
 - Talk to the agent over the air: set a channel's transmit source to AGENT.
 - The agent speaks with a model on this machine, or with a speech server.
 
+- The agent says what it is doing: asking, making speech, or downloading a voice.
+
 - The agent answers to a name you choose, and waits for the channel to be clear.
 
 - Agents can key the transmitter, set the tone or microphone, and set transmit gain.
@@ -85,6 +87,10 @@ the code is in the commit log.
 - A wrapped line in the scanners file dropped half the channels it listed.
 
 - The keys tab lit its dot on every start for anybody with a key saved.
+
+- Blank lines at the top and bottom of every agent reply.
+
+- A transmit key on the agent's channel, which the agent keys itself.
 
 - Keying a channel just added or recalled: it said there was no transmit side.
 

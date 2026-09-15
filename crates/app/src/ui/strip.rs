@@ -33,6 +33,9 @@ pub(super) struct Strip<'a> {
     /// setting on the source stage.
     pub chain: Option<&'a pipeline::graph::Topology>,
     pub files: &'a mut super::state::FilePick,
+    /// The agent on the air, so the channel it answers on shows what it is
+    /// doing where the key would be.
+    pub air: &'a crate::agent::channel::AgentChannel,
 }
 
 impl Strip<'_> {
@@ -227,6 +230,79 @@ impl Strip<'_> {
 
     /// The transmit half of a channel.
     ///
+    /// Where the key would be on an agent channel: what the agent is doing.
+    ///
+    /// The same shape as the key so the strip does not jump when a channel is
+    /// switched to the agent, and lit the same amber when it is on air, but
+    /// it takes no clicks. Every step is named. A model fetching three
+    /// gigabytes, a chat server not answering and a card making speech take
+    /// wildly different lengths of time, and one word covering all of them is
+    /// a readout that cannot be used to decide whether to wait.
+    fn agent_key(ui: &mut egui::Ui, id: u64, air: &crate::agent::channel::AgentChannel) {
+        use crate::agent::channel::State;
+        let mine = air.on == Some(id);
+        let state = mine.then_some(air.state);
+        let on_air = state == Some(State::OnAir);
+        let (rect, r) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
+        // What the speech model is doing, which is the slow half and the one
+        // with a download in it.
+        let voice = crate::agent::voice::health();
+        let word = match (state, &voice.state) {
+            (None, _) => "not the agent's channel".to_string(),
+            (Some(State::Speaking), crate::transcripts::ModelState::Fetching) => {
+                match voice.fetch.fraction() {
+                    Some(f) => format!("fetching the voice {:.0}%", f * 100.0),
+                    None => "fetching the voice".to_string(),
+                }
+            }
+            (Some(State::Speaking), crate::transcripts::ModelState::Loading) => {
+                "loading the voice".to_string()
+            }
+            (Some(s), _) => s.label().to_string(),
+        };
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            let (fill, ink) = match on_air {
+                true => (theme::READOUT, theme::PANEL),
+                false => (theme::WELL, theme::READOUT),
+            };
+            p.rect_filled(rect, 3.0, fill);
+            p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
+            let font = FontId::new(13.0, egui::FontFamily::Name(theme::LEGEND_FONT.into()));
+            let label = match on_air {
+                true => "ON AIR".to_string(),
+                false => word.to_ascii_uppercase(),
+            };
+            let galley = p.layout_no_wrap(label, font, ink);
+            let icon = 22.0;
+            let gap = 8.0;
+            let total = icon + gap + galley.size().x;
+            let x0 = rect.center().x - total / 2.0;
+            crate::icons::Icon::Transmit.paint(
+                p,
+                Rect::from_center_size(
+                    Pos2::new(x0 + icon / 2.0, rect.center().y),
+                    Vec2::splat(icon),
+                ),
+                ink,
+            );
+            p.galley(
+                Pos2::new(x0 + icon + gap, rect.center().y - galley.size().y / 2.0),
+                galley,
+                ink,
+            );
+        }
+        let why = match (&voice.state, mine) {
+            (crate::transcripts::ModelState::Failed(e), _) => {
+                format!("the agent cannot speak: {e}")
+            }
+            (_, false) => "Give this channel to the agent in the Agent settings".to_string(),
+            (_, true) => "The agent keys this channel itself when it has an answer".to_string(),
+        };
+        r.on_hover_text(why);
+    }
+
     /// Drawn on every channel of a radio that can transmit, and on none of a
     /// radio that cannot: a key that always fails is worse than no key, since
     /// the operator learns to press it.
@@ -244,6 +320,7 @@ impl Strip<'_> {
         cmds: &mut Vec<Cmd>,
         source: Option<(usize, String)>,
         files: &mut super::state::FilePick,
+        air: &crate::agent::channel::AgentChannel,
     ) -> bool {
         let mut changed = false;
         // Nothing to draw for a mode with no modulator behind it. A dead key
@@ -418,6 +495,15 @@ impl Strip<'_> {
         }
 
         ui.add_space(4.0);
+        // An agent channel has no key: the agent decides when to answer and
+        // keys it itself, so a key here is a control that either does nothing
+        // or transmits silence over the top of the reply. What goes in its
+        // place is what the agent is doing, which is the thing an operator
+        // watching this channel actually wants to know.
+        if tx.source == TxSource::Agent {
+            Self::agent_key(ui, ch.id, air);
+            return changed;
+        }
         let keyed_here = keyed == Some(ch.id);
         // The key: the whole width of the strip, the transmit mark and the
         // word together in the middle, lit amber while on air. Sensed as a
@@ -832,6 +918,7 @@ impl Strip<'_> {
                                     self.cmds,
                                     tx_source_file(self.chain),
                                     self.files,
+                                    self.air,
                                 )
                             {
                                 tune = Some(i);
