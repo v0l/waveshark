@@ -276,7 +276,7 @@ impl Strip<'_> {
         if !digital {
             ui.horizontal(|ui| {
                 theme::Line::new().legend("src").show(ui);
-                for src in [TxSource::Mic, TxSource::Tone] {
+                for src in [TxSource::Mic, TxSource::Tone, TxSource::Agent] {
                     if ui.selectable_label(tx.source == src, src.label()).clicked() {
                         tx.source = src;
                         changed = true;
@@ -305,6 +305,15 @@ impl Strip<'_> {
         });
 
         match tx.source {
+            TxSource::Agent => {
+                ui.horizontal(|ui| {
+                    ui.add_space(28.0);
+                    theme::Line::new()
+                        .value("the agent keys this channel to answer")
+                        .size(11.0)
+                        .show(ui);
+                });
+            }
             _ if digital => {
                 let (node, path) = source.unzip();
                 let path = path.unwrap_or_default();

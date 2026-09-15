@@ -23,7 +23,6 @@ fn window_icon() -> Option<egui::IconData> {
     Some(egui::IconData { rgba: img.into_raw(), width, height })
 }
 
-#[cfg(feature = "mcp")]
 mod agent;
 mod audiobus;
 mod bands;
@@ -900,6 +899,7 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Listen(pub Option<std::net::SocketAddr>);
 
+#[cfg(feature = "mcp")]
 impl std::str::FromStr for Listen {
     type Err = String;
 
@@ -1450,7 +1450,7 @@ fn main() -> eframe::Result<()> {
             // from, because it is not a reason to refuse to be a receiver.
             #[cfg(feature = "mcp")]
             if let Some(addr) = args.mcp_listen.0 {
-                if let Err(e) = app.serve_mcp(addr, &cc.egui_ctx) {
+                if let Err(e) = app.serve_mcp(addr) {
                     eprintln!("not serving MCP on {addr}: {e}");
                 }
             }

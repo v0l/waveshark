@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 common.workspace = true
+hfmodel.workspace = true
 audio.workspace = true
 tracing.workspace = true
 candle-core = "0.11"

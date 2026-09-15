@@ -24,8 +24,8 @@
 //! [`head`] and [`settings`], because neither is a view of anything: both set
 //! the receiver itself, so what they borrow is most of the application.
 
-#[cfg(feature = "mcp")]
 mod agent;
+mod agent_pane;
 mod burst;
 mod calls_pane;
 mod chain_pane;
@@ -227,18 +227,25 @@ pub struct App {
     station_edit: Option<String>,
     saved: crate::session::Session,
     saved_at: Option<std::time::Instant>,
-    /// What an agent has asked for over MCP, when a server was started.
-    /// `None` in an ordinary run, which is every run without `--mcp-listen`.
-    #[cfg(feature = "mcp")]
-    agent: Option<crossbeam_channel::Receiver<crate::agent::Ask>>,
+    /// What an agent has asked for, whether it came over MCP or from the
+    /// chat in the Agent view. One queue: both front ends hold the same desk.
+    agent: crossbeam_channel::Receiver<crate::agent::Ask>,
+    /// The counter they put work on, handed to whatever wants to drive this
+    /// receiver.
+    desk: crate::agent::Desk,
+    /// Whether the desk's bell has been given this window's repaint.
+    desk_rung: bool,
+    /// The conversation in the Agent view, and the model behind it.
+    chat: crate::agent::chat::Chat,
+    /// The agent on the air: the channel it answers on, and what it has to
+    /// say. Off until a channel is set to transmit from it.
+    air: crate::agent::channel::AgentChannel,
     /// Agents waiting for a picture of the window. Held rather than answered
     /// on the spot because egui hands the image back on a later frame.
-    #[cfg(feature = "mcp")]
     agent_shots: Vec<tokio::sync::oneshot::Sender<crate::agent::Reply>>,
     /// Graph edits an agent made, waiting for the rebuild that takes them:
     /// an edit that will not build is refused, and answering before the
     /// receiver has tried would be answering the wrong question.
-    #[cfg(feature = "mcp")]
     agent_edits: Vec<agent::PendingEdit>,
 }
 
@@ -260,6 +267,8 @@ pub enum Settings {
     Memory,
     /// The dataset cache: what is held on disc, how old it is, and refresh.
     Data,
+    /// Which model the Agent view talks to.
+    Agent,
     /// Everything about where this receiver is rather than what it is doing:
     /// language, country, band plan, station position.
     App,
@@ -291,6 +300,8 @@ enum View {
     Keys,
     /// Where the sticks are, on every model control link in earshot.
     Control,
+    /// A model driving this receiver, and what it was asked.
+    Agent,
 }
 
 impl View {
@@ -309,6 +320,7 @@ impl View {
             View::Video => "Video",
             View::Keys => "Keys",
             View::Control => "Control",
+            View::Agent => "Agent",
         }
     }
 
@@ -329,6 +341,7 @@ impl View {
             View::Satellites => Icon::Satellite,
             View::Keys => Icon::Key,
             View::Control => Icon::Control,
+            View::Agent => Icon::Agent,
         }
     }
 
@@ -349,6 +362,7 @@ impl View {
             View::Satellites => "Passes overhead, and what they send",
             View::Keys => "Encryption seen, and the keys held",
             View::Control => "Where the sticks are, on every handset heard",
+            View::Agent => "A model with the run of the receiver, and what you asked it",
         }
     }
 
@@ -365,7 +379,15 @@ impl View {
             View::Messages,
             View::Video,
         ],
-        &[View::Map, View::Links, View::Devices, View::Control, View::Satellites, View::Keys],
+        &[
+            View::Map,
+            View::Links,
+            View::Devices,
+            View::Control,
+            View::Satellites,
+            View::Keys,
+            View::Agent,
+        ],
     ];
 
     const COUNT: usize = View::ROWS[0].len() + View::ROWS[1].len();
@@ -527,6 +549,7 @@ fn device_rates(e: &crate::devices::Entry) -> std::ops::RangeInclusive<Sps> {
 
 impl Default for App {
     fn default() -> Self {
+        let (desk, asks) = crate::agent::Desk::new();
         Self {
             scope: state::ScopeState::default(),
             chain: state::ChainState::default(),
@@ -603,11 +626,12 @@ impl Default for App {
             station_edit: None,
             saved: crate::session::Session::default(),
             saved_at: None,
-            #[cfg(feature = "mcp")]
-            agent: None,
-            #[cfg(feature = "mcp")]
+            agent: asks,
+            desk,
+            desk_rung: false,
+            chat: crate::agent::chat::Chat::default(),
+            air: crate::agent::channel::AgentChannel::default(),
             agent_shots: Vec::new(),
-            #[cfg(feature = "mcp")]
             agent_edits: Vec::new(),
         }
     }
@@ -1015,15 +1039,11 @@ impl App {
     }
 
     /// Serve MCP on `addr`, so an agent drives this receiver rather than one
-    /// of its own.
+    /// of its own. The desk is the one the chat uses, so a tool call from
+    /// either arrives the same way.
     #[cfg(feature = "mcp")]
-    pub fn serve_mcp(
-        &mut self,
-        addr: std::net::SocketAddr,
-        ctx: &egui::Context,
-    ) -> anyhow::Result<()> {
-        self.agent = Some(crate::agent::serve(addr, self.rt.handle(), ctx.clone())?);
-        Ok(())
+    pub fn serve_mcp(&mut self, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+        crate::agent::serve(addr, self.rt.handle(), self.desk.clone())
     }
 
     pub fn set_device(&mut self, want: &str) {
@@ -1117,6 +1137,9 @@ impl App {
         for cmd in self.startup_cmds() {
             self.send(cmd);
         }
+        // The queue the agent speaks into, handed over once: a channel set to
+        // transmit from the agent reads it when it is keyed.
+        self.send(Cmd::Voice(self.air.speaker()));
         // The thread opens the default speaker at startup; this puts the one
         // the session asked for in its place, and hands over the microphone
         // to use when a channel is keyed.
@@ -1743,6 +1766,92 @@ impl App {
                 self.transcript.log.clear();
                 self.transcript.only = None;
             }
+            None => {}
+        }
+    }
+
+    /// The agent on the air: what was said on its channel, and whether it is
+    /// its turn to talk.
+    ///
+    /// Every frame and whichever view is open, for the reason the transcript
+    /// is read every frame: a receiver that only answers while somebody is
+    /// looking at the Agent pane is not a station.
+    fn agent_air(&mut self) {
+        use crate::agent::channel::Move;
+        let agent = self
+            .audio
+            .channels
+            .iter()
+            .find(|c| c.tx.is_some_and(|t| t.source == crate::radio::TxSource::Agent))
+            .map(|c| (c.id, c.freq));
+        match (agent, self.air.on) {
+            (None, None) => return,
+            // The channel was closed or given back to a person mid-over.
+            (None, Some(_)) => {
+                self.air.on = None;
+                if let Some(Move::Unkey) = self.air.stand_down() {
+                    self.audio.keying = Default::default();
+                    self.send(Cmd::Key(None));
+                }
+                return;
+            }
+            (Some((id, _)), _) => self.air.on = Some(id),
+        }
+        let Some((id, freq)) = agent else { return };
+
+        // What was said on that channel, by frequency: the transcript files
+        // speech under the conversation it was heard in, and an analogue
+        // channel's conversation is its frequency.
+        let heard: Vec<(std::time::Instant, String)> = self
+            .transcript
+            .log
+            .recent(16)
+            .into_iter()
+            .filter(|u| {
+                u.settled
+                    && u.credible
+                    && (u.key.channel_hz as f64 - freq).abs() < common::CHANNEL_MATCH_HZ
+            })
+            .map(|u| (u.at, u.text.clone()))
+            .collect();
+        let config = self.chat.config.clone();
+        for (at, text) in heard {
+            let desk = self.desk.clone();
+            self.air.heard(&config, &desk, self.rt.handle(), at, &text);
+        }
+
+        let busy = self
+            .radio
+            .as_ref()
+            .map(|r| r.status.channel_states())
+            .unwrap_or_default()
+            .iter()
+            .any(|s| s.id == id && s.squelch_open);
+        match self.air.poll(&config, std::time::Instant::now(), busy) {
+            Some(Move::Key(id)) => {
+                self.audio.keying = state::Keying { at: Some(id), latched: true };
+                self.send(Cmd::Key(Some(id)));
+            }
+            Some(Move::Unkey) => {
+                self.audio.keying = Default::default();
+                self.send(Cmd::Key(None));
+            }
+            None => {}
+        }
+    }
+
+    /// Draw the conversation, then do what it asked for.
+    fn agent_view(&mut self, ui: &mut egui::Ui) {
+        let running = self.radio.is_some();
+        let act = agent_pane::AgentView { chat: &mut self.chat, running, air: &self.air }.show(ui);
+        match act {
+            Some(agent_pane::Action::Ask(text)) => {
+                let desk = self.desk.clone();
+                self.chat.ask(&text, desk, self.rt.handle());
+            }
+            Some(agent_pane::Action::Clear) => self.chat.clear(),
+            Some(agent_pane::Action::Interrupt) => self.chat.interrupt(),
+            Some(agent_pane::Action::Settings) => self.open = Some(Settings::Agent),
             None => {}
         }
     }
@@ -2396,8 +2505,12 @@ impl eframe::App for App {
         // Before the panes draw, so what an agent changed is on the screen in
         // the same frame it asked for it and what it reads back is what the
         // frame is about to show.
-        #[cfg(feature = "mcp")]
         self.agent_serve(ui.ctx());
+        // Whatever the model has said since the last frame, whichever view is
+        // open: a conversation that only advances while its pane is showing
+        // is one that stops when an operator looks at the spectrum.
+        self.chat.poll();
+        self.agent_air();
         self.screenshot(ui.ctx());
         // Who is talking and what they said, every frame and whichever view
         // is open. Both used to be read only under --soak, so the call list
@@ -2454,6 +2567,7 @@ impl eframe::App for App {
                     View::Satellites => self.sats_view(ui),
                     View::Video => self.video_view(ui),
                     View::Keys => self.keys_view(ui),
+                    View::Agent => self.agent_view(ui),
                 }
             });
         }
@@ -2580,6 +2694,7 @@ impl App {
             View::Control => self.control.list.len() as u64,
             View::Satellites => u64::from(self.sats.tracking.is_some()),
             View::Keys => self.keys.store.channels().len() as u64,
+            View::Agent => self.chat.turns() as u64,
         }
     }
 
@@ -3384,7 +3499,7 @@ mod tests {
     #[test]
     fn every_view_has_a_tab_of_its_own() {
         let tabs: Vec<View> = View::ROWS.into_iter().flatten().copied().collect();
-        assert_eq!(tabs.len(), 13);
+        assert_eq!(tabs.len(), 14);
         for v in [
             View::Dashboard,
             View::Spectrum,
@@ -3399,6 +3514,7 @@ mod tests {
             View::Video,
             View::Keys,
             View::Control,
+            View::Agent,
         ] {
             assert!(tabs.contains(&v), "{} has no tab", v.label());
         }

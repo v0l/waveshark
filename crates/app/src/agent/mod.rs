@@ -10,12 +10,22 @@
 //! rejected for that reason: two receivers means two graphs, two USB claims
 //! and an interface that cannot be asked what the agent just did.
 //!
-//! Transport is MCP over streamable HTTP, bound to a loopback address given
-//! on the command line. Nothing is served unless `--mcp-listen` was passed.
+//! Two front ends read the same desk. MCP over streamable HTTP, bound to a
+//! loopback address given on the command line and serving nothing unless
+//! `--mcp-listen` was passed; and the chat in the Agent view, which drives a
+//! model over the same catalogue of tools. Neither knows about the other, and
+//! nothing here knows about egui: what wakes the interface is a closure it
+//! hangs on the [`Bell`], so an agent with no window open still gets served.
 
+pub mod catalog;
+pub mod channel;
+pub mod chat;
+pub mod config;
+#[cfg(feature = "mcp")]
 mod tools;
+pub mod voice;
 
-use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// One thing an agent asked for, with somewhere to put the answer.
 pub struct Ask {
@@ -34,22 +44,56 @@ pub type Reply = Result<serde_json::Value, String>;
 /// reported as such rather than hanging the agent.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// Whoever has to be nudged when a job lands on the desk.
+///
+/// The interface only draws when something happens, and a request arriving
+/// over a socket or from a model is not something egui knows about. The bell
+/// is empty until a front end hangs its own repaint on it, so the desk can be
+/// built before there is a window and works when there is none.
+type Ring = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct Bell {
+    ring: Arc<parking_lot::Mutex<Option<Ring>>>,
+}
+
+impl Bell {
+    pub fn answered_by(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.ring.lock() = Some(Arc::new(f));
+    }
+
+    fn ring(&self) {
+        let held = self.ring.lock().clone();
+        if let Some(f) = held {
+            f();
+        }
+    }
+}
+
 /// The counter an agent puts its work on: a queue into the interface and the
-/// context to wake it with.
+/// bell to wake it with.
 #[derive(Clone)]
 pub struct Desk {
     jobs: crossbeam_channel::Sender<Ask>,
-    ctx: egui::Context,
+    bell: Bell,
 }
 
 impl Desk {
+    /// A desk, and the queue whoever holds the receiver drains.
+    pub fn new() -> (Self, crossbeam_channel::Receiver<Ask>) {
+        let (jobs, asks) = crossbeam_channel::unbounded();
+        (Self { jobs, bell: Bell::default() }, asks)
+    }
+
+    pub fn bell(&self) -> Bell {
+        self.bell.clone()
+    }
+
     /// Queue an action and wait for the interface to answer it.
     pub async fn ask(&self, action: Action) -> Reply {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.jobs.send(Ask { action, reply }).map_err(|_| "the interface has gone".to_string())?;
-        // The interface only draws when something happens, and a request
-        // arriving over a socket is not something egui knows about.
-        self.ctx.request_repaint();
+        self.bell.ring();
         match tokio::time::timeout(PATIENCE, answer).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err("the interface dropped the request".into()),
@@ -103,6 +147,13 @@ pub enum Action {
     RemoveChannel(args::Channel),
     Listen(args::Channel),
     Volume(args::Volume),
+
+    // Transmitting. Half duplex: one channel is keyed or none is, which is
+    // why keying takes the channel and unkeying takes nothing.
+    Key(args::Channel),
+    Unkey,
+    Transmit(args::Transmit),
+    TxGain(args::TxGain),
 
     // What it watches, writes and shows.
     Decode(args::Switch),
@@ -273,6 +324,37 @@ pub mod args {
         pub id: u64,
     }
 
+    /// What a keyed channel puts through the modulator.
+    #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Source {
+        /// A steady tone, which is what a deviation or power check wants.
+        Tone,
+        /// The microphone, opened while the channel is keyed.
+        Mic,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Transmit {
+        /// From `list_channels`. The channel's own mode decides how it is
+        /// modulated, so a transmission is set up by setting the channel.
+        pub id: u64,
+        pub source: Option<Source>,
+        /// The tone fed to the modulator under `tone`, in Hz.
+        pub tone_hz: Option<f32>,
+        /// Microphone gain, as a multiplier on what the capture delivers.
+        pub mic_gain: Option<f32>,
+        /// Level into the modulator in dB, for trimming deviation.
+        pub trim_db: Option<f32>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct TxGain {
+        /// The radio's transmit gain, in dB. What that buys in power is the
+        /// radio's business, and an amplifier's beyond it.
+        pub db: f32,
+    }
+
     #[derive(Debug, Deserialize, JsonSchema)]
     pub struct Volume {
         /// Master level, 0 to 1.
@@ -303,6 +385,7 @@ pub mod args {
         Video,
         Keys,
         Control,
+        Agent,
     }
 
     #[derive(Debug, Deserialize, JsonSchema)]
@@ -379,17 +462,17 @@ pub mod args {
     }
 }
 
-/// Start serving MCP on `addr`, and hand back the queue the interface drains.
+/// Start serving MCP on `addr`, against a desk the interface is already
+/// draining.
 ///
 /// The socket is bound here rather than in the task, so a port already in use
 /// is reported at startup instead of into a log nobody is reading.
+#[cfg(feature = "mcp")]
 pub fn serve(
-    addr: SocketAddr,
+    addr: std::net::SocketAddr,
     rt: &tokio::runtime::Handle,
-    ctx: egui::Context,
-) -> anyhow::Result<crossbeam_channel::Receiver<Ask>> {
-    let (jobs, asks) = crossbeam_channel::unbounded();
-    let desk = Desk { jobs, ctx };
+    desk: Desk,
+) -> anyhow::Result<()> {
     let listener = std::net::TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     let bound = listener.local_addr()?;
@@ -416,5 +499,5 @@ pub fn serve(
         }
     });
     println!("mcp on http://{bound}/mcp");
-    Ok(asks)
+    Ok(())
 }

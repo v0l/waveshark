@@ -66,33 +66,8 @@ impl Files {
     /// "a model is here" and "90 MB of model is here" are different claims to
     /// somebody deciding whether to fetch a larger one.
     pub fn bytes(&self) -> u64 {
-        let mut files = vec![self.config.clone(), self.tokenizer.clone(), self.weights.clone()];
-        if let Some(dir) = self.weights.parent() {
-            files.extend(shards(&self.weights).into_iter().map(|s| dir.join(s)));
-        }
-        files.into_iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum()
+        hfmodel::bytes_of(&[self.config.clone(), self.tokenizer.clone(), self.weights.clone()])
     }
-}
-
-/// The shard files an index names, or nothing for a file that is not one.
-fn shards(index: &Path) -> Vec<String> {
-    if index.file_name().and_then(|n| n.to_str()) != Some("model.safetensors.index.json") {
-        return Vec::new();
-    }
-    let Ok(text) = std::fs::read_to_string(index) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = v
-        .get("weight_map")
-        .and_then(|m| m.as_object())
-        .map(|m| m.values().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    out.sort();
-    out.dedup();
-    out
 }
 
 /// How many tokens the model was trained with, from its config.
@@ -136,58 +111,7 @@ fn gguf_in(dir: &Path) -> Result<PathBuf> {
 /// anything does. A bigger one is a directory away.
 pub const DEFAULT_REPO: &str = "openai/whisper-base.en";
 
-/// How far a download has got, reported as it goes.
-///
-/// A model is between 74 MB and several gigabytes over somebody's home
-/// connection, and without this the interface can only say "downloading" for
-/// as long as it takes, which is indistinguishable from a fetch that has
-/// hung.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Fetching {
-    /// The file being fetched now.
-    pub file: String,
-    /// Bytes of it that have arrived, and what it is altogether. The total
-    /// is zero until the hub answers with a length.
-    pub done: u64,
-    pub total: u64,
-    /// Files finished before this one, and how many there are to do. The
-    /// count is only known as the fetch walks the repository, so it grows.
-    pub files_done: usize,
-    pub files: usize,
-}
-
-/// What the hub calls as bytes arrive, folded into a [`Fetching`] and handed
-/// on. Held by reference so one report survives every file of a fetch.
-struct Report<'a, 'b> {
-    seen: &'a std::cell::RefCell<Fetching>,
-    on: &'a std::cell::RefCell<OnProgress<'b>>,
-}
-
-impl hf_hub::api::Progress for Report<'_, '_> {
-    fn init(&mut self, size: usize, filename: &str) {
-        let mut f = self.seen.borrow_mut();
-        f.file = filename.to_string();
-        f.done = 0;
-        f.total = size as u64;
-        (self.on.borrow_mut())(&f);
-    }
-
-    fn update(&mut self, size: usize) {
-        let mut f = self.seen.borrow_mut();
-        f.done += size as u64;
-        (self.on.borrow_mut())(&f);
-    }
-
-    fn finish(&mut self) {
-        let mut f = self.seen.borrow_mut();
-        f.done = f.total;
-        (self.on.borrow_mut())(&f);
-    }
-}
-
-/// Somewhere to report progress to. A closure rather than a trait, because
-/// the one caller keeps it behind a mutex the interface reads.
-pub type OnProgress<'a> = &'a mut dyn FnMut(&Fetching);
+pub use hfmodel::{Fetching, OnProgress};
 
 /// The files in `dir`, fetching them first if they are not there.
 ///
@@ -219,60 +143,16 @@ pub fn fetch_with(
     dir: impl AsRef<Path>,
     on: OnProgress<'_>,
 ) -> Result<Files> {
-    use hf_hub::api::sync::ApiBuilder;
-
     let dir = dir.as_ref();
-    std::fs::create_dir_all(dir)?;
-    let api = ApiBuilder::new().build().map_err(|e| Error::other(format!("hub: {e}")))?.repo(
-        hf_hub::Repo::with_revision(
-            repo.to_string(),
-            hf_hub::RepoType::Model,
-            revision.to_string(),
-        ),
-    );
-    let seen = std::cell::RefCell::new(Fetching::default());
-    let on = std::cell::RefCell::new(on);
-    let get = |name: &str| -> Result<PathBuf> {
-        {
-            let mut f = seen.borrow_mut();
-            f.file = name.to_string();
-            f.done = 0;
-            f.total = 0;
-            f.files = f.files.max(f.files_done + 1);
-        }
-        let src = api
-            .download_with_progress(name, Report { seen: &seen, on: &on })
-            .map_err(|e| Error::other(format!("hub {name}: {e}")))?;
-        {
-            let mut f = seen.borrow_mut();
-            f.files_done += 1;
-            f.done = f.total;
-        }
-        (on.borrow_mut())(&seen.borrow());
-        let dst = dir.join(name);
-        if !dst.exists() {
-            std::fs::copy(&src, &dst)?;
-        }
-        Ok(dst)
-    };
-    let config = get("config.json")?;
-    // One file, or an index and the shards it names. Asking the hub which
-    // rather than reading the listing: a 404 on the index is the answer.
-    match get("model.safetensors.index.json") {
-        Ok(index) => {
-            for shard in shards(&index) {
-                get(&shard)?;
-            }
-        }
-        Err(_) => {
-            get("model.safetensors")?;
-        }
-    }
+    let fetch = hfmodel::Fetch::new(repo, revision, dir, on)?;
+    let config = fetch.get("config.json")?;
+    fetch.weights()?;
     // Qwen3-ASR publishes no tokenizer.json, only the vocabulary, the merges
     // and the special tokens it would be built from. Whisper publishes the
     // built one.
     if model_type(&config).as_deref() == Some("qwen3_asr") {
-        let read = |name: &str| -> Result<String> { Ok(std::fs::read_to_string(get(name)?)?) };
+        let read =
+            |name: &str| -> Result<String> { Ok(std::fs::read_to_string(fetch.get(name)?)?) };
         let vocab = read("vocab.json")?;
         let merges = read("merges.txt")?;
         let tok_config = read("tokenizer_config.json")?;
@@ -280,7 +160,7 @@ pub fn fetch_with(
             .map_err(|e| Error::other(format!("qwen3 tokenizer: {e}")))?;
         std::fs::write(dir.join("tokenizer.json"), json)?;
     } else {
-        get("tokenizer.json")?;
+        fetch.get("tokenizer.json")?;
     }
     Files::in_dir(dir)
 }

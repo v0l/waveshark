@@ -2671,9 +2671,17 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         } else {
             let band = tx_audio_band(tx.mode);
             let (kind, mut settings) = match tx.spec.source {
-                TxSource::Mic => {
+                // The agent's speech is drawn as a microphone stage, because
+                // that is what it is: samples at a rate of their own, band
+                // limited and pre-emphasised for the mode. What differs is
+                // where they come from, and that is a sink, not a stage.
+                TxSource::Mic | TxSource::Agent => {
                     let mut s = Settings::new();
-                    s.insert("level".into(), pipeline::ParamValue::Float(tx.spec.mic_gain as f64));
+                    let level = match tx.spec.source {
+                        TxSource::Agent => 1.0,
+                        _ => f64::from(tx.spec.mic_gain),
+                    };
+                    s.insert("level".into(), pipeline::ParamValue::Float(level));
                     // What the receiving radio de-emphasises by: 750 us on a
                     // voice channel, 50 us on broadcast FM in Europe, nothing
                     // on AM.
@@ -5809,8 +5817,15 @@ pub fn transmit_graph(
     let band = tx_audio_band(mode);
     let head: Box<dyn pipeline::Node> = match (tx.source, mic) {
         (TxSource::Mic, Some(src)) => Box::new(nodes::MicNode::with_band(src, tx.mic_gain, band)),
+        // Speech is speech: the agent's queue goes through the same stage the
+        // microphone does, so it is band limited, pre-emphasised and
+        // resampled the same way, at a level nothing is metering against.
+        (TxSource::Agent, Some(src)) => Box::new(nodes::MicNode::with_band(src, 1.0, band)),
         (TxSource::Mic, None) => {
             return Err(common::Error::other("no microphone is open to transmit from"));
+        }
+        (TxSource::Agent, None) => {
+            return Err(common::Error::other("the agent has nothing open to transmit from"));
         }
         (TxSource::Tone, _) => Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
     };

@@ -24,6 +24,8 @@ members = [
     "crates/orbit",
     "crates/stt",
     "crates/stt-cuda",
+    "crates/tts",
+    "crates/hfmodel",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent
@@ -54,6 +56,8 @@ default-members = [
     "crates/httpc",
     "crates/orbit",
     "crates/stt",
+    "crates/tts",
+    "crates/hfmodel",
 ]
 
 [workspace.package]
@@ -67,6 +71,8 @@ license = "GPL-3.0-or-later"
 # Rust sysroot crate and makes every `use core::..` path ambiguous.
 common = { path = "crates/common" }
 stt = { path = "crates/stt", default-features = false }
+tts = { path = "crates/tts", default-features = false }
+hfmodel = { path = "crates/hfmodel" }
 dsp = { path = "crates/dsp" }
 pipeline = { path = "crates/pipeline" }
 nodes = { path = "crates/nodes" }
@@ -122,6 +128,7 @@ hmac = "0.13"
 # carries the same user agent. rustls rather than the system OpenSSL, so a
 # release binary runs on a machine that has neither.
 reqwest = { version = "0.12", default-features = false, features = [
+    "json",
     "rustls-tls",
     "blocking",
     "multipart",

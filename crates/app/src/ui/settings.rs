@@ -4,6 +4,20 @@
 //! anybody else depends on, which is what makes them separable from the panes.
 
 use super::*;
+use crate::agent::config::Speech;
+
+/// What the local voice falls back to, for the hints beside the fields it
+/// fills in: the description, the repository, and where the weights go.
+fn voice_defaults() -> (&'static str, &'static str, String) {
+    #[cfg(feature = "tts")]
+    {
+        (tts::DEFAULT_DESCRIPTION, tts::DEFAULT_REPO, tts::default_dir().display().to_string())
+    }
+    #[cfg(not(feature = "tts"))]
+    {
+        ("", "", "this build has no speech model".to_string())
+    }
+}
 
 impl App {
     pub(super) fn settings_modal(&mut self, ctx: &egui::Context) {
@@ -16,6 +30,7 @@ impl App {
             Settings::Scanners => "Scanners",
             Settings::Memory => "Memory bank",
             Settings::Data => crate::i18n::t("settings.data"),
+            Settings::Agent => "Agent",
             Settings::App => crate::i18n::t("settings.title"),
         };
         let r = egui::containers::Modal::new(egui::Id::new(title))
@@ -23,7 +38,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(match which {
                     Settings::Radio | Settings::PacketLog => 420.0,
-                    Settings::App | Settings::Data => 520.0,
+                    Settings::App | Settings::Data | Settings::Agent => 520.0,
                     Settings::Scanners | Settings::Memory => 560.0,
                     _ => 320.0,
                 });
@@ -36,6 +51,7 @@ impl App {
                     Settings::Scanners => self.scanner_settings(ui),
                     Settings::Memory => self.memory_pane(ui),
                     Settings::Data => self.data_settings(ui),
+                    Settings::Agent => self.agent_settings(ui),
                     Settings::App => self.app_settings(ui),
                 }
                 ui.add_space(12.0);
@@ -397,6 +413,154 @@ impl App {
     /// are: another front end putting packets on the same bus, whose frames
     /// reach the packet list, the log and the flight list exactly like the
     /// ones this receiver demodulated itself.
+    /// Which model the Agent view talks to.
+    ///
+    /// Written out as it is changed rather than on a save button: the file is
+    /// four lines and a receiver that forgets an endpoint because nobody
+    /// found the button is a receiver with no agent.
+    fn agent_settings(&mut self, ui: &mut egui::Ui) {
+        hint(
+            ui,
+            "Anything speaking the OpenAI chat completions API with tool calls: a server on \
+             this machine, or one on the internet with a key. The model is given the whole \
+             receiver.",
+        );
+        ui.add_space(8.0);
+        let before = self.chat.config.clone();
+        let c = &mut self.chat.config;
+        row_help(ui, "server", "The base address, without /chat/completions.", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut c.url)
+                    .desired_width(300.0)
+                    .hint_text(crate::agent::config::DEFAULT_URL),
+            );
+        });
+        row_help(ui, "model", "As the server names it.", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut c.model).desired_width(300.0).hint_text("qwen3:8b"),
+            );
+        });
+        row_help(ui, "key", "Sent as a bearer token. Leave empty for a local server.", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut c.key).desired_width(300.0).password(true));
+        });
+        row_help(
+            ui,
+            "tool calls",
+            "How many calls one question may take before the model is stopped.",
+            |ui| {
+                let mut steps = c.steps as u32;
+                if ui.add(egui::DragValue::new(&mut steps).range(1..=100)).changed() {
+                    c.steps = steps as usize;
+                }
+            },
+        );
+        ui.add_space(8.0);
+        theme::Line::new().legend("standing instructions").size(11.0).show(ui);
+        ui.add(
+            egui::TextEdit::multiline(&mut c.brief)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text("Anything the model should know: your callsign, what not to key up"),
+        );
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        hint(
+            ui,
+            "Talking to it over the air. Set a channel's transmit source to AGENT on the \
+             strip, mark it as voice so it is transcribed, and it answers an over that \
+             starts with its name. It never keys while the squelch is open.",
+        );
+        ui.add_space(8.0);
+        row_help(ui, "name", "What it answers to on the air. Empty means it never keys.", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut c.wake).desired_width(300.0).hint_text("shark"));
+        });
+        row_help(
+            ui,
+            "voice from",
+            "A model on this machine needs nothing else running and about 3.5 GB of weights, \
+             fetched the first time it speaks, and wants the card. A server needs neither.",
+            |ui| {
+                for how in [Speech::Local, Speech::Server] {
+                    if ui.selectable_label(c.speech == how, how.label()).clicked() {
+                        c.speech = how;
+                    }
+                }
+            },
+        );
+        match c.speech {
+            Speech::Local => {
+                row_help(
+                    ui,
+                    "sounds like",
+                    "Parler is steered by a sentence rather than by a voice name: describe \
+                     the speaker, the pace and the room.",
+                    |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut c.voice_description)
+                                .desired_rows(2)
+                                .desired_width(300.0)
+                                .hint_text(voice_defaults().0),
+                        );
+                    },
+                );
+                row_help(ui, "model", "A Hugging Face repository. Empty for the default.", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut c.voice_repo)
+                            .desired_width(300.0)
+                            .hint_text(voice_defaults().1),
+                    );
+                });
+                row_help(ui, "weights", "Where they are kept. Empty for the usual place.", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut c.voice_dir)
+                            .desired_width(300.0)
+                            .hint_text(voice_defaults().2),
+                    );
+                });
+            }
+            Speech::Server => {
+                row_help(
+                    ui,
+                    "speech server",
+                    "An OpenAI-compatible /v1/audio/speech. Often not the same server as the \
+                     model.",
+                    |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut c.voice_url)
+                                .desired_width(300.0)
+                                .hint_text("https://api.openai.com/v1"),
+                        );
+                    },
+                );
+                row_help(ui, "speech model", "As that server names it.", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut c.voice_model).desired_width(300.0));
+                });
+                row_help(ui, "voice", "As that server names it.", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut c.voice).desired_width(300.0));
+                });
+                row_help(ui, "speech key", "Leave empty to use the model's key.", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut c.voice_key)
+                            .desired_width(300.0)
+                            .password(true),
+                    );
+                });
+            }
+        }
+        row_help(
+            ui,
+            "hang",
+            "How long the channel must be quiet before it keys, in seconds.",
+            |ui| {
+                ui.add(egui::DragValue::new(&mut c.hang_s).speed(0.1).range(0.0..=30.0));
+            },
+        );
+        if *c != before {
+            let _ = c.save();
+        }
+    }
+
     fn packet_log_settings(&mut self, ui: &mut egui::Ui) {
         let (logged, bytes, full) = match &self.radio {
             Some(r) => {

@@ -6,7 +6,7 @@
 mod capture;
 mod resample;
 
-pub use capture::{AudioCapture, AudioSource, Canned};
+pub use capture::{AudioCapture, AudioSource, Canned, Speaker};
 pub use resample::Resampler;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

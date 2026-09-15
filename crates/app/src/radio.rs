@@ -348,6 +348,7 @@ fn key_up(
     center: Hz,
     gain_db: f32,
     mic: &Option<audio::AudioCapture>,
+    voice: &Option<std::sync::Arc<dyn audio::AudioSource>>,
 ) -> common::Result<(crate::chain::TxPlan, crate::chain::TxSinks)> {
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
@@ -401,6 +402,9 @@ fn key_up(
         _ if matches!(mode, TxMode::Digital(_)) => None,
         TxSource::Mic => {
             Some(mic.as_ref().ok_or_else(|| common::Error::other("no microphone is open"))?.tap())
+        }
+        TxSource::Agent => {
+            Some(voice.clone().ok_or_else(|| common::Error::other("the agent has no voice"))?)
         }
         TxSource::Tone => None,
     };
@@ -564,6 +568,9 @@ pub enum Cmd {
         out: String,
         input: String,
     },
+    /// What the agent says, as a source the transmit chain reads when a
+    /// channel is set to [`TxSource::Agent`].
+    Voice(std::sync::Arc<dyn audio::AudioSource>),
     /// Key a channel by id, or unkey with `None`.
     ///
     /// One command for the whole receiver rather than one per channel: every
@@ -730,6 +737,9 @@ pub enum TxSource {
     /// let go. A radio that holds it open between overs is listening to the
     /// room between overs.
     Mic,
+    /// What the agent has to say, from the queue it writes into. The key
+    /// follows the queue: see `agent::channel`.
+    Agent,
 }
 
 impl TxSource {
@@ -737,6 +747,7 @@ impl TxSource {
         match self {
             Self::Tone => "TONE",
             Self::Mic => "MIC",
+            Self::Agent => "AGENT",
         }
     }
 }
@@ -2040,6 +2051,9 @@ struct RadioThread<'a, R: Fn()> {
     scanners: crate::scanners::Scanners,
     audio: AudioIo,
     tx: Tx,
+    /// What the agent has to say, when there is an agent channel. Handed
+    /// over once and read whenever such a channel is keyed.
+    voice: Option<std::sync::Arc<dyn audio::AudioSource>>,
     status: &'a Status,
     cmd: Receiver<Cmd>,
     frames: Sender<Frame>,
@@ -2189,6 +2203,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 mic: None,
             },
             tx: Tx { gain_db: 0.0, blocks_since_key: 0, keying_for: None, last_keyed: None },
+            voice: None,
             status,
             cmd,
             frames,
@@ -2306,6 +2321,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // frequencies already superseded.
             Cmd::Center(f) => self.want_center = Some(f),
             Cmd::Audio { out, input } => self.set_audio_devices(out, input),
+            Cmd::Voice(src) => self.voice = Some(src),
             Cmd::TxGain(db) => {
                 self.tx.gain_db = db.max(0.0);
                 self.status.tx_gain_db.store(self.tx.gain_db.to_bits(), Ordering::Relaxed);
@@ -2612,8 +2628,15 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             return;
         };
         let tx = ch.spec_to_transmit();
-        let up =
-            key_up(self.dev.as_mut(), &ch, &tx, self.plan.center, self.tx.gain_db, &self.audio.mic);
+        let up = key_up(
+            self.dev.as_mut(),
+            &ch,
+            &tx,
+            self.plan.center,
+            self.tx.gain_db,
+            &self.audio.mic,
+            &self.voice,
+        );
         let (tx_plan, mut sinks) = match up {
             Ok(got) => got,
             Err(e) => {
