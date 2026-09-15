@@ -71,11 +71,11 @@ pub(super) fn fetching(file: &str, done: u64, total: u64, files_done: usize, fil
 pub async fn speak(config: &Config, text: &str) -> Result<Said, String> {
     let said = match config.speech {
         Speech::Local => local_speak(config.clone(), text.to_string()).await,
-        Speech::Server => server_speak(config, text).await,
+        Speech::Chat | Speech::Server => server_speak(config, text).await,
     };
     // A server is ready or it is not; there is nothing to download and no
     // model to load, so its health is the last answer it gave.
-    if config.speech == Speech::Server {
+    if config.speech.is_remote() {
         report(|h| {
             h.state = match &said {
                 Ok(_) => ModelState::Ready,
@@ -106,11 +106,13 @@ async fn local_speak(_config: Config, _text: String) -> Result<Said, String> {
 
 /// Ask the server to say `text`.
 async fn server_speak(config: &Config, text: &str) -> Result<Said, String> {
-    if config.voice_url.trim().is_empty() || config.voice_model.trim().is_empty() {
+    let Some((url, key)) = config.speech_endpoint() else {
         return Err("no speech server: the Agent settings take one".into());
+    };
+    if config.voice_model.trim().is_empty() {
+        return Err("no speech model: the Agent settings take one".into());
     }
     let client = httpc::client(PATIENCE).map_err(|e| e.to_string())?;
-    let url = format!("{}/audio/speech", config.voice_url.trim_end_matches('/'));
     let body = json!({
         "model": config.voice_model,
         "voice": config.voice,
@@ -120,10 +122,6 @@ async fn server_speak(config: &Config, text: &str) -> Result<Said, String> {
         "response_format": "wav",
     });
     let mut req = client.post(url).json(&body);
-    let key = match config.voice_key.trim() {
-        "" => config.key.trim(),
-        k => k,
-    };
     if !key.is_empty() {
         req = req.bearer_auth(key);
     }

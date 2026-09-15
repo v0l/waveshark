@@ -38,14 +38,22 @@ pub enum Speech {
     /// and nothing sent anywhere, at the cost of the weights and a card.
     #[default]
     Local,
-    /// An OpenAI-compatible `/v1/audio/speech`.
+    /// The server the chat talks to, at its `/audio/speech`: one address
+    /// and one key for both, which is what OpenAI and the hosted services
+    /// that copy it offer.
+    Chat,
+    /// A second OpenAI-compatible `/v1/audio/speech`, with an address and a
+    /// key of its own: a local chat server rarely has one.
     Server,
 }
 
 impl Speech {
+    pub const ALL: [Speech; 3] = [Speech::Local, Speech::Chat, Speech::Server];
+
     pub fn id(self) -> &'static str {
         match self {
             Self::Local => "local",
+            Self::Chat => "chat",
             Self::Server => "server",
         }
     }
@@ -53,14 +61,21 @@ impl Speech {
     pub fn label(self) -> &'static str {
         match self {
             Self::Local => "a model here",
+            Self::Chat => "the model's server",
             Self::Server => "a speech server",
         }
+    }
+
+    /// Whether the voice is fetched over HTTP rather than made here.
+    pub fn is_remote(self) -> bool {
+        !matches!(self, Self::Local)
     }
 
     /// Anything unrecognised is the local model, which is the default and
     /// the one that needs nothing else running.
     pub fn parse(text: &str) -> Self {
         match text.trim().to_lowercase().as_str() {
+            "chat" | "same" | "model" => Self::Chat,
             "server" | "remote" | "openai" => Self::Server,
             _ => Self::Local,
         }
@@ -100,8 +115,8 @@ pub struct Config {
     /// time.
     pub voice_precision: String,
 
-    /// A speech server, which is a second OpenAI-compatible one more often
-    /// than not: a local chat server rarely has `/audio/speech`.
+    /// A speech server of its own, for [`Speech::Server`]. Under
+    /// [`Speech::Chat`] the chat's `url` and `key` serve instead.
     pub voice_url: String,
     pub voice_model: String,
     /// The voice that server names, as it names it.
@@ -212,7 +227,9 @@ impl Config {
              agent's on\n\
              # the strip; it answers an over that starts with the wake word \
              and\n\
-             # nothing else.\n\
+             # nothing else. speech is local, chat or server: chat asks the model's\n\
+             # own server, at url with key, for voice_model (tts-1 on OpenAI,\n\
+             # openrouter/hexgrad/kokoro-82m on OpenRouter) in the voice named.\n\
              speech = {}\n\
              voice_repo = {}\n\
              voice_dir = {}\n\
@@ -255,6 +272,9 @@ impl Config {
         {
             return Some("no speech server");
         }
+        if self.speech == Speech::Chat && self.voice_model.trim().is_empty() {
+            return Some("no speech model");
+        }
         if self.speech == Speech::Local && !cfg!(feature = "tts") {
             return Some("this build has no speech model");
         }
@@ -267,6 +287,27 @@ impl Config {
     /// Where the request goes.
     pub fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.url.trim_end_matches('/'))
+    }
+
+    /// Where speech is asked for and what key to send, for a voice that
+    /// comes over HTTP: the chat's server or the speech server's own.
+    /// `None` for the local model.
+    pub fn speech_endpoint(&self) -> Option<(String, &str)> {
+        let (base, key) = match self.speech {
+            Speech::Local => return None,
+            Speech::Chat => (self.url.trim(), self.key.trim()),
+            Speech::Server => (
+                self.voice_url.trim(),
+                match self.voice_key.trim() {
+                    "" => self.key.trim(),
+                    k => k,
+                },
+            ),
+        };
+        if base.is_empty() {
+            return None;
+        }
+        Some((format!("{}/audio/speech", base.trim_end_matches('/')), key))
     }
 
     /// Why the chat cannot run, or nothing.
@@ -359,9 +400,44 @@ mod tests {
         assert_eq!(Speech::parse("server"), Speech::Server);
         assert_eq!(Speech::parse(" SERVER "), Speech::Server);
         assert_eq!(Speech::parse("local"), Speech::Local);
+        assert_eq!(Speech::parse("chat"), Speech::Chat);
         assert_eq!(Speech::parse("nonsense"), Speech::Local);
+        assert_eq!(Config::parse("speech = chat").speech, Speech::Chat);
         assert_eq!(Config::parse("speech = server").speech, Speech::Server);
         assert_eq!(Config::default().speech, Speech::Local);
+    }
+
+    /// The chat's server can be the voice too: one address and one key,
+    /// and only the speech model and voice have to be named.
+    #[test]
+    fn the_voice_can_come_from_the_chat_server() {
+        let mut c = Config {
+            url: "https://api.example.com/v1/".into(),
+            key: "sk-chat".into(),
+            model: "m".into(),
+            wake: "shark".into(),
+            speech: Speech::Chat,
+            voice_url: "http://elsewhere/v1".into(),
+            voice_key: "other".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            c.speech_endpoint(),
+            Some(("https://api.example.com/v1/audio/speech".into(), "sk-chat")),
+            "the chat's address and key, not the speech server's"
+        );
+        assert_eq!(c.voice_fault(), None);
+        c.voice_model.clear();
+        assert_eq!(c.voice_fault(), Some("no speech model"));
+        // The speech server's own, when that is what is asked for; its key
+        // falls back to the chat's.
+        c.speech = Speech::Server;
+        c.voice_model = "tts-1".into();
+        assert_eq!(c.speech_endpoint(), Some(("http://elsewhere/v1/audio/speech".into(), "other")));
+        c.voice_key.clear();
+        assert_eq!(c.speech_endpoint().map(|(_, k)| k), Some("sk-chat"));
+        c.speech = Speech::Local;
+        assert_eq!(c.speech_endpoint(), None);
     }
 
     #[test]

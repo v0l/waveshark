@@ -424,31 +424,6 @@ pub fn help(ui: &mut egui::Ui, text: &str) -> Response {
     r.on_hover_text(text)
 }
 
-/// A section legend with its explanation on a "?" at the end of the row.
-///
-/// Against the right edge rather than against the label, so the icons form a
-/// column instead of a ragged edge following the length of each word.
-pub fn legend_help(ui: &mut egui::Ui, label: &str, text: &str) {
-    ui.horizontal(|ui| {
-        ui.label(legend(label));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            help(ui, text);
-        });
-    });
-}
-
-/// A checkbox with its explanation on a "?" at the end of the row.
-pub fn check_help(ui: &mut egui::Ui, on: &mut bool, label: &str, text: &str) -> Response {
-    ui.horizontal(|ui| {
-        let r = ui.checkbox(on, label);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            help(ui, text);
-        });
-        r
-    })
-    .inner
-}
-
 /// The heading every modal wears, so one dialog does not announce itself in a
 /// different voice from the next.
 pub fn modal_title(ui: &mut egui::Ui, text: &str) {
@@ -521,4 +496,169 @@ pub fn cog_rect(pane: &Rect) -> Rect {
 pub fn cog(p: &egui::Painter, r: &Rect, hot: bool) {
     let col = if hot { theme::READOUT } else { Color32::from_rgb(0x6A, 0x72, 0x7C) };
     crate::icons::Icon::Setup.paint(p, *r, col);
+}
+
+/// A text field set into the panel the way a readout is: a well with an
+/// etched edge, the text in the readout face, the hint in the legend's
+/// grey. Fills the row it is given.
+///
+/// The stock text edit is a grey box in a proportional face, which is what
+/// every other program's is, and on a chassis whose every reading is amber
+/// tabular figures in a recess it is the one thing on screen that looks
+/// pasted on.
+pub fn field(ui: &mut Ui, text: &mut String, hint: &str) -> Response {
+    field_of(ui, text, hint, false, 1, f32::INFINITY)
+}
+
+/// A [`field`] with controls after it on the same row. `reserve` is the
+/// width kept for them: a field that fills the row and then has a button
+/// added pushes the button off the edge, and what a button will measure is
+/// not known until it is drawn.
+pub fn field_then(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    reserve: f32,
+    after: impl FnOnce(&mut Ui),
+) -> Response {
+    let w = (ui.available_width() - reserve).max(60.0);
+    let r = field_of(ui, text, hint, false, 1, w);
+    after(ui);
+    r
+}
+
+/// A [`field`] whose contents are not shown: a key.
+pub fn secret(ui: &mut Ui, text: &mut String) -> Response {
+    field_of(ui, text, "", true, 1, f32::INFINITY)
+}
+
+/// A [`field`] of several lines, for prose.
+pub fn prose(ui: &mut Ui, text: &mut String, hint: &str, rows: usize) -> Response {
+    field_of(ui, text, hint, false, rows, f32::INFINITY)
+}
+
+/// The well is `width` across, or the row when that is infinite.
+fn field_of(
+    ui: &mut Ui,
+    text: &mut String,
+    hint: &str,
+    secret: bool,
+    rows: usize,
+    width: f32,
+) -> Response {
+    let font = egui::FontId::new(12.5, egui::FontFamily::Name(theme::READOUT_FONT.into()));
+    let hint =
+        egui::RichText::new(hint).font(font.clone()).color(theme::LEGEND.gamma_multiply(0.6));
+    egui::Frame::NONE
+        .fill(theme::WELL)
+        .stroke(Stroke::new(1.0, theme::ETCH))
+        .corner_radius(2)
+        .inner_margin(egui::Margin { left: 6, right: 6, top: 3, bottom: 3 })
+        .show(ui, |ui| {
+            let mut edit = if rows > 1 {
+                egui::TextEdit::multiline(text).desired_rows(rows)
+            } else {
+                egui::TextEdit::singleline(text)
+            };
+            edit = edit
+                .frame(egui::Frame::NONE)
+                .font(font)
+                .text_color(theme::VALUE)
+                .hint_text(hint)
+                .password(secret)
+                .desired_width(if width.is_finite() { width - 12.0 } else { width });
+            ui.add(edit)
+        })
+        .inner
+}
+
+/// A status lamp and what it says: lit green for a thing that will work,
+/// red for one that will not and why.
+///
+/// A settings dialog can only be judged by closing it and trying; this is
+/// the trying, done as the fields are typed, so the reason the agent cannot
+/// answer is on the same screen as the field that fixes it.
+pub fn lamp(ui: &mut Ui, ok: bool, text: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 18.0), Sense::hover());
+        let c = rect.center();
+        let col = if ok { theme::OK } else { theme::FAULT };
+        ui.painter().circle_filled(c, 3.0, col);
+        ui.painter().circle_stroke(c, 4.5, Stroke::new(1.0, col.gamma_multiply(0.4)));
+        theme::Line::new().value(text).tint(col).size(11.0).wrapped(ui);
+    });
+}
+
+/// A card whose header is a legend and, on the right, one line saying what
+/// the card is for: the sentence that would otherwise sit under the title
+/// as a paragraph nobody reads twice.
+pub fn section<R>(
+    ui: &mut Ui,
+    label: &str,
+    note: &str,
+    body: impl FnOnce(&mut Ui) -> R,
+) -> egui::InnerResponse<R> {
+    card(
+        ui,
+        None,
+        |ui| {
+            theme::Line::new().legend(label).show(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::Line::new().note(note).size(10.5).elided(ui);
+            });
+        },
+        body,
+    )
+}
+
+/// A switch in a settings row: the legend in the column every other row
+/// keeps, the box and what it does in the control column, the "?" at the
+/// end. Returns whether it was thrown.
+pub fn switch(ui: &mut Ui, label: &str, on: &mut bool, text: &str, help: &str) -> bool {
+    let mut changed = false;
+    row_help(ui, label, help, |ui| {
+        changed = ui.checkbox(on, text).changed();
+    });
+    changed
+}
+
+/// A choice from a closed list, in the control column, as wide as the
+/// field beside it would be. Shows the label of whatever is picked.
+pub fn choice<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    picked: &mut T,
+    options: impl IntoIterator<Item = (T, String)>,
+) -> bool {
+    let options: Vec<(T, String)> = options.into_iter().collect();
+    let shown = options.iter().find(|(v, _)| v == picked).map(|(_, l)| l.clone());
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown.unwrap_or_default())
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for (v, label) in options {
+                let on = *picked == v;
+                if ui.selectable_label(on, label).clicked() && !on {
+                    *picked = v;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+/// The bottom of every modal: a rule, then the buttons against the right
+/// edge, the one that closes it outermost.
+pub fn footer(ui: &mut Ui, buttons: impl FnOnce(&mut Ui)) {
+    ui.add_space(10.0);
+    let r = ui.available_rect_before_wrap();
+    ui.painter().line_segment(
+        [Pos2::new(r.left(), r.top()), Pos2::new(r.right(), r.top())],
+        Stroke::new(1.0, theme::ETCH),
+    );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), buttons);
+    });
 }

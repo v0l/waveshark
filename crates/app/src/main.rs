@@ -1007,6 +1007,11 @@ struct Args {
     #[arg(long)]
     run: bool,
 
+    /// Open with a settings dialog up: agent, radio, spectrum, waterfall,
+    /// log, scanners, memory, data or app. For looking at one in a screenshot
+    #[arg(long, value_name = "NAME")]
+    settings: Option<String>,
+
     /// Publish every device heard to this MQTT broker, so Home Assistant
     /// builds them: [user:password@]host[:port]
     #[arg(long, value_name = "BROKER", value_parser = parse_broker)]
@@ -1483,6 +1488,12 @@ fn main() -> eframe::Result<()> {
             }
             if args.chain {
                 app.show_chain();
+            }
+            if let Some(name) = &args.settings {
+                match ui::Settings::parse(name) {
+                    Some(s) => app.open_settings(s),
+                    None => eprintln!("--settings {name}: no such dialog"),
+                }
             }
             if args.flights {
                 app.show_map();

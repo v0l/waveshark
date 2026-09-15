@@ -120,6 +120,46 @@ cell goes through `widgets::cell`, and the spectrum's axis labels are painter
 calls because they are part of a plot. `burst.rs` and `chain_pane.rs` still
 call `ui.label`; convert what you touch and add no more.
 
+## The design language is a chassis
+
+The screen is a receiver's front panel, and every colour and face means
+one thing (`crates/app/src/theme.rs`): `CHASSIS` is the case, `PANEL` a card
+standing proud of it, `WELL` a recess (a readout window, a text field),
+`ETCH` an edge or a rule, `LEGEND` a silkscreened caption, `VALUE` a
+reading, `READOUT` amber what the operator set, `TRACE` cyan what the radio
+heard, `OK` and `FAULT` a lamp. Do not introduce a colour or a face; pick the
+meaning.
+
+A modal or a settings pane is a column of cards, and nothing else:
+
+- `widgets::section(ui, legend, note, body)`: the legend and a one-line
+  purpose in the header, rows in the body. A list of things (scanners,
+  datasets, memories, feeds) is one `widgets::card` per thing with its name
+  in the header, its actions on the right of the header (TUNE, REMOVE,
+  REFRESH), and its state on the rail: amber for what the operator set, cyan
+  for what is running or heard, red for a fault, nothing for a plain card.
+- A row is `row_help(ui, legend, help, control)`: a legend of at most ten
+  characters in the left column, the control filling the right, the
+  explanation behind the `?`. Never a paragraph of prose between controls;
+  `hint` is for one line under a picker at most.
+- Text goes in `field`, `secret` or `prose`; a field with anything after it
+  on the row is `field_then(reserve, after)`, because a field fills the row
+  and a button added afterwards pushes the card wider on every frame. Never a
+  bare `egui::TextEdit`, `ui.checkbox` or `ui.separator` in a modal: a switch
+  is `switch`, a closed list is `choice`, a card edge is the separator.
+- A number the operator reads is `reading`. Whether the card will work as it
+  is set is a `lamp` at the foot of the card, green with what it resolved to
+  or red with why not, computed live from the fields above it.
+- The modal ends in `footer`, CLOSE outermost right and the action beside
+  it. Buttons are legends: uppercase verbs.
+- Widths are 520, or 560 for a list. A scroll area inside a modal takes
+  `set_max_width` of what was available outside it.
+
+Check a modal by looking at it: `waveshark --settings agent --shot
+/tmp/agent.png --shot-after 5` writes the window, and the name can be any
+dialog (`radio`, `spectrum`, `waterfall`, `log`, `scanners`, `memory`,
+`data`, `app`).
+
 ## Every HTTP request goes out under the same name
 
 `crates/httpc` holds the user agent and builds every client, async or

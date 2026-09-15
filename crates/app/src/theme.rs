@@ -351,7 +351,9 @@ impl Line {
     /// for anything off the air, whose length nobody here chose.
     pub fn wrapped(mut self, ui: &mut egui::Ui) -> egui::Response {
         self.job.wrap.max_width = ui.available_width();
-        ui.add(egui::Label::new(self.job))
+        // Said explicitly, or a horizontal layout's own mode wins and the
+        // line runs off the edge of whatever holds it.
+        ui.add(egui::Label::new(self.job).wrap())
     }
 }
 
