@@ -428,7 +428,7 @@ impl Dashboard<'_> {
                     // it, so "behind" starts at several times that and not
                     // at zero: reading it as an error made the lamp amber
                     // whenever the speaker was working.
-                    let late_ms = backlog as f64 / crate::audiobus::OUT_HZ * 1e3;
+                    let late_ms = backlog as f64 / crate::mix::OUT_HZ * 1e3;
                     Self::lamp_row(
                         ui,
                         (backlog as f64) < 3.0 * audio::TARGET_BACKLOG,

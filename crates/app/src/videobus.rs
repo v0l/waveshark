@@ -1,6 +1,6 @@
 //! The video bus: every picture the receiver has, in one place.
 //!
-//! The counterpart of [`crate::audiobus`], and it exists for the same reason:
+//! The counterpart of [`crate::mix`], and it exists for the same reason:
 //! a picture that arrives somewhere other than the graph is a picture no
 //! patch can route, no view can find and no recorder can take. Every front
 //! end that produces an image ends here.

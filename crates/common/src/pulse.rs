@@ -436,9 +436,33 @@ pub struct Voice {
     /// Who is talking, when the system says.
     pub from: Option<String>,
     pub rate: f64,
+    /// How many channels `pcm` interleaves. One for every codec; a
+    /// broadcast in stereo keeps its sides through the bus.
+    pub channels: usize,
     /// Decoded in the last block. Empty when the channel is idle, which is
     /// still worth reporting: it says the front end is there and listening.
     pub pcm: Vec<f32>,
+}
+
+impl Voice {
+    /// Frames in this block: samples per channel.
+    pub fn frames(&self) -> usize {
+        self.pcm.len() / self.channels.max(1)
+    }
+
+    /// Seconds of audio in this block.
+    pub fn seconds(&self) -> f64 {
+        self.frames() as f64 / self.rate.max(1.0)
+    }
+
+    /// One channel, averaged from however many there are.
+    pub fn mono(&self) -> Vec<f32> {
+        let ch = self.channels.max(1);
+        if ch == 1 {
+            return self.pcm.clone();
+        }
+        self.pcm.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect()
+    }
 }
 
 /// Which conversation a block of speech belongs to.

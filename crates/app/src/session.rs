@@ -146,7 +146,6 @@ pub struct Session {
     /// Whether the dashboard is one of the views, and so the one the receiver
     /// opens on. On for a new install, and off for anyone who turned it off.
     pub dashboard: bool,
-    pub volume: f32,
     /// Sound devices by name, empty for the system default.
     ///
     /// A name rather than an index for the same reason the radio is a label:
@@ -274,7 +273,6 @@ impl Default for Session {
             packet_log_on: false,
             survey_on: false,
             dashboard: true,
-            volume: 0.5,
             audio_out: String::new(),
             audio_in: String::new(),
             log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
@@ -456,7 +454,6 @@ impl Session {
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
             packet_log_on: kv.get("packet_log_on").map(|v| *v == "true").unwrap_or(d.packet_log_on),
             survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
-            volume: f("volume", d.volume as f64) as f32,
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
@@ -550,7 +547,6 @@ impl Session {
         s.push_str(&format!("dashboard = {}\n", self.dashboard));
         s.push_str(&format!("packet_log_on = {}\n", self.packet_log_on));
         s.push_str(&format!("survey_on = {}\n", self.survey_on));
-        s.push_str(&format!("volume = {}\n", self.volume));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
         s.push_str(&format!("capture_cap_mb = {}\n", render_cap(self.capture_cap_mb)));
         let v = &self.view;
@@ -677,7 +673,6 @@ mod tests {
             dashboard: false,
             packet_log_on: true,
             survey_on: true,
-            volume: 0.25,
             gps: "/dev/ttyACM0@9600".into(),
             wigle_name: "AID0000".into(),
             wigle_token: "hunter2".into(),

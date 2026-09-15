@@ -266,7 +266,7 @@ fn build() -> Vec<Tool> {
         ),
         takes(
             "set_volume",
-            "The master level, and whether the mix leaves the bus at all.",
+            "The master level on the speaker, and whether anything is heard.",
             Action::Volume,
         ),
         // Transmitting.

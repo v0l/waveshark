@@ -7,9 +7,11 @@
 
 use super::state::{AudioState, CallsState};
 use super::*;
-use crate::audiobus::Rule;
 use crate::calls::Call;
+use crate::chain::derived;
+use crate::mix::calls::Rule;
 use crate::transcripts::TranscriptLog;
+use pipeline::param::ParamValue;
 
 /// Columns, and how wide each is.
 ///
@@ -264,9 +266,16 @@ impl CallList<'_> {
                 |ui| {
                     ui.horizontal(|ui| {
                         theme::Line::new().legend("level").show(ui);
-                        let mut changed = ui
+                        if ui
                             .add(Fader::new(&mut self.audio.call_volume, level).width(VU_W))
-                            .changed();
+                            .changed()
+                        {
+                            self.cmds.push(Cmd::StageParam(
+                                derived::CALLS,
+                                "vol".into(),
+                                ParamValue::Float(self.audio.call_volume as f64),
+                            ));
+                        }
                         if crate::icons::icon_button(
                             ui,
                             if self.audio.call_muted {
@@ -281,13 +290,11 @@ impl CallList<'_> {
                         .clicked()
                         {
                             self.audio.call_muted = !self.audio.call_muted;
-                            changed = true;
-                        }
-                        if changed {
-                            self.cmds.push(Cmd::CallVolume {
-                                volume: self.audio.call_volume,
-                                muted: self.audio.call_muted,
-                            });
+                            self.cmds.push(Cmd::StageParam(
+                                derived::CALLS,
+                                "mute".into(),
+                                ParamValue::Bool(self.audio.call_muted),
+                            ));
                         }
                         ui.add_space(12.0);
                         // A call arrives at whatever level the transmitting
@@ -298,7 +305,11 @@ impl CallList<'_> {
                             .on_hover_text("Even out the level between one call and the next")
                             .changed()
                         {
-                            self.cmds.push(Cmd::CallAgc(self.audio.call_agc));
+                            self.cmds.push(Cmd::StageParam(
+                                derived::CALLS,
+                                "agc".into(),
+                                ParamValue::Bool(self.audio.call_agc),
+                            ));
                         }
                         if self.audio.call_agc && gain_db.abs() > 0.1 {
                             theme::Line::new().set(format!("{gain_db:+.0} dB")).size(11.0).show(ui);

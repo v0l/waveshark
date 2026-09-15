@@ -979,7 +979,7 @@ mod work {
                 let key = job.key.to_string().replace(':', "_");
                 let name = format!("{dumped:04}_{key}_{seconds:.1}s.wav");
                 let speech = common::Speech { pcm: job.pcm.clone(), rate: job.rate };
-                let _ = crate::audiobus::write_wav(&dir.join(name), &speech);
+                let _ = crate::mix::write_wav(&dir.join(name), &speech);
                 dumped += 1;
             }
             let started = Instant::now();
@@ -1194,6 +1194,7 @@ mod tests {
             to: to.map(|s| s.to_string()),
             from: from.map(|s| s.to_string()),
             rate: 8_000.0,
+            channels: 1,
             pcm: vec![level; n],
         }
     }
@@ -1203,9 +1204,9 @@ mod tests {
     /// without parsing anything back out.
     #[test]
     fn a_key_says_what_the_receiver_knows_and_no_more() {
-        let fm = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.1, 8);
+        let fm = voice(crate::mix::fader::ANALOGUE, 145_500_000.0, None, None, 0.1, 8);
         let key = common::ConversationKey::of(&fm);
-        assert_eq!(key.system, crate::audiobus::ANALOGUE);
+        assert_eq!(key.system, crate::mix::fader::ANALOGUE);
         assert_eq!(key.channel_hz, 145_500_000);
         assert_eq!(key.to, None);
         assert_eq!(key.from, None);
@@ -1223,11 +1224,11 @@ mod tests {
     #[test]
     fn a_pause_for_breath_does_not_end_an_utterance() {
         let mut n = LiveTranscribeNode::new();
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
         let at = Instant::now();
         let block = 0.1;
-        let loud = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.2, 800);
-        let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
+        let loud = voice(crate::mix::fader::ANALOGUE, 145_500_000.0, None, None, 0.2, 800);
+        let quiet = voice(crate::mix::fader::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
         for _ in 0..10 {
             assert!(!n.collect(key.clone(), &loud, block, at));
         }
@@ -1248,12 +1249,12 @@ mod tests {
     #[test]
     fn an_open_channel_with_nobody_on_it_is_not_speech() {
         let mut n = LiveTranscribeNode::new();
-        let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
+        let quiet = voice(crate::mix::fader::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
         for _ in 0..100 {
-            let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+            let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
             assert!(!n.collect(key, &quiet, 0.1, Instant::now()));
         }
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
         assert_eq!(n.held_seconds(&key), 0.0);
     }
 
@@ -1264,7 +1265,7 @@ mod tests {
         let mut log = TranscriptLog::default();
         let at = Instant::now();
         let u = |text: &str, settled: bool| Utterance {
-            key: common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0),
+            key: common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0),
             at,
             seconds: 1.0,
             text: text.into(),
@@ -1272,7 +1273,7 @@ mod tests {
             confidence: -0.2,
             credible: true,
         };
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
         log.push(u("all stations", false));
         log.push(u("all stations this is", false));
         assert_eq!(log.of(&key).len(), 1);
@@ -1316,14 +1317,15 @@ mod tests {
         // Silence on the end, so the utterance is finished rather than still
         // being spoken when the samples run out.
         blocks.extend((0..20).map(|_| vec![0.0; block]));
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
         for b in blocks {
             let payload = Payload::Voice(vec![common::Voice {
-                system: crate::audiobus::ANALOGUE,
+                system: crate::mix::fader::ANALOGUE,
                 channel_hz: 145_500_000.0,
                 to: None,
                 from: None,
                 rate,
+                channels: 1,
                 pcm: b,
             }]);
             let mut out = Payload::Voice(Vec::new());
@@ -1390,11 +1392,12 @@ mod tests {
         blocks.extend((0..20).map(|_| vec![0.0; block]));
         for b in blocks {
             let payload = Payload::Voice(vec![common::Voice {
-                system: crate::audiobus::ANALOGUE,
+                system: crate::mix::fader::ANALOGUE,
                 channel_hz: 145_500_000.0,
                 to: None,
                 from: None,
                 rate,
+                channels: 1,
                 pcm: b,
             }]);
             let mut out = Payload::Voice(Vec::new());
@@ -1408,7 +1411,7 @@ mod tests {
         // would have asked for it again as settled is beside the point, since
         // it is not there to ask.
         drop(n);
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
         for _ in 0..600 {
             if log.lock().latest(&key).is_some() {
                 break;
@@ -1433,7 +1436,7 @@ mod tests {
         let window = |text: &str| {
             vec![
                 Utterance {
-                    key: common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0),
+                    key: common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0),
                     at,
                     seconds: 2.0,
                     text: text.into(),
@@ -1472,7 +1475,7 @@ mod tests {
             .from(Some("1234567".into()));
         assert_eq!(log.of(&dmr).len(), 1);
         assert_eq!(log.latest(&dmr).unwrap().text, "go ahead over");
-        let fm = |hz: f64| common::ConversationKey::new(crate::audiobus::ANALOGUE, hz);
+        let fm = |hz: f64| common::ConversationKey::new(crate::mix::fader::ANALOGUE, hz);
         assert!(log.has(&fm(145_500_000.0)));
         assert!(!log.has(&fm(433_000_000.0)), "a conversation nobody spoke on");
     }
@@ -1541,9 +1544,9 @@ mod tests {
     #[test]
     fn a_channel_the_model_finds_nothing_in_is_left_alone() {
         let mut n = LiveTranscribeNode::new();
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 145_500_000.0);
-        let noise = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.02, 800);
-        let quiet = voice(crate::audiobus::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
+        let noise = voice(crate::mix::fader::ANALOGUE, 145_500_000.0, None, None, 0.02, 800);
+        let quiet = voice(crate::mix::fader::ANALOGUE, 145_500_000.0, None, None, 0.0, 800);
         for _ in 0..50 {
             n.collect(key.clone(), &noise, 0.1, Instant::now());
         }
@@ -1576,8 +1579,8 @@ mod tests {
     #[test]
     fn what_the_receiver_said_is_not_what_it_heard() {
         let mut n = LiveTranscribeNode::new();
-        let key = common::ConversationKey::new(crate::audiobus::ANALOGUE, 446_050_000.0);
-        let speech = voice(crate::audiobus::ANALOGUE, 446_050_000.0, None, None, 0.3, 800);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 446_050_000.0);
+        let speech = voice(crate::mix::fader::ANALOGUE, 446_050_000.0, None, None, 0.3, 800);
         let heard = |n: &mut LiveTranscribeNode| {
             let payload = pipeline::port::Payload::Voice(vec![speech.clone()]);
             let mut out = pipeline::port::Payload::Voice(Vec::new());
@@ -1615,7 +1618,7 @@ mod tests {
         let mut log = TranscriptLog::default();
         for i in 0..(MAX_KEYS + 8) {
             log.push(Utterance {
-                key: common::ConversationKey::new(crate::audiobus::ANALOGUE, i as f64),
+                key: common::ConversationKey::new(crate::mix::fader::ANALOGUE, i as f64),
                 at: Instant::now(),
                 seconds: 1.0,
                 text: format!("{i}"),
@@ -1624,7 +1627,7 @@ mod tests {
                 credible: true,
             });
         }
-        let key = |i: usize| common::ConversationKey::new(crate::audiobus::ANALOGUE, i as f64);
+        let key = |i: usize| common::ConversationKey::new(crate::mix::fader::ANALOGUE, i as f64);
         assert_eq!(log.keys().len(), MAX_KEYS);
         assert!(log.of(&key(0)).is_empty(), "the oldest conversation was kept");
         assert_eq!(log.latest(&key(MAX_KEYS + 7)).unwrap().text, format!("{}", MAX_KEYS + 7));

@@ -93,6 +93,11 @@ the code is in the commit log.
   turns it off, and a port or host:port still moves it.
 - DVB-T decodes at twice real time on a modern x86.
 - SSTV holds up better on a weak signal.
+- The audio path is drawn stage by stage: a fader per channel, the calls, the
+  tap, the bus, the replay and the speaker.
+- Every level and mute is kept with the graph edits and survives a restart.
+- The strip shows what the speaker is playing: who, to whom, on what frequency.
+- A chain drawn by hand reaches the speaker through a fader stage of its own.
 
 ### Fixed
 

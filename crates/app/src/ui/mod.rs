@@ -703,7 +703,6 @@ impl App {
         app.scope.restore(&s.view, s.fft);
         app.scope.db_center = s.center;
         app.scope.wf_center = s.center;
-        app.audio.volume = s.volume;
         // What the receiver writes down, as the operator last left it. Off
         // until asked: see `Session::packet_log_on`.
         app.log.path = s.packet_log_on.then(crate::packetlog::PacketLog::default_dir).flatten();
@@ -783,7 +782,6 @@ impl App {
             streams: crate::devices::streams().into_iter().map(|r| (r.addr, r.label)).collect(),
             dc_block: self.dc_block,
             decode_on: self.decode_on,
-            volume: self.audio.volume,
             log_cap_mb: self.log_cap_mb,
             gps: self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default(),
             wigle_name: self.survey.wigle.name.clone(),
@@ -1184,12 +1182,10 @@ impl App {
             Cmd::Decode(self.decode_on),
             Cmd::DcBlock(self.dc_block),
             Cmd::Manual(self.chain.manual()),
-            // The spectrum, and the bus with every level on it.
+            // The spectrum. The levels are not sent: each lives on its node
+            // and comes back as an edit with the rest of the graph.
             Cmd::Refresh(self.scope.refresh),
             Cmd::Smoothing(self.scope.smoothing),
-            Cmd::Volume { volume: self.audio.volume, muted: self.audio.muted },
-            Cmd::CallVolume { volume: self.audio.call_volume, muted: self.audio.call_muted },
-            Cmd::CallAgc(self.audio.call_agc),
             Cmd::CallSubs(self.calls.subs.clone()),
             Cmd::WatchVideo(self.video.rules()),
             // What writes to disk.
@@ -1350,6 +1346,7 @@ impl App {
             }
             self.chain.take_edits_from_the_running_graph();
         }
+        self.chain.flush_edits(false);
         // A level set in the chain view lands on the node, and the strip
         // has to follow or the next thing it sends puts the level back.
         let levels = radio.status.levels();
@@ -2407,8 +2404,6 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             offset_hz: c.freq - center,
             mode: c.mode.clone(),
             bandwidth_hz: c.bandwidth_hz,
-            volume: c.volume,
-            muted: c.muted,
             squelch_db: c.squelch_db,
             agc: c.agc,
             voice: c.voice,
@@ -2591,6 +2586,7 @@ impl eframe::App for App {
         // of seconds before quitting is still only in memory.
         self.saved_at = None;
         self.save_session();
+        self.chain.flush_edits(true);
     }
 }
 
@@ -3065,7 +3061,6 @@ mod tests {
         assert_eq!(specs.len(), 2, "a channel that is off should not be demodulated");
         assert_eq!(specs[0].offset_hz, 100_000.0);
         assert_eq!(specs[1].offset_hz, -250_000.0);
-        assert_eq!(specs[1].volume, 0.3, "each channel keeps its own level");
     }
 
     #[test]
@@ -3079,20 +3074,6 @@ mod tests {
         let second = a.channel_specs()[1].id;
         a.audio.channels.remove(0);
         assert_eq!(a.channel_specs()[0].id, second);
-    }
-
-    #[test]
-    fn muting_everything_leaves_the_channels_running() {
-        // Mute is a level, not a teardown: unmuting should not have to wait
-        // for chains to be rebuilt and AGCs to settle again.
-        let mut a = app();
-        channel(&mut a, 100_000.0, true, 1.0);
-        for c in &mut a.audio.channels {
-            c.muted = true;
-        }
-        let specs = a.channel_specs();
-        assert_eq!(specs.len(), 1);
-        assert!(specs[0].muted);
     }
 
     fn rect() -> Rect {
