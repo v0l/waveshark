@@ -577,7 +577,9 @@ impl Default for App {
             rt: background_runtime(),
             calls: state::CallsState::default(),
             transcript: state::TranscriptState::default(),
-            messages: state::MessagesState::default(),
+            // What was written before this receiver started, so the view
+            // opens on last night rather than on nothing.
+            messages: state::MessagesState::loaded(),
             links: state::LinksState::default(),
             control: state::ControlState::default(),
             video: video_pane::VideoState::default(),
@@ -742,6 +744,7 @@ impl App {
         app.survey.homeassistant.topic = s.ha_topic.clone();
         app.survey.homeassistant.spaces = s.ha_spaces.clone();
         app.survey.homeassistant.on = s.ha_on;
+        app.survey.homeassistant.buses = s.ha_buses;
         app.survey.beacondb.lookup = s.beacondb_lookup;
         crate::beacondb::set_lookup(s.beacondb_lookup);
         crate::beacondb::start();
@@ -814,6 +817,7 @@ impl App {
             ha_topic: self.survey.homeassistant.topic.clone(),
             ha_spaces: self.survey.homeassistant.spaces.clone(),
             ha_on: self.survey.homeassistant.on,
+            ha_buses: self.survey.homeassistant.buses,
             beacondb_lookup: self.survey.beacondb.lookup,
             capture_cap_mb: self.capture_cap_mb,
             manual_chain: self.chain.edit.manual,
@@ -3115,6 +3119,7 @@ mod tests {
                 ("humidity_pct".into(), common::Value::Int(89)),
             ],
             media_type: pipeline::event::media::BYTES,
+            written: false,
             rssi_dbfs: -18.0,
             snr_db: 21.5,
             bytes: vec![0xab, 0xcd],

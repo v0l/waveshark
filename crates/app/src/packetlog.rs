@@ -66,9 +66,10 @@
 //! nine scalars and an array, and it is not worth a dependency in the crate
 //! that has none.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 
+use crate::segments::{self, Format, Segments};
 use common::{Packet, PacketBody, Pulse};
 
 /// How much of the disk the whole log folder may take.
@@ -84,6 +85,21 @@ pub const DEFAULT_MAX_BYTES: u64 = 2 << 30;
 /// files in the folder the log owns and may delete.
 const EXT: &str = "wspkt";
 
+/// The shape of a segment: what it is called, what it carries at its head,
+/// and how it is buffered.
+///
+/// A pulse record is a few hundred bytes and 1090 MHz can produce thousands
+/// of frames a second, so the buffer holds a busy second rather than a single
+/// burst, and the deadline bounds what a receiver killed at 4am loses.
+const FORMAT: Format = Format {
+    ext: EXT,
+    magic: MAGIC,
+    version: VERSION,
+    segment_bytes: SEGMENT_BYTES,
+    buf_bytes: 256 << 10,
+    flush_every: std::time::Duration::from_millis(250),
+};
+
 /// How large one segment grows before the next is started.
 ///
 /// The log is trimmed by deleting whole files, so the segment size is how
@@ -97,19 +113,6 @@ const SEGMENT_BYTES: u64 = 256 << 20;
 
 const MAGIC: &[u8; 6] = b"WSPKT\0";
 const VERSION: u16 = 2;
-
-/// Write buffer per open day file. A pulse record is a few hundred bytes and
-/// 1090 MHz can produce thousands of frames a second, so this is sized to
-/// hold a busy second rather than a single burst.
-const BUF_BYTES: usize = 256 << 10;
-
-/// How long a record may sit in the buffer before it reaches the disk.
-///
-/// The buffer is what makes a high packet rate cheap, and the deadline is
-/// what stops it costing an evening of captures when the receiver is killed:
-/// at most this much is ever in flight, no matter how quiet or how busy the
-/// band is.
-const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Timings from a front end that detects bursts.
 pub const KIND_PULSES: u8 = 1;
@@ -176,27 +179,7 @@ const IQ_ZSTD_LEVEL: i32 = 1;
 const IQ_COMPRESSED: u32 = 0x8000_0000;
 
 pub struct PacketLog {
-    dir: PathBuf,
-    /// The day currently open, as `YYYY-MM-DD`, and its writer.
-    open: Option<(String, std::io::BufWriter<std::fs::File>)>,
-    /// The segment being written, as `YYYY-MM-DD.NNN`, which is the one file
-    /// in the folder a trim may not delete.
-    segment: Option<String>,
-    /// Bytes in the day's file.
-    bytes: u64,
-    /// Bytes in every other day's file, so the folder's total is this plus
-    /// the open one and no directory has to be walked per record.
-    older: u64,
-    full: bool,
-    /// Packets appended since the receiver started.
-    written: u64,
-    /// Size the whole folder may reach, or `None` for no limit.
-    cap: Option<u64>,
-    /// Records written into the buffer since the last flush.
-    dirty: bool,
-    last_flush: std::time::Instant,
-    /// When the folder was last added up, for the reading in the interface.
-    measured: std::time::Instant,
+    seg: Segments,
 }
 
 impl PacketLog {
@@ -218,246 +201,41 @@ impl PacketLog {
     }
 
     pub fn new(dir: PathBuf) -> Self {
-        // Measured here rather than at the first record: the reading is about
-        // the folder, and a receiver that has heard nothing yet, or is tuned
-        // where no front end produces packets, still has whatever last night
-        // wrote sitting on the disk. It read 0 B until something arrived.
-        let older = measure(&dir, None);
-        Self {
-            dir,
-            open: None,
-            segment: None,
-            bytes: 0,
-            older,
-            full: false,
-            written: 0,
-            cap: Some(DEFAULT_MAX_BYTES),
-            dirty: false,
-            last_flush: std::time::Instant::now(),
-            measured: std::time::Instant::now(),
-        }
+        let mut seg = Segments::new(dir, FORMAT);
+        seg.set_cap(Some(DEFAULT_MAX_BYTES));
+        Self { seg }
     }
 
     /// Change the folder's limit. `None` lifts it, which is what a receiver
     /// left running on 1090 MHz for a week wants.
     pub fn with_cap(mut self, cap: Option<u64>) -> Self {
-        self.cap = cap;
-        // Raising the cap on a log that stopped should start it again, or the
-        // setting would only take effect on the next restart.
-        if self.cap.is_none_or(|c| self.total() < c) {
-            self.full = false;
-        }
+        self.seg.set_cap(cap);
         self
     }
 
     /// What the folder holds: the day being written and every day kept.
     pub fn total(&self) -> u64 {
-        self.older + self.bytes
+        self.seg.total()
     }
 
-    /// Add up the folder again, at most this often.
-    ///
-    /// Called from whatever publishes the status rather than from a write:
-    /// the segment being written is counted as it grows, so this is only for
-    /// what changed underneath, and a directory listing per record is a
-    /// syscall per burst.
+    /// Add up the folder again, at most every couple of seconds.
     pub fn refresh_folder(&mut self) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-        if self.measured.elapsed() < EVERY {
-            return;
-        }
-        self.measured = std::time::Instant::now();
-        self.older = measure(&self.dir, self.segment.as_deref());
-    }
-
-    /// Delete whole segments, oldest first, until the folder is back under
-    /// its limit. The segment being written is never a candidate: it is the
-    /// one with the packets somebody is watching arrive.
-    ///
-    /// Returns whether there is now room. When there is not, the only file
-    /// left is the open segment and it is over the limit on its own, so
-    /// appending stops rather than the log eating itself; a cap under
-    /// [`SEGMENT_BYTES`] is the only way to reach that.
-    fn make_room(&mut self, open: &str) -> bool {
-        let Some(cap) = self.cap else { return true };
-        if self.total() < cap {
-            return true;
-        }
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return false;
-        };
-        // The name is the date and a sequence, so alphabetical order is
-        // chronological.
-        let mut days: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().is_some_and(|x| x == EXT) && p.file_stem().is_some_and(|s| s != open)
-            })
-            .collect();
-        days.sort();
-        for path in days {
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            if std::fs::remove_file(&path).is_ok() {
-                self.older = self.older.saturating_sub(size);
-            }
-            if self.total() < cap {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Open or roll the day's file, returning false once logging has stopped.
-    ///
-    /// Errors are swallowed on purpose. A full disk or a read-only home must
-    /// not take the receiver down or spam the fault line: the log is a
-    /// convenience, and losing it is not worth losing the packets on screen.
-    fn writer(&mut self, at_us: u64) -> Option<&mut std::io::BufWriter<std::fs::File>> {
-        if self.full {
-            return None;
-        }
-        let day = day_of(at_us);
-        let roll = self.bytes >= SEGMENT_BYTES;
-        if roll || self.open.as_ref().is_none_or(|(d, _)| *d != day) {
-            // The old segment's buffer goes out before its writer does, or a
-            // roll silently truncates the file it just closed.
-            self.flush();
-            if std::fs::create_dir_all(&self.dir).is_err() {
-                self.full = true;
-                return None;
-            }
-            let (name, path) = self.next_segment(&day);
-            let fresh = !path.exists();
-            let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
-                self.full = true;
-                return None;
-            };
-            let mut w = std::io::BufWriter::with_capacity(BUF_BYTES, f);
-            self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
-            self.older = measure(&self.dir, Some(&name));
-            self.measured = std::time::Instant::now();
-            // A receiver started against a folder already over its limit
-            // makes room before it writes, rather than on the record that
-            // happens to cross the line.
-            if !self.make_room(&name) {
-                self.full = true;
-                return None;
-            }
-            if fresh || self.bytes == 0 {
-                if w.write_all(MAGIC).is_err() || w.write_all(&VERSION.to_le_bytes()).is_err() {
-                    self.full = true;
-                    return None;
-                }
-                self.bytes += MAGIC.len() as u64 + 2;
-            }
-            self.open = Some((day, w));
-            self.segment = Some(name);
-        }
-        self.open.as_mut().map(|(_, w)| w)
-    }
-
-    /// The next segment for a day: the highest sequence already there, or a
-    /// new one when that segment is full.
-    ///
-    /// A restart continues the last segment rather than starting another, so
-    /// a receiver stopped and started ten times leaves ten minutes of log in
-    /// one file rather than ten files of a minute.
-    fn next_segment(&self, day: &str) -> (String, PathBuf) {
-        let mut last: Option<(u32, PathBuf)> = None;
-        if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.extension().is_none_or(|x| x != EXT) {
-                    continue;
-                }
-                let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let Some((d, seq)) = stem.rsplit_once('.') else {
-                    continue;
-                };
-                if d != day {
-                    continue;
-                }
-                let Ok(seq) = seq.parse::<u32>() else {
-                    continue;
-                };
-                if last.as_ref().is_none_or(|(n, _)| seq > *n) {
-                    last = Some((seq, p));
-                }
-            }
-        }
-        let next = match last {
-            Some((seq, ref p)) => {
-                let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                if size >= SEGMENT_BYTES { seq + 1 } else { seq }
-            }
-            None => 0,
-        };
-        let name = format!("{day}.{next:03}");
-        let path = self.dir.join(format!("{name}.{EXT}"));
-        (name, path)
-    }
-
-    fn append(&mut self, at_us: u64, rec: &[u8]) {
-        let Some(w) = self.writer(at_us) else { return };
-        if w.write_all(rec).is_err() {
-            self.full = true;
-            return;
-        }
-        self.dirty = true;
-        self.bytes += rec.len() as u64;
-        self.written += 1;
-        if self.cap.is_some_and(|c| self.total() >= c) {
-            let open = self.segment.clone().unwrap_or_default();
-            self.full = !self.make_room(&open);
-        }
-        self.flush_due();
-    }
-
-    /// Push the buffer to the disk if it has been waiting long enough.
-    ///
-    /// A per-record flush turns every burst into a write syscall, and on a
-    /// band that produces thousands a second that is the receiver's time
-    /// spent on a convenience. Batching by deadline keeps the syscall rate
-    /// bounded by the clock rather than by the traffic.
-    fn flush_due(&mut self) {
-        if self.dirty && self.last_flush.elapsed() >= FLUSH_EVERY {
-            self.flush();
-        }
+        self.seg.refresh_folder();
     }
 
     /// Put everything buffered on the disk now.
     pub fn flush(&mut self) {
-        self.last_flush = std::time::Instant::now();
-        if !self.dirty {
-            return;
-        }
-        self.dirty = false;
-        if let Some((_, w)) = self.open.as_mut() {
-            if w.flush().is_err() {
-                self.full = true;
-            }
-        }
-    }
-}
-
-/// A closed receiver keeps its last bursts. `BufWriter` drops silently, and
-/// silently is exactly how the tail of an overnight capture goes missing.
-impl Drop for PacketLog {
-    fn drop(&mut self) {
-        self.flush();
+        self.seg.flush();
     }
 }
 
 impl nodes::PacketSink for PacketLog {
     fn bytes(&self) -> u64 {
-        self.total()
+        self.seg.total()
     }
 
     fn full(&self) -> bool {
-        self.full
+        self.seg.full()
     }
 
     fn write(&mut self, p: &Packet) {
@@ -501,41 +279,24 @@ impl nodes::PacketSink for PacketLog {
             Some(q) if !q.samples.is_empty() => put_iq(rec, q),
             _ => rec,
         };
-        self.append(p.at_us, &rec);
+        self.seg.append(p.at_us, &rec);
     }
 
     fn written(&self) -> u64 {
-        self.written
+        self.seg.written()
     }
 
     /// Called between blocks whether or not anything arrived, so a band that
     /// went quiet still gets its last burst on the disk.
     fn flush(&mut self) {
-        self.flush_due();
-        self.refresh_folder();
+        self.seg.flush_due();
+        self.seg.refresh_folder();
     }
 }
 
 /// What a log folder holds, for a receiver with no log open to ask.
 pub fn folder_bytes(dir: &std::path::Path) -> u64 {
-    measure(dir, None)
-}
-
-/// Add up the segments on the disk, other than the one named.
-fn measure(dir: &std::path::Path, except: Option<&str>) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| {
-            let p = e.path();
-            p.extension().is_some_and(|x| x == EXT)
-                && except.is_none_or(|e| p.file_stem().is_some_and(|s| s != e))
-        })
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
-        .sum()
+    segments::folder_bytes(dir, EXT)
 }
 
 /// Whether there is anything in this packet a decoder could read.
@@ -702,10 +463,9 @@ pub fn read(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<Packet>> {
 
 pub fn parse(buf: &[u8]) -> Vec<Packet> {
     let mut out = Vec::new();
-    if buf.len() < MAGIC.len() + 2 || &buf[..MAGIC.len()] != MAGIC {
+    let Some(mut at) = segments::after_magic(buf, MAGIC) else {
         return out;
-    }
-    let mut at = MAGIC.len() + 2;
+    };
     while at + 4 <= buf.len() {
         let len = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()) as usize;
         at += 4;
@@ -790,26 +550,10 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
     out
 }
 
-/// UTC date as `YYYY-MM-DD`, by civil-from-days rather than a calendar crate.
-fn day_of(at_us: u64) -> String {
-    let days = (at_us / 1_000_000) as i64 / 86_400;
-    // Howard Hinnant's civil_from_days, which is exact and fits in a function.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::segments::day_of;
     use nodes::PacketSink;
 
     fn dir(name: &str) -> PathBuf {
@@ -1127,7 +871,7 @@ mod tests {
         assert_eq!(log.total(), 40_000, "the folder was not measured");
         // And it follows the folder afterwards, whoever emptied it.
         std::fs::remove_file(d.join(format!("2026-08-30.000.{EXT}"))).unwrap();
-        log.measured -= std::time::Duration::from_secs(5);
+        log.seg.forget_measurement();
         log.refresh_folder();
         assert_eq!(log.total(), 0);
         let _ = std::fs::remove_dir_all(&d);

@@ -29,6 +29,21 @@
 //! band, and a device per unknown OOK pulse train would fill a house with
 //! entities nobody can name. The rule is the survey's rule: a transmitter
 //! with an identity, and nothing else.
+//!
+//! # The receiver itself is a device too
+//!
+//! Everything published hangs off a bridge device called WaveShark, which is
+//! announced as soon as the broker accepts a connection. Without it the
+//! `via_device` on every other device pointed at nothing, so Home Assistant
+//! dropped the link and a house full of discovered sensors had no way to say
+//! where they came from.
+//!
+//! Beside it is the call bus: what the radio hears people saying, as an event
+//! entity to trigger on and a lamp that is lit while somebody is talking, and
+//! the message bus, which is the same for what people write. Neither is a
+//! transmitter, so neither goes through the device-per-identity path above:
+//! a talkgroup is not a thing in a house, and one entity per talkgroup on a
+//! busy trunked network is a house nobody can read.
 
 use common::Result;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
@@ -55,6 +70,28 @@ const MIN_INTERVAL_S: f64 = 10.0;
 /// city centre holds thousands of BLE addresses, and filling Home Assistant
 /// with them is a mistake that takes an afternoon to undo.
 const MAX_DEVICES: usize = 250;
+
+/// What the bridge device is called, and the identifier every other device
+/// points at with `via_device`.
+const HUB: &str = "waveshark";
+const HUB_NAME: &str = "WaveShark";
+
+/// The device the call bus publishes as, and the one the messages do.
+const CALL_BUS: &str = "waveshark_call_bus";
+const MESSAGE_BUS: &str = "waveshark_messages";
+
+/// How long after the last voice frame a call is still on the air.
+///
+/// A trunked talkgroup holds its channel for a few seconds between
+/// transmissions, and an automation that fired twice for one conversation is
+/// worse than one that fires a little late. The call list uses the same six
+/// seconds for the same reason.
+const CALL_HANG_S: f64 = 6.0;
+
+/// A Home Assistant state is a short string, and a pager message is not
+/// always short. The state carries the beginning and the attribute carries
+/// what was written.
+const STATE_MAX: usize = 255;
 
 /// Entities under one device. A decoder that emits forty timing fields is
 /// describing a burst, not a thing in a house.
@@ -129,6 +166,9 @@ pub struct Publish {
     /// Identity spaces worth an entity, comma separated, or empty for all of
     /// them. `ism,wmbus` is a house's own sensors and meters.
     pub spaces: String,
+    /// Whether what people say and write goes to the house as well as what
+    /// the sensors report.
+    pub buses: bool,
 }
 
 /// What the feed is doing, for the interface to draw.
@@ -163,6 +203,11 @@ pub struct Publisher {
     /// Woken when the broker changes, so the thread does not sleep out a
     /// retry before trying the address it was just given.
     wake: std::sync::Condvar,
+    /// Everything that was offered to the broker, for a test to read. What is
+    /// worth asserting here is what would be said, and saying it needs a
+    /// network.
+    #[cfg(test)]
+    said: Mutex<Vec<(String, String)>>,
 }
 
 impl Publisher {
@@ -179,6 +224,8 @@ impl Publisher {
             error: Mutex::new(None),
             started: AtomicBool::new(false),
             wake: std::sync::Condvar::new(),
+            #[cfg(test)]
+            said: Mutex::new(Vec::new()),
         })
     }
 
@@ -259,6 +306,10 @@ impl Publisher {
     /// thread, which has to keep draining USB, and a broker that has stopped
     /// reading must cost a dropped reading rather than a dropped block.
     pub fn send(&self, topic: &str, payload: String, retain: bool) {
+        #[cfg(test)]
+        if let Ok(mut said) = self.said.lock() {
+            said.push((topic.to_string(), payload.clone()));
+        }
         let client = match self.client.lock() {
             Ok(c) => c.clone(),
             Err(_) => None,
@@ -381,14 +432,39 @@ struct Known {
     last: Instant,
 }
 
+/// A call in progress, as the house is told about it.
+#[derive(Clone, Debug, PartialEq)]
+struct OnAir {
+    system: String,
+    channel_hz: f64,
+    to: String,
+    from: Option<String>,
+    encrypted: bool,
+    codec: Option<&'static str>,
+    started: Instant,
+    last: Instant,
+}
+
 /// The feed to Home Assistant, on the packet bus.
 pub struct HomeAssistantNode {
     publisher: Arc<Publisher>,
     known: HashMap<(String, String), Known>,
+    /// Calls being talked on, by system, channel and group. Cleared by the
+    /// hang, which is what publishes `call_ended`.
+    on_air: Vec<OnAir>,
+    /// The connection the bus devices were announced over, so a broker that
+    /// restarted is introduced to them again and a running one is not.
+    announced_buses: Option<u64>,
     devices: u64,
     /// The least time between two publications about one device.
     min_interval: Duration,
     max_devices: usize,
+    /// Whether what people say and write is published at all.
+    ///
+    /// A house may want its own meters and not the radio traffic: an
+    /// operator listening to somebody else's network has a reason to keep it
+    /// off the dashboard, and a broker is not a private place.
+    buses: bool,
     /// Identity spaces worth a permanent entity, or empty for all of them.
     ///
     /// The reason this exists is the phone in the street. A BLE address is
@@ -414,6 +490,9 @@ impl HomeAssistantNode {
         Self {
             publisher,
             known: HashMap::new(),
+            on_air: Vec::new(),
+            buses: true,
+            announced_buses: None,
             devices: 0,
             min_interval: Duration::from_secs_f64(MIN_INTERVAL_S),
             max_devices: MAX_DEVICES,
@@ -440,11 +519,17 @@ impl HomeAssistantNode {
         if !Arc::ptr_eq(&self.publisher, &p) {
             self.publisher = p;
             self.known.clear();
+            self.announced_buses = None;
         }
     }
 
     /// Which identity spaces to publish, as a comma-separated list, or empty
     /// for every one of them.
+    /// Whether calls and messages are published at all.
+    pub fn set_buses(&mut self, on: bool) {
+        self.buses = on;
+    }
+
     pub fn set_spaces(&mut self, spaces: &str) {
         self.spaces =
             spaces.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
@@ -459,6 +544,295 @@ impl HomeAssistantNode {
 
     pub fn status(&self) -> HomeAssistantStatus {
         HomeAssistantStatus { devices: self.devices, ..self.publisher.status() }
+    }
+
+    /// Announce the bridge, the call bus and the message bus, once per
+    /// connection.
+    ///
+    /// The bridge first and with an entity of its own, because a device with
+    /// no entities is a device Home Assistant does not keep, and every other
+    /// device's `via_device` points at this one.
+    fn announce_buses(&mut self) {
+        if !self.buses {
+            return;
+        }
+        let Some(broker) = self.publisher.broker() else { return };
+        let generation = self.publisher.generation();
+        if self.announced_buses == Some(generation) {
+            return;
+        }
+        self.announced_buses = Some(generation);
+        let hub = serde_json::json!({
+            "identifiers": [HUB],
+            "name": HUB_NAME,
+            "manufacturer": HUB_NAME,
+            "model": "Wideband receiver",
+            "sw_version": env!("CARGO_PKG_VERSION"),
+        });
+        let availability = broker.availability();
+        // The bridge's own entity, which is also the honest answer to "is the
+        // receiver still there": it is the last will the broker publishes
+        // when this process disappears.
+        self.publisher.send(
+            &format!("{}/binary_sensor/{HUB}/receiving/config", broker.prefix()),
+            serde_json::json!({
+                "name": "Receiving",
+                "unique_id": format!("{HUB}_receiving"),
+                "object_id": format!("{HUB}_receiving"),
+                "state_topic": availability,
+                "payload_on": "online",
+                "payload_off": "offline",
+                "device_class": "connectivity",
+                "entity_category": "diagnostic",
+                "device": hub,
+            })
+            .to_string(),
+            true,
+        );
+
+        let calls = format!("{}/calls", broker.topic());
+        let bus_device = |id: &str, name: &str| {
+            serde_json::json!({
+                "identifiers": [id],
+                "name": name,
+                "manufacturer": HUB_NAME,
+                "model": "Air",
+                "via_device": HUB,
+            })
+        };
+        // The event entity is what an automation triggers on: it fires and
+        // leaves no state behind, which is right for something that happened
+        // rather than something that is.
+        self.publisher.send(
+            &format!("{}/event/{CALL_BUS}/call/config", broker.prefix()),
+            serde_json::json!({
+                "name": "Call",
+                "unique_id": format!("{CALL_BUS}_call"),
+                "object_id": format!("{CALL_BUS}_call"),
+                "state_topic": format!("{calls}/event"),
+                "event_types": ["call_started", "call_ended"],
+                "availability_topic": availability,
+                "device": bus_device(CALL_BUS, "WaveShark call bus"),
+            })
+            .to_string(),
+            true,
+        );
+        self.publisher.send(
+            &format!("{}/binary_sensor/{CALL_BUS}/on_air/config", broker.prefix()),
+            serde_json::json!({
+                "name": "On air",
+                "unique_id": format!("{CALL_BUS}_on_air"),
+                "object_id": format!("{CALL_BUS}_on_air"),
+                "state_topic": format!("{calls}/state"),
+                "value_template": "{{ value_json.on_air }}",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device_class": "sound",
+                "availability_topic": availability,
+                "device": bus_device(CALL_BUS, "WaveShark call bus"),
+            })
+            .to_string(),
+            true,
+        );
+        // The last of each, because an event entity's attributes are awkward
+        // to put on a dashboard and "who was that" is the question somebody
+        // asks of a scanner.
+        for (field, name, unit) in [
+            ("caller", "Last caller", None),
+            ("talkgroup", "Last talkgroup", None),
+            ("system", "Last system", None),
+            ("channel_mhz", "Last channel", Some("MHz")),
+        ] {
+            let mut config = serde_json::json!({
+                "name": name,
+                "unique_id": format!("{CALL_BUS}_{field}"),
+                "object_id": format!("{CALL_BUS}_{field}"),
+                "state_topic": format!("{calls}/state"),
+                "value_template": format!("{{{{ value_json.{field} }}}}"),
+                "availability_topic": availability,
+                "device": bus_device(CALL_BUS, "WaveShark call bus"),
+            });
+            if let Some(u) = unit {
+                config["unit_of_measurement"] = serde_json::json!(u);
+                config["device_class"] = serde_json::json!("frequency");
+                config["state_class"] = serde_json::json!("measurement");
+            }
+            self.publisher.send(
+                &format!("{}/sensor/{CALL_BUS}/{field}/config", broker.prefix()),
+                config.to_string(),
+                true,
+            );
+        }
+
+        let messages = format!("{}/messages", broker.topic());
+        self.publisher.send(
+            &format!("{}/event/{MESSAGE_BUS}/message/config", broker.prefix()),
+            serde_json::json!({
+                "name": "Message",
+                "unique_id": format!("{MESSAGE_BUS}_message"),
+                "object_id": format!("{MESSAGE_BUS}_message"),
+                "state_topic": format!("{messages}/event"),
+                "event_types": ["message"],
+                "availability_topic": availability,
+                "device": bus_device(MESSAGE_BUS, "WaveShark messages"),
+            })
+            .to_string(),
+            true,
+        );
+        // The words themselves are an attribute rather than the state: a
+        // state is 255 characters and a page can be longer, and a truncated
+        // message is a message misread.
+        self.publisher.send(
+            &format!("{}/sensor/{MESSAGE_BUS}/last/config", broker.prefix()),
+            serde_json::json!({
+                "name": "Last message",
+                "unique_id": format!("{MESSAGE_BUS}_last"),
+                "object_id": format!("{MESSAGE_BUS}_last"),
+                "state_topic": format!("{messages}/state"),
+                "value_template": "{{ value_json.text }}",
+                "json_attributes_topic": format!("{messages}/state"),
+                "availability_topic": availability,
+                "device": bus_device(MESSAGE_BUS, "WaveShark messages"),
+            })
+            .to_string(),
+            true,
+        );
+    }
+
+    /// What the call bus says about itself: whether anybody is talking, and
+    /// who was heard last.
+    ///
+    /// Retained, unlike a reading: this is a state rather than a moment, and
+    /// Home Assistant restarted should know whether the channel is busy
+    /// without waiting for somebody to key up.
+    fn publish_call_state(&self, call: Option<&OnAir>) {
+        let Some(broker) = self.publisher.broker() else { return };
+        let state = match call {
+            Some(c) => serde_json::json!({
+                "on_air": "ON",
+                "caller": c.from.clone().unwrap_or_default(),
+                "talkgroup": c.to,
+                "system": c.system,
+                "channel_mhz": (c.channel_hz / 1e6 * 10_000.0).round() / 10_000.0,
+            }),
+            // The last caller stays: what a scanner is asked when it is quiet
+            // is who that was, not who nobody is.
+            None => serde_json::json!({ "on_air": "OFF" }),
+        };
+        self.publisher.send(&format!("{}/calls/state", broker.topic()), state.to_string(), true);
+    }
+
+    fn publish_call_event(&self, kind: &str, c: &OnAir, now: Instant) {
+        let Some(broker) = self.publisher.broker() else { return };
+        let event = serde_json::json!({
+            "event_type": kind,
+            "system": c.system,
+            "talkgroup": c.to,
+            "caller": c.from.clone().unwrap_or_default(),
+            "channel_mhz": (c.channel_hz / 1e6 * 10_000.0).round() / 10_000.0,
+            "encrypted": c.encrypted,
+            "codec": c.codec.unwrap_or_default(),
+            "seconds": (now.saturating_duration_since(c.started).as_secs_f64() * 10.0).round() / 10.0,
+        });
+        self.publisher.send(&format!("{}/calls/event", broker.topic()), event.to_string(), false);
+    }
+
+    /// A voice decode, as the call bus.
+    ///
+    /// Reads what the decoder stated and not what its fields are called: the
+    /// airtime says it is speech, the link says who it was between.
+    fn hear_call(&mut self, d: &common::Decoded, now: Instant) {
+        if !self.buses {
+            return;
+        }
+        let Some(airtime) = d.airtime.as_ref().filter(|a| a.voice) else { return };
+        let system = d.protocol.split('-').next().unwrap_or(d.protocol).to_string();
+        let party = |p: &Option<common::Party>| p.as_ref().map(|p| p.id.clone());
+        let to = d.link.as_ref().and_then(|l| party(&l.to)).unwrap_or_default();
+        let from = d.link.as_ref().and_then(|l| party(&l.from)).filter(|s| !s.is_empty());
+        let channel_hz = d.center.as_f64();
+        let found = self.on_air.iter_mut().find(|c| {
+            c.system == system && c.to == to && (c.channel_hz - channel_hz).abs() < 500.0
+        });
+        if let Some(c) = found {
+            c.last = now;
+            if c.from.is_none() {
+                c.from = from;
+            }
+            if c.codec.is_none() {
+                c.codec = airtime.codec;
+            }
+            return;
+        }
+        let call = OnAir {
+            system,
+            channel_hz,
+            to,
+            from,
+            encrypted: !matches!(airtime.secrecy, common::Secrecy::Clear | common::Secrecy::Unsaid),
+            codec: airtime.codec,
+            started: now,
+            last: now,
+        };
+        self.publish_call_event("call_started", &call, now);
+        self.publish_call_state(Some(&call));
+        self.on_air.push(call);
+    }
+
+    /// Close the calls nothing has been heard on for the hang.
+    fn age_calls(&mut self, now: Instant) {
+        let hang = Duration::from_secs_f64(CALL_HANG_S);
+        let ended: Vec<OnAir> = self
+            .on_air
+            .iter()
+            .filter(|c| now.saturating_duration_since(c.last) >= hang)
+            .cloned()
+            .collect();
+        if ended.is_empty() {
+            return;
+        }
+        self.on_air.retain(|c| now.saturating_duration_since(c.last) < hang);
+        for c in &ended {
+            self.publish_call_event("call_ended", c, c.last);
+        }
+        self.publish_call_state(self.on_air.last());
+    }
+
+    /// A message somebody wrote, as an event and as the last one.
+    fn hear_message(&mut self, d: &common::Decoded) {
+        if !self.buses || !d.written {
+            return;
+        }
+        let Some(broker) = self.publisher.broker() else { return };
+        let field = |keys: &[&str]| {
+            keys.iter().find_map(|k| {
+                d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| match v {
+                    common::Value::Text(t) => t.clone(),
+                    other => other.to_string(),
+                })
+            })
+        };
+        let Some(text) = field(&["text", "message", "sms"]).filter(|t| !t.trim().is_empty()) else {
+            return;
+        };
+        let system = d.protocol.split('-').next().unwrap_or(d.protocol);
+        let from = field(&["sender", "from", "src", "source", "radio_id"]).unwrap_or_default();
+        let to =
+            field(&["addressee", "to", "dst", "destination", "talkgroup", "channel", "address"])
+                .unwrap_or_default();
+        let body = serde_json::json!({
+            "system": system,
+            "from": from,
+            "to": to,
+            "text": text.chars().take(STATE_MAX).collect::<String>(),
+            "full_text": text,
+            "channel_mhz": (d.center.as_f64() / 1e6 * 10_000.0).round() / 10_000.0,
+        });
+        let mut event = body.clone();
+        event["event_type"] = serde_json::json!("message");
+        let topic = broker.topic();
+        self.publisher.send(&format!("{topic}/messages/event"), event.to_string(), false);
+        self.publisher.send(&format!("{topic}/messages/state"), body.to_string(), true);
     }
 
     /// One decode, as a device in a house.
@@ -567,6 +941,7 @@ impl Simple for HomeAssistantNode {
             .unit("s"),
             pipeline::param::Param::int("max_devices", self.max_devices as i64, 1..=5_000),
             pipeline::param::Param::text("spaces", self.spaces.join(",")),
+            pipeline::param::Param::bool("buses", self.buses).label("Publish calls and messages"),
         ]
     }
 
@@ -588,6 +963,10 @@ impl Simple for HomeAssistantNode {
                 self.set_spaces(v.as_str().unwrap_or(""));
                 Ok(())
             }
+            "buses" => {
+                self.buses = v.as_bool().unwrap_or(true);
+                Ok(())
+            }
             _ => Err(common::Error::other(format!("no parameter {name}"))),
         }
     }
@@ -597,11 +976,17 @@ impl Simple for HomeAssistantNode {
             return Ok(());
         }
         let now = Instant::now();
+        self.announce_buses();
         for p in i.as_packets().unwrap_or(&[]) {
             for d in p.decodes.iter() {
+                self.hear_call(d, now);
+                self.hear_message(d);
                 self.publish(p, d, now);
             }
         }
+        // Called every block whether or not anything arrived: a call ends
+        // when nothing more is heard on it, and silence is not a packet.
+        self.age_calls(now);
         Ok(())
     }
 }
@@ -755,9 +1140,14 @@ fn discovery(
         "device": {
             "identifiers": [node_id],
             "name": name.map(|n| format!("{n} ({ident})")).unwrap_or_else(|| format!("{} {ident}", space.to_uppercase())),
-            "manufacturer": vendor.unwrap_or("unknown"),
+            // Who made the thing, where the decoder recovered it, and
+            // otherwise what put it in the house. "unknown" was the honest
+            // answer to a question nobody asked: the column is read to find
+            // out where a device came from, and every one of these came from
+            // here.
+            "manufacturer": vendor.unwrap_or(HUB_NAME),
             "model": space.to_uppercase(),
-            "via_device": "waveshark",
+            "via_device": HUB,
         },
     });
     if let Some(u) = unit {
@@ -894,6 +1284,12 @@ mod tests {
         node.process(&Payload::Packets(packets), &mut out, &mut ctx).unwrap();
     }
 
+    /// Configuration messages the bridge, the call bus and the message bus
+    /// cost, once per connection: the bridge's own connectivity entity, the
+    /// call event, the on-air lamp, four last-heard sensors, the message
+    /// event and the last message.
+    const BUS_ANNOUNCEMENTS: u64 = 9;
+
     /// A node pointed at a broker that is not there. Nothing reaches a
     /// network: what is being tested is what would be said, not the saying.
     fn node() -> HomeAssistantNode {
@@ -929,7 +1325,7 @@ mod tests {
         // offered at all.
         let known = n.known.values().next().unwrap();
         let announced = known.announced.len() as u64;
-        assert_eq!(n.publisher.status().dropped, announced + 1);
+        assert_eq!(n.publisher.status().dropped, announced + 1 + BUS_ANNOUNCEMENTS);
     }
 
     /// A burst nothing identified is not a device. The bus carries every
@@ -940,7 +1336,9 @@ mod tests {
         let mut n = node();
         run(&mut n, vec![packet(vec![0x01, 0x02, 0x03], 433_920_000)]);
         assert_eq!(n.status().devices, 0);
-        assert_eq!(n.publisher.status().dropped, 0);
+        // The buses are announced whatever is on the air; the burst itself
+        // said nothing.
+        assert_eq!(n.publisher.status().dropped, BUS_ANNOUNCEMENTS);
     }
 
     /// Nothing is published at all until somebody has said where to.
@@ -950,6 +1348,217 @@ mod tests {
         assert!(!n.is_on());
         run(&mut n, vec![advertisement()]);
         assert_eq!(n.status().devices, 0);
+    }
+
+    /// Everything offered to the broker, topic and payload.
+    fn said(n: &HomeAssistantNode) -> Vec<(String, String)> {
+        n.publisher.said.lock().unwrap().clone()
+    }
+
+    fn payload<'a>(said: &'a [(String, String)], topic: &str) -> &'a str {
+        said.iter().rev().find(|(t, _)| t == topic).map(|(_, p)| p.as_str()).unwrap_or_else(|| {
+            let topics: Vec<&str> = said.iter().map(|(t, _)| t.as_str()).collect();
+            panic!("nothing on {topic}, only {topics:?}")
+        })
+    }
+
+    /// A voice decode, as a trunked system produces one: the airtime says it
+    /// is speech and the link says who it was between.
+    fn over(from: &str, to: &str) -> common::Decoded {
+        let mut d = common::Decoded::bytes("TETRA-Call", Hz(391_035_600), 0.0, vec![1]);
+        d.link = Some(pipeline::event::Link::between(
+            pipeline::event::Party::unit(from.to_string()),
+            pipeline::event::Party::group(to.to_string()),
+        ));
+        d.airtime = Some(common::Airtime {
+            seconds: 0.06,
+            voice: true,
+            live: true,
+            secrecy: common::Secrecy::Clear,
+            codec: Some("ACELP 4.6k"),
+        });
+        d
+    }
+
+    fn with_decode(d: common::Decoded) -> Packet {
+        let mut p = packet(vec![1, 2, 3], 391_035_600);
+        p.decodes.push(d);
+        p
+    }
+
+    /// The whole point of the call bus: somebody keys up and the house can
+    /// trigger on it, see who it was, and see the lamp go out afterwards.
+    #[test]
+    fn a_call_is_an_event_and_a_lamp() {
+        let mut n = node();
+        run(&mut n, vec![with_decode(over("10223295", "Control 1"))]);
+        let s = said(&n);
+
+        let event: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/event")).unwrap();
+        assert_eq!(event["event_type"], "call_started");
+        assert_eq!(event["caller"], "10223295");
+        assert_eq!(event["talkgroup"], "Control 1");
+        assert_eq!(event["system"], "TETRA");
+        assert_eq!(event["channel_mhz"], 391.0356);
+        assert_eq!(event["encrypted"], false);
+        assert_eq!(event["codec"], "ACELP 4.6k");
+
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["on_air"], "ON");
+        assert_eq!(state["caller"], "10223295");
+
+        // A second frame of the same over is the same call: an automation
+        // that fired once a burst would fire fifty times a second.
+        run(&mut n, vec![with_decode(over("10223295", "Control 1"))]);
+        let started = said(&n)
+            .iter()
+            .filter(|(t, p)| t == "waveshark/calls/event" && p.contains("call_started"))
+            .count();
+        assert_eq!(started, 1, "one over, one event");
+
+        // And the call ends when nothing more is heard on it.
+        n.age_calls(Instant::now() + Duration::from_secs_f64(CALL_HANG_S + 1.0));
+        let s = said(&n);
+        let event: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/event")).unwrap();
+        assert_eq!(event["event_type"], "call_ended");
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/calls/state")).unwrap();
+        assert_eq!(state["on_air"], "OFF");
+    }
+
+    /// A decode with no airtime, or with airtime that is not speech, is not a
+    /// call: a registration and a short data message both name parties.
+    #[test]
+    fn a_frame_that_is_not_speech_is_not_a_call() {
+        let mut n = node();
+        let mut d = over("10223295", "Control 1");
+        d.airtime.as_mut().unwrap().voice = false;
+        run(&mut n, vec![with_decode(d)]);
+        assert!(
+            !said(&n).iter().any(|(t, _)| t == "waveshark/calls/event"),
+            "a data frame became a call"
+        );
+    }
+
+    /// What somebody wrote reaches the house as an event and as the last
+    /// message. The words are an attribute as well as the state, because a
+    /// state is 255 characters and a page can be longer.
+    #[test]
+    fn a_message_is_an_event_and_the_last_message() {
+        let mut n = node();
+        let mut d = common::Decoded::bytes("TETRA-SDS", Hz(391_035_600), 0.0, vec![1]).written();
+        d.fields = vec![
+            ("from".into(), common::Value::Text("10223295".into())),
+            ("to".into(), common::Value::Text("15835885".into())),
+            ("text".into(), common::Value::Text("rtb".into())),
+        ];
+        run(&mut n, vec![with_decode(d)]);
+        let s = said(&n);
+        let event: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/messages/event")).unwrap();
+        assert_eq!(event["event_type"], "message");
+        assert_eq!(event["text"], "rtb");
+        assert_eq!(event["from"], "10223295");
+        assert_eq!(event["to"], "15835885");
+        assert_eq!(event["system"], "TETRA");
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/messages/state")).unwrap();
+        assert_eq!(state["text"], "rtb");
+        assert_eq!(state["full_text"], "rtb");
+    }
+
+    /// A long page arrives whole in the attribute and cut in the state, since
+    /// Home Assistant refuses a state longer than 255 characters.
+    #[test]
+    fn a_long_message_keeps_its_words_in_the_attribute() {
+        let mut n = node();
+        let long = "M".repeat(400);
+        let mut d = common::Decoded::bytes("POCSAG", Hz(153_350_000), 0.0, vec![1]).written();
+        d.fields = vec![("text".into(), common::Value::Text(long.clone()))];
+        run(&mut n, vec![with_decode(d)]);
+        let s = said(&n);
+        let state: serde_json::Value =
+            serde_json::from_str(payload(&s, "waveshark/messages/state")).unwrap();
+        assert_eq!(state["text"].as_str().unwrap().len(), STATE_MAX);
+        assert_eq!(state["full_text"].as_str().unwrap(), long);
+    }
+
+    /// A house that wants its meters and not the radio traffic can have
+    /// them: the buses are one switch, and it is off the same node.
+    #[test]
+    fn the_buses_can_be_turned_off() {
+        let mut n = node();
+        pipeline::node::Node::set_param(&mut n, "buses", pipeline::ParamValue::Bool(false))
+            .unwrap();
+        run(&mut n, vec![with_decode(over("10223295", "Control 1"))]);
+        let s = said(&n);
+        assert!(!s.iter().any(|(t, _)| t.contains("calls")), "a call reached a broker");
+        assert!(!s.iter().any(|(t, _)| t.contains("call_bus")), "the bus was announced");
+    }
+
+    /// Text nobody wrote is not a message here either: the same statement
+    /// decides as in the message view.
+    #[test]
+    fn a_machine_talking_is_not_a_message() {
+        let mut n = node();
+        let mut d = common::Decoded::bytes("rds", Hz(95_800_000), 0.0, vec![1])
+            .with_media(common::media::TEXT);
+        d.fields = vec![("text".into(), common::Value::Text("NOW PLAYING".into()))];
+        run(&mut n, vec![with_decode(d)]);
+        assert!(!said(&n).iter().any(|(t, _)| t == "waveshark/messages/event"));
+    }
+
+    /// Every device says where it came from. `via_device` pointed at a bridge
+    /// that was never announced, so Home Assistant dropped the link and a
+    /// house full of discovered sensors read as coming from nobody.
+    #[test]
+    fn the_receiver_is_a_device_and_everything_is_published_through_it() {
+        let mut n = node();
+        run(&mut n, vec![advertisement()]);
+        let s = said(&n);
+        let hub: serde_json::Value = serde_json::from_str(payload(
+            &s,
+            "homeassistant/binary_sensor/waveshark/receiving/config",
+        ))
+        .unwrap();
+        assert_eq!(hub["device"]["identifiers"][0], "waveshark");
+        assert_eq!(hub["device"]["manufacturer"], "WaveShark");
+        assert_eq!(hub["state_topic"], "waveshark/status");
+
+        let device = "waveshark_ble_e8_31_cd_0a_f5_3a";
+        let config: serde_json::Value = serde_json::from_str(payload(
+            &s,
+            &format!("homeassistant/sensor/{device}/rssi_dbfs/config"),
+        ))
+        .unwrap();
+        assert_eq!(config["device"]["via_device"], "waveshark");
+        // The maker where the decode named one.
+        assert_eq!(config["device"]["manufacturer"], "Victron Energy");
+        // And where it did not, who put it in the house rather than the word
+        // "unknown", which is what every OOK sensor read as.
+        let bare: serde_json::Value = serde_json::from_str(&discovery(
+            &Broker::new("broker.invalid"),
+            "waveshark_ism_43104",
+            "waveshark/ism/43104/state",
+            "temperature_c",
+            Some("\u{b0}C"),
+            "ism:Fineoffset-WHx080",
+            "43104",
+            None,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(bare["device"]["manufacturer"], "WaveShark");
+
+        let bus: serde_json::Value =
+            serde_json::from_str(payload(&s, "homeassistant/event/waveshark_call_bus/call/config"))
+                .unwrap();
+        assert_eq!(bus["device"]["via_device"], "waveshark");
+        assert_eq!(bus["event_types"][0], "call_started");
+        assert_eq!(bus["event_types"][1], "call_ended");
     }
 
     /// The units come off the field names, which is the convention every
@@ -1200,9 +1809,11 @@ mod tests {
         let mut seen: Vec<(String, String)> = Vec::new();
         while let Ok(msg) = rx.recv_timeout(Duration::from_secs(2)) {
             seen.push(msg);
-            // Availability, one configuration per announced field, and the
-            // one state message they all read.
-            if seen.len() >= node.known.values().next().unwrap().announced.len() + 2 {
+            // Availability, the bus announcements, one configuration per
+            // announced field, and the one state message they all read.
+            let want =
+                node.known.values().next().unwrap().announced.len() as u64 + 2 + BUS_ANNOUNCEMENTS;
+            if seen.len() as u64 >= want {
                 break;
             }
         }

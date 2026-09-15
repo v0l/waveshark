@@ -874,6 +874,9 @@ pub struct DecodeRecord {
     /// What the payload is, as a media type, so a view can claim packets it
     /// knows how to render without knowing the protocol that made them.
     pub media_type: &'static str,
+    /// Whether somebody wrote it. The message view's entry condition; see
+    /// [`common::Decoded::written`].
+    pub written: bool,
     /// Received level in dBFS, and signal to noise in dB.
     pub rssi_dbfs: f32,
     pub snr_db: f32,
@@ -957,6 +960,7 @@ impl DecodeRecord {
             detail: String::new(),
             fields: Vec::new(),
             media_type: pipeline::event::media::BYTES,
+            written: false,
             rssi_dbfs: -20.0,
             snr_db: 15.0,
             bytes: vec![1, 2, 3],
@@ -1229,6 +1233,9 @@ pub struct Status {
     /// on and whether it is reading anything. `None` where the graph has no
     /// transcriber, which is every build made without the `stt` feature.
     pub transcriber: parking_lot::Mutex<Option<crate::transcripts::Engine>>,
+    /// The call recorder: whether it is on, what it has written, and where.
+    /// `None` until a receiver is built.
+    pub recorder: parking_lot::Mutex<Option<crate::calllog::Recorder>>,
     /// What has been said, as the receiver's own transcript rather than a
     /// copy of it: the node writes into this from the radio thread and the
     /// view takes a snapshot when its sequence number moves. Empty until a
@@ -1475,6 +1482,7 @@ impl Default for Status {
             logged: AtomicU64::new(0),
             track_list: parking_lot::Mutex::new(Vec::new()),
             transcriber: parking_lot::Mutex::new(None),
+            recorder: parking_lot::Mutex::new(None),
             transcript: parking_lot::Mutex::new(Default::default()),
             capture_on: AtomicBool::new(false),
             capture_bytes: AtomicU64::new(0),
@@ -3073,6 +3081,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         {
             *self.status.transcriber.lock() = self.rx.transcriber();
         }
+        *self.status.recorder.lock() = self.rx.recorder();
         if !self.plan.feeds.is_empty() {
             *self.status.feeds.lock() = self.rx.feed_status();
         }
@@ -4014,6 +4023,7 @@ pub(crate) mod tests {
         plan.settings.homeassistant = Some(nodes::Publish {
             broker: nodes::Broker { port, ..nodes::Broker::new("127.0.0.1") },
             spaces: "ism".into(),
+            buses: true,
         });
         rx.apply_settings(&plan);
         let up = std::time::Instant::now();
@@ -5409,6 +5419,83 @@ pub(crate) mod tests {
         // can say who was on it.
         assert!(heard.is_empty(), "a tuned channel became a call: {heard:?}");
         assert!(calls.active(std::time::Instant::now()).is_empty());
+    }
+
+    /// The same handheld, kept as audio: the whole path from IQ to a record
+    /// on the disk, with the file read back and decoded.
+    ///
+    /// What it proves that the node's own tests cannot: the tap really
+    /// carries a tuned analogue channel's audio, at the rate the strip runs
+    /// at, labelled with the channel it was heard on, and the recorder is in
+    /// the graph the receiver draws rather than only in a test's patch.
+    #[test]
+    fn a_handheld_on_pmr446_is_recorded_and_reads_back() {
+        let Some(buf) = pmr446_fixture() else {
+            eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        const CHANNEL_HZ: f64 = 446_049_100.0;
+        let dir = std::env::temp_dir().join(format!("sr-calls-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts.clear();
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "PMR1".into(),
+            offset_hz: CHANNEL_HZ - buf.center.as_f64(),
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            squelch_db: Some(-200.0),
+            agc: true,
+            voice: true,
+            tx: None,
+        }];
+        let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+        let id = rx.node_of_stage(crate::chain::derived::CALL_LOG).expect("a call log");
+        rx.set_node_param(id.0, "dir", pipeline::ParamValue::Text(dir.display().to_string()))
+            .expect("the folder");
+        rx.set_node_param(id.0, "enabled", pipeline::ParamValue::Bool(true)).expect("the switch");
+        let _ = replay_blocks(&mut rx, &buf);
+        // The over ends with the samples, so the hang has to run out before
+        // the record is written: that is what a real channel going quiet
+        // does.
+        let silence = vec![C32::default(); 16_384];
+        for _ in 0..80 {
+            let _ = rx.process(&silence);
+        }
+        let recorded = rx.recorder().expect("the recorder reports");
+        assert_eq!(recorded.calls, 1, "one transmission is one record");
+        drop(rx);
+
+        let files: Vec<std::path::PathBuf> =
+            std::fs::read_dir(&dir).expect("the folder").flatten().map(|e| e.path()).collect();
+        assert_eq!(files.len(), 1, "one segment, got {files:?}");
+        let calls = crate::calllog::read(&files[0]).expect("the log reads back");
+        assert_eq!(calls.len(), 1);
+        let c = &calls[0];
+        assert_eq!(c.channel_hz, CHANNEL_HZ as u64, "recorded on {} Hz", c.channel_hz);
+        assert_eq!(c.system, crate::mix::fader::ANALOGUE);
+        // The capture is six seconds with the handheld keyed for about five
+        // of them, and the recording holds the speech rather than the file.
+        assert!(
+            (3.5..=6.0).contains(&c.seconds()),
+            "a five second over came back as {:.2} s",
+            c.seconds()
+        );
+        let speech = c.speech().expect("the audio decodes");
+        assert_eq!(speech.rate, crate::calllog::RATE);
+        let rms = (speech.pcm.iter().map(|v| v * v).sum::<f32>() / speech.pcm.len() as f32).sqrt();
+        assert!((0.03..0.2).contains(&rms), "the recording reads {rms:.4} rms");
+        // The tap carries this channel at seventeen times full scale, so
+        // without the limiter every sample would be a square wave. A handful
+        // of samples on the codec's ringing is not clipping.
+        let clipped = speech.pcm.iter().filter(|s| s.abs() > 0.99).count();
+        assert!(clipped < 50, "{clipped} of {} samples are clipped", speech.pcm.len());
+        assert!(c.peak > 10.0, "the tap's level is not being reported: {}", c.peak);
+        // 16 kbit/s and nothing between overs: a six second over is 12 kB.
+        let bytes = std::fs::metadata(&files[0]).expect("the segment").len();
+        assert!((11_000..14_000).contains(&bytes), "six seconds of speech cost {bytes} bytes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn pmr446_fixture() -> Option<common::IqBuf> {

@@ -164,6 +164,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
 
     let mut fix = None;
     let mut media = pipeline::event::media::BYTES;
+    let mut written = false;
     let mut report = common::ReportDetail::Bare;
     let protocol = match &aprs_report {
         Some(aprs::Report::Position { position, comment }) => {
@@ -203,6 +204,10 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
             fields.push(("addressee".into(), Value::Text(to.clone())));
             fields.push(("message".into(), Value::Text(text.clone())));
             media = pipeline::event::media::TEXT;
+            // A message is addressed to a station and was typed by whoever
+            // sent it. A position, a status and a telemetry frame are the
+            // radio talking about itself.
+            written = true;
             "APRS-Message"
         }
         Some(aprs::Report::Other(k)) => {
@@ -235,6 +240,7 @@ pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> De
     d.position = fix;
     d.report = report;
     d.media_type = media;
+    d.written = written;
     d
 }
 

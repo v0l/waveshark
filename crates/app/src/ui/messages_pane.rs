@@ -60,9 +60,19 @@ impl Msgs<'_> {
             ui.vertical_centered(|ui| {
                 hint(
                     ui,
-                    "Nothing has been written yet. Any decode carrying a text or message \
-                     field lands here: a TETRA short data message, an M17 SMS packet, an \
-                     APRS message, a pager page.",
+                    "Nothing has been written yet. A decode the decoder says somebody wrote \
+                     lands here: a TETRA short data message, an M17 SMS packet, an APRS \
+                     message, a pager page. A station's radiotext and an aircraft's \
+                     datalink are text and are not messages, so they stay in the packet \
+                     list.",
+                );
+                hint(
+                    ui,
+                    &format!(
+                        "They are kept as they arrive, a file a day in {}, so an overnight \
+                         watch is readable in the morning.",
+                        crate::messagelog::messages_dir().display()
+                    ),
                 );
             });
             return act;

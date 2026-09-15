@@ -21,7 +21,7 @@ use dsp::m17::{
     SYMBOLS_PER_FRAME,
 };
 use dsp::{FirDecim, FmDemod, Mixer};
-use pipeline::event::{Decoded, media};
+use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -467,7 +467,8 @@ pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         // failed never became an event.
         .with_crc(Some(true));
     if let Some(t) = text {
-        d = d.with_media(media::TEXT).with_text(t);
+        // An M17 SMS packet: a person typed it into a radio.
+        d = d.written().with_text(t);
     }
     d.link = link;
     d.identity = lsf.map(|l| common::Identity::new("m17", l.source().to_string()));
@@ -794,7 +795,8 @@ mod tests {
             frames.iter().filter_map(|f| m17_decoded(f, Hz(center as u64))).collect();
         let packet = rows.iter().find(|r| r.protocol == "M17-Packet").expect("no packet row");
         assert_eq!(packet.text.as_deref(), Some("CQ CQ CQ de M0ABC, testing M17 packet mode"));
-        assert_eq!(packet.media_type, media::TEXT);
+        assert_eq!(packet.media_type, pipeline::event::media::TEXT);
+        assert!(packet.written, "an SMS packet is somebody writing");
         assert_eq!(
             packet.fields.iter().find(|(n, _)| n == "packet_type").map(|(_, v)| v.clone()),
             Some(common::Value::Text("SMS".into()))

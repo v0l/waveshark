@@ -1614,6 +1614,20 @@ impl App {
                         if switch(ui, "publish", &mut ha.on, "while receiving", on_help) {
                             apply = true;
                         }
+                        let buses_help = "A call bus and a message bus beside the sensors: an \
+                                          event to trigger on when somebody keys up or writes, \
+                                          a lamp while the channel is busy, and who was heard \
+                                          last. Off publishes the meters and keeps the traffic \
+                                          off the dashboard.";
+                        if switch(
+                            ui,
+                            "traffic",
+                            &mut ha.buses,
+                            "calls and messages too",
+                            buses_help,
+                        ) {
+                            apply = true;
+                        }
                         match ha.status.as_ref() {
                             Some(st) if st.configured => {
                                 let said = format!(

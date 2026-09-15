@@ -18,7 +18,9 @@ pub mod media {
     pub const BYTES: &str = "application/octet-stream";
     /// A JSON object, for structured decodes with named fields.
     pub const JSON: &str = "application/json";
-    /// Plain text, for protocols that are text: RDS radiotext, pager messages.
+    /// Plain text, for protocols that are text: RDS radiotext, pager
+    /// messages. What the payload is, not who composed it: see
+    /// [`super::Decoded::written`] for the second question.
     pub const TEXT: &str = "text/plain";
     pub const JPEG: &str = "image/jpeg";
     pub const PNG: &str = "image/png";
@@ -373,6 +375,15 @@ pub struct Decoded {
     /// How long it held the channel, and whether it carried speech. What the
     /// call list measures.
     pub airtime: Option<Airtime>,
+    /// Whether the text this frame carries is somebody writing to somebody.
+    ///
+    /// The message view's entry condition, as `Airtime::voice` is the call
+    /// list's, and only the decoder can say it: `media_type` says the payload
+    /// is text, which RDS radiotext, an ACARS position report and a drone
+    /// naming its own message types all are. None of those is a message, and
+    /// a view that could not tell them apart showed a broadcast station's
+    /// track listing beside a pager call-out.
+    pub written: bool,
 }
 
 impl Decoded {
@@ -394,7 +405,19 @@ impl Decoded {
             report: ReportDetail::Bare,
             identity: None,
             airtime: None,
+            written: false,
         }
+    }
+
+    /// Somebody wrote this, and it is text they addressed to somebody.
+    ///
+    /// Sets the media type with it: a message is text by definition, and the
+    /// two being set apart is how a decoder ended up saying one and not the
+    /// other.
+    pub fn written(mut self) -> Self {
+        self.media_type = media::TEXT;
+        self.written = true;
+        self
     }
 
     /// Who the frame was between. The decoder's own statement, which is what

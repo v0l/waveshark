@@ -1060,6 +1060,7 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         at: 0.0,
         payload: bytes.to_vec(),
         text: None,
+        written: false,
         crc_ok: Some(crc_ok),
         modulation: Some(common::Modulation::Dqpsk),
         detail: Some(format!(
@@ -1249,9 +1250,11 @@ pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .with_crc(Some(true));
     // Short data is somebody writing to somebody, which is what puts it in
     // the message view. Said here rather than left to a reader to guess from
-    // a field called `text`.
+    // a field called `text`. Only the two text protocol identifiers reach
+    // this: a status message and a location report are not short data anybody
+    // wrote.
     if protocol == "TETRA-SDS" {
-        d = d.with_media(pipeline::event::media::TEXT);
+        d = d.written();
     }
     d.airtime = airtime;
     Some(d)

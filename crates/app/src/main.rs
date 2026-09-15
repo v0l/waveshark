@@ -26,6 +26,7 @@ fn window_icon() -> Option<egui::IconData> {
 mod agent;
 mod bands;
 mod beacondb;
+mod calllog;
 mod calls;
 mod chain;
 mod chainview;
@@ -41,6 +42,7 @@ mod locale;
 mod map;
 mod memory;
 mod meshnode;
+mod messagelog;
 mod messages;
 mod mix;
 mod packetlog;
@@ -51,6 +53,7 @@ mod radio;
 mod record;
 mod sats;
 mod scanners;
+mod segments;
 mod session;
 mod shutdown;
 mod station;
@@ -795,6 +798,51 @@ fn scan(
     eprintln!("{n} packets");
 }
 
+/// List a call log, and write each over out as a WAV when asked.
+///
+/// The recordings are Opus inside the log's own records, which nothing else
+/// opens, so this is how they leave: a table to find the over by, and a
+/// folder of WAVs any player, spectrogram or transcriber reads.
+fn list_calls(path: &std::path::Path, wavs: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let calls = calllog::read(path)?;
+    if calls.is_empty() {
+        anyhow::bail!("{} holds no calls", path.display());
+    }
+    let mut seconds = 0.0;
+    for (k, c) in calls.iter().enumerate() {
+        let secs = c.at_us / 1_000_000 % 86_400;
+        let when = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+        seconds += c.seconds();
+        println!(
+            "{when}  {:10.4} MHz  {:<8} {:>12} -> {:<12} {:>6.1} s  peak {:>5.2}",
+            c.channel_hz as f64 / 1e6,
+            c.system,
+            c.from.as_deref().unwrap_or(""),
+            c.to.as_deref().unwrap_or(""),
+            c.seconds(),
+            c.peak,
+        );
+        let Some(dir) = wavs else { continue };
+        let Some(speech) = c.speech() else {
+            eprintln!("call {k} did not decode");
+            continue;
+        };
+        let who = c.from.as_deref().or(c.to.as_deref()).unwrap_or(&c.system);
+        let who: String =
+            who.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let name = format!(
+            "{k:04}_{}_{who}_{:.4}MHz.wav",
+            when.replace(':', ""),
+            c.channel_hz as f64 / 1e6
+        );
+        if let Err(e) = mix::write_wav(&dir.join(&name), &speech) {
+            eprintln!("{name}: {e}");
+        }
+    }
+    println!("{} calls, {seconds:.0} s of speech", calls.len());
+    Ok(())
+}
+
 fn replay(path: &str) -> anyhow::Result<()> {
     let path = std::path::Path::new(path);
     if path.extension().and_then(|s| s.to_str()) == Some("wspkt") {
@@ -890,7 +938,7 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
         None => (String::new(), String::new()),
     };
     let broker = nodes::Broker { port, username, password, ..nodes::Broker::new(host) };
-    Ok(nodes::Publish { broker, spaces: session::DEFAULT_HA_SPACES.into() })
+    Ok(nodes::Publish { broker, spaces: session::DEFAULT_HA_SPACES.into(), buses: true })
 }
 
 /// `8931` or `127.0.0.1:8931`, for the MCP server's address.
@@ -1095,6 +1143,10 @@ struct Args {
     /// Decode a capture, or a directory of them, and print what came out
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "captures")]
     replay: Option<String>,
+
+    /// With a call log, write every over in it here as a WAV
+    #[arg(long, value_name = "DIR")]
+    extract_calls: Option<PathBuf>,
 
     /// Run for this many seconds, then report CPU and span timings
     #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "12")]
@@ -1380,7 +1432,12 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
     if let Some(path) = &args.replay {
-        if let Err(e) = replay(path) {
+        let p = std::path::Path::new(path);
+        let done = match p.extension().and_then(|s| s.to_str()) == Some("wscal") {
+            true => list_calls(p, args.extract_calls.as_deref()),
+            false => replay(path),
+        };
+        if let Err(e) = done {
             eprintln!("replay failed: {e}");
             std::process::exit(1);
         }

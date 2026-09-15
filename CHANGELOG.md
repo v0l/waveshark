@@ -11,6 +11,14 @@ the code is in the commit log.
 
 ### Added
 
+- Call recording: every over kept as Opus, from the Record switch on the call list.
+
+- Messages are written down as they arrive, a file a day, and read back at start.
+
+- A call bus and a message bus in Home Assistant, with an on-air lamp.
+
+- `--replay` on a call log lists the overs, and `--extract-calls` writes them as WAVs.
+
 - An Agent view: ask a model for something and it drives the receiver.
 - Talk to the agent over the air: set a channel's transmit source to AGENT.
 - The agent speaks with a model on this machine, or with a speech server.
@@ -106,6 +114,10 @@ the code is in the commit log.
 - A chain drawn by hand reaches the speaker through a fader stage of its own.
 
 ### Fixed
+
+- Radiotext and aircraft datalink filled the message view with nobody's words.
+
+- Every device published to Home Assistant read as made by "unknown".
 
 - ACARS and VDL Mode 2 decoded one channel of the several the table lists.
 
