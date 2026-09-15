@@ -475,7 +475,6 @@ pub struct BeaconDbState {
 /// The broker as it is being typed, kept apart from the live one so a
 /// half-written hostname does not reconnect on every keystroke, and what the
 /// node last said it was doing.
-#[derive(Default)]
 pub struct HomeAssistantState {
     pub open: bool,
     pub on: bool,
@@ -488,14 +487,40 @@ pub struct HomeAssistantState {
     /// Identity spaces worth publishing, as typed: `ism,wmbus` is a house's
     /// own sensors without the street's handsets.
     pub spaces: String,
+    /// Whether what people say and write goes with the readings.
+    pub buses: bool,
     pub status: Option<nodes::HomeAssistantStatus>,
+}
+
+impl Default for HomeAssistantState {
+    /// Calls and messages on: a receiver pointed at a house is pointed at it
+    /// for what it hears, and the sensors are the part somebody filters.
+    fn default() -> Self {
+        Self {
+            open: false,
+            on: false,
+            host: String::new(),
+            port: String::new(),
+            username: String::new(),
+            password: String::new(),
+            prefix: String::new(),
+            topic: String::new(),
+            spaces: String::new(),
+            buses: true,
+            status: None,
+        }
+    }
 }
 
 impl HomeAssistantState {
     /// What is typed, as somewhere to publish. The port falls back to 1883
     /// rather than refusing a field somebody cleared.
     pub fn publish(&self) -> nodes::Publish {
-        nodes::Publish { broker: self.broker(), spaces: self.spaces.trim().to_string() }
+        nodes::Publish {
+            broker: self.broker(),
+            spaces: self.spaces.trim().to_string(),
+            buses: self.buses,
+        }
     }
 
     fn broker(&self) -> nodes::Broker {
@@ -677,6 +702,21 @@ impl CallsState {
 impl Default for CallsState {
     fn default() -> Self {
         Self { list: crate::calls::Calls::new(), subs: Vec::new(), optout: Vec::new() }
+    }
+}
+
+impl MessagesState {
+    /// The recent past off the disk, oldest first, so the view is not empty
+    /// after a restart. The file is the record; this is the last couple of
+    /// days of it.
+    pub fn loaded() -> Self {
+        let mut s = Self::default();
+        let dir = crate::messagelog::messages_dir();
+        for m in crate::messagelog::recent(&dir, crate::messagelog::LOAD_DAYS) {
+            let at = m.last;
+            s.list.push(m, at);
+        }
+        s
     }
 }
 

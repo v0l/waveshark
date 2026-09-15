@@ -1532,6 +1532,7 @@ mod tests {
                 detail: "test".into(),
                 fields: vec![("k".into(), common::Value::Int(1))],
                 media_type: pipeline::event::media::BYTES,
+                written: false,
                 rssi_dbfs: -40.0,
                 snr_db: 12.0,
                 bytes: vec![0xde, 0xad],

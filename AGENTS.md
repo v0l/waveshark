@@ -103,6 +103,26 @@ Parse a string once, at the edge, into an enum, and match on that afterwards.
 The exception is a genuinely open identifier: a registry protocol id, a call
 sign.
 
+## A view that lists people asks the decoder, never the fields
+
+The call list, the message view and the map each answer a question only the
+decoder can answer, so each reads one statement and nothing else:
+`Airtime::voice` for a call, `Decoded::written` for a message, `position` for
+the map. A field name is not evidence and a media type is not either. GSM
+calls one of its fields `message` and puts `SI3` in it; `media_type` is
+`text/plain` for an FM station's track listing and for an aircraft reporting
+its position, neither of which anybody wrote.
+
+So a decoder carrying text has to decide whether a person composed it and
+addressed it to somebody. If a machine emitted it, set the media type and
+leave `written` false: the packet list shows it already, with its fields, and
+that is where a transmitter talking about itself belongs. The test is who the
+sender is, not whether the bytes happen to be readable.
+
+The same goes the other way: a view that finds itself matching on a protocol
+name, or scanning for a field called `text`, is guessing at something the
+decoder knows. Put the statement on the decode.
+
 ## Words on the screen go through `theme::Line`
 
 Every caption, reading, sentence and label in a pane is a `theme::Line`

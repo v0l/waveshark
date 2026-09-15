@@ -17,7 +17,7 @@ use common::Result;
 use decode::pocsag::{self, Body};
 use dsp::pocsag::{DEVIATION_HZ, PocsagConfig, PocsagDemod, Transmission};
 use dsp::{FirDecim, FmDemod, Mixer};
-use pipeline::event::{Decoded, media};
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -182,7 +182,10 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
                 // integrity check rather than a plausibility argument.
                 .with_crc(Some(true));
             if let Some(t) = text {
-                d = d.with_media(media::TEXT).with_text(t);
+                // A page is written to somebody, whether a person typed it or
+                // an alarm system did: either way it is addressed to whoever
+                // carries the pager.
+                d = d.written().with_text(t);
             }
             d
         })
@@ -310,7 +313,8 @@ mod tests {
         assert_eq!(decodes.len(), 1);
         assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
         assert_eq!(decodes[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
-        assert_eq!(decodes[0].media_type, media::TEXT);
+        assert_eq!(decodes[0].media_type, pipeline::event::media::TEXT);
+        assert!(decodes[0].written, "a page is written to whoever carries the pager");
         assert_eq!(decodes[0].crc_ok, Some(true));
         let get = |k: &str| decodes[0].fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("address"), Some(common::Value::Int(1_234_568)));

@@ -51,6 +51,9 @@ tracing-subscriber.workspace = true
 parking_lot.workspace = true
 libc = "0.2"
 zstd = { version = "0.13", default-features = false }
+# The call log's codec. Pure Rust, so a release build needs no C toolchain
+# and no system libopus.
+opus-rs = "0.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "net"] }

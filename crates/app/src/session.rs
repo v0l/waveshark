@@ -186,6 +186,8 @@ pub struct Session {
     /// Identity spaces published, comma separated, or empty for all of them.
     pub ha_spaces: String,
     pub ha_on: bool,
+    /// Whether calls and messages go to the house as well as the sensors.
+    pub ha_buses: bool,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -291,6 +293,7 @@ impl Default for Session {
             ha_topic: String::new(),
             ha_spaces: DEFAULT_HA_SPACES.into(),
             ha_on: false,
+            ha_buses: true,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -475,6 +478,7 @@ impl Session {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| DEFAULT_HA_SPACES.into()),
             ha_on: kv.get("ha_on").map(|v| *v == "true").unwrap_or(false),
+            ha_buses: kv.get("ha_buses").map(|v| *v == "true").unwrap_or(true),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -570,6 +574,7 @@ impl Session {
         if self.beacondb_on {
             s.push_str("beacondb_on = true\n");
         }
+        s.push_str(&format!("ha_buses = {}\n", self.ha_buses));
         if self.ha_on {
             s.push_str("ha_on = true\n");
         }
@@ -688,6 +693,7 @@ mod tests {
             ha_topic: "waveshark".into(),
             ha_spaces: "ism,wmbus".into(),
             ha_on: true,
+            ha_buses: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             view: ViewPrefs {

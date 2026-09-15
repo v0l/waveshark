@@ -80,10 +80,47 @@ impl CallList<'_> {
                 head = head.value(format!("{live} on air")).tint(CRC_OK).size(11.0);
             }
             head.show(ui);
+            let rec = self.radio.and_then(|r| r.status.recorder.lock().clone());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
                 if ui.add_enabled(!calls.is_empty(), egui::Button::new("Clear calls")).clicked() {
                     act = Some(Action::Clear);
+                }
+                if let Some(rec) = rec {
+                    ui.add_space(12.0);
+                    let mut on = rec.on;
+                    if ui
+                        .checkbox(&mut on, "Record")
+                        .on_hover_text(format!(
+                            "Keep every over as Opus in {}, about 2 kB a second of speech",
+                            rec.dir
+                        ))
+                        .changed()
+                    {
+                        self.cmds.push(Cmd::NodeParam(
+                            rec.node,
+                            "enabled".into(),
+                            pipeline::param::ParamValue::Bool(on),
+                        ));
+                    }
+                    // What is on the disk, so a watch left running overnight
+                    // can be judged without leaving the pane. A recorder at
+                    // its limit says so: that state looks like a quiet band
+                    // and is not one.
+                    if rec.on || rec.bytes > 0 {
+                        let (text, tint) = match rec.full {
+                            true => ("folder full".to_string(), theme::FAULT),
+                            false => (
+                                format!(
+                                    "{} recorded, {}",
+                                    rec.calls,
+                                    super::human_bytes(rec.bytes)
+                                ),
+                                theme::LEGEND,
+                            ),
+                        };
+                        theme::Line::new().value(text).tint(tint).size(11.0).show(ui);
+                    }
                 }
             });
         });

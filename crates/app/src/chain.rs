@@ -2199,6 +2199,19 @@ impl Receiver {
             .unwrap_or_default()
     }
 
+    /// What the call recorder is doing, or `None` when the graph has none.
+    ///
+    /// The count is the node's, so it restarts when the graph is rebuilt; the
+    /// folder's size does not, which is the reading that matters for a watch
+    /// left running.
+    pub fn recorder(&self) -> Option<crate::calllog::Recorder> {
+        let id = self.node_of_stage(derived::CALL_LOG)?;
+        let n = downcast::<crate::calllog::CallLogNode>(&self.graph, id)?;
+        let mut r = n.recorder();
+        r.node = id.0;
+        Some(r)
+    }
+
     /// What the transcriber is, where its model is, and what it is doing.
     ///
     /// `None` when there is no transcriber in the graph at all, which is a
@@ -2260,6 +2273,7 @@ impl Receiver {
         if let Some(n) = self.homeassistant_node_mut() {
             n.set_publisher(publisher);
             n.set_spaces(publish.as_ref().map(|p| p.spaces.as_str()).unwrap_or(""));
+            n.set_buses(publish.as_ref().is_none_or(|p| p.buses));
             n.set_broker(publish.map(|p| p.broker));
         }
         let calls = want.calls.clone();
@@ -2643,6 +2657,10 @@ pub mod derived {
     pub const HEARD: u64 = Patch::DERIVED_BASE + 25;
     /// A decoded transmission played back once.
     pub const REPLAY: u64 = Patch::DERIVED_BASE + 26;
+    /// Every over the receiver hears, on its way to disk as Opus.
+    pub const CALL_LOG: u64 = Patch::DERIVED_BASE + 27;
+    /// Everything somebody wrote, on its way to a file a day.
+    pub const MESSAGES: u64 = Patch::DERIVED_BASE + 28;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -3073,6 +3091,15 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // already there, not a rebuild under the packets.
         let ha = p.add_derived(derived::HOMEASSISTANT, "homeassistant", Settings::new());
         p.connect(Source::Stage(rows, 0), (ha, 0));
+
+        // And what somebody wrote is a fifth. On, like the packet log: the
+        // bursts these were decoded from are already being written down, and
+        // a line of text beside them costs nothing and is the half anybody
+        // reads.
+        let mut w = p.stage(derived::MESSAGES).map(|s| s.settings.clone()).unwrap_or_default();
+        w.entry("enabled".into()).or_insert(pipeline::ParamValue::Bool(true));
+        let written = p.add_derived(derived::MESSAGES, "message_log", w);
+        p.connect(Source::Stage(rows, 0), (written, 0));
     }
 
     p
@@ -3372,6 +3399,19 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
         p.connect(Source::Stage(derived::HEARD, 0), (id, 0));
     }
+
+    // The call log reads the same tap, and for the same reason: a recording
+    // taken after the faders would carry the listener's volume and would
+    // stop when they muted the channel.
+    //
+    // Read back off the edited patch rather than drawn fresh, or the switch
+    // would spring back off on the next rebuild. Off in the graph the
+    // receiver draws: keeping what people said is not something to start
+    // doing because nobody said otherwise.
+    let mut c = p.stage(derived::CALL_LOG).map(|s| s.settings.clone()).unwrap_or_default();
+    c.entry("enabled".into()).or_insert(V::Bool(false));
+    let calls = p.add_derived(derived::CALL_LOG, "call_log", c);
+    p.connect(Source::Stage(derived::HEARD, 0), (calls, 0));
 }
 
 /// The id a channel's fader is drawn under: the channel's alone, so a
@@ -3984,6 +4024,8 @@ pub fn registry() -> pipeline::registry::Registry {
     );
     r.register(crate::picsave::DESC, crate::picsave::build);
     crate::mix::register(&mut r);
+    r.register(crate::calllog::DESC, crate::calllog::build);
+    r.register(crate::messagelog::DESC, crate::messagelog::build);
     r
 }
 
@@ -4310,6 +4352,7 @@ fn record(
         detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
         fields: d.fields.clone(),
         media_type: d.media_type,
+        written: d.written,
         rssi_dbfs: p.rssi_dbfs(),
         snr_db: p.snr_db(),
         bytes: d.payload.clone(),

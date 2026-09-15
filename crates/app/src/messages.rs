@@ -49,6 +49,10 @@ pub struct Message {
     pub text: String,
     pub first: Instant,
     pub last: Instant,
+    /// When it was first heard on the clock rather than on the receiver's,
+    /// so a message written down today reads as today's when it is loaded
+    /// back tomorrow. An `Instant` cannot survive a restart.
+    pub at_us: u64,
     /// Times it was heard, which for a pager is usually two.
     pub heard: u64,
 }
@@ -101,7 +105,17 @@ impl Messages {
         let Some(msg) = rec.to_message(at) else {
             return false;
         };
+        self.push(msg, at);
+        true
+    }
 
+    /// Fold a message in, and say whether it was one nobody had heard.
+    ///
+    /// The repeat rule in one place: a pager sends the same page twice and a
+    /// TETRA short data message is retransmitted until it is acknowledged, so
+    /// whatever is counting messages, showing them or writing them down has to
+    /// agree about what "the same message" is.
+    pub fn push(&mut self, msg: Message, at: Instant) -> bool {
         if let Some(m) = self.seen.iter_mut().find(|m| {
             m.system == msg.system
                 && m.text == msg.text
@@ -111,7 +125,7 @@ impl Messages {
         }) {
             m.last = at;
             m.heard += 1;
-            return true;
+            return false;
         }
 
         self.seen.push(msg);
@@ -138,43 +152,68 @@ impl DecodeRecord {
     ///
     /// An empty string is not a message: a link setup frame with an empty
     /// metadata field is a voice transmission, not somebody writing nothing.
-    /// Only a decode that says it carries text. GSM names its blocks in a
-    /// field called `message` (`SI3`, `Paging1`) and Open Drone ID does the
-    /// same, so reading the field alone filled this view with a network
-    /// talking to handsets and a drone naming its own message types. What
-    /// belongs here is somebody writing to somebody, and the decoder that
-    /// read it is the thing that knows: it says so with `media::TEXT`.
+    ///
+    /// Only a decode that says somebody wrote it. Reading a field called
+    /// `message` filled this view with GSM naming its own blocks (`SI3`,
+    /// `Paging1`) and a drone naming its message types; reading the media
+    /// type instead filled it with an FM station's track listing and an
+    /// aircraft's position report, which are text and are not messages.
+    /// What belongs here is somebody writing to somebody, and only the
+    /// decoder knows: it says so with [`common::Decoded::written`].
     pub fn to_message(&self, at: Instant) -> Option<Message> {
-        if self.media_type != pipeline::event::media::TEXT {
+        if !self.written {
             return None;
         }
-        let body = text(self, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
+        Message::of(self.system(), self.freq, &self.fields, at)
+    }
+}
+
+impl Message {
+    /// The message a decode's fields make, for anything holding fields rather
+    /// than a record: the log node writes from the bus, the view folds from
+    /// the record, and both have to read the same names.
+    pub fn of(
+        system: &str,
+        channel_hz: f64,
+        fields: &[(String, Value)],
+        at: Instant,
+    ) -> Option<Self> {
+        let body = text(fields, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
         Some(Message {
-            system: self.system().to_string(),
-            channel_hz: self.freq,
+            system: system.to_string(),
+            channel_hz,
             // `sender` first: where a protocol carries a name somebody typed
             // as well as the address the radio sent from, the name is what a
             // message is from. It is also unauthenticated, which the message
             // view says elsewhere.
-            from: text(self, &["sender", "from", "src", "source", "radio_id"])
+            from: text(fields, &["sender", "from", "src", "source", "radio_id"])
                 .filter(|s| !s.is_empty()),
             to: text(
-                self,
+                fields,
                 &["addressee", "to", "dst", "destination", "talkgroup", "channel", "address"],
             )
             .filter(|s| !s.is_empty()),
             text: body,
             first: at,
             last: at,
+            at_us: now_us(),
             heard: 1,
         })
     }
 }
 
+/// Now, in microseconds since the epoch.
+pub fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
 /// The first of these fields the decode carries, as text.
-fn text(rec: &DecodeRecord, keys: &[&str]) -> Option<String> {
+fn text(fields: &[(String, Value)], keys: &[&str]) -> Option<String> {
     for k in keys {
-        if let Some((_, v)) = rec.fields.iter().find(|(name, _)| name == k) {
+        if let Some((_, v)) = fields.iter().find(|(name, _)| name == k) {
             return Some(match v {
                 Value::Text(t) => t.clone(),
                 other => other.to_string(),
@@ -188,20 +227,22 @@ fn text(rec: &DecodeRecord, keys: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A decode that says it carries text, which is what this view reads.
+    /// A decode that says somebody wrote it, which is what this view reads.
     fn rec(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
         let mut r = DecodeRecord::for_test(freq, model);
         r.channel_hz = 12_500.0;
         r.media_type = pipeline::event::media::TEXT;
+        r.written = true;
         r.fields = fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
         r
     }
 
-    /// And one that does not: a decode whose fields happen to include a
-    /// `message` or a `text` but which is not somebody writing.
-    fn not_text(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
+    /// And one that nobody wrote: a decode whose fields happen to include a
+    /// `message` or a `text`, or whose payload really is text, but which is
+    /// a machine talking.
+    fn not_written(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
         let mut r = rec(model, freq, fields);
-        r.media_type = pipeline::event::media::BYTES;
+        r.written = false;
         r
     }
 
@@ -364,26 +405,42 @@ mod tests {
         m.update(&to("15835885"), t(1));
         assert_eq!(m.recent().len(), 2);
     }
-    /// A network naming its own blocks is not a conversation. GSM calls its
-    /// field `message` and puts `SI3` or `Paging1` in it, and Open Drone ID
-    /// does the same with its message types, so this view filled with a
-    /// tower talking to handsets. What decides is what the decoder says it
-    /// carries, not what its fields are called.
+    /// A machine is not a correspondent. GSM calls its field `message` and
+    /// puts `SI3` or `Paging1` in it, Open Drone ID does the same with its
+    /// message types, an FM station's radiotext is its track listing and an
+    /// ACARS downlink is an aeroplane reporting its position. All four are
+    /// text; none of them is somebody writing to somebody. What decides is
+    /// the decoder's own statement.
     #[test]
-    fn a_protocol_naming_its_own_blocks_is_not_a_message() {
+    fn a_machine_talking_is_not_a_message() {
         let mut m = Messages::default();
         assert!(!m.update(
-            &not_text("GSM-CCCH", 947.4e6, &[("message", Value::Text("Paging1".into()))]),
+            &not_written("GSM-CCCH", 947.4e6, &[("message", Value::Text("Paging1".into()))]),
             t(0)
         ));
-        assert!(
-            !m.update(
-                &not_text("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]),
-                t(0)
-            )
-        );
         assert!(!m.update(
-            &not_text("OpenDroneID", 2431e6, &[("message", Value::Text("Basic ID".into()))]),
+            &not_written("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]),
+            t(0)
+        ));
+        assert!(!m.update(
+            &not_written("OpenDroneID", 2431e6, &[("message", Value::Text("Basic ID".into()))]),
+            t(0)
+        ));
+        // Text, and still not a message: the payload being text is a
+        // different question from somebody having written it.
+        assert!(!m.update(
+            &not_written("rds", 95.8e6, &[("text", Value::Text("NOW PLAYING".into()))]),
+            t(0)
+        ));
+        assert!(!m.update(
+            &not_written(
+                "ACARS-Downlink",
+                131.725e6,
+                &[
+                    ("text", Value::Text("POS N51.4 W000.4".into())),
+                    ("label", Value::Text("16".into()))
+                ]
+            ),
             t(0)
         ));
         assert!(m.recent().is_empty(), "{:?}", m.recent());
