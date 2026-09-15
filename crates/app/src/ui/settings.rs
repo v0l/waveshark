@@ -681,7 +681,19 @@ impl App {
                             format!("{} at {}", c.voice_model.trim(), host_of(&c.voice_url))
                         }
                     };
-                    lamp(ui, true, &from);
+                    // What the server lists, when it lists anything: a
+                    // voice it does not have is a 400 at the first over.
+                    let listing = match c.speech {
+                        Speech::Chat => served::served(&c.url),
+                        Speech::Server => served::served(&c.voice_url),
+                        Speech::Local => None,
+                    };
+                    let voices = listing.map(|l| l.voices_of(&c.voice_model)).unwrap_or_default();
+                    if !voices.is_empty() && !voices.iter().any(|v| v == c.voice.trim()) {
+                        lamp(ui, false, &format!("{from}, which has no voice {}", c.voice.trim()));
+                    } else {
+                        lamp(ui, true, &from);
+                    }
                 }
                 Some(why) => lamp(ui, false, why),
             }
