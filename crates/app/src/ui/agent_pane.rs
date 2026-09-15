@@ -177,60 +177,94 @@ impl AgentView<'_> {
                     }
                     // What was said over the air, under what was typed: one
                     // agent, two ways in, and an operator needs to see what
-                    // it has been telling people on the channel.
+                    // it has been telling people on the channel. One card
+                    // per over, in the shape a call has everywhere else:
+                    // what was heard, what was answered, or why not.
                     let now = std::time::Instant::now();
                     let quiet = !self.air.state.busy();
+                    if !self.air.log.is_empty() && !self.chat.turns.is_empty() {
+                        ui.add_space(6.0);
+                        theme::Line::new().legend("on the air").size(11.0).show(ui);
+                        ui.add_space(4.0);
+                    }
                     for (nth, x) in self.air.log.iter().enumerate() {
                         let ago = now.duration_since(x.at).as_secs();
-                        theme::Line::new()
-                            .legend("heard")
-                            .value(match ago {
-                                0..=59 => format!("{ago}s ago"),
-                                _ => format!("{}m ago", ago / 60),
-                            })
-                            .size(11.0)
-                            .show(ui);
-                        theme::Line::new().heard(x.heard.clone()).wrapped(ui);
-                        match &x.said {
-                            Ok(said) => {
-                                // "Say again" is the commonest thing anybody
-                                // says on a channel, and the answer is
-                                // already made: this sends the same over
-                                // rather than asking for another.
-                                ui.horizontal(|ui| {
-                                    theme::Line::new().legend("said").size(11.0).show(ui);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let can = quiet && x.can_repeat();
-                                            let b = egui::Button::new("SAY AGAIN").small();
-                                            if ui
-                                                .add_enabled(can, b)
-                                                .on_hover_text(
-                                                    "Send this answer over the air again, \
-                                                     the same words and the same voice",
-                                                )
-                                                .on_disabled_hover_text(match x.can_repeat() {
-                                                    true => "it is answering something else",
-                                                    false => "this one never went out",
-                                                })
-                                                .clicked()
-                                            {
-                                                act = Some(Action::SayAgain(nth));
-                                            }
-                                        },
-                                    );
-                                });
-                                theme::Line::new().words(said.clone()).wrapped(ui);
-                            }
-                            Err(e) => {
-                                theme::Line::new()
-                                    .value(e.clone())
-                                    .size(11.0)
-                                    .tint(theme::FAULT)
-                                    .wrapped(ui);
-                            }
-                        }
+                        let when = match ago {
+                            0..=59 => format!("{ago}s ago"),
+                            _ => format!("{}m ago", ago / 60),
+                        };
+                        let rail = match &x.said {
+                            Ok(_) => Some(theme::TRACE),
+                            Err(_) => Some(theme::FAULT),
+                        };
+                        widgets::card(
+                            ui,
+                            rail,
+                            |ui| {
+                                theme::Line::new().legend("heard").value(when).size(11.0).show(ui);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // "Say again" is the commonest thing
+                                        // anybody says on a channel, and the
+                                        // answer is already made: this sends
+                                        // the same over rather than asking
+                                        // for another.
+                                        let can = quiet && x.can_repeat();
+                                        let b = egui::Button::new("SAY AGAIN").small();
+                                        if ui
+                                            .add_enabled(can, b)
+                                            .on_hover_text(
+                                                "Send this answer over the air again, the \
+                                                 same words and the same voice",
+                                            )
+                                            .on_disabled_hover_text(match x.can_repeat() {
+                                                true => "it is answering something else",
+                                                false => "this one never went out",
+                                            })
+                                            .clicked()
+                                        {
+                                            act = Some(Action::SayAgain(nth));
+                                        }
+                                    },
+                                );
+                            },
+                            |ui| {
+                                theme::Line::new().heard(x.heard.clone()).wrapped(ui);
+                                match &x.said {
+                                    Ok(said) => {
+                                        ui.add_space(2.0);
+                                        theme::Line::new().legend("said").size(11.0).show(ui);
+                                        theme::Line::new()
+                                            .note(said.clone())
+                                            .size(13.0)
+                                            .tint(theme::VALUE)
+                                            .wrapped(ui);
+                                    }
+                                    // One line of the fault, the whole of it
+                                    // on hover: a server's error is a page
+                                    // of JSON and this is a log, not a
+                                    // debugger.
+                                    Err(e) => {
+                                        ui.add_space(2.0);
+                                        ui.horizontal(|ui| {
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::Vec2::new(10.0, 18.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            let c = rect.center();
+                                            ui.painter().circle_filled(c, 3.0, theme::FAULT);
+                                            theme::Line::new()
+                                                .value(short_fault(e))
+                                                .tint(theme::FAULT)
+                                                .size(11.0)
+                                                .elided(ui)
+                                                .on_hover_text(e);
+                                        });
+                                    }
+                                }
+                            },
+                        );
                         ui.add_space(6.0);
                     }
                     if busy {
@@ -430,5 +464,17 @@ mod tests {
         let long = format!("{{\"text\":\"{}\"}}", "x".repeat(200));
         assert!(short(&long).ends_with('…'));
         assert!(short(&long).chars().count() <= 81);
+    }
+}
+
+/// The first sentence of a fault, for a line in a log. A gateway's answer
+/// wraps a provider's answer wraps a JSON body, and the first clause is
+/// the one that says what happened.
+fn short_fault(e: &str) -> String {
+    let first = e.lines().next().unwrap_or(e).trim();
+    let cut = first.find(": {").map(|i| &first[..i]).unwrap_or(first);
+    match cut.char_indices().nth(120) {
+        Some((i, _)) => format!("{}…", &cut[..i]),
+        None => cut.to_string(),
     }
 }
