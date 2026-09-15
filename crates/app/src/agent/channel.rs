@@ -21,8 +21,15 @@ use std::time::{Duration, Instant};
 ///
 /// A model that decides to read out a packet list would otherwise key up for
 /// several minutes, which on a shared channel is the worst thing this can do.
-/// The text is cut to fit before it is ever spoken.
+/// The text is cut to fit before it is ever spoken; what was spoken is then
+/// let run, because a voice that reads slower than the guess used to cut the
+/// text must not be cut again mid-sentence.
 pub const MAX_OVER_S: f64 = 30.0;
+
+/// How long past the queued speech an over may run before it is let go:
+/// a queue nothing is draining must not hold the channel, and this is the
+/// margin between "still draining" and "stuck".
+const OVERRUN_S: f64 = 5.0;
 
 /// The rate the queue runs at, whatever the speech server produced.
 ///
@@ -212,8 +219,10 @@ pub struct AgentChannel {
     /// When the squelch was last open, which is what the hang is measured
     /// from.
     last_busy: Option<Instant>,
-    /// When the key went down, so an over that will not end can be ended.
+    /// When the key went down, so an over that will not end can be ended,
+    /// and how long what was queued then should take to go out.
     keyed_at: Option<Instant>,
+    keyed_for_s: f64,
     /// When it was last transmitting, from key down to key up.
     ///
     /// A half duplex radio feeds the receiver its own transmission for the
@@ -269,6 +278,7 @@ impl Default for AgentChannel {
             asked: String::new(),
             last_busy: None,
             keyed_at: None,
+            keyed_for_s: 0.0,
             spoke: None,
             answered: None,
             stage: Stage::default(),
@@ -511,12 +521,16 @@ impl AgentChannel {
                 }
                 self.state = State::OnAir;
                 self.keyed_at = Some(now);
+                self.keyed_for_s = self.speaker.seconds();
                 Some(Move::Key(channel))
             }
             State::OnAir => {
-                let over_ran = self
-                    .keyed_at
-                    .is_some_and(|t| now.duration_since(t) > Duration::from_secs_f64(MAX_OVER_S));
+                // Let go when the queue is empty, or when it has held the
+                // key well past what it held at key-up: the words were cut
+                // to fit before they were spoken, so the limit here is on a
+                // queue that is not draining, not on the answer.
+                let allowed = Duration::from_secs_f64(self.keyed_for_s + OVERRUN_S);
+                let over_ran = self.keyed_at.is_some_and(|t| now.duration_since(t) > allowed);
                 if self.speaker.waiting() > 0 && !over_ran {
                     return None;
                 }
@@ -607,12 +621,36 @@ mod tests {
     fn an_over_that_runs_long_is_let_go() {
         let c = config();
         let mut a = AgentChannel { on: Some(1), state: State::Holding, ..Default::default() };
+        // Two seconds queued and nothing draining it.
         a.speaker.say(&[0.1; 48_000]);
         let t0 = Instant::now();
         assert_eq!(a.poll(&c, t0, false), Some(Move::Key(1)));
-        let late = t0 + Duration::from_secs_f64(MAX_OVER_S + 1.0);
+        let still = t0 + Duration::from_secs_f64(2.0 + OVERRUN_S - 1.0);
+        assert_eq!(a.poll(&c, still, false), None, "within what it was keyed for");
+        let late = t0 + Duration::from_secs_f64(2.0 + OVERRUN_S + 1.0);
         assert_eq!(a.poll(&c, late, false), Some(Move::Unkey));
         assert_eq!(a.speaker.waiting(), 0, "what was left is thrown away, not saved up");
+    }
+
+    /// A long answer is let run to its end: the voice reads slower than
+    /// the guess the text was cut by, and a thirty second answer cut at
+    /// thirty seconds ended mid-sentence.
+    #[test]
+    fn a_long_answer_is_not_cut_off_while_it_is_still_going_out() {
+        let c = config();
+        let mut a = AgentChannel { on: Some(1), state: State::Holding, ..Default::default() };
+        let forty = (40.0 * VOICE_RATE) as usize;
+        a.speaker.say(&vec![0.1; forty]);
+        let t0 = Instant::now();
+        assert_eq!(a.poll(&c, t0, false), Some(Move::Key(1)));
+        // Thirty five seconds in, the chain has taken most of it and is
+        // still taking.
+        let mut out = Vec::new();
+        audio::AudioSource::take(a.speaker.as_ref(), &mut out, (35.0 * VOICE_RATE) as usize);
+        let mid = t0 + Duration::from_secs_f64(35.0);
+        assert_eq!(a.poll(&c, mid, false), None, "cut off with five seconds still to say");
+        audio::AudioSource::take(a.speaker.as_ref(), &mut out, forty);
+        assert_eq!(a.poll(&c, t0 + Duration::from_secs_f64(41.0), false), Some(Move::Unkey));
     }
 
     /// Speech from a server at another rate is put on the queue at the
