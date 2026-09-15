@@ -222,6 +222,13 @@ pub struct Receiver {
     /// no microphone to give it skips the stage: the chain after it was then
     /// built unfed, and keying transmitted a carrier with nothing on it.
     mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
+    /// What the agent has queued to say, held for the same reason the
+    /// microphone is. The transmit stage is built on every rebuild, so the
+    /// source it reads from has to be something the receiver holds rather
+    /// than something handed in at key-up: a chain rebuilt between two
+    /// answers came back reading the microphone, and the agent keyed up and
+    /// transmitted the room.
+    voice: Option<std::sync::Arc<dyn audio::AudioSource>>,
     /// Where the packet log is written, if it is. Held as a directory rather
     /// than an open file so that a rebuild has something to reopen when the
     /// bus itself had to be built again.
@@ -542,6 +549,7 @@ impl Receiver {
             pending_record: None,
             pending_tx: None,
             mic: None,
+            voice: None,
             log_dir: sinks.packet_log,
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
             log_folder: 0,
@@ -578,6 +586,21 @@ impl Receiver {
     /// The microphone every rebuild from now on builds the mic stage from.
     pub fn set_microphone(&mut self, mic: Option<std::sync::Arc<dyn audio::AudioSource>>) {
         self.mic = mic;
+    }
+
+    /// The agent's queue, which a channel set to AGENT transmits instead of
+    /// the microphone.
+    pub fn set_agent_voice(&mut self, voice: Option<std::sync::Arc<dyn audio::AudioSource>>) {
+        self.voice = voice;
+    }
+
+    /// What the transmit chain's source stage reads, for the plan as it is:
+    /// the agent's queue on an agent channel, the microphone otherwise.
+    fn tx_source_of(&self, plan: &Plan) -> Option<std::sync::Arc<dyn audio::AudioSource>> {
+        match plan.tx.map(|t| t.spec.source) {
+            Some(crate::radio::TxSource::Agent) => self.voice.clone(),
+            _ => self.mic.clone(),
+        }
     }
 
     /// Key: give the transmit stage a radio, without rebuilding the graph.
@@ -822,13 +845,16 @@ impl Receiver {
         self.center = plan.center;
         self.rate = plan.rate;
         let mut tx = self.pending_tx.take();
-        // The microphone the receiver holds stands in wherever a key-up did
-        // not bring one, which is every rebuild but that one.
-        if let Some(mic) = &self.mic {
+        // What the receiver holds stands in wherever a key-up did not bring
+        // anything, which is every rebuild but that one. Which of the two it
+        // is follows the plan, not whichever was set last: a channel on AGENT
+        // transmits the agent and a channel on MIC transmits the room, and
+        // getting that wrong once put the room on the air.
+        if let Some(src) = self.tx_source_of(plan) {
             match tx.as_mut() {
-                Some(t) if t.mic.is_none() => t.mic = Some(mic.clone()),
+                Some(t) if t.mic.is_none() => t.mic = Some(src),
                 Some(_) => {}
-                None => tx = Some(TxSinks { stream: None, mic: Some(mic.clone()) }),
+                None => tx = Some(TxSinks { stream: None, mic: Some(src) }),
             }
         }
         self.assemble_without_refusals(plan, pool, ring, tx, retuned)?;
@@ -6659,17 +6685,26 @@ mod tx_in_graph_tests {
     /// Counts what reaches the antenna, for a test that has to know the
     /// difference between a chain that is running and one that is on air.
     #[derive(Clone, Default)]
-    struct Counted(std::sync::Arc<std::sync::atomic::AtomicU64>);
+    struct Counted {
+        n: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        /// What reached the antenna, for a test that has to read it back.
+        air: std::sync::Arc<parking_lot::Mutex<Vec<C32>>>,
+    }
 
     impl Counted {
         fn samples(&self) -> u64 {
-            self.0.load(std::sync::atomic::Ordering::Relaxed)
+            self.n.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn transmitted(&self) -> Vec<C32> {
+            self.air.lock().clone()
         }
     }
 
     impl common::TxStream for Counted {
         fn write(&mut self, buf: &common::IqBuf) -> Result<()> {
-            self.0.fetch_add(buf.samples.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            self.n.fetch_add(buf.samples.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            self.air.lock().extend_from_slice(&buf.samples);
             Ok(())
         }
         fn underruns(&self) -> u64 {
@@ -6789,6 +6824,62 @@ mod tx_in_graph_tests {
         assert!(rx.tx_on_air(), "the chain arrived and the radio was not put on it");
         until("the over that was waiting for its chain", || radio.samples() > 0);
         rx.unkey();
+    }
+
+    /// An agent channel transmits the agent, not the room.
+    ///
+    /// The source stage is built on every rebuild, and what it reads was
+    /// handed in at key-up only. Any rebuild between two answers therefore
+    /// came back reading whatever the receiver held, which is the
+    /// microphone, and the next time the agent keyed up it put the room on
+    /// the air instead of its reply.
+    #[test]
+    fn an_agent_channel_transmits_the_agent_and_not_the_microphone() {
+        // Two sources that can be told apart by what comes out of them.
+        let tone = |hz: f64| -> std::sync::Arc<dyn audio::AudioSource> {
+            let n = 48_000;
+            let w: Vec<f32> = (0..n)
+                .map(|i| 0.8 * (std::f32::consts::TAU * hz as f32 * i as f32 / 48_000.0).sin())
+                .collect();
+            std::sync::Arc::new(audio::Canned::new(w, 48_000.0, true))
+        };
+        let (room, agent) = (tone(700.0), tone(2_000.0));
+
+        let mut plan = plan_with_tx(TxSource::Agent);
+        plan.channels[0].tx = Some(TxSpec { source: TxSource::Agent, ..Default::default() });
+        plan.tx = Some(TxPlan {
+            spec: TxSpec { source: TxSource::Agent, ..Default::default() },
+            mode: crate::radio::TxMode::Nfm,
+            on_air: Hz(446_049_000),
+        });
+
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        rx.set_microphone(Some(room.clone()));
+        rx.set_agent_voice(Some(agent.clone()));
+        // A rebuild for any other reason at all, which is what used to leave
+        // the microphone wired to the transmitter.
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())));
+        assert!(rx.tx_on_air());
+        until("an over on the air", || radio.samples() > 96_000);
+        rx.unkey();
+
+        // What went out, read back off the carrier: the agent's tone and not
+        // the room's.
+        let air = radio.transmitted();
+        let mut demod = dsp::FmDemod::new(plan.rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&air[48_000..], &mut audio);
+        let seg = &audio[4_000..];
+        let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        let hz = crossings as f64 * plan.rate / seg.len() as f64;
+        assert!(
+            (hz - 2_000.0).abs() < 120.0,
+            "the air carried {hz:.0} Hz: the agent is 2000 and the microphone is 700"
+        );
     }
 
     /// A transmitter told there is nothing to transmit stops transmitting.
