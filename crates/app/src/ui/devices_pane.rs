@@ -16,6 +16,9 @@ use super::*;
 
 pub(super) struct Devices<'a> {
     pub st: &'a mut SurveyState,
+    /// What the operator set, which is what the feed buttons report: the
+    /// dialogs hold a draft of it and a draft is not what is running.
+    pub settings: crate::session::Settings,
     /// What the survey holds and what the GPS is doing, from the radio
     /// thread's status.
     pub counts: (u64, u64, u64),
@@ -91,7 +94,7 @@ impl Devices<'_> {
                 // dialog nobody has open: an upload that has been failing all
                 // afternoon is worth noticing from the pane.
                 let w = self.st.wigle.status.as_ref();
-                let label = match (self.st.wigle.on, w) {
+                let label = match (self.settings.read(|s| s.wigle_on), w) {
                     (false, _) => "WiGLE".to_string(),
                     (true, Some(s)) if s.error.is_some() => "WiGLE: failing".into(),
                     (true, Some(s)) => format!("WiGLE: {} sent", s.sent_rows),
@@ -101,7 +104,7 @@ impl Devices<'_> {
                     act = Some(Action::Wigle);
                 }
                 let b = self.st.beacondb.status.as_ref();
-                let label = match (self.st.beacondb.on, b) {
+                let label = match (self.settings.read(|s| s.beacondb_on), b) {
                     (false, _) => "beaconDB".to_string(),
                     (true, Some(s)) if s.error.is_some() => "beaconDB: failing".into(),
                     (true, Some(s)) => format!("beaconDB: {} sent", s.sent_items),
@@ -111,7 +114,7 @@ impl Devices<'_> {
                     act = Some(Action::BeaconDb);
                 }
                 let h = self.st.homeassistant.status.as_ref();
-                let label = match (self.st.homeassistant.on, h) {
+                let label = match (self.settings.read(|s| s.ha_on), h) {
                     (false, _) => "Home Assistant".to_string(),
                     (true, Some(s)) if s.error.is_some() => "Home Assistant: failing".into(),
                     (true, Some(s)) if !s.connected => "Home Assistant: connecting".into(),
@@ -130,7 +133,7 @@ impl Devices<'_> {
                 // value Setup shows beside the GPS, since the position is
                 // what a survey is for, but this is where its absence is
                 // noticed.
-                let mut on = self.st.path.is_some();
+                let mut on = self.settings.read(|s| s.survey_on);
                 if ui
                     .checkbox(&mut on, "Record")
                     .on_hover_text(
@@ -145,7 +148,7 @@ impl Devices<'_> {
         });
         ui.add_space(6.0);
 
-        if self.st.path.is_none() {
+        if !self.settings.read(|s| s.survey_on) {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
                 hint(
