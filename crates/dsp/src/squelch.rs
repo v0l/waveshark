@@ -52,6 +52,16 @@ pub struct Squelch {
     step: f32,
 }
 
+/// How far below the closing threshold means the signal has gone rather than
+/// dipped, in dB.
+///
+/// The hang exists to bridge a breath in the middle of a transmission, where
+/// the measurement wobbles a decibel or two around the threshold. Four dB
+/// below where it closes is not a wobble: on a noise squelch an empty channel
+/// reads near zero against a threshold of nine, so this is the difference
+/// between a pause and a carrier that has dropped.
+const GONE_BELOW_DB: f32 = 4.0;
+
 impl Squelch {
     /// `open_at` and `close_at` are in dB on whatever the measurement is.
     ///
@@ -121,6 +131,14 @@ impl Squelch {
         if self.level >= self.open_at {
             self.open = true;
             self.hang = self.hang_samples;
+        } else if self.level < self.close_at - GONE_BELOW_DB {
+            // The transmitter has stopped, not dipped. Holding the mute open
+            // through the hang is what puts half a second of hiss on the end
+            // of every over: an FM discriminator with no carrier on it is
+            // full scale noise, and a channel with gain control on it is
+            // full scale noise turned up.
+            self.hang = 0;
+            self.open = false;
         } else if self.level < self.close_at {
             self.hang = self.hang.saturating_sub(samples as u64);
             if self.hang == 0 {
@@ -292,15 +310,36 @@ mod tests {
 
     #[test]
     fn the_squelch_hangs_through_a_pause_for_breath() {
+        // A dip to just under the closing threshold, which is what a breath
+        // in the middle of a transmission measures as.
         let mut sq = Squelch::new(RATE, 9.0, 6.0, 5.0);
         sq.update(12.0, 1024);
         for _ in 0..(RATE / 1024.0 * 0.4) as usize {
-            assert!(sq.update(0.0, 1024), "closed during a short pause");
+            assert!(sq.update(5.0, 1024), "closed during a short pause");
         }
         for _ in 0..(RATE / 1024.0 * 0.4) as usize {
-            sq.update(0.0, 1024);
+            sq.update(5.0, 1024);
         }
         assert!(!sq.is_open(), "never closed at all");
+    }
+
+    /// A carrier that stops does not get the hang.
+    ///
+    /// This is where the hiss on the end of every recorded over came from: a
+    /// discriminator with no signal on it is full scale noise, the hang held
+    /// the mute open through half a second of it, and the channel's gain
+    /// control turned it up on the way out. The hang is for a dip near the
+    /// threshold, and a channel reading far below it has nothing on it.
+    #[test]
+    fn a_carrier_that_stops_is_not_hung_on_to() {
+        let mut sq = Squelch::new(RATE, 9.0, 6.0, 5.0);
+        sq.update(12.0, 1024);
+        let mut silent = 0.0;
+        while sq.is_open() && silent < 1.0 {
+            sq.update(0.0, 1024);
+            silent += 1024.0 / RATE;
+        }
+        assert!(silent < 0.1, "held {silent:.2} s of noise after the carrier went");
     }
 
     #[test]
@@ -318,7 +357,7 @@ mod tests {
             sq.update(12.0, block);
             let mut silent = 0.0;
             while sq.is_open() && silent < 2.0 {
-                sq.update(0.0, block);
+                sq.update(5.0, block);
                 silent += block as f64 / RATE;
             }
             // The allowance is one block, which is the granularity of the

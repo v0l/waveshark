@@ -26,6 +26,13 @@ the code is in the commit log.
 - Vaisala RS41 radiosondes on the map: serial, height, climb rate and the
   air temperature and humidity the balloon was sent up to measure.
 
+### Fixed
+
+- The hiss on the end of every over: the squelch no longer hangs on to a
+  channel whose carrier has gone.
+- CTCSS tones and DCS codes are filtered out of the audio, so they no longer
+  rumble under the speech, steer the gain control or reach a recording.
+
 ### Changed
 
 - The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather

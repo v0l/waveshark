@@ -49,8 +49,26 @@ const FLOOR: f32 = 0.004;
 /// stays above the floor.
 const HOLD_S: f64 = 0.2;
 
+/// Where the coded squelch is filtered out of the speech, in hertz.
+///
+/// Above the highest CTCSS tone, 254.1 Hz, and below anything an FM
+/// transmitter sends: a radio filters its microphone at 300 Hz before it
+/// modulates, so nothing that was said is lost here. Three poles, because one
+/// leaves a tone ten decibels down and still audible as a rumble under every
+/// over.
+const TONE_HZ: f64 = 300.0;
+const TONE_POLES: usize = 3;
+
 pub struct IdentNode {
     dtmf: dsp::dtmf::Dtmf,
+    /// The filter that takes the coded squelch back out of the speech.
+    ///
+    /// Here rather than as a stage of its own because this is the one stage
+    /// that wants the tone: everything downstream is worse for carrying it,
+    /// and a filter in front of this would take it from the detectors that
+    /// exist to read it. One per channel of the stream.
+    tone_filter: Vec<[dsp::filter::Biquad; TONE_POLES]>,
+    filter_tones: bool,
     runs: decode::dtmf::Sequences,
     /// The coded squelch: a tone, or a code, whichever the group uses.
     ctcss: dsp::ctcss::Ctcss,
@@ -87,6 +105,8 @@ impl IdentNode {
             dtmf: dsp::dtmf::Dtmf::new(1.0),
             runs: decode::dtmf::Sequences::new(),
             ctcss: dsp::ctcss::Ctcss::new(1.0),
+            tone_filter: Vec::new(),
+            filter_tones: true,
             dcs: dsp::dcs::Dcs::new(1.0),
             group: None,
             caller: None,
@@ -136,6 +156,23 @@ impl IdentNode {
     }
 
     /// The group, said once where the chain view and the log can see it.
+    /// The block with the coded squelch taken out, which is what everything
+    /// downstream hears: the speaker, the recorder, the transcriber and the
+    /// agent.
+    fn without_tones(&mut self, pcm: &[f32]) -> Vec<f32> {
+        if !self.filter_tones || self.tone_filter.is_empty() {
+            return pcm.to_vec();
+        }
+        let channels = self.channels.max(1);
+        pcm.iter()
+            .enumerate()
+            .map(|(k, s)| {
+                let ch = &mut self.tone_filter[k % channels];
+                ch.iter_mut().fold(*s, |x, b| b.process(x))
+            })
+            .collect()
+    }
+
     fn said_group(&mut self, c: &mut NodeCtx<'_>) {
         let Some(group) = self.group.clone() else { return };
         c.emit(Event::Decoded(
@@ -192,6 +229,16 @@ impl Simple for IdentNode {
         self.dtmf = dsp::dtmf::Dtmf::new(self.rate);
         self.runs = decode::dtmf::Sequences::new();
         self.ctcss = dsp::ctcss::Ctcss::new(self.rate);
+        self.tone_filter = (0..self.channels.max(1))
+            .map(|_| {
+                [dsp::filter::Biquad::design(
+                    dsp::filter::Response::Highpass,
+                    self.rate,
+                    TONE_HZ,
+                    0.707,
+                ); TONE_POLES]
+            })
+            .collect();
         self.dcs = dsp::dcs::Dcs::new(self.rate);
         Ok(StreamSpec {
             kind: PortKind::Voice,
@@ -206,12 +253,17 @@ impl Simple for IdentNode {
     fn params(&self) -> Vec<Param> {
         vec![
             Param::bool("enabled", self.enabled).label("Read the identity and the group"),
+            Param::bool("filter_tones", self.filter_tones).label("Filter the coded squelch out"),
             Param::text("label", self.label.clone()).label("Channel"),
         ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
+            "filter_tones" => {
+                self.filter_tones = v.as_bool().unwrap_or(self.filter_tones);
+                Ok(())
+            }
             "enabled" => {
                 self.enabled = v.as_bool().unwrap_or(self.enabled);
                 if !self.enabled {
@@ -337,12 +389,17 @@ impl Simple for IdentNode {
             code: self.group.clone(),
             rate: self.rate,
             channels: self.channels,
-            pcm: pcm.to_vec(),
+            pcm: self.without_tones(pcm),
         });
         Ok(())
     }
 
     fn reset(&mut self) {
+        for ch in &mut self.tone_filter {
+            for b in ch {
+                b.reset();
+            }
+        }
         self.dtmf.reset();
         self.ctcss.reset();
         self.dcs.reset();
