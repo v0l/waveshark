@@ -36,7 +36,9 @@ rumqttc = { version = "0.25", default-features = false }
 serde_json.workspace = true
 
 [features]
-default = ["ffmpeg"]
+# Nothing by default: the app names what it wants, and a default here was on
+# whatever the app asked for, so a build without ffmpeg linked it anyway.
+default = []
 # TETRA air-interface decryption and TEA1 key recovery in the TETRA node.
 # Off by default; enables `decode/tea`. Without it the node still reads
 # signalling and decodes clear speech, but carries no cipher or key search.
