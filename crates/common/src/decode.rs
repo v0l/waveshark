@@ -196,6 +196,22 @@ pub enum ReportDetail {
     /// a repeater, a room server or a sensor is installed somewhere, a chat
     /// node is carried.
     MeshCore { role: &'static str, fixed: bool },
+    /// A weather balloon: a radiosonde reports its own height and how fast
+    /// it is climbing, which is the whole of what a listener wants from one.
+    /// Climb rate rather than a vertical rate in feet a minute, because a
+    /// sonde's flight is metres a second and everybody who watches them
+    /// talks about it that way.
+    Sonde {
+        altitude_m: f64,
+        climb_ms: f64,
+        battery_v: f32,
+        satellites: u8,
+        /// True once it has burst and is falling under its parachute.
+        descending: bool,
+        /// The sensor readings, which one frame is not enough to turn into
+        /// degrees. See [`SondeSensors`].
+        sensors: Option<SondeSensors>,
+    },
     /// A handset flying something: the stick positions it sent, and what the
     /// link said about itself.
     ///
@@ -218,6 +234,25 @@ pub enum ReportDetail {
 /// How many channels a control report has room for. Sixteen is what every
 /// hobby link here carries at most.
 pub const CONTROL_CHANNELS: usize = 16;
+
+/// A radiosonde's sensors as one frame carries them: ratios, and a
+/// sixteenth of the constants needed to read them.
+///
+/// Here for the same reason [`Cpr`] is. A sonde's thermometer is a resistor
+/// measured against two references, and turning that into degrees needs
+/// polynomials measured on that sonde in the factory, which it sends
+/// sixteen bytes at a time over 51 frames. So a frame carries evidence and
+/// not a temperature, and whatever is following the sonde across frames
+/// does the joining; a decoder that answered with a temperature here would
+/// be answering from a table it is not allowed to keep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SondeSensors {
+    /// The twelve 24-bit counts, as the sensor block sends them.
+    pub meas: [u32; 12],
+    /// The piece of the calibration this frame carried, and which of the
+    /// 51 it is.
+    pub calibration: Option<(u8, [u8; 16])>,
+}
 
 /// Half a position, as Mode S sends it.
 ///

@@ -780,3 +780,51 @@ video_pid = 49
 audio_pid = 52
 picture_width = 1920
 picture_height = 1080
+
+[[capture]]
+name = "rs41_herstmonceux_405.80024M_31.25k.cs16"
+sha256 = "56c441feb1ea430e3bdb80ed69e4a2d1e92565403bebf8c8813abee651696a30"
+url = "https://nostr.download/56c441feb1ea430e3bdb80ed69e4a2d1e92565403bebf8c8813abee651696a30.xz"
+compression = "xz"
+center_hz = 405_800_240
+rate_sps = 31_250
+format = "cs16"
+description = """
+Vaisala RS41 radiosonde S1720982, recorded 2022-02-15 at 13:23 UTC near
+London and published by SDRangel as its radiosonde example
+(https://www.sdrangel.org/iq-files/, radiosonde.zip). The first 40 seconds of
+that recording, converted from the WAV's data chunk without resampling or
+retuning; the centre here is the one the recorder wrote into the file's auxi
+chunk. The sonde sits 9.76 kHz above it.
+
+It is over Sussex at 10.3 km climbing at 5 to 7 m/s, which puts its launch at
+Herstmonceux for the 12 UTC sounding about an hour earlier. SDRangel's own
+radiosonde demodulator reads this file, which is what the serial and the
+telemetry below are checked against.
+
+What it demonstrates that a synthesised signal does not, and what it was kept
+at 40 seconds and at its original centre for, is everything between the
+antenna and the decoder. The transmission is only 4 dB over the floor, so the
+detector opens it late and measures its centre a few kilohertz differently
+every second; the 10 kHz raster on the band is what turns those into one
+channel rather than forty. The sonde is off centre by two thirds of the span,
+which is what caught a remembered channel being dropped for not fitting
+inside it. And the duty cycle is real: 534 ms of carrier a second, so the
+decoder has to survive the gaps.
+"""
+
+[capture.expect]
+serial = "S1720982"
+# Frames the whole receiver reads, not what is on the air: about forty
+# transmissions are here and the first seven go to finding the channel.
+frames = 28
+first_frame_no = 3409
+last_frame_no = 3441
+longest_unbroken_run = 20
+bad_blocks = 0
+# Where it was on the last frame read.
+lat_deg = 50.7898
+lon_deg = 0.9226
+altitude_m = 10500.5
+climb_ms = 4.30
+battery_v = 2.7

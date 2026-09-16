@@ -67,6 +67,30 @@ pub fn crc16_ti(data: &[u8]) -> u16 {
     crc16(data, 0x8005, 0xffff)
 }
 
+/// The sixty-four byte mask a Vaisala radiosonde XORs its frame with, from
+/// the header onward, repeating every 64 bytes.
+///
+/// Not an LFSR the sonde's data sheet publishes: it was recovered by
+/// shifting a frame against itself, which works because the mask repeats
+/// every 64 bytes and a radiosonde frame has long runs of zeros in it. The
+/// sequence does satisfy `m[i + 16] = m[i] ^ m[i+2] ^ m[i+4] ^ m[i+6]` from
+/// `i = 8`, which [`vaisala_mask_is_lfsr`] checks, so the table is a
+/// transcription that a typo would break rather than a magic constant.
+pub const VAISALA_MASK: [u8; 64] = [
+    0x96, 0x83, 0x3E, 0x51, 0xB1, 0x49, 0x08, 0x98, 0x32, 0x05, 0x59, 0x0E, 0xF9, 0x44, 0xC6, 0x26,
+    0x21, 0x60, 0xC2, 0xEA, 0x79, 0x5D, 0x6D, 0xA1, 0x54, 0x69, 0x47, 0x0C, 0xDC, 0xE8, 0x5C, 0xF1,
+    0xF7, 0x76, 0x82, 0x7F, 0x07, 0x99, 0xA2, 0x2C, 0x93, 0x7C, 0x30, 0x63, 0xF5, 0x10, 0x2E, 0x61,
+    0xD0, 0xBC, 0xB4, 0xB6, 0x06, 0xAA, 0xF4, 0x23, 0x78, 0x6E, 0x3B, 0xAE, 0xBF, 0x7B, 0x4C, 0xC1,
+];
+
+/// XOR `bytes` with the Vaisala mask in place, `from` being the position of
+/// `bytes[0]` in the frame. Its own inverse, like every whitener here.
+pub fn vaisala(bytes: &mut [u8], from: usize) {
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b ^= VAISALA_MASK[(from + i) % VAISALA_MASK.len()];
+    }
+}
+
 /// A frame that reads as variable-length TI framing: one length byte, that
 /// many payload bytes, then a two-byte CRC over both.
 #[derive(Clone, Debug, PartialEq)]
@@ -245,6 +269,22 @@ mod tests {
             }
         }
         assert!(hits <= 1, "{hits} of 1000 noise buffers read as frames");
+    }
+
+    /// The mask was recovered by hand from a frame shifted against itself,
+    /// so the only check on the transcription is the recurrence the sequence
+    /// obeys from byte 8 on.
+    #[test]
+    fn vaisala_mask_is_lfsr() {
+        let m = VAISALA_MASK;
+        for i in 8..48 {
+            assert_eq!(m[i + 16], m[i] ^ m[i + 2] ^ m[i + 4] ^ m[i + 6], "at {i}");
+        }
+        // The run that was published separately, as Mask[0x3B..0x44], which
+        // wraps the end of the table onto its start.
+        let mut run = [0u8; 10];
+        vaisala(&mut run, 0x3b);
+        assert_eq!(run, [0xAE, 0xBF, 0x7B, 0x4C, 0xC1, 0x96, 0x83, 0x3E, 0x51, 0xB1]);
     }
 
     #[test]

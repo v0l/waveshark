@@ -279,6 +279,223 @@ impl FskDetector {
     }
 }
 
+/// Continuous two-level FSK at a known baud: samples in, a bit stream out.
+///
+/// The detector above cuts a burst into mark and gap timings, which is the
+/// vocabulary a sensor packet is written in: a short burst, a few tens of
+/// symbols, timings that a published protocol table transcribes directly.
+/// That vocabulary does not fit a transmitter that keys thousands of symbols
+/// at a fixed baud, where the clock has to be tracked rather than measured,
+/// and where a run of twelve identical bits is ordinary rather than a sign
+/// the burst has ended.
+///
+/// This is the other half: a discriminator, a matched filter one symbol
+/// wide, and a Gardner timing loop reading at two samples a symbol. What
+/// comes out is bits with no framing at all, because framing is the caller's
+/// business ([`crate::hdlc`], a sync word, a header search).
+///
+/// Nothing here knows what it is reading. A radiosonde is 4800 baud and a
+/// low-power telemetry link is 38400; both are this, parameterised.
+pub struct BitSync {
+    rate: f64,
+    baud: f64,
+    /// Input samples per symbol.
+    sps: f64,
+    /// Channel filter, or none where the stream is already no wider than
+    /// the signal.
+    lp: Option<crate::fir::Fir>,
+    narrow: Vec<C32>,
+    prev: C32,
+    /// Slow mean of the discriminator, which is the tuning error between
+    /// this receiver and the transmitter.
+    dc: f32,
+    dc_alpha: f32,
+    /// Boxcar over one symbol: the matched filter for rectangular keying,
+    /// and close enough for the Gaussian shaping a GFSK transmitter uses.
+    box_ring: Vec<f32>,
+    box_pos: usize,
+    box_sum: f32,
+    /// The last filtered sample, for interpolating between it and this one.
+    last: f32,
+    /// Fractional input-sample index of the next half-symbol strobe,
+    /// relative to the newest sample.
+    next: f64,
+    /// Half-symbol strobes since the last symbol decision: the loop reads at
+    /// two samples a symbol and decides on every second one.
+    half_phase: bool,
+    /// The reading halfway between the last two symbols, which is where a
+    /// transition would be if the clock were early or late.
+    mid: f32,
+    /// The last symbol's reading.
+    sym: f32,
+    /// Running mean square of the filtered signal, which normalises the
+    /// timing error so the loop gain does not depend on how loud it is.
+    power: f32,
+}
+
+/// How hard the timing loop pulls, as a fraction of a symbol per unit of
+/// normalised error. Low enough that noise does not walk the clock off a
+/// long frame, high enough to pull in a few hundred ppm of crystal error
+/// within a preamble.
+const TIMING_GAIN: f64 = 0.02;
+
+impl BitSync {
+    /// A demodulator for `baud` symbols a second at modulation index one,
+    /// which is where the deviation is half the baud and the signal occupies
+    /// about `2 * baud` by Carson's rule. Use [`BitSync::with_bandwidth`]
+    /// for a link keyed wider or narrower than that.
+    pub fn new(rate: f64, baud: f64) -> Self {
+        Self::with_bandwidth(rate, baud, 2.0 * baud)
+    }
+
+    /// The same, saying how much spectrum the signal occupies.
+    ///
+    /// The filter is why this matters rather than being a detail: handed a
+    /// stream three times the signal's width it carries three times the
+    /// noise into the discriminator, and a discriminator's output degrades
+    /// sharply rather than gracefully once the noise reaches it. Measured on
+    /// a 31.25 kS/s recording of a radiosonde, filtering the 9.6 kHz the
+    /// sonde occupies out of it took the frames read from 8 of 28 to all 28.
+    pub fn with_bandwidth(rate: f64, baud: f64, bandwidth_hz: f64) -> Self {
+        let sps = rate / baud;
+        let box_len = sps.round().max(1.0) as usize;
+        let cutoff = bandwidth_hz / 2.0 / rate;
+        // Nothing to do where the stream is already about as narrow as the
+        // signal: a filter there is a pass over the samples for no gain.
+        let lp = (cutoff < 0.4).then(|| {
+            let taps = crate::fir::estimate_taps(cutoff / 2.0, 50.0).min(255);
+            crate::fir::Fir::new(crate::fir::lowpass(taps, cutoff, 50.0))
+        });
+        Self {
+            rate,
+            baud,
+            sps,
+            lp,
+            narrow: Vec::new(),
+            prev: C32::new(1.0, 0.0),
+            dc: 0.0,
+            // Sixty-four symbols. Anything a transmitter keys this way is
+            // balanced over that, whether by scrambling or by a preamble,
+            // and it is short enough to follow a drifting tuner.
+            dc_alpha: 1.0 / (64.0 * sps as f32),
+            box_ring: vec![0.0; box_len],
+            box_pos: 0,
+            box_sum: 0.0,
+            last: 0.0,
+            next: 0.0,
+            half_phase: false,
+            mid: 0.0,
+            sym: 0.0,
+            power: 1e-6,
+        }
+    }
+
+    /// Four samples a symbol is the floor: below it the half-symbol strobe
+    /// has nothing to interpolate between.
+    pub fn usable(&self) -> bool {
+        self.sps >= 4.0
+    }
+
+    pub fn sps(&self) -> f64 {
+        self.sps
+    }
+
+    pub fn baud(&self) -> f64 {
+        self.baud
+    }
+
+    /// The tuning error the loop has settled on, in hertz. A sonde is
+    /// specified to within a few kilohertz of its nominal channel and this
+    /// is how far off it actually is.
+    pub fn offset_hz(&self) -> f32 {
+        self.dc * (self.rate / std::f64::consts::TAU) as f32
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(lp) = &mut self.lp {
+            lp.reset();
+        }
+        self.prev = C32::new(1.0, 0.0);
+        self.dc = 0.0;
+        self.box_ring.fill(0.0);
+        self.box_sum = 0.0;
+        self.box_pos = 0;
+        self.last = 0.0;
+        self.next = 0.0;
+        self.half_phase = false;
+        self.mid = 0.0;
+        self.sym = 0.0;
+        self.power = 1e-6;
+    }
+
+    /// Feed samples, appending every bit the clock decided to `bits`.
+    pub fn process(&mut self, input: &[C32], bits: &mut Vec<bool>) {
+        if !self.usable() {
+            return;
+        }
+        let half = self.sps / 2.0;
+        let mut narrow = std::mem::take(&mut self.narrow);
+        narrow.clear();
+        if let Some(lp) = &mut self.lp {
+            lp.process(input, &mut narrow);
+        } else {
+            narrow.extend_from_slice(input);
+        }
+        for &x in &narrow {
+            let d = x * self.prev.conj();
+            self.prev = x;
+            let f = if d.norm_sqr() > 0.0 { d.arg() } else { 0.0 };
+            self.dc += self.dc_alpha * (f - self.dc);
+            let v = f - self.dc;
+            self.box_sum += v - self.box_ring[self.box_pos];
+            self.box_ring[self.box_pos] = v;
+            self.box_pos = (self.box_pos + 1) % self.box_ring.len();
+            let y = self.box_sum / self.box_ring.len() as f32;
+            self.power += 0.001 * (y * y - self.power);
+
+            // `next` counts down towards this sample as each one arrives,
+            // so a strobe at 0 is the previous sample and at 1 is this one.
+            self.next -= 1.0;
+            while self.next <= 0.0 {
+                let frac = (self.next + 1.0).clamp(0.0, 1.0) as f32;
+                let s = self.last + (y - self.last) * frac;
+                self.next += half;
+                if self.half_phase {
+                    // A symbol instant: decide, then ask the halfway
+                    // reading whether the clock is early or late. Gardner's
+                    // detector, which needs no decisions and so works
+                    // before the loop has locked.
+                    let e = ((s - self.sym) * self.mid / self.power.max(1e-9)) as f64;
+                    self.sym = s;
+                    bits.push(s > 0.0);
+                    self.next -= (TIMING_GAIN * e).clamp(-0.4, 0.4) * half;
+                } else {
+                    self.mid = s;
+                }
+                self.half_phase = !self.half_phase;
+            }
+            self.last = y;
+        }
+        self.narrow = narrow;
+    }
+}
+
+/// Key `bits` as two-level FSK at `baud`, for tests and for anything that
+/// wants to make a signal.
+pub fn modulate(bits: &[bool], rate: f64, baud: f64, deviation_hz: f64, amp: f32) -> Vec<C32> {
+    let sps = rate / baud;
+    let mut out = Vec::with_capacity((bits.len() as f64 * sps) as usize + 1);
+    let mut ph = 0.0f64;
+    for (i, &b) in bits.iter().enumerate() {
+        let f = if b { deviation_hz } else { -deviation_hz };
+        while (out.len() as f64) < (i + 1) as f64 * sps {
+            ph += std::f64::consts::TAU * f / rate;
+            out.push(C32::new(amp * ph.cos() as f32, amp * ph.sin() as f32));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +624,65 @@ mod tests {
         }
         split.flush(&mut got);
         assert_eq!(whole, got, "block splitting changed the pulse train");
+    }
+
+    /// A pseudo-random bit stream at 4800 baud, keyed and read back. The
+    /// loop needs a lead-in to pull the clock in, so the test looks for its
+    /// own sequence inside what came out rather than at the front of it.
+    #[test]
+    fn the_bit_clock_reads_a_stream_back() {
+        let baud = 4800.0;
+        let rate = 48_000.0;
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let bits: Vec<bool> = (0..4000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed & 1 != 0
+            })
+            .collect();
+        // 2.4 kHz either way, which is what a radiosonde keys, riding on a
+        // 900 Hz tuning error the loop has to take out by itself.
+        let iq = modulate(&bits, rate, baud, 2_400.0, 0.5);
+        let mut ph = 0.0f64;
+        let iq: Vec<C32> = iq
+            .iter()
+            .map(|s| {
+                ph += std::f64::consts::TAU * 900.0 / rate;
+                s * C32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+        let mut sync = BitSync::new(rate, baud);
+        assert!(sync.usable());
+        let mut got = Vec::new();
+        for block in iq.chunks(1000) {
+            sync.process(block, &mut got);
+        }
+        assert!(got.len() >= 3900, "{} bits out of 4000 symbols", got.len());
+        // Find where the stream lines up, then require the rest exactly.
+        let want = &bits[500..3500];
+        let at = (0..got.len().saturating_sub(want.len()))
+            .find(|&k| got[k..k + want.len()] == *want)
+            .expect("the keyed stream is not in what came out");
+        assert!(at < 600, "it took {at} bits to lock");
+        // The offset is a one-pole mean over 64 symbols, so a random stream
+        // leaves it a tenth of a symbol's swing out. That is a reading of
+        // the tuning error, not a correction of it: the loop only needs the
+        // mean to be close enough that the slicer is not biased.
+        assert!((sync.offset_hz() - 900.0).abs() < 150.0, "{} Hz", sync.offset_hz());
+    }
+
+    /// Four samples a symbol is the floor, and below it the demodulator
+    /// refuses rather than returning bits it cannot have read.
+    #[test]
+    fn the_bit_clock_refuses_a_stream_it_cannot_read() {
+        assert!(!BitSync::new(14_400.0, 4800.0).usable());
+        assert!(BitSync::new(19_200.0, 4800.0).usable());
+        let mut slow = BitSync::new(14_400.0, 4800.0);
+        let mut bits = Vec::new();
+        slow.process(&vec![C32::new(0.5, 0.0); 1000], &mut bits);
+        assert!(bits.is_empty());
     }
 
     #[test]
