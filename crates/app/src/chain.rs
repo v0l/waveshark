@@ -321,6 +321,15 @@ pub struct Plan {
     pub capture_format: common::SampleFormat,
     /// Log every burst the front ends detect.
     pub log: bool,
+    /// Where every over heard is kept as Opus, when it is kept at all. Here
+    /// rather than as an edit on the stage: a switch somebody expects to
+    /// stay on belongs with the rest of what they set.
+    pub calls: Option<PathBuf>,
+    /// Whether what is heard is read back into words, with which weights and
+    /// on which device. Empty strings mean the shipped defaults.
+    pub transcribe: bool,
+    pub transcribe_model: String,
+    pub transcribe_device: String,
     /// Other receivers feeding the same packet bus.
     pub feeds: Vec<nodes::FeedSpec>,
     /// The channel being transmitted on, if any, and what it transmits.
@@ -1010,6 +1019,10 @@ impl Receiver {
         let base = derived_patch(plan);
         let mut patch = base.clone();
         plan.edits.apply(&mut patch);
+        // What the record owns is put back after the edits, so a stale entry
+        // in a file written by an older build cannot switch on something the
+        // operator switched off.
+        derived_settings(&mut patch, plan);
         // Stages a previous attempt found could not take the stream they were
         // wired to. Left out rather than built, with what they said kept for
         // the interface: a decoder that refuses its input is one decoder
@@ -3193,6 +3206,15 @@ fn sync_video(p: &mut crate::patch::Patch) {
 /// keep it.
 pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::Stage) -> bool {
     let _ = base;
+    // The recorder's switch and the transcriber's switch, weights and device
+    // are the record's, not the graph's. They were edits once, and an edit
+    // is read back off a running graph and written when it settles, which is
+    // one more way for a switch to be lost than a switch anybody expects to
+    // stay on can afford. Held here as well as excluded from the diff, so a
+    // file written by an older build stops overriding what the record says.
+    if st.id == derived::CALL_LOG || st.id == derived::TRANSCRIBE {
+        return !matches!(name, "enabled" | "model" | "device" | "dir");
+    }
     // A fader's level and mute are the operator's wherever the fader is;
     // its name and whether it is speech follow the strip.
     if st.kind == crate::mix::fader::KIND {
@@ -3202,6 +3224,32 @@ pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::
         return false;
     }
     true
+}
+
+/// What the record owns on stages the graph draws, written over whatever an
+/// edit said.
+///
+/// The recorder's switch and folder, and the transcriber's switch, weights
+/// and device: all four are in the saved record rather than in the graph, so
+/// they survive a receiver that was never started and a file written before
+/// they moved.
+fn derived_settings(p: &mut crate::patch::Patch, plan: &Plan) {
+    use pipeline::ParamValue as V;
+    if let Some(st) = p.stage_mut(derived::CALL_LOG) {
+        st.settings.insert("enabled".into(), V::Bool(plan.calls.is_some()));
+        if let Some(dir) = &plan.calls {
+            st.settings.insert("dir".into(), V::Text(dir.display().to_string()));
+        }
+    }
+    if let Some(st) = p.stage_mut(derived::TRANSCRIBE) {
+        st.settings.insert("enabled".into(), V::Bool(plan.transcribe));
+        if !plan.transcribe_model.trim().is_empty() {
+            st.settings.insert("model".into(), V::Text(plan.transcribe_model.clone()));
+        }
+        if !plan.transcribe_device.trim().is_empty() {
+            st.settings.insert("device".into(), V::Text(plan.transcribe_device.clone()));
+        }
+    }
 }
 
 /// The stages the strip owns, drawn into a patch: one chain per listening
@@ -3437,10 +3485,17 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         // and then overwritten a line later, and the switch sprang back off.
         let mut t = p.stage(derived::TRANSCRIBE).map(|s| s.settings.clone()).unwrap_or_default();
         t.insert("root".into(), V::Text(models_root().display().to_string()));
-        // Off in the graph the receiver draws: writing down what people said
-        // is not something to start doing because nobody said otherwise.
-        // Turning it on is an edit, which is how it is remembered.
-        t.entry("enabled".into()).or_insert(V::Bool(false));
+        // The switch, the weights and the device come from the plan, which is
+        // where the record puts them. Off unless somebody asked: writing down
+        // what people said is not something to start doing because nobody
+        // said otherwise.
+        t.insert("enabled".into(), V::Bool(plan.transcribe));
+        if !plan.transcribe_model.trim().is_empty() {
+            t.insert("model".into(), V::Text(plan.transcribe_model.clone()));
+        }
+        if !plan.transcribe_device.trim().is_empty() {
+            t.insert("device".into(), V::Text(plan.transcribe_device.clone()));
+        }
         let id = p.add_derived(derived::TRANSCRIBE, "transcribe_live", t);
         p.connect(Source::Stage(derived::HEARD, 0), (id, 0));
     }
@@ -3449,12 +3504,16 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     // taken after the faders would carry the listener's volume and would
     // stop when they muted the channel.
     //
-    // Read back off the edited patch rather than drawn fresh, or the switch
-    // would spring back off on the next rebuild. Off in the graph the
-    // receiver draws: keeping what people said is not something to start
-    // doing because nobody said otherwise.
+    // The switch and the folder come from the plan, which is where the
+    // record puts them: both were edits on the stage, and a stage's edit is
+    // read back off a graph that only exists while a radio is running, which
+    // is one more way for a switch to be found off at the next start than a
+    // switch has any business having. Off unless somebody asked.
     let mut c = p.stage(derived::CALL_LOG).map(|s| s.settings.clone()).unwrap_or_default();
-    c.entry("enabled".into()).or_insert(V::Bool(false));
+    c.insert("enabled".into(), V::Bool(plan.calls.is_some()));
+    if let Some(dir) = &plan.calls {
+        c.insert("dir".into(), V::Text(dir.display().to_string()));
+    }
     let calls = p.add_derived(derived::CALL_LOG, "call_log", c);
     p.connect(Source::Stage(derived::HEARD, 0), (calls, 0));
 }
@@ -4536,6 +4595,10 @@ pub(crate) mod tests {
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
             log: false,
+            calls: None,
+            transcribe: false,
+            transcribe_model: String::new(),
+            transcribe_device: String::new(),
             feeds: Vec::new(),
             tx: None,
             settings: Default::default(),
@@ -4645,19 +4708,34 @@ pub(crate) mod tests {
         plan.fronts.clear();
         plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
         let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
-        assert_eq!(rx.transcriber().expect("a transcriber").enabled, false);
-        let id = rx.node_of_stage(derived::TRANSCRIBE).expect("the transcriber's node");
-        rx.set_node_param(id.0, "enabled", pipeline::ParamValue::Bool(true)).expect("the switch");
-        assert_eq!(rx.transcriber().expect("a transcriber").enabled, true);
-        // The switch is the operator's edit, which is how the radio thread
-        // puts it back into the plan for the next rebuild.
-        plan.edits = rx.edits();
-        assert!(plan.edits.settings.iter().any(|(id, name, v)| *id == derived::TRANSCRIBE
-            && name == "enabled"
-            && *v == pipeline::ParamValue::Bool(true)));
+        assert!(!rx.transcriber().expect("a transcriber").enabled);
+
+        // Switched on in the record, which is the one place it lives.
+        plan.transcribe = true;
+        rx.rebuild(&plan).expect("a rebuild");
+        assert!(rx.transcriber().expect("a transcriber").enabled);
+
+        // And it survives a rebuild for some other reason entirely.
         plan.channels.push(chan(2, -25_000.0, Demod::Nfm));
         rx.rebuild(&plan).expect("a rebuild");
-        assert_eq!(rx.transcriber().expect("a transcriber").enabled, true);
+        assert!(rx.transcriber().expect("a transcriber").enabled);
+    }
+
+    /// The call recorder is the same decision and is kept the same way.
+    #[test]
+    fn the_call_recorder_comes_back_on_after_a_restart() {
+        let mut plan = plan(2_400_000.0, Hz::mhz(145));
+        plan.fronts.clear();
+        plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        assert!(!rx.recorder().expect("a call recorder").on);
+
+        let dir = std::env::temp_dir().join("sr-calls-record");
+        plan.calls = Some(dir.clone());
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let rec = rx.recorder().expect("a call recorder");
+        assert!(rec.on, "the switch was found off at the next start");
+        assert_eq!(rec.dir, dir.display().to_string(), "it wrote somewhere else");
     }
 
     /// The switch survives a restart, not merely a rebuild.
@@ -4673,31 +4751,37 @@ pub(crate) mod tests {
         plan.fronts.clear();
         plan.channels = vec![chan(1, 25_000.0, Demod::Nfm)];
 
-        // Switched on, and what that writes down.
-        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
-        let id = rx.node_of_stage(derived::TRANSCRIBE).expect("the transcriber's node");
-        rx.set_node_param(id.0, "enabled", pipeline::ParamValue::Bool(true)).expect("the switch");
-        rx.set_node_param(id.0, "model", pipeline::ParamValue::Text("whisper-tiny.en".into()))
-            .expect("the model");
-        rx.set_node_param(id.0, "device", pipeline::ParamValue::Text("cuda:0".into()))
-            .expect("the device");
-        let written = rx.edits().render(&Default::default());
-        for want in ["enabled b true", "model t whisper-tiny.en", "device t cuda:0"] {
-            assert!(
-                written.contains(&format!("override {} {want}", derived::TRANSCRIBE)),
-                "the file would say {written:?}"
-            );
-        }
-
-        // The next start: the file read back, and a receiver built with it.
-        let (edits, _places) = crate::patch::Edits::parse(&written);
-        assert_eq!(edits, rx.edits(), "the file does not round trip");
-        plan.edits = edits;
+        // What the record says, which is what the next start reads off disk.
+        plan.transcribe = true;
+        plan.transcribe_model = "whisper-tiny.en".into();
+        plan.transcribe_device = "cuda:0".into();
         let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
         let back = rx.transcriber().expect("a transcriber");
         assert!(back.enabled, "it came up off, so the switch is found again at every start");
         assert_eq!(back.model, "whisper-tiny.en", "the model picked is not the model");
         assert_eq!(back.device_choice, "cuda:0", "the card picked is not the card");
+
+        // A file written by an older build held the switch as an edit on the
+        // stage. It no longer decides: the record does, and an edit saying
+        // otherwise cannot switch on something that was switched off.
+        plan.transcribe = false;
+        plan.edits.settings.push((
+            derived::TRANSCRIBE,
+            "enabled".into(),
+            pipeline::ParamValue::Bool(true),
+        ));
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        assert!(!rx.transcriber().expect("a transcriber").enabled, "a stale edit turned it on");
+
+        // And the switch is not written back out as an edit, so the stale
+        // line goes when the file is next written.
+        assert!(
+            !rx.edits()
+                .settings
+                .iter()
+                .any(|(id, name, _)| *id == derived::TRANSCRIBE && name == "enabled"),
+            "the switch is in two places again"
+        );
     }
 
     /// Without the mark it is audio and nothing else, which is what an

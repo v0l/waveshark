@@ -25,6 +25,11 @@ pub(super) struct Transcript<'a> {
     /// no radio, or a build made without speech to text.
     pub engine: Option<Engine>,
     pub cmds: &'a mut Vec<Cmd>,
+    /// The record, which is where the switch, the weights and the device
+    /// live: the stage is in the graph, the graph goes away when the radio
+    /// stops, and a setting kept only there is a setting to find again at
+    /// every start.
+    pub settings: &'a crate::session::Settings,
 }
 
 /// What the pane wants done that it cannot do itself.
@@ -416,27 +421,19 @@ impl Transcript<'_> {
                 },
             );
         });
+        // Written to the record rather than onto the stage: the record is
+        // what is saved, and what it holds is applied to the graph on every
+        // rebuild, so a switch stays switched whether or not a radio is
+        // running when the program is next started.
         let (enabled, load, model, device) = want.into_inner();
         if let Some(id) = model {
-            self.cmds.push(Cmd::NodeParam(
-                e.node,
-                "model".into(),
-                pipeline::param::ParamValue::Text(id),
-            ));
+            self.settings.edit(|s| s.transcribe_model = id.clone());
         }
         if let Some(id) = device {
-            self.cmds.push(Cmd::NodeParam(
-                e.node,
-                "device".into(),
-                pipeline::param::ParamValue::Text(id),
-            ));
+            self.settings.edit(|s| s.transcribe_device = id.clone());
         }
         if let Some(on) = enabled {
-            self.cmds.push(Cmd::NodeParam(
-                e.node,
-                "enabled".into(),
-                pipeline::param::ParamValue::Bool(on),
-            ));
+            self.settings.edit(|s| s.transcribe_on = on);
         }
         if load {
             self.st.asked = true;

@@ -33,7 +33,9 @@ the code is in the commit log.
 - CTCSS tones and DCS codes are filtered out of the audio, so they no longer
   rumble under the speech, steer the gain control or reach a recording.
 - Switches that did not stick: every setting is now saved and applied from
-  one record, and a fresh radio is told all of it.
+  one record, and a fresh radio is told all of it. Call recording and the
+  transcriber, with the weights and the device it runs on, are in that record
+  too, so they stay as they were left.
 
 ### Changed
 

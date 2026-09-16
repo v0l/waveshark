@@ -104,6 +104,11 @@ pub(super) struct CallList<'a> {
     pub said: &'a TranscriptLog,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
+    /// The record, which is where the recorder's switch lives: the stage is
+    /// in the graph and the graph only exists while a radio is running, and
+    /// a switch somebody expects to stay on cannot be kept somewhere that
+    /// goes away when they stop the receiver.
+    pub settings: &'a crate::session::Settings,
 }
 
 impl CallList<'_> {
@@ -146,28 +151,29 @@ impl CallList<'_> {
                     *open = !*open;
                     opened = *open;
                 }
-                if let Some(rec) = rec {
+                {
                     ui.add_space(12.0);
-                    let mut on = rec.on;
+                    let mut on = self.settings.read(|s| s.calls_on);
+                    let where_to = rec
+                        .as_ref()
+                        .map(|r| r.dir.clone())
+                        .unwrap_or_else(|| crate::calllog::calls_dir().display().to_string());
                     if ui
                         .checkbox(&mut on, "Record")
                         .on_hover_text(format!(
-                            "Keep every over as Opus in {}, about 2 kB a second of speech",
-                            rec.dir
+                            "Keep every over as Opus in {where_to}, about 2 kB a second of speech"
                         ))
                         .changed()
                     {
-                        self.cmds.push(Cmd::NodeParam(
-                            rec.node,
-                            "enabled".into(),
-                            pipeline::param::ParamValue::Bool(on),
-                        ));
+                        self.settings.edit(|s| s.calls_on = on);
                     }
                     // What is on the disk, so a watch left running overnight
                     // can be judged without leaving the pane. A recorder at
                     // its limit says so: that state looks like a quiet band
                     // and is not one.
-                    if rec.on || rec.bytes > 0 {
+                    if let Some(rec) = &rec
+                        && (rec.on || rec.bytes > 0)
+                    {
                         let (text, tint) = match rec.full {
                             true => ("folder full".to_string(), theme::FAULT),
                             false => (
