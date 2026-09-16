@@ -18,10 +18,7 @@ impl Chain<'_> {
     pub(super) fn show(mut self, ui: &mut egui::Ui) {
         let Some(full) = self.st.topo.clone() else {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("The radio is stopped, so no chain is running.")
-                        .color(theme::LEGEND),
-                );
+                theme::Line::new().note("The radio is stopped, so no chain is running.").show(ui);
             });
             return;
         };
@@ -254,7 +251,7 @@ impl Chain<'_> {
         } else {
             "drag a port to wire, drag a wire off an input to move it"
         };
-        ui.label(legend(hint));
+        widgets::hint(ui, hint);
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(6.0);
@@ -274,7 +271,7 @@ impl Chain<'_> {
         let mut add: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (category, stages) in &by_category {
-                ui.label(legend(category.label()));
+                theme::Line::new().legend(category.label()).show(ui);
                 for (name, summary) in stages {
                     let w = egui::Button::new(egui::RichText::new(*name).size(12.0))
                         .fill(theme::WELL)

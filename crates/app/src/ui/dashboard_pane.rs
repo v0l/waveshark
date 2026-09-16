@@ -253,7 +253,7 @@ impl Dashboard<'_> {
                 &mut c[col(0)],
                 Some(Rail::Set.colour()),
                 |ui| {
-                    ui.label(legend("tuned"));
+                    theme::Line::new().legend("tuned").show(ui);
                 },
                 |ui| {
                     theme::Line::new().set(fmt_hz(self.center)).size(20.0).show(ui);
@@ -287,9 +287,9 @@ impl Dashboard<'_> {
                 &mut c[col(1)],
                 None,
                 |ui| {
-                    ui.label(legend("real time"));
+                    theme::Line::new().legend("real time").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(value(format!("{now:.2}x")).size(12.0));
+                        theme::Line::new().value(format!("{now:.2}x")).size(12.0).show(ui);
                     });
                 },
                 |ui| {
@@ -313,7 +313,7 @@ impl Dashboard<'_> {
                 &mut c[col(2)],
                 Some(Rail::Heard.colour()),
                 |ui| {
-                    ui.label(legend("decoded"));
+                    theme::Line::new().legend("decoded").show(ui);
                 },
                 |ui| {
                     theme::Line::new()
@@ -355,7 +355,7 @@ impl Dashboard<'_> {
                 &mut c[0],
                 Some(Rail::Heard.colour()),
                 |ui| {
-                    ui.label(legend("what has been heard"));
+                    theme::Line::new().legend("what has been heard").show(ui);
                 },
                 |ui| {
                     for (name, n) in heard {
@@ -380,7 +380,7 @@ impl Dashboard<'_> {
                 &mut c[col(1)],
                 Some(Rail::Heard.colour()),
                 |ui| {
-                    ui.label(legend("on the air now"));
+                    theme::Line::new().legend("on the air now").show(ui);
                 },
                 |ui| {
                     if open.is_empty() {
@@ -412,7 +412,7 @@ impl Dashboard<'_> {
                 &mut c[col(2)],
                 None,
                 |ui| {
-                    ui.label(legend("health"));
+                    theme::Line::new().legend("health").show(ui);
                 },
                 |ui| {
                     Self::lamp_row(
@@ -471,7 +471,7 @@ impl Dashboard<'_> {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
             let col = if ok { theme::OK } else { theme::READOUT };
             ui.painter().circle_filled(rect.center(), 4.0, col);
-            ui.label(egui::RichText::new(text).size(12.0).color(theme::VALUE));
+            theme::Line::new().value(text).size(12.0).show(ui);
         });
     }
 
@@ -481,12 +481,13 @@ impl Dashboard<'_> {
             ui,
             None,
             |ui| {
-                ui.label(legend("nothing is being received"));
+                theme::Line::new().legend("nothing is being received").show(ui);
             },
             |ui| {
-                ui.label(
-                    egui::RichText::new("Start a radio and the readings appear here.").size(14.0),
-                );
+                theme::Line::new()
+                    .note("Start a radio and the readings appear here.")
+                    .size(14.0)
+                    .show(ui);
                 hint(
                     ui,
                     "The receiver opens on 433.92 MHz with the scanner table already watching \
@@ -518,10 +519,10 @@ impl Dashboard<'_> {
             ui,
             Some(q.rail.colour().gamma_multiply(0.55)),
             |ui| {
-                ui.label(legend(q.place));
+                theme::Line::new().legend(q.place).show(ui);
             },
             |ui| {
-                ui.label(egui::RichText::new(q.title).size(14.0).color(theme::VALUE));
+                theme::Line::new().value(q.title).size(14.0).show(ui);
                 hint(ui, q.note);
             },
         );
@@ -575,7 +576,7 @@ impl Dashboard<'_> {
     /// A section legend with a rule running off the end of it.
     fn rule(ui: &mut egui::Ui, name: &str) {
         ui.horizontal(|ui| {
-            ui.label(legend(name));
+            theme::Line::new().legend(name).show(ui);
             let (rect, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
             ui.painter().line_segment(

@@ -318,7 +318,11 @@ impl App {
             // running at a quarter rate behaves differently enough to say so.
             if self.zoom > 1 {
                 ui.add_space(4.0);
-                ui.label(value(format!("/{} zoom", self.zoom)).color(theme::LEGEND).size(11.0));
+                theme::Line::new()
+                    .value(format!("/{} zoom", self.zoom))
+                    .size(11.0)
+                    .tint(theme::LEGEND)
+                    .show(ui);
             }
         });
         if let Some(sp) = pick {
@@ -482,10 +486,14 @@ impl App {
             let now = self.speed_now();
             self.status_lamp(ui);
             ui.add_space(2.0);
-            ui.label(match now {
-                Some(x) => value(format!("{x:.1}x")).color(theme::LEGEND).size(11.0),
-                None => value("stopped").color(theme::LEGEND).size(11.0),
-            });
+            theme::Line::new()
+                .value(match now {
+                    Some(x) => format!("{x:.1}x"),
+                    None => "stopped".to_string(),
+                })
+                .size(11.0)
+                .tint(theme::LEGEND)
+                .show(ui);
         });
     }
 
@@ -587,7 +595,7 @@ fn cell(ui: &mut egui::Ui, name: &str, width: f32, content: impl FnOnce(&mut egu
         |ui| {
             ui.set_min_size(Vec2::new(width, CELL_H));
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            ui.label(legend(name));
+            theme::Line::new().legend(name).show(ui);
             ui.add_space(3.0);
             content(ui);
         },

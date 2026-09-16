@@ -201,15 +201,17 @@ impl Log<'_> {
                     Vec::new()
                 };
                 let tracking = r.status.tracking.load(Ordering::Relaxed);
-                ui.label(legend(&if !self.decode_on {
-                    "decoding off".to_string()
-                } else if running.is_empty() {
-                    format!("no scanner covers this span, {total} frames")
-                } else if tracking {
-                    format!("{}, {aircraft} tracks, {total} frames", running.join(", "))
-                } else {
-                    format!("{}, {total} frames", running.join(", "))
-                }));
+                theme::Line::new()
+                    .legend(&if !self.decode_on {
+                        "decoding off".to_string()
+                    } else if running.is_empty() {
+                        format!("no scanner covers this span, {total} frames")
+                    } else if tracking {
+                        format!("{}, {aircraft} tracks, {total} frames", running.join(", "))
+                    } else {
+                        format!("{}, {total} frames", running.join(", "))
+                    })
+                    .show(ui);
             }
             let logged = self
                 .radio
@@ -218,10 +220,12 @@ impl Log<'_> {
                 .unwrap_or(0);
             if logged > 0 {
                 ui.add_space(10.0);
-                ui.label(legend(&format!("{logged} saved"))).on_hover_text(match &self.st.path {
-                    Some(d) => format!("appended to {}", d.display()),
-                    None => "appended to the packet log".into(),
-                });
+                theme::Line::new().legend(&format!("{logged} saved")).show(ui).on_hover_text(
+                    match &self.st.path {
+                        Some(d) => format!("appended to {}", d.display()),
+                        None => "appended to the packet log".into(),
+                    },
+                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("CLEAR").clicked() {
@@ -297,7 +301,7 @@ impl Log<'_> {
                     format!("{} running, nothing heard yet", names.join(", "))
                 }
             };
-            ui.label(legend(&waiting));
+            theme::Line::new().legend(&waiting).show(ui);
             return;
         }
         let t0 = self.st.origin;
