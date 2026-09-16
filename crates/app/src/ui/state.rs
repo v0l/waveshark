@@ -362,11 +362,6 @@ impl ChainState {
         }
     }
 
-    /// Whether the graph is unlocked for editing.
-    pub fn manual(&self) -> bool {
-        self.edit.manual
-    }
-
     /// Unlock the graph for editing, or lock it again.
     ///
     /// Nothing about what runs changes with it: the edits already made stay
@@ -401,16 +396,11 @@ pub(super) struct LogState {
     /// edge. Held here rather than in a panel's memory so it is exactly this
     /// for every packet, whatever the packet holds.
     pub inspector_h: f32,
-    /// Show bursts no protocol claimed.
-    pub show_unknown: bool,
     pub open: bool,
     /// Print every packet to standard output as well as listing it, timed
     /// from when the window opened.
     pub print: bool,
     pub print_since: Instant,
-    /// Where the log is being written, for the status line. The log itself
-    /// lives in the graph, on the radio thread.
-    pub path: Option<std::path::PathBuf>,
     /// The packet the signal identification modal is open on, if it is.
     pub sigid: Option<DecodeRecord>,
 }
@@ -420,11 +410,6 @@ pub(super) struct LogState {
 /// The survey itself is a node on the radio thread; what lives here is where
 /// it writes, where the position comes from, and what the pane is showing.
 pub struct SurveyState {
-    /// Where the survey file is, or `None` when nothing is being recorded.
-    pub path: Option<std::path::PathBuf>,
-    /// A GPS named by the operator, or `None` for the local gpsd the reader
-    /// looks for on its own. The reader always runs.
-    pub gps: Option<gps::Transport>,
     /// The row the pane is expanded on, which is the device whose sightings
     /// are drawn on the map.
     pub selected: Option<i64>,
@@ -451,7 +436,8 @@ pub struct SurveyState {
     pub gps_edit: Option<String>,
     /// The feed to wigle.net: who it uploads as, and what it has sent.
     pub wigle: WigleState,
-    /// The feed to beacondb.net: whether it is on, and what it has sent.
+    /// The feed to beacondb.net: whether its dialog is up, and what it has
+    /// sent.
     pub beacondb: BeaconDbState,
     /// The feed into Home Assistant: the broker, and what it has published.
     pub homeassistant: HomeAssistantState,
@@ -464,9 +450,6 @@ pub struct SurveyState {
 #[derive(Default)]
 pub struct BeaconDbState {
     pub open: bool,
-    pub on: bool,
-    /// Whether the map may ask where a decoded cell is.
-    pub lookup: bool,
     pub status: Option<nodes::BeaconDbStatus>,
 }
 
@@ -508,29 +491,6 @@ impl Default for HomeAssistantState {
             spaces: String::new(),
             buses: true,
             status: None,
-        }
-    }
-}
-
-impl HomeAssistantState {
-    /// What is typed, as somewhere to publish. The port falls back to 1883
-    /// rather than refusing a field somebody cleared.
-    pub fn publish(&self) -> nodes::Publish {
-        nodes::Publish {
-            broker: self.broker(),
-            spaces: self.spaces.trim().to_string(),
-            buses: self.buses,
-        }
-    }
-
-    fn broker(&self) -> nodes::Broker {
-        nodes::Broker {
-            host: self.host.trim().to_string(),
-            port: self.port.trim().parse().unwrap_or(1883),
-            username: self.username.trim().to_string(),
-            password: self.password.clone(),
-            prefix: self.prefix.trim().to_string(),
-            topic: self.topic.trim().to_string(),
         }
     }
 }
@@ -610,8 +570,6 @@ pub struct WigleState {
 impl Default for SurveyState {
     fn default() -> Self {
         Self {
-            path: None,
-            gps: None,
             selected: None,
             rows: Vec::new(),
             trail: Vec::new(),
@@ -636,11 +594,9 @@ impl Default for LogState {
             selected: None,
             sigid: None,
             inspector_h: 116.0 + super::BURST_VIEW_H + 24.0,
-            show_unknown: true,
             open: true,
             print: false,
             print_since: Instant::now(),
-            path: None,
         }
     }
 }
