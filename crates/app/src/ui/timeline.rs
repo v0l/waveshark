@@ -70,6 +70,9 @@ pub(super) struct TimelineState {
     /// both in axis seconds.
     pub sel: Option<(f64, f64)>,
     pub drag: Option<f64>,
+    /// Whether the drag in flight began on the clock, which pans rather than
+    /// selects for as long as it lasts.
+    ruler_drag: bool,
     /// Where the last press started playing and how long it queued, so the
     /// cursor can be drawn against what the player has left.
     pub playing: Option<(f64, f64)>,
@@ -83,8 +86,8 @@ impl TimelineState {
     pub fn zoom(&mut self, factor: f64, total: f64) {
         let Some((from, span)) = self.view else { return };
         let middle = from + span / 2.0;
-        let span = (span * factor).clamp(0.2, total.max(1.0) * 1.5);
-        self.view = Some((middle - span / 2.0, span));
+        let span = (span * factor).clamp(0.2, total.max(1.0));
+        self.view = Some(bounded(middle - span / 2.0, span, total));
     }
 
     /// Fit the view to all of it, which is what opening it does and what FIT
@@ -95,6 +98,14 @@ impl TimelineState {
         self.sel = None;
         self.playing = None;
     }
+}
+
+/// A window held inside the axis: nothing is drawn before the first over or
+/// after the last, so panning cannot run off into empty lane and zooming out
+/// stops at the whole of it.
+fn bounded(from: f64, span: f64, total: f64) -> (f64, f64) {
+    let span = span.min(total.max(0.2));
+    (from.clamp(0.0, (total - span).max(0.0)), span)
 }
 
 /// Where each stretch of recorded air sits on the axis.
@@ -175,8 +186,16 @@ impl Map {
 
 /// What the lane wants done that it cannot do itself.
 pub(super) enum Act {
-    /// Play these stretches of air, in order.
-    Play(Vec<(u64, u64)>),
+    /// Play these stretches of air, in order, from this point on the axis.
+    ///
+    /// The point comes back with them because how long the audio turns out
+    /// to be is what draws the cursor, and only the caller that builds it
+    /// knows that: a press near the end of a conversation asks for five
+    /// minutes and gets whatever is left.
+    Play {
+        at: f64,
+        ranges: Vec<(u64, u64)>,
+    },
     /// Write them out, through a save dialog.
     Export(Vec<(u64, u64)>),
     Close,
@@ -194,265 +213,346 @@ pub(super) fn show(
         st.fit(entries);
     }
     let (from, span) = st.view.map(|(f, s)| (f, s.max(0.05)))?;
-    let mut act = None;
+    let mut press: Option<Press> = None;
 
-    // Right to left, so a pane too narrow for both crowds the reading rather
-    // than drawing it under the buttons.
-    ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("CLOSE").clicked() {
-                act = Some(Act::Close);
-            }
-            ui.add_space(6.0);
-            if ui.small_button("FIT").on_hover_text("Show all of it").clicked() {
-                st.fit(entries);
-            }
-            // Zoom as buttons as well as on the wheel: a wheel over a pane
-            // that also scrolls is a guess about which one was meant, and
-            // these are not a guess.
-            if ui.small_button("\u{2212}").on_hover_text("Further out").clicked() {
-                st.zoom(2.0, map.total());
-            }
-            if ui.small_button("+").on_hover_text("Closer in").clicked() {
-                st.zoom(0.5, map.total());
-            }
-            ui.add_space(6.0);
-            let sel = st.sel;
-            if ui
-                .add_enabled(sel.is_some(), egui::Button::new("EXPORT").small())
-                .on_hover_text("Write the selected stretch out as one Opus file")
-                .clicked()
-                && let Some((a, b)) = sel
-            {
-                act = Some(Act::Export(map.ranges(a, b)));
-            }
-            if ui
-                .add_enabled(sel.is_some(), egui::Button::new("PLAY").small())
-                .on_hover_text("Play the selected stretch")
-                .clicked()
-                && let Some((a, b)) = sel
-            {
-                st.playing = Some((a, b - a));
-                act = Some(Act::Play(map.ranges(a, b)));
-            }
-            ui.add_space(8.0);
+    // A card like every other panel: the legend and what it is for in the
+    // header, what can be done to it on the right of that, and the lane in
+    // the body. The header only records which button was pressed, because
+    // the body holds the state and two closures cannot both have it.
+    let sel = st.sel;
+    let card = widgets::card(
+        ui,
+        Some(theme::TRACE),
+        |ui| {
             let mut line = theme::Line::new()
                 .legend("timeline")
-                .value(format!("{} overs", entries.len()))
-                .size(11.0);
-            if map.runs.len() < entries.len() {
-                line = line.gap(10.0).value(format!("{} runs", map.runs.len())).size(11.0);
-            }
-            if let Some((a, b)) = st.sel {
+                .note("clips against the clock, with the dead air taken out");
+            if let Some((a, b)) = sel {
                 line = line.gap(10.0).set(format!("{:.0} s picked", b - a)).size(11.0);
             }
             line.elided(ui);
-        });
-    });
-
-    let width = ui.available_width() - 24.0;
-    ui.add_space(2.0);
-    let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(width.max(120.0), RULER_H + LANE_H),
-        Sense::click_and_drag(),
-    );
-    let ruler = Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), rect.top() + RULER_H));
-    let lane = Rect::from_min_max(Pos2::new(rect.left(), ruler.bottom()), rect.right_bottom());
-    let p = ui.painter_at(rect);
-    p.rect_filled(lane, 2.0, theme::WELL);
-    p.rect_filled(ruler, 0.0, theme::CHASSIS);
-
-    let at_x = |s: f64| -> f32 { lane.left() + ((s - from) / span) as f32 * lane.width() };
-    let at_s =
-        |x: f32| -> f64 { from + ((x - lane.left()) / lane.width()).clamp(0.0, 1.0) as f64 * span };
-
-    // The selection under the clips, so a clip inside it still reads as a
-    // clip rather than as a tinted block.
-    if let Some((a, b)) = st.sel {
-        let band = Rect::from_min_max(
-            Pos2::new(at_x(a), lane.top()),
-            Pos2::new(at_x(b).max(at_x(a) + 1.0), lane.bottom()),
-        );
-        p.rect_filled(band, 0.0, theme::READOUT.gamma_multiply(0.18));
-        p.rect_stroke(band, 0.0, Stroke::new(1.0, theme::READOUT), egui::StrokeKind::Inside);
-    }
-
-    // The runs, each with the time it starts at, and the break before it
-    // saying how long nobody transmitted. Both labels are skipped where
-    // there is no room for them: a hundred runs in a pane's width is a smear
-    // if every one is written on, and the rule on the marker is its width
-    // rather than a count, so zooming in brings them back.
-    let mut labelled = f32::NEG_INFINITY;
-    for r in &map.runs {
-        let x0 = at_x(r.at_s);
-        if r.break_s > 0.0 {
-            draw_break(&p, lane, at_x(r.at_s - BREAK_S), x0, r.break_s);
-        }
-        if x0 < lane.left() || x0 > lane.right() {
-            continue;
-        }
-        if x0 - labelled < CLOCK_GAP {
-            continue;
-        }
-        // The rule is drawn with the label rather than at every run: at a
-        // hundred runs to the pane it is the rules, not the clips, that the
-        // eye reads as the picture.
-        p.line_segment(
-            [Pos2::new(x0, ruler.bottom() - 5.0), Pos2::new(x0, lane.bottom())],
-            Stroke::new(1.0, theme::ETCH),
-        );
-        labelled = x0;
-        p.text(
-            Pos2::new(x0 + 2.0, ruler.top() + 1.0),
-            egui::Align2::LEFT_TOP,
-            crate::segments::when(r.from_us).format("%d %b %H:%M:%S").to_string(),
-            egui::FontId::new(10.0, egui::FontFamily::Name(theme::READOUT_FONT.into())),
-            theme::LEGEND,
-        );
-    }
-
-    let mut decoded = 0;
-    for e in entries {
-        let (Some(a), Some(b)) = (map.at(e.call.at_us), map.at(e.call.end_us())) else {
-            continue;
-        };
-        let (x0, x1) = (at_x(a), at_x(b));
-        if x1 < lane.left() || x0 > lane.right() {
-            continue;
-        }
-        // Half a pixel off each side, so two overs a second apart read as
-        // two clips rather than as one block.
-        let clip = Rect::from_min_max(
-            Pos2::new(x0 + 0.5, lane.top() + 6.0),
-            Pos2::new((x1 - 0.5).max(x0 + 1.5), lane.bottom() - 6.0),
-        );
-        p.rect_filled(clip, 1.0, theme::PANEL);
-        let key = (e.file.clone(), e.at);
-        if !st.peaks.contains_key(&key) && decoded < DECODE_PER_FRAME && clip.width() > 2.0 {
-            st.peaks.insert(key.clone(), envelope(e));
-            decoded += 1;
-        }
-        match st.peaks.get(&key) {
-            Some(peaks) if clip.width() > 2.0 && !peaks.is_empty() => {
-                draw_envelope(&p, clip, peaks)
-            }
-            // Nothing decoded yet, or a clip too narrow to draw one in: the
-            // block itself still says a transmission was here.
-            _ => {
-                p.rect_filled(clip.shrink2(Vec2::new(0.0, clip.height() * 0.3)), 1.0, theme::TRACE);
-            }
-        }
-    }
-
-    // The cursor: where the player has got to. Playback and the axis are
-    // measured in the same seconds, so this is the start plus what has been
-    // played.
-    if let Some((started, total)) = st.playing
-        && left_s > 0.0
-    {
-        let at = started + (total - left_s as f64).max(0.0);
-        // Follow it when it runs off the edge, so a zoomed-in lane does not
-        // have to be dragged along behind the playback.
-        if at < from || at > from + span {
-            st.view = Some((at - span / 2.0, span));
-        }
-        let x = at_x(at);
-        if lane.x_range().contains(x) {
-            // Amber, two pixels, with a head on the ruler and a wash either
-            // side: a hairline over a lane of cyan clips cannot be found,
-            // and the whole point of it is to be findable while it moves.
-            p.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(x - 3.0, lane.top()),
-                    Pos2::new(x + 3.0, lane.bottom()),
-                ),
-                0.0,
-                theme::READOUT.gamma_multiply(0.20),
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("CLOSE").clicked() {
+                    press = Some(Press::Close);
+                }
+                ui.add_space(6.0);
+                if ui.small_button("FIT").on_hover_text("Show all of it").clicked() {
+                    press = Some(Press::Fit);
+                }
+                // Zoom as buttons as well as on the wheel: a wheel over a
+                // pane that also scrolls is a guess about which one was
+                // meant, and these are not a guess.
+                if ui.small_button("\u{2212}").on_hover_text("Further out").clicked() {
+                    press = Some(Press::Out);
+                }
+                if ui.small_button("+").on_hover_text("Closer in").clicked() {
+                    press = Some(Press::In);
+                }
+                ui.add_space(6.0);
+                if ui
+                    .add_enabled(sel.is_some(), egui::Button::new("EXPORT").small())
+                    .on_hover_text("Write the selected stretch out as one Opus file")
+                    .clicked()
+                {
+                    press = Some(Press::Export);
+                }
+                if ui
+                    .add_enabled(sel.is_some(), egui::Button::new("PLAY").small())
+                    .on_hover_text("Play the selected stretch")
+                    .clicked()
+                {
+                    press = Some(Press::Play);
+                }
+            });
+        },
+        |ui| {
+            let mut act: Option<Act> = None;
+            let width = ui.available_width();
+            ui.add_space(2.0);
+            let (rect, resp) = ui.allocate_exact_size(
+                Vec2::new(width.max(120.0), RULER_H + LANE_H),
+                Sense::click_and_drag(),
             );
-            p.line_segment(
-                [Pos2::new(x, ruler.top() + 6.0), Pos2::new(x, lane.bottom())],
-                Stroke::new(2.0, theme::READOUT),
+            let ruler =
+                Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), rect.top() + RULER_H));
+            let lane =
+                Rect::from_min_max(Pos2::new(rect.left(), ruler.bottom()), rect.right_bottom());
+            // The clock is a handle on the lane rather than a target of its own:
+            // a press on it drags the whole view, which is what the strip of
+            // times along the top of an editor does. Which it was is remembered
+            // for as long as the drag lasts, or letting the pointer wander down
+            // into the lane would turn a pan into a selection halfway through.
+            if resp.drag_started() {
+                st.ruler_drag = resp.interact_pointer_pos().is_some_and(|pos| ruler.contains(pos));
+            }
+            if resp.drag_stopped() {
+                st.ruler_drag = false;
+            }
+            let ruler_drag = st.ruler_drag && resp.dragged();
+            let p = ui.painter_at(rect);
+            p.rect_filled(lane, 2.0, theme::WELL);
+            p.rect_filled(ruler, 0.0, theme::CHASSIS);
+
+            let at_x = |s: f64| -> f32 { lane.left() + ((s - from) / span) as f32 * lane.width() };
+            let at_s = |x: f32| -> f64 {
+                from + ((x - lane.left()) / lane.width()).clamp(0.0, 1.0) as f64 * span
+            };
+
+            // The selection under the clips, so a clip inside it still reads as a
+            // clip rather than as a tinted block.
+            if let Some((a, b)) = st.sel {
+                let band = Rect::from_min_max(
+                    Pos2::new(at_x(a), lane.top()),
+                    Pos2::new(at_x(b).max(at_x(a) + 1.0), lane.bottom()),
+                );
+                p.rect_filled(band, 0.0, theme::READOUT.gamma_multiply(0.18));
+                p.rect_stroke(
+                    band,
+                    0.0,
+                    Stroke::new(1.0, theme::READOUT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            // The runs, each with the time it starts at, and the break before it
+            // saying how long nobody transmitted. Both labels are skipped where
+            // there is no room for them: a hundred runs in a pane's width is a smear
+            // if every one is written on, and the rule on the marker is its width
+            // rather than a count, so zooming in brings them back.
+            let mut labelled = f32::NEG_INFINITY;
+            for r in &map.runs {
+                let x0 = at_x(r.at_s);
+                let x1 = at_x(r.at_s + (r.to_us - r.from_us) as f64 / 1e6);
+                if r.break_s > 0.0 {
+                    draw_break(&p, lane, at_x(r.at_s - BREAK_S), x0, r.break_s);
+                }
+                // A run is one recording, not a row of boxes: the band runs from
+                // the first over to the last with a zero line through it, and a
+                // pause between two overs inside it reads as the silence it was
+                // rather than as a hole in the picture.
+                if x1 > lane.left() && x0 < lane.right() {
+                    let band = Rect::from_min_max(
+                        Pos2::new(x0.max(lane.left()), lane.top() + 6.0),
+                        Pos2::new(x1.min(lane.right()).max(x0 + 1.0), lane.bottom() - 6.0),
+                    );
+                    p.rect_filled(band, 1.0, theme::PANEL);
+                    p.line_segment(
+                        [
+                            Pos2::new(band.left(), band.center().y),
+                            Pos2::new(band.right(), band.center().y),
+                        ],
+                        Stroke::new(1.0, theme::TRACE.gamma_multiply(0.35)),
+                    );
+                }
+                if x0 < lane.left() || x0 > lane.right() {
+                    continue;
+                }
+                if x0 - labelled < CLOCK_GAP {
+                    continue;
+                }
+                // The rule is drawn with the label rather than at every run: at a
+                // hundred runs to the pane it is the rules, not the clips, that the
+                // eye reads as the picture.
+                p.line_segment(
+                    [Pos2::new(x0, ruler.bottom() - 5.0), Pos2::new(x0, lane.bottom())],
+                    Stroke::new(1.0, theme::ETCH),
+                );
+                labelled = x0;
+                p.text(
+                    Pos2::new(x0 + 2.0, ruler.top() + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    crate::segments::when(r.from_us).format("%d %b %H:%M:%S").to_string(),
+                    egui::FontId::new(10.0, egui::FontFamily::Name(theme::READOUT_FONT.into())),
+                    theme::LEGEND,
+                );
+            }
+
+            let mut decoded = 0;
+            for e in entries {
+                let (Some(a), Some(b)) = (map.at(e.call.at_us), map.at(e.call.end_us())) else {
+                    continue;
+                };
+                let (x0, x1) = (at_x(a), at_x(b));
+                if x1 < lane.left() || x0 > lane.right() {
+                    continue;
+                }
+                let clip = Rect::from_min_max(
+                    Pos2::new(x0, lane.top() + 6.0),
+                    Pos2::new(x1.max(x0 + 1.0), lane.bottom() - 6.0),
+                );
+                let key = (e.file.clone(), e.at);
+                if !st.peaks.contains_key(&key) && decoded < DECODE_PER_FRAME && clip.width() > 2.0
+                {
+                    st.peaks.insert(key.clone(), envelope(e));
+                    decoded += 1;
+                }
+                match st.peaks.get(&key) {
+                    Some(peaks) if clip.width() > 2.0 && !peaks.is_empty() => {
+                        draw_envelope(&p, clip, peaks)
+                    }
+                    // Nothing decoded yet, or a clip too narrow to draw one in: the
+                    // block itself still says a transmission was here.
+                    _ => {
+                        p.rect_filled(
+                            clip.shrink2(Vec2::new(0.0, clip.height() * 0.3)),
+                            1.0,
+                            theme::TRACE,
+                        );
+                    }
+                }
+            }
+
+            // The cursor: where the player has got to. Playback and the axis are
+            // measured in the same seconds, so this is the start plus what has been
+            // played.
+            if let Some((started, total)) = st.playing
+                && left_s > 0.0
+            {
+                let at = started + (total - left_s as f64).max(0.0);
+                // Follow it when it runs off the edge, so a zoomed-in lane does not
+                // have to be dragged along behind the playback.
+                if at < from || at > from + span {
+                    st.view = Some(bounded(at - span / 2.0, span, map.total()));
+                }
+                let x = at_x(at);
+                if lane.x_range().contains(x) {
+                    // Amber, two pixels, with a head on the ruler and a wash either
+                    // side: a hairline over a lane of cyan clips cannot be found,
+                    // and the whole point of it is to be findable while it moves.
+                    p.rect_filled(
+                        Rect::from_min_max(
+                            Pos2::new(x - 3.0, lane.top()),
+                            Pos2::new(x + 3.0, lane.bottom()),
+                        ),
+                        0.0,
+                        theme::READOUT.gamma_multiply(0.20),
+                    );
+                    p.line_segment(
+                        [Pos2::new(x, ruler.top() + 6.0), Pos2::new(x, lane.bottom())],
+                        Stroke::new(2.0, theme::READOUT),
+                    );
+                    p.add(egui::Shape::convex_polygon(
+                        vec![
+                            Pos2::new(x - 5.0, ruler.top() + 2.0),
+                            Pos2::new(x + 5.0, ruler.top() + 2.0),
+                            Pos2::new(x, ruler.top() + 9.0),
+                        ],
+                        theme::READOUT,
+                        Stroke::NONE,
+                    ));
+                }
+            }
+
+            // Zoom about the pointer, which is what every editor does and what makes
+            // a long conversation navigable without a scrollbar.
+            if let Some(pos) = resp.hover_pos() {
+                // Wheel events rather than the scroll delta: the delta carries
+                // whatever a scroll area near the pointer is still easing, and the
+                // lane would zoom itself while nobody was touching it.
+                let scroll: f32 = ui.input(|i| {
+                    i.events
+                        .iter()
+                        .filter_map(|e| match e {
+                            egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                            _ => None,
+                        })
+                        .sum()
+                });
+                if scroll.abs() > 0.1 {
+                    let anchor = at_s(pos.x);
+                    let factor = (1.0 - scroll as f64 * 0.15).clamp(0.2, 5.0);
+                    let new_span = (span * factor).clamp(0.2, map.total().max(1.0));
+                    st.view = Some(bounded(
+                        anchor - (anchor - from) / span * new_span,
+                        new_span,
+                        map.total(),
+                    ));
+                }
+            }
+
+            // Dragging with the left button picks a stretch; dragging with any
+            // other, or anywhere on the ruler, carries the lane along under the
+            // pointer. Both on the same surface, because the thing being pointed
+            // at is the same thing.
+            let panning = resp.dragged_by(egui::PointerButton::Secondary)
+                || resp.dragged_by(egui::PointerButton::Middle)
+                || ruler_drag;
+            if panning {
+                let by = resp.drag_delta().x as f64 / lane.width() as f64 * span;
+                st.view = Some(bounded(from - by, span, map.total()));
+                st.drag = None;
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if !panning
+                && resp.drag_started_by(egui::PointerButton::Primary)
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                st.drag = Some(at_s(pos.x));
+            }
+            if !panning
+                && resp.dragged_by(egui::PointerButton::Primary)
+                && let (Some(anchor), Some(pos)) = (st.drag, resp.interact_pointer_pos())
+            {
+                let now = at_s(pos.x);
+                st.sel = Some((anchor.min(now), anchor.max(now)));
+            }
+            if resp.drag_stopped() {
+                st.drag = None;
+                // A drag that went nowhere is a click, and a click plays from there
+                // rather than selecting nothing.
+                if let Some((a, b)) = st.sel.filter(|(a, b)| b - a < span / 200.0) {
+                    let _ = b;
+                    st.sel = None;
+                    act = Some(Act::Play { at: a, ranges: map.ranges(a, a + PLAY_MAX_S) });
+                }
+            }
+            if resp.clicked()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                let at = at_s(pos.x);
+                st.sel = None;
+                act = Some(Act::Play { at, ranges: map.ranges(at, at + PLAY_MAX_S) });
+            }
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+            }
+
+            overview(ui, st, &map, (from, span));
+
+            ui.add_space(2.0);
+            hint(
+                ui,
+                "Click to play from there, drag to select a stretch, drag the clock or the right \
+             button to pan, scroll or the buttons to zoom. Quiet longer than three seconds is a \
+             marker saying how long it lasted, and is not played.",
             );
-            p.add(egui::Shape::convex_polygon(
-                vec![
-                    Pos2::new(x - 5.0, ruler.top() + 2.0),
-                    Pos2::new(x + 5.0, ruler.top() + 2.0),
-                    Pos2::new(x, ruler.top() + 9.0),
-                ],
-                theme::READOUT,
-                Stroke::NONE,
-            ));
-        }
-    }
-
-    // Zoom about the pointer, which is what every editor does and what makes
-    // a long conversation navigable without a scrollbar.
-    if let Some(pos) = resp.hover_pos() {
-        // Wheel events rather than the scroll delta: the delta carries
-        // whatever a scroll area near the pointer is still easing, and the
-        // lane would zoom itself while nobody was touching it.
-        let scroll: f32 = ui.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
-                    _ => None,
-                })
-                .sum()
-        });
-        if scroll.abs() > 0.1 {
-            let anchor = at_s(pos.x);
-            let factor = (1.0 - scroll as f64 * 0.15).clamp(0.2, 5.0);
-            let new_span = (span * factor).clamp(0.2, map.total().max(1.0) * 1.5);
-            st.view = Some((anchor - (anchor - from) / span * new_span, new_span));
-        }
-    }
-
-    if resp.drag_started()
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
-        st.drag = Some(at_s(pos.x));
-    }
-    if resp.dragged()
-        && let (Some(anchor), Some(pos)) = (st.drag, resp.interact_pointer_pos())
-    {
-        let now = at_s(pos.x);
-        st.sel = Some((anchor.min(now), anchor.max(now)));
-    }
-    if resp.drag_stopped() {
-        st.drag = None;
-        // A drag that went nowhere is a click, and a click plays from there
-        // rather than selecting nothing.
-        if let Some((a, b)) = st.sel.filter(|(a, b)| b - a < span / 200.0) {
-            let _ = b;
-            st.sel = None;
-            st.playing = Some((a, PLAY_MAX_S));
-            act = Some(Act::Play(map.ranges(a, a + PLAY_MAX_S)));
-        }
-    }
-    if resp.clicked()
-        && let Some(pos) = resp.interact_pointer_pos()
-    {
-        let at = at_s(pos.x);
-        st.sel = None;
-        st.playing = Some((at, PLAY_MAX_S));
-        act = Some(Act::Play(map.ranges(at, at + PLAY_MAX_S)));
-    }
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-    }
-
-    overview(ui, st, &map, (from, span));
-
-    ui.add_space(2.0);
-    hint(
-        ui,
-        "Click to play from there, drag to select a stretch, scroll to zoom. Quiet longer than \
-         three seconds is a marker saying how long it lasted, and is not played. A row in the \
-         table below opens its own conversation.",
+            act
+        },
     );
+    let mut act = card.inner;
+    match (press, sel) {
+        (Some(Press::Close), _) => act = Some(Act::Close),
+        (Some(Press::Fit), _) => st.fit(entries),
+        (Some(Press::In), _) => st.zoom(0.5, map.total()),
+        (Some(Press::Out), _) => st.zoom(2.0, map.total()),
+        (Some(Press::Export), Some((a, b))) => act = Some(Act::Export(map.ranges(a, b))),
+        (Some(Press::Play), Some((a, b))) => {
+            act = Some(Act::Play { at: a, ranges: map.ranges(a, b) })
+        }
+        _ => {}
+    }
     act
+}
+
+/// A button in the card's header, applied once the body has had the state.
+#[derive(Clone, Copy)]
+enum Press {
+    Close,
+    Fit,
+    In,
+    Out,
+    Export,
+    Play,
 }
 
 /// The whole conversation in a strip under the lane, with the window on it.
@@ -496,7 +596,7 @@ fn overview(ui: &mut egui::Ui, st: &mut TimelineState, map: &Map, view: (f64, f6
         && let Some(pos) = resp.interact_pointer_pos()
     {
         let middle = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * total;
-        st.view = Some((middle - span / 2.0, span));
+        st.view = Some(bounded(middle - span / 2.0, span, total));
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);

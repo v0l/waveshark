@@ -412,129 +412,132 @@ impl CallList<'_> {
         // and what EXPORT writes are all the same set, or a listener hears
         // one conversation and saves another.
         let shown = self.st.filtered();
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            let seconds: f64 = shown.iter().map(|e| e.call.seconds()).sum();
-            let held = self.st.recordings.len();
-            let count = match shown.len() == held {
-                true => format!("{held} overs"),
-                false => format!("{} of {held} overs", shown.len()),
-            };
-            theme::Line::new()
-                .legend("recorded")
-                .value(count)
-                .gap(14.0)
-                .value(format!("{seconds:.0} s"))
-                .size(11.0)
-                .show(ui);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(12.0);
-                // The folder is on the button rather than on the row: a path
-                // is longer than the pane and the header is a reading.
-                if ui.small_button("REFRESH").on_hover_text(dir.display().to_string()).clicked() {
-                    self.st.read_recordings(&dir, true);
-                }
-                ui.add_space(8.0);
-                // A folder rather than a file, because what is listed is
-                // many overs; one of them is the row's own button.
-                if ui
-                    .add_enabled(
-                        !shown.is_empty() && self.st.saving.is_none(),
-                        egui::Button::new("EXPORT").small(),
-                    )
-                    .on_hover_text("Write every over listed into a folder, as Opus")
-                    .clicked()
-                {
-                    let (entries, start) = (shown.clone(), dir.clone());
-                    let ctx = ui.ctx().clone();
-                    self.st.saving =
-                        Some(poll_promise::Promise::spawn_thread("export calls", move || {
-                            let picked = rfd::FileDialog::new()
-                                .set_title("Export the recordings listed")
-                                .set_directory(&start)
-                                .pick_folder();
-                            ctx.request_repaint();
-                            let Some(into) = picked else { return String::new() };
-                            match crate::calllog::export(&entries, &into) {
-                                Ok((done, 0)) => format!("{done} written to {}", into.display()),
-                                Ok((done, bad)) => format!(
-                                    "{done} written to {}, {bad} would not read back",
-                                    into.display()
-                                ),
-                                Err(e) => format!("{}: {e}", into.display()),
-                            }
-                        }));
-                }
-                ui.add_space(8.0);
-                // The picture of what is listed, which is the way into
-                // playing from a moment rather than from an over.
-                if ui
-                    .selectable_label(self.st.timeline.open, "TIMELINE")
-                    .on_hover_text("Draw what is listed against the clock")
-                    .clicked()
-                {
-                    self.st.timeline.open = !self.st.timeline.open;
-                    self.st.timeline.fit(&shown);
-                }
-                ui.add_space(8.0);
-                // The conversation rather than the over: filter to a group
-                // or a channel and this is that group's day, in order, with
-                // the pauses between overs standing in for the waiting.
-                if ui
-                    .add_enabled(!shown.is_empty(), egui::Button::new("PLAY ALL").small())
-                    .on_hover_text(
-                        "Play what is listed as one conversation, oldest first, up to the \
-                         newest ten minutes of it",
-                    )
-                    .clicked()
-                {
-                    match crate::calllog::timeline(&shown, TIMELINE_GAP_S, TIMELINE_MAX_S) {
-                        Some(s) => {
-                            let all: f64 = shown.iter().map(|e| e.call.seconds()).sum();
-                            self.st.log_note = match all > s.seconds() + 1.0 {
-                                true => format!(
-                                    "playing the newest {:.0} s of {:.0} s; narrow the filter \
-                                     for the rest",
-                                    s.seconds(),
-                                    all
-                                ),
-                                false => format!("{} overs, {:.0} s", shown.len(), s.seconds()),
-                            };
-                            self.cmds.push(Cmd::Play(std::sync::Arc::new(s)));
-                        }
-                        None => self.st.log_note = "none of those overs would decode".into(),
-                    }
-                }
-            });
-        });
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            theme::Line::new().legend("filter").show(ui);
-            let mut clear = false;
-            widgets::field_then(
+        let seconds: f64 = shown.iter().map(|e| e.call.seconds()).sum();
+        let held = self.st.recordings.len();
+        let count = match shown.len() == held {
+            true => format!("{held} overs"),
+            false => format!("{} of {held} overs", shown.len()),
+        };
+        // A card, like every other panel: what it holds in the header, what
+        // can be done to it on the right of that, the filter in the body and
+        // what the last press did on the rail at the foot.
+        let mut pressed: Option<Press> = None;
+        let saving = self.st.saving.is_some();
+        let timeline_open = self.st.timeline.open;
+        let empty = shown.is_empty();
+        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+            widgets::card(
                 ui,
-                &mut self.st.filter,
-                "talkgroup, caller, system or frequency",
-                90.0,
+                Some(theme::TRACE),
                 |ui| {
-                    clear = ui.small_button("CLEAR").clicked();
+                    theme::Line::new()
+                        .legend("recorded")
+                        .value(count)
+                        .size(11.0)
+                        .gap(12.0)
+                        .value(format!("{seconds:.0} s"))
+                        .size(11.0)
+                        .elided(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // The folder is on the button rather than on a row:
+                        // a path is longer than the pane.
+                        if ui
+                            .small_button("REFRESH")
+                            .on_hover_text(dir.display().to_string())
+                            .clicked()
+                        {
+                            pressed = Some(Press::Refresh);
+                        }
+                        ui.add_space(6.0);
+                        // A folder rather than a file, because what is
+                        // listed is many overs; one of them is the row's own
+                        // button.
+                        if ui
+                            .add_enabled(!empty && !saving, egui::Button::new("EXPORT").small())
+                            .on_hover_text("Write every over listed into a folder, as Opus")
+                            .clicked()
+                        {
+                            pressed = Some(Press::Export);
+                        }
+                        ui.add_space(6.0);
+                        // The picture of what is listed, which is the way
+                        // into playing from a moment rather than from an
+                        // over.
+                        if ui
+                            .selectable_label(timeline_open, "TIMELINE")
+                            .on_hover_text("Draw what is listed against the clock")
+                            .clicked()
+                        {
+                            pressed = Some(Press::Timeline);
+                        }
+                        ui.add_space(6.0);
+                        // The overs back to back rather than the air as it
+                        // was: filter to a group and this is what was said
+                        // on it, with the waiting taken out.
+                        if ui
+                            .add_enabled(!empty, egui::Button::new("PLAY ALL").small())
+                            .on_hover_text(
+                                "Play what is listed as one conversation, oldest first, up to \
+                                 the newest ten minutes of it",
+                            )
+                            .clicked()
+                        {
+                            pressed = Some(Press::PlayAll);
+                        }
+                    });
+                },
+                |ui| {
+                    widgets::row_help(
+                        ui,
+                        "filter",
+                        "Every word has to be somewhere on the row, in any order: a talkgroup \
+                         and a caller narrows to that caller on that group.",
+                        |ui| {
+                            let mut clear = false;
+                            widgets::field_then(
+                                ui,
+                                &mut self.st.filter,
+                                "talkgroup, caller, system or frequency",
+                                70.0,
+                                |ui| clear = ui.small_button("CLEAR").clicked(),
+                            );
+                            if clear {
+                                self.st.filter.clear();
+                            }
+                        },
+                    );
+                    if !self.st.log_note.is_empty() {
+                        let note = self.st.log_note.clone();
+                        // Green for what was written or played, red for what
+                        // would not: the lamp is the answer to the last
+                        // press and the only place it is reported.
+                        let ok = !note.contains("not") && !note.contains("nothing");
+                        widgets::lamp(ui, ok, &note);
+                    }
                 },
             );
-            if clear {
-                self.st.filter.clear();
-            }
         });
-        if !self.st.log_note.is_empty() {
-            hint(ui, &self.st.log_note.clone());
+        ui.add_space(6.0);
+        match pressed {
+            None => {}
+            Some(Press::Refresh) => self.st.read_recordings(&dir, true),
+            Some(Press::Timeline) => {
+                self.st.timeline.open = !self.st.timeline.open;
+                self.st.timeline.fit(&shown);
+            }
+            Some(Press::Export) => self.export_all(&shown, &dir, ui.ctx()),
+            Some(Press::PlayAll) => self.play_all(&shown),
         }
-        ui.add_space(4.0);
 
         if self.st.timeline.open && !shown.is_empty() {
             let left = self.radio.map(|r| r.status.replay_left_s()).unwrap_or(0.0);
-            let act = super::timeline::show(ui, &mut self.st.timeline, &shown, left);
+            let st = &mut self.st;
+            let act = egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(12, 0))
+                .show(ui, |ui| super::timeline::show(ui, &mut st.timeline, &shown, left))
+                .inner;
             self.timeline_act(act, &shown, ui.ctx());
-            ui.add_space(4.0);
+            ui.add_space(6.0);
         }
 
         if self.st.recordings.is_empty() {
@@ -652,6 +655,55 @@ impl CallList<'_> {
         }
     }
 
+    /// Every over listed, into a folder somebody picks, as the Opus it was
+    /// recorded as.
+    fn export_all(
+        &mut self,
+        shown: &[crate::calllog::Entry],
+        dir: &std::path::Path,
+        ctx: &egui::Context,
+    ) {
+        if self.st.saving.is_some() {
+            return;
+        }
+        let (entries, start, ctx) = (shown.to_vec(), dir.to_path_buf(), ctx.clone());
+        self.st.saving = Some(poll_promise::Promise::spawn_thread("export calls", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Export the recordings listed")
+                .set_directory(&start)
+                .pick_folder();
+            ctx.request_repaint();
+            let Some(into) = picked else { return String::new() };
+            match crate::calllog::export(&entries, &into) {
+                Ok((done, 0)) => format!("{done} written to {}", into.display()),
+                Ok((done, bad)) => {
+                    format!("{done} written to {}, {bad} would not read back", into.display())
+                }
+                Err(e) => format!("{}: {e}", into.display()),
+            }
+        }));
+    }
+
+    /// The overs listed, back to back, with the waiting between them cut to
+    /// a breath.
+    fn play_all(&mut self, shown: &[crate::calllog::Entry]) {
+        match crate::calllog::timeline(shown, TIMELINE_GAP_S, TIMELINE_MAX_S) {
+            Some(s) => {
+                let all: f64 = shown.iter().map(|e| e.call.seconds()).sum();
+                self.st.log_note = match all > s.seconds() + 1.0 {
+                    true => format!(
+                        "playing the newest {:.0} s of {:.0} s; narrow the filter for the rest",
+                        s.seconds(),
+                        all
+                    ),
+                    false => format!("{} overs, {:.0} s", shown.len(), s.seconds()),
+                };
+                self.cmds.push(Cmd::Play(std::sync::Arc::new(s)));
+            }
+            None => self.st.log_note = "none of those overs would decode".into(),
+        }
+    }
+
     /// What the timeline asked for: play a stretch, write one out, or close.
     ///
     /// Play and export are the same stretch of the same conversation, taken
@@ -665,10 +717,15 @@ impl CallList<'_> {
         match act {
             None => {}
             Some(super::timeline::Act::Close) => self.st.timeline.open = false,
-            Some(super::timeline::Act::Play(ranges)) => {
+            Some(super::timeline::Act::Play { at, ranges }) => {
                 let from = ranges.first().map(|(a, _)| *a).unwrap_or_default();
                 match crate::calllog::audio(shown, &ranges, super::timeline::BREAK_S) {
                     Some(s) => {
+                        // The cursor is drawn from how long this turned out
+                        // to be, not from how much was asked for: a press
+                        // near the end of a conversation asks for five
+                        // minutes and gets the twenty seconds that are left.
+                        self.st.timeline.playing = Some((at, s.seconds()));
                         self.st.log_note = format!(
                             "playing {} from {}",
                             fmt_span(s.seconds()),
@@ -676,7 +733,10 @@ impl CallList<'_> {
                         );
                         self.cmds.push(Cmd::Play(std::sync::Arc::new(s)));
                     }
-                    None => self.st.log_note = "nothing was recorded there".into(),
+                    None => {
+                        self.st.timeline.playing = None;
+                        self.st.log_note = "nothing was recorded there".into();
+                    }
                 }
             }
             Some(super::timeline::Act::Export(ranges)) => {
@@ -829,6 +889,16 @@ impl CallList<'_> {
             );
         });
     }
+}
+
+/// A button in the recordings card's header, applied once the body has had
+/// the state it needs.
+#[derive(Clone, Copy)]
+enum Press {
+    Refresh,
+    Export,
+    Timeline,
+    PlayAll,
 }
 
 /// A length as somebody would say it: seconds under a minute, minutes above.
