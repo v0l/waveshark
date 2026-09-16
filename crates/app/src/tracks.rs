@@ -38,6 +38,7 @@ fn track_id(who: &common::Identity) -> Option<TrackId> {
         "ais" => who.id.parse().ok().map(TrackId::Mmsi),
         "aprs" => Some(TrackId::Call(who.id.clone())),
         "meshtastic" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Mesh),
+        "vaisala" => Some(TrackId::Sonde(who.id.clone())),
         "meshcore" => {
             let mut key = [0u8; 32];
             if who.id.len() != 64 {
@@ -121,6 +122,24 @@ fn merge_detail(into: &mut Detail, from: Detail) {
             *temperature_c = t.or(*temperature_c);
             *humidity_pct = h.or(*humidity_pct);
             *pressure_hpa = pr.or(*pressure_hpa);
+        }
+        // A sonde's report replaces the one before it, because every field
+        // of it is what the sonde is doing now. The two readings are the
+        // exception: they appear partway through the flight, once enough
+        // calibration has arrived, and must not blink out again on a frame
+        // whose sensor block failed its CRC.
+        (into @ Detail::Sonde { .. }, from @ Detail::Sonde { .. }) => {
+            let (was_t, was_h) = match into {
+                Detail::Sonde { temperature_c, humidity_pct, .. } => {
+                    (*temperature_c, *humidity_pct)
+                }
+                _ => (None, None),
+            };
+            *into = from;
+            if let Detail::Sonde { temperature_c, humidity_pct, .. } = into {
+                *temperature_c = temperature_c.or(was_t);
+                *humidity_pct = humidity_pct.or(was_h);
+            }
         }
         (into @ Detail::Station { .. }, from @ Detail::Station { .. }) => *into = from,
         (into @ Detail::Aprs { .. }, from @ Detail::Aprs { .. }) => *into = from,
@@ -212,6 +231,8 @@ pub enum TrackId {
     /// A MeshCore node's Ed25519 public key, which is its identity; other
     /// packets address it by the first byte.
     MeshCore([u8; 32]),
+    /// A radiosonde's serial, printed on the case and the only name it has.
+    Sonde(String),
 }
 
 impl TrackId {
@@ -225,6 +246,7 @@ impl TrackId {
             // The hash other nodes use, then enough of the key to tell two
             // nodes with the same hash apart.
             TrackId::MeshCore(k) => format!("{:02x}:{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3]),
+            TrackId::Sonde(s) => s.clone(),
         }
     }
 
@@ -237,6 +259,7 @@ impl TrackId {
             TrackId::Call(_) => "APRS",
             TrackId::Mesh(_) => "Meshtastic",
             TrackId::MeshCore(_) => "MeshCore",
+            TrackId::Sonde(_) => "Radiosonde",
         }
     }
 }
@@ -301,9 +324,40 @@ pub enum Detail {
     /// network. What it is decides how it is drawn: a repeater, a room
     /// server or a sensor is installed somewhere, a chat node is carried.
     MeshCore { role: &'static str, fixed: bool },
+    /// A radiosonde under a balloon: climbing to about 35 km, bursting, and
+    /// coming down under a parachute somewhere downwind.
+    Sonde {
+        altitude_m: f64,
+        climb_ms: f64,
+        battery_v: f32,
+        satellites: u8,
+        descending: bool,
+        /// Air temperature, once enough of the sonde's calibration has
+        /// arrived to read its thermometer. The reason the balloon is up
+        /// there at all.
+        temperature_c: Option<f32>,
+        humidity_pct: Option<f32>,
+        /// How much of the 51 piece calibration has been collected, so a
+        /// view can say why there is no temperature yet.
+        calibration_pieces: usize,
+    },
 }
 
 impl Detail {
+    /// A sonde nothing has been read from yet.
+    pub fn new_sonde() -> Self {
+        Detail::Sonde {
+            altitude_m: f64::NAN,
+            climb_ms: f64::NAN,
+            battery_v: f32::NAN,
+            satellites: 0,
+            descending: false,
+            temperature_c: None,
+            humidity_pct: None,
+            calibration_pieces: 0,
+        }
+    }
+
     /// An aircraft nothing has been heard from yet.
     pub fn new_aircraft() -> Self {
         Detail::Aircraft {
@@ -331,6 +385,9 @@ impl Detail {
                     Kind::Vehicle
                 }
             }
+            // Under a balloon at up to 35 km, so it is drawn and forgotten
+            // like the other thing in the sky.
+            Detail::Sonde { .. } => Kind::Aircraft,
         }
     }
 }
@@ -483,6 +540,10 @@ struct Entry {
     track: Track,
     /// Empty for every protocol whose positions are absolute.
     cpr: Cpr,
+    /// A radiosonde's factory calibration, collected sixteen bytes a frame.
+    /// Here for the same reason `cpr` is: it is what this transmitter has
+    /// said so far, which no single frame knows.
+    calibration: Option<Box<decode::rs41::Calibration>>,
 }
 
 #[derive(Default)]
@@ -520,7 +581,11 @@ impl Tracks {
         if let Some(i) = self.seen.iter().position(|e| e.track.id == id) {
             return i;
         }
-        self.seen.push(Entry { track: Track::new(id, detail, at), cpr: Cpr::default() });
+        self.seen.push(Entry {
+            track: Track::new(id, detail, at),
+            cpr: Cpr::default(),
+            calibration: None,
+        });
         // Something heard an hour ago is not worth remembering, and a
         // receiver left running for a week would otherwise accumulate every
         // vessel and aircraft in the country.
@@ -571,6 +636,46 @@ impl Tracks {
             },
             common::ReportDetail::MeshCore { role, fixed } => {
                 Detail::MeshCore { role, fixed: *fixed }
+            }
+            common::ReportDetail::Sonde {
+                altitude_m,
+                climb_ms,
+                battery_v,
+                satellites,
+                descending,
+                sensors,
+            } => {
+                // The sonde's calibration belongs to the sonde and arrives a
+                // sixteenth at a time, so it is folded in here before the
+                // reading is taken, and the reading is whatever the pieces
+                // collected so far allow: nothing, then temperature, then
+                // humidity with it.
+                let i = self.entry(id.clone(), Detail::new_sonde(), at);
+                let cal = self.seen[i]
+                    .calibration
+                    .get_or_insert_with(|| Box::new(decode::rs41::Calibration::new()));
+                let mut ptu = decode::rs41::Ptu::default();
+                if let Some(s) = sensors {
+                    if let Some((n, piece)) = &s.calibration {
+                        cal.feed(*n, piece);
+                    }
+                    let t = cal.air_temperature_c(&s.meas);
+                    ptu = decode::rs41::Ptu {
+                        temperature_c: t,
+                        humidity_pct: t.and_then(|t| cal.humidity_pct(&s.meas, t)),
+                        sensor_temp_c: None,
+                    };
+                }
+                Detail::Sonde {
+                    altitude_m: *altitude_m,
+                    climb_ms: *climb_ms,
+                    battery_v: *battery_v,
+                    satellites: *satellites,
+                    descending: *descending,
+                    temperature_c: ptu.temperature_c,
+                    humidity_pct: ptu.humidity_pct,
+                    calibration_pieces: cal.pieces(),
+                }
             }
             common::ReportDetail::Mesh {
                 long_name,

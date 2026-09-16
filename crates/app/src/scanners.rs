@@ -310,7 +310,7 @@ impl Scanner {
 /// block up. Without it the file is written once, on the first run, and a
 /// front end added later never runs for anybody who already had one: BLE
 /// shipped, and every existing installation quietly had no Bluetooth.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The scanners, in the order they are consulted.
 #[derive(Clone, PartialEq, Debug)]
@@ -953,6 +953,16 @@ range = 390 - 400 MHz
 span  = 250 kHz
 front = auto
 
+[Radiosonde]
+# Weather balloons. Every upper-air station in the world launches one at 00
+# and 12 UTC and it climbs for two hours, so there is nearly always one
+# overhead somewhere in this band. A Vaisala RS41 is tuned anywhere in it on
+# a 10 kHz raster and the frequency is decided at the station rather than
+# published, so the band is scanned rather than a channel list watched.
+range = 400 - 406 MHz
+span  = 25 kHz
+front = auto
+
 # The licence-free allocations, one block each, so a receiver tuned into any
 # of them decodes what is there without being told. They are all shipped
 # enabled because a block only costs anything when the span covers it, and a
@@ -1141,6 +1151,7 @@ mod tests {
                 "DCS 1800",
                 "PCS 1900",
                 "TETRA",
+                "Radiosonde",
                 "ISM 27",
                 "ISM 40",
                 "ISM 169",
