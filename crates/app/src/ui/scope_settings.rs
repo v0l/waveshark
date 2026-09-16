@@ -16,11 +16,10 @@ pub(super) enum Action {
 /// The scope's settings, over the state they change.
 pub(super) struct ScopeSettings<'a> {
     pub st: &'a mut ScopeState,
-    /// Removing the direct-conversion centre spur, which is a property of the
-    /// receiver rather than of the drawing but is set beside it.
-    pub dc_block: &'a mut bool,
+    /// The record, for the centre spur: removing it is a property of the
+    /// receiver rather than of the drawing, but it is set beside it.
+    pub settings: crate::session::Settings,
     pub rate: f64,
-    pub cmds: &'a mut Vec<Cmd>,
     pub acts: Vec<Action>,
 }
 
@@ -36,11 +35,10 @@ impl ScopeSettings<'_> {
                 let opts = FFTS.iter().map(|v| (*v, v.to_string()));
                 if choice(ui, "fft", &mut n, opts) {
                     self.st.fft_size = n;
-                    // The same value the session saves and the radio starts
-                    // with, so a chosen FFT size survives a restart rather
-                    // than only living in the running spectrum.
+                    // The same value the record holds and the radio starts
+                    // with, so a chosen transform size survives a restart
+                    // rather than only living in the running spectrum.
                     self.st.fft = n;
-                    self.cmds.push(Cmd::Fft(n));
                     self.acts.push(Action::ResetWaterfall);
                 }
             });
@@ -50,15 +48,12 @@ impl ScopeSettings<'_> {
                 let opts = REFRESH.iter().map(|(n, f)| (*f, format!("{n} fps")));
                 if choice(ui, "fps", &mut v, opts) {
                     self.st.refresh = v;
-                    self.cmds.push(Cmd::Refresh(v));
                 }
             });
             row_help(ui, "averaging", "How much of the last frame the next one keeps.", |ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
                 let slider = egui::Slider::new(&mut self.st.smoothing, 0.02..=1.0);
-                if ui.add(slider.show_value(false)).changed() {
-                    self.cmds.push(Cmd::Smoothing(self.st.smoothing));
-                }
+                ui.add(slider.show_value(false));
                 let text = if self.st.smoothing > 0.95 {
                     "off".to_string()
                 } else {
@@ -66,14 +61,9 @@ impl ScopeSettings<'_> {
                 };
                 theme::Line::new().set(text).size(11.0).show(ui);
             });
-            if switch(
-                ui,
-                "centre spur",
-                self.dc_block,
-                "remove",
-                "LO leakage at the tuned frequency.",
-            ) {
-                self.cmds.push(Cmd::DcBlock(*self.dc_block));
+            let mut dc = self.settings.read(|s| s.dc_block);
+            if switch(ui, "centre spur", &mut dc, "remove", "LO leakage at the tuned frequency.") {
+                self.settings.edit(|s| s.dc_block = dc);
             }
         });
         ui.add_space(8.0);

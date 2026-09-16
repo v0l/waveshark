@@ -202,9 +202,8 @@ impl App {
     fn scope_settings(&mut self, ui: &mut egui::Ui, spectrum: bool) {
         let mut pane = scope_settings::ScopeSettings {
             st: &mut self.scope,
-            dc_block: &mut self.dc_block,
+            settings: self.settings.clone(),
             rate: self.rate,
-            cmds: &mut self.cmds,
             acts: Vec::new(),
         };
         if spectrum {
@@ -901,26 +900,20 @@ impl App {
             // Off until it is asked for, and remembered once it is: writing
             // every burst a receiver hears onto somebody's disc is a decision
             // for them to make.
-            let mut on = self.log.path.is_some();
+            let mut on = self.setting(|s| s.packet_log_on);
             let log_help = "Timings and frames as demodulated, replayable.";
             if switch(ui, "write", &mut on, "every packet to disk", log_help) {
-                let dir = if on {
-                    self.log_dir.clone().or_else(crate::packetlog::PacketLog::default_dir)
-                } else {
-                    None
-                };
-                self.log.path = dir.clone();
-                self.send(Cmd::PacketLog(dir));
+                self.settings.edit(|s| s.packet_log_on = on);
             }
             // What the list shows, rather than what the receiver does. An
             // unrecognised burst is still reported, logged and replayable
             // with this off; it is only kept out of the table.
-            let mut unknown = self.log.show_unknown;
+            let mut unknown = self.setting(|s| s.list_unknown);
             let unknown_help = "Bursts that decoded to no known protocol. They are the point \
                                 of scanning an unfamiliar band, and on a noisy one they bury \
                                 the decodes.";
             if switch(ui, "list", &mut unknown, "unrecognised bursts too", unknown_help) {
-                self.log.show_unknown = unknown;
+                self.settings.edit(|s| s.list_unknown = unknown);
             }
             row_help(ui, "folder", "Where the files go. Enter or SET applies it.", |ui| {
                 let mut set = false;
@@ -928,23 +921,18 @@ impl App {
                     set = ui.small_button("SET").clicked();
                 });
                 let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if typed || set {
-                    let dir = std::path::PathBuf::from(self.log_dir_edit.trim());
-                    if !self.log_dir_edit.trim().is_empty() {
-                        self.log_dir = Some(dir.clone());
-                        self.log.path = Some(dir.clone());
-                        self.send(Cmd::PacketLog(Some(dir)));
-                    }
+                if (typed || set) && !self.log_dir_edit.trim().is_empty() {
+                    let dir = self.log_dir_edit.trim().to_string();
+                    self.settings.edit(|s| s.log_dir = dir);
                 }
             });
             let cap_help = "What the whole folder may take. The oldest days are deleted to \
                             keep it under, so the log rolls rather than stopping.";
             row_help(ui, "limit", cap_help, |ui| {
-                let mut cap = self.log_cap_mb;
+                let mut cap = self.setting(|s| s.log_cap_mb);
                 let opts = [Some(512u64), Some(2048), Some(8192), Some(32_768), None];
                 if choice(ui, "log_cap", &mut cap, opts.map(|o| (o, size_label(o)))) {
-                    self.log_cap_mb = cap;
-                    self.send(Cmd::PacketLogCap(cap.map(|mb| mb << 20)));
+                    self.settings.edit(|s| s.log_cap_mb = cap);
                 }
             });
             ui.add_space(4.0);
@@ -993,8 +981,9 @@ impl App {
 
         let status = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
         let mut remove = None;
+        let feeds = self.setting(|s| s.feeds.clone());
         section(ui, "feeds", "packets from another receiver, over TCP", |ui| {
-            for (i, f) in self.feeds.iter().enumerate() {
+            for (i, f) in feeds.iter().enumerate() {
                 let live = status.iter().find(|s| s.spec == *f);
                 let (ok, said) = match live {
                     Some(s) if s.connected => (true, format!("{} frames", s.frames)),
@@ -1034,9 +1023,8 @@ impl App {
                 self.feed_kind = kind;
                 if add {
                     match parse_feed(&self.feed_host, self.feed_kind) {
-                        Some(spec) if !self.feeds.contains(&spec) => {
-                            self.feeds.push(spec);
-                            self.send(Cmd::Feeds(self.feeds.clone()));
+                        Some(spec) if !feeds.contains(&spec) => {
+                            self.settings.edit(|s| s.feeds.push(spec));
                             self.feed_host.clear();
                         }
                         Some(_) => self.err = Some("that feed is already attached".into()),
@@ -1046,8 +1034,9 @@ impl App {
             });
         });
         if let Some(i) = remove {
-            self.feeds.remove(i);
-            self.send(Cmd::Feeds(self.feeds.clone()));
+            self.settings.edit(|s| {
+                s.feeds.remove(i);
+            });
         }
     }
 
@@ -1070,18 +1059,14 @@ impl App {
                 }
             });
             row_help(ui, t("settings.country"), t("settings.country.help"), |ui| {
-                let mut code = self.country.clone();
+                let mut code = self.setting(|s| s.country.clone());
                 let opts = crate::locale::COUNTRIES
                     .iter()
                     .map(|c| (c.code.to_string(), c.name.to_string()));
                 if choice(ui, "app-country", &mut code, opts)
                     && let Some(c) = crate::locale::by_code(&code)
                 {
-                    self.country = c.code.to_string();
-                    // The cell export is fetched per country, so the
-                    // dataset pane has to hear about this to know which
-                    // one it would fetch.
-                    crate::data::set_country(&self.country);
+                    self.settings.edit(|s| s.country = c.code.to_string());
                     // A country decides the plan the first time and then
                     // stops having an opinion, so choosing one after
                     // overriding the plan puts the override back rather
@@ -1091,7 +1076,7 @@ impl App {
                     // wrong by a couple of hundred miles, which is close
                     // enough to draw with and is replaced the moment a
                     // real position is typed in.
-                    if self.location.is_none() {
+                    if self.setting(|s| s.location).is_none() {
                         self.set_location(c.centre.0, c.centre.1);
                         self.station_edit = None;
                     }
@@ -1125,31 +1110,29 @@ impl App {
         // this machine.
         section(ui, "sound", "this machine's speaker and microphone", |ui| {
             row_help(ui, "speaker", "Where the mix, the calls and any replay come out.", |ui| {
-                let mut out = self.audio_out.clone();
+                let mut out = self.setting(|s| s.audio_out.clone());
                 if device_combo(ui, "app-audio-out", &mut out, audio::AudioPlayer::devices()) {
-                    self.audio_out = out;
-                    self.send_audio();
+                    self.settings.edit(|s| s.audio_out = out);
                 }
             });
             let mic = "What a keyed channel transmits. Held open while a channel is set to \
                        MIC, so the meter moves before you key.";
             row_help(ui, "microphone", mic, |ui| {
-                let mut input = self.audio_in.clone();
+                let mut input = self.setting(|s| s.audio_in.clone());
                 if device_combo(ui, "app-audio-in", &mut input, audio::AudioCapture::devices()) {
-                    self.audio_in = input;
-                    self.send_audio();
+                    self.settings.edit(|s| s.audio_in = input);
                 }
             });
         });
         ui.add_space(8.0);
 
         section(ui, "opens on", "the first view when the window comes up", |ui| {
-            let mut on = self.dashboard;
+            let mut on = self.setting(|s| s.dashboard);
             let help = "Quick start and receiver status, as the first view. Off takes its \
                         tab away and opens the receiver on the spectrum.";
             if switch(ui, "dashboard", &mut on, "show it first", help) {
                 match on {
-                    true => self.dashboard = true,
+                    true => self.settings.edit(|s| s.dashboard = true),
                     false => self.hide_dashboard(),
                 }
             }
@@ -1159,7 +1142,8 @@ impl App {
         section(ui, t("settings.position"), "where the aerial is, for ranges and the map", |ui| {
             row_help(ui, "station", t("settings.position.help"), |ui| {
                 let mut edit = self.station_edit.take();
-                let text = edit.get_or_insert_with(|| match self.location {
+                let here = self.setting(|s| s.location);
+                let text = edit.get_or_insert_with(|| match here {
                     Some((lat, lon)) => format!("{lat:.4}, {lon:.4}"),
                     None => String::new(),
                 });
@@ -1183,7 +1167,7 @@ impl App {
             reading(
                 ui,
                 "or",
-                if self.location.is_some() {
+                if self.setting(|s| s.location.is_some()) {
                     "right-click the map to move it"
                 } else {
                     "right-click the map"
@@ -1274,12 +1258,11 @@ impl App {
                     port or a daemon elsewhere: a device path such as /dev/ttyACM0, or \
                     gpsd:host.";
         let mut set: Option<Option<gps::Transport>> = None;
+        let saved = self.setting(|s| s.gps.clone());
         row_help(ui, "gps", help, |ui| {
-            let text = self.survey.gps_edit.get_or_insert_with(|| {
-                self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default()
-            });
+            let text = self.survey.gps_edit.get_or_insert_with(|| saved.clone());
             let (mut pressed, mut auto) = (false, false);
-            let named = self.survey.gps.is_some();
+            let named = !saved.is_empty();
             let reserve = if named { 92.0 } else { 44.0 };
             let r = field_then(ui, text, gps::Transport::LOCAL_GPSD, reserve, |ui| {
                 pressed = ui.small_button("SET").clicked();
@@ -1333,10 +1316,9 @@ impl App {
             // Nothing answering is only a fault when somebody named a
             // receiver; the local gpsd is looked for whether or not one is
             // there.
-            (false, None) => (
-                self.survey.gps.is_none(),
-                "no gps answering: the station is where it was set".into(),
-            ),
+            (false, None) => {
+                (saved.is_empty(), "no gps answering: the station is where it was set".into())
+            }
         };
         lamp(ui, ok, &line);
         // The reader is not the radio's, so this pane keeps its own clock:
@@ -1491,35 +1473,24 @@ impl App {
         index: usize,
         k: crate::data::Key,
     ) {
-        let Some(slot) = self.key_slot(which, index) else {
+        let Some(before) = self.setting(|s| key_of(s, which, index).cloned()) else {
             return;
         };
-        let before = slot.clone();
+        let mut text = before.clone();
         row_help(ui, k.label, k.help, |ui| {
             if k.secret {
-                secret(ui, slot);
+                secret(ui, &mut text);
             } else {
-                field(ui, slot, k.hint);
+                field(ui, &mut text, k.hint);
             }
         });
-        if *slot != before {
-            let value = slot.clone();
-            which.set_key(index, &value);
-        }
-    }
-
-    /// Where this pane holds the credential for a dataset, so what is typed
-    /// is what the session saves.
-    fn key_slot(&mut self, which: crate::data::Which, index: usize) -> Option<&mut String> {
-        match (which, index) {
-            (crate::data::Which::CellTowers, 0) => Some(&mut self.opencellid_token),
-            (crate::data::Which::Satellites(g), 0) if g.needs_login() => {
-                Some(&mut self.spacetrack_identity)
-            }
-            (crate::data::Which::Satellites(g), _) if g.needs_login() => {
-                Some(&mut self.spacetrack_password)
-            }
-            _ => None,
+        if text != before {
+            self.settings.edit(|s| {
+                if let Some(slot) = key_slot(s, which, index) {
+                    *slot = text.clone();
+                }
+            });
+            which.set_key(index, &text);
         }
     }
 
@@ -1638,13 +1609,16 @@ impl App {
             return;
         }
         let mut close = false;
-        let mut apply = false;
+        // Two switches and no text, so each goes into the record as it is
+        // clicked: there is nothing here to type wrongly on the way.
+        let (mut on, mut lookup) = self.setting(|s| (s.beacondb_on, s.beacondb_lookup));
+        let (was_on, was_lookup) = (on, lookup);
         let r = egui::containers::Modal::new(egui::Id::new("beacondb"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(520.0);
                 modal_title(ui, "Feed beacondb.net");
-                let b = &mut self.survey.beacondb;
+                let b = &self.survey.beacondb;
                 section(ui, "submit", "crowd-sourced, no account, published as collected", |ui| {
                     let why = "Bluetooth devices and cells heard with a position are spooled \
                                to disc and submitted when there is a network. Everything else \
@@ -1653,16 +1627,12 @@ impl App {
                                was when it heard something, so a drive is a track of where you \
                                have been. Levels are not sent: this receiver measures dBFS and \
                                the field means dBm.";
-                    if switch(ui, "submit", &mut b.on, "while receiving", why) {
-                        apply = true;
-                    }
+                    switch(ui, "submit", &mut on, "while receiving", why);
                     let ask = "Draws a position for a cell you have decoded that the \
                                OpenCelliD export has no row for, as a cross with the accuracy \
                                beaconDB gives it. Asking tells beaconDB which cells this \
                                receiver has heard, which is why it is separate from submitting.";
-                    if switch(ui, "look up", &mut b.lookup, "where a heard cell is", ask) {
-                        apply = true;
-                    }
+                    switch(ui, "look up", &mut lookup, "where a heard cell is", ask);
                     match b.status.as_ref() {
                         Some(st) => {
                             reading(
@@ -1693,16 +1663,16 @@ impl App {
                     if ui.button(crate::i18n::t("ui.close")).clicked() {
                         close = true;
                     }
-                    if ui.button("APPLY").clicked() {
-                        apply = true;
-                    }
                 });
             });
         if r.should_close() {
             close = true;
         }
-        if apply {
-            self.apply_beacondb();
+        if (on, lookup) != (was_on, was_lookup) {
+            self.settings.edit(|s| {
+                s.beacondb_on = on;
+                s.beacondb_lookup = lookup;
+            });
         }
         if close {
             self.survey.beacondb.open = false;
@@ -2177,14 +2147,13 @@ impl App {
                     changed = true;
                 }
             });
-            let mut dc = self.dc_block;
+            let mut dc = self.setting(|s| s.dc_block);
             let dc_help = "A direct conversion receiver leaks its own local oscillator into \
                            the middle of the span, where it looks exactly like a carrier on \
                            the frequency you are tuned to. This measures the offset and \
                            subtracts it.";
             if switch(ui, "centre spur", &mut dc, "remove", dc_help) {
-                self.dc_block = dc;
-                self.send(Cmd::DcBlock(dc));
+                self.settings.edit(|s| s.dc_block = dc);
             }
         });
         ui.add_space(8.0);
@@ -2218,7 +2187,10 @@ impl App {
             None => (false, 0, 0, false, None),
         };
         section(ui, "raw capture", "the whole span to one file, as it arrives", |ui| {
-            let mut on = cap_on;
+            // What was asked for rather than what the node reports: a radio
+            // that is not running has no capture node to ask, and a switch
+            // that reads off one goes dark the moment the source stops.
+            let mut on = self.setting(|s| s.capture_on);
             let why = "The recording to make when the receiver shows a transmission and \
                        reads nothing from it: replaying the file puts the same samples \
                        through the same graph, so a decoder can be changed and tried again.";
@@ -2229,11 +2201,10 @@ impl App {
                             capture is evidence of a signal that may not come again, so \
                             writing stops instead.";
             row_help(ui, "limit", cap_help, |ui| {
-                let mut cap = self.capture_cap_mb;
+                let mut cap = self.setting(|s| s.capture_cap_mb);
                 let opts = [Some(1024u64), Some(4096), Some(16_384), Some(65_536), None];
                 if choice(ui, "capture_cap", &mut cap, opts.map(|o| (o, size_label(o)))) {
-                    self.capture_cap_mb = cap;
-                    self.send(Cmd::CaptureCap(cap.map(|mb| mb << 20).unwrap_or(0)));
+                    self.settings.edit(|s| s.capture_cap_mb = cap);
                 }
             });
             // Where the files are, and a way into it. A capture is made to
@@ -2420,4 +2391,32 @@ fn pick_or_type(ui: &mut egui::Ui, id: &str, value: &mut String, offered: Vec<St
         options.insert(0, (String::new(), "choose".into()));
     }
     choice(ui, id, value, options);
+}
+
+/// Where the record keeps the credential a dataset needs, so what is typed
+/// into the row is what is saved and what fetches it.
+fn key_slot(
+    s: &mut crate::session::Session,
+    which: crate::data::Which,
+    index: usize,
+) -> Option<&mut String> {
+    match (which, index) {
+        (crate::data::Which::CellTowers, 0) => Some(&mut s.opencellid_token),
+        (crate::data::Which::Satellites(g), 0) if g.needs_login() => {
+            Some(&mut s.spacetrack_identity)
+        }
+        (crate::data::Which::Satellites(g), _) if g.needs_login() => {
+            Some(&mut s.spacetrack_password)
+        }
+        _ => None,
+    }
+}
+
+fn key_of(s: &crate::session::Session, which: crate::data::Which, index: usize) -> Option<&String> {
+    match (which, index) {
+        (crate::data::Which::CellTowers, 0) => Some(&s.opencellid_token),
+        (crate::data::Which::Satellites(g), 0) if g.needs_login() => Some(&s.spacetrack_identity),
+        (crate::data::Which::Satellites(g), _) if g.needs_login() => Some(&s.spacetrack_password),
+        _ => None,
+    }
 }
