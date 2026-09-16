@@ -14,6 +14,8 @@ the code is in the commit log.
 - The agent and the MCP server reach the settings: the scanner table, the
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.
+- Vaisala RS41 radiosondes on the map: serial, height, climb rate and the
+  air temperature and humidity the balloon was sent up to measure.
 
 ## [0.3.0] - 2026-09-16
 

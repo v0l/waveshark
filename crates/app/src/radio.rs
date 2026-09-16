@@ -4228,6 +4228,144 @@ pub(crate) mod tests {
         assert!(peak > 1e-3, "the sound port carried silence, peak {peak}");
     }
 
+    /// The radiosonde capture: 40 s of a Vaisala RS41 recorded near London
+    /// and published by SDRangel, at its own centre with the sonde 9.76 kHz
+    /// off it.
+    fn rs41_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/rs41_herstmonceux_405.80024M_31.25k.cs16");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    /// A weather balloon read the whole way through the receiver: detector,
+    /// raster, remembered channel, decoder, map.
+    ///
+    /// Everything about this capture is hostile to a decoder placed on a
+    /// source and nothing else. The transmission is 4 dB over the floor and
+    /// lasts 534 ms a second, so the detector opens it late and closes it
+    /// again, measuring a slightly different centre each time; the sonde sits
+    /// two thirds of the way to the edge of a 31 kHz span. What makes it work
+    /// is the band's 10 kHz raster turning forty measurements into one
+    /// channel, and the latch keeping that channel once a frame has decoded
+    /// on it. Take either away and this reads one frame in forty seconds.
+    #[test]
+    fn a_radiosonde_is_found_and_tracked_through_the_receiver() {
+        let Some(buf) = rs41_fixture() else {
+            eprintln!(
+                "skipping: rs41_herstmonceux_405.80024M_31.25k.cs16 absent, run testdata/fetch.sh"
+            );
+            return;
+        };
+        fn field<'a>(r: &'a DecodeRecord, k: &str) -> Option<&'a common::Value> {
+            r.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v)
+        }
+        let mut rx = replay_receiver(&buf, None).expect("a receiver");
+        let rows = replay_blocks(&mut rx, &buf);
+        let sonde: Vec<&DecodeRecord> = rows.iter().filter(|r| r.model == Some("rs41")).collect();
+        // 28 of the 40 transmissions in the capture. The first seven go to
+        // finding it: a channel is not remembered until a frame has decoded
+        // on it, and until then every burst is a fresh decoder that started
+        // after the header had already gone by.
+        assert_eq!(sonde.len(), 28, "{} sonde frames", sonde.len());
+        assert!(sonde.iter().all(|r| r.crc == Some(true)), "a frame failed a block CRC");
+        assert!(
+            sonde.iter().all(|r| r.bytes.len() == decode::rs41::FRAME_STD),
+            "a frame was not a standard 320 byte one"
+        );
+
+        // One sonde, named, on one channel of the raster.
+        let serials: std::collections::BTreeSet<String> =
+            sonde.iter().filter_map(|r| r.identity.as_ref().map(|i| i.id.clone())).collect();
+        assert_eq!(serials, ["S1720982".to_string()].into_iter().collect());
+        for r in &sonde {
+            assert_eq!(r.freq, 405_810_000.0, "off the 10 kHz raster");
+            assert_eq!(r.modulation, common::Modulation::Fsk2);
+        }
+
+        // Consecutive frame numbers, which is the sonde's own clock: one a
+        // second, none missed once it is being tracked.
+        let nums: Vec<i64> =
+            sonde.iter().filter_map(|r| field(r, "frame").and_then(|v| v.as_i64())).collect();
+        assert_eq!(nums.len(), 28);
+        assert_eq!(nums[0], 3409, "{nums:?}");
+        assert_eq!(*nums.last().unwrap(), 3441, "{nums:?}");
+        assert!(nums.windows(2).all(|w| w[1] > w[0]), "out of order: {nums:?}");
+        // Once it has the channel it holds it: twenty in a row without a
+        // gap, through twenty transmitter silences of 466 ms each.
+        let run = nums
+            .windows(2)
+            .fold((1, 1), |(best, run), w| {
+                let run = if w[1] == w[0] + 1 { run + 1 } else { 1 };
+                (best.max(run), run)
+            })
+            .0;
+        assert_eq!(run, 20, "longest unbroken run in {nums:?}");
+
+        // And where it was: climbing through 10.3 km over Sussex, drifting
+        // east, which is a 12 UTC Herstmonceux sounding an hour after launch.
+        let last = sonde.last().unwrap();
+        let f = |k: &str| field(last, k).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
+        assert!((f("altitude_m") - 10_500.5).abs() < 1.0, "{}", f("altitude_m"));
+        assert!((f("climb_ms") - 4.30).abs() < 0.05, "{}", f("climb_ms"));
+        assert!((f("battery_v") - 2.7).abs() < 0.05, "{}", f("battery_v"));
+        assert_eq!(field(last, "state").map(|v| v.to_string()).as_deref(), Some("ascending"));
+
+        // The map reads the tracker and the tracker reads `position`, so
+        // this is the test that a balloon is drawn: one track, labelled with
+        // the serial, with a trail behind it. It drifted 900 m east across
+        // the capture, which is the whole of the trail.
+        let tracks = rx.tracks(std::time::Instant::now());
+        assert_eq!(tracks.len(), 1, "{tracks:?}");
+        let t = &tracks[0];
+        assert_eq!(t.id, crate::tracks::TrackId::Sonde("S1720982".into()));
+        assert_eq!(t.id.system(), "Radiosonde");
+        let (lat, lon) = t.position.expect("no fix on the map");
+        assert!((lat - 50.7898).abs() < 1e-3, "{lat}");
+        assert!((lon - 0.9226).abs() < 1e-3, "{lon}");
+        // One point per frame read, and a balloon at 10 km in a westerly
+        // drifting east across the whole of them.
+        assert_eq!(t.trail.len(), 28);
+        let east = t.trail.last().unwrap().1 - t.trail[0].1;
+        assert!((east - 0.0230).abs() < 1e-3, "drifted {east} degrees east");
+
+        // And its thermometer, which is what the balloon was sent up for.
+        //
+        // A sonde sends a sixteenth of its factory calibration a second, so
+        // there is no temperature on the first frame and there is one by the
+        // end: the counts in a frame are ratios, and the tracker is where
+        // the pieces that turn them into degrees are joined. Twenty-eight
+        // pieces here, one per frame read.
+        let crate::tracks::Detail::Sonde {
+            temperature_c,
+            humidity_pct,
+            calibration_pieces,
+            altitude_m,
+            descending,
+            ..
+        } = t.detail
+        else {
+            panic!("the track is not a sonde: {:?}", t.detail);
+        };
+        assert_eq!(calibration_pieces, 28);
+        assert!(!descending);
+        assert!((altitude_m - 10_500.5).abs() < 1.0, "{altitude_m}");
+        // The Met Office published this ascent: Herstmonceux (03882), 00 UTC
+        // on 27 December 2021, which is the hour the frames' own GPS time
+        // gives. Its profile reads -59.4 C at 10475 m and -59.3 C at 10586 m,
+        // against the -59.1 C read here at 10500 m. Nothing about that number
+        // comes from this repository: it is a second reduction, of the same
+        // balloon, from the station that launched it.
+        let t_c = temperature_c.expect("no temperature");
+        assert!((t_c + 59.1).abs() < 0.2, "{t_c} C against the published -59.4 at 10475 m");
+        // Humidity is the empirical fit rather than Vaisala's own reduction,
+        // and the published profile says 55% at 10475 m.
+        let rh = humidity_pct.expect("no humidity");
+        assert!((rh - 55.7).abs() < 0.5, "{rh}% against the published 55%");
+    }
+
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
     /// so the packets are read across the tuner's own DC spike.
     fn ble_fixture() -> Option<common::IqBuf> {

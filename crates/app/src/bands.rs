@@ -241,6 +241,20 @@ pub const EUROPE: &[Band] = &[
         raster: Some(Raster::step(25_000.0)),
     },
     Band {
+        lo: 400.0e6,
+        hi: 406.0e6,
+        name: "Radiosonde",
+        demod: Demod::Nfm,
+        color: NAV,
+        // Vaisala tunes a sonde in 10 kHz steps through the band, and the
+        // step is what stops a burst being measured afresh every second: the
+        // detector's centroid wanders a few kilohertz from one 534 ms
+        // transmission to the next, and without the raster each one opened a
+        // new channel with a cold bit clock. Measured on a 40 second
+        // recording, snapping took it from 1 frame read to 37.
+        raster: Some(Raster::step(10_000.0)),
+    },
+    Band {
         lo: 430.0e6,
         hi: 440.0e6,
         name: "70 cm",
@@ -580,6 +594,19 @@ pub const AMERICAS: &[Band] = &[
         raster: Some(Raster::step(25_000.0)),
     },
     Band {
+        lo: 400.0e6,
+        hi: 406.0e6,
+        name: "Radiosonde",
+        demod: Demod::Nfm,
+        color: NAV,
+        // Vaisala tunes a sonde in 10 kHz steps through the band, and the
+        // step is what stops a burst being measured afresh every second: the
+        // detector's centroid wanders a few kilohertz from one 534 ms
+        // transmission to the next, and without the raster each one opened a
+        // new channel with a cold bit clock.
+        raster: Some(Raster::step(10_000.0)),
+    },
+    Band {
         lo: 420.0e6,
         hi: 450.0e6,
         name: "70 cm",
@@ -889,6 +916,19 @@ pub const ASIA_PACIFIC: &[Band] = &[
         demod: Demod::Nfm,
         color: UTILITY,
         raster: Some(Raster::step(12_500.0)),
+    },
+    Band {
+        lo: 400.0e6,
+        hi: 406.0e6,
+        name: "Radiosonde",
+        demod: Demod::Nfm,
+        color: NAV,
+        // Vaisala tunes a sonde in 10 kHz steps through the band, and the
+        // step is what stops a burst being measured afresh every second: the
+        // detector's centroid wanders a few kilohertz from one 534 ms
+        // transmission to the next, and without the raster each one opened a
+        // new channel with a cold bit clock.
+        raster: Some(Raster::step(10_000.0)),
     },
     Band {
         lo: 430.0e6,

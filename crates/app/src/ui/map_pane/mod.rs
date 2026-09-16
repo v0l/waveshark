@@ -358,6 +358,9 @@ impl Map<'_> {
                         crate::tracks::Detail::Mesh { altitude_m, .. } => {
                             altitude_m.map(|v| format!("{v} m"))
                         }
+                        crate::tracks::Detail::Sonde { altitude_m, .. } => {
+                            Some(format!("{altitude_m:.0} m"))
+                        }
                         _ => None,
                     }
                     .unwrap_or_else(|| dash.clone());
@@ -393,6 +396,31 @@ impl Map<'_> {
                         crate::tracks::Detail::Aprs { comment, .. } => {
                             (comment.clone().unwrap_or_else(|| dash.clone()), theme::LEGEND)
                         }
+                        // What a sonde watcher wants at a glance: whether it
+                        // is still going up, and how fast.
+                        crate::tracks::Detail::Sonde {
+                            climb_ms,
+                            descending,
+                            temperature_c,
+                            ..
+                        } => (
+                            match temperature_c {
+                                // The reading the balloon was sent up for,
+                                // beside the only other thing worth seeing at
+                                // a glance: which way it is going.
+                                Some(t) => format!(
+                                    "{} {:.1} m/s, {t:.1} C",
+                                    if *descending { "descending" } else { "climbing" },
+                                    climb_ms.abs()
+                                ),
+                                None => format!(
+                                    "{} {:.1} m/s",
+                                    if *descending { "descending" } else { "climbing" },
+                                    climb_ms.abs()
+                                ),
+                            },
+                            if *descending { theme::READOUT } else { CRC_OK },
+                        ),
                         crate::tracks::Detail::Mesh { short_name, battery_pct, .. } => {
                             let mut parts = Vec::new();
                             if let Some(s) = short_name {
