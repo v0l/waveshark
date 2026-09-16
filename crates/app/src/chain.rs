@@ -7027,6 +7027,15 @@ mod tx_in_graph_tests {
     /// `cargo test --release -p app what_a_television_transmission_costs -- --nocapture`
     #[test]
     fn what_a_television_transmission_costs() {
+        // A multiplex is encoded across every core there is: 3.0x real time on
+        // 48 of them and 0.38x on a four core CI runner, which measures the
+        // machine rather than the graph.
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if cores < 8 {
+            eprintln!("skipping: a television multiplex needs 8 cores, this machine has {cores}");
+            return;
+        }
+
         let rate = 10_000_000.0;
         let mut plan = tests::plan(rate, Hz(770_000_000));
         plan.channels = vec![ChannelSpec {

@@ -136,6 +136,8 @@ the code is in the commit log.
 
 - A channel marked as voice, the agent's own included, is listed as a call.
 
+- A machine with no microphone no longer starts up showing a fault.
+
 - The transcriber loads its model as the receiver starts, not at the first over.
 
 - The transcriber and the call recorder came up switched off, whatever was saved.
