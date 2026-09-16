@@ -11,11 +11,12 @@
 //! default on every radio that has it, so an over with no number is the
 //! ordinary case.
 //!
-//! **Which group**, from the coded squelch, which is always on because it is
-//! how the radios decide whom to hear: a CTCSS tone ([`dsp::ctcss`]) or a DCS
-//! code ([`dsp::dcs`]) under the speech. Two users of one frequency with
-//! different codes cannot hear each other, so the code is what tells their
-//! traffic apart, and it is the only identity most analogue traffic carries.
+//! **Which group**, from the coded squelch, which the squelch stage reads and
+//! publishes as a tag: it is the half of a squelch that decides whom to hear,
+//! and it is read where the tone is still in the audio. Two users of one
+//! frequency with different codes cannot hear each other, so the code is what
+//! tells their traffic apart, and it is the only identity most analogue
+//! traffic carries.
 //!
 //! The identity belongs to one over and is dropped when the squelch shuts:
 //! whoever keys up next is somebody else until they say who they are. The
@@ -49,30 +50,9 @@ const FLOOR: f32 = 0.004;
 /// stays above the floor.
 const HOLD_S: f64 = 0.2;
 
-/// Where the coded squelch is filtered out of the speech, in hertz.
-///
-/// Above the highest CTCSS tone, 254.1 Hz, and below anything an FM
-/// transmitter sends: a radio filters its microphone at 300 Hz before it
-/// modulates, so nothing that was said is lost here. Three poles, because one
-/// leaves a tone ten decibels down and still audible as a rumble under every
-/// over.
-const TONE_HZ: f64 = 300.0;
-const TONE_POLES: usize = 3;
-
 pub struct IdentNode {
     dtmf: dsp::dtmf::Dtmf,
-    /// The filter that takes the coded squelch back out of the speech.
-    ///
-    /// Here rather than as a stage of its own because this is the one stage
-    /// that wants the tone: everything downstream is worse for carrying it,
-    /// and a filter in front of this would take it from the detectors that
-    /// exist to read it. One per channel of the stream.
-    tone_filter: Vec<[dsp::filter::Biquad; TONE_POLES]>,
-    filter_tones: bool,
     runs: decode::dtmf::Sequences,
-    /// The coded squelch: a tone, or a code, whichever the group uses.
-    ctcss: dsp::ctcss::Ctcss,
-    dcs: dsp::dcs::Dcs,
     /// The group heard now, as a radio names it: "141.3" or "D023".
     group: Option<String>,
     /// Who is on the channel now, and how long the channel has been quiet.
@@ -104,10 +84,6 @@ impl IdentNode {
         Self {
             dtmf: dsp::dtmf::Dtmf::new(1.0),
             runs: decode::dtmf::Sequences::new(),
-            ctcss: dsp::ctcss::Ctcss::new(1.0),
-            tone_filter: Vec::new(),
-            filter_tones: true,
-            dcs: dsp::dcs::Dcs::new(1.0),
             group: None,
             caller: None,
             quiet_s: 0.0,
@@ -156,23 +132,6 @@ impl IdentNode {
     }
 
     /// The group, said once where the chain view and the log can see it.
-    /// The block with the coded squelch taken out, which is what everything
-    /// downstream hears: the speaker, the recorder, the transcriber and the
-    /// agent.
-    fn without_tones(&mut self, pcm: &[f32]) -> Vec<f32> {
-        if !self.filter_tones || self.tone_filter.is_empty() {
-            return pcm.to_vec();
-        }
-        let channels = self.channels.max(1);
-        pcm.iter()
-            .enumerate()
-            .map(|(k, s)| {
-                let ch = &mut self.tone_filter[k % channels];
-                ch.iter_mut().fold(*s, |x, b| b.process(x))
-            })
-            .collect()
-    }
-
     fn said_group(&mut self, c: &mut NodeCtx<'_>) {
         let Some(group) = self.group.clone() else { return };
         c.emit(Event::Decoded(
@@ -228,18 +187,6 @@ impl Simple for IdentNode {
         self.channel_hz = i.spec.center.as_f64();
         self.dtmf = dsp::dtmf::Dtmf::new(self.rate);
         self.runs = decode::dtmf::Sequences::new();
-        self.ctcss = dsp::ctcss::Ctcss::new(self.rate);
-        self.tone_filter = (0..self.channels.max(1))
-            .map(|_| {
-                [dsp::filter::Biquad::design(
-                    dsp::filter::Response::Highpass,
-                    self.rate,
-                    TONE_HZ,
-                    0.707,
-                ); TONE_POLES]
-            })
-            .collect();
-        self.dcs = dsp::dcs::Dcs::new(self.rate);
         Ok(StreamSpec {
             kind: PortKind::Voice,
             rate: self.rate * self.channels as f64,
@@ -253,17 +200,12 @@ impl Simple for IdentNode {
     fn params(&self) -> Vec<Param> {
         vec![
             Param::bool("enabled", self.enabled).label("Read the identity and the group"),
-            Param::bool("filter_tones", self.filter_tones).label("Filter the coded squelch out"),
             Param::text("label", self.label.clone()).label("Channel"),
         ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            "filter_tones" => {
-                self.filter_tones = v.as_bool().unwrap_or(self.filter_tones);
-                Ok(())
-            }
             "enabled" => {
                 self.enabled = v.as_bool().unwrap_or(self.enabled);
                 if !self.enabled {
@@ -271,8 +213,6 @@ impl Simple for IdentNode {
                     self.group = None;
                     self.runs.take();
                     self.dtmf.reset();
-                    self.ctcss.reset();
-                    self.dcs.reset();
                 }
                 Ok(())
             }
@@ -317,26 +257,15 @@ impl Simple for IdentNode {
                 1 => pcm.to_vec(),
                 ch => pcm.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect(),
             };
-            // The coded squelch, which is under the speech and on for the
-            // whole over. Both detectors are fed every block, whatever the
-            // other one says: they hold windows half a second long, and one
-            // starved of a block while the other answered had a hole in it.
-            //
-            // A transmitter sends one or the other, never both, so hearing
-            // both means one of them is wrong. DCS wins: it is data with a
-            // Golay check and a table of 104 words behind it, while a tone
-            // is a line in a band a voice also occupies. A DCS code's own
-            // waveform puts energy at 58 and 76 Hz, which is in the tone
-            // set, so this is not a rare case but the ordinary one on a
-            // channel using DCS.
-            let code = self.dcs.push(&mono);
-            let tone = self.ctcss.push(&mono);
-            let read = match (code, tone, self.dcs.code()) {
-                (Some(c), _, _) => Some(c.label()),
-                (None, Some(t), None) => Some(t.label()),
+            // The group, from the squelch that read it. It is the half of a
+            // squelch that decides whom to hear, so it is read where the
+            // tone is still in the audio; by here it has been filtered out
+            // and there would be nothing to read.
+            let read = c.in_tags(0).iter().find_map(|t| match (t.key, &t.value) {
+                ("squelch_code", pipeline::port::TagValue::Text(code)) => Some(code.clone()),
                 _ => None,
-            };
-            if let Some(group) = read {
+            });
+            if let Some(group) = read.filter(|g| Some(g) != self.group.as_ref()) {
                 self.group = Some(group);
                 self.said_group(c);
             }
@@ -366,8 +295,6 @@ impl Simple for IdentNode {
                     // close, every over began under the bare channel name
                     // and was relabelled once the code came through. It is
                     // replaced when a different one is heard.
-                    self.ctcss.reset();
-                    self.dcs.reset();
                     // An identity sent at the end of the over arrives just
                     // before the squelch shuts, so what is held is settled
                     // rather than thrown away.
@@ -389,20 +316,13 @@ impl Simple for IdentNode {
             code: self.group.clone(),
             rate: self.rate,
             channels: self.channels,
-            pcm: self.without_tones(pcm),
+            pcm: pcm.to_vec(),
         });
         Ok(())
     }
 
     fn reset(&mut self) {
-        for ch in &mut self.tone_filter {
-            for b in ch {
-                b.reset();
-            }
-        }
         self.dtmf.reset();
-        self.ctcss.reset();
-        self.dcs.reset();
         self.runs.take();
         self.caller = None;
         self.group = None;
@@ -447,10 +367,25 @@ mod tests {
 
     /// One block through, and what it published.
     fn run(n: &mut IdentNode, pcm: &[f32]) -> Vec<common::Voice> {
+        run_tagged(n, pcm, None)
+    }
+
+    /// The same, with what the squelch in front of it said about the group.
+    fn run_tagged(n: &mut IdentNode, pcm: &[f32], code: Option<&str>) -> Vec<common::Voice> {
         let spec =
             StreamSpec { kind: PortKind::Real, rate: RATE, channels: 1, ..Default::default() };
         let ins = [PortSpec { spec, latency: 0 }];
-        let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+        let said: Vec<pipeline::port::Tag> = code
+            .map(|c| {
+                vec![pipeline::port::Tag::new(
+                    0,
+                    "squelch_code",
+                    pipeline::port::TagValue::Text(c.to_string()),
+                )]
+            })
+            .unwrap_or_default();
+        let tags = [&said[..]];
+        let (mut events, mut new_tags) = (Vec::new(), Vec::new());
         let mut out = [Payload::Voice(Vec::new())];
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
         ctx.block_seconds = pcm.len() as f64 / RATE;
@@ -580,74 +515,24 @@ mod tests {
         assert_eq!(reply[0].to.as_deref(), Some("CH1"), "still a call on the channel");
     }
 
-    /// A channel using DCS reports the code and not a tone.
+    /// The group comes off the tag the squelch publishes, not off the audio.
     ///
-    /// The two are never sent together, so hearing both means one is wrong,
-    /// and the code is the one with a check behind it. It matters because a
-    /// DCS waveform is a 134.4 bps square wave whose own components land in
-    /// the tone set: on a channel using DCS, a tone detector has something
-    /// to find on every over.
+    /// The tone is gone by here: the squelch reads it where it is still in
+    /// the audio and filters it out on the way through, so a stage looking
+    /// for it in the speech would find nothing and every over would be
+    /// published under the bare channel name.
     #[test]
-    fn a_code_wins_over_a_tone() {
+    fn the_group_is_whatever_the_squelch_said() {
         let mut n = node("CH1");
-        let voice = talking(2.0);
-        let word = dsp::dcs::word_of(23);
-        let per_bit = RATE / dsp::dcs::BAUD;
-        let both: Vec<f32> = voice
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let t = i as f64 / RATE;
-                let bit = (i as f64 / per_bit) as usize % 23;
-                // The code, and a tone under it as well, which is what a
-                // misread of the code's own spectrum looks like.
-                s + if word >> bit & 1 == 1 { 0.2 } else { -0.2 }
-                    + (std::f64::consts::TAU * 141.3 * t).sin() as f32 * 0.1
-            })
-            .collect();
-        run(&mut n, &both);
-        assert_eq!(n.group(), Some("D023"), "a tone was reported over a checked code");
-    }
-
-    /// The group a radio is in, off its coded squelch: a tone or a code,
-    /// under the speech, which is the only identity most analogue traffic
-    /// carries at all.
-    #[test]
-    fn the_coded_squelch_says_which_group_it_is() {
-        // CTCSS: a tone under the voice, as a PMR446 handheld sends it.
-        let mut n = node("CH1");
-        let voice = talking(2.0);
-        let with_tone: Vec<f32> = voice
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let t = i as f64 / RATE;
-                s + (std::f64::consts::TAU * 141.3 * t).sin() as f32 * 0.2
-            })
-            .collect();
-        run(&mut n, &with_tone);
-        assert_eq!(n.group(), Some("141.3"));
-
-        // DCS: the same, with a code instead of a tone.
-        let mut n = node("CH1");
-        let word = dsp::dcs::word_of(23);
-        let per_bit = RATE / dsp::dcs::BAUD;
-        let with_code: Vec<f32> = voice
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let bit = (i as f64 / per_bit) as usize % 23;
-                s + if word >> bit & 1 == 1 { 0.2 } else { -0.2 }
-            })
-            .collect();
-        run(&mut n, &with_code);
+        let said = run_tagged(&mut n, &talking(0.5), Some("D023"));
+        assert_eq!(said[0].code.as_deref(), Some("D023"));
         assert_eq!(n.group(), Some("D023"));
 
-        // And an over with neither is in no group rather than the nearest
-        // tone to somebody's voice.
-        let mut n = node("CH1");
-        run(&mut n, &voice);
-        assert_eq!(n.group(), None);
+        // And it outlives the over: a coded squelch describes the traffic on
+        // the channel rather than one transmission.
+        run(&mut n, &vec![0.0f32; (RATE * 0.5) as usize]);
+        let next = run(&mut n, &talking(0.5));
+        assert_eq!(next[0].code.as_deref(), Some("D023"));
     }
 
     /// Keys pressed on a repeater are not an identity: one digit is a

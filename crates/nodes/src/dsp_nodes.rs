@@ -738,13 +738,8 @@ impl Simple for AgcNode {
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
-        // Audio, whether or not it has been labelled yet. A voice channel
-        // names its speech before the gain is set, because the stage that
-        // reads the coded squelch has to see it and the gain control must
-        // not: a tone ten times the size of the speech sets a gain that
-        // clips, and what comes out is the tone with the voice buried in it.
-        if !matches!(i.spec.kind, PortKind::Real | PortKind::Voice) {
-            return Err(common::Error::other("agc needs audio"));
+        if i.spec.kind != PortKind::Real {
+            return Err(common::Error::other("agc needs a real input"));
         }
         self.agc = Agc::new(i.spec.rate, self.attack_ms, self.release_ms, self.hang_ms);
         self.agc.set_max_gain_db(self.max_gain_db);
@@ -752,26 +747,8 @@ impl Simple for AgcNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        if let Some(voice) = i.as_voice() {
-            let out = o.voice_mut();
-            for v in voice {
-                let mut v = v.clone();
-                if self.enabled {
-                    self.agc.process(&mut v.pcm);
-                }
-                out.push(v);
-            }
-            if self.enabled {
-                c.tag(Tag::new(
-                    c.sample_index,
-                    "agc_gain_db",
-                    TagValue::Float(self.agc.gain_db() as f64),
-                ));
-            }
-            return Ok(());
-        }
         let out = o.real_mut();
-        out.extend_from_slice(i.as_real().unwrap_or(&[]));
+        out.extend_from_slice(i.as_real().unwrap());
         if !self.enabled {
             return Ok(());
         }
@@ -871,7 +848,27 @@ pub const DEFAULT_SQUELCH_DB: f32 = 9.0;
 /// again, in dB.
 const DEFAULT_HYSTERESIS_DB: f64 = 3.0;
 
-/// Mute a channel with nothing on it.
+/// Where the coded squelch is filtered out of the audio, in hertz, and how
+/// steeply.
+///
+/// Above the highest CTCSS tone, 254.1 Hz, and below anything a transmitter
+/// sends: a radio filters its microphone at 300 Hz before it modulates, so
+/// nothing that was said is lost. One pole leaves a tone ten decibels down
+/// and still audible as a rumble under every over; three put it thirty down.
+const TONE_HZ: f64 = 300.0;
+const TONE_POLES: usize = 3;
+
+/// Mute a channel with nothing on it, or with the wrong people on it.
+///
+/// Both halves of what a radio's squelch does. The first is the obvious one:
+/// nothing on the channel, nothing on the speaker. The second is the coded
+/// squelch every analogue radio sends, a CTCSS tone or a DCS code under the
+/// speech, which is how two groups share a frequency without hearing each
+/// other. Reading it here rather than further down the chain is what lets a
+/// channel be set to one group and stay shut for the rest, and it is the last
+/// point at which the tone is wanted: it goes out of the audio on the way
+/// through, so nothing downstream carries it into a speaker, a recording, a
+/// transcriber or a gain control.
 pub struct SquelchNode {
     kind: SquelchKind,
     threshold_db: f32,
@@ -880,6 +877,15 @@ pub struct SquelchNode {
     meter: NoiseMeter,
     open: bool,
     measured: f32,
+    /// The coded squelch: a tone, or a code, whichever the group uses.
+    ctcss: dsp::ctcss::Ctcss,
+    dcs: dsp::dcs::Dcs,
+    /// What is being sent now, as a radio names it: "141.3" or "D023".
+    code: Option<String>,
+    /// The code this channel is set to, or empty for whoever is there.
+    want: String,
+    filter_tones: bool,
+    tone_filter: [dsp::filter::Biquad; TONE_POLES],
 }
 
 /// How long the mute takes to open or close, in milliseconds.
@@ -904,7 +910,33 @@ impl SquelchNode {
             meter: NoiseMeter::new(48_000.0, 4_000.0),
             open: false,
             measured: -120.0,
+            ctcss: dsp::ctcss::Ctcss::new(48_000.0),
+            dcs: dsp::dcs::Dcs::new(48_000.0),
+            code: None,
+            want: String::new(),
+            filter_tones: true,
+            tone_filter: [dsp::filter::Biquad::design(
+                dsp::filter::Response::Highpass,
+                48_000.0,
+                TONE_HZ,
+                0.707,
+            ); TONE_POLES],
         }
+    }
+
+    /// The coded squelch heard now, as a radio names it.
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    /// Whether what is being sent is what this channel is set to.
+    ///
+    /// An empty setting hears everybody, which is what a receiver is for: a
+    /// scanner that stayed shut until it was told a code would hear nothing
+    /// at all on a channel nobody had set up.
+    fn wanted(&self) -> bool {
+        let want = self.want.trim();
+        want.is_empty() || self.code.as_deref().map(str::trim) == Some(want)
     }
 
     /// Narrowband FM, at the level where a signal becomes intelligible.
@@ -953,6 +985,17 @@ impl Simple for SquelchNode {
             RAMP_MS,
         );
         self.meter = NoiseMeter::new(i.spec.rate, 4_000.0);
+        // Both detectors decimate to a kilohertz of their own, so reading
+        // them here, on the discriminator's own rate, costs a running sum
+        // per sample and nothing else.
+        self.ctcss = dsp::ctcss::Ctcss::new(i.spec.rate);
+        self.dcs = dsp::dcs::Dcs::new(i.spec.rate);
+        self.tone_filter = [dsp::filter::Biquad::design(
+            dsp::filter::Response::Highpass,
+            i.spec.rate,
+            TONE_HZ,
+            0.707,
+        ); TONE_POLES];
         Ok(i.spec)
     }
 
@@ -962,13 +1005,46 @@ impl Simple for SquelchNode {
             SquelchKind::Noise => self.meter.measure(input),
             SquelchKind::Level => dsp::squelch::level_db(input),
         };
+        // The coded squelch, read off the audio as it arrived. Both
+        // detectors are fed every block whatever the other one says: they
+        // hold windows half a second long, and one starved of a block while
+        // the other answered had a hole in it.
+        //
+        // A transmitter sends one or the other, never both, so hearing both
+        // means one of them is wrong. DCS wins: it is data with a Golay
+        // check and a table of 104 words behind it, while a tone is a line
+        // in a band a voice also occupies. A DCS code's own waveform puts
+        // energy at 58 and 76 Hz, which is in the tone set, so this is the
+        // ordinary case on a channel using DCS rather than a rare one.
+        let code = self.dcs.push(input);
+        let tone = self.ctcss.push(input);
+        let read = match (code, tone, self.dcs.code()) {
+            (Some(c), _, _) => Some(c.label()),
+            (None, Some(t), None) => Some(t.label()),
+            _ => None,
+        };
+        if let Some(read) = read {
+            self.code = Some(read.clone());
+            c.tag(Tag::new(c.sample_index, "squelch_code", TagValue::Text(read)));
+        }
+        // The coded squelch is the other half of the decision, and it is the
+        // squelch's own: a channel set to one group stays shut for another
+        // however loud that other group is.
+        self.squelch.mute(!self.wanted());
         self.open = self.squelch.update(measured, input.len());
         // The smoothed figure, not the raw one. The meter exists to set the
         // threshold against, and a bar that jumps either side of a line the
         // audio is not crossing makes the control look broken.
         self.measured = self.squelch.level_db();
         let out = o.real_mut();
-        out.extend_from_slice(input);
+        match self.filter_tones {
+            true => out.extend(
+                input.iter().map(|s| self.tone_filter.iter_mut().fold(*s, |x, b| b.process(x))),
+            ),
+            false => out.extend_from_slice(input),
+        }
+        // Muted on the decision rather than on the measurement, so a channel
+        // set to a code stays shut while the wrong group is on it.
         self.squelch.apply(out);
         let at = c.sample_index;
         c.tag(Tag::new(at, "squelch_open", TagValue::Int(self.open as i64)));
@@ -979,6 +1055,12 @@ impl Simple for SquelchNode {
     fn reset(&mut self) {
         self.squelch.reset();
         self.meter.reset();
+        self.ctcss.reset();
+        self.dcs.reset();
+        for b in &mut self.tone_filter {
+            b.reset();
+        }
+        self.code = None;
         self.open = false;
     }
 
@@ -990,6 +1072,8 @@ impl Simple for SquelchNode {
             Param::float(HYSTERESIS_DB, self.hysteresis_db as f64, 0.0..=20.0)
                 .unit("dB")
                 .label("Hysteresis"),
+            Param::text("code", self.want.clone()).label("Only this group"),
+            Param::bool("filter_tones", self.filter_tones).label("Filter the coded squelch out"),
         ]
     }
 
@@ -1000,6 +1084,14 @@ impl Simple for SquelchNode {
             }
             HYSTERESIS_DB => {
                 self.hysteresis_db = v.as_f64().unwrap_or(DEFAULT_HYSTERESIS_DB) as f32
+            }
+            "code" => {
+                self.want = v.as_str().unwrap_or_default().to_string();
+                return Ok(());
+            }
+            "filter_tones" => {
+                self.filter_tones = v.as_bool().unwrap_or(self.filter_tones);
+                return Ok(());
             }
             _ => return Err(common::Error::other(format!("squelch: unknown parameter {name:?}"))),
         }
@@ -1151,4 +1243,184 @@ pub const SQUELCH: StageDesc = StageDesc {
 pub fn build_squelch(s: &Settings) -> Result<Box<dyn Node>> {
     let kind = s.str_or(KIND, SquelchKind::Noise.label()).parse().unwrap_or(SquelchKind::Noise);
     Ok(Box::new(SquelchNode::new(kind, s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32)))
+}
+
+#[cfg(test)]
+mod squelch_tests {
+    use super::*;
+    use pipeline::node::Node;
+    use pipeline::port::{Tag, TagValue};
+
+    const RATE: f64 = 24_000.0;
+
+    fn node() -> SquelchNode {
+        let mut n = SquelchNode::fm();
+        let spec = StreamSpec {
+            kind: PortKind::Real,
+            rate: RATE,
+            center: common::Hz(145_500_000),
+            channels: 1,
+            ..Default::default()
+        };
+        Simple::negotiate(&mut n, &PortSpec { spec, latency: 0 }).expect("audio in, audio out");
+        n
+    }
+
+    /// One block through, answering with the audio and the tags it published.
+    fn run(n: &mut SquelchNode, pcm: &[f32]) -> (Vec<f32>, Vec<Tag>) {
+        let spec =
+            StreamSpec { kind: PortKind::Real, rate: RATE, channels: 1, ..Default::default() };
+        let ins = [PortSpec { spec, latency: 0 }];
+        let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+        let mut out = [Payload::Real(Vec::new())];
+        let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+        ctx.block_seconds = pcm.len() as f64 / RATE;
+        Node::process(n, &[&Payload::Real(pcm.to_vec())], &mut out, &mut ctx).expect("a block");
+        (out[0].as_real().unwrap_or(&[]).to_vec(), new_tags)
+    }
+
+    /// Speech, as a voice on a channel measures: a pitch that moves, with
+    /// harmonics, and nothing under 150 Hz.
+    fn talking(seconds: f64) -> Vec<f32> {
+        let n = (RATE * seconds) as usize;
+        let mut phase = vec![0.0f64; 11];
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / RATE;
+                let pitch = 190.0 + 40.0 * (std::f64::consts::TAU * 2.0 * t).sin();
+                let mut v = 0.0;
+                for h in 1..=10 {
+                    phase[h] += std::f64::consts::TAU * pitch * h as f64 / RATE;
+                    v += phase[h].sin() / h as f64;
+                }
+                (v * 0.2) as f32
+            })
+            .collect()
+    }
+
+    fn with_tone(voice: &[f32], hz: f64, amp: f32) -> Vec<f32> {
+        voice
+            .iter()
+            .enumerate()
+            .map(|(i, s)| s + (std::f64::consts::TAU * hz * i as f64 / RATE).sin() as f32 * amp)
+            .collect()
+    }
+
+    fn with_code(voice: &[f32], code: u16) -> Vec<f32> {
+        let word = dsp::dcs::word_of(code);
+        let per_bit = RATE / dsp::dcs::BAUD;
+        voice
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let bit = (i as f64 / per_bit) as usize % 23;
+                s + if word >> bit & 1 == 1 { 0.2 } else { -0.2 }
+            })
+            .collect()
+    }
+
+    fn said(tags: &[Tag]) -> Option<String> {
+        tags.iter().find_map(|t| match (t.key, &t.value) {
+            ("squelch_code", TagValue::Text(c)) => Some(c.clone()),
+            _ => None,
+        })
+    }
+
+    /// The group a radio is in, off its coded squelch: a tone or a code,
+    /// under the speech, which is the only identity most analogue traffic
+    /// carries at all.
+    #[test]
+    fn the_coded_squelch_says_which_group_it_is() {
+        let voice = talking(2.0);
+
+        // CTCSS: a tone under the voice, as a PMR446 handheld sends it.
+        let mut n = node();
+        let (_, tags) = run(&mut n, &with_tone(&voice, 141.3, 0.2));
+        assert_eq!(said(&tags).as_deref(), Some("141.3"));
+        assert_eq!(n.code(), Some("141.3"));
+
+        // DCS: the same, with a code instead of a tone.
+        let mut n = node();
+        let (_, tags) = run(&mut n, &with_code(&voice, 23));
+        assert_eq!(said(&tags).as_deref(), Some("D023"));
+
+        // And an over with neither is in no group rather than the nearest
+        // tone to somebody's voice.
+        let mut n = node();
+        let (_, tags) = run(&mut n, &voice);
+        assert_eq!(said(&tags), None);
+        assert_eq!(n.code(), None);
+    }
+
+    /// A channel using DCS reports the code and not a tone.
+    ///
+    /// The two are never sent together, so hearing both means one is wrong,
+    /// and the code is the one with a check behind it. It matters because a
+    /// DCS waveform is a 134.4 bps square wave whose own components land in
+    /// the tone set: on a channel using DCS, a tone detector has something
+    /// to find on every over.
+    #[test]
+    fn a_code_wins_over_a_tone() {
+        let mut n = node();
+        let voice = talking(2.0);
+        let both = with_tone(&with_code(&voice, 23), 141.3, 0.1);
+        let (_, tags) = run(&mut n, &both);
+        assert_eq!(said(&tags).as_deref(), Some("D023"), "a tone was reported over a checked code");
+    }
+
+    /// The tone does not come out the other side.
+    ///
+    /// This is the one stage that wants it, so it is the stage that takes it
+    /// away: everything downstream is worse for carrying it, from the gain
+    /// control to the speaker to what a transcriber hears between words.
+    #[test]
+    fn the_tone_is_not_in_the_audio_that_comes_out() {
+        let voice = talking(2.0);
+        let mut n = node();
+        let (out, _) = run(&mut n, &with_tone(&voice, 141.3, 0.2));
+        // How much of the block is at the tone's frequency, against how much
+        // of it is speech.
+        let energy = |buf: &[f32], hz: f64| -> f64 {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, s) in buf.iter().enumerate() {
+                let a = std::f64::consts::TAU * hz * i as f64 / RATE;
+                re += *s as f64 * a.cos();
+                im += *s as f64 * a.sin();
+            }
+            (re * re + im * im).sqrt() / buf.len() as f64
+        };
+        let half = out.len() / 2;
+        let sent = with_tone(&voice, 141.3, 0.2);
+        let (was, now) = (energy(&sent[half..], 141.3), energy(&out[half..], 141.3));
+        assert!(now * 20.0 < was, "the tone went in at {was:.4} and came out at {now:.4}");
+        // And the speech is still there. The filter cuts at 300 Hz, so this
+        // voice's own 190 Hz fundamental goes with the tone, which is what an
+        // FM transmitter does to it before it modulates anyway.
+        let peak = out[half..].iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(peak > 0.05, "the speech went with it, at a peak of {peak:.3}");
+    }
+
+    /// A channel set to one group stays shut for another.
+    ///
+    /// The half of a squelch a level cannot do: two groups share the
+    /// frequency, both are loud, and only one of them is yours.
+    #[test]
+    fn a_channel_set_to_a_code_hears_only_that_group() {
+        let voice = talking(2.0);
+        let mut n = node();
+        Simple::set_param(&mut n, "code", ParamValue::Text("D023".into())).unwrap();
+        let (out, _) = run(&mut n, &with_code(&voice, 23));
+        assert!(out.iter().any(|s| s.abs() > 0.01), "the channel's own group was muted");
+
+        let mut n = node();
+        Simple::set_param(&mut n, "code", ParamValue::Text("D023".into())).unwrap();
+        let (out, _) = run(&mut n, &with_code(&voice, 25));
+        assert!(out.iter().all(|s| s.abs() < 0.01), "somebody else's group came through");
+
+        // With nothing set, everybody is heard: a receiver told no code is a
+        // receiver, not a radio waiting to be programmed.
+        let mut n = node();
+        let (out, _) = run(&mut n, &with_code(&voice, 25));
+        assert!(out.iter().any(|s| s.abs() > 0.01), "an unset channel muted a signal");
+    }
 }
