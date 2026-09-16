@@ -20,6 +20,10 @@
 /// the tests can drive it with numbers rather than with signals.
 pub struct Squelch {
     open: bool,
+    /// Held shut whatever the level says, for the half of a squelch a level
+    /// cannot decide: the coded squelch says whose traffic this is, and a
+    /// channel set to one group stays muted for another however loud it is.
+    muted: bool,
     open_at: f32,
     close_at: f32,
     /// The measurement after smoothing, which is what the decision is made on.
@@ -72,6 +76,7 @@ impl Squelch {
     pub fn new(rate: f64, open_at: f32, close_at: f32, ramp_ms: f64) -> Self {
         Self {
             open: false,
+            muted: false,
             open_at,
             close_at: close_at.min(open_at),
             level: 0.0,
@@ -89,7 +94,12 @@ impl Squelch {
     }
 
     pub fn is_open(&self) -> bool {
-        self.open
+        self.open && !self.muted
+    }
+
+    /// Hold it shut, or let the level decide again.
+    pub fn mute(&mut self, muted: bool) {
+        self.muted = muted;
     }
 
     pub fn set_thresholds(&mut self, open_at: f32, close_at: f32) {
@@ -145,12 +155,12 @@ impl Squelch {
                 self.open = false;
             }
         }
-        self.open
+        self.is_open()
     }
 
     /// Apply the current decision to a block, ramping rather than switching.
     pub fn apply(&mut self, buf: &mut [f32]) {
-        let want = if self.open { 1.0 } else { 0.0 };
+        let want = if self.is_open() { 1.0 } else { 0.0 };
         for s in buf.iter_mut() {
             if self.ramp < want {
                 self.ramp = (self.ramp + self.step).min(want);
@@ -163,6 +173,7 @@ impl Squelch {
 
     pub fn reset(&mut self) {
         self.open = false;
+        self.muted = false;
         self.hang = 0;
         self.ramp = 0.0;
         self.primed = false;
