@@ -26,6 +26,16 @@ the code is in the commit log.
 - Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
   climb rate: serial, and the air temperature and humidity it was sent up to
   measure. The channel follows the transmitter as it drifts on the way up.
+- Graw DFM-09 and DFM-17 radiosondes, with their serial, position and climb
+  rate.
+- Meteomodem M10 and M20 radiosondes, with their serial, position and climb
+  rate.
+- InterMet iMet radiosondes, with position, pressure, temperature and
+  humidity.
+- Meisei iMS-100 radiosondes, with their serial, position and climb rate.
+- Meteo-Radiy MRZ radiosondes, with their serial, position and climb rate.
+- Lockheed Martin LMS6 radiosondes, with their serial, position and climb
+  rate.
 - Radiosonde launch sites from SondeHub, on the map with the time until the
   next release from each.
 

@@ -130,7 +130,27 @@ impl Tone {
 /// Takes the discriminator output of an NFM receiver, not RF: what modulation
 /// the channel used is the caller's business, and a soundcard fed from a
 /// handheld would present the same samples.
-pub struct AfskDemod {
+/// One symbol the tones decided, and whether there was a signal to decide
+/// it from.
+///
+/// The quiet flag is not a detail of the framer above: a channel with
+/// nothing on it still produces symbols, and every framer has to know the
+/// difference between a mark and silence. HDLC restarts on it; an
+/// asynchronous line reads it as the idle between characters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Symbol {
+    /// True for the mark tone, the lower of the two.
+    pub mark: bool,
+    pub quiet: bool,
+}
+
+/// The tone pair and the bit clock: audio in, symbols out.
+///
+/// Everything above this differs by protocol. APRS reads the symbols as NRZI
+/// and then HDLC ([`AfskDemod`]); an iMet radiosonde reads them as an
+/// ordinary asynchronous line with a start bit and a stop bit. Neither is a
+/// property of Bell 202, which is why the split is here.
+pub struct AfskBits {
     cfg: AfskConfig,
     mark: Tone,
     space: Tone,
@@ -138,12 +158,9 @@ pub struct AfskDemod {
     sps: f32,
     since: f32,
     last_sign: bool,
-    /// NRZI reference: the level the previous symbol sat at.
-    prev_level: bool,
-    hdlc: Hdlc,
 }
 
-impl AfskDemod {
+impl AfskBits {
     pub fn new(rate: f64, cfg: AfskConfig) -> Self {
         // Integrate over exactly one symbol. Shorter and the two tones are not
         // resolved; longer and the correlator straddles a transition and reads
@@ -156,29 +173,23 @@ impl AfskDemod {
             sps: (rate / BAUD) as f32,
             since: 0.0,
             last_sign: false,
-            prev_level: false,
-            hdlc: Hdlc::new(MIN_FRAME_BITS, MAX_FRAME_BITS),
         }
     }
 
     pub fn reset(&mut self) {
         self.mark.reset();
         self.space.reset();
-        self.hdlc.reset();
         self.since = 0.0;
     }
 
-    /// Demodulate a block of audio, appending the AX.25 frames that closed
-    /// inside it. Frames are packed least significant bit first, which is how
-    /// HDLC puts bytes on the air and therefore how AX.25 fields read.
-    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Vec<u8>>) {
+    /// Decide a symbol at every bit instant in this block of audio.
+    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Symbol>) {
         for &x in audio {
             let m = self.mark.push(x);
             let s = self.space.push(x);
             // The decision is which tone is stronger, so the difference is the
             // signal and its magnitude is the confidence.
-            let v = m - s;
-            let sign = v > 0.0;
+            let sign = m - s > 0.0;
 
             // A transition marks a symbol boundary, so the next symbol centre
             // is half a symbol away. Nudged towards it rather than set to it,
@@ -194,20 +205,55 @@ impl AfskDemod {
                 continue;
             }
             self.since -= self.sps;
+            out.push(Symbol { mark: sign, quiet: (m + s) < self.cfg.min_level });
+        }
+    }
+}
 
-            if (m + s) < self.cfg.min_level {
+pub struct AfskDemod {
+    bits: AfskBits,
+    symbols: Vec<Symbol>,
+    /// NRZI reference: the level the previous symbol sat at.
+    prev_level: bool,
+    hdlc: Hdlc,
+}
+
+impl AfskDemod {
+    pub fn new(rate: f64, cfg: AfskConfig) -> Self {
+        Self {
+            bits: AfskBits::new(rate, cfg),
+            symbols: Vec::new(),
+            prev_level: false,
+            hdlc: Hdlc::new(MIN_FRAME_BITS, MAX_FRAME_BITS),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.bits.reset();
+        self.hdlc.reset();
+    }
+
+    /// Demodulate a block of audio, appending the AX.25 frames that closed
+    /// inside it. Frames are packed least significant bit first, which is how
+    /// HDLC puts bytes on the air and therefore how AX.25 fields read.
+    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Vec<u8>>) {
+        let mut symbols = std::mem::take(&mut self.symbols);
+        symbols.clear();
+        self.bits.process(audio, &mut symbols);
+        for sym in &symbols {
+            if sym.quiet {
                 self.hdlc.reset();
-                self.prev_level = sign;
+                self.prev_level = sym.mark;
                 continue;
             }
-
             // NRZI: a zero is a transition, a one is no transition.
-            let bit = sign == self.prev_level;
-            self.prev_level = sign;
+            let bit = sym.mark == self.prev_level;
+            self.prev_level = sym.mark;
             if let Some(frame) = self.hdlc.push(bit) {
                 out.push(hdlc::pack_lsb(&frame));
             }
         }
+        self.symbols = symbols;
     }
 }
 

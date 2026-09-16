@@ -99,6 +99,15 @@ which is a different and stronger claim than "it runs".
   SDRangel publishes as its own example. The frame layout itself is described
   by Johannes Bazant (`bazjo/RS41_Decoding`) and zilog80 (`rs1729/RS`), which
   is all there is: Vaisala publishes nothing.
+- **zilog80's `rs1729/RS`** for the Graw DFM (`demod/mod/dfm09mod.c`) and the
+  Meteomodem M10 and M20 (`demod/mod/m10m20mod.c`) and the InterMet iMet
+  (`imet/imet1rs_dft.c`), the Meisei iMS-100 (`demod/mod/meisei100mod.c`) and
+  the Meteo-Radiy MRZ (`demod/mod/mp3h1mod.c`) and the Lockheed Martin LMS6
+  (`demod/mod/lms6Xmod.c`): the headers, the
+  interleave, the Hamming(8,4), Meteomodem's own sixteen-bit digest and the
+  meaning of every field are from there, and it is the decoder
+  radiosonde_auto_rx runs. No off-air recording of either has been read here
+  yet, so the tests are against frames built by the same description.
 - The transmitters themselves, where an independent decoder does not exist:
   a LoRa frame carrying its own CRC, an M17 transmission carrying a callsign,
   and a Holybro RemoteID module shipped with a known serial are each evidence

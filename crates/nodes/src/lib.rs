@@ -16,6 +16,7 @@ pub mod beacondb_nodes;
 pub mod ble_nodes;
 pub mod capture_nodes;
 pub mod decode_nodes;
+pub mod dfm_nodes;
 pub mod dmr_nodes;
 pub mod droneid_nodes;
 pub mod dsp_nodes;
@@ -27,12 +28,17 @@ pub mod frame_meter;
 pub mod gsm_nodes;
 pub mod homeassistant_nodes;
 pub mod ident_nodes;
+pub mod imet_nodes;
 pub mod keyed;
+pub mod lms6_nodes;
 pub mod lora_nodes;
+pub mod m10_nodes;
 pub mod m17_nodes;
+pub mod meisei_nodes;
 pub mod mic_in;
 pub mod mod_nodes;
 pub mod modes_nodes;
+pub mod mrz_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod protocol;
@@ -63,6 +69,7 @@ pub use capture_nodes::IqCaptureNode;
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode, UNKNOWN,
 };
+pub use dfm_nodes::DfmNode;
 pub use dmr_nodes::DmrNode;
 pub use dsp_nodes::{
     AgcNode, AgcPreset, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode,
@@ -76,15 +83,20 @@ pub use homeassistant_nodes::{
     Broker, HomeAssistantNode, HomeAssistantStatus, Publish, Publisher as HomeAssistantPublisher,
     mqtt_packet,
 };
+pub use imet_nodes::ImetNode;
 pub use keyed::{Keyed, keyed, keyed_mut};
+pub use lms6_nodes::Lms6Node;
 pub use lora_nodes::LoraNode;
+pub use m10_nodes::M10Node;
 pub use m17_nodes::M17Node;
+pub use meisei_nodes::MeiseiNode;
 pub use mic_in::MicInNode;
 pub use mod_nodes::{
     AmModNode, AskModNode, Carrier, FM_DEVIATION_HZ, FmModNode, FskModNode, NBFM_DEVIATION_HZ,
     OokModNode, WBFM_DEVIATION_HZ,
 };
 pub use modes_nodes::ModeSNode;
+pub use mrz_nodes::MrzNode;
 pub use packet_nodes::{DedupeNode, PacketDecodeNode};
 pub use pocsag_nodes::PocsagNode;
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
@@ -192,6 +204,12 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),
     (wmbus_nodes::DESC, wmbus_nodes::build),
+    (dfm_nodes::DESC, dfm_nodes::build),
+    (imet_nodes::DESC, imet_nodes::build),
+    (lms6_nodes::DESC, lms6_nodes::build),
+    (m10_nodes::DESC, m10_nodes::build),
+    (meisei_nodes::DESC, meisei_nodes::build),
+    (mrz_nodes::DESC, mrz_nodes::build),
     (rs41_nodes::DESC, rs41_nodes::build),
     (bank_node::DESC, bank_node::build),
     (auto::DESC, auto::build),

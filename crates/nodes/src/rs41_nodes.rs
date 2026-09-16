@@ -386,9 +386,17 @@ impl Protocol for Rs41 {
     fn stickiness(&self) -> crate::protocol::Stickiness {
         crate::protocol::Stickiness::Latch { hold_s: Some(30.0) }
     }
+    /// The band alone is not enough to claim a frame here: a DFM is launched
+    /// into the same six megahertz, so the frame has to be the length of an
+    /// RS41's and start with its header before this refuses to pass it on.
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz) {
+            return None;
+        }
+        if !matches!(bytes.len(), rs41::FRAME_STD | rs41::FRAME_AUX)
+            || bytes.get(..8) != Some(&rs41::HEADER[..])
+        {
             return None;
         }
         Some(rs41_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
