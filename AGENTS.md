@@ -272,21 +272,33 @@ Good: a follow-up window on an unreleased agent channel widens that feature's
 Bad: `Fixed - an over answering the agent was thrown away as its own`, for an
 agent channel no release has.
 
-**One line, under about fifteen words, and no how.** The reader is scanning a
-list to find out whether to upgrade, not reading an account of the work. Name
-the protocol, the pane or the fault and stop. Never list the parts of a fix,
-never explain the mechanism, never write a second sentence justifying the
-first. The reasoning belongs in a code comment where it is findable, and the
-measurements in the test that pins them.
+**One entry per thing somebody gets, not per change made.** A feature is one
+entry however many commits it took, and the settings card, the switch, the
+second source and the fault found on the way all belong in that entry. Five
+lines about the agent's voice are one line about the agent's voice.
+
+**One line each, under about fifteen words, and no how.** The reader is
+scanning to find out whether to upgrade. Name the protocol, the pane or the
+fault and stop. Never list the parts of a fix, never explain the mechanism,
+never write a second sentence justifying the first. The few headline features
+of a release may take two or three lines to say what the thing does; nothing
+else may. The reasoning belongs in a code comment where it is findable, and
+the measurements in the test that pins them.
 
 Good: `SSTV pictures: Martin, Scottie and Robot modes, on the video pane.`
 Good: `A green stripe down the right of a Robot picture.`
 Bad: anything with a colon followed by three clauses, or the word "which".
 
-A release is `tools/changelog.sh release X.Y.Z`, the version in `Cargo.toml`,
+A release is `tools/changelog.sh release X.Y.Z`, the version in `Cargo.toml`
+and `Cargo.lock` (the release jobs build `--locked` and stop on a stale one),
 one commit, and the tag `vX.Y.Z` pushed. The release workflow takes its notes
 from that section and refuses a tag with none; CI checks that `[Unreleased]`
 exists and that a tagged version has its own section.
+
+Read the section through before tagging, as somebody who has not seen the
+work: merge what is one feature seen from several angles, and strike what was
+only ever a step on the way. A release that takes more than a screen to read
+is a list of commits, not a list of changes.
 
 ## Commits
 
