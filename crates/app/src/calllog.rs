@@ -446,6 +446,76 @@ pub fn speech_of(e: &Entry) -> Option<common::Speech> {
     record(&buf, true)?.speech()
 }
 
+/// Every over in `entries`, oldest first, as one piece of audio.
+///
+/// A conversation is what somebody wants to hear, and it is kept as one
+/// record per over: played one at a time that is a row of buttons rather than
+/// a conversation. `gap_s` of silence stands in for the pause between overs,
+/// so a reply does not begin on the last syllable of the call it answers.
+/// Overs that will not decode are left out rather than replaced with silence.
+///
+/// `max_s` is a ceiling on how much is joined, newest kept: the audio is held
+/// as samples and resampled again by the player, so an unbounded join of a
+/// week of a repeater is hundreds of megabytes before a sound comes out.
+pub fn timeline(entries: &[Entry], gap_s: f64, max_s: f64) -> Option<common::Speech> {
+    let mut order: Vec<&Entry> = entries.iter().collect();
+    order.sort_by_key(|e| e.call.at_us);
+    // Trimmed from the front, because the end of a conversation is the part
+    // somebody is catching up on.
+    let mut budget = max_s;
+    let mut from = order.len();
+    while from > 0 && budget > 0.0 {
+        from -= 1;
+        budget -= order[from].call.seconds() + gap_s;
+    }
+    let order = &order[from..];
+    let gap = vec![0.0f32; (gap_s.max(0.0) * RATE) as usize];
+    let mut pcm: Vec<f32> = Vec::new();
+    for e in order.iter() {
+        let Some(s) = speech_of(e) else { continue };
+        if !pcm.is_empty() {
+            pcm.extend_from_slice(&gap);
+        }
+        pcm.extend_from_slice(&s.pcm);
+    }
+    (!pcm.is_empty()).then_some(common::Speech { pcm, rate: RATE })
+}
+
+/// What one call is written out as: when it was, who was talking and where.
+///
+/// The time is in it because that is what somebody searching a folder of
+/// exports has; the index because two overs a second apart would otherwise
+/// be one file.
+pub fn wav_name(c: &Call, k: usize) -> String {
+    let when = segments::when(c.at_us).format("%Y%m%d-%H%M%S").to_string();
+    let who = c.from.as_deref().or(c.to.as_deref()).unwrap_or(&c.system);
+    let who: String =
+        who.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    format!("{k:04}_{when}_{who}_{:.4}MHz.wav", c.channel_hz as f64 / 1e6)
+}
+
+/// Write each over out as a WAV, and say how many were written.
+///
+/// WAV because the point of an export is a file something else can open, and
+/// Opus in a bespoke container is not that. An over that will not decode is
+/// counted as a failure rather than written empty.
+pub fn export(entries: &[Entry], dir: &std::path::Path) -> std::io::Result<(usize, usize)> {
+    std::fs::create_dir_all(dir)?;
+    let mut order: Vec<&Entry> = entries.iter().collect();
+    order.sort_by_key(|e| e.call.at_us);
+    let (mut done, mut failed) = (0, 0);
+    for (k, e) in order.iter().enumerate() {
+        match speech_of(e) {
+            Some(s) => {
+                crate::mix::write_wav(&dir.join(wav_name(&e.call, k)), &s)?;
+                done += 1;
+            }
+            None => failed += 1,
+        }
+    }
+    Ok((done, failed))
+}
+
 /// Kind, codec, frame count, time, channel, duration and peak.
 const HEAD_LEN: usize = 1 + 1 + 2 + 8 + 8 + 4 + 4;
 
@@ -1038,6 +1108,59 @@ mod tests {
         let two = browse(&d, 2);
         assert_eq!(two.len(), 2);
         assert_eq!(two[0].call.from.as_deref(), Some("M0QRP"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Three overs joined into one conversation, in the order they happened
+    /// and with the pause between them, and written out as three WAVs.
+    #[test]
+    fn a_conversation_plays_and_exports_as_one_set() {
+        let d = dir("timeline");
+        let mut n = CallLogNode::new(d.clone());
+        Node::set_param(&mut n, "enabled", ParamValue::Bool(true)).unwrap();
+        for who in ["M0ABC", "M0XYZ", "M0QRP"] {
+            for _ in 0..5 {
+                run(&mut n, &[voice(0.2, 0.3, who)], 0.2);
+            }
+            for _ in 0..10 {
+                run(&mut n, &[silence(0.2, who)], 0.2);
+            }
+        }
+        drop(n);
+
+        let listed = browse(&d, 100);
+        assert_eq!(listed.len(), 3);
+        let joined = timeline(&listed, 0.4, 600.0).expect("a conversation");
+        // Three overs of 0.98 s and two gaps of 0.4 s, whatever order the
+        // listing was in.
+        assert!((joined.seconds() - (3.0 * 0.98 + 0.8)).abs() < 0.1, "{} s", joined.seconds());
+
+        // The ceiling keeps the newest overs: two of the three, not the
+        // first two seconds of the afternoon.
+        let capped = timeline(&listed, 0.4, 2.2).expect("a conversation");
+        assert!((capped.seconds() - (2.0 * 0.98 + 0.4)).abs() < 0.1, "{} s", capped.seconds());
+        // The gap is silence and lands between the first two overs, which is
+        // what makes a reply audibly a reply rather than an interruption.
+        let at = (RATE * 1.1) as usize;
+        let quiet =
+            joined.pcm[at..at + (RATE * 0.2) as usize].iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(quiet < 0.01, "the pause between overs carried {quiet}");
+
+        let wavs = d.join("wav");
+        assert_eq!(export(&listed, &wavs).expect("written"), (3, 0));
+        let mut names: Vec<String> = std::fs::read_dir(&wavs)
+            .expect("the folder")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 3);
+        // Oldest first, numbered in the order they were said rather than in
+        // the order the newest-first table lists them.
+        assert!(names[0].starts_with("0000_"), "{}", names[0]);
+        assert!(names[0].contains("M0ABC"), "{}", names[0]);
+        assert!(names[2].contains("M0QRP"), "{}", names[2]);
+        assert!(names.iter().all(|n| n.ends_with("434.0000MHz.wav")), "{names:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

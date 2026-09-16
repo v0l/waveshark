@@ -663,6 +663,12 @@ pub(super) struct CallsState {
     /// When the folder was last walked, so the table refreshes itself
     /// without doing so on every frame.
     pub read_at: Option<Instant>,
+    /// What the recordings table is narrowed to: every word of it has to
+    /// appear somewhere in a row for that row to be listed.
+    pub filter: String,
+    /// What the last export or timeline did, shown under the filter until
+    /// something else is asked for.
+    pub log_note: String,
     pub log_open: bool,
     /// Where the divider between the live list and the recordings sits.
     pub log_frac: f32,
@@ -682,6 +688,37 @@ pub(super) const RECORDINGS_EVERY: std::time::Duration = std::time::Duration::fr
 
 impl CallsState {
     /// Walk the folder again if it is time to, or if something asked.
+    /// The recordings the filter leaves, newest first.
+    ///
+    /// Every word of the filter has to appear somewhere in the row, so
+    /// "pmr5 101" is that caller on that talkgroup and the order of the words
+    /// does not matter. A row is matched against what it shows: the time, the
+    /// system, the frequency, the group and the caller.
+    pub fn filtered(&self) -> Vec<crate::calllog::Entry> {
+        let want = self.filter.to_lowercase();
+        let terms: Vec<&str> = want.split_whitespace().collect();
+        if terms.is_empty() {
+            return self.recordings.clone();
+        }
+        self.recordings
+            .iter()
+            .filter(|e| {
+                let c = &e.call;
+                let row = format!(
+                    "{} {} {:.4} {} {}",
+                    crate::segments::when(c.at_us).format("%Y-%m-%d %H:%M:%S"),
+                    c.system,
+                    c.channel_hz as f64 / 1e6,
+                    c.to.as_deref().unwrap_or(""),
+                    c.from.as_deref().unwrap_or(""),
+                )
+                .to_lowercase();
+                terms.iter().all(|t| row.contains(t))
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn read_recordings(&mut self, dir: &std::path::Path, force: bool) {
         let due = self.read_at.is_none_or(|at| at.elapsed() >= RECORDINGS_EVERY);
         if !force && !due {
@@ -742,6 +779,8 @@ impl Default for CallsState {
             optout: Vec::new(),
             recordings: Vec::new(),
             read_at: None,
+            filter: String::new(),
+            log_note: String::new(),
             log_open: false,
             log_frac: 0.6,
             log_splitting: false,
