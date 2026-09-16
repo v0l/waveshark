@@ -1,7 +1,7 @@
 //! Score the blind modulation classifier against real recordings.
 //!
 //! The devices in rtl_433's corpus are known, so their modulation is known,
-//! from rtl_433's own device table. That makes these 52 captures a labelled
+//! from rtl_433's own device table. That makes these captures a labelled
 //! set for a classifier that is otherwise tuned entirely against signals this
 //! project generated itself.
 //!
@@ -20,8 +20,14 @@ use dsp::{Classifier, ClassifyConfig, Modulation};
 
 /// The captures whose device transmits FSK. Everything else in the corpus is
 /// on-off keyed. Both lists come from rtl_433's device definitions.
-const FSK_CAPTURES: &[&str] =
-    &["fineoffset_wh51", "lacrosse_tx29it", "lacrosse_tx35dthit", "tpms_toyota"];
+const FSK_CAPTURES: &[&str] = &[
+    "fineoffset_wh51",
+    "lacrosse_tx29it",
+    "lacrosse_tx35dthit",
+    "tpms_toyota",
+    "tpms_ford",
+    "tpms_renault",
+];
 
 /// Captures the classifier is known to read wrong, with the reason.
 ///
@@ -70,6 +76,24 @@ const KNOWN_MISSES: &[(&str, &str)] = &[
          verdict from one window in fourteen. The decoder reads every \
          transmission in both",
     ),
+    (
+        "tpms_ford_a_433.92M_250k.cu8",
+        "the sensor sends four transmissions over half a second and the \
+         harness merges them, with the silence between, into one window that \
+         is nine tenths noise. An 8 ms window sitting inside a burst reads \
+         Fsk2 at full confidence; one straddling a burst edge reads Ook, \
+         which is what a carrier turning on and off is",
+    ),
+    (
+        "tpms_ford_b_433.92M_250k.cu8",
+        "as the Ford capture above: one merged window of mostly silence",
+    ),
+    (
+        "tpms_renault_a_433.92M_250k.cu8",
+        "as the Ford captures: the transmissions are half a second apart and \
+         merge into one window. A window inside the burst reads Fsk2",
+    ),
+    ("tpms_renault_b_433.92M_250k.cu8", "as the Renault capture above"),
     (
         "tpms_toyota_b_433.92M_250k.cu8",
         "one strong spike sets the upper envelope level for the whole window, \

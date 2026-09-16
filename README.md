@@ -15,7 +15,7 @@ decoded or not.
 
 | | where | what you get |
 |---|---|---|
-| ISM devices | 433, 868, 915 MHz | 43 decoders, most from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, shelf labels, mostly with a stable device ID |
+| ISM devices | 433, 868, 915 MHz | 45 decoders, most from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, shelf labels, mostly with a stable device ID |
 | Unknown bursts | anywhere | coding inferred and bits sliced out, enough to recognise the same device again and reverse engineer it |
 | Aircraft | 1090 MHz | ADS-B and Mode S onto a map with a track table: callsign, altitude, speed, track, position |
 | Aircraft datalinks | 131 and 136 MHz | ACARS and VDL Mode 2, the messages crews and airlines send each other |
@@ -197,7 +197,7 @@ and `--settings <name>` on a settings dialog.
 
 ## Status
 
-Verified against other people's decoders, not just its own: 77 recordings from
+Verified against other people's decoders, not just its own: 81 recordings from
 rtl_433's corpus are replayed field for field against what rtl_433 25.02 made
 of them, plus ADS-B against dump1090, ACARS against acarsdec, VDL Mode 2
 against dumpvdl2, SSTV against colaclanth's decoder, and a radiosonde against
@@ -205,7 +205,7 @@ SDRangel. Off-air captures of M17, DMR, TETRA and Meshtastic are asserted
 against what the transmission itself says. Those tests need
 `testdata/fetch.sh` to have pulled the recordings, and skip cleanly when it
 has not, which is also what happens in CI. Coverage is the thin part,
-forty-three ISM decoders where the goal is hundreds, and the browser build is
+forty-five ISM decoders where the goal is hundreds, and the browser build is
 still a plan.
 
 ## Where to read next

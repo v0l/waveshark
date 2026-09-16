@@ -55,7 +55,7 @@ pub use prologue::PrologueTh;
 pub use rubicson::Rubicson;
 pub use security::HoneywellSecurity;
 pub use somfy_rts::SomfyRts;
-pub use tpms::{SchraderTpms, ToyotaTpms};
+pub use tpms::{FordTpms, RenaultTpms, SchraderTpms, ToyotaTpms};
 pub use x10::X10Rf;
 
 use crate::bits::BitBuffer;

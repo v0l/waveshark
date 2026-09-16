@@ -628,3 +628,35 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "72dc1e729081535e1442e343cacaa37a368cafbe1ca855f32fd9024d700fe2ad"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/hideki/04/gfile310.json"
 description = "The anemometer, thirteen bytes with a temperature, a speed, a gust and a vane code, reading 67.5 degrees in still air"
+
+[[sample]]
+name = "tpms_ford_a_433.92M_250k.cu8"
+sha256 = "836941a8bdd03f492c3e032ebc363ea49f856016d68e9e79c7948f671fb99c6b"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Ford_TPMS/gfile059.cu8"
+reference_sha256 = "c521159f8f3e431ec6dd86ddc5fae8649d68e43e3d68a4343b16d3fce503ef21"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Ford_TPMS/gfile059.json"
+description = "A wheel on a moving car at 26.5 PSI, whose temperature byte carries something other than a temperature, which is how this sensor says it is being driven"
+
+[[sample]]
+name = "tpms_ford_b_433.92M_250k.cu8"
+sha256 = "7dbab6ec43d43e9b09bed70b38c3c7c6be4e7f1e75429b6c26280167bb93be71"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Ford_TPMS/gfile082.cu8"
+reference_sha256 = "62e50bae8284674e2f26e1e358e012d81f40efa488706af00ca04f6d1f0e668d"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Ford_TPMS/gfile082.json"
+description = "A second Ford sensor at 33.75 PSI, a different id and a different flag code behind the same eight bit sum"
+
+[[sample]]
+name = "tpms_renault_a_433.92M_250k.cu8"
+sha256 = "7278506e7af42f0cd16633df75c5bd1bf495ccb6b8f7ab68acb1c888532f5c34"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Renault_TPMS/gfile070.cu8"
+reference_sha256 = "781e774d22c11d84b240e79b18e14dc2f092d74cde2a99b4e990e71a8b5a8f4f"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Renault_TPMS/gfile070.json"
+description = "A Renault wheel at 202.5 kPa and 25 C, the same waveform as the Ford sensor with a nine byte frame and a CRC"
+
+[[sample]]
+name = "tpms_renault_b_433.92M_250k.cu8"
+sha256 = "fe88bbc9770a7235de462079ad5a284d5beb2d634c109591b82b5df783abec70"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Renault_TPMS/gfile091.cu8"
+reference_sha256 = "6e5ff6c98c1f6e4239855030a154e68933457db178c20418e45f740d338b4e30"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Renault_TPMS/gfile091.json"
+description = "A second Renault wheel, 227.25 kPa at 27 C, the id little-endian in the middle of the frame"
