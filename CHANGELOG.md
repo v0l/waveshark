@@ -15,7 +15,7 @@ the code is in the commit log.
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.
 - A timeline under the call list: the recordings drawn as clips against the
-  clock, with quiet longer than ten seconds shown as a marker rather than
+  clock, with quiet longer than three seconds shown as a marker rather than
   empty lane. Click to play from a moment, drag to pick a stretch, and write
   that stretch out as one Opus file.
 - The recordings table filters by talkgroup, caller, system or frequency, and

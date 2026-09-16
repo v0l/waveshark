@@ -26,15 +26,18 @@ use crate::calllog::Entry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// How tall the clip lane is, and the ruler above it.
+/// How tall the clip lane is, the ruler above it and the overview under it.
 const LANE_H: f32 = 84.0;
 const RULER_H: f32 = 18.0;
+const OVERVIEW_H: f32 = 12.0;
 
-/// Quiet longer than this is a marker rather than a stretch of lane.
+/// Quiet longer than this is a marker rather than a stretch of lane, and is
+/// not played through either.
 ///
-/// Ten seconds: shorter than that is somebody thinking before they answer,
-/// which is part of the conversation, and longer is the band being empty.
-pub const BREAK_AFTER_S: f64 = 10.0;
+/// Three seconds: that is about as long as a pause between two overs of the
+/// same exchange, and it is also as long as anybody will sit through. Beyond
+/// it the silence says nothing the marker does not say better.
+pub const BREAK_AFTER_S: f64 = 3.0;
 
 /// What a break is worth, in the seconds the axis is measured in.
 ///
@@ -75,6 +78,15 @@ pub(super) struct TimelineState {
 }
 
 impl TimelineState {
+    /// Zoom about the middle of what is on screen, which is what the
+    /// buttons do and what keeps the thing being looked at in view.
+    pub fn zoom(&mut self, factor: f64, total: f64) {
+        let Some((from, span)) = self.view else { return };
+        let middle = from + span / 2.0;
+        let span = (span * factor).clamp(0.2, total.max(1.0) * 1.5);
+        self.view = Some((middle - span / 2.0, span));
+    }
+
     /// Fit the view to all of it, which is what opening it does and what FIT
     /// does afterwards.
     pub fn fit(&mut self, entries: &[Entry]) {
@@ -184,30 +196,28 @@ pub(super) fn show(
     let (from, span) = st.view.map(|(f, s)| (f, s.max(0.05)))?;
     let mut act = None;
 
+    // Right to left, so a pane too narrow for both crowds the reading rather
+    // than drawing it under the buttons.
     ui.horizontal(|ui| {
         ui.add_space(12.0);
-        let breaks = entries.len().saturating_sub(map.runs.len());
-        let mut line = theme::Line::new()
-            .legend("timeline")
-            .value(format!("{} overs", entries.len()))
-            .size(11.0);
-        if breaks > 0 {
-            line = line.gap(12.0).value(format!("{} runs", map.runs.len())).size(11.0);
-        }
-        if let Some((a, b)) = st.sel {
-            line = line.gap(12.0).set(format!("{:.0} s picked", b - a)).size(11.0);
-        }
-        line.show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(12.0);
             if ui.small_button("CLOSE").clicked() {
                 act = Some(Act::Close);
             }
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             if ui.small_button("FIT").on_hover_text("Show all of it").clicked() {
                 st.fit(entries);
             }
-            ui.add_space(8.0);
+            // Zoom as buttons as well as on the wheel: a wheel over a pane
+            // that also scrolls is a guess about which one was meant, and
+            // these are not a guess.
+            if ui.small_button("\u{2212}").on_hover_text("Further out").clicked() {
+                st.zoom(2.0, map.total());
+            }
+            if ui.small_button("+").on_hover_text("Closer in").clicked() {
+                st.zoom(0.5, map.total());
+            }
+            ui.add_space(6.0);
             let sel = st.sel;
             if ui
                 .add_enabled(sel.is_some(), egui::Button::new("EXPORT").small())
@@ -217,7 +227,6 @@ pub(super) fn show(
             {
                 act = Some(Act::Export(map.ranges(a, b)));
             }
-            ui.add_space(8.0);
             if ui
                 .add_enabled(sel.is_some(), egui::Button::new("PLAY").small())
                 .on_hover_text("Play the selected stretch")
@@ -227,6 +236,18 @@ pub(super) fn show(
                 st.playing = Some((a, b - a));
                 act = Some(Act::Play(map.ranges(a, b)));
             }
+            ui.add_space(8.0);
+            let mut line = theme::Line::new()
+                .legend("timeline")
+                .value(format!("{} overs", entries.len()))
+                .size(11.0);
+            if map.runs.len() < entries.len() {
+                line = line.gap(10.0).value(format!("{} runs", map.runs.len())).size(11.0);
+            }
+            if let Some((a, b)) = st.sel {
+                line = line.gap(10.0).set(format!("{:.0} s picked", b - a)).size(11.0);
+            }
+            line.elided(ui);
         });
     });
 
@@ -331,22 +352,58 @@ pub(super) fn show(
         && left_s > 0.0
     {
         let at = started + (total - left_s as f64).max(0.0);
+        // Follow it when it runs off the edge, so a zoomed-in lane does not
+        // have to be dragged along behind the playback.
+        if at < from || at > from + span {
+            st.view = Some((at - span / 2.0, span));
+        }
         let x = at_x(at);
         if lane.x_range().contains(x) {
-            p.line_segment(
-                [Pos2::new(x, lane.top()), Pos2::new(x, lane.bottom())],
-                Stroke::new(1.0, theme::OK),
+            // Amber, two pixels, with a head on the ruler and a wash either
+            // side: a hairline over a lane of cyan clips cannot be found,
+            // and the whole point of it is to be findable while it moves.
+            p.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(x - 3.0, lane.top()),
+                    Pos2::new(x + 3.0, lane.bottom()),
+                ),
+                0.0,
+                theme::READOUT.gamma_multiply(0.20),
             );
+            p.line_segment(
+                [Pos2::new(x, ruler.top() + 6.0), Pos2::new(x, lane.bottom())],
+                Stroke::new(2.0, theme::READOUT),
+            );
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(x - 5.0, ruler.top() + 2.0),
+                    Pos2::new(x + 5.0, ruler.top() + 2.0),
+                    Pos2::new(x, ruler.top() + 9.0),
+                ],
+                theme::READOUT,
+                Stroke::NONE,
+            ));
         }
     }
 
     // Zoom about the pointer, which is what every editor does and what makes
     // a long conversation navigable without a scrollbar.
     if let Some(pos) = resp.hover_pos() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        // Wheel events rather than the scroll delta: the delta carries
+        // whatever a scroll area near the pointer is still easing, and the
+        // lane would zoom itself while nobody was touching it.
+        let scroll: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum()
+        });
         if scroll.abs() > 0.1 {
             let anchor = at_s(pos.x);
-            let factor = (1.0 - scroll as f64 * 0.002).clamp(0.2, 5.0);
+            let factor = (1.0 - scroll as f64 * 0.15).clamp(0.2, 5.0);
             let new_span = (span * factor).clamp(0.2, map.total().max(1.0) * 1.5);
             st.view = Some((anchor - (anchor - from) / span * new_span, new_span));
         }
@@ -386,14 +443,64 @@ pub(super) fn show(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
     }
 
+    overview(ui, st, &map, (from, span));
+
     ui.add_space(2.0);
     hint(
         ui,
         "Click to play from there, drag to select a stretch, scroll to zoom. Quiet longer than \
-         ten seconds is a marker saying how long it lasted, not lane. A row in the table below \
-         opens its own conversation.",
+         three seconds is a marker saying how long it lasted, and is not played. A row in the \
+         table below opens its own conversation.",
     );
     act
+}
+
+/// The whole conversation in a strip under the lane, with the window on it.
+///
+/// A zoomed-in lane has no edges to tell you where in the afternoon you are,
+/// and a scrollbar would say how far along without saying where the talking
+/// was. This says both: every run is a tick, the window is a box, and
+/// dragging the box is how the lane is panned.
+fn overview(ui: &mut egui::Ui, st: &mut TimelineState, map: &Map, view: (f64, f64)) {
+    let (from, span) = view;
+    let total = map.total().max(1.0);
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width() - 24.0, OVERVIEW_H),
+        Sense::click_and_drag(),
+    );
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 1.0, theme::WELL);
+    let at_x = |s: f64| rect.left() + (s / total).clamp(0.0, 1.0) as f32 * rect.width();
+    for r in &map.runs {
+        let x0 = at_x(r.at_s);
+        let x1 = at_x(r.at_s + (r.to_us - r.from_us) as f64 / 1e6);
+        p.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(x0, rect.top() + 2.0),
+                Pos2::new(x1.max(x0 + 1.0), rect.bottom() - 2.0),
+            ),
+            0.0,
+            theme::TRACE.gamma_multiply(0.7),
+        );
+    }
+    let window = Rect::from_min_max(
+        Pos2::new(at_x(from), rect.top()),
+        Pos2::new(at_x(from + span).max(at_x(from) + 2.0), rect.bottom()),
+    );
+    p.rect_filled(window, 0.0, theme::READOUT.gamma_multiply(0.18));
+    p.rect_stroke(window, 0.0, Stroke::new(1.0, theme::READOUT), egui::StrokeKind::Inside);
+
+    // A press anywhere on the strip centres the window there, and dragging
+    // carries it: the same gesture whichever was meant.
+    if (resp.clicked() || resp.dragged())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let middle = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * total;
+        st.view = Some((middle - span / 2.0, span));
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
 }
 
 /// The marker that stands for a stretch of empty band: a hatched gap with how
@@ -409,20 +516,21 @@ fn draw_break(p: &egui::Painter, lane: Rect, x0: f32, x1: f32, seconds: f64) {
     let band =
         Rect::from_min_max(Pos2::new(x0, lane.top()), Pos2::new(x1.max(x0 + 3.0), lane.bottom()));
     p.rect_filled(band, 0.0, theme::CHASSIS);
-    p.rect_stroke(
-        band,
-        0.0,
-        Stroke::new(1.0, theme::READOUT.gamma_multiply(0.35)),
-        egui::StrokeKind::Inside,
+    // A cut rather than a thing that was recorded: a rule through the middle
+    // where the lane would have been, and the hatching only where there is
+    // room for it to read as hatching rather than as noise.
+    p.line_segment(
+        [Pos2::new(band.left(), band.center().y), Pos2::new(band.right(), band.center().y)],
+        Stroke::new(1.0, theme::ETCH),
     );
-    // Two hatched strokes rather than a fill, so it reads as the axis being
-    // cut rather than as something that was recorded.
-    for k in 0..3 {
-        let x = band.left() + band.width() * (k as f32 + 0.5) / 3.0;
-        p.line_segment(
-            [Pos2::new(x - 3.0, band.bottom() - 4.0), Pos2::new(x + 3.0, band.top() + 4.0)],
-            Stroke::new(1.0, theme::ETCH),
-        );
+    if band.width() >= 8.0 {
+        for k in 0..2 {
+            let x = band.left() + band.width() * (k as f32 + 0.5) / 2.0;
+            p.line_segment(
+                [Pos2::new(x - 3.0, band.bottom() - 6.0), Pos2::new(x + 3.0, band.top() + 6.0)],
+                Stroke::new(1.0, theme::ETCH),
+            );
+        }
     }
     if band.width() >= BREAK_LABEL_W {
         p.text(
