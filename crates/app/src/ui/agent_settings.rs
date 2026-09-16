@@ -480,14 +480,11 @@ impl super::App {
         if let Some(code) = a.country {
             let c = crate::locale::by_code(code.trim())
                 .ok_or_else(|| format!("no country {code:?}, which is an ISO two letter code"))?;
-            self.country = c.code.to_string();
-            // The cell export is fetched per country, so the dataset cache
-            // has to hear about this to know which one it would fetch.
-            crate::data::set_country(&self.country);
+            self.settings.edit(|s| s.country = c.code.to_string());
             // A country decides the plan the first time and then stops
             // having an opinion, so a plan named in the same call wins.
             crate::bands::set_plan(c.plan);
-            if self.location.is_none() {
+            if self.setting(|s| s.location).is_none() {
                 self.set_location(c.centre.0, c.centre.1);
                 self.station_edit = None;
             }
@@ -497,29 +494,25 @@ impl super::App {
         }
         let plan = crate::bands::plan();
         Ok(json!({
-            "country": self.country,
+            "country": self.setting(|s| s.country.clone()),
             "band_plan": plan.id(),
-            "position": self.location.map(|(lat, lon)| json!({ "lat": lat, "lon": lon })),
+            "position": self.setting(|s| s.location).map(|(lat, lon)| json!({ "lat": lat, "lon": lon })),
             "here": crate::bands::name_at_in(plan, self.center),
         }))
     }
 
     fn agent_set_sound(&mut self, a: args::Sound) -> Result<Value, String> {
-        let mut moved = false;
-        if let Some(s) = a.speaker {
-            self.audio_out = s.trim().to_string();
-            moved = true;
-        }
-        if let Some(m) = a.microphone {
-            self.audio_in = m.trim().to_string();
-            moved = true;
-        }
-        if moved {
-            self.send_audio();
-        }
+        self.settings.edit(|s| {
+            if let Some(out) = a.speaker {
+                s.audio_out = out.trim().to_string();
+            }
+            if let Some(mic) = a.microphone {
+                s.audio_in = mic.trim().to_string();
+            }
+        });
         Ok(json!({
-            "speaker": self.audio_out,
-            "microphone": self.audio_in,
+            "speaker": self.setting(|s| s.audio_out.clone()),
+            "microphone": self.setting(|s| s.audio_in.clone()),
             "speakers": audio::AudioPlayer::devices(),
             "microphones": audio::AudioCapture::devices(),
         }))
@@ -540,119 +533,123 @@ impl super::App {
         let path = a.path.map(std::path::PathBuf::from);
         match (a.on, path) {
             (Some(on), p) => self.set_survey(!on, p),
-            (None, Some(p)) if self.survey.path.is_some() => self.set_survey(false, Some(p)),
+            (None, Some(p)) if self.setting(|s| s.survey_on) => self.set_survey(false, Some(p)),
             _ => {}
         }
         Ok(json!({
-            "recording": self.survey.path.is_some(),
-            "path": self.survey.path.as_ref().map(|p| p.display().to_string()),
-            "gps": self.survey.gps.as_ref().map(|t| t.to_string()),
+            "recording": self.setting(|s| s.survey_on),
+            "path": self.setting(|s| s.survey_file()).map(|p| p.display().to_string()),
+            "gps": self.setting(|s| s.gps.clone()),
             "devices": self.survey.rows.len(),
         }))
     }
 
     fn agent_set_wigle(&mut self, a: args::Wigle) -> Result<Value, String> {
-        {
-            let w = &mut self.survey.wigle;
+        self.settings.edit(|s| {
             if let Some(n) = a.name {
-                w.name = n.trim().to_string();
+                s.wigle_name = n.trim().to_string();
             }
             if let Some(t) = a.token {
-                w.token = t.trim().to_string();
+                s.wigle_token = t.trim().to_string();
             }
             if let Some(d) = a.donate {
-                w.donate = d;
+                s.wigle_donate = d;
             }
             if let Some(on) = a.on {
-                w.on = on;
+                s.wigle_on = on;
             }
-        }
-        self.apply_wigle();
-        let w = &self.survey.wigle;
+        });
+        // The switch may not survive the record being applied: an account
+        // with half of it typed in cannot upload, whatever was asked for.
+        self.apply_settings();
+        let w = self.setting(|s| s.wigle_account());
+        let status = self.survey.wigle.status.clone();
         Ok(json!({
-            "uploading": w.on,
+            "uploading": self.setting(|s| s.wigle_on),
             "account": w.name,
             "donate": w.donate,
             // The token is what somebody else would upload as: it goes in and
             // is never read back out.
             "token_set": !w.token.is_empty(),
-            "sent_rows": w.status.as_ref().map(|s| s.sent_rows),
-            "queued_rows": w.status.as_ref().map(|s| s.queued_rows),
-            "fault": w.status.as_ref().and_then(|s| s.error.clone()),
+            "sent_rows": status.as_ref().map(|s| s.sent_rows),
+            "queued_rows": status.as_ref().map(|s| s.queued_rows),
+            "fault": status.as_ref().and_then(|s| s.error.clone()),
         }))
     }
 
     fn agent_set_beacondb(&mut self, a: args::BeaconDb) -> Result<Value, String> {
-        if let Some(on) = a.on {
-            self.survey.beacondb.on = on;
-        }
-        if let Some(l) = a.lookup {
-            self.survey.beacondb.lookup = l;
-        }
-        self.apply_beacondb();
-        let b = &self.survey.beacondb;
+        self.settings.edit(|s| {
+            if let Some(on) = a.on {
+                s.beacondb_on = on;
+            }
+            if let Some(l) = a.lookup {
+                s.beacondb_lookup = l;
+            }
+        });
+        let status = self.survey.beacondb.status.clone();
         Ok(json!({
-            "submitting": b.on,
-            "lookup": b.lookup,
-            "sent_items": b.status.as_ref().map(|s| s.sent_items),
-            "queued_items": b.status.as_ref().map(|s| s.queued_items),
-            "fault": b.status.as_ref().and_then(|s| s.error.clone()),
+            "submitting": self.setting(|s| s.beacondb_on),
+            "lookup": self.setting(|s| s.beacondb_lookup),
+            "sent_items": status.as_ref().map(|s| s.sent_items),
+            "queued_items": status.as_ref().map(|s| s.queued_items),
+            "fault": status.as_ref().and_then(|s| s.error.clone()),
         }))
     }
 
     fn agent_set_homeassistant(&mut self, a: args::HomeAssistant) -> Result<Value, String> {
-        {
-            let h = &mut self.survey.homeassistant;
+        self.settings.edit(|s| {
             if let Some(v) = a.host {
-                h.host = v.trim().to_string();
+                s.ha_host = v.trim().to_string();
             }
             if let Some(v) = a.port {
-                h.port = v.to_string();
+                s.ha_port = v.to_string();
             }
             if let Some(v) = a.username {
-                h.username = v.trim().to_string();
+                s.ha_user = v.trim().to_string();
             }
             if let Some(v) = a.password {
-                h.password = v;
+                s.ha_password = v;
             }
             if let Some(v) = a.prefix {
-                h.prefix = v.trim().to_string();
+                s.ha_prefix = v.trim().to_string();
             }
             if let Some(v) = a.topic {
-                h.topic = v.trim().to_string();
+                s.ha_topic = v.trim().to_string();
             }
             if let Some(v) = a.spaces {
-                h.spaces = v.trim().to_string();
+                s.ha_spaces = v.trim().to_string();
             }
             if let Some(v) = a.buses {
-                h.buses = v;
+                s.ha_buses = v;
             }
             if let Some(on) = a.on {
-                h.on = on;
+                s.ha_on = on;
             }
-        }
-        self.apply_homeassistant();
-        let h = &self.survey.homeassistant;
+        });
+        // A broker with no host cannot publish, whatever the switch said.
+        self.apply_settings();
+        let h = self.settings.get();
+        let status = self.survey.homeassistant.status.clone();
         Ok(json!({
-            "publishing": h.on,
-            "host": h.host,
-            "port": h.port,
-            "username": h.username,
-            "password_set": !h.password.is_empty(),
-            "prefix": h.prefix,
-            "topic": h.topic,
-            "spaces": h.spaces,
-            "buses": h.buses,
-            "connected": h.status.as_ref().map(|s| s.connected),
-            "published": h.status.as_ref().map(|s| s.published),
-            "fault": h.status.as_ref().and_then(|s| s.error.clone()),
+            "publishing": h.ha_on,
+            "host": h.ha_host,
+            "port": h.ha_port,
+            "username": h.ha_user,
+            "password_set": !h.ha_password.is_empty(),
+            "prefix": h.ha_prefix,
+            "topic": h.ha_topic,
+            "spaces": h.ha_spaces,
+            "buses": h.ha_buses,
+            "connected": status.as_ref().map(|s| s.connected),
+            "published": status.as_ref().map(|s| s.published),
+            "fault": status.as_ref().and_then(|s| s.error.clone()),
         }))
     }
 
     fn agent_feeds(&self) -> Value {
         let live = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
-        let rows: Vec<Value> = self
-            .feeds
+        let feeds = self.setting(|s| s.feeds.clone());
+        let rows: Vec<Value> = feeds
             .iter()
             .map(|f| {
                 let s = live.iter().find(|s| s.spec == *f);
@@ -678,26 +675,25 @@ impl super::App {
             })?;
         let spec = super::parse_feed(&a.host, kind)
             .ok_or_else(|| format!("{:?} is not a host or a host:port", a.host))?;
-        if self.feeds.contains(&spec) {
+        if self.setting(|s| s.feeds.contains(&spec)) {
             return Err(format!("{} is already attached", spec.address()));
         }
-        self.feeds.push(spec);
-        let feeds = self.feeds.clone();
-        self.send(Cmd::Feeds(feeds));
+        self.settings.edit(|s| s.feeds.push(spec));
         Ok(self.agent_feeds())
     }
 
     fn agent_remove_feed(&mut self, address: &str) -> Result<Value, String> {
         let want = address.trim();
-        let i = self.feeds.iter().position(|f| f.address().eq_ignore_ascii_case(want)).ok_or_else(
-            || {
-                let have: Vec<String> = self.feeds.iter().map(|f| f.address()).collect();
+        let i = self
+            .setting(|s| s.feeds.iter().position(|f| f.address().eq_ignore_ascii_case(want)))
+            .ok_or_else(|| {
+                let have: Vec<String> =
+                    self.setting(|s| s.feeds.iter().map(|f| f.address()).collect());
                 format!("no feed at {want:?}. Attached: {have:?}")
-            },
-        )?;
-        self.feeds.remove(i);
-        let feeds = self.feeds.clone();
-        self.send(Cmd::Feeds(feeds));
+            })?;
+        self.settings.edit(|s| {
+            s.feeds.remove(i);
+        });
         Ok(self.agent_feeds())
     }
 
@@ -798,17 +794,13 @@ impl super::App {
                 return Err(format!("a transform is one of {:?} bins", super::FFTS));
             }
             self.scope.fft = n;
-            self.send(Cmd::Fft(n));
+            self.scope.fft_size = n;
         }
         if let Some(hz) = a.refresh_hz {
             self.scope.refresh = hz.clamp(1.0, 120.0);
-            let hz = self.scope.refresh;
-            self.send(Cmd::Refresh(hz));
         }
         if let Some(s) = a.smoothing {
             self.scope.smoothing = s.clamp(0.0, 0.99);
-            let s = self.scope.smoothing;
-            self.send(Cmd::Smoothing(s));
         }
         if let Some(r) = a.rows_per_sec {
             self.scope.rows_per_sec = r.clamp(1.0, 200.0);

@@ -73,6 +73,18 @@ use widgets::{
 };
 
 pub struct App {
+    /// What the operator has set, as one record. Every pane holds a clone of
+    /// this handle and writes its setting through it; nothing keeps a second
+    /// copy of a setting in a field of its own, because a second copy is a
+    /// copy that can be stale.
+    settings: crate::session::Settings,
+    /// The record as the receiver was last told it, or `None` for a radio
+    /// thread that has been told nothing yet. [`App::apply_settings`] sends
+    /// what differs, so a setting cannot be stored without being applied.
+    applied: Option<crate::session::Session>,
+    /// Which version of the record that was, so a frame that changed nothing
+    /// costs one atomic read.
+    applied_rev: u64,
     /// What each view remembers. A pane is handed its own and nothing else,
     /// which is what stops one view reaching into another's business.
     scope: state::ScopeState,
@@ -138,17 +150,10 @@ pub struct App {
     shot_sent: bool,
     /// Start the radio on the first frame, rather than waiting for a click.
     autostart: bool,
-    /// Remove the direct-conversion centre spur. On by default: it is an
-    /// artefact of the receiver, not something being received.
-    dc_block: bool,
     view: View,
     /// What was open before it. A look at the map and back is then one key,
     /// which is the thing an operator does most often with these views.
     prev_view: View,
-    /// Whether the dashboard is one of the views. Off takes its tab away and
-    /// opens the receiver on the spectrum, for an operator who knows what the
-    /// thing does and wants the band instead.
-    dashboard: bool,
     /// How much each view held when it was last looked at, by
     /// [`View::slot`]. A tab's dot is on when its view has more than this.
     view_seen: [u64; View::COUNT],
@@ -156,34 +161,13 @@ pub struct App {
     /// Counted because the video pane has no list to take a length of.
     video_seen: u64,
     video_live_was: bool,
-    /// Decoding every channel is on by default and can be turned off; it is
-    /// the most expensive thing the app does.
-    decode_on: bool,
-    /// Whether the raw span capture is wanted. Held rather than sent once:
-    /// choosing a device starts a new radio thread with a new graph, and a
-    /// capture that quietly stopped there would be worse than none.
-    capture: bool,
-    /// Where the receiver is, when it has been told.
-    location: Option<(f64, f64)>,
-    /// How far out that position may be, in metres, when a fix said. `None`
+    /// How far out the station position may be, in metres, when a fix said. `None`
     /// for a position typed in or taken from the country, which is a claim
     /// with no error bar rather than a perfect one.
     accuracy_m: Option<f64>,
     /// When the radio last delivered a spectrum, for noticing that it has
     /// stopped.
     last_frame: Option<std::time::Instant>,
-    /// ISO country code, or empty when nothing has chosen one.
-    country: String,
-    /// OpenCelliD download token, as typed in the datasets pane.
-    opencellid_token: String,
-    /// The Space-Track login, as typed in the same pane. Its catalogue query
-    /// is answered only while logged in.
-    spacetrack_identity: String,
-    spacetrack_password: String,
-    /// Sound devices by name, empty for the system default. The speaker the
-    /// mix comes out of, and the microphone a keyed channel transmits from.
-    audio_out: String,
-    audio_in: String,
     /// What the radio is set to, as the operator set it. The one record every
     /// route to a radio setting writes and reads; see
     /// [`crate::session::RadioSettings`].
@@ -199,9 +183,6 @@ pub struct App {
     /// given the settings. Set on connect and on reset, cleared once the
     /// driver has reported its controls and the settings have gone to it.
     radio_dirty: bool,
-    /// Packet feeds from other receivers, as configured here and saved in
-    /// the session.
-    feeds: Vec<nodes::FeedSpec>,
     /// The feed being typed into the settings modal.
     feed_host: String,
     /// The remote radio being created, while that dialog is open.
@@ -216,18 +197,14 @@ pub struct App {
     /// The memory bank, and the group the next save goes into.
     memory: crate::memory::Memory,
     memory_group: String,
+    /// Where the packet log is being pointed, while it is being typed. Apart
+    /// from the setting so a half-written path does not move the log on every
+    /// keystroke.
     log_dir_edit: String,
-    log_dir: Option<std::path::PathBuf>,
-    log_cap_mb: Option<u64>,
-    /// How large the raw capture folder may get, in megabytes, or `None` for
-    /// no limit.
-    capture_cap_mb: Option<u64>,
     feed_kind: &'static nodes::FeedKind,
     /// The station position being typed, while it is being typed. Kept apart
     /// from the real one so a half-finished latitude does not move the map.
     station_edit: Option<String>,
-    saved: crate::session::Session,
-    saved_at: Option<std::time::Instant>,
     /// What an agent has asked for, whether it came over MCP or from the
     /// chat in the Agent view. One queue: both front ends hold the same desk.
     agent: crossbeam_channel::Receiver<crate::agent::Ask>,
@@ -570,6 +547,9 @@ impl Default for App {
     fn default() -> Self {
         let (desk, asks) = crate::agent::Desk::new();
         Self {
+            settings: crate::session::Settings::new(crate::session::Session::default()),
+            applied: None,
+            applied_rev: 0,
             scope: state::ScopeState::default(),
             chain: state::ChainState::default(),
             log: state::LogState::default(),
@@ -607,32 +587,20 @@ impl Default for App {
             soak: None,
             shot: None,
             shot_after: 6.0,
-            decode_on: true,
-            capture: false,
             shot_at: None,
             shot_sent: false,
             autostart: false,
-            dc_block: true,
             view: View::Dashboard,
             prev_view: View::Spectrum,
-            dashboard: true,
             view_seen: [0; View::COUNT],
             video_seen: 0,
             video_live_was: false,
-            location: None,
             accuracy_m: None,
             last_frame: None,
-            country: String::new(),
-            opencellid_token: String::new(),
-            spacetrack_identity: String::new(),
-            spacetrack_password: String::new(),
-            audio_out: String::new(),
-            audio_in: String::new(),
             radio_settings: Default::default(),
             ppm_by_device: Default::default(),
             offset_by_device: Default::default(),
             radio_dirty: false,
-            feeds: Vec::new(),
             feed_host: String::new(),
             remote: None,
             feed_kind: nodes::FEED_KINDS[0],
@@ -641,12 +609,7 @@ impl Default for App {
             memory: Default::default(),
             memory_group: crate::memory::UNGROUPED.into(),
             log_dir_edit: String::new(),
-            log_dir: None,
-            log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
-            capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             station_edit: None,
-            saved: crate::session::Session::default(),
-            saved_at: None,
             agent: asks,
             desk,
             desk_rung: false,
@@ -662,18 +625,9 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         crate::shutdown::install(cc.egui_ctx.clone());
-        let mut s = crate::session::Session::load();
-        apply_locale(&mut s);
-        // The dataset cache is asked questions from drawing code with no
-        // session to consult, so what it needs is handed to it once here:
-        // the country picks which cell export applies, and the token is what
-        // fetches it.
-        crate::data::set_country(&s.country);
-        crate::data::set_opencellid_token(&s.opencellid_token);
-        datasets::spacetrack::set_account(Some(datasets::spacetrack::Account {
-            identity: s.spacetrack_identity.clone(),
-            password: s.spacetrack_password.clone(),
-        }));
+        let settings = crate::session::Settings::load();
+        settings.edit(apply_locale);
+        let s = settings.get();
         // A radio on the network cannot be found by looking at the bus, so the
         // saved servers have to be registered before the list is built. Added
         // rather than set: the command line may already have put one there.
@@ -697,60 +651,35 @@ impl App {
             // effective one, which zoom divides.
             rate: s.rate / s.zoom.max(1) as f64,
             zoom: s.zoom,
-            dc_block: s.dc_block,
-            decode_on: s.decode_on,
-            location: s.location,
-            accuracy_m: None,
-            country: s.country.clone(),
-            opencellid_token: s.opencellid_token.clone(),
-            spacetrack_identity: s.spacetrack_identity.clone(),
-            spacetrack_password: s.spacetrack_password.clone(),
-            audio_out: s.audio_out.clone(),
-            audio_in: s.audio_in.clone(),
             radio_settings,
             ppm_by_device: s.ppm.clone(),
             offset_by_device: s.offset.clone(),
-            feeds: s.feeds.clone(),
-            log_cap_mb: s.log_cap_mb,
-            capture_cap_mb: s.capture_cap_mb,
             scanners: crate::scanners::Scanners::load(),
             memory: crate::memory::Memory::load(),
-            saved: s.clone(),
-            dashboard: s.dashboard,
             view: if s.dashboard { View::Dashboard } else { View::Spectrum },
+            settings,
             ..Default::default()
         };
         app.map.map.layers.restore(&s.map_layers);
         app.scope.restore(&s.view, s.fft);
         app.scope.db_center = s.center;
         app.scope.wf_center = s.center;
-        // What the receiver writes down, as the operator last left it. Off
-        // until asked: see `Session::packet_log_on`.
-        app.log.path = s.packet_log_on.then(crate::packetlog::PacketLog::default_dir).flatten();
-        app.survey.path =
-            s.survey_on.then(crate::packetlog::PacketLog::default_survey_path).flatten();
-        // A GPS named once stays named: a survey is usually the same drive
-        // with the same receiver, and typing the port again every start is
-        // the difference between a tool and a demonstration.
-        app.survey.gps = gps::Transport::parse(&s.gps);
-        app.survey.wigle.name = s.wigle_name.clone();
-        app.survey.wigle.token = s.wigle_token.clone();
-        app.survey.wigle.donate = s.wigle_donate;
-        app.survey.wigle.on = s.wigle_on;
-        app.survey.beacondb.on = s.beacondb_on;
-        app.survey.homeassistant.host = s.ha_host.clone();
-        app.survey.homeassistant.port = s.ha_port.clone();
-        app.survey.homeassistant.username = s.ha_user.clone();
-        app.survey.homeassistant.password = s.ha_password.clone();
-        app.survey.homeassistant.prefix = s.ha_prefix.clone();
-        app.survey.homeassistant.topic = s.ha_topic.clone();
-        app.survey.homeassistant.spaces = s.ha_spaces.clone();
-        app.survey.homeassistant.on = s.ha_on;
-        app.survey.homeassistant.buses = s.ha_buses;
-        app.survey.beacondb.lookup = s.beacondb_lookup;
-        crate::beacondb::set_lookup(s.beacondb_lookup);
+        // The field shows where the log would go, not where it is going: an
+        // empty box beside a switch nobody has thrown says nothing.
+        app.log_dir_edit = match s.log_dir.is_empty() {
+            true => crate::packetlog::PacketLog::default_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default(),
+            false => s.log_dir.clone(),
+        };
         crate::beacondb::start();
         app.radio_dirty = true;
+        // Everything the record reaches outside the radio thread: the GPS
+        // source, the beaconDB lookup and what the dataset cache is asked
+        // from drawing code. Before the connect and whether or not one
+        // happens, since a receiver with nothing plugged in still draws a map
+        // and still downloads a catalogue.
+        app.apply_settings();
         // What was changed about the graph, if anything was. Applied
         // whether or not manual mode is on: the mode only says whether the
         // graph can be edited now.
@@ -760,11 +689,6 @@ impl App {
                 places.iter().map(|(k, (x, y))| (*k, egui::Pos2::new(*x, *y))).collect();
             app.chain.places = places;
         }
-        // The settings show where the log is going, so they start from where
-        // it is actually going.
-        app.log_dir = app.log.path.clone();
-        app.log_dir_edit =
-            app.log_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
         // What was already there when the window opened did not arrive while
         // you were somewhere else, so no tab lights for it. Without this the
         // keys tab was lit on every start for anybody with a key saved: its
@@ -775,78 +699,111 @@ impl App {
         app
     }
 
-    /// The live settings, in the form they are stored in.
-    fn session(&self) -> crate::session::Session {
-        let rs = &self.radio_settings;
-        crate::session::Session {
-            device: self.device.as_ref().map(|d| d.label.clone()),
-            center: self.center,
-            rate: self.rate * self.zoom.max(1) as f64,
-            zoom: self.zoom,
-            fft: self.scope.fft,
-            gains: rs.gains.clone(),
-            toggles: rs.toggles.clone(),
-            choices: rs.choices.clone(),
-            ppm: self.ppm_by_device.clone(),
-            offset: self.offset_by_device.clone(),
-            tx_gain_db: rs.tx_gain_db,
-            location: self.location,
-            language: crate::i18n::language().code().to_string(),
-            country: self.country.clone(),
-            opencellid_token: self.opencellid_token.clone(),
-            spacetrack_identity: self.spacetrack_identity.clone(),
-            spacetrack_password: self.spacetrack_password.clone(),
-            audio_out: self.audio_out.clone(),
-            audio_in: self.audio_in.clone(),
-            band_plan: crate::bands::plan().id().to_string(),
-            view: self.scope.prefs(),
-            feeds: self.feeds.clone(),
-            streams: crate::devices::streams().into_iter().map(|r| (r.addr, r.label)).collect(),
-            dc_block: self.dc_block,
-            decode_on: self.decode_on,
-            log_cap_mb: self.log_cap_mb,
-            gps: self.survey.gps.as_ref().map(|t| t.to_string()).unwrap_or_default(),
-            wigle_name: self.survey.wigle.name.clone(),
-            wigle_token: self.survey.wigle.token.clone(),
-            wigle_donate: self.survey.wigle.donate,
-            wigle_on: self.survey.wigle.on,
-            beacondb_on: self.survey.beacondb.on,
-            ha_host: self.survey.homeassistant.host.clone(),
-            ha_port: self.survey.homeassistant.port.clone(),
-            ha_user: self.survey.homeassistant.username.clone(),
-            ha_password: self.survey.homeassistant.password.clone(),
-            ha_prefix: self.survey.homeassistant.prefix.clone(),
-            ha_topic: self.survey.homeassistant.topic.clone(),
-            ha_spaces: self.survey.homeassistant.spaces.clone(),
-            ha_on: self.survey.homeassistant.on,
-            ha_buses: self.survey.homeassistant.buses,
-            beacondb_lookup: self.survey.beacondb.lookup,
-            capture_cap_mb: self.capture_cap_mb,
-            manual_chain: self.chain.edit.manual,
-            packet_log_on: self.log.path.is_some(),
-            survey_on: self.survey.path.is_some(),
-            map_layers: self.map.map.layers.saved(),
-            dashboard: self.dashboard,
-        }
+    /// One setting, read off the record.
+    fn setting<R>(&self, f: impl FnOnce(&crate::session::Session) -> R) -> R {
+        self.settings.read(f)
     }
 
-    /// Write the session out when it has changed and settled.
+    /// Where the tuner is pointed and what the radio is set to, which the
+    /// dial and the strip change directly rather than through a switch.
     ///
-    /// Debounced because dragging the dial changes the centre on every frame,
-    /// and a file written sixty times a second to record a frequency nobody
-    /// stopped on is a lot of writes for no information.
-    fn save_session(&mut self) {
-        let now = self.session();
-        if now == self.saved {
-            return;
+    /// Put back into the record once a frame instead of on every drag, since
+    /// this is the part of the settings the interface owns rather than the
+    /// operator's switches.
+    fn sync_settings(&mut self) {
+        let rs = self.radio_settings.clone();
+        let device = self.device.as_ref().map(|d| d.label.clone());
+        let (center, rate, zoom, fft) = (self.center, self.rate, self.zoom, self.scope.fft);
+        let prefs = self.scope.prefs();
+        let layers = self.map.map.layers.saved();
+        let manual = self.chain.edit.manual;
+        let streams: Vec<(String, String)> =
+            crate::devices::streams().into_iter().map(|r| (r.addr, r.label)).collect();
+        let ppm = self.ppm_by_device.clone();
+        let offset = self.offset_by_device.clone();
+        self.settings.edit(|s| {
+            s.device = device;
+            s.center = center;
+            s.rate = rate * zoom.max(1) as f64;
+            s.zoom = zoom;
+            s.fft = fft;
+            s.gains = rs.gains;
+            s.toggles = rs.toggles;
+            s.choices = rs.choices;
+            s.tx_gain_db = rs.tx_gain_db;
+            s.ppm = ppm;
+            s.offset = offset;
+            s.language = crate::i18n::language().code().to_string();
+            s.band_plan = crate::bands::plan().id().to_string();
+            s.view = prefs;
+            s.streams = streams;
+            s.map_layers = layers;
+            s.manual_chain = manual;
+        });
+    }
+
+    /// Put the record into effect: the one path from a setting to the thing
+    /// it controls.
+    ///
+    /// Run whenever the record has moved, and in full for every radio thread
+    /// that has been told nothing yet, which is what a fresh one is: a thread
+    /// builds its graph from its own defaults, so a source stopped and
+    /// started came back decoding a band nobody asked for and writing nothing
+    /// the operator had switched on.
+    ///
+    /// Only what differs is sent. Dragging the dial changes the record sixty
+    /// times a second, and a feed reconnected on each of those frames would
+    /// be worse than the fault this replaces.
+    fn apply_settings(&mut self) {
+        self.applied_rev = self.settings.revision();
+        let was = self.applied.take();
+        // A feed with half an account typed into it is off, whatever the
+        // switch says. Written back rather than only obeyed, so the switch on
+        // screen says what the receiver is doing.
+        self.settings.edit(|s| {
+            s.wigle_on = s.wigle_on && s.wigle_account().is_complete();
+            s.ha_on = s.ha_on && s.publish().broker.is_complete();
+        });
+        let now = self.settings.get();
+        for c in settings_cmds(&now, was.as_ref()) {
+            self.send(c);
         }
-        let due = self.saved_at.is_none_or(|t| t.elapsed().as_secs_f32() >= 2.0);
-        if !due {
-            return;
+        let all = was.is_none();
+        let blank = crate::session::Session::default();
+        let before = was.as_ref().unwrap_or(&blank);
+        if all || (now.survey_on, &now.survey_path) != (before.survey_on, &before.survey_path) {
+            // The pane reads the survey through a connection of its own,
+            // which does not exist until the radio thread has made the file.
+            self.survey.db = None;
+            self.survey.refreshed = None;
         }
-        now.save();
-        self.saved = now;
-        self.saved_at = Some(std::time::Instant::now());
+        // Read from where there is no record to consult: the reader runs
+        // whether or not a radio does, and the datasets are asked from
+        // drawing code.
+        if all || now.gps != before.gps {
+            crate::station::set_source(now.gps_source());
+        }
+        if all || now.beacondb_lookup != before.beacondb_lookup {
+            // The lookup answers the map rather than the graph, so it is set
+            // here rather than sent.
+            crate::beacondb::set_lookup(now.beacondb_lookup);
+        }
+        if all || now.country != before.country {
+            crate::data::set_country(&now.country);
+        }
+        if all || now.opencellid_token != before.opencellid_token {
+            crate::data::set_opencellid_token(&now.opencellid_token);
+        }
+        if all
+            || (&now.spacetrack_identity, &now.spacetrack_password)
+                != (&before.spacetrack_identity, &before.spacetrack_password)
+        {
+            datasets::spacetrack::set_account(Some(datasets::spacetrack::Account {
+                identity: now.spacetrack_identity.clone(),
+                password: now.spacetrack_password.clone(),
+            }));
+        }
+        self.applied = Some(now);
     }
 
     /// Put the radio settings on the radio.
@@ -918,33 +875,25 @@ impl App {
     /// Tell the tracker where the receiver is, so a single position frame
     /// resolves instead of waiting for a matching pair.
     pub fn set_location(&mut self, lat: f64, lon: f64) {
-        self.location = Some((lat, lon));
         self.accuracy_m = None;
-        self.send(Cmd::Location(lat, lon));
+        self.settings.edit(|s| s.location = Some((lat, lon)));
     }
 
     /// Start or stop recording the survey, or point it at another file.
     pub fn set_survey(&mut self, off: bool, path: Option<std::path::PathBuf>) {
-        self.survey.path =
-            if off { None } else { path.or_else(crate::packetlog::PacketLog::default_survey_path) };
-        let p = self.survey.path.clone();
-        self.send(Cmd::Survey(p));
-        // The pane reads the same file through a connection of its own. It
-        // does not exist until the radio thread has created it, so opening
-        // here is allowed to fail and is retried while the pane is drawn.
-        self.survey.db = None;
-        self.survey.refreshed = None;
+        self.settings.edit(|s| {
+            s.survey_on = !off;
+            if let Some(p) = path {
+                s.survey_path = p.display().to_string();
+            }
+        });
     }
 
     /// Read the receiver's own position from a named GPS, or `None` to go
     /// back to the local gpsd the reader finds on its own.
-    ///
-    /// Set here rather than sent to the radio, since the reader is not the
-    /// radio's: choosing a GPS works with no device connected, and the radio
-    /// thread reads the same fixes when there is one.
     pub fn set_gps(&mut self, transport: Option<gps::Transport>) {
-        self.survey.gps = transport.clone();
-        crate::station::set_source(transport);
+        let named = transport.map(|t| t.to_string()).unwrap_or_default();
+        self.settings.edit(|s| s.gps = named);
     }
 
     /// Move the station to wherever the GPS last said, whether or not a radio
@@ -959,10 +908,10 @@ impl App {
         };
         self.accuracy_m = f.accuracy_m();
         let moved = self
-            .location
+            .setting(|s| s.location)
             .is_none_or(|(lat, lon)| (lat - f.lat).abs() > 1e-5 || (lon - f.lon).abs() > 1e-5);
         if moved {
-            self.location = Some((f.lat, f.lon));
+            self.settings.edit(|s| s.location = Some((f.lat, f.lon)));
             // The box in settings shows the position; a stale string in it
             // would sit there claiming the receiver had not moved.
             self.station_edit = None;
@@ -971,10 +920,13 @@ impl App {
 
     /// Turn the packet log off, or point it somewhere other than the default.
     pub fn set_packet_log(&mut self, off: bool, dir: Option<std::path::PathBuf>) {
-        self.log.path =
-            if off { None } else { dir.or_else(crate::packetlog::PacketLog::default_dir) };
-        let dir = self.log.path.clone();
-        self.send(Cmd::PacketLog(dir));
+        self.settings.edit(|s| {
+            s.packet_log_on = !off;
+            if let Some(d) = dir {
+                s.log_dir = d.display().to_string();
+            }
+        });
+        self.log_dir_edit = self.setting(|s| s.log_dir.clone());
     }
 
     /// Record every burst that decodes into a directory of captures.
@@ -994,8 +946,7 @@ impl App {
 
     /// Start or stop writing the raw span to a file.
     pub fn set_capture(&mut self, on: bool) {
-        self.capture = on;
-        self.send(Cmd::CaptureIq(on));
+        self.settings.edit(|s| s.capture_on = on);
     }
 
     /// Ask the tuner for a total gain, distributed across whatever stages the
@@ -1041,16 +992,16 @@ impl App {
     /// plugged in and the saved one is not the one wanted.
     /// Publish every device heard to this broker, from the command line.
     pub fn publish_to(&mut self, publish: nodes::Publish) {
-        let ha = &mut self.survey.homeassistant;
-        ha.host = publish.broker.host.clone();
-        ha.port = publish.broker.port.to_string();
-        ha.username = publish.broker.username.clone();
-        ha.password = publish.broker.password.clone();
-        ha.prefix = publish.broker.prefix.clone();
-        ha.topic = publish.broker.topic.clone();
-        ha.spaces = publish.spaces.clone();
-        ha.on = true;
-        self.apply_homeassistant();
+        self.settings.edit(|s| {
+            s.ha_host = publish.broker.host.clone();
+            s.ha_port = publish.broker.port.to_string();
+            s.ha_user = publish.broker.username.clone();
+            s.ha_password = publish.broker.password.clone();
+            s.ha_prefix = publish.broker.prefix.clone();
+            s.ha_topic = publish.broker.topic.clone();
+            s.ha_spaces = publish.spaces.clone();
+            s.ha_on = true;
+        });
     }
 
     /// Start the radio without waiting for the play button, which is what a
@@ -1166,23 +1117,10 @@ impl App {
         // The queue the agent speaks into, handed over once: a channel set to
         // transmit from the agent reads it when it is keyed.
         self.send(Cmd::Voice(self.air.speaker()));
-        // The thread opens the default speaker at startup; this puts the one
-        // the session asked for in its place, and hands over the microphone
-        // to use when a channel is keyed.
-        if !self.audio_out.is_empty() || !self.audio_in.is_empty() {
-            self.send_audio();
-        }
-        // The uploads carry an account or a promise rather than a value, so
-        // each is restored by the same call that switches it on.
-        if self.survey.wigle.on {
-            self.apply_wigle();
-        }
-        if self.survey.beacondb.on {
-            self.apply_beacondb();
-        }
-        if self.survey.homeassistant.on {
-            self.apply_homeassistant();
-        }
+        // A fresh thread has been told nothing, so the whole record goes to
+        // it rather than whatever has changed since the last one.
+        self.applied = None;
+        self.apply_settings();
         // Whatever the radio was set to has to be pushed at it again: a new
         // thread means a freshly opened device at its defaults. Start and
         // reset are the same path through here.
@@ -1198,37 +1136,20 @@ impl App {
     /// stopped and started came back decoding a band nobody asked for and
     /// without the channel that was on the strip a second earlier.
     ///
-    /// Built from the live state rather than the session, because the two
-    /// differ as soon as anything is changed, and returned as a list so the
-    /// whole of it can be read in a test.
+    /// What is not a setting but still has to be sent: the channels, the
+    /// subscriptions, the recorder and the graph's edits. Everything the
+    /// operator set goes with [`App::apply_settings`], which the connect
+    /// runs in full for a thread that has been told nothing.
     fn startup_cmds(&self) -> Vec<Cmd> {
         let mut cmds = vec![
             // The channels first: everything below is about a graph that
             // has them in it.
             Cmd::Channels(self.channel_specs()),
             Cmd::Zoom(self.zoom),
-            Cmd::Decode(self.decode_on),
-            Cmd::DcBlock(self.dc_block),
-            Cmd::Manual(self.chain.manual()),
-            // The spectrum. The levels are not sent: each lives on its node
-            // and comes back as an edit with the rest of the graph.
-            Cmd::Refresh(self.scope.refresh),
-            Cmd::Smoothing(self.scope.smoothing),
             Cmd::CallSubs(self.calls.subs.clone()),
             Cmd::WatchVideo(self.video.rules()),
-            // What writes to disk.
-            Cmd::PacketLogCap(self.log_cap_mb.map(|mb| mb << 20)),
-            Cmd::CaptureCap(self.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)),
-            Cmd::CaptureIq(self.capture),
-            Cmd::PacketLog(self.log.path.clone()),
             Cmd::Record(self.record_dir.clone()),
-            Cmd::Survey(self.survey.path.clone()),
-            Cmd::Gps(self.survey.gps.clone()),
-            Cmd::Feeds(self.feeds.clone()),
         ];
-        if let Some((lat, lon)) = self.location {
-            cmds.push(Cmd::Location(lat, lon));
-        }
         // Last, so the edited graph is the first one that settles rather
         // than the automatic one rebuilt a moment later.
         if !self.chain.edits.is_empty() {
@@ -1602,9 +1523,10 @@ impl App {
             ident: ident.as_deref(),
             estimate: self.survey.estimate,
         };
+        let home = self.setting(|s| s.location);
         let place = map_pane::Map {
             st: &mut self.map,
-            home: self.location,
+            home,
             accuracy_m: self.accuracy_m,
             edit: &mut edit,
             trail,
@@ -1628,23 +1550,25 @@ impl App {
 
     /// Draw the packet log, then do what its buttons asked for.
     fn log_view(&mut self, ui: &mut egui::Ui) {
+        let decode_on = self.setting(|s| s.decode_on);
+        let show_unknown = self.setting(|s| s.list_unknown);
+        let log_dir = self.setting(|s| s.log_path());
         let acts = packets::Log {
             st: &mut self.log,
+            show_unknown,
+            log_dir,
             radio: self.radio.as_ref(),
             scanners: &self.scanners,
             center: self.center,
             rate: self.rate,
-            decode_on: self.decode_on,
+            decode_on,
             cmds: &mut self.cmds,
             acts: Vec::new(),
         }
         .show(ui);
         for a in acts {
             match a {
-                packets::Action::Decode(on) => {
-                    self.decode_on = on;
-                    self.send(Cmd::Decode(on));
-                }
+                packets::Action::Decode(on) => self.settings.edit(|s| s.decode_on = on),
                 packets::Action::Open(w) => self.open = Some(w),
                 packets::Action::Pin { freq, model } => self.pin_channel(freq, &model),
             }
@@ -1931,8 +1855,10 @@ impl App {
             None => (0, 0, 0),
         };
         self.refresh_survey();
+        let settings = self.settings.clone();
         let act = devices_pane::Devices {
             st: &mut self.survey,
+            settings,
             counts,
             fix: crate::station::fix(),
             gps_connected: crate::station::connected(),
@@ -1952,9 +1878,9 @@ impl App {
             }
             Some(devices_pane::Action::Record(on)) => self.set_survey(!on, None),
             Some(devices_pane::Action::Export) => self.export_survey(),
-            Some(devices_pane::Action::Wigle) => self.survey.wigle.open = true,
+            Some(devices_pane::Action::Wigle) => self.open_wigle(),
             Some(devices_pane::Action::BeaconDb) => self.survey.beacondb.open = true,
-            Some(devices_pane::Action::HomeAssistant) => self.survey.homeassistant.open = true,
+            Some(devices_pane::Action::HomeAssistant) => self.open_homeassistant(),
             None => {}
         }
     }
@@ -1991,7 +1917,7 @@ impl App {
     /// what the pane and the map draw, so a survey being written while it is
     /// being looked at lags by up to a second and never blocks the writer.
     fn refresh_survey(&mut self) {
-        let Some(path) = self.survey.path.clone() else {
+        let Some(path) = self.setting(|s| s.survey_file()) else {
             self.survey.rows.clear();
             return;
         };
@@ -2015,49 +1941,75 @@ impl App {
         self.survey.refreshed = Some(std::time::Instant::now());
     }
 
-    /// Start or stop feeding wigle.net with what has been typed into the
-    /// modal.
+    /// Fill a feed's dialog from the record, and open it.
     ///
-    /// The account goes to the radio thread rather than being kept here: the
-    /// feed is a node on the packet bus, and the interface holding an account
-    /// the node had not been told about would be a switch that reports on.
+    /// The dialog's fields are a draft rather than the setting: an account
+    /// name reaches the record when APPLY is pressed, because a broker
+    /// reconnected on every keystroke would spend a typed hostname's worth of
+    /// connections failing.
+    fn open_wigle(&mut self) {
+        let s = self.settings.get();
+        let w = &mut self.survey.wigle;
+        (w.name, w.token, w.donate, w.on, w.open) =
+            (s.wigle_name, s.wigle_token, s.wigle_donate, s.wigle_on, true);
+    }
+
+    fn open_homeassistant(&mut self) {
+        let s = self.settings.get();
+        let h = &mut self.survey.homeassistant;
+        h.host = s.ha_host;
+        h.port = s.ha_port;
+        h.username = s.ha_user;
+        h.password = s.ha_password;
+        h.prefix = s.ha_prefix;
+        h.topic = s.ha_topic;
+        h.spaces = s.ha_spaces;
+        h.on = s.ha_on;
+        h.buses = s.ha_buses;
+        h.open = true;
+    }
+
+    /// Put the wigle.net dialog's draft into the record.
     fn apply_wigle(&mut self) {
-        let account = survey::Account {
-            name: self.survey.wigle.name.trim().to_string(),
-            token: self.survey.wigle.token.trim().to_string(),
-            donate: self.survey.wigle.donate,
-        };
-        self.survey.wigle.on = self.survey.wigle.on && account.is_complete();
-        let on = self.survey.wigle.on;
-        self.send(Cmd::Wigle(on.then_some(account)));
+        let w = &self.survey.wigle;
+        let (name, token, donate, on) = (w.name.clone(), w.token.clone(), w.donate, w.on);
+        self.settings.edit(|s| {
+            s.wigle_name = name;
+            s.wigle_token = token;
+            s.wigle_donate = donate;
+            s.wigle_on = on;
+        });
+        // An account with half of it typed cannot upload, so the switch has
+        // to come back off before the dialog draws it as on.
+        self.apply_settings();
+        self.survey.wigle.on = self.setting(|s| s.wigle_on);
     }
 
-    /// Start or stop submitting to beaconDB.
-    ///
-    /// The switch goes to the radio thread rather than being kept here: the
-    /// feed is a node on the packet bus, and an interface holding a switch
-    /// the node had not been told about would be a switch that reports on.
-    fn apply_beacondb(&mut self) {
-        self.send(Cmd::BeaconDb(self.survey.beacondb.on));
-        // The lookup runs here rather than in the receiver: it answers the
-        // map, not the graph.
-        crate::beacondb::set_lookup(self.survey.beacondb.lookup);
-    }
-
-    /// Point the feed at a broker, or stop it.
-    ///
-    /// The broker goes to the radio thread rather than being kept here: the
-    /// feed is a node on the packet bus, and the connection belongs to it.
+    /// Put the Home Assistant dialog's draft into the record.
     fn apply_homeassistant(&mut self) {
-        let publish = self.survey.homeassistant.publish();
-        self.survey.homeassistant.on = self.survey.homeassistant.on && publish.broker.is_complete();
-        let on = self.survey.homeassistant.on;
-        self.send(Cmd::HomeAssistant(on.then_some(publish)));
+        let h = &self.survey.homeassistant;
+        let (host, port, user) = (h.host.clone(), h.port.clone(), h.username.clone());
+        let (password, prefix, topic) = (h.password.clone(), h.prefix.clone(), h.topic.clone());
+        let (spaces, on, buses) = (h.spaces.clone(), h.on, h.buses);
+        self.settings.edit(|s| {
+            s.ha_host = host;
+            s.ha_port = port;
+            s.ha_user = user;
+            s.ha_password = password;
+            s.ha_prefix = prefix;
+            s.ha_topic = topic;
+            s.ha_spaces = spaces;
+            s.ha_on = on;
+            s.ha_buses = buses;
+        });
+        self.apply_settings();
+        self.survey.homeassistant.on = self.setting(|s| s.ha_on);
     }
 
     /// Write the survey out as WiGLE CSV, beside the survey file.
     fn export_survey(&mut self) {
-        let (Some(path), Some(db)) = (self.survey.path.clone(), self.survey.db.as_ref()) else {
+        let (Some(path), Some(db)) = (self.setting(|s| s.survey_file()), self.survey.db.as_ref())
+        else {
             return;
         };
         let out = path.with_extension("wigle.csv");
@@ -2075,13 +2027,14 @@ impl App {
 
     /// Draw the dashboard, then do what it asked for.
     fn dashboard_view(&mut self, ui: &mut egui::Ui) {
+        let decode_on = self.setting(|s| s.decode_on);
         let acts = dashboard_pane::Dashboard {
             radio: self.radio.as_ref(),
             device: self.device.as_ref().map(|d| d.label.as_str()),
             center: self.center,
             rate: self.rate,
             zoom: self.zoom,
-            decode_on: self.decode_on,
+            decode_on,
             counts: dashboard_pane::Counts {
                 tracks: self.map.tracks.len(),
                 calls: self.calls.list.len(),
@@ -2117,7 +2070,8 @@ impl App {
 
     /// The pass table, and what its buttons asked for.
     fn sats_view(&mut self, ui: &mut egui::Ui) {
-        let acts = sats_pane::Sats { st: &mut self.sats, home: self.location }.show(ui);
+        let home = self.setting(|s| s.location);
+        let acts = sats_pane::Sats { st: &mut self.sats, home }.show(ui);
         for a in acts {
             match a {
                 sats_pane::Action::ShowOnMap => self.set_view(View::Map),
@@ -2194,7 +2148,7 @@ impl App {
 
     /// Where a satellite is from here, now.
     fn look_at(&self, norad: u64) -> Option<orbit::Look> {
-        let (lat, lon) = self.location?;
+        let (lat, lon) = self.setting(|s| s.location)?;
         let sky = crate::sats::sky(self.sats.group)?;
         sky.get(norad)?.look(orbit::Station::new(lat, lon), crate::sats::now_s())
     }
@@ -2250,6 +2204,7 @@ impl App {
     /// that was dragged comes back as an action and is carried out here,
     /// which is the only place that knows how to send anything.
     fn scope_view(&mut self, ui: &mut egui::Ui) {
+        let decode_on = self.setting(|s| s.decode_on);
         let acts = scope::Scope {
             st: &mut self.scope,
             channels: &mut self.audio.channels,
@@ -2259,7 +2214,7 @@ impl App {
             radio: self.radio.as_ref(),
             scanners: &self.scanners,
             patch: &self.chain.patch,
-            decode_on: self.decode_on,
+            decode_on,
             err: self.err.as_deref(),
             acts: Vec::new(),
         }
@@ -2325,12 +2280,6 @@ impl App {
     /// one that knows which chains it already has: sending it the state it
     /// should be in leaves no way for the two to disagree, and it keeps the
     /// chains of channels that did not change.
-    /// Tell the radio thread which sound devices to use.
-    fn send_audio(&mut self) {
-        let (out, input) = (self.audio_out.clone(), self.audio_in.clone());
-        self.send(Cmd::Audio { out, input });
-    }
-
     fn send_channels(&mut self) {
         let specs = self.channel_specs();
         self.send(Cmd::Channels(specs));
@@ -2362,6 +2311,79 @@ impl App {
 /// Done once at startup rather than read from the session on every lookup:
 /// naming the band a frequency falls in happens from drawing code that has no
 /// settings object to consult.
+/// The record as commands to the receiver: what changed since `was`, or the
+/// whole of it for a thread that has been told nothing.
+///
+/// A free function so a test can read the whole list. Every setting the radio
+/// thread has to know is named here exactly once, which is what stops a
+/// switch from being stored without being applied.
+fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Session>) -> Vec<Cmd> {
+    let all = was.is_none();
+    let blank = crate::session::Session::default();
+    let was = was.unwrap_or(&blank);
+    let mut cmds = Vec::new();
+    let mut when = |differs: bool, c: Cmd| {
+        if all || differs {
+            cmds.push(c);
+        }
+    };
+    when(now.decode_on != was.decode_on, Cmd::Decode(now.decode_on));
+    when(now.dc_block != was.dc_block, Cmd::DcBlock(now.dc_block));
+    when(now.manual_chain != was.manual_chain, Cmd::Manual(now.manual_chain));
+    // The spectrum. The levels are not sent: each lives on its node and comes
+    // back as an edit with the rest of the graph.
+    when(now.view.refresh != was.view.refresh, Cmd::Refresh(now.view.refresh));
+    when(now.view.smoothing != was.view.smoothing, Cmd::Smoothing(now.view.smoothing));
+    // What writes to disk.
+    when(now.log_cap_mb != was.log_cap_mb, Cmd::PacketLogCap(now.log_cap_mb.map(|mb| mb << 20)));
+    when(
+        now.capture_cap_mb != was.capture_cap_mb,
+        Cmd::CaptureCap(now.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)),
+    );
+    when(now.capture_on != was.capture_on, Cmd::CaptureIq(now.capture_on));
+    when(
+        (now.packet_log_on, &now.log_dir) != (was.packet_log_on, &was.log_dir),
+        Cmd::PacketLog(now.log_path()),
+    );
+    when(
+        (now.survey_on, &now.survey_path) != (was.survey_on, &was.survey_path),
+        Cmd::Survey(now.survey_file()),
+    );
+    when(now.gps != was.gps, Cmd::Gps(now.gps_source()));
+    when(now.feeds != was.feeds, Cmd::Feeds(now.feeds.clone()));
+    if let Some((lat, lon)) = now.location {
+        when(now.location != was.location, Cmd::Location(lat, lon));
+    }
+    // A thread opens the default speaker on its own, so silence is not a
+    // setting to send.
+    if !now.audio_out.is_empty() || !now.audio_in.is_empty() {
+        when(
+            (&now.audio_out, &now.audio_in) != (&was.audio_out, &was.audio_in),
+            Cmd::Audio { out: now.audio_out.clone(), input: now.audio_in.clone() },
+        );
+    }
+    // The uploads carry an account or a broker rather than a switch, so each
+    // goes again when anything about it is typed.
+    let account = now.wigle_account();
+    when(
+        now.wigle_on != was.wigle_on || account != was.wigle_account(),
+        Cmd::Wigle(now.wigle_on.then(|| account.clone())),
+    );
+    when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
+    let publish = now.publish();
+    when(
+        now.ha_on != was.ha_on || publish != was.publish(),
+        Cmd::HomeAssistant(now.ha_on.then(|| publish.clone())),
+    );
+    // The transform size is the one thing not swept in for a fresh thread:
+    // the radio is started at the size the record holds, so sending it would
+    // be a rebuild to the size it already is.
+    if now.fft != was.fft {
+        cmds.push(Cmd::Fft(now.fft));
+    }
+    cmds
+}
+
 fn apply_locale(s: &mut crate::session::Session) {
     if let Some(l) = crate::i18n::Language::from_code(&s.language) {
         crate::i18n::set_language(l);
@@ -2618,14 +2640,21 @@ impl eframe::App for App {
         self.homeassistant_modal(ui.ctx());
         self.flush_cmds();
         self.restore_radio_settings();
-        self.save_session();
+        // The dial and the strip put what they changed back into the record,
+        // then anything that moved reaches the receiver and the disc. One
+        // order, once a frame, whichever pane was drawn.
+        self.sync_settings();
+        if self.applied_rev != self.settings.revision() {
+            self.apply_settings();
+        }
+        self.settings.flush(false);
     }
 
     fn on_exit(&mut self) {
-        // The periodic save is debounced, so a change made in the last couple
-        // of seconds before quitting is still only in memory.
-        self.saved_at = None;
-        self.save_session();
+        // The periodic write is debounced, so a change made in the last
+        // couple of seconds before quitting is still only in memory.
+        self.sync_settings();
+        self.settings.flush(true);
         self.chain.flush_edits(true);
     }
 }
@@ -2790,7 +2819,7 @@ impl App {
     /// wanted. The dashboard leads the top row, so leaving it out is a slice.
     fn tabs(&self) -> [&'static [View]; 2] {
         let mut rows = View::ROWS;
-        if !self.dashboard {
+        if !self.setting(|s| s.dashboard) {
             rows[0] = &View::ROWS[0][1..];
         }
         rows
@@ -2799,7 +2828,7 @@ impl App {
     /// Stop showing the dashboard, from its own corner or from settings. The
     /// view it was open on has to go somewhere, and that is the spectrum.
     fn hide_dashboard(&mut self) {
-        self.dashboard = false;
+        self.settings.edit(|s| s.dashboard = false);
         if self.view == View::Dashboard {
             self.set_view(View::Spectrum);
         }
@@ -3102,6 +3131,145 @@ mod tests {
         }
     }
 
+    /// What the name of a command is, for asserting which ones a change
+    /// produced without writing out their contents.
+    fn named(c: &Cmd) -> &'static str {
+        match c {
+            Cmd::Decode(_) => "decode",
+            Cmd::DcBlock(_) => "dc_block",
+            Cmd::Manual(_) => "manual",
+            Cmd::Refresh(_) => "refresh",
+            Cmd::Smoothing(_) => "smoothing",
+            Cmd::PacketLogCap(_) => "log_cap",
+            Cmd::CaptureCap(_) => "capture_cap",
+            Cmd::CaptureIq(_) => "capture",
+            Cmd::PacketLog(_) => "packet_log",
+            Cmd::Survey(_) => "survey",
+            Cmd::Gps(_) => "gps",
+            Cmd::Feeds(_) => "feeds",
+            Cmd::Location(..) => "location",
+            Cmd::Audio { .. } => "audio",
+            Cmd::Wigle(_) => "wigle",
+            Cmd::BeaconDb(_) => "beacondb",
+            Cmd::HomeAssistant(_) => "homeassistant",
+            _ => "something else",
+        }
+    }
+
+    /// A radio thread that has been told nothing is told the whole record.
+    ///
+    /// A thread builds its graph from its own defaults: the scanner table
+    /// running, the DC blocker in, nothing being recorded. Every one of those
+    /// is the operator's, so a source stopped and started came back decoding
+    /// a band nobody asked for.
+    #[test]
+    fn a_fresh_radio_is_told_every_setting_it_has_to_know() {
+        let mut s = crate::session::Session {
+            packet_log_on: true,
+            survey_on: true,
+            capture_on: true,
+            gps: "/dev/ttyACM0@9600".into(),
+            location: Some((53.5137, -6.2431)),
+            audio_out: "Scarlett 2i2".into(),
+            ..Default::default()
+        };
+        s.feeds.push(nodes::FeedSpec::new("10.0.0.5", 30005, &nodes::feed_nodes::BEAST));
+        let cmds = settings_cmds(&s, None);
+        let mut said: Vec<&str> = cmds.iter().map(named).collect();
+        said.sort_unstable();
+        assert_eq!(
+            said,
+            [
+                "audio",
+                "beacondb",
+                "capture",
+                "capture_cap",
+                "dc_block",
+                "decode",
+                "feeds",
+                "gps",
+                "homeassistant",
+                "location",
+                "log_cap",
+                "manual",
+                "packet_log",
+                "refresh",
+                "smoothing",
+                "survey",
+                "wigle",
+            ],
+            "a setting the thread is not told is a setting that does not apply"
+        );
+    }
+
+    /// One switch changed sends one command.
+    ///
+    /// The dial writes the record on every frame it moves, so applying the
+    /// whole of it each time would reconnect the feeds sixty times a second.
+    #[test]
+    fn a_change_sends_only_what_changed() {
+        let was = crate::session::Session::default();
+        let mut now = was.clone();
+        now.capture_on = true;
+        let cmds = settings_cmds(&now, Some(&was));
+        assert_eq!(cmds.iter().map(named).collect::<Vec<_>>(), ["capture"]);
+
+        // The centre is in the same record and is not the radio thread's to
+        // hear about this way: it is retuned where it is dragged.
+        let mut moved = was.clone();
+        moved.center = 868_300_000.0;
+        assert!(settings_cmds(&moved, Some(&was)).is_empty(), "a drag reapplied the settings");
+        assert!(settings_cmds(&was, Some(&was)).is_empty());
+    }
+
+    /// A feed with half an account typed into it cannot upload, and the
+    /// switch has to say so rather than sitting on while nothing goes.
+    #[test]
+    fn a_feed_with_no_account_comes_back_off() {
+        let mut a = app();
+        a.settings.edit(|s| {
+            s.wigle_on = true;
+            s.wigle_name = "AID0000".into();
+            s.ha_on = true;
+        });
+        a.apply_settings();
+        assert!(!a.setting(|s| s.wigle_on), "uploading with no token");
+        assert!(!a.setting(|s| s.ha_on), "publishing to no broker");
+
+        a.settings.edit(|s| {
+            s.wigle_token = "hunter2".into();
+            s.wigle_on = true;
+            s.ha_host = "homeassistant.local".into();
+            s.ha_on = true;
+        });
+        a.apply_settings();
+        assert!(a.setting(|s| s.wigle_on));
+        assert!(a.setting(|s| s.ha_on));
+    }
+
+    /// What a pane writes is what is saved, and what is saved is what is
+    /// applied: the fault this replaces was a switch kept in three places,
+    /// where missing one of them left it on screen and nowhere else.
+    #[test]
+    fn a_switch_thrown_in_a_pane_is_in_the_record_and_survives_the_file() {
+        let mut a = app();
+        a.settings.edit(|s| {
+            s.packet_log_on = true;
+            s.log_dir = "/tmp/waveshark-log".into();
+            s.list_unknown = false;
+            s.capture_on = true;
+            s.beacondb_on = true;
+        });
+        a.apply_settings();
+        let back = crate::session::Session::parse(&a.settings.get().render());
+        assert!(back.packet_log_on && back.capture_on && back.beacondb_on);
+        assert!(!back.list_unknown);
+        assert_eq!(back.log_path(), Some(std::path::PathBuf::from("/tmp/waveshark-log")));
+        // And applying it again sends nothing: it is already what it is.
+        let now = a.settings.get();
+        assert!(settings_cmds(&now, Some(&now)).is_empty());
+    }
+
     fn app() -> App {
         let mut a = App { center: 100_000_000.0, rate: 2_000_000.0, ..Default::default() };
         // The waterfall holds history from where the radio actually is,
@@ -3242,7 +3410,7 @@ mod tests {
         let mut unknown = record(a.center, None);
         unknown.model = None;
         a.log_decodes(vec![unknown, record(a.center, Some(true))]);
-        a.log.show_unknown = false;
+        a.settings.edit(|s| s.list_unknown = false);
         assert_eq!(a.log.decodes.len(), 2, "hiding must not drop anything");
         assert_eq!(a.log.decodes.iter().filter(|l| !l.rec.is_known()).count(), 1);
     }
@@ -3280,6 +3448,7 @@ mod tests {
 
     /// The scope pane over an app's state, for the geometry tests.
     fn scope_of(a: &mut App) -> scope::Scope<'_> {
+        let decode_on = a.setting(|s| s.decode_on);
         scope::Scope {
             st: &mut a.scope,
             channels: &mut a.audio.channels,
@@ -3289,7 +3458,7 @@ mod tests {
             radio: None,
             scanners: &a.scanners,
             patch: &a.chain.patch,
-            decode_on: a.decode_on,
+            decode_on,
             err: None,
             acts: Vec::new(),
         }

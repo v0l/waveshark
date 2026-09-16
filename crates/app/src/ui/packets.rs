@@ -23,6 +23,10 @@ pub(super) struct Log<'a> {
     pub center: f64,
     pub rate: f64,
     pub decode_on: bool,
+    /// Whether bursts no protocol claimed are listed.
+    pub show_unknown: bool,
+    /// Where the packet log is writing, when it is.
+    pub log_dir: Option<std::path::PathBuf>,
     /// Whether the receiver is running the operator's own graph, in which
     /// case the decode switch is not the pane's to throw.
     pub cmds: &'a mut Vec<Cmd>,
@@ -221,7 +225,7 @@ impl Log<'_> {
             if logged > 0 {
                 ui.add_space(10.0);
                 theme::Line::new().legend(&format!("{logged} saved")).show(ui).on_hover_text(
-                    match &self.st.path {
+                    match &self.log_dir {
                         Some(d) => format!("appended to {}", d.display()),
                         None => "appended to the packet log".into(),
                     },
@@ -315,7 +319,7 @@ impl Log<'_> {
         let mut shown = 0usize;
         for log in self.st.decodes.iter() {
             let rec = &log.rec;
-            if !self.st.show_unknown && !rec.is_known() {
+            if !self.show_unknown && !rec.is_known() {
                 continue;
             }
             let n = shown;

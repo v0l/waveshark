@@ -32,9 +32,13 @@ the code is in the commit log.
   channel whose carrier has gone.
 - CTCSS tones and DCS codes are filtered out of the audio, so they no longer
   rumble under the speech, steer the gain control or reach a recording.
+- Switches that did not stick: every setting is now saved and applied from
+  one record, and a fresh radio is told all of it.
 
 ### Changed
 
+- The packet log folder, the unrecognised-burst filter and the raw capture
+  switch are remembered between runs.
 - The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather
   than 3.5 GB, and ahead of real time without a card. Describing a voice in
   a sentence is gone, and so is the precision setting.

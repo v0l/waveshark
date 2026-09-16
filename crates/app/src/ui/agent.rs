@@ -625,13 +625,11 @@ impl App {
             }
 
             Action::Decode(a) => {
-                self.decode_on = a.on;
-                self.send(Cmd::Decode(a.on));
+                self.settings.edit(|s| s.decode_on = a.on);
                 Ok(ok())
             }
             Action::DcBlock(a) => {
-                self.dc_block = a.on;
-                self.send(Cmd::DcBlock(a.on));
+                self.settings.edit(|s| s.dc_block = a.on);
                 Ok(ok())
             }
             Action::View(a) => {
@@ -674,7 +672,7 @@ impl App {
                 let dir = a.dir.map(std::path::PathBuf::from);
                 self.set_packet_log(!a.on, dir);
                 Ok(json!({
-                    "dir": self.log.path.as_ref().map(|p| p.display().to_string()),
+                    "dir": self.setting(|s| s.log_path()).map(|p| p.display().to_string()),
                 }))
             }
             Action::NodeParam(a) => self.agent_node_param(a),
@@ -951,10 +949,10 @@ impl App {
             "tunable": self.tunable,
             "reach_hz": [self.reach.0, self.reach.1],
             "fft": self.scope.fft_size,
-            "dc_block": self.dc_block,
-            "decode_span": self.decode_on,
+            "dc_block": self.setting(|s| s.dc_block),
+            "decode_span": self.setting(|s| s.decode_on),
             "view": View::label(self.view),
-            "location": self.location.map(|(lat, lon)| json!({ "lat": lat, "lon": lon })),
+            "location": self.setting(|s| s.location).map(|(lat, lon)| json!({ "lat": lat, "lon": lon })),
             "channels_open": self.audio.channels.len(),
             "volume": self.audio.volume,
             "muted": self.audio.muted,
@@ -962,9 +960,9 @@ impl App {
             "dropped": st.map(|s| s.dropped.load(std::sync::atomic::Ordering::Relaxed)),
             "scan_channels": st.map(|s| s.scan_channels.load(std::sync::atomic::Ordering::Relaxed)),
             "aircraft": st.map(|s| s.aircraft.load(std::sync::atomic::Ordering::Relaxed)),
-            "packet_log": self.log.path.as_ref().map(|p| p.display().to_string()),
+            "packet_log": self.setting(|s| s.log_path()).map(|p| p.display().to_string()),
             "recording": self.record_dir.as_ref().map(|(d, _)| d.display().to_string()),
-            "capture_iq": self.capture,
+            "capture_iq": self.setting(|s| s.capture_on),
             "can_transmit": st.map(|s| s.can_transmit.load(std::sync::atomic::Ordering::Relaxed)),
             "gains": controls.as_ref().map(|c| {
                 c.stages
@@ -1321,7 +1319,7 @@ impl App {
 
     fn agent_satellites(&self, limit: usize) -> Result<Value, String> {
         let (lat, lon) = self
-            .location
+            .setting(|s| s.location)
             .ok_or("no station position: a pass is over somewhere. Use set_location.")?;
         let station = orbit::Station::new(lat, lon);
         let now = crate::sats::now_s();

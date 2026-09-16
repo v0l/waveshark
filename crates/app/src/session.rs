@@ -14,6 +14,106 @@
 use common::GainMode;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
+
+/// The one copy of what the operator has set, shared by whoever needs it.
+///
+/// Every setting used to live twice: once in [`Session`] and once in a field
+/// of the interface, with a line in the startup restore to copy it one way
+/// and a line in the save to copy it back. A switch added without all three
+/// was a switch that did not persist, which is what most of the settings
+/// faults were.
+///
+/// So the record is the store. A pane holds a clone of this handle, writes
+/// the setting through [`Settings::edit`], and the revision it bumps is what
+/// tells the interface to apply the whole record to the receiver again. There
+/// is no second copy to disagree with, and nothing to forget to write.
+#[derive(Clone)]
+pub struct Settings(Arc<Store>);
+
+struct Store {
+    now: RwLock<Session>,
+    /// Bumped whenever an edit actually changes something, so a pane writing
+    /// the same value every frame costs nothing.
+    revision: AtomicU64,
+    saved: Mutex<Saved>,
+}
+
+struct Saved {
+    /// The revision last written to disc, and when it went.
+    revision: u64,
+    at: Option<Instant>,
+}
+
+/// How long a change has to settle before it is written.
+///
+/// Dragging the dial changes the centre on every frame, and a file written
+/// sixty times a second to record a frequency nobody stopped on is a lot of
+/// writes for no information.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Settings {
+    pub fn new(session: Session) -> Self {
+        Self(Arc::new(Store {
+            now: RwLock::new(session),
+            revision: AtomicU64::new(1),
+            saved: Mutex::new(Saved { revision: 1, at: None }),
+        }))
+    }
+
+    /// What was saved last time, or the defaults.
+    pub fn load() -> Self {
+        Self::new(Session::load())
+    }
+
+    /// The whole record, as a value to read at leisure.
+    pub fn get(&self) -> Session {
+        self.0.now.read().expect("settings").clone()
+    }
+
+    /// One field, without cloning the rest.
+    pub fn read<R>(&self, f: impl FnOnce(&Session) -> R) -> R {
+        f(&self.0.now.read().expect("settings"))
+    }
+
+    /// Change the record. The revision moves only if something did, so this
+    /// is safe to call from drawing code that cannot tell whether the value
+    /// in its hand is new.
+    pub fn edit(&self, f: impl FnOnce(&mut Session)) {
+        let mut now = self.0.now.write().expect("settings");
+        let before = now.clone();
+        f(&mut now);
+        if *now != before {
+            self.0.revision.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Which version of the record this is. The interface applies the record
+    /// to the receiver whenever this has moved, so no setting can be stored
+    /// without being applied.
+    pub fn revision(&self) -> u64 {
+        self.0.revision.load(Ordering::Relaxed)
+    }
+
+    /// Write the record out once it has settled, or at once when told to,
+    /// which is what quitting does: the debounce would otherwise lose a
+    /// change made in the last couple of seconds.
+    pub fn flush(&self, now: bool) {
+        let revision = self.revision();
+        let mut saved = self.0.saved.lock().expect("settings");
+        if saved.revision == revision {
+            return;
+        }
+        if !now && saved.at.is_some_and(|t| t.elapsed() < SETTLE) {
+            return;
+        }
+        self.get().save();
+        saved.revision = revision;
+        saved.at = Some(Instant::now());
+    }
+}
 
 /// Where the receiver starts with nothing saved.
 ///
@@ -143,6 +243,19 @@ pub struct Session {
     /// is an edit like any other setting changed by hand.
     pub packet_log_on: bool,
     pub survey_on: bool,
+    /// Where the packet log writes, empty for the default folder. Saved with
+    /// the switch: a folder chosen once is part of the same decision.
+    pub log_dir: String,
+    /// Where the survey database is, empty for the default file.
+    pub survey_path: String,
+    /// Whether the packet table lists bursts that decoded to no known
+    /// protocol. On, because they are the point of scanning an unfamiliar
+    /// band; off is for a noisy one where they bury the decodes.
+    pub list_unknown: bool,
+    /// Whether the whole span is being written to a file. Remembered like
+    /// the packet log: it is switched on to catch something that happens
+    /// rarely, and a restart in between should not quietly stop it.
+    pub capture_on: bool,
     /// Whether the dashboard is one of the views, and so the one the receiver
     /// opens on. On for a new install, and off for anyone who turned it off.
     pub dashboard: bool,
@@ -274,6 +387,10 @@ impl Default for Session {
             decode_on: true,
             packet_log_on: false,
             survey_on: false,
+            log_dir: String::new(),
+            survey_path: String::new(),
+            list_unknown: true,
+            capture_on: false,
             dashboard: true,
             audio_out: String::new(),
             audio_in: String::new(),
@@ -316,6 +433,65 @@ impl Session {
             offset: self.offset_for(device),
             tx_gain_db: self.tx_gain_db,
         }
+    }
+
+    /// Where the packet log writes, or `None` when it is not writing.
+    ///
+    /// The folder and the switch are one answer: a log switched on with
+    /// nowhere to write it is not switched on.
+    pub fn log_path(&self) -> Option<PathBuf> {
+        if !self.packet_log_on {
+            return None;
+        }
+        match self.log_dir.trim() {
+            "" => crate::packetlog::PacketLog::default_dir(),
+            dir => Some(PathBuf::from(dir)),
+        }
+    }
+
+    /// Where the survey is recorded, or `None` when it is not recording.
+    pub fn survey_file(&self) -> Option<PathBuf> {
+        if !self.survey_on {
+            return None;
+        }
+        match self.survey_path.trim() {
+            "" => crate::packetlog::PacketLog::default_survey_path(),
+            path => Some(PathBuf::from(path)),
+        }
+    }
+
+    /// The wigle.net account as typed. Whether it is complete is the
+    /// account's own question, and the answer is what decides whether the
+    /// switch can be on.
+    pub fn wigle_account(&self) -> survey::Account {
+        survey::Account {
+            name: self.wigle_name.trim().to_string(),
+            token: self.wigle_token.trim().to_string(),
+            donate: self.wigle_donate,
+        }
+    }
+
+    /// What is typed, as somewhere to publish. The port falls back to 1883
+    /// rather than refusing a field somebody cleared.
+    pub fn publish(&self) -> nodes::Publish {
+        nodes::Publish {
+            broker: nodes::Broker {
+                host: self.ha_host.trim().to_string(),
+                port: self.ha_port.trim().parse().unwrap_or(1883),
+                username: self.ha_user.trim().to_string(),
+                password: self.ha_password.clone(),
+                prefix: self.ha_prefix.trim().to_string(),
+                topic: self.ha_topic.trim().to_string(),
+            },
+            spaces: self.ha_spaces.trim().to_string(),
+            buses: self.ha_buses,
+        }
+    }
+
+    /// The GPS the operator named, or `None` for the local gpsd the reader
+    /// finds on its own.
+    pub fn gps_source(&self) -> Option<gps::Transport> {
+        gps::Transport::parse(&self.gps)
     }
 
     /// The saved correction for one radio, or none for a radio that has never
@@ -457,6 +633,10 @@ impl Session {
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
             packet_log_on: kv.get("packet_log_on").map(|v| *v == "true").unwrap_or(d.packet_log_on),
             survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
+            log_dir: kv.get("log_dir").map(|v| v.to_string()).unwrap_or_default(),
+            survey_path: kv.get("survey_path").map(|v| v.to_string()).unwrap_or_default(),
+            list_unknown: kv.get("list_unknown").map(|v| *v == "true").unwrap_or(d.list_unknown),
+            capture_on: kv.get("capture_on").map(|v| *v == "true").unwrap_or(d.capture_on),
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
@@ -532,6 +712,8 @@ impl Session {
             ("audio_out", &self.audio_out),
             ("audio_in", &self.audio_in),
             ("gps", &self.gps),
+            ("log_dir", &self.log_dir),
+            ("survey_path", &self.survey_path),
             ("wigle_name", &self.wigle_name),
             ("wigle_token", &self.wigle_token),
             ("ha_host", &self.ha_host),
@@ -551,6 +733,8 @@ impl Session {
         s.push_str(&format!("dashboard = {}\n", self.dashboard));
         s.push_str(&format!("packet_log_on = {}\n", self.packet_log_on));
         s.push_str(&format!("survey_on = {}\n", self.survey_on));
+        s.push_str(&format!("list_unknown = {}\n", self.list_unknown));
+        s.push_str(&format!("capture_on = {}\n", self.capture_on));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
         s.push_str(&format!("capture_cap_mb = {}\n", render_cap(self.capture_cap_mb)));
         let v = &self.view;
@@ -678,6 +862,10 @@ mod tests {
             dashboard: false,
             packet_log_on: true,
             survey_on: true,
+            log_dir: "/var/log/waveshark".into(),
+            survey_path: "/var/log/waveshark/survey.sqlite".into(),
+            list_unknown: false,
+            capture_on: true,
             gps: "/dev/ttyACM0@9600".into(),
             wigle_name: "AID0000".into(),
             wigle_token: "hunter2".into(),
@@ -792,5 +980,39 @@ mod tests {
         let on = Session { packet_log_on: true, survey_on: true, ..Session::default() };
         let back = Session::parse(&on.render());
         assert!(back.packet_log_on && back.survey_on, "a switch turned on was forgotten");
+
+        // The raw capture is the third of them, and was the one that only
+        // ever lived in the interface.
+        assert!(!Session::default().capture_on);
+        assert!(
+            Session::parse(&Session { capture_on: true, ..Session::default() }.render()).capture_on
+        );
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_does_not_move_the_revision() {
+        // Drawing code writes the value in its hand whether or not it is new,
+        // so an edit has to be able to be a no-op: the revision is what makes
+        // the interface apply the whole record to the receiver again.
+        let s = Settings::new(Session::default());
+        let was = s.revision();
+        s.edit(|s| s.beacondb_on = false);
+        assert_eq!(s.revision(), was, "the same value was taken for a change");
+        s.edit(|s| s.beacondb_on = true);
+        assert_eq!(s.revision(), was + 1);
+        assert!(s.read(|s| s.beacondb_on));
+        assert!(s.get().beacondb_on);
+    }
+
+    #[test]
+    fn the_handle_is_one_record_however_many_clones_hold_it() {
+        // A pane holds a clone and writes through it. If that were a copy,
+        // the setting would be applied and then saved from the stale one,
+        // which is the fault this replaces.
+        let a = Settings::new(Session::default());
+        let b = a.clone();
+        b.edit(|s| s.ha_on = true);
+        assert!(a.read(|s| s.ha_on));
+        assert_eq!(a.revision(), b.revision());
     }
 }
