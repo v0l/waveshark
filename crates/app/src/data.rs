@@ -60,6 +60,7 @@ static SATS: LazyLock<Vec<SatSlot>> =
 
 type SatSlot = RwLock<Option<Arc<datasets::tle::Sats>>>;
 static TRANSMITTERS: RwLock<Option<Arc<datasets::satnogs::Transmitters>>> = RwLock::new(None);
+static LAUNCH_SITES: RwLock<Option<Arc<Vec<datasets::sondehub::Site>>>> = RwLock::new(None);
 static OPERATORS: RwLock<Option<Arc<Operators>>> = RwLock::new(None);
 static CELLS: RwLock<Option<Arc<Cells>>> = RwLock::new(None);
 /// The two halves of the wiki, held apart because they are two files from
@@ -140,6 +141,18 @@ pub fn satellites(g: &'static datasets::tle::Group) -> Option<Arc<datasets::tle:
 /// What the satellites transmit on, downloading the table if it is not held.
 pub fn transmitters() -> Option<Arc<datasets::satnogs::Transmitters>> {
     on_demand(Which::Transmitters, &TRANSMITTERS)
+}
+
+/// Where balloons go up from, and when. Downloaded on first use, which is
+/// the map layer being switched on or the sonde band being tuned.
+pub fn launch_sites() -> Option<Arc<Vec<datasets::sondehub::Site>>> {
+    on_demand(Which::LaunchSites, &LAUNCH_SITES)
+}
+
+/// Now, as the launch schedule is written: UTC off the system clock.
+pub fn utc_now() -> chrono::DateTime<chrono::Utc> {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or(chrono::DateTime::UNIX_EPOCH)
 }
 
 fn group_index(g: &'static datasets::tle::Group) -> usize {
@@ -277,6 +290,8 @@ pub enum Which {
     Satellites(&'static datasets::tle::Group),
     /// What those satellites transmit on.
     Transmitters,
+    /// Where weather balloons are released, and when.
+    LaunchSites,
 }
 
 impl Which {
@@ -291,7 +306,7 @@ impl Which {
             v.extend(datasets::gateways::HOST_FILES.iter().copied().map(Which::Gateway));
             v.extend([Which::CellOperators, Which::CellTowers, Which::Artemis, Which::SigIdUnid]);
             v.extend(datasets::tle::GROUPS.iter().copied().map(Which::Satellites));
-            v.push(Which::Transmitters);
+            v.extend([Which::Transmitters, Which::LaunchSites]);
             v
         })
     }
@@ -314,6 +329,7 @@ impl Which {
             Which::Gateway(h) => format!("gateways-{}", slug(h.name)),
             Which::Satellites(g) => format!("satellites-{}", slug(g.name)),
             Which::Transmitters => "satellite-transmitters".into(),
+            Which::LaunchSites => "launch-sites".into(),
             Which::CellOperators => "mobile-networks".into(),
             Which::CellTowers => "cell-towers".into(),
             Which::Artemis => "identified-signals".into(),
@@ -330,6 +346,7 @@ impl Which {
             Which::Gateway(h) => format!("{} gateways", h.name),
             Which::Satellites(g) => format!("{} satellites", g.name),
             Which::Transmitters => "Satellite transmitters".into(),
+            Which::LaunchSites => "Radiosonde launch sites".into(),
             Which::CellOperators => "Mobile networks".into(),
             Which::CellTowers => "Cell towers".into(),
             Which::Artemis => "Identified signals".into(),
@@ -344,6 +361,7 @@ impl Which {
             Which::Gateway(h) => h.publisher,
             Which::Satellites(g) => g.publisher,
             Which::Transmitters => "db.satnogs.org",
+            Which::LaunchSites => "sondehub.org",
             Which::CellOperators => "github.com/pbakondy/mcc-mnc-list",
             Which::CellTowers => "opencellid.org",
             Which::Artemis => "github.com/AresValley/Artemis-DB",
@@ -363,6 +381,7 @@ impl Which {
             Which::Gateway(h) => h.page,
             Which::Satellites(g) => g.page,
             Which::Transmitters => "https://db.satnogs.org/",
+            Which::LaunchSites => "https://sondehub.org/",
             Which::CellOperators => "https://github.com/pbakondy/mcc-mnc-list",
             Which::CellTowers => "https://opencellid.org/",
             Which::Artemis => "https://github.com/AresValley/Artemis-DB",
@@ -455,6 +474,7 @@ impl Which {
             Which::Gateway(h) => (h.name, h.publisher),
             Which::Satellites(g) => (g.credit_name, g.credit_licence),
             Which::Transmitters => ("SatNOGS DB", "CC BY-SA 4.0"),
+            Which::LaunchSites => ("SondeHub", "CC BY-SA 2.0"),
             _ => ("radioid.net", "amateur use"),
         };
         Credit { name, licence, url: self.page() }
@@ -480,6 +500,7 @@ impl Which {
             Which::Gateway(h) => h.terms,
             Which::Satellites(g) => g.terms,
             Which::Transmitters => "CC BY-SA 4.0, credit the SatNOGS project",
+            Which::LaunchSites => "CC BY-SA 2.0, credit SondeHub and link sondehub.org",
             // radioid.net publishes the registry for amateur use and states
             // no licence, so the honest line is who it belongs to.
             _ => "radioid.net, for amateur radio use",
@@ -508,6 +529,12 @@ impl Which {
                  the mode and the baud rate, corrected against what their ground stations \
                  actually hear. Elements say where a satellite will be; this says where to \
                  tune when it gets there."
+            }
+            Which::LaunchSites => {
+                "Every upper-air station SondeHub knows of: where the balloon goes up, what \
+                 days and hours it goes up on, and which instrument it carries. The station \
+                 picks a frequency on the day, so the band is still scanned; this says where \
+                 to expect one and when."
             }
             Which::CellOperators => {
                 "Which network an MCC and MNC belong to, so a decoded GSM beacon reads as an \
@@ -542,6 +569,7 @@ impl Which {
             Which::Gateway(h) => vec![h.source()],
             Which::Satellites(g) => vec![g.source()],
             Which::Transmitters => vec![datasets::satnogs::source()],
+            Which::LaunchSites => vec![datasets::sondehub::source()],
             Which::CellOperators => vec![datasets::cells::operators_source()],
             // Nothing to fetch until both halves of the URL exist. An empty
             // list reads as nothing held, which is the truth.
@@ -599,6 +627,7 @@ impl Which {
             Which::Gateway(h) => GATEWAYS[host_file_index(h)].read().as_ref().map(|g| g.len()),
             Which::Satellites(g) => SATS[group_index(g)].read().as_ref().map(|s| s.len()),
             Which::Transmitters => TRANSMITTERS.read().as_ref().map(|t| t.len()),
+            Which::LaunchSites => LAUNCH_SITES.read().as_ref().map(|s| s.len()),
             Which::CellOperators => OPERATORS.read().as_ref().map(|o| o.len()),
             Which::CellTowers => CELLS.read().as_ref().map(|c| c.len()),
             Which::Artemis => ARTEMIS.read().as_ref().map(|s| s.len()),
@@ -782,6 +811,14 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
             }
             if let Some(t) = datasets::satnogs::refresh(cache, when)? {
                 *TRANSMITTERS.write() = Some(Arc::new(t));
+            }
+        }
+        Which::LaunchSites => {
+            if LAUNCH_SITES.read().is_none() {
+                *LAUNCH_SITES.write() = Some(Arc::new(datasets::sondehub::load(cache)?));
+            }
+            if let Some(s) = datasets::sondehub::refresh(cache, when)? {
+                *LAUNCH_SITES.write() = Some(Arc::new(s));
             }
         }
         Which::Satellites(g) => {
