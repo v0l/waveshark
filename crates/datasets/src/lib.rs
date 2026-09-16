@@ -18,6 +18,7 @@ pub mod pistar;
 pub mod radioid;
 pub mod satnogs;
 pub mod sigid;
+pub mod sondehub;
 pub mod spacetrack;
 pub mod tle;
 

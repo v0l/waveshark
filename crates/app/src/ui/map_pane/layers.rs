@@ -247,6 +247,222 @@ impl Layer for AirportLayer {
     }
 }
 
+/// Where weather balloons go up from, as SondeHub's crowd-sourced list of
+/// upper-air stations has it.
+///
+/// The only transmitter on this map whose next appearance is published: a
+/// station launches at a filed hour, so a site is drawn with the time until
+/// its next flight. Amber like the airports, because a launch site is a
+/// fixed facility rather than something in the air, and hollow where the
+/// site flies nothing this receiver can read.
+#[derive(Default)]
+pub(super) struct SondeLayer {
+    /// The sites held this frame. Kept as a handle rather than as borrowed
+    /// rows, because a refresh replaces the list and a hover reads it after
+    /// every layer has drawn.
+    sites: Option<std::sync::Arc<Vec<datasets::sondehub::Site>>>,
+    /// Where each drawn site landed on screen, as an index into `sites`.
+    shown: Vec<(Pos2, usize)>,
+}
+
+impl Layer for SondeLayer {
+    fn key(&self) -> &'static str {
+        "sondes"
+    }
+
+    fn label(&self) -> &'static str {
+        "LAUNCH SITES"
+    }
+
+    fn draw(&mut self, c: &Canvas) {
+        if c.zoom() < SITE_ZOOM {
+            self.shown.clear();
+            return;
+        }
+        // Asking is what downloads it, so the file is fetched when somebody
+        // switches this on rather than at every start.
+        self.sites = crate::data::launch_sites();
+        let Some(sites) = self.sites.clone() else {
+            self.shown.clear();
+            return;
+        };
+        let near = c.rect.expand(20.0);
+        self.shown = sites
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let at = c.at(s.lat, s.lon);
+                near.contains(at).then_some((at, i))
+            })
+            .collect();
+        let readable = datasets::sondehub::Model::Rs41;
+        for (at, i) in &self.shown {
+            let s = &sites[*i];
+            let col = theme::READOUT.gamma_multiply(0.85);
+            if s.flies(readable) {
+                c.p.circle_filled(*at, 3.0, col);
+            } else {
+                c.p.circle_stroke(*at, 3.0, Stroke::new(1.0, col.gamma_multiply(0.6)));
+            }
+            // The balloon over the mark, so a site reads as a launch rather
+            // than as another airfield.
+            c.p.line_segment(
+                [Pos2::new(at.x, at.y - 4.0), Pos2::new(at.x, at.y - 8.0)],
+                Stroke::new(1.0, col.gamma_multiply(0.5)),
+            );
+            c.p.circle_stroke(Pos2::new(at.x, at.y - 10.0), 2.5, Stroke::new(1.0, col));
+        }
+    }
+
+    fn over(&mut self, c: &Canvas) {
+        if c.zoom() < SITE_ZOOM {
+            return;
+        }
+        let Some(sites) = self.sites.clone() else { return };
+        let Some(pos) = c.hover() else { return };
+        if let Some((at, i)) = nearest(&self.shown, pos, 12.0) {
+            site_card(&c.p, c.rect, at, &sites[i]);
+        }
+    }
+
+    fn status(&self) -> Option<String> {
+        let now = crate::data::utc_now();
+        let sites = self.sites.clone().unwrap_or_default();
+        let next = self
+            .shown
+            .iter()
+            .filter_map(|(_, i)| sites.get(*i))
+            .filter_map(|s| s.next_launch(now).map(|(d, _)| (d, s.name.as_str())))
+            .min_by_key(|(d, _)| *d);
+        let sites = |n: usize| match n {
+            1 => "1 launch site".to_string(),
+            n => format!("{n} launch sites"),
+        };
+        match (self.shown.len(), next) {
+            (0, _) => None,
+            (n, None) => Some(sites(n)),
+            (n, Some((d, name))) => Some(format!("{}, next {name} in {}", sites(n), until(d))),
+        }
+    }
+
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        match self.shown.is_empty() {
+            true => Vec::new(),
+            false => vec![crate::data::Which::LaunchSites.credit()],
+        }
+    }
+}
+
+/// Below this the sites are not drawn. Lower than the airports' threshold
+/// because there are 900 upper-air stations in the world against tens of
+/// thousands of airfields: at a country's width they are a scatter of marks
+/// rather than a wall, and a balloon two hundred kilometres away is still
+/// one this receiver will hear.
+const SITE_ZOOM: f64 = 6.0;
+
+/// A duration as a person reads a countdown: hours and minutes up to a day,
+/// days and hours beyond it.
+fn until(d: std::time::Duration) -> String {
+    let mins = d.as_secs() / 60;
+    match (mins / 60, mins % 60) {
+        (0, m) => format!("{m} min"),
+        (h, m) if h < 24 => format!("{h} h {m:02} min"),
+        (h, _) => format!("{} d {} h", h / 24, h % 24),
+    }
+}
+
+/// The marker nearest the pointer within `px`, for a hover card.
+fn nearest(shown: &[(Pos2, usize)], pos: Pos2, px: f32) -> Option<(Pos2, usize)> {
+    let mut best: Option<(f32, Pos2, usize)> = None;
+    for (at, i) in shown {
+        let d = at.distance(pos);
+        if d <= px && best.is_none_or(|(b, _, _)| d < b) {
+            best = Some((d, *at, *i));
+        }
+    }
+    best.map(|(_, at, i)| (at, i))
+}
+
+/// What a hovered launch site says: the station, what it flies, when it
+/// flies it, and anything the contributors noted.
+fn site_card(p: &egui::Painter, rect: Rect, anchor: Pos2, s: &datasets::sondehub::Site) {
+    const MAX_ROWS: usize = 8;
+    let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
+    let font = |sz: f32| FontId::new(sz, FontFamily::Name(theme::READOUT_FONT.into()));
+    let text_max = (f64::from(rect.width()) - 2.0 * f64::from(pad) - 8.0).clamp(80.0, 260.0) as f32;
+
+    let name = p.layout(s.name.clone(), font(13.0), theme::VALUE, text_max);
+    let mut meta = format!("LAUNCH SITE   {} M", s.alt_m.round());
+    if let Some(b) = s.burst_m {
+        meta.push_str(&format!("   BURST {:.0} KM", b / 1000.0));
+    }
+    let meta = p.layout_no_wrap(meta, font(9.0), theme::LEGEND);
+    let station = p.layout_no_wrap(format!("WMO {}", s.station), font(11.0), theme::READOUT);
+
+    let mut rows: Vec<(std::sync::Arc<egui::Galley>, Color32)> = Vec::new();
+    let mut row = |text: String, col: Color32, size: f32| {
+        rows.push((p.layout(text, font(size), col, text_max), col));
+    };
+    let sondes: Vec<String> = s
+        .sondes
+        .iter()
+        .map(|t| match t.hz {
+            Some(hz) => format!("{} {:.3} MHz", t.label(), hz / 1e6),
+            None => t.label(),
+        })
+        .collect();
+    match sondes.is_empty() {
+        true => row("instrument not filed".into(), theme::LEGEND, 10.0),
+        false => row(sondes.join(", "), theme::VALUE, 11.0),
+    }
+
+    let now = crate::data::utc_now();
+    match s.next_launch(now) {
+        Some((d, l)) => row(
+            format!("next in {}, {:02}:{:02} UTC", until(d), l.hour, l.minute),
+            theme::TRACE,
+            11.0,
+        ),
+        None => row("schedule not known".into(), theme::LEGEND, 10.0),
+    }
+    for l in s.schedule.iter().take(MAX_ROWS) {
+        row(format!("{:<10} {:02}:{:02} UTC", l.day.label(), l.hour, l.minute), theme::VALUE, 11.0);
+    }
+    if s.schedule.len() > MAX_ROWS {
+        row(format!("+{} more", s.schedule.len() - MAX_ROWS), theme::LEGEND, 10.0);
+    }
+    if !s.notes.is_empty() {
+        row(s.notes.clone(), theme::LEGEND, 10.0);
+    }
+
+    let head = [(name, theme::VALUE), (meta, theme::LEGEND), (station, theme::READOUT)];
+    let head_sizes: Vec<Vec2> = head.iter().map(|(g, _)| g.size()).collect();
+    let row_sizes: Vec<Vec2> = rows.iter().map(|(g, _)| g.size()).collect();
+    let l = card_layout(&head_sizes, &row_sizes, pad, sep, rule_gap);
+
+    let mut at = anchor + Vec2::new(14.0, -8.0);
+    if anchor.x + 14.0 + l.size.x > rect.right() - 4.0 {
+        at.x = anchor.x - 14.0 - l.size.x;
+    }
+    let max_x = (rect.right() - 4.0 - l.size.x).max(rect.left() + 4.0);
+    let max_y = (rect.bottom() - 4.0 - l.size.y).max(rect.top() + 4.0);
+    at.x = at.x.clamp(rect.left() + 4.0, max_x);
+    at.y = at.y.clamp(rect.top() + 4.0, max_y);
+    let card = Rect::from_min_size(at, l.size);
+    p.rect_filled(card, 3.0, theme::PANEL);
+    p.rect_stroke(card, 3.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
+
+    let x = card.left() + l.text_x;
+    for ((g, col), y) in head.iter().chain(rows.iter()).zip(&l.ys) {
+        p.galley(Pos2::new(x, card.top() + y), g.clone(), *col);
+    }
+    let rule_y = card.top() + l.rule_y;
+    p.line_segment(
+        [Pos2::new(x, rule_y), Pos2::new(card.right() - pad, rule_y)],
+        Stroke::new(1.0, theme::ETCH),
+    );
+}
+
 /// Cells from the OpenCelliD export, at the position the crowd averaged for
 /// each and with the radius that position is good to.
 ///

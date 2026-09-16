@@ -30,6 +30,7 @@ holds the rows, the terms and the credit each is shown with.
 | Unidentified signals | sigidwiki.com contributors | wiki contributors | `sigidwiki.com/api.php?action=ask` |
 | Orbital elements | CelesTrak (Dr. T.S. Kelso) | [usage policy](https://celestrak.org/usage-policy.php): documented queries only, one download per update, stop on any non-200 | `celestrak.org/NORAD/elements/gp.php?GROUP=…&FORMAT=csv` |
 | Satellite transmitters | SatNOGS DB | CC BY-SA 4.0 | `db.satnogs.org/api/transmitters/?format=json` |
+| Radiosonde launch sites | SondeHub (Project Horus) | CC BY-SA 2.0, visible credit and link required | `api.v2.sondehub.org/sites` |
 | Satellites the TinyGS network tracks | TinyGS | open network, elements published for its own stations | `api.tinygs.com/v1/tinygs_supported.txt` |
 | Catalogue of objects in orbit | Space-Track (US Space Force) | their user agreement, an account of your own, no redistribution | `space-track.org/basicspacedata/query/class/gp/…`, logged in, fewer than 30 requests a minute |
 | Map tiles | OpenStreetMap contributors | ODbL, tile usage policy | `tile.openstreetmap.org` |

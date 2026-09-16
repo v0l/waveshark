@@ -10,7 +10,8 @@ mod layers;
 use super::mapview::{Layer, MapView};
 use super::*;
 use layers::{
-    AirportLayer, CellLayer, RingLayer, SatLayer, SightingLayer, StationLayer, TrackLayer,
+    AirportLayer, CellLayer, RingLayer, SatLayer, SightingLayer, SondeLayer, StationLayer,
+    TrackLayer,
 };
 
 /// What the map pane remembers. Its own, and reachable from no other view:
@@ -124,6 +125,7 @@ impl Map<'_> {
                 let mut rings = RingLayer { home };
                 let mut airports = AirportLayer::default();
                 let mut cells = CellLayer::new(self.heard);
+                let mut sondes = SondeLayer::default();
                 let mut station = StationLayer { home, accuracy_m };
                 let mut tracks = TrackLayer { active: &active, now };
                 let mut sats = SatLayer::new(
@@ -138,10 +140,11 @@ impl Map<'_> {
                     ident: self.trail.ident,
                     estimate: self.trail.estimate,
                 };
-                let mut layers: [&mut dyn Layer; 7] = [
+                let mut layers: [&mut dyn Layer; 8] = [
                     &mut rings,
                     &mut cells,
                     &mut airports,
+                    &mut sondes,
                     &mut station,
                     &mut sightings,
                     &mut sats,
