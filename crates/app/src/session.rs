@@ -238,11 +238,22 @@ pub struct Session {
     /// turned on, so it is a decision made once rather than a switch to find
     /// at every start.
     ///
-    /// The transcriber is the third of these and is not here: it is a stage
-    /// in the graph, off in the graph the receiver draws, and switching it on
-    /// is an edit like any other setting changed by hand.
+    /// The call recorder and the transcriber are the other two, and they are
+    /// here rather than in the graph. Both are stages, and a stage's setting
+    /// is ordinarily an edit; both were switched on, saved as edits, and
+    /// found off again at the next start often enough that the mechanism is
+    /// the wrong one for them. A switch somebody expects to stay on belongs
+    /// in the record with the rest of what they set.
     pub packet_log_on: bool,
     pub survey_on: bool,
+    pub calls_on: bool,
+    /// Where the recorder writes, empty for the default folder.
+    pub calls_dir: String,
+    pub transcribe_on: bool,
+    /// Which weights read the speech and where they run, as the Transcript
+    /// pane names them. Empty means the shipped defaults.
+    pub transcribe_model: String,
+    pub transcribe_device: String,
     /// Where the packet log writes, empty for the default folder. Saved with
     /// the switch: a folder chosen once is part of the same decision.
     pub log_dir: String,
@@ -387,6 +398,11 @@ impl Default for Session {
             decode_on: true,
             packet_log_on: false,
             survey_on: false,
+            calls_on: false,
+            calls_dir: String::new(),
+            transcribe_on: false,
+            transcribe_model: String::new(),
+            transcribe_device: String::new(),
             log_dir: String::new(),
             survey_path: String::new(),
             list_unknown: true,
@@ -447,6 +463,20 @@ impl Session {
             "" => crate::packetlog::PacketLog::default_dir(),
             dir => Some(PathBuf::from(dir)),
         }
+    }
+
+    /// Where the call recorder writes, or `None` when it is not recording.
+    ///
+    /// The folder and the switch are one answer, as the packet log's are: a
+    /// recorder switched on with nowhere to write is not switched on.
+    pub fn calls_path(&self) -> Option<PathBuf> {
+        if !self.calls_on {
+            return None;
+        }
+        Some(match self.calls_dir.trim() {
+            "" => crate::calllog::calls_dir(),
+            dir => PathBuf::from(dir),
+        })
     }
 
     /// Where the survey is recorded, or `None` when it is not recording.
@@ -633,6 +663,14 @@ impl Session {
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
             packet_log_on: kv.get("packet_log_on").map(|v| *v == "true").unwrap_or(d.packet_log_on),
             survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
+            calls_on: kv.get("calls_on").map(|v| *v == "true").unwrap_or(d.calls_on),
+            calls_dir: kv.get("calls_dir").map(|v| v.to_string()).unwrap_or_default(),
+            transcribe_on: kv.get("transcribe_on").map(|v| *v == "true").unwrap_or(d.transcribe_on),
+            transcribe_model: kv.get("transcribe_model").map(|v| v.to_string()).unwrap_or_default(),
+            transcribe_device: kv
+                .get("transcribe_device")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             log_dir: kv.get("log_dir").map(|v| v.to_string()).unwrap_or_default(),
             survey_path: kv.get("survey_path").map(|v| v.to_string()).unwrap_or_default(),
             list_unknown: kv.get("list_unknown").map(|v| *v == "true").unwrap_or(d.list_unknown),
@@ -733,6 +771,11 @@ impl Session {
         s.push_str(&format!("dashboard = {}\n", self.dashboard));
         s.push_str(&format!("packet_log_on = {}\n", self.packet_log_on));
         s.push_str(&format!("survey_on = {}\n", self.survey_on));
+        s.push_str(&format!("calls_on = {}\n", self.calls_on));
+        s.push_str(&format!("calls_dir = {}\n", self.calls_dir));
+        s.push_str(&format!("transcribe_on = {}\n", self.transcribe_on));
+        s.push_str(&format!("transcribe_model = {}\n", self.transcribe_model));
+        s.push_str(&format!("transcribe_device = {}\n", self.transcribe_device));
         s.push_str(&format!("list_unknown = {}\n", self.list_unknown));
         s.push_str(&format!("capture_on = {}\n", self.capture_on));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
@@ -861,6 +904,11 @@ mod tests {
             decode_on: false,
             dashboard: false,
             packet_log_on: true,
+            calls_on: true,
+            calls_dir: "/srv/calls".into(),
+            transcribe_on: true,
+            transcribe_model: "whisper-large-v3-turbo".into(),
+            transcribe_device: "cuda:0".into(),
             survey_on: true,
             log_dir: "/var/log/waveshark".into(),
             survey_path: "/var/log/waveshark/survey.sqlite".into(),

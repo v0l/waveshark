@@ -539,6 +539,15 @@ pub enum Cmd {
     /// log is a node in the graph: what it writes is what the demodulators
     /// produced, which never reaches the interface at all.
     PacketLog(Option<std::path::PathBuf>),
+    /// Where every over heard is kept, or nothing to stop keeping them.
+    RecordCalls(Option<std::path::PathBuf>),
+    /// Whether what is heard is read back into words, with which weights and
+    /// on which device.
+    Transcribe {
+        on: bool,
+        model: String,
+        device: String,
+    },
     /// Size the packet log's folder may reach, or `None` to let it grow until
     /// the disk says otherwise. The oldest days go to keep it under.
     PacketLogCap(Option<u64>),
@@ -1026,6 +1035,10 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         capture_dir: crate::chain::default_capture_dir(),
         capture_format: common::SampleFormat::Cu8,
         log: false,
+        calls: None,
+        transcribe: false,
+        transcribe_model: String::new(),
+        transcribe_device: String::new(),
         settings: Default::default(),
     }
 }
@@ -1945,6 +1958,10 @@ impl Audio {
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
             log: false,
+            calls: None,
+            transcribe: false,
+            transcribe_model: String::new(),
+            transcribe_device: String::new(),
             feeds: Vec::new(),
             tx: None,
             settings: Default::default(),
@@ -2211,6 +2228,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // Switched on as soon as the interface says where to write; the
             // default is on, and the command arrives with the first frame.
             log: false,
+            calls: None,
+            transcribe: false,
+            transcribe_model: String::new(),
+            transcribe_device: String::new(),
             // Feeds arrive from the session or the settings modal, as a
             // command.
             feeds: Vec::new(),
@@ -2526,6 +2547,32 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::TetraKey { colour, key } => self.rx.set_tetra_key(colour, key),
             #[cfg(feature = "tea")]
             Cmd::TetraIdSecret { colour, c } => self.rx.set_tetra_id_secret(colour, c),
+            // The recorder and the transcriber are switched from the record
+            // rather than by editing their stages, so they arrive here like
+            // every other setting and are put into the plan the graph is
+            // drawn from.
+            Cmd::RecordCalls(dir) => {
+                if dir != self.plan.calls {
+                    self.plan.calls = dir;
+                    self.needs_rebuild = true;
+                }
+            }
+            Cmd::Transcribe { on, model, device } => {
+                let want = (on, model, device);
+                let held = (
+                    self.plan.transcribe,
+                    self.plan.transcribe_model.clone(),
+                    self.plan.transcribe_device.clone(),
+                );
+                if want != held {
+                    (
+                        self.plan.transcribe,
+                        self.plan.transcribe_model,
+                        self.plan.transcribe_device,
+                    ) = want;
+                    self.needs_rebuild = true;
+                }
+            }
             Cmd::PacketLog(dir) => {
                 self.plan.log = dir.is_some();
                 self.rx.set_packet_log(dir);
@@ -3423,6 +3470,10 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         capture_dir: crate::chain::default_capture_dir(),
         capture_format: common::SampleFormat::Cu8,
         log: false,
+        calls: None,
+        transcribe: false,
+        transcribe_model: String::new(),
+        transcribe_device: String::new(),
         feeds: Vec::new(),
         tx: None,
         settings: Default::default(),

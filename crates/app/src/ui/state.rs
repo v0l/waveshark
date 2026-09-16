@@ -987,11 +987,16 @@ mod tests {
     use pipeline::ParamValue as V;
 
     /// The graph the receiver draws before it has been handed anything.
+    /// A graph with one stage carrying one setting the operator owns.
+    ///
+    /// The spectrum's, not the transcriber's: the transcriber's switch, its
+    /// weights and its device are in the saved record rather than in the
+    /// graph, so none of them is an edit any more.
     fn drawn() -> crate::patch::Patch {
         let mut p = crate::patch::Patch::default();
         let mut s = pipeline::registry::Settings::new();
-        s.insert("enabled".into(), V::Bool(false));
-        p.add_derived(derived::TRANSCRIBE, "transcribe_live", s);
+        s.insert("smoothing".into(), V::Float(0.5));
+        p.add_derived(derived::SPECTRUM, "spectrum", s);
         p
     }
 
@@ -1001,14 +1006,13 @@ mod tests {
     /// The receiver comes up, draws a graph and publishes it before the
     /// interface has handed it the edits read off disk. Reading that graph
     /// gives an empty set, and adopting it wrote an empty file over the one
-    /// just loaded: the transcriber's switch, the model picked, every setting
-    /// changed by parameter, all of it had to be found again at the next
-    /// start.
+    /// just loaded: every setting changed by parameter had to be found again
+    /// at the next start.
     #[test]
     fn a_saved_edit_survives_the_graph_published_before_it_lands() {
         let mut c = ChainState { edits: crate::patch::Edits::default(), ..Default::default() };
         // As `App::new` leaves it: read off disk, not yet seen running.
-        c.edits.settings.push((derived::TRANSCRIBE, "enabled".into(), V::Bool(true)));
+        c.edits.settings.push((derived::SPECTRUM, "smoothing".into(), V::Float(0.8)));
         assert!(!c.edits_landed);
 
         // The first publish: the receiver's own graph, without them.
@@ -1021,10 +1025,10 @@ mod tests {
         // there, and now known to have landed.
         let mut running = drawn();
         running
-            .stage_mut(derived::TRANSCRIBE)
+            .stage_mut(derived::SPECTRUM)
             .unwrap()
             .settings
-            .insert("enabled".into(), V::Bool(true));
+            .insert("smoothing".into(), V::Float(0.8));
         c.patch = running;
         c.take_edits_from_the_running_graph();
         assert!(c.edits_landed);
@@ -1034,7 +1038,7 @@ mod tests {
         // reads is the graph they are actually looking at.
         c.patch = drawn();
         c.take_edits_from_the_running_graph();
-        assert!(c.edits.settings.is_empty(), "the switch cannot be turned off again");
+        assert!(c.edits.settings.is_empty(), "the setting cannot be put back again");
     }
 
     /// A receiver with nothing saved adopts what it reads straight away.

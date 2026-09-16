@@ -1602,6 +1602,7 @@ impl App {
             radio: self.radio.as_ref(),
             said: &self.transcript.log,
             cmds: &mut self.cmds,
+            settings: &self.settings,
         }
         .show(ui);
         match act {
@@ -1693,9 +1694,13 @@ impl App {
     /// Draw the transcript, then do what its buttons asked for.
     fn transcript_view(&mut self, ui: &mut egui::Ui) {
         let engine = self.radio.as_ref().and_then(|r| r.status.transcriber.lock().clone());
-        let act =
-            transcript_pane::Transcript { st: &mut self.transcript, engine, cmds: &mut self.cmds }
-                .show(ui);
+        let act = transcript_pane::Transcript {
+            st: &mut self.transcript,
+            engine,
+            cmds: &mut self.cmds,
+            settings: &self.settings,
+        }
+        .show(ui);
         match act {
             Some(transcript_pane::Action::Clear) => {
                 if let Some(r) = self.radio.as_ref() {
@@ -2348,6 +2353,19 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     when(
         (now.survey_on, &now.survey_path) != (was.survey_on, &was.survey_path),
         Cmd::Survey(now.survey_file()),
+    );
+    when(
+        (now.calls_on, &now.calls_dir) != (was.calls_on, &was.calls_dir),
+        Cmd::RecordCalls(now.calls_path()),
+    );
+    when(
+        (now.transcribe_on, &now.transcribe_model, &now.transcribe_device)
+            != (was.transcribe_on, &was.transcribe_model, &was.transcribe_device),
+        Cmd::Transcribe {
+            on: now.transcribe_on,
+            model: now.transcribe_model.clone(),
+            device: now.transcribe_device.clone(),
+        },
     );
     when(now.gps != was.gps, Cmd::Gps(now.gps_source()));
     when(now.feeds != was.feeds, Cmd::Feeds(now.feeds.clone()));
@@ -3152,6 +3170,8 @@ mod tests {
             Cmd::Wigle(_) => "wigle",
             Cmd::BeaconDb(_) => "beacondb",
             Cmd::HomeAssistant(_) => "homeassistant",
+            Cmd::RecordCalls(_) => "record_calls",
+            Cmd::Transcribe { .. } => "transcribe",
             _ => "something else",
         }
     }
@@ -3193,9 +3213,11 @@ mod tests {
                 "log_cap",
                 "manual",
                 "packet_log",
+                "record_calls",
                 "refresh",
                 "smoothing",
                 "survey",
+                "transcribe",
                 "wigle",
             ],
             "a setting the thread is not told is a setting that does not apply"

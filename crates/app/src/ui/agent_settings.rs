@@ -111,12 +111,9 @@ impl super::App {
             A::SetDatasetKey(a) => agent_set_dataset_key(a),
             A::SetDisplay(a) => self.agent_set_display(a),
             A::SetCallLog(a) => {
-                self.agent_running()?;
-                self.send(Cmd::StageParam(
-                    crate::chain::derived::CALL_LOG,
-                    "enabled".into(),
-                    pipeline::param::ParamValue::Bool(a.on),
-                ));
+                // In the record, so it can be switched with no radio running
+                // and is still switched at the next start.
+                self.settings.edit(|s| s.calls_on = a.on);
                 Ok(json!({ "recording": a.on }))
             }
             _ => Err("not a settings action".into()),
@@ -413,25 +410,24 @@ impl super::App {
             // the agent, and it reads where this says.
             crate::agent::config::publish_reading(&self.chat.config);
         }
+        // The switch, the weights and the device are in the record, so they
+        // can be set with no radio running and are still set at the next
+        // start. Everything else about the stage is the graph's.
+        if let Some(on) = a.enabled {
+            self.settings.edit(|s| s.transcribe_on = on);
+        }
+        if let Some(m) = a.model {
+            self.settings.edit(|s| s.transcribe_model = m.clone());
+        }
+        if let Some(d) = a.device {
+            self.settings.edit(|s| s.transcribe_device = d.clone());
+        }
         let id = crate::chain::derived::TRANSCRIBE;
         // A stage setting goes to the graph, and there is no graph until the
         // radio is running: without this the call is answered by a receiver
         // that dropped it.
-        if a.enabled.is_some()
-            || a.model.is_some()
-            || a.device.is_some()
-            || a.min_speech_s.is_some()
-        {
+        if a.min_speech_s.is_some() {
             self.agent_running()?;
-        }
-        if let Some(on) = a.enabled {
-            self.send(Cmd::StageParam(id, "enabled".into(), ParamValue::Bool(on)));
-        }
-        if let Some(m) = a.model {
-            self.send(Cmd::StageParam(id, "model".into(), ParamValue::Text(m)));
-        }
-        if let Some(d) = a.device {
-            self.send(Cmd::StageParam(id, "device".into(), ParamValue::Text(d)));
         }
         if let Some(s) = a.min_speech_s {
             self.send(Cmd::StageParam(id, "min_speech_s".into(), ParamValue::Float(s)));
