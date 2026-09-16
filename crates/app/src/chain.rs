@@ -3270,6 +3270,20 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
                 p.connect(from, (id, 0));
                 want.push(id);
                 from = Source::Stage(id, 0);
+
+                // The gain control, now that the coded squelch is out of the
+                // audio. It takes the labelled speech rather than the bare
+                // audio, which is the same samples with the channel, the
+                // caller and the group on them.
+                if let ChanMode::Audio(mode) = spec.mode
+                    && let Some(preset) = agc_preset(mode)
+                {
+                    let id = chan_stage_id("chan_agc", spec, rate);
+                    p.add_derived(id, "agc", agc_settings(preset, spec.agc));
+                    p.connect(from, (id, 0));
+                    want.push(id);
+                    from = Source::Stage(id, 0);
+                }
             }
             // The fader is the channel's, under an id that is the channel's
             // alone: a channel that changes mode or width keeps its level.
@@ -3775,16 +3789,15 @@ fn audio_channel_stages(
     // The gain control comes after the squelch, so what it sees is either a
     // signal or silence. The other order lets the AGC lift the noise on a
     // dead channel up to the threshold and hold the squelch open.
-    let preset = match mode {
-        Demod::Cw => Some(nodes::AgcPreset::Cw),
-        Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some(nodes::AgcPreset::Voice),
-        Demod::Wfm => None,
-    };
-    if let Some(preset) = preset {
-        let mut a = Settings::new();
-        a.insert("preset".into(), V::Text(preset.to_string()));
-        a.insert("enabled".into(), V::Bool(spec.agc));
-        let agc = at(p, "chan_agc", "agc", a);
+    //
+    // On a channel marked as voice it comes later still, after the stage
+    // that reads the coded squelch and takes it back out of the audio: a
+    // tone at ten times the amplitude of the speech sets a gain that clips,
+    // and what is heard is the tone with the voice buried under it.
+    if let Some(preset) = agc_preset(mode)
+        && !spec.voice
+    {
+        let agc = at(p, "chan_agc", "agc", agc_settings(preset, spec.agc));
         p.connect(tail, (agc, 0));
         tail = Source::Stage(agc, 0);
     }
@@ -3792,6 +3805,23 @@ fn audio_channel_stages(
     let hb = at(p, "chan_blend", "high_blend", Settings::new());
     p.connect(tail, (hb, 0));
     hb
+}
+
+/// The gain behaviour a mode wants, or nothing for one that manages its own.
+fn agc_preset(mode: Demod) -> Option<nodes::AgcPreset> {
+    match mode {
+        Demod::Cw => Some(nodes::AgcPreset::Cw),
+        Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some(nodes::AgcPreset::Voice),
+        Demod::Wfm => None,
+    }
+}
+
+fn agc_settings(preset: nodes::AgcPreset, on: bool) -> pipeline::registry::Settings {
+    use pipeline::ParamValue as V;
+    let mut a = pipeline::registry::Settings::new();
+    a.insert("preset".into(), V::Text(preset.to_string()));
+    a.insert("enabled".into(), V::Bool(on));
+    a
 }
 
 /// The id one stage of one channel is derived under.
@@ -5336,6 +5366,15 @@ pub(crate) mod tests {
             .find(|n| n.kind == "ident")
             .expect("a channel marked as voice reads identities");
         assert_eq!(ptt.outputs[0].1.kind, PortKind::Voice, "it publishes speech, labelled");
+        // The gain control is behind it and takes the labelled speech: the
+        // identity stage reads the coded squelch and takes it back out of
+        // the audio, and a gain set before that is a gain set by the tone.
+        let agc = topo
+            .nodes
+            .iter()
+            .find(|n| n.kind == "agc" && n.inputs.iter().any(|(o, _)| *o == ptt.outputs[0].0))
+            .expect("the gain control is not behind the identity stage");
+        assert_eq!(agc.outputs[0].1.kind, PortKind::Voice, "the speech lost its labels");
         // The channel's own fader, not the replay's: both are faders.
         let fader = topo
             .nodes
@@ -5343,7 +5382,7 @@ pub(crate) mod tests {
             .find(|n| n.kind == crate::mix::fader::KIND && n.tag == Some(fader_id(1)))
             .expect("the channel's fader");
         assert!(
-            fader.inputs.iter().any(|(o, _)| *o == ptt.outputs[0].0),
+            fader.inputs.iter().any(|(o, _)| *o == agc.outputs[0].0),
             "the identity stage is not in front of the fader"
         );
 
