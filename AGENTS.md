@@ -40,7 +40,9 @@ without touching it? If not, it is in the wrong file.
 `tea` is TETRA decryption, `ambe` is DMR speech through `crates/mbe`. Both
 default on, so `cargo test` at the root builds them; `crates/mbe` is not a
 default workspace member and `cargo test -p mbe` must be asked for by name.
-Releases build `--no-default-features --features limesdr,stt,mcp`. `mcp` is
+Releases build `--no-default-features --features limesdr,stt,mcp,ffmpeg`,
+except on Windows, which has no ffmpeg to link and so no broadcast
+pictures. `mcp` is
 the agent server behind `--mcp-listen`, which listens only when given an
 address.
 
