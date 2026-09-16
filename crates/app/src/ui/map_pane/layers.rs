@@ -528,6 +528,14 @@ impl Layer for TrackLayer<'_> {
             // fixed and has neither.
             let under = match a.kind() {
                 crate::tracks::Kind::Aircraft => a.altitude_ft().map(|ft| format!("{ft} ft")),
+                // Metres, as a sonde reports and as the people who chase them
+                // talk: a balloon at 35 km is not "114,829 ft" to anybody.
+                crate::tracks::Kind::Sonde => match a.detail {
+                    crate::tracks::Detail::Sonde { altitude_m, climb_ms, .. } => {
+                        Some(format!("{altitude_m:.0} m  {climb_ms:+.1} m/s"))
+                    }
+                    _ => None,
+                },
                 crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => {
                     a.speed_kt.filter(|v| *v > 0.0).map(|kt| format!("{kt:.0} kt"))
                 }
@@ -763,6 +771,17 @@ fn track_mark(
     // the track is (sin, -cos) in screen coordinates.
     let rot = |x: f32, y: f32| Pos2::new(at.x + x * c + y * s, at.y + x * s - y * c);
     let shape = match kind {
+        // A balloon and what hangs under it: a circle above the fix, drawn
+        // whichever way the wind is taking it, since a sonde has no heading
+        // of its own.
+        Kind::Sonde => {
+            p.circle_filled(Pos2::new(at.x, at.y - 4.0), 3.5, col);
+            p.line_segment(
+                [Pos2::new(at.x, at.y - 1.0), Pos2::new(at.x, at.y + 4.0)],
+                Stroke::new(1.0, col),
+            );
+            return;
+        }
         Kind::Aircraft => {
             vec![rot(0.0, 6.0), rot(-4.0, -4.0), rot(0.0, -1.5), rot(4.0, -4.0)]
         }

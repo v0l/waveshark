@@ -1597,6 +1597,41 @@ mod tests {
         assert!(n.remembered().is_empty(), "{:?}", n.remembered());
     }
 
+    /// A decoder whose transmitter has moved takes its channel with it. A
+    /// radiosonde drifts kilohertz as it cools on the way up, and the
+    /// remembered channel is where it was first heard, so the one that is
+    /// reading it says where it is now.
+    #[test]
+    fn a_reshape_moves_the_remembered_channel() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(403))]).unwrap();
+        n.remember_for("rs41", 403_000_000.0, 10_000.0, None, None, Default::default());
+        let b = SourceBlock {
+            id: n.memory.channels()[0].id,
+            state: SourceState::Opened,
+            center_hz: 403_000_000,
+            bandwidth_hz: 10_000.0,
+            signal_hz: 10_000.0,
+            rate: n.cfg.min_rate_hz,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b, None).unwrap();
+        let asking = AskAt::Source(slot.id);
+        n.slots.push(slot);
+        let mut said = Vec::new();
+        let ask = Request::Reshape { lo_hz: 403_016_000.0, hi_hz: 403_026_000.0 };
+        assert!(n.answer(asking, "rs41", ask, &mut said).is_none());
+        let at: Vec<(String, f64, f64)> =
+            n.remembered().into_iter().map(|(name, hz, w)| (name.to_string(), hz, w)).collect();
+        assert_eq!(at, [("rs41".to_string(), 403_021_000.0, 10_000.0)], "{at:?}");
+        // Outside the span it needs the dial, so it is handed back rather
+        // than silently dropped.
+        let far = Request::Reshape { lo_hz: 405_995_000.0, hi_hz: 406_005_000.0 };
+        assert_eq!(n.answer(asking, "rs41", far.clone(), &mut said), Some(far));
+    }
+
     /// What the asker said the decoder needs reaches it, with where its
     /// stream sits in the span: a GSM carrier a beacon sent a phone to is
     /// built timed from the beacon.
