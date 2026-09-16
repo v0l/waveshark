@@ -9,63 +9,68 @@ use crate::ui::widgets::{
     card, choice, field, field_then, footer, lamp, prose, secret, section, switch,
 };
 
-/// What the local voice falls back to, for the hints beside the fields it
-/// fills in: the description, the repository, and where the weights go.
-fn voice_defaults() -> (&'static str, &'static str, String) {
-    #[cfg(feature = "tts")]
-    {
-        (tts::DEFAULT_DESCRIPTION, tts::DEFAULT_MODEL, tts::default_dir().display().to_string())
-    }
-    #[cfg(not(feature = "tts"))]
-    {
-        ("", "", "this build has no speech model".to_string())
+/// What the lamp says for a voice made here: the speaker, and whether its
+/// files are on disc or have still to be fetched.
+#[cfg(feature = "tts")]
+fn local_voice_lamp(c: &crate::agent::config::Config) -> String {
+    let name = match c.voice_local.trim() {
+        "" => tts::DEFAULT_VOICE,
+        n => n,
+    };
+    let dir = match c.voice_dir.trim() {
+        "" => tts::default_dir(),
+        d => std::path::PathBuf::from(d),
+    };
+    match tts::Files::in_dir(&dir, name) {
+        Ok(f) => format!("{}, {:.0} MB on disc", tts::label_of(name), f.bytes() as f64 / 1e6),
+        Err(_) => format!("{}, 330 MB to fetch on the first over", tts::label_of(name)),
     }
 }
 
-/// Every voice that can be picked: the catalogue, with what each costs and
-/// whether its weights are already here, plus anything found on disc beside
-/// them. A closed list for the same reason the transcriber has one: a
-/// repository name is a thing most operators do not know, and what they do
-/// know is how big it is and whether it is downloaded.
+#[cfg(not(feature = "tts"))]
+fn local_voice_lamp(_: &crate::agent::config::Config) -> String {
+    "this build has no speech model".to_string()
+}
+
+/// Where the speech model's files go, for the hint beside the field.
+fn voice_dir_hint() -> String {
+    #[cfg(feature = "tts")]
+    {
+        tts::default_dir().display().to_string()
+    }
+    #[cfg(not(feature = "tts"))]
+    {
+        "this build has no speech model".to_string()
+    }
+}
+
+/// Every speaker that can be picked: the catalogue with the publisher's
+/// grade, and a mark against the ones already fetched. A closed list for the
+/// same reason the transcriber has one, and English only, because the
+/// dictionary that turns words into phonemes here is English.
 #[cfg(feature = "tts")]
-fn voice_models(dir: &str) -> Vec<(String, String)> {
+fn voices(dir: &str) -> Vec<(String, String)> {
     let root = match dir.trim() {
         "" => tts::default_dir(),
         d => std::path::PathBuf::from(d),
     };
     let here = tts::installed(&root);
-    let mut out: Vec<(String, String)> = tts::MODELS
+    let mut out: Vec<(String, String)> = tts::VOICES
         .iter()
-        .map(|m| {
-            let mark = match here.iter().any(|h| h == m.id) {
-                true => "on disc".to_string(),
-                false => format!("{:.1} GB", f64::from(m.mb) / 1000.0),
+        .map(|v| {
+            let mark = match here.iter().any(|h| h == v.id) {
+                true => " (on disc)",
+                false => "",
             };
-            (m.id.to_string(), format!("{} ({mark})", m.label))
+            (v.id.to_string(), format!("{}{mark}", tts::label_of(v.id)))
         })
         .collect();
-    // A model somebody put there by hand, or one from a later build.
     for id in here {
-        if tts::model(&id).is_none() {
+        if tts::voice(&id).is_none() {
             out.push((id.clone(), format!("{id} (on disc)")));
         }
     }
     out
-}
-
-/// What a model says about itself, for the line under the picker.
-#[cfg(feature = "tts")]
-fn voice_note(id: &str) -> String {
-    let id = match id.trim() {
-        "" => tts::DEFAULT_MODEL,
-        i => i,
-    };
-    match tts::model(id) {
-        Some(m) => m.note.to_string(),
-        None => {
-            format!("Fetched from {}, read as {}.", tts::repo_of(id), tts::family_of(id).label())
-        }
-    }
 }
 
 impl App {
@@ -695,7 +700,7 @@ impl App {
             match c.voice_fault() {
                 None => {
                     let from = match c.speech {
-                        Speech::Local => "a model here".to_string(),
+                        Speech::Local => local_voice_lamp(c),
                         Speech::Chat => format!("{} at {}", c.voice_model.trim(), host_of(&c.url)),
                         Speech::Server => {
                             format!("{} at {}", c.voice_model.trim(), host_of(&c.voice_url))
@@ -812,44 +817,36 @@ impl App {
         }
     }
 
-    /// The rows for a voice made on this machine: how it should sound,
-    /// which weights, where they run.
+    /// The rows for a voice made on this machine: which speaker, where it
+    /// runs, and where its files are.
     fn local_voice_rows(ui: &mut egui::Ui, c: &mut crate::agent::config::Config) {
-        row_help(
-            ui,
-            "sounds like",
-            "Parler is steered by a sentence rather than by a voice name: describe the \
-             speaker, the pace and the room.",
-            |ui| {
-                prose(ui, &mut c.voice_description, voice_defaults().0, 2);
-            },
-        );
         #[cfg(feature = "tts")]
         {
-            let chosen = match c.voice_repo.trim() {
-                "" => tts::DEFAULT_MODEL.to_string(),
-                id => id.to_string(),
+            let chosen = match c.voice_local.trim() {
+                "" => tts::DEFAULT_VOICE.to_string(),
+                name => name.to_string(),
             };
             row_help(
                 ui,
-                "model",
-                "What it costs is the weights it reads for every frame of speech, which on a \
-                 CPU is the whole of the speed.",
+                "speaker",
+                "The letter after the grade is the publisher's, from how much and how good \
+                 the audio behind each voice was. They are the same arithmetic and they do \
+                 not sound alike.",
                 |ui| {
-                    egui::ComboBox::from_id_salt("voice_model")
+                    egui::ComboBox::from_id_salt("voice_local")
                         .selected_text(tts::label_of(&chosen))
                         .width(300.0)
                         .show_ui(ui, |ui| {
-                            for (id, label) in voice_models(&c.voice_dir) {
+                            for (id, label) in voices(&c.voice_dir) {
                                 let on = chosen == id;
                                 if ui.selectable_label(on, label).clicked() {
-                                    c.voice_repo = id;
+                                    c.voice_local = id;
                                 }
                             }
                         });
                 },
             );
-            hint(ui, &voice_note(&chosen));
+            hint(ui, "Kokoro, 82 million parameters, ahead of real time on a processor.");
             row_help(
                 ui,
                 "run on",
@@ -875,25 +872,16 @@ impl App {
                         });
                 },
             );
-            row_help(
-                ui,
-                "precision",
-                "Half reads half the bytes for every frame, which is most of the cost of a \
-                 model making one frame at a time. On a card it is close to twice the speed \
-                 for no audible difference.",
-                |ui| {
-                    let want = tts::Precision::parse(&c.voice_precision);
-                    for p in [tts::Precision::Full, tts::Precision::Half] {
-                        if ui.selectable_label(want == p, p.label()).clicked() {
-                            c.voice_precision = p.id().to_string();
-                        }
-                    }
-                },
-            );
         }
-        row_help(ui, "weights", "Where they are kept. Empty for the usual place.", |ui| {
-            field(ui, &mut c.voice_dir, &voice_defaults().2);
-        });
+        row_help(
+            ui,
+            "files",
+            "The model, the voices and the pronunciation dictionary. Empty for the usual \
+             place.",
+            |ui| {
+                field(ui, &mut c.voice_dir, &voice_dir_hint());
+            },
+        );
     }
 
     fn packet_log_settings(&mut self, ui: &mut egui::Ui) {

@@ -395,9 +395,8 @@ pub mod args {
         /// source is set to the agent. Omit to use the channel already set
         /// to AGENT.
         pub channel: Option<u64>,
-        /// The voice to say it in: a voice the speech server names, or, for
-        /// the model on this machine, a sentence describing how it should
-        /// sound. Omit for the one in the Agent settings.
+        /// The voice to say it in: a speaker the model here has, or a voice
+        /// the speech server names. Omit for the one in the Agent settings.
         pub voice: Option<String>,
     }
 
@@ -605,21 +604,17 @@ pub mod args {
         /// Where speech is made. Called with nothing, this reports what is
         /// set and changes nothing.
         pub source: Option<VoiceFrom>,
-        /// For a model here: the catalogue id, or any repository name.
-        pub model: Option<String>,
-        /// For a model here: `auto`, `cpu`, `cuda:0`, `metal`.
+        /// For the model here: `auto`, `cpu`, `cuda:0`, `metal`.
         pub device: Option<String>,
-        /// For a model here: `full` or `half`.
-        pub precision: Option<String>,
-        /// For a model here: the sentence that says how it should sound.
-        pub description: Option<String>,
-        /// Where the weights are kept. Empty for the usual place.
+        /// Where the model, the voices and the dictionary are kept. Empty
+        /// for the usual place.
         pub dir: Option<String>,
         /// For a speech server: its base address.
         pub url: Option<String>,
         /// For a server: the speech model to ask it for.
         pub server_model: Option<String>,
-        /// For a server: the voice as it names it.
+        /// The speaker: a name from the catalogue for the model here, or
+        /// the voice a server names.
         pub voice: Option<String>,
         /// What the agent answers to on the air.
         pub wake: Option<String>,

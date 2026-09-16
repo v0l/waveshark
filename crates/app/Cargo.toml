@@ -111,10 +111,9 @@ ambe = ["nodes/ambe"]
 # --no-default-features to keep candle and the tokenizer out of the build.
 stt = ["nodes/stt", "dep:stt"]
 # Speak the agent's replies with a model on this machine rather than a speech
-# server. On by default in a build from source and a large download the first
-# time the agent is asked to talk on the air: Parler is about 3.5 GB, and it
-# wants the card `cuda` turns on. A build without it can still use a speech
-# server.
+# server. On by default in a build from source; the first time the agent is
+# asked to talk on the air it fetches about 330 MB of model, voice and
+# pronunciation dictionary. A build without it can still use a speech server.
 tts = ["dep:tts"]
 # Run the speech model on a CUDA card. On by default in a build from source,
 # since the model on a CPU keeps up with one handheld and not a repeater;

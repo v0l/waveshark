@@ -19,6 +19,12 @@ the code is in the commit log.
 - Vaisala RS41 radiosondes on the map: serial, height, climb rate and the
   air temperature and humidity the balloon was sent up to measure.
 
+### Changed
+
+- The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather
+  than 3.5 GB, and ahead of real time without a card. Describing a voice in
+  a sentence is gone, and so is the precision setting.
+
 ## [0.3.0] - 2026-09-16
 
 ### Added

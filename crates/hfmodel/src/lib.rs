@@ -81,16 +81,34 @@ impl<'a> Fetch<'a> {
         dir: impl AsRef<Path>,
         on: OnProgress<'a>,
     ) -> Result<Self> {
+        Self::of(repo, revision, hf_hub::RepoType::Model, dir, on)
+    }
+
+    /// The same, for a repository the hub files under datasets rather than
+    /// models: a pronunciation dictionary is data, and is published as such.
+    pub fn dataset(
+        repo: &str,
+        revision: &str,
+        dir: impl AsRef<Path>,
+        on: OnProgress<'a>,
+    ) -> Result<Self> {
+        Self::of(repo, revision, hf_hub::RepoType::Dataset, dir, on)
+    }
+
+    fn of(
+        repo: &str,
+        revision: &str,
+        kind: hf_hub::RepoType,
+        dir: impl AsRef<Path>,
+        on: OnProgress<'a>,
+    ) -> Result<Self> {
         use hf_hub::api::sync::ApiBuilder;
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
-        let api = ApiBuilder::new().build().map_err(|e| Error::other(format!("hub: {e}")))?.repo(
-            hf_hub::Repo::with_revision(
-                repo.to_string(),
-                hf_hub::RepoType::Model,
-                revision.to_string(),
-            ),
-        );
+        let api = ApiBuilder::new()
+            .build()
+            .map_err(|e| Error::other(format!("hub: {e}")))?
+            .repo(hf_hub::Repo::with_revision(repo.to_string(), kind, revision.to_string()));
         Ok(Self {
             api,
             dir,
@@ -120,6 +138,12 @@ impl<'a> Fetch<'a> {
         }
         (self.on.borrow_mut())(&self.seen.borrow());
         let dst = self.dir.join(name);
+        // A file in a subdirectory of the repository keeps that directory
+        // here, so a voice lands in `voices/` rather than on top of the last
+        // one fetched.
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         if !dst.exists() {
             std::fs::copy(&src, &dst)?;
         }
