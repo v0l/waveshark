@@ -399,6 +399,14 @@ impl CallList<'_> {
             .map(|r| std::path::PathBuf::from(&r.dir))
             .unwrap_or_else(crate::calllog::calls_dir);
         self.st.read_recordings(&dir, false);
+        // What a dialog came back with, once it has: the thread that opened
+        // it did the writing, so this is only the line to show.
+        if self.st.saving.as_ref().is_some_and(|p| p.ready().is_some())
+            && let Some(note) = self.st.saving.take().map(|p| p.block_and_take())
+            && !note.is_empty()
+        {
+            self.st.log_note = note;
+        }
 
         // Filtered once a frame: the table, the count, what PLAY ALL joins
         // and what EXPORT writes are all the same set, or a listener hears
@@ -427,22 +435,46 @@ impl CallList<'_> {
                     self.st.read_recordings(&dir, true);
                 }
                 ui.add_space(8.0);
-                // Into a folder beside the recordings rather than through a
-                // file dialog: what is exported is a set of overs, and
-                // naming each one is not a question anybody wants asked.
-                let wavs = dir.join("wav");
+                // A folder rather than a file, because what is listed is
+                // many overs; one of them is the row's own button.
                 if ui
-                    .add_enabled(!shown.is_empty(), egui::Button::new("EXPORT").small())
-                    .on_hover_text(format!("Write what is listed as WAVs in {}", wavs.display()))
+                    .add_enabled(
+                        !shown.is_empty() && self.st.saving.is_none(),
+                        egui::Button::new("EXPORT").small(),
+                    )
+                    .on_hover_text("Write every over listed into a folder, as Opus")
                     .clicked()
                 {
-                    self.st.log_note = match crate::calllog::export(&shown, &wavs) {
-                        Ok((done, 0)) => format!("{done} written to {}", wavs.display()),
-                        Ok((done, bad)) => {
-                            format!("{done} written to {}, {bad} would not decode", wavs.display())
-                        }
-                        Err(e) => format!("{}: {e}", wavs.display()),
-                    };
+                    let (entries, start) = (shown.clone(), dir.clone());
+                    let ctx = ui.ctx().clone();
+                    self.st.saving =
+                        Some(poll_promise::Promise::spawn_thread("export calls", move || {
+                            let picked = rfd::FileDialog::new()
+                                .set_title("Export the recordings listed")
+                                .set_directory(&start)
+                                .pick_folder();
+                            ctx.request_repaint();
+                            let Some(into) = picked else { return String::new() };
+                            match crate::calllog::export(&entries, &into) {
+                                Ok((done, 0)) => format!("{done} written to {}", into.display()),
+                                Ok((done, bad)) => format!(
+                                    "{done} written to {}, {bad} would not read back",
+                                    into.display()
+                                ),
+                                Err(e) => format!("{}: {e}", into.display()),
+                            }
+                        }));
+                }
+                ui.add_space(8.0);
+                // The picture of what is listed, which is the way into
+                // playing from a moment rather than from an over.
+                if ui
+                    .selectable_label(self.st.timeline.open, "TIMELINE")
+                    .on_hover_text("Draw what is listed against the clock")
+                    .clicked()
+                {
+                    self.st.timeline.open = !self.st.timeline.open;
+                    self.st.timeline.fit(&shown);
                 }
                 ui.add_space(8.0);
                 // The conversation rather than the over: filter to a group
@@ -498,6 +530,13 @@ impl CallList<'_> {
         }
         ui.add_space(4.0);
 
+        if self.st.timeline.open && !shown.is_empty() {
+            let left = self.radio.map(|r| r.status.replay_left_s()).unwrap_or(0.0);
+            let act = super::timeline::show(ui, &mut self.st.timeline, &shown, left);
+            self.timeline_act(act, &shown, ui.ctx());
+            ui.add_space(4.0);
+        }
+
         if self.st.recordings.is_empty() {
             ui.add_space(12.0);
             ui.vertical_centered(|ui| {
@@ -521,6 +560,7 @@ impl CallList<'_> {
         let width: f32 = LOG_COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
         let mut play = None;
         let mut save = None;
+        let mut open = None;
         egui::ScrollArea::horizontal().id_salt("recordings").auto_shrink([false, false]).show(
             ui,
             |ui| {
@@ -540,13 +580,23 @@ impl CallList<'_> {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for (n, e) in shown.iter().enumerate() {
                         let h = widgets::ROW_H.max(20.0);
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
                         if !ui.is_rect_visible(rect) {
                             continue;
                         }
                         let p = ui.painter_at(rect);
                         if n % 2 == 1 {
                             p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                        }
+                        // The row is the way into its own conversation: the
+                        // filter narrows to that channel and talkgroup and
+                        // the timeline draws it.
+                        if resp.clicked() {
+                            open = Some(e.call.clone());
+                        }
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         let buttons = LOG_COLS[0].1 + LOG_COLS[1].1;
                         let mut x = rect.left() + 12.0 + buttons;
@@ -598,15 +648,109 @@ impl CallList<'_> {
             }
         }
         if let Some(e) = save {
-            let wavs = dir.join("wav");
-            self.st.log_note = match crate::calllog::export(std::slice::from_ref(&e), &wavs) {
-                Ok((1, _)) => {
-                    format!("{} written", wavs.join(crate::calllog::wav_name(&e.call, 0)).display())
-                }
-                Ok(_) => format!("{} would not decode", e.file.display()),
-                Err(err) => format!("{}: {err}", wavs.display()),
-            };
+            self.save_one(&e, &dir, ui.ctx());
         }
+    }
+
+    /// What the timeline asked for: play a stretch, write one out, or close.
+    ///
+    /// Play and export are the same stretch of the same conversation, taken
+    /// at packet granularity: what is heard is what is written.
+    fn timeline_act(
+        &mut self,
+        act: Option<super::timeline::Act>,
+        shown: &[crate::calllog::Entry],
+        ctx: &egui::Context,
+    ) {
+        match act {
+            None => {}
+            Some(super::timeline::Act::Close) => self.st.timeline.open = false,
+            Some(super::timeline::Act::Play(ranges)) => {
+                let from = ranges.first().map(|(a, _)| *a).unwrap_or_default();
+                match crate::calllog::audio(shown, &ranges, super::timeline::BREAK_S) {
+                    Some(s) => {
+                        self.st.log_note = format!(
+                            "playing {} from {}",
+                            fmt_span(s.seconds()),
+                            crate::segments::when(from).format("%H:%M:%S")
+                        );
+                        self.cmds.push(Cmd::Play(std::sync::Arc::new(s)));
+                    }
+                    None => self.st.log_note = "nothing was recorded there".into(),
+                }
+            }
+            Some(super::timeline::Act::Export(ranges)) => {
+                if self.st.saving.is_some() {
+                    return;
+                }
+                let from = ranges.first().map(|(a, _)| *a).unwrap_or_default();
+                let to = ranges.last().map(|(_, b)| *b).unwrap_or_default();
+                let packets = crate::calllog::sections(shown, &ranges, super::timeline::BREAK_S);
+                if packets.is_empty() {
+                    self.st.log_note = "nothing was recorded in that stretch".into();
+                    return;
+                }
+                let name = format!(
+                    "{}_{}.opus",
+                    crate::segments::when(from).format("%Y%m%d-%H%M%S"),
+                    fmt_span((to - from) as f64 / 1e6).replace(' ', "")
+                );
+                let start = crate::calllog::calls_dir();
+                let ctx = ctx.clone();
+                self.st.saving =
+                    Some(poll_promise::Promise::spawn_thread("export section", move || {
+                        let picked = rfd::FileDialog::new()
+                            .set_title("Export this stretch of the conversation")
+                            .set_directory(&start)
+                            .set_file_name(&name)
+                            .add_filter("Opus", &["opus"])
+                            .save_file();
+                        ctx.request_repaint();
+                        let Some(path) = picked else { return String::new() };
+                        match crate::oggopus::write(
+                            &path,
+                            &packets,
+                            crate::calllog::RATE as u32,
+                            crate::calllog::FRAME,
+                        ) {
+                            Ok(()) => format!("{} written", path.display()),
+                            Err(e) => format!("{}: {e}", path.display()),
+                        }
+                    }));
+            }
+        }
+    }
+
+    /// One over, through a save dialog, as the Opus it was stored as.
+    fn save_one(&mut self, e: &crate::calllog::Entry, dir: &std::path::Path, ctx: &egui::Context) {
+        if self.st.saving.is_some() {
+            return;
+        }
+        let Some(call) = crate::calllog::call_of(e) else {
+            self.st.log_note = format!("{} did not read back", e.file.display());
+            return;
+        };
+        let name = format!("{}.opus", crate::calllog::stem(&call, None));
+        let (start, ctx) = (dir.to_path_buf(), ctx.clone());
+        self.st.saving = Some(poll_promise::Promise::spawn_thread("export over", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Save this over")
+                .set_directory(&start)
+                .set_file_name(&name)
+                .add_filter("Opus", &["opus"])
+                .save_file();
+            ctx.request_repaint();
+            let Some(path) = picked else { return String::new() };
+            match crate::oggopus::write(
+                &path,
+                &call.frames,
+                crate::calllog::RATE as u32,
+                crate::calllog::FRAME,
+            ) {
+                Ok(()) => format!("{} written", path.display()),
+                Err(e) => format!("{}: {e}", path.display()),
+            }
+        }));
     }
 
     /// The call bus: one level for every call the front ends decode, its
@@ -684,6 +828,14 @@ impl CallList<'_> {
                 },
             );
         });
+    }
+}
+
+/// A length as somebody would say it: seconds under a minute, minutes above.
+fn fmt_span(seconds: f64) -> String {
+    match seconds < 60.0 {
+        true => format!("{seconds:.0} s"),
+        false => format!("{:.0} min", seconds / 60.0),
     }
 }
 

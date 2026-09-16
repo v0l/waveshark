@@ -171,18 +171,14 @@ impl Call {
         self.duration_ms as f64 / 1000.0
     }
 
+    /// When it stopped, in microseconds since the epoch.
+    pub fn end_us(&self) -> u64 {
+        self.at_us + self.duration_ms as u64 * 1_000
+    }
+
     /// The speech back, ready to play or to hand to a transcriber.
     pub fn speech(&self) -> Option<common::Speech> {
-        let mut dec = OpusDecoder::new(RATE as i32, 1).ok()?;
-        let mut pcm = Vec::with_capacity(self.frames.len() * FRAME);
-        let mut block = vec![0.0f32; FRAME];
-        for f in &self.frames {
-            // A torn packet ends the audio rather than the record: what was
-            // decoded before it is still what was said.
-            let Ok(n) = dec.decode(f, FRAME, &mut block) else { break };
-            pcm.extend_from_slice(&block[..n.min(block.len())]);
-        }
-        Some(common::Speech { pcm, rate: RATE })
+        decode(&self.frames)
     }
 }
 
@@ -481,33 +477,147 @@ pub fn timeline(entries: &[Entry], gap_s: f64, max_s: f64) -> Option<common::Spe
     (!pcm.is_empty()).then_some(common::Speech { pcm, rate: RATE })
 }
 
+/// Samples from Opus packets, at [`RATE`].
+pub fn decode(packets: &[Vec<u8>]) -> Option<common::Speech> {
+    let mut dec = OpusDecoder::new(RATE as i32, 1).ok()?;
+    let mut pcm = Vec::with_capacity(packets.len() * FRAME);
+    let mut block = vec![0.0f32; FRAME];
+    for f in packets {
+        // A torn packet ends the audio rather than the record: what was
+        // decoded before it is still what was said.
+        let Ok(n) = dec.decode(f, FRAME, &mut block) else { break };
+        pcm.extend_from_slice(&block[..n.min(block.len())]);
+    }
+    Some(common::Speech { pcm, rate: RATE })
+}
+
+/// One over with its audio, as it is stored: Opus packets, not samples.
+pub fn call_of(e: &Entry) -> Option<Call> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(&e.file).ok()?;
+    f.seek(SeekFrom::Start(e.at)).ok()?;
+    let mut buf = vec![0u8; e.len as usize];
+    f.read_exact(&mut buf).ok()?;
+    record(&buf, true)
+}
+
+/// One frame of encoded silence, for the pauses between overs.
+///
+/// Encoded rather than stored, because nothing was transmitted in a pause
+/// and there is no packet to copy. Made once and repeated: every frame of
+/// silence is the same bytes, and at this bitrate an hour of it is a few
+/// hundred kilobytes.
+pub fn silence_packet() -> Option<Vec<u8>> {
+    let mut encoder = OpusEncoder::new(RATE as i32, 1, Application::Voip).ok()?;
+    encoder.bitrate_bps = BITRATE;
+    let quiet = [0.0f32; FRAME];
+    let mut out = vec![0u8; 512];
+    let n = encoder.encode(&quiet, FRAME, &mut out).ok()?;
+    out.truncate(n);
+    Some(out)
+}
+
+/// The Opus packets covering several stretches of the air, each pause inside
+/// a stretch kept and each stretch joined to the next by `join_s` of silence.
+///
+/// Stretches rather than one span because a timeline hides the hours nobody
+/// transmitted in: what is played and what is written are the parts that were
+/// drawn, joined the way they were drawn, or a file would run for the
+/// afternoon the picture said it did not.
+pub fn sections(entries: &[Entry], ranges: &[(u64, u64)], join_s: f64) -> Vec<Vec<u8>> {
+    let frame_us = (FRAME as f64 / RATE * 1e6) as u64;
+    let quiet = silence_packet();
+    let joiner = (join_s * 1e6) as u64 / frame_us.max(1);
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    for (k, (from, to)) in ranges.iter().enumerate() {
+        if k > 0
+            && let Some(q) = &quiet
+        {
+            for _ in 0..joiner {
+                out.push(q.clone());
+            }
+        }
+        out.extend(section(entries, *from, *to));
+    }
+    out
+}
+
+/// The same, decoded, and nothing if none of it was recorded.
+pub fn audio(entries: &[Entry], ranges: &[(u64, u64)], join_s: f64) -> Option<common::Speech> {
+    decode(&sections(entries, ranges, join_s)).filter(|s| !s.pcm.is_empty())
+}
+
+/// The Opus packets covering `from_us` to `to_us`, pauses included.
+///
+/// Packet granularity, which is 20 ms: a section can begin and end inside an
+/// over and nothing is decoded to make that happen. What is between the
+/// overs is silence encoded here, so the file runs for as long as the air
+/// did and the second over arrives where it arrived.
+pub fn section(entries: &[Entry], from_us: u64, to_us: u64) -> Vec<Vec<u8>> {
+    let frame_us = (FRAME as f64 / RATE * 1e6) as u64;
+    let quiet = silence_packet();
+    let mut order: Vec<&Entry> =
+        entries.iter().filter(|e| e.call.at_us < to_us && e.call.end_us() > from_us).collect();
+    order.sort_by_key(|e| e.call.at_us);
+
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut at = from_us;
+    for e in order {
+        let Some(call) = call_of(e) else { continue };
+        // The pause before this over, as silence, so the timing survives.
+        if let Some(q) = &quiet {
+            let gap = call.at_us.saturating_sub(at);
+            for _ in 0..gap / frame_us {
+                out.push(q.clone());
+            }
+        }
+        for (k, p) in call.frames.iter().enumerate() {
+            let when = call.at_us + k as u64 * frame_us;
+            if when + frame_us <= from_us || when >= to_us {
+                continue;
+            }
+            out.push(p.clone());
+            at = when + frame_us;
+        }
+        at = at.max(call.at_us);
+    }
+    out
+}
+
 /// What one call is written out as: when it was, who was talking and where.
 ///
 /// The time is in it because that is what somebody searching a folder of
 /// exports has; the index because two overs a second apart would otherwise
 /// be one file.
 pub fn wav_name(c: &Call, k: usize) -> String {
+    format!("{}.wav", stem(c, Some(k)))
+}
+
+/// The name an over is offered under, without an extension.
+pub fn stem(c: &Call, k: Option<usize>) -> String {
     let when = segments::when(c.at_us).format("%Y%m%d-%H%M%S").to_string();
     let who = c.from.as_deref().or(c.to.as_deref()).unwrap_or(&c.system);
     let who: String =
         who.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    format!("{k:04}_{when}_{who}_{:.4}MHz.wav", c.channel_hz as f64 / 1e6)
+    let index = k.map(|k| format!("{k:04}_")).unwrap_or_default();
+    format!("{index}{when}_{who}_{:.4}MHz", c.channel_hz as f64 / 1e6)
 }
 
-/// Write each over out as a WAV, and say how many were written.
+/// Write each over out as an `.opus`, and say how many were written and how
+/// many would not read back.
 ///
-/// WAV because the point of an export is a file something else can open, and
-/// Opus in a bespoke container is not that. An over that will not decode is
-/// counted as a failure rather than written empty.
+/// The packets are copied rather than decoded: what comes out is the audio
+/// that was encoded off the air, not a second generation of it.
 pub fn export(entries: &[Entry], dir: &std::path::Path) -> std::io::Result<(usize, usize)> {
     std::fs::create_dir_all(dir)?;
     let mut order: Vec<&Entry> = entries.iter().collect();
     order.sort_by_key(|e| e.call.at_us);
     let (mut done, mut failed) = (0, 0);
     for (k, e) in order.iter().enumerate() {
-        match speech_of(e) {
-            Some(s) => {
-                crate::mix::write_wav(&dir.join(wav_name(&e.call, k)), &s)?;
+        match call_of(e) {
+            Some(c) => {
+                let path = dir.join(format!("{}.opus", stem(&c, Some(k))));
+                crate::oggopus::write(&path, &c.frames, RATE as u32, FRAME)?;
                 done += 1;
             }
             None => failed += 1,
@@ -1146,9 +1256,9 @@ mod tests {
             joined.pcm[at..at + (RATE * 0.2) as usize].iter().fold(0.0f32, |a, s| a.max(s.abs()));
         assert!(quiet < 0.01, "the pause between overs carried {quiet}");
 
-        let wavs = d.join("wav");
-        assert_eq!(export(&listed, &wavs).expect("written"), (3, 0));
-        let mut names: Vec<String> = std::fs::read_dir(&wavs)
+        let out = d.join("opus");
+        assert_eq!(export(&listed, &out).expect("written"), (3, 0));
+        let mut names: Vec<String> = std::fs::read_dir(&out)
             .expect("the folder")
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -1160,7 +1270,66 @@ mod tests {
         assert!(names[0].starts_with("0000_"), "{}", names[0]);
         assert!(names[0].contains("M0ABC"), "{}", names[0]);
         assert!(names[2].contains("M0QRP"), "{}", names[2]);
-        assert!(names.iter().all(|n| n.ends_with("434.0000MHz.wav")), "{names:?}");
+        assert!(names.iter().all(|n| n.ends_with("434.0000MHz.opus")), "{names:?}");
+        // The packets are copied rather than re-encoded, so the file holds
+        // the same audio the log does: the Ogg headers and the stored
+        // frames, and nothing longer.
+        let one = std::fs::read(out.join(&names[0])).expect("the file");
+        assert_eq!(&one[..4], b"OggS");
+        let stored: usize =
+            call_of(&listed[2]).expect("the oldest over").frames.iter().map(|f| f.len()).sum();
+        assert!(one.len() > stored, "{} bytes for {stored} of audio", one.len());
+        assert!(one.len() < stored + 2_000, "{} bytes for {stored} of audio", one.len());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A section is packets, not samples: what comes out of two stretches is
+    /// the packets of each and the join between them, at twenty milliseconds
+    /// a packet.
+    #[test]
+    fn a_section_is_cut_at_packet_boundaries_and_joined_with_silence() {
+        let d = dir("section");
+        let mut n = CallLogNode::new(d.clone());
+        Node::set_param(&mut n, "enabled", ParamValue::Bool(true)).unwrap();
+        for who in ["M0ABC", "M0XYZ"] {
+            for _ in 0..5 {
+                run(&mut n, &[voice(0.2, 0.3, who)], 0.2);
+            }
+            for _ in 0..10 {
+                run(&mut n, &[silence(0.2, who)], 0.2);
+            }
+        }
+        drop(n);
+        let listed = browse(&d, 100);
+        assert_eq!(listed.len(), 2);
+        // One over at a time: the recorder stamps a test's overs with the
+        // wall clock, and a test writes both of them inside a millisecond, so
+        // the two records overlap on the clock and only one of them can be
+        // asked about at once.
+        let (first, second) = (&listed[1], &listed[0]);
+
+        // Half of the first over: 0.49 s, which is the first 25 packets.
+        let half = first.call.at_us + 490_000;
+        assert_eq!(section(std::slice::from_ref(first), first.call.at_us, half).len(), 25);
+
+        // Two stretches, joined by 0.4 s of silence, which is 20 packets.
+        let ranges = [(first.call.at_us, half)];
+        let mut joined = sections(std::slice::from_ref(first), &ranges, 0.4);
+        joined.extend(sections(
+            std::slice::from_ref(second),
+            &[(second.call.at_us, second.call.end_us())],
+            0.4,
+        ));
+        assert_eq!(joined.len(), 25 + 49);
+        let both = sections(
+            std::slice::from_ref(first),
+            &[(first.call.at_us, half), (half, half + 1)],
+            0.4,
+        );
+        assert_eq!(both.len(), 25 + 20 + 1, "the join between two stretches");
+        // And it decodes to what its length says, silence included.
+        let speech = decode(&both).expect("the section decodes");
+        assert!((speech.seconds() - (0.5 + 0.4 + 0.02)).abs() < 0.05, "{} s", speech.seconds());
         let _ = std::fs::remove_dir_all(&d);
     }
 
