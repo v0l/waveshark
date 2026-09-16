@@ -18,10 +18,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # No ffmpeg: this image's is 4.4 and ffmpeg-sys wants 5.1 or newer,
+          # and a newer image would link a soname the machine running the
+          # binary has to have as well. So a released Linux binary decodes a
+          # multiplex and shows no pictures; a build from source shows them.
           - name: linux-x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            features: --no-default-features --features limesdr,stt,mcp,ffmpeg
+            features: --no-default-features --features limesdr,stt,mcp
           # The same again with the speech model on the card. A separate
           # asset rather than one binary that tries: candle links cudart and
           # cublas at load, so a CUDA build does not start on a machine
@@ -29,7 +33,7 @@ jobs:
           - name: linux-x86_64-cuda
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            features: --no-default-features --features limesdr,stt,cuda,mcp,ffmpeg
+            features: --no-default-features --features limesdr,stt,cuda,mcp
             cuda: '12.8.1'
           # Apple silicon only. The Intel runners are on their way out and
           # nobody has an Intel Mac to check the result on, and a binary
@@ -61,8 +65,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
             libasound2-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
@@ -136,9 +138,8 @@ jobs:
       # person may compile for themselves and not things this project ships.
       # LimeSuite has no vcpkg port either, so the Windows binary is built
       # without the LimeSDR driver, which only means the device never appears
-      # in the list. The same goes for ffmpeg, which the Windows job would
-      # have to build from a port or unpack from somebody's zip: that binary
-      # shows no pictures off a broadcast multiplex.
+      # in the list. Only the macOS job links ffmpeg, where Homebrew has a
+      # new enough one; the others show no pictures off a multiplex.
       # Locked: the lock file is the set of versions this has been built with,
       # and a resolver free to pick a newer one has picked a crate needing a
       # compiler newer than the job has. That failure reads as "unstable
@@ -170,6 +171,10 @@ jobs:
           libasound.so.2 and libusb-1.0.so.0 and nothing else out of the
           ordinary. The macOS build is linked against Homebrew's librtlsdr
           and LimeSuite, so both have to be installed for it to start.
+
+          The Linux build carries no ffmpeg, so a broadcast multiplex is
+          decoded but its pictures are not shown; the macOS build shows them,
+          as does a build from source.
 
           The -cuda build runs the speech model on an NVIDIA card and also
           links the CUDA 12 runtime: libcudart.so.12, libcublas.so.12,
@@ -213,8 +218,8 @@ jobs:
           plain build reads speech on the CPU and needs neither.
 
           This build carries no ffmpeg, so a broadcast multiplex is decoded
-          but its pictures are not shown. The Linux and macOS builds do show
-          them, as does a build from source.
+          but its pictures are not shown. The macOS build does show them, as
+          does a build from source.
 
           Windows needs WinUSB bound to the device rather than the DVB-T
           driver it ships with. Use Zadig (https://zadig.akeo.ie) and replace
