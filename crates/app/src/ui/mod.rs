@@ -26,6 +26,7 @@
 
 mod agent;
 mod agent_pane;
+mod agent_settings;
 mod burst;
 mod calls_pane;
 mod chain_pane;

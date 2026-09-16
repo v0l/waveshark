@@ -53,6 +53,16 @@ impl VideoState {
             None => vec![crate::videobus::Rule::Everything],
         }
     }
+
+    /// Watch one transmission, or whatever comes.
+    pub(super) fn watch(&mut self, key: Option<String>) {
+        self.watching_label = key.clone();
+        self.watching = key;
+    }
+
+    pub(super) fn watching(&self) -> Option<&str> {
+        self.watching.as_deref()
+    }
 }
 
 pub(super) struct VideoPane<'a> {

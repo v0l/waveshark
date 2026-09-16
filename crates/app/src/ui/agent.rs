@@ -32,7 +32,7 @@ fn ok() -> Value {
 /// is the one genuinely open set here: `list_protocols` is what it answers
 /// from, and a name nothing answers to is refused with that list rather than
 /// quietly becoming something else.
-fn parse_mode(text: &str) -> Result<ChanMode, String> {
+pub(super) fn parse_mode(text: &str) -> Result<ChanMode, String> {
     let want = text.trim().to_lowercase();
     let demod = match want.as_str() {
         "wfm" => Some(Demod::Wfm),
@@ -201,7 +201,7 @@ impl App {
     }
 
     /// One request: applied now, or drawn and left for the rebuild.
-    fn agent_take(
+    pub(super) fn agent_take(
         &mut self,
         action: Action,
         reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
@@ -678,6 +678,10 @@ impl App {
                 }))
             }
             Action::NodeParam(a) => self.agent_node_param(a),
+
+            // What the receiver is rather than what it is doing: the tables,
+            // the installation and the feeds, in `agent_settings.rs`.
+            other => self.agent_configure(other),
         }
     }
 
@@ -1466,21 +1470,12 @@ impl App {
     }
 
     fn agent_scanners(&self) -> Value {
+        let (center, rate) = (self.center, self.rate);
         let rows: Vec<Value> = self
             .scanners
             .list
             .iter()
-            .map(|s| {
-                json!({
-                    "name": s.name,
-                    "lo_hz": s.lo,
-                    "hi_hz": s.hi,
-                    "min_span_hz": s.min_rate,
-                    "channels_hz": s.channels,
-                    "enabled": s.enabled,
-                    "applies_now": s.applies(self.center, self.rate),
-                })
-            })
+            .map(|s| super::agent_settings::scanner_json(s, center, rate))
             .collect();
         json!({ "scanners": rows })
     }

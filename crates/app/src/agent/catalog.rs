@@ -90,6 +90,14 @@ pub const BRIEF: &str = "WaveShark, a wideband software radio receiver. The tool
      somebody: it keys once the channel is clear and lets go when the words run out, which \
      `key` does not. Check that the operator is licensed for the frequency and that the channel's mode is one the \
      other end can read before keying.\n\n\
+     What the receiver is, as opposed to what it is doing, is set by the tools whose names \
+     begin `set_`, `add_` or `remove_`: the scanner table that decides what runs on a span, \
+     the memory bank, where the receiver is installed, its voice and what reads speech back, \
+     the feeds it uploads to, and how the spectrum is drawn. Each takes only what is being \
+     changed and answers with all of what it then holds, so calling one with no arguments \
+     reads it. Anything written this way is saved, so it survives a restart.
+
+\
      The graph can be drawn by hand. `patch` lists the stages and wires with the ids an edit \
      names them by, `list_stage_kinds` is what can be added, and `add_stage`, `connect`, \
      `disconnect` and `remove_stage` change it. What you change is kept as a difference from \
@@ -366,6 +374,138 @@ fn build() -> Vec<Tool> {
              the dial, the scanner table and the strip.",
             || Action::ResetGraph,
         ),
+        // What the receiver is, rather than what it is doing. Each of these
+        // takes only what is being changed, so a call with no arguments
+        // reports what is set and changes nothing.
+        takes(
+            "add_scanner",
+            "Add a block to the scanner table: a front end, the band it is about, and the \
+             channels that have to be in the span for it to run. Saved to the table's file and \
+             applied without a retune.",
+            Action::AddScanner,
+        ),
+        takes(
+            "set_scanner",
+            "Change one block of the scanner table, by the name `scanners` gives it. Switching \
+             a block off keeps everything it was configured with.",
+            Action::SetScanner,
+        ),
+        takes("remove_scanner", "Delete a block from the scanner table.", Action::RemoveScanner),
+        takes(
+            "add_memory",
+            "Save a channel to the memory bank, in a group. Saving twice on the same frequency \
+             and mode is a correction, not a duplicate.",
+            Action::AddMemory,
+        ),
+        takes("remove_memory", "Forget a saved channel.", Action::RemoveMemory),
+        takes(
+            "recall_memory",
+            "Put a saved channel back on the strip, tuning the span to reach it if it is \
+             outside.",
+            Action::RecallMemory,
+        ),
+        takes(
+            "set_voice",
+            "Where the agent's own voice comes from and how it sounds: a model on this machine \
+             or a speech server, the weights, what it answers to on the air, and how long it \
+             waits. Called with nothing, reports what is set.",
+            Action::SetVoice,
+        ),
+        takes(
+            "set_transcriber",
+            "What reads speech off the air back into words: the model here or a server, which \
+             weights, where it runs, and the shortest speech worth reading. `transcript` is \
+             what it produced. Called with nothing, reports what is set.",
+            Action::SetTranscriber,
+        ),
+        takes(
+            "set_station",
+            "Where this receiver is installed: the country and the band plan the dial names \
+             frequencies by. `set_location` is the position itself.",
+            Action::SetStation,
+        ),
+        takes(
+            "set_sound",
+            "This machine's speaker and microphone, by name. Called with nothing, lists what \
+             there is to choose from.",
+            Action::SetSound,
+        ),
+        takes(
+            "set_survey",
+            "Record every device heard to a database, with where it was heard from, or stop. \
+             This is what the wigle.net and beaconDB feeds upload.",
+            Action::SetSurvey,
+        ),
+        takes(
+            "set_wigle",
+            "Upload what is heard to wigle.net as an account, or stop.",
+            Action::SetWigle,
+        ),
+        takes(
+            "set_beacondb",
+            "Submit what is heard to beacondb.net, and whether the map may ask it where a \
+             decoded cell is.",
+            Action::SetBeaconDb,
+        ),
+        takes(
+            "set_homeassistant",
+            "Publish every device heard to an MQTT broker so Home Assistant builds them, or \
+             stop.",
+            Action::SetHomeAssistant,
+        ),
+        takes(
+            "add_feed",
+            "Take packets from another receiver over TCP, onto the same bus this one decodes \
+             to.",
+            Action::AddFeed,
+        ),
+        takes(
+            "remove_feed",
+            "Stop taking packets from a feed, by its address.",
+            Action::RemoveFeed,
+        ),
+        takes(
+            "set_calls",
+            "What the audio bus mixes without a channel being open for it: talkgroups, callers, \
+             systems or channels, each with its own level. The whole set at once, since that \
+             is how the bus holds it. Called with nothing, reports what is set.",
+            Action::SetCalls,
+        ),
+        takes(
+            "set_watching",
+            "Which transmission the video bus publishes: one, by the key it is kept under, or \
+             whatever comes.",
+            Action::SetWatching,
+        ),
+        plain(
+            "datasets",
+            "The reference data on disc: aircraft and repeater registries, satellite elements, \
+             cell operators, what each is for, how old it is, and which need a key.",
+            || Action::Datasets,
+        ),
+        takes(
+            "refresh_dataset",
+            "Fetch one dataset again now, by the name `datasets` gives it.",
+            Action::RefreshDataset,
+        ),
+        takes(
+            "set_dataset_key",
+            "Give a dataset the account key its publisher requires.",
+            Action::SetDatasetKey,
+        ),
+        takes(
+            "set_display",
+            "How the spectrum and waterfall are drawn: the transform size, the frame rate, the \
+             smoothing and the scale. This changes what `spectrum` reads as well as the \
+             window.",
+            Action::SetDisplay,
+        ),
+        takes(
+            "set_call_log",
+            "Keep every over heard on a voice channel as Opus, or stop. The Calls view plays \
+             them back.",
+            Action::SetCallLog,
+        ),
         takes(
             "set_manual",
             "Unlock the graph in the window so a person can drag and wire it. Edits made through \
@@ -386,7 +526,7 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(names.len(), before, "a tool name is used twice");
-        assert_eq!(before, 55, "the catalogue changed size");
+        assert_eq!(before, 78, "the catalogue changed size");
     }
 
     /// Every schema is an object, because that is what both the protocol and

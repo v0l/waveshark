@@ -296,6 +296,31 @@ impl Which {
         })
     }
 
+    /// The stable name a tool or a command line calls it by. The label is
+    /// not one: it is a display string, and "DMR repeaters" has a space in
+    /// it and may be translated.
+    pub fn id(self) -> String {
+        fn slug(name: &str) -> String {
+            name.to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect()
+        }
+        match self {
+            Which::Airports => "airports".into(),
+            Which::Repeaters => "dmr-repeaters".into(),
+            Which::DmrIds => "dmr-ids".into(),
+            Which::NxdnIds => "nxdn-ids".into(),
+            Which::Gateway(h) => format!("gateways-{}", slug(h.name)),
+            Which::Satellites(g) => format!("satellites-{}", slug(g.name)),
+            Which::Transmitters => "satellite-transmitters".into(),
+            Which::CellOperators => "mobile-networks".into(),
+            Which::CellTowers => "cell-towers".into(),
+            Which::Artemis => "identified-signals".into(),
+            Which::SigIdUnid => "unidentified-signals".into(),
+        }
+    }
+
     pub fn label(self) -> String {
         match self {
             Which::Airports => "Airports".into(),

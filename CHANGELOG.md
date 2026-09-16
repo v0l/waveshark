@@ -9,6 +9,12 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Added
+
+- The agent and the MCP server reach the settings: the scanner table, the
+  memory bank, its own voice, what reads speech, the station, the sound
+  devices, the survey and its feeds, the datasets and the display.
+
 ## [0.3.0] - 2026-09-16
 
 ### Added

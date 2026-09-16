@@ -128,6 +128,7 @@ pub enum Action {
     Scanners,
     Memory,
     Protocols,
+    Datasets,
     Screenshot,
 
     // What it is set to.
@@ -166,6 +167,32 @@ pub enum Action {
     CaptureIq(args::Switch),
     PacketLog(args::PacketLog),
     NodeParam(args::NodeParam),
+
+    // What the receiver is, rather than what it is doing: the tables, the
+    // installation and the feeds. Each of these is a file or a command the
+    // settings panes write, reached here by the same route a click takes.
+    AddScanner(args::AddScanner),
+    SetScanner(args::SetScanner),
+    RemoveScanner(args::Named),
+    AddMemory(args::AddMemory),
+    RemoveMemory(args::FindMemory),
+    RecallMemory(args::FindMemory),
+    SetVoice(args::Voice),
+    SetTranscriber(args::Transcriber),
+    SetStation(args::Station),
+    SetSound(args::Sound),
+    SetSurvey(args::Survey),
+    SetWigle(args::Wigle),
+    SetBeaconDb(args::BeaconDb),
+    SetHomeAssistant(args::HomeAssistant),
+    AddFeed(args::AddFeed),
+    RemoveFeed(args::Named),
+    SetCalls(args::Calls),
+    SetWatching(args::Watching),
+    RefreshDataset(args::Named),
+    SetDatasetKey(args::DatasetKey),
+    SetDisplay(args::Display),
+    SetCallLog(args::CallLog),
 
     // Drawing the graph. Every one of these is an edit on top of the graph
     // the receiver derives, so a retune keeps it, and every one of them is
@@ -485,6 +512,292 @@ pub mod args {
         /// The value, as JSON: a number, a boolean, a string, or a list of
         /// numbers. It has to match the parameter's own kind.
         pub value: serde_json::Value,
+    }
+
+    /// One thing named, where the name is the whole of the argument: a
+    /// scanner block, a feed's address, a dataset.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Named {
+        pub name: String,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct AddScanner {
+        /// What the block is called, which is also what names it afterwards.
+        pub name: String,
+        /// The front end it runs: `auto`, `banks`, or a protocol id from
+        /// `list_protocols`.
+        pub front: String,
+        /// The band the block is about, in MHz.
+        pub lo_mhz: f64,
+        pub hi_mhz: f64,
+        /// Frequencies that must be inside the span for it to run, in MHz.
+        /// Omit for a block decided by its band alone.
+        pub channels_mhz: Option<Vec<f64>>,
+        /// Channel widths for a `banks` front end, in kHz.
+        pub widths_khz: Option<Vec<f64>>,
+        /// Narrowest span the front end works in, in kHz.
+        pub min_span_khz: Option<f64>,
+        /// How far inside the span edge a channel must fall, in kHz.
+        pub margin_khz: Option<f64>,
+        /// Band plans this block is for: europe, americas, asia-pacific.
+        /// Omit for everywhere.
+        pub regions: Option<Vec<String>>,
+        pub enabled: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct SetScanner {
+        /// The block to change, as `scanners` names it.
+        pub name: String,
+        /// What to call it instead.
+        pub rename: Option<String>,
+        pub front: Option<String>,
+        pub lo_mhz: Option<f64>,
+        pub hi_mhz: Option<f64>,
+        pub channels_mhz: Option<Vec<f64>>,
+        pub widths_khz: Option<Vec<f64>>,
+        pub min_span_khz: Option<f64>,
+        pub margin_khz: Option<f64>,
+        pub regions: Option<Vec<String>>,
+        /// Whether the block runs. A block switched off keeps everything it
+        /// was configured with.
+        pub enabled: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct AddMemory {
+        /// Where the channel is, in MHz.
+        pub mhz: f64,
+        /// What to call it.
+        pub label: String,
+        /// The group it goes in. Defaults to "Channels".
+        pub group: Option<String>,
+        /// As in `add_channel`. Defaults to what the band plan suggests.
+        pub mode: Option<String>,
+        pub bandwidth_khz: Option<f64>,
+    }
+
+    /// A saved channel, by what tells it from the others.
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct FindMemory {
+        /// Its label, as `memory` reports it. Matched without case.
+        pub label: Option<String>,
+        /// Where it is, in MHz, for a channel with no label or two with the
+        /// same one.
+        pub mhz: Option<f64>,
+    }
+
+    /// Where the agent's voice is made.
+    #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    pub enum VoiceFrom {
+        /// A model on this machine. Nothing is sent anywhere.
+        Local,
+        /// The chat model's own server, at its /audio/speech.
+        Chat,
+        /// A speech server with an address of its own.
+        Server,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Voice {
+        /// Where speech is made. Called with nothing, this reports what is
+        /// set and changes nothing.
+        pub source: Option<VoiceFrom>,
+        /// For a model here: the catalogue id, or any repository name.
+        pub model: Option<String>,
+        /// For a model here: `auto`, `cpu`, `cuda:0`, `metal`.
+        pub device: Option<String>,
+        /// For a model here: `full` or `half`.
+        pub precision: Option<String>,
+        /// For a model here: the sentence that says how it should sound.
+        pub description: Option<String>,
+        /// Where the weights are kept. Empty for the usual place.
+        pub dir: Option<String>,
+        /// For a speech server: its base address.
+        pub url: Option<String>,
+        /// For a server: the speech model to ask it for.
+        pub server_model: Option<String>,
+        /// For a server: the voice as it names it.
+        pub voice: Option<String>,
+        /// What the agent answers to on the air.
+        pub wake: Option<String>,
+        /// How long after the channel goes quiet before it keys, in seconds.
+        pub hang_s: Option<f64>,
+        /// How long after its own over it answers without being named, in
+        /// seconds. Zero wants the name every time.
+        pub follow_s: Option<f64>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Transcriber {
+        /// Whether what is heard is read back into words at all.
+        pub enabled: Option<bool>,
+        /// Where it is read: local, chat or server.
+        pub source: Option<VoiceFrom>,
+        /// For the model here: which weights, as the Transcript pane names
+        /// them.
+        pub model: Option<String>,
+        /// For the model here: `auto`, `cpu`, `cuda:0`, `metal`.
+        pub device: Option<String>,
+        /// Shortest speech worth reading, in seconds.
+        pub min_speech_s: Option<f64>,
+        /// For a reading server: its base address.
+        pub url: Option<String>,
+        /// For a server: the model to ask it for, such as whisper-1.
+        pub server_model: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Station {
+        /// ISO country code. Sets the band plan and the cell export with it.
+        pub country: Option<String>,
+        /// europe, americas or asia-pacific, to override the country's.
+        pub band_plan: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Sound {
+        /// Where the mix comes out, by device name. Empty for the system
+        /// default.
+        pub speaker: Option<String>,
+        /// What a keyed channel transmits, by device name.
+        pub microphone: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Survey {
+        /// Whether every device heard is recorded to a database.
+        pub on: Option<bool>,
+        /// Where that database is. Omit for the usual place.
+        pub path: Option<String>,
+        /// A GPS to take the position from, as host:port or a serial port.
+        /// Empty for the local gpsd.
+        pub gps: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Wigle {
+        /// Whether what is heard is uploaded to wigle.net.
+        pub on: Option<bool>,
+        /// The account name from wigle.net/account.
+        pub name: Option<String>,
+        pub token: Option<String>,
+        /// Whether wigle.net may licence what is uploaded commercially.
+        pub donate: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct BeaconDb {
+        /// Whether what is heard is submitted to beacondb.net.
+        pub on: Option<bool>,
+        /// Whether the map may ask it where a decoded cell is.
+        pub lookup: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct HomeAssistant {
+        /// Whether every device heard is published for Home Assistant.
+        pub on: Option<bool>,
+        pub host: Option<String>,
+        pub port: Option<u16>,
+        pub username: Option<String>,
+        pub password: Option<String>,
+        /// What Home Assistant listens under. Empty means homeassistant.
+        pub prefix: Option<String>,
+        /// The topic the readings go to.
+        pub topic: Option<String>,
+        /// Identity spaces worth publishing, comma separated: `ism,wmbus` is
+        /// a house's own sensors without the street's handsets.
+        pub spaces: Option<String>,
+        /// Whether what people say and write goes with the readings.
+        pub buses: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct AddFeed {
+        /// Another receiver, as host or host:port.
+        pub host: String,
+        /// What it speaks, from what `add_feed` lists when it refuses.
+        pub kind: String,
+    }
+
+    /// What a standing instruction on the audio bus names.
+    #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    pub enum CallRule {
+        /// Every call any decoder reads.
+        Everything,
+        /// One talkgroup, reflector or destination.
+        Group,
+        /// One caller, wherever they transmit.
+        Caller,
+        /// Whatever is heard on one channel.
+        Channel,
+        /// One system: every M17 call, every DMR call.
+        System,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Subscription {
+        pub rule: CallRule,
+        /// The group, caller or system named. Ignored by `everything`.
+        pub value: Option<String>,
+        /// Where the channel is, in MHz, for a `channel` rule.
+        pub mhz: Option<f64>,
+        /// Its level in the mix, 0 to 2.
+        pub volume: Option<f32>,
+        pub muted: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Calls {
+        /// The whole set of standing instructions, replacing what is there.
+        /// An empty list hears nothing; omit it to read what is set.
+        pub subscriptions: Option<Vec<Subscription>>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Watching {
+        /// The transmission to watch, by the key the video bus keeps it
+        /// under. Omit with `everything` false to read what is set.
+        pub key: Option<String>,
+        /// Watch whatever comes, which is what a scanning receiver wants.
+        pub everything: Option<bool>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct DatasetKey {
+        /// The dataset, as `datasets` names it.
+        pub name: String,
+        /// Which of its keys, as `datasets` names them.
+        pub key: String,
+        pub value: String,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Display {
+        /// Bins the transform produces: 512 to 16384.
+        pub fft: Option<usize>,
+        /// Spectrum frames a second.
+        pub refresh_hz: Option<f32>,
+        /// How much of the last frame the next one keeps, 0 to 1.
+        pub smoothing: Option<f32>,
+        /// Waterfall rows a second.
+        pub rows_per_sec: Option<f32>,
+        /// Whether the scale follows the noise floor.
+        pub auto_scale: Option<bool>,
+        /// Bottom of the scale, in dBFS. Ignored while auto_scale is on.
+        pub floor_dbfs: Option<f32>,
+        /// Top of the scale, in dBFS.
+        pub ceil_dbfs: Option<f32>,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct CallLog {
+        /// Whether every over heard is kept as Opus.
+        pub on: bool,
     }
 }
 
