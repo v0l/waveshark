@@ -15,10 +15,12 @@ decoded or not.
 
 | | where | what you get |
 |---|---|---|
-| ISM devices | 433, 868, 915 MHz | 39 decoders, most from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, shelf labels, mostly with a stable device ID |
+| ISM devices | 433, 868, 915 MHz | 43 decoders, most from rtl_433's family: weather stations, thermometers, TPMS, door contacts, gate remotes, shelf labels, mostly with a stable device ID |
 | Unknown bursts | anywhere | coding inferred and bits sliced out, enough to recognise the same device again and reverse engineer it |
 | Aircraft | 1090 MHz | ADS-B and Mode S onto a map with a track table: callsign, altitude, speed, track, position |
+| Aircraft datalinks | 131 and 136 MHz | ACARS and VDL Mode 2, the messages crews and airlines send each other |
 | Shipping | marine VHF | AIS positions and vessel identity on the same map |
+| Radiosondes | 400-406 MHz | Vaisala RS41 weather balloons on the map: serial, height, climb rate, and the air it was sent up to measure |
 | APRS | 144.800, 144.390 US, 144.640 JP | packet stations and vehicle trackers, Mic-E included |
 | Pagers | wherever you point it | POCSAG at 512, 1200 and 2400 bit/s, message text in clear |
 | DMR | 136-174, 400-470 MHz | who called whom on which talkgroup, and speech through the `ambe` feature |
@@ -27,9 +29,15 @@ decoded or not.
 | LoRa mesh | 433, 868, 915 MHz | LoRaWAN join requests and addresses, Meshtastic text under the public keys, MeshCore adverts |
 | Utility meters | 868.95 MHz | wireless M-Bus mode T: manufacturer, meter number, version and type |
 | Voice | any band | WFM with stereo and RDS, NFM, AM, USB, LSB, CW, several channels at once |
+| Pictures | any band | SSTV in Martin, Scottie and Robot modes, and television off a DVB-T multiplex |
 
 It transmits too, on a radio that can: a microphone or a tone into NFM, WFM or
-AM, drawn as the TX side of the same flow graph.
+AM, drawn as the TX side of the same flow graph. A channel's transmit source
+can also be an agent, which answers when it hears its name.
+
+Turn on Record and every over is kept as Opus, playable back from the call
+list. Messages are written down as they arrive, a file a day, and a local
+speech model transcribes what is said.
 
 ## Hardware
 
@@ -40,15 +48,18 @@ LimeSDR both of those plus full duplex.
 
 ## Install
 
-Grab a build from [releases](https://github.com/v0l/waveshark/releases), Linux
-x86_64 or Windows x86_64.
+Grab a build from [releases](https://github.com/v0l/waveshark/releases): Linux
+x86_64, Windows x86_64, or macOS on Apple silicon. Linux and Windows also have
+a CUDA build, which is the same receiver with the speech models and the key
+search on the GPU.
 
 The Linux binary links librtlsdr rather than bundling it, so install
 `librtlsdr0` or `rtl-sdr` for the udev rules that let you open a dongle without
 root. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
 [Zadig](https://zadig.akeo.ie/) first or nothing can open the device. The
 Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
-is built without the driver.
+is built without the driver. Only the macOS build shows pictures off a
+multiplex, because it is the only one whose ffmpeg is new enough.
 
 From source:
 
@@ -149,7 +160,9 @@ one: what the agent tunes, opens or switches on appears in the window, and it
 can take a picture of that window to see what it did. It can read the
 spectrum, the packets, the calls, the transcript and the tracker, change
 anything in the signal chain, and draw the chain itself: add stages, wire
-them and take them out again. It cannot transmit.
+them and take them out again. It reaches the settings too, so it can add a
+scanner, store a memory, pick a voice or turn on a feed. On a radio that can
+transmit it will key up and speak.
 
 `--mcp-listen off` stops it listening, and a port or a `host:port` puts it
 somewhere else. The default reaches no further than this machine.
@@ -178,18 +191,21 @@ somewhere else. The default reaches no further than this machine.
 --probe [mhz]          check the signal path with no display
 ```
 
-`--chain`, `--flights`, `--calls`, `--messages`, `--scanners`, `--gain` and
-`--setup` open on a view.
+`--chain`, `--flights`, `--calls`, `--messages`, `--transcript`, `--links`,
+`--control`, `--video`, `--scanners`, `--gain` and `--setup` open on a view,
+and `--settings <name>` on a settings dialog.
 
 ## Status
 
-Verified against other people's decoders, not just its own: 52 recordings from
+Verified against other people's decoders, not just its own: 77 recordings from
 rtl_433's corpus are replayed field for field against what rtl_433 25.02 made
-of them, plus ADS-B against dump1090, and off-air captures of M17, DMR, TETRA
-and Meshtastic are asserted against what the transmission itself says. Those
-tests need `testdata/fetch.sh` to have pulled the recordings, and skip cleanly
-when it has not, which is also what happens in CI. Coverage is the thin part,
-thirty-nine ISM decoders where the goal is hundreds, and the browser build is
+of them, plus ADS-B against dump1090, ACARS against acarsdec, VDL Mode 2
+against dumpvdl2, SSTV against colaclanth's decoder, and a radiosonde against
+SDRangel. Off-air captures of M17, DMR, TETRA and Meshtastic are asserted
+against what the transmission itself says. Those tests need
+`testdata/fetch.sh` to have pulled the recordings, and skip cleanly when it
+has not, which is also what happens in CI. Coverage is the thin part,
+forty-three ISM decoders where the goal is hundreds, and the browser build is
 still a plan.
 
 ## Where to read next
