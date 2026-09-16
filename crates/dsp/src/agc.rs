@@ -12,9 +12,27 @@
 //! below are the conventional ones, and they are settable because CW and voice
 //! genuinely want different ones.
 
+use crate::filter as dsp_filter;
+
+/// Below this the detector hears nothing worth following.
+///
+/// Coded squelch lives under the speech: a CTCSS tone is 67 to 254 Hz and a
+/// DCS code is a 134 bit/s square wave under that, both sent continuously and
+/// both loud enough to set an envelope follower on their own. A gain control
+/// steered by them turns the speech down for the whole of every over, and
+/// turns it up again at the end where there is nothing but the tone. So the
+/// detector listens above them and the audio passes whole.
+const DETECT_HZ: f64 = 250.0;
+
 /// Gain control acting on a real audio stream.
 pub struct Agc {
     rate: f64,
+    /// Three poles of highpass on the detector path alone. One is 6 dB an
+    /// octave, which leaves a 100 Hz tone ten decibels down and still the
+    /// loudest thing in the block; three put it thirty down, where a tone at
+    /// ten times the amplitude of the speech no longer moves the gain a
+    /// decibel.
+    detect: [dsp_filter::Biquad; 3],
     envelope: f32,
     gain: f32,
     target: f32,
@@ -32,6 +50,12 @@ impl Agc {
     pub fn new(rate: f64, attack_ms: f64, release_ms: f64, hang_ms: f64) -> Self {
         Self {
             rate,
+            detect: [dsp_filter::Biquad::design(
+                dsp_filter::Response::Highpass,
+                rate,
+                DETECT_HZ,
+                0.707,
+            ); 3],
             envelope: 0.0,
             gain: 1.0,
             // Well below full scale: this is the level speech peaks at, and
@@ -82,6 +106,9 @@ impl Agc {
         self.envelope = 0.0;
         self.gain = 1.0;
         self.hang = 0;
+        for b in &mut self.detect {
+            b.reset();
+        }
     }
 
     pub fn rate(&self) -> f64 {
@@ -105,7 +132,10 @@ impl Agc {
             return;
         }
         for s in buf.iter_mut() {
-            let a = s.abs();
+            // What the gain follows is the speech band, not whatever is
+            // under it; what it multiplies is the block as it arrived.
+            let heard = self.detect.iter_mut().fold(*s, |x, b| b.process(x));
+            let a = heard.abs();
             if a > self.envelope {
                 self.envelope += (a - self.envelope) * self.attack;
                 self.hang = self.hang_samples;
@@ -165,6 +195,41 @@ mod tests {
         );
     }
 
+    /// A coded squelch under the speech does not set the gain.
+    ///
+    /// Every analogue radio sends one, it is continuous, and it is often
+    /// louder than the speech at the discriminator. Followed by the detector
+    /// it turns the whole over down, and then turns the hiss at the end of it
+    /// up, which is the gain control everybody complains about.
+    #[test]
+    fn a_ctcss_tone_under_the_speech_does_not_set_the_gain() {
+        let speech = |amp: f32, n: usize| -> Vec<f32> {
+            (0..n).map(|i| amp * (TAU * 700.0 * i as f64 / RATE).sin() as f32).collect()
+        };
+        let n = (RATE * 2.0) as usize;
+        let clean = speech(0.02, n);
+        // The same speech with a 100 Hz tone at ten times its amplitude, as
+        // a radio with the deviation split between them delivers it.
+        let with_tone: Vec<f32> = clean
+            .iter()
+            .enumerate()
+            .map(|(i, s)| s + 0.2 * (TAU * 100.0 * i as f64 / RATE).sin() as f32)
+            .collect();
+
+        let mut a = Agc::voice(RATE);
+        let mut one = clean.clone();
+        a.process(&mut one);
+        let mut b = Agc::voice(RATE);
+        let mut two = with_tone;
+        b.process(&mut two);
+        assert!(
+            (a.gain_db() - b.gain_db()).abs() < 1.0,
+            "the tone moved the gain from {:.1} dB to {:.1} dB",
+            a.gain_db(),
+            b.gain_db()
+        );
+    }
+
     #[test]
     fn a_loud_signal_is_brought_down_within_the_attack_time() {
         let mut agc = Agc::voice(RATE);
@@ -172,7 +237,11 @@ mod tests {
         agc.process(&mut buf);
         // Five milliseconds of attack, so by twenty the gain must be there.
         let after = &buf[(RATE * 0.02) as usize..];
-        assert!(db(peak(after)) < db(0.25) + 2.0, "still at {:.1} dBFS 20 ms in", db(peak(after)));
+        // Three decibels rather than two: the detector hears the speech band
+        // and a 700 Hz tone sits on the skirt of its highpass, so the gain
+        // lands about a decibel high. Any band-limited detector does this,
+        // and a decibel is not what a gain control is for.
+        assert!(db(peak(after)) < db(0.25) + 3.0, "still at {:.1} dBFS 20 ms in", db(peak(after)));
     }
 
     #[test]
