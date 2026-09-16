@@ -270,6 +270,10 @@ pub struct Session {
     /// Whether the dashboard is one of the views, and so the one the receiver
     /// opens on. On for a new install, and off for anyone who turned it off.
     pub dashboard: bool,
+    /// Whether the channel strip is drawn down the right of the window. On,
+    /// because it is where the receiver is listened to; off for anybody
+    /// watching a wide span who wants the width back.
+    pub strip: bool,
     /// Sound devices by name, empty for the system default.
     ///
     /// A name rather than an index for the same reason the radio is a label:
@@ -396,6 +400,7 @@ impl Default for Session {
             spacetrack_password: String::new(),
             dc_block: true,
             decode_on: true,
+            strip: true,
             packet_log_on: false,
             survey_on: false,
             calls_on: false,
@@ -661,6 +666,7 @@ impl Session {
             dc_block: kv.get("dc_block").map(|v| *v == "true").unwrap_or(d.dc_block),
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
+            strip: kv.get("strip").map(|v| *v == "true").unwrap_or(d.strip),
             packet_log_on: kv.get("packet_log_on").map(|v| *v == "true").unwrap_or(d.packet_log_on),
             survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
             calls_on: kv.get("calls_on").map(|v| *v == "true").unwrap_or(d.calls_on),
@@ -769,6 +775,7 @@ impl Session {
         s.push_str(&format!("dc_block = {}\n", self.dc_block));
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("dashboard = {}\n", self.dashboard));
+        s.push_str(&format!("strip = {}\n", self.strip));
         s.push_str(&format!("packet_log_on = {}\n", self.packet_log_on));
         s.push_str(&format!("survey_on = {}\n", self.survey_on));
         s.push_str(&format!("calls_on = {}\n", self.calls_on));
@@ -903,6 +910,7 @@ mod tests {
             dc_block: false,
             decode_on: false,
             dashboard: false,
+            strip: false,
             packet_log_on: true,
             calls_on: true,
             calls_dir: "/srv/calls".into(),

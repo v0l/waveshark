@@ -40,6 +40,10 @@ pub(super) struct Strip<'a> {
     /// no speech server, a build with no model. Without it the channel says
     /// "listening" and means "it will never answer you".
     pub air_fault: Option<&'static str>,
+    /// The record, which is where the strip's own switch lives: hiding it is
+    /// a decision about the window, and it is made once rather than at every
+    /// start.
+    pub settings: &'a crate::session::Settings,
 }
 
 impl Strip<'_> {
@@ -684,6 +688,23 @@ impl Strip<'_> {
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("channels").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // The way out of the strip is on the strip. It comes
+                        // back from the panels at the right of the top bar,
+                        // which is where everything that appears and
+                        // disappears is switched.
+                        if crate::icons::icon_button_sized(
+                            ui,
+                            crate::icons::Icon::Hide,
+                            "Hide the channel strip",
+                            true,
+                            false,
+                            18.0,
+                        )
+                        .clicked()
+                        {
+                            self.settings.edit(|s| s.strip = false);
+                        }
+                        ui.add_space(6.0);
                         if ui.small_button("BANK").on_hover_text("saved channels").clicked() {
                             self.acts.push(Action::Open(Settings::Memory));
                         }
