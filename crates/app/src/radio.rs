@@ -2573,9 +2573,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     /// set a level against, and two consumers would have taken samples from
     /// each other.
     ///
-    /// A device that will not open is reported once and left alone: a receiver
-    /// that works is more useful than one that refuses to start because there
-    /// is no microphone in the machine.
+    /// A device that will not open is logged and left alone: a receiver that
+    /// works is more useful than one that refuses to start because there is no
+    /// microphone in the machine. It is not the receiver's error either, since
+    /// nothing has asked for speech yet; keying a channel whose source is the
+    /// microphone is what says so, and that says it there.
     fn open_mic(&mut self) {
         if self.audio.mic.is_none() {
             let opened = match self.audio.input.is_empty() {
@@ -2588,7 +2590,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                     self.audio.mic = Some(c);
                 }
                 Err(e) => {
-                    *self.status.error.lock() = Some(format!("no microphone: {e}"));
+                    tracing::warn!("no microphone: {e}");
                     self.status.mic_level.store(0f32.to_bits(), Ordering::Relaxed);
                 }
             }
@@ -5210,12 +5212,19 @@ pub(crate) mod tests {
         // that is the symptom either way.
         let mut a = Audio::new(120_000.0, 2_304_000.0, Demod::Wfm, 48_000.0);
         let b = block(8192);
+        // The quickest of three passes, because a shared machine's jitter only
+        // ever adds time: a loaded CI runner read 3.3x off single passes of a
+        // chain that was not growing at all.
         let cost = |a: &mut Audio| {
-            let t = std::time::Instant::now();
-            for _ in 0..10 {
-                a.process(&b, 0.5);
-            }
-            t.elapsed().as_secs_f64()
+            (0..3)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    for _ in 0..10 {
+                        a.process(&b, 0.5);
+                    }
+                    t.elapsed().as_secs_f64()
+                })
+                .fold(f64::MAX, f64::min)
         };
         let first = cost(&mut a);
         for _ in 0..5 {
