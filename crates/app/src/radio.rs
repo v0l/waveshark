@@ -2169,12 +2169,18 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
         // The device the session asked for arrives as a command once the
         // interface is up, so this is the default until then.
-        let (player, sink) = match AudioPlayer::open(48_000) {
-            Ok((p, s)) => (Some(p), Some(s)),
-            Err(e) => {
-                *status.error.lock() = Some(format!("no audio output: {e}"));
-                (None, None)
-            }
+        let (player, sink) = match cfg!(test) {
+            // A test radio hears a capture as fast as the machine will run it,
+            // and a keyed channel sends the 1 kHz tone: opening the speaker
+            // beeps at whoever is running the tests.
+            true => (None, None),
+            false => match AudioPlayer::open(48_000) {
+                Ok((p, s)) => (Some(p), Some(s)),
+                Err(e) => {
+                    *status.error.lock() = Some(format!("no audio output: {e}"));
+                    (None, None)
+                }
+            },
         };
 
         let stream = dev.start_rx()?;
