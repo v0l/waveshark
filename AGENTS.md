@@ -43,9 +43,10 @@ default workspace member and `cargo test -p mbe` must be asked for by name.
 Releases build `--no-default-features --features limesdr,stt,mcp`, with
 `ffmpeg` added on macOS alone: Homebrew has a new enough one, where the
 release's Linux image has ffmpeg 4.4 and Windows has none at all, so those
-binaries show no pictures off a multiplex. `mcp` is
-the agent server behind `--mcp-listen`, which listens only when given an
-address.
+binaries show no pictures off a multiplex. Windows drops `limesdr` too, since
+LimeSuite is not packaged for it, and Linux and Windows each get a second
+build with `cuda` added. `mcp` is the agent server behind `--mcp-listen`,
+which serves 127.0.0.1:8931 unless told an address or `off`.
 
 ## Everything the receiver does is a node
 

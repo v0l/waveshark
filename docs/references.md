@@ -58,6 +58,11 @@ knowing which number to look up is most of the work.
 | TETRA | ETSI EN 300 392-2 (air interface), EN 300 392-7 (security), EN 300 395-2 (the full-rate speech codec) |
 | DMR | ETSI TS 102 361-1 (air interface), -2 and -3 for voice and data |
 | Wireless M-Bus | EN 13757-4, modes T and C |
+| ACARS | ARINC 618 for the air side, ARINC 620 for the ground side |
+| VDL Mode 2 | ICAO Annex 10 Vol III for the link, ARINC 631 for what rides on it |
+| DVB-T | ETSI EN 300 744, with ISO/IEC 13818-1 for the transport stream above it |
+| SSTV | no standard: the mode timings as their authors published them, collected in JL Barber N7CXI's *Proposal for SSTV Mode Specifications* |
+| Vaisala RS41 | not published; the frame layout is reverse engineered (see below) |
 | LoRaWAN | LoRa Alliance LoRaWAN 1.0.x specification; the PHY itself is not published and is reverse engineered (see below) |
 | Bluetooth LE | Bluetooth Core Specification, the link layer and advertising channels |
 | Open Drone ID | ASTM F3411 and EN 4709-002, the same message set in both |
@@ -84,6 +89,15 @@ which is a different and stronger claim than "it runs".
 - **osmo-tetra** and Midnight Blue's TETRA research for the TETRA stack; see
   the ports below.
 - **Flipper Zero firmware** (Momentum fork) for the fixed-code gate remotes.
+- **acarsdec** 3.7 (Thierry Leconte) for ACARS: its own off-air recording,
+  and the seven messages it reads out of it.
+- **dumpvdl2** (Tomasz Lemiech) for VDL Mode 2, which is where the header and
+  block constants were read from as well.
+- **colaclanth's `sstv`** for the SSTV modes, picture against picture.
+- **SDRangel's radiosonde demodulator** for the RS41, on the recording
+  SDRangel publishes as its own example. The frame layout itself is described
+  by Johannes Bazant (`bazjo/RS41_Decoding`) and zilog80 (`rs1729/RS`), which
+  is all there is: Vaisala publishes nothing.
 - The transmitters themselves, where an independent decoder does not exist:
   a LoRa frame carrying its own CRC, an M17 transmission carrying a callsign,
   and a Holybro RemoteID module shipped with a known serial are each evidence
