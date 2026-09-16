@@ -23,8 +23,9 @@ the code is in the commit log.
   recorded as, through a file dialog.
 - Ford and Renault tyre pressure sensors, with pressure, temperature and
   whether the wheel is moving.
-- Vaisala RS41 radiosondes on the map: serial, height, climb rate and the
-  air temperature and humidity the balloon was sent up to measure.
+- Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
+  climb rate: serial, and the air temperature and humidity it was sent up to
+  measure. The channel follows the transmitter as it drifts on the way up.
 
 ### Fixed
 

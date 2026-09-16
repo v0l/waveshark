@@ -19,7 +19,7 @@ use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::rs41;
 use dsp::fsk::BitSync;
-use pipeline::event::Decoded;
+use pipeline::event::{Decoded, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -52,6 +52,24 @@ const MAX_BITS: usize = rs41::FRAME_AUX * 8 * 3;
 /// nothing, because the Reed-Solomon code then refuses it.
 const HEADER_SLACK: u32 = 4;
 
+/// How far off the middle of its channel a sonde may sit before the channel
+/// is moved onto it.
+///
+/// The transmitter drifts: the crystal is at ground temperature when the
+/// balloon leaves and near -60 C at the tropopause, and Vaisala only
+/// specifies the channel to within a few kilohertz to begin with. The bit
+/// clock's own loop takes the offset off the bits, so what a move protects
+/// is the filter in front of it: the channel passes `OCCUPIED_HZ / 2`, which
+/// is 4.8 kHz either side, and the tones sit at 2.4 kHz, so the upper tone
+/// starts being cut at 2.4 kHz of drift. Half of that leaves the loop room
+/// to have measured the offset before the signal it measured on is being
+/// attenuated.
+const DRIFT_LIMIT_HZ: f32 = 1_200.0;
+
+/// Seconds between moves. A reshape closes the stream and cuts a new one, so
+/// a frame or two goes with each move, and a sonde sends one a second.
+const MOVE_EVERY_S: f64 = 10.0;
+
 pub struct Rs41Node {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
@@ -60,6 +78,11 @@ pub struct Rs41Node {
     /// to, so what was rejected stays rejected.
     scanned: usize,
     frames: u64,
+    /// The middle of the stream this node was handed, which is what a
+    /// measured offset is measured from.
+    center_hz: f64,
+    /// When the channel was last asked to move, in seconds of stream.
+    moved_s: Option<f64>,
 }
 
 impl Default for Rs41Node {
@@ -76,6 +99,8 @@ impl Rs41Node {
             bits: Vec::new(),
             scanned: 0,
             frames: 0,
+            center_hz: 0.0,
+            moved_s: None,
         }
     }
 
@@ -83,6 +108,29 @@ impl Rs41Node {
     /// made.
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// Ask for the channel to be cut `offset_hz` further along, where the
+    /// sonde has drifted far enough to be worth the move.
+    ///
+    /// Only ever off a frame that decoded. The offset the bit clock reports
+    /// is a mean of the discriminator, which on an empty channel is a mean
+    /// of noise, and acting on that would walk the channel away from the
+    /// band a sonde was about to appear in.
+    fn follow_drift(&mut self, offset_hz: f32, c: &mut NodeCtx<'_>) {
+        let now_s = c.timestamp();
+        if offset_hz.abs() < DRIFT_LIMIT_HZ {
+            return;
+        }
+        if self.moved_s.is_some_and(|at| now_s - at < MOVE_EVERY_S) {
+            return;
+        }
+        let hz = self.center_hz + offset_hz as f64;
+        self.moved_s = Some(now_s);
+        c.request(Request::Reshape {
+            lo_hz: hz - CHANNEL_WIDTH_HZ / 2.0,
+            hi_hz: hz + CHANNEL_WIDTH_HZ / 2.0,
+        });
     }
 
     /// Look for headers in the bits held, returning every frame behind one.
@@ -189,20 +237,27 @@ impl Simple for Rs41Node {
         // A frame is 534 ms of air, so the ring has to be long enough to
         // give one back once it has decoded.
         self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.6);
+        self.center_hz = i.spec.center.0 as f64;
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let (Some(iq), Some(s)) = (i.as_iq(), self.sync.as_mut()) else {
             return Ok(());
         };
         self.meter.feed(iq);
         s.process(iq, &mut self.bits);
-        for frame in self.search() {
+        let offset_hz = s.offset_hz();
+        let frames = self.search();
+        let decoded = !frames.is_empty();
+        for frame in frames {
             self.frames += 1;
             o.frames_mut().push(self.meter.frame(frame));
+        }
+        if decoded {
+            self.follow_drift(offset_hz, c);
         }
         if self.bits.len() > MAX_BITS {
             let drop = self.bits.len() - MAX_BITS;
@@ -216,6 +271,7 @@ impl Simple for Rs41Node {
         self.meter.reset();
         self.bits.clear();
         self.scanned = 0;
+        self.moved_s = None;
         if let Some(s) = &mut self.sync {
             s.reset();
         }
@@ -313,6 +369,22 @@ impl Protocol for Rs41 {
     /// The six megahertz of the sonde band, which nothing else here claims.
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
+    }
+    /// Kept while it is being read, and given back half a minute after the
+    /// last frame.
+    ///
+    /// Not for the session, which is what a channel that stays put wants.
+    /// The node follows the transmitter's drift by asking for its channel to
+    /// be recut ([`Rs41Node::follow_drift`]), and that only works while
+    /// something is still decoding: drift that outruns the filter during a
+    /// fade leaves a channel nothing decodes on, and a latch held for the
+    /// session would keep the detector out of the 30 kHz around it for the
+    /// rest of the run, which is three raster steps the sonde could have
+    /// moved to. Thirty frames of silence is a sonde that has gone or gone
+    /// somewhere else, and either way the band is better off back with the
+    /// detector.
+    fn stickiness(&self) -> crate::protocol::Stickiness {
+        crate::protocol::Stickiness::Latch { hold_s: Some(30.0) }
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
         let hz = p.center_hz() as f64;
@@ -424,6 +496,94 @@ mod tests {
         assert!((p.lat - 53.385_054).abs() < 1e-5, "{}", p.lat);
         assert!((p.lon + 5.112_850).abs() < 1e-5, "{}", p.lon);
         assert!((p.altitude_m.unwrap() - 4_712.22).abs() < 0.01, "{:?}", p.altitude_m);
+    }
+
+    /// A sonde keyed 1.6 kHz off the middle of its channel still decodes,
+    /// and the node asks for the channel to be cut where the sonde actually
+    /// is. One request, not one a block: the move is held off until either
+    /// the channel has been recut or ten seconds have passed.
+    #[test]
+    fn a_drifted_sonde_moves_its_channel() {
+        let (rate, center, drift) = (48_000.0, 403_000_000.0, 1_600.0);
+        let frame = a_frame(b"W7654321", 71);
+        let keyed = key(&frame, rate);
+        let iq: Vec<common::C32> = keyed
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let ph = std::f64::consts::TAU * drift * i as f64 / rate;
+                s * common::C32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+
+        let port = PortSpec { spec: StreamSpec::iq(rate, common::Hz(center as u64)), latency: 0 };
+        let mut n = Rs41Node::new();
+        n.negotiate(&port).unwrap();
+
+        let ins = [port];
+        let tags = Vec::new();
+        let mut frames = 0;
+        let mut moves: Vec<f64> = Vec::new();
+        for block in iq.chunks(2048) {
+            let input = Payload::Iq(block.to_vec());
+            let mut out = Payload::Frames(Vec::new());
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            n.process(&input, &mut out, &mut ctx).unwrap();
+            if let Payload::Frames(f) = out {
+                frames += f.len();
+            }
+            for e in events {
+                if let pipeline::event::Event::Request(Request::Reshape { lo_hz, hi_hz }) = e {
+                    assert!(
+                        (hi_hz - lo_hz - CHANNEL_WIDTH_HZ).abs() < 1.0,
+                        "{} Hz wide",
+                        hi_hz - lo_hz
+                    );
+                    moves.push((lo_hz + hi_hz) / 2.0);
+                }
+            }
+        }
+
+        assert_eq!(frames, 1, "{frames} frames off one drifted transmission");
+        assert_eq!(moves.len(), 1, "{} channel moves off one frame", moves.len());
+        let want = center + drift;
+        // The offset is a one-pole mean over 64 symbols, so it lands within
+        // a couple of hundred hertz rather than exactly.
+        assert!((moves[0] - want).abs() < 300.0, "moved to {:.0} Hz, wanted {want:.0}", moves[0]);
+    }
+
+    /// Twenty seconds of noise moves nothing. The offset the bit clock
+    /// reports on an empty channel is a mean of noise, and a channel that
+    /// followed it would walk off the band.
+    #[test]
+    fn noise_does_not_move_the_channel() {
+        let (rate, center) = (48_000.0, 403_000_000.0);
+        let mut seed = 0x0f1e_2d3c_4b5a_6978u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let port = PortSpec { spec: StreamSpec::iq(rate, common::Hz(center as u64)), latency: 0 };
+        let mut n = Rs41Node::new();
+        n.negotiate(&port).unwrap();
+        let ins = [port];
+        let tags = Vec::new();
+        let mut asked = 0;
+        for _ in 0..(rate as usize * 20 / 4096) {
+            let block: Vec<common::C32> =
+                (0..4096).map(|_| common::C32::new(rng(), rng())).collect();
+            let input = Payload::Iq(block);
+            let mut out = Payload::Frames(Vec::new());
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            n.process(&input, &mut out, &mut ctx).unwrap();
+            asked +=
+                events.iter().filter(|e| matches!(e, pipeline::event::Event::Request(_))).count();
+        }
+        assert_eq!(asked, 0, "{asked} requests out of twenty seconds of noise");
     }
 
     /// Noise on the channel produces no frames at all. A header search with

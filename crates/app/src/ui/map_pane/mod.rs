@@ -447,6 +447,7 @@ impl Map<'_> {
                         Kind::Vessel => "sea",
                         Kind::Vehicle => "land",
                         Kind::Station => "fixed",
+                        Kind::Sonde => "balloon",
                     };
                     let text = [
                         (a.label.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),

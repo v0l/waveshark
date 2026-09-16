@@ -172,6 +172,11 @@ pub enum Kind {
     /// Something that does not move: a shore station, a navigation mark, a
     /// digipeater or a weather station.
     Station,
+    /// A radiosonde under a balloon. Not an aircraft: it goes where the wind
+    /// takes it, it is measured in metres rather than in feet, and on a map
+    /// that already has aeroplanes on it a balloon drawn as one is a lie
+    /// about what is up there.
+    Sonde,
 }
 
 impl Kind {
@@ -190,6 +195,10 @@ impl Kind {
             // schedule would empty the map between transmissions.
             Kind::Vehicle => std::time::Duration::from_secs(1800),
             Kind::Station => std::time::Duration::from_secs(3600),
+            // One frame a second from 35 km, so a gap is terrain or a fade
+            // rather than a landing. It stays on the map long enough to be
+            // found again as it comes down.
+            Kind::Sonde => std::time::Duration::from_secs(600),
         }
     }
 
@@ -205,6 +214,9 @@ impl Kind {
             // and slower than the errors worth catching.
             Kind::Vehicle => 200.0,
             Kind::Station => 1.0,
+            // A balloon rises at 5 m/s and the jet stream it drifts in runs
+            // to about 200 knots; twice that is wrong rather than windy.
+            Kind::Sonde => 400.0,
         }
     }
 }
@@ -385,9 +397,7 @@ impl Detail {
                     Kind::Vehicle
                 }
             }
-            // Under a balloon at up to 35 km, so it is drawn and forgotten
-            // like the other thing in the sky.
-            Detail::Sonde { .. } => Kind::Aircraft,
+            Detail::Sonde { .. } => Kind::Sonde,
         }
     }
 }
