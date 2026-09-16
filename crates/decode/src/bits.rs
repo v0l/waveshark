@@ -298,6 +298,117 @@ pub fn lfsr_digest8(data: &[u8], r#gen: u8, key: u8) -> u8 {
     sum
 }
 
+/// GF(64), built on x^6 + x + 1, as the tables a BCH(63,51) decoder needs.
+///
+/// Antilog and log: `exp[i]` is the field element a^i and `log[e]` the power
+/// that produced it. Built once, because a Meisei radiosonde asks for twelve
+/// codewords a second and a fresh table each time is the whole cost.
+fn gf64() -> &'static ([u8; 64], [u8; 64]) {
+    static TABLES: std::sync::OnceLock<([u8; 64], [u8; 64])> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let (mut exp, mut log) = ([0u8; 64], [0u8; 64]);
+        let mut x = 1u8;
+        for (i, e) in exp.iter_mut().enumerate().take(63) {
+            *e = x;
+            log[x as usize] = i as u8;
+            x <<= 1;
+            if x & 0x40 != 0 {
+                x ^= 0x43;
+            }
+        }
+        exp[63] = exp[0];
+        (exp, log)
+    })
+}
+
+/// BCH(63,51) over GF(64), correcting up to two wrong bits.
+///
+/// `code` is the codeword as bits, `code[i]` the coefficient of x^i, so the
+/// parity is at the low end. A shortened code is the same thing with zeros
+/// in the positions that were never sent: the Meisei sondes send (46,34),
+/// which is this with seventeen zeros above it.
+///
+/// Returns how many bits were corrected, or `None` where the syndromes name
+/// no pair of positions, which is three wrong bits or more. Two syndromes
+/// are enough: for a binary code the even ones follow from the odd, so only
+/// `S1` and `S3` have to be computed.
+pub fn bch63_51(code: &mut [bool]) -> Option<u32> {
+    if code.len() != 63 {
+        return None;
+    }
+    let (exp, log) = gf64();
+    let mul = |a: u8, b: u8| match a == 0 || b == 0 {
+        true => 0,
+        false => exp[(usize::from(log[a as usize]) + usize::from(log[b as usize])) % 63],
+    };
+    let syndrome = |power: usize| {
+        code.iter().enumerate().filter(|(_, b)| **b).fold(0u8, |s, (i, _)| s ^ exp[i * power % 63])
+    };
+    let (s1, s3) = (syndrome(1), syndrome(3));
+    if s1 == 0 {
+        // No first syndrome and a third one is a pattern no pair of errors
+        // can make.
+        return (s3 == 0).then_some(0);
+    }
+    let s1_cubed = mul(mul(s1, s1), s1);
+    if s1_cubed == s3 {
+        let at = usize::from(log[s1 as usize]);
+        code[at] = !code[at];
+        return Some(1);
+    }
+    // The error locator is 1 + s1 x + ((s1^3 + s3)/s1) x^2, and its roots are
+    // the inverses of the two positions. Chien search: try every power.
+    let num = s1_cubed ^ s3;
+    let sigma2 = exp[(usize::from(log[num as usize]) + 63 - usize::from(log[s1 as usize])) % 63];
+    let mut found = Vec::with_capacity(2);
+    for at in 0..63usize {
+        let x = exp[(63 - at) % 63];
+        if 1 ^ mul(s1, x) ^ mul(sigma2, mul(x, x)) == 0 {
+            found.push(at);
+        }
+    }
+    if found.len() != 2 {
+        return None;
+    }
+    for at in found {
+        code[at] = !code[at];
+    }
+    Some(2)
+}
+
+/// One nibble read back out of a Hamming(8,4) codeword, and whether a bit
+/// had to be corrected to get it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Hamming84 {
+    pub nibble: u8,
+    pub corrected: bool,
+}
+
+/// Parity check matrix, one row a byte, most significant bit first, which is
+/// the order the bits arrive in.
+const H84: [u8; 4] = [0b0111_1000, 0b1011_0100, 0b1101_0010, 0b1110_0001];
+
+/// The syndrome a single wrong bit leaves, by position. Reading the columns
+/// of [`H84`], so position 0 is `0x7` and the four parity bits are the
+/// powers of two.
+const H84_SYNDROME: [u8; 8] = [0x7, 0xB, 0xD, 0xE, 0x8, 0x4, 0x2, 0x1];
+
+/// Systematic Hamming(8,4): four data bits, four parity bits, one error
+/// corrected and two detected.
+///
+/// `code` is the eight bits as they arrived, most significant first, with
+/// the data in the top nibble. `None` where the syndrome names no single
+/// position, which is two bits wrong or worse. The DFM radiosondes protect
+/// every nibble of a frame this way.
+pub fn hamming84(code: u8) -> Option<Hamming84> {
+    let syndrome = H84.iter().fold(0u8, |s, row| s << 1 | (row & code).count_ones() as u8 & 1);
+    if syndrome == 0 {
+        return Some(Hamming84 { nibble: code >> 4, corrected: false });
+    }
+    let at = H84_SYNDROME.iter().position(|s| *s == syndrome)?;
+    Some(Hamming84 { nibble: (code ^ 0x80 >> at) >> 4, corrected: true })
+}
+
 /// LSB-first CRC-8, rtl_433's `crc8le`: the same polynomial division as
 /// [`crc8`] run through the byte from the other end, which is what a device
 /// that transmits its bits least significant first computes.
@@ -316,6 +427,119 @@ pub fn crc8le(data: &[u8], poly: u8, init: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Encode a message as a BCH(63,51) codeword: the remainder of the
+    /// message shifted up, divided by the generator, put in the low bits.
+    /// The generator is the product of the minimal polynomials of a and a^3,
+    /// which is x^12+x^10+x^8+x^5+x^4+x^3+1.
+    fn bch_encode(message: &[bool]) -> Vec<bool> {
+        const GEN: u64 = 0b1_0101_0011_1001;
+        let mut acc = 0u64;
+        // Highest message bit first, as polynomial division runs.
+        for bit in message.iter().rev() {
+            acc = acc << 1 | u64::from(*bit);
+            if acc >> 12 & 1 != 0 {
+                acc ^= GEN;
+            }
+        }
+        for _ in 0..12 {
+            acc <<= 1;
+            if acc >> 12 & 1 != 0 {
+                acc ^= GEN;
+            }
+        }
+        let mut code: Vec<bool> = (0..12).map(|i| acc >> i & 1 != 0).collect();
+        code.extend_from_slice(message);
+        code
+    }
+
+    /// Every message comes back, and so does every message with one or two
+    /// wrong bits anywhere in the word. Three is refused rather than
+    /// mis-corrected wherever the syndromes can tell.
+    #[test]
+    fn bch63_51_corrects_two_wrong_bits() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..64 {
+            let message: Vec<bool> = (0..51).map(|_| next() & 1 != 0).collect();
+            let code = bch_encode(&message);
+            assert_eq!(code.len(), 63);
+            let mut clean = code.clone();
+            assert_eq!(bch63_51(&mut clean), Some(0), "a clean codeword was corrected");
+            assert_eq!(clean, code);
+
+            let (a, b) = ((next() % 63) as usize, (next() % 63) as usize);
+            let mut one = code.clone();
+            one[a] = !one[a];
+            assert_eq!(bch63_51(&mut one), Some(1), "one wrong bit at {a}");
+            assert_eq!(one, code);
+
+            if a == b {
+                continue;
+            }
+            let mut two = code.clone();
+            two[a] = !two[a];
+            two[b] = !two[b];
+            assert_eq!(bch63_51(&mut two), Some(2), "two wrong bits at {a} and {b}");
+            assert_eq!(two, code);
+        }
+    }
+
+    /// A word too broken to place is refused. Not every triple can be told
+    /// from a correctable pair, which is why the caller checks what it got
+    /// as well: the Meisei frame carries its own sum over the words.
+    #[test]
+    fn bch63_51_refuses_some_triples() {
+        let code = bch_encode(&[true; 51]);
+        let mut refused = 0;
+        for at in 0..20usize {
+            let mut bad = code.clone();
+            for k in [at, at + 7, at + 19] {
+                bad[k % 63] = !bad[k % 63];
+            }
+            refused += u32::from(bch63_51(&mut bad).is_none() || bad != code);
+        }
+        assert_eq!(refused, 20, "a triple was silently turned into a codeword");
+    }
+
+    /// Every nibble survives a round trip through the code, and every single
+    /// wrong bit in all eight positions is put back.
+    #[test]
+    fn hamming84_corrects_any_one_bit() {
+        // The generator, read as the parity rows of H: bits 4..8 are the
+        // three-of-four sums the DFM sonde transmits after each nibble.
+        let encode = |nib: u8| {
+            let mut code = nib << 4;
+            for (i, row) in H84.iter().enumerate() {
+                let parity = (row & 0xF0 & code).count_ones() as u8 & 1;
+                code |= parity << (3 - i);
+            }
+            code
+        };
+        for nib in 0..16u8 {
+            let code = encode(nib);
+            assert_eq!(hamming84(code), Some(Hamming84 { nibble: nib, corrected: false }));
+            for bit in 0..8 {
+                let got = hamming84(code ^ (0x80 >> bit)).expect("a correctable word");
+                assert_eq!(got, Hamming84 { nibble: nib, corrected: true }, "bit {bit} of {nib:X}");
+            }
+        }
+    }
+
+    /// Two wrong bits are refused rather than turned into a wrong nibble,
+    /// which is what lets a frame say how much of it was guessed.
+    #[test]
+    fn hamming84_refuses_two_wrong_bits() {
+        let code = 0b0000_0000u8;
+        assert_eq!(hamming84(code).map(|h| h.nibble), Some(0));
+        assert_eq!(hamming84(code ^ 0b1100_0000), None);
+        assert_eq!(hamming84(code ^ 0b0000_0011), None);
+    }
 
     #[test]
     fn pushes_msb_first() {

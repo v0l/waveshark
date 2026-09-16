@@ -533,6 +533,12 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::elrs_nodes::Elrs,
         &crate::wmbus_nodes::Wmbus,
         &crate::rs41_nodes::Rs41,
+        &crate::dfm_nodes::Dfm,
+        &crate::m10_nodes::M10,
+        &crate::imet_nodes::Imet,
+        &crate::meisei_nodes::Meisei,
+        &crate::mrz_nodes::Mrz,
+        &crate::lms6_nodes::Lms6,
     ];
     ALL
 }
