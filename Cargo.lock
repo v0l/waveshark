@@ -6600,6 +6600,7 @@ dependencies = [
  "common",
  "hfmodel",
  "hound",
+ "serde",
  "serde_json",
  "stt-cuda",
  "tokenizers",

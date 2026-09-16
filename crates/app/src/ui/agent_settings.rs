@@ -337,27 +337,8 @@ impl super::App {
                 args::VoiceFrom::Server => Speech::Server,
             };
         }
-        // A model here and a model on a server are named in different
-        // fields, so which one `model` means depends on where speech comes
-        // from. Naming both would be two settings for one decision.
-        if let Some(m) = a.model {
-            match c.speech.is_remote() {
-                true => c.voice_model = m,
-                false => c.voice_repo = m,
-            }
-        }
         if let Some(d) = a.device {
             c.voice_device = d;
-        }
-        if let Some(p) = a.precision {
-            let want = p.trim().to_lowercase();
-            if want != "full" && want != "half" {
-                return Err("precision is full or half".into());
-            }
-            c.voice_precision = want;
-        }
-        if let Some(d) = a.description {
-            c.voice_description = d;
         }
         if let Some(d) = a.dir {
             c.voice_dir = d;
@@ -368,8 +349,14 @@ impl super::App {
         if let Some(m) = a.server_model {
             c.voice_model = m;
         }
+        // A speaker here and a voice on a server are named in different
+        // fields, so which one `voice` means depends on where speech comes
+        // from. Naming both would be two settings for one decision.
         if let Some(v) = a.voice {
-            c.voice = v;
+            match c.speech.is_remote() {
+                true => c.voice = v,
+                false => c.voice_local = v,
+            }
         }
         if let Some(w) = a.wake {
             c.wake = w;
@@ -386,16 +373,14 @@ impl super::App {
         let c = &self.chat.config;
         Ok(json!({
             "source": c.speech.id(),
-            "model": match c.speech.is_remote() {
-                true => c.voice_model.clone(),
-                false => c.voice_repo.clone(),
-            },
+            "model": c.voice_model,
             "device": c.voice_device,
-            "precision": c.voice_precision,
-            "description": c.voice_description,
             "dir": c.voice_dir,
             "url": c.voice_url,
-            "voice": c.voice,
+            "voice": match c.speech.is_remote() {
+                true => c.voice.clone(),
+                false => c.voice_local.clone(),
+            },
             "wake": c.wake,
             "hang_s": c.hang_s,
             "follow_s": c.follow_s,
@@ -1152,13 +1137,10 @@ mod tests {
             &mut a,
             Action::SetVoice(args::Voice {
                 source: Some(args::VoiceFrom::Server),
-                model: Some("tts-1-hd".into()),
                 device: None,
-                precision: None,
-                description: None,
                 dir: None,
                 url: Some("http://speech:8080/v1".into()),
-                server_model: None,
+                server_model: Some("tts-1-hd".into()),
                 voice: Some("alloy".into()),
                 wake: Some("shark".into()),
                 hang_s: None,
@@ -1181,7 +1163,7 @@ mod tests {
         for f in ["key", "steps", "brief"] {
             assert!(!fields.contains_key(f), "set_voice offers {f}, which is the chat's");
         }
-        assert_eq!(fields.len(), 12, "set_voice changed shape");
+        assert_eq!(fields.len(), 9, "set_voice changed shape");
     }
 
     /// Every dataset answers to a name that is not its label, and the name is

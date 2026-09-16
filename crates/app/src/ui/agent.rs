@@ -848,11 +848,9 @@ impl App {
         self.air.on = self.agent_tx_channel().map(|(id, _)| id);
         let mut config = self.chat.config.clone();
         if let Some(v) = a.voice.filter(|v| !v.trim().is_empty()) {
-            // A server names its voices; the model here is given a sentence
-            // describing how to sound instead.
             match config.speech.is_remote() {
                 true => config.voice = v,
-                false => config.voice_description = v,
+                false => config.voice_local = v,
             }
         }
         let said = self.air.say(&config, self.rt.handle(), &a.text)?;

@@ -185,23 +185,16 @@ pub struct Config {
     /// Where speech comes from at all.
     pub speech: Speech,
 
-    /// The model on this machine: which one, where the weights are kept, and
-    /// the sentence that describes how it should sound. Empty means the
-    /// shipped defaults.
+    /// The model on this machine: which speaker it uses and where its files
+    /// are kept. Empty means the shipped defaults.
     ///
-    /// `voice_repo` is a catalogue id (`tts::MODELS`) or, for a model that
-    /// shipped after this build, any repository name: an id that is not in
-    /// the list is read as one.
-    pub voice_repo: String,
+    /// `voice_local` is a name from `tts::VOICES`, or any voice the
+    /// repository publishes: a name not in the list is fetched as one.
+    pub voice_local: String,
     pub voice_dir: String,
-    pub voice_description: String,
     /// Where it runs: `auto`, `cpu`, `cuda:0`, `metal`. Auto is the fastest
     /// that will take it, falling back to the CPU and saying so.
     pub voice_device: String,
-    /// `full` or `half`. Half reads half the bytes per frame, which is the
-    /// whole of the speed on an autoregressive decoder making one frame at a
-    /// time.
-    pub voice_precision: String,
 
     /// A speech server of its own, for [`Speech::Server`]. Under
     /// [`Speech::Chat`] the chat's `url` and `key` serve instead.
@@ -240,11 +233,9 @@ impl Default for Config {
             steps: DEFAULT_STEPS,
             brief: String::new(),
             speech: Speech::Local,
-            voice_repo: String::new(),
+            voice_local: String::new(),
             voice_dir: String::new(),
-            voice_description: String::new(),
             voice_device: String::new(),
-            voice_precision: String::new(),
             voice_url: String::new(),
             voice_model: "tts-1".into(),
             voice: "alloy".into(),
@@ -302,11 +293,9 @@ impl Config {
                 // is one setting per line and a brief is a paragraph.
                 "brief" => c.brief = value.replace("\\n", "\n"),
                 "speech" => c.speech = Speech::parse(value),
-                "voice_repo" => c.voice_repo = value.to_string(),
+                "voice_local" => c.voice_local = value.to_string(),
                 "voice_device" => c.voice_device = value.to_string(),
-                "voice_precision" => c.voice_precision = value.to_string(),
                 "voice_dir" => c.voice_dir = value.to_string(),
-                "voice_description" => c.voice_description = value.replace("\\n", "\n"),
                 "voice_url" => c.voice_url = value.to_string(),
                 "voice_model" => c.voice_model = value.to_string(),
                 "voice" => c.voice = value.to_string(),
@@ -342,11 +331,9 @@ impl Config {
              # own server, at url with key, for voice_model (tts-1 on OpenAI,\n\
              # openrouter/hexgrad/kokoro-82m on OpenRouter) in the voice named.\n\
              speech = {}\n\
-             voice_repo = {}\n\
+             voice_local = {}\n\
              voice_dir = {}\n\
              voice_device = {}\n\
-             voice_precision = {}\n\
-             voice_description = {}\n\
              voice_url = {}\n\
              voice_model = {}\n\
              voice = {}\n\
@@ -370,11 +357,9 @@ impl Config {
             self.steps,
             self.brief.replace('\n', "\\n"),
             self.speech.id(),
-            self.voice_repo,
+            self.voice_local,
             self.voice_dir,
             self.voice_device,
-            self.voice_precision,
-            self.voice_description.replace('\n', "\\n"),
             self.voice_url,
             self.voice_model,
             self.voice,
@@ -512,11 +497,9 @@ mod tests {
             steps: 7,
             brief: "two\nlines".into(),
             speech: Speech::Server,
-            voice_repo: "parler-large-v1".into(),
-            voice_dir: "/srv/models/parler".into(),
+            voice_local: "bm_george".into(),
+            voice_dir: "/srv/models/kokoro".into(),
             voice_device: "cuda:1".into(),
-            voice_precision: "half".into(),
-            voice_description: "a level voice\nclose to the microphone".into(),
             voice_url: "http://127.0.0.1:8880/v1".into(),
             voice_model: "kokoro".into(),
             voice: "af_sky".into(),
