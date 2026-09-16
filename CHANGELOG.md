@@ -9,192 +9,59 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-16
+
 ### Added
 
-- PTT-ID: the DTMF unit number a radio sends names who keyed up on an analogue
-  channel.
-
-- The coded squelch on an analogue channel is read and shown as the group: a
-  CTCSS tone or a DCS code, on the call list, in Home Assistant and to the
-  agent.
-
-- Call recording: every over kept as Opus, from the Record switch on the call list.
-
-- A Recordings table under the call list: every over on the disk, playable.
-
+- An agent on the air. Set a channel's transmit source to AGENT, give it a
+  name, and it answers when called: it hears the over, replies in its own
+  voice, and keeps the conversation going for half a minute without being
+  named again. It can tune, key, read the spectrum and say what it heard.
+- Speech both ways through a model on this machine or on a server: a voice
+  picker for what it sounds like, and a reading server for what it hears.
+- Call recording. Every over is kept as Opus from the Record switch, and a
+  Recordings table under the call list plays them back. `--replay` lists what
+  a log holds and `--extract-calls` writes the overs out as WAVs.
+- Who keyed up and which group, on an analogue channel: the DTMF unit number
+  a radio sends, and the CTCSS tone or DCS code its users are set to.
+- Television off a DVB-T multiplex, at full frame rate with its sound in step,
+  and a service picker for the programmes on it.
+- Transmit a multiplex: a transport stream file, anything ffmpeg can open, or
+  colour bars and a tone when nothing is chosen.
+- SSTV pictures on the video pane: Martin, Scottie and Robot modes. Every
+  still is saved to `~/.local/share/waveshark/pictures`.
+- ACARS and VDL Mode 2, the two aircraft datalinks, on every channel in use.
 - Messages are written down as they arrive, a file a day, and read back at
-  start, marked as being from the log.
-
+  start.
 - A call bus and a message bus in Home Assistant, with an on-air lamp.
-
-- `--replay` on a call log lists the overs, and `--extract-calls` writes them as WAVs.
-
-- An Agent view: ask a model for something and it drives the receiver.
-- Talk to the agent over the air: set a channel's transmit source to AGENT.
-- The agent speaks with a model on this machine, or with a speech server.
-
-- A voice picker: which model, where it runs, and at what precision.
-
-- Say again: send one of the agent's answers over the air a second time.
-
-- The agent answering its own transmission, over and over.
-
-- The transcript filling with what the receiver had just transmitted.
-
-- The agent's reply was cut off at the first pause in it.
-
-- The agent's voice sounded like whispering.
-
-- The agent says what it is doing: asking, making speech, or downloading a voice.
-
-- The agent's voice can come from the model's own server, with a speech model named there.
-
-- The Agent settings list the server's models and voices, and say when what is set is not among them.
-
-- Every settings dialog is a column of cards, with a lamp saying whether it will work.
-
-- `--settings NAME` opens with a settings dialog up.
-
-- The agent channel shows the last over it heard and why it did not answer.
-
-- The agent answers to a name you choose, and waits for the channel to be clear.
-- The agent holds a conversation: once it has answered, the next 30 seconds need
-  no name.
-- Agents can say something over the air in the agent's voice, and ask what the
-  radio can transmit.
-- Speech heard on the air can be read on the model's server instead of on this
-  machine.
-
-- Agents can key the transmitter, set the tone or microphone, and set transmit gain.
-
-- Scanner blocks that are one region's allocation run only in that region.
-
-- A decoder that cannot read the span is left out instead of stopping the receiver.
-
-- VDL Mode 2 and SSTV on a span whose rate is an awkward number.
-
-- Saved channels keep their repeater shift and what they transmit.
-
-- Every VDL Mode 2 channel in use, European and North American.
-
-- A transmitted multiplex carries a network table and a service name, so a television finds it.
-
+- More sensors: Ambient Weather F007TH, Prologue, Hideki and Alecto V1
+  weather stations, and Interlogix security contacts on 319.5 MHz.
 - Channel numbers beside the band: UHF TV, DAB blocks, PMR446, marine, CB,
   LPD433, FRS and GMRS.
-
-- Stages say what they have been doing in the chain view: seconds on air, gaps,
-  what is being sent.
-
-- Transmit a DVB-T multiplex from a transport stream file.
-- Transmit any file ffmpeg can open: it is re-encoded as a multiplex.
-- Choose what to transmit with a file dialog, on the strip or in the chain view,
-  and clear it again to go back to the test card.
-- Colour bars and a tone go on the air when no file is chosen.
-- SSTV pictures on the video pane: Martin 1 and 2, Scottie 1, 2 and DX, Robot
-  36 and 72, on 144.500 or any chain with audio.
-- Every still picture is saved to `~/.local/share/waveshark/pictures`.
-- Right click the transmit key to leave it keyed; left click stops it.
-- A microphone input stage, so a decoder can read audio from the machine
-  rather than off the air.
-- VDL Mode 2, the aircraft datalink most European traffic uses, on 136.725 to
-  136.975.
-- ACARS on the airband, on 131.525 to 131.825 and 131.550.
-- Ambient Weather F007TH thermo-hygrometers, sold as the F012TH, SwitchDoc
-  F016TH and TFA 30.3208.02.
-- Prologue thermo-hygrometers, sold as FreeTec NC-7104, Pearl NC-7159-675,
-  ThermoPro TX2 and TFA 30.3240.10.
-- Hideki weather sensors, sold as Cresta, TFA Nexus, Irox, Mebus and Bresser
-  5CH: temperature, humidity, wind and rain.
-- Alecto V1 weather sensors, and the Auriol, Silvercrest and Ventus rebadges.
-  Wind is not read yet.
-- Interlogix, GE and UTC security sensors on 319.5 MHz, with the ELK-319DWM
-  and Alula RE101 modules.
-- A bias tee switch for the HackRF, to power a mast head amplifier.
-- A converter setting in the radio settings, so the dial reads the frequency
-  at the aerial when an LNB or transverter is on the cable.
-- DVB-T television multiplexes on the UHF and band III channels: the
-  transmission parameters, the transport stream, and the services on it.
-- The band plan names UHF television and the Ku satellite band.
-- A service picker on the video pane, for the programmes of a DVB-T multiplex.
-- Television off a DVB-T multiplex, at full frame rate, with its sound in step
-  and on the channel's own fader.
+- A bias tee switch for the HackRF, and a converter setting so the dial reads
+  the frequency at the aerial through an LNB or transverter.
 
 ### Changed
 
 - The MCP server is on by default, on 127.0.0.1:8931. `--mcp-listen off`
-  turns it off, and a port or host:port still moves it.
-- DVB-T decodes at twice real time on a modern x86.
-- SSTV holds up better on a weak signal.
-- The audio path is drawn stage by stage: a fader per channel, the calls, the
-  tap, the bus, the replay and the speaker.
-- Every level and mute is kept with the graph edits and survives a restart.
-- The strip shows what the speaker is playing: who, to whom, on what frequency.
-- A played-back over is a strip of its own, with a level, a mute and STOP.
-- A chain drawn by hand reaches the speaker through a fader stage of its own.
+  turns it off.
+- The audio path is a mixer: a fader per channel, a level and a mute on each,
+  kept across a restart, and a played-back over with a strip of its own.
+- A channel marked as voice is listed as a call, the agent's own included.
+- Every settings dialog is a column of cards with a lamp saying whether what
+  is set will work, and `--settings NAME` opens on one.
 
 ### Fixed
 
-- A channel marked as voice, the agent's own included, is listed as a call.
-
-- A machine with no microphone no longer starts up showing a fault.
-
-- The transcriber loads its model as the receiver starts, not at the first over.
-
-- The transcriber and the call recorder came up switched off, whatever was saved.
-
-- The agent keys a moment before it speaks and holds a moment after, so a squelch opens in time.
-
-- A long answer from the agent was cut off at thirty seconds, mid-sentence.
-
-- Radiotext and aircraft datalink filled the message view with nobody's words.
-
-- Every device published to Home Assistant read as made by "unknown".
-
-- ACARS and VDL Mode 2 decoded one channel of the several the table lists.
-
-- A wrapped line in the scanners file dropped half the channels it listed.
-
-- The keys tab lit its dot on every start for anybody with a key saved.
-
-- The agent keyed up and transmitted the microphone instead of its reply.
-
-- Blank lines at the top and bottom of every agent reply.
-
-- A transmit key on the agent's channel, which the agent keys itself.
-
-- Keying a channel just added or recalled: it said there was no transmit side.
-
-- A second channel keying up but putting nothing on the air.
-
-- Keying a second transmit channel put nothing on air.
-
-- Watching your own transmission on a half duplex radio: the picture came and went.
-
-- Changing the modulation left the source sending the old rate, so packets were lost.
-
-- A scope dropped on the transmit chain drew nothing and said it was not connected.
-
-- Every choice on the modulator set its first option: picking 64-QAM sent QPSK.
-
+- Keying a channel just added or recalled said there was no transmit side.
+- Keying a second transmit channel put nothing, or the first channel's
+  source, on the air.
 - A radio unplugged mid-transmission left the key lit and the chain running.
-
-- The transmitter built a multiplex even with nothing keyed.
-- A long file name made the channel strip and the chain inspector too wide.
-- A DVB-T channel on the strip built no decoder, so no picture ever came.
-- A DVB-T channel took the whole graph down over the packet log.
-- Restarting a source switched decoding back on, whatever the switch said.
-- A channel the span was too narrow for vanished without saying so.
-- An agent refusing the whole MCP tool list over a schema that described
-  nothing.
-- A half-fetched speech model was picked and read nothing, with no sign of why.
-- The Transcribe switch turning itself back off whenever a channel changed.
-- Keying a second transmit channel put the first channel's source on air.
-- Robot 36 and 72 colours: cyan came out green.
-- A green stripe down the right of a Robot picture.
-- An SSTV transmission that stopped part way being filled with noise.
-- An SSTV picture drawing only its first line in the pane.
-- SSTV and VDL Mode 2 refusing a radio at 2.048 MS/s.
-- An Acurite 606TX reading appearing for a Prologue sensor's transmission.
+- Every device published to Home Assistant read as made by "unknown".
+- A wrapped line in the scanners file dropped half the channels it listed.
+- The transcriber and the call recorder came up switched off, whatever was
+  saved.
+- A machine with no microphone started up showing a fault.
 
 ## [0.2.0] - 2026-09-12
 
@@ -688,6 +555,7 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/v0l/waveshark/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/v0l/waveshark/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/v0l/waveshark/releases/tag/v0.1.0
