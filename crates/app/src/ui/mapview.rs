@@ -147,7 +147,7 @@ impl MapView {
     /// is one nobody flicks.
     pub fn switches(&mut self, ui: &mut egui::Ui, layers: &[&mut dyn Layer]) {
         ui.horizontal(|ui| {
-            ui.label(legend("layers"));
+            theme::Line::new().legend("layers").show(ui);
             for l in layers.iter().filter(|l| l.switchable()) {
                 self.layers.note(l.key());
                 let on = self.layers.on(l.key());

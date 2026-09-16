@@ -140,8 +140,12 @@ air, `note` a sentence for a person.
 Helpers built on `Line` live in `crates/app/src/ui/widgets.rs` (`hint`, `cell`,
 `row`, `card`); a new one belongs there. Painted text is the exception: a table
 cell goes through `widgets::cell`, and the spectrum's axis labels are painter
-calls because they are part of a plot. `burst.rs` and `chain_pane.rs` still
-call `ui.label`; convert what you touch and add no more.
+calls because they are part of a plot. Only `widgets.rs` itself still calls
+`ui.label`, where the helpers are built; a pane that calls it is a pane to
+convert.
+
+A button's label is the one thing `Line` cannot set, so a button that needs a
+size other than the style's keeps its `RichText`.
 
 ## The design language is a chassis
 

@@ -117,11 +117,7 @@ impl VideoPane<'_> {
                         );
                     }
                     if self.inputs.is_empty() {
-                        ui.label(
-                            egui::RichText::new("nothing receiving")
-                                .color(theme::LEGEND)
-                                .size(11.0),
-                        );
+                        theme::Line::new().note("nothing receiving").size(11.0).show(ui);
                     }
                 });
             ui.add_space(12.0);
@@ -173,11 +169,10 @@ impl VideoPane<'_> {
                             );
                         }
                         if mux.services.is_empty() {
-                            ui.label(
-                                egui::RichText::new("no services described yet")
-                                    .color(theme::LEGEND)
-                                    .size(11.0),
-                            );
+                            theme::Line::new()
+                                .note("no services described yet")
+                                .size(11.0)
+                                .show(ui);
                         }
                     });
                 if pick != mux.wanted {
@@ -224,7 +219,7 @@ impl VideoPane<'_> {
 
         let (Some(tex), Some(f)) = (st.texture.as_ref(), st.shown.as_ref()) else {
             ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new("no picture").color(theme::LEGEND).size(14.0));
+                theme::Line::new().note("no picture").size(14.0).show(ui);
             });
             return;
         };

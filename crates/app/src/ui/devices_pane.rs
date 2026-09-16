@@ -195,7 +195,7 @@ impl Devices<'_> {
                         for h in
                             ["identity", "protocol", "name", "vendor", "level", "seen", "packets"]
                         {
-                            ui.label(egui::RichText::new(h).size(10.0).color(theme::LEGEND));
+                            theme::Line::new().legend(h).size(10.0).show(ui);
                         }
                         ui.end_row();
                         for d in &rows {
@@ -218,18 +218,19 @@ impl Devices<'_> {
                                     .unwrap_or_default(),
                             );
                             cell(ui, &ago(now_us.saturating_sub(d.last_us)));
-                            let freq = egui::RichText::new(format!(
-                                "{} at {:.3} MHz",
-                                d.packets,
-                                d.center_hz as f64 / 1e6
-                            ))
-                            .size(11.0)
-                            .color(theme::LEGEND);
                             // A reading, not a control: a device list is for
                             // what has been heard, and clicking a row to
                             // retune took the receiver off the band it was
                             // surveying.
-                            ui.label(freq);
+                            theme::Line::new()
+                                .value(format!(
+                                    "{} at {:.3} MHz",
+                                    d.packets,
+                                    d.center_hz as f64 / 1e6
+                                ))
+                                .size(11.0)
+                                .tint(theme::LEGEND)
+                                .show(ui);
                             ui.end_row();
                         }
                     },
@@ -242,7 +243,7 @@ impl Devices<'_> {
 }
 
 fn cell(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(11.0).color(theme::READOUT));
+    theme::Line::new().set(text).size(11.0).show(ui);
 }
 
 /// Wall clock in microseconds, which is what the survey stamps sightings

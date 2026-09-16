@@ -682,7 +682,7 @@ impl Strip<'_> {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(legend("channels"));
+                    theme::Line::new().legend("channels").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("BANK").on_hover_text("saved channels").clicked() {
                             self.acts.push(Action::Open(Settings::Memory));
@@ -753,11 +753,7 @@ impl Strip<'_> {
                 ui.add_space(8.0);
 
                 if self.st.channels.is_empty() {
-                    ui.label(
-                        egui::RichText::new("Click the spectrum to tune a channel.")
-                            .color(theme::LEGEND)
-                            .size(12.0),
-                    );
+                    theme::Line::new().note("Click the spectrum to tune a channel.").show(ui);
                 }
 
                 let states: Vec<ChannelState> =
