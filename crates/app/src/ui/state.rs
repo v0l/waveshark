@@ -669,6 +669,13 @@ pub(super) struct CallsState {
     /// What the last export or timeline did, shown under the filter until
     /// something else is asked for.
     pub log_note: String,
+    /// The conversation drawn against the clock, over whatever the filter
+    /// leaves.
+    pub timeline: super::timeline::TimelineState,
+    /// A save dialog in flight, and what it will have written when it
+    /// answers. Off the painting thread: a dialog that blocks the frame is a
+    /// window the compositor calls unresponsive.
+    pub saving: Option<poll_promise::Promise<String>>,
     pub log_open: bool,
     /// Where the divider between the live list and the recordings sits.
     pub log_frac: f32,
@@ -781,6 +788,8 @@ impl Default for CallsState {
             read_at: None,
             filter: String::new(),
             log_note: String::new(),
+            timeline: Default::default(),
+            saving: None,
             log_open: false,
             log_frac: 0.6,
             log_splitting: false,

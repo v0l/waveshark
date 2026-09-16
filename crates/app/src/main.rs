@@ -45,6 +45,7 @@ mod meshnode;
 mod messagelog;
 mod messages;
 mod mix;
+mod oggopus;
 mod packetlog;
 mod patch;
 mod picsave;

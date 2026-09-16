@@ -47,6 +47,7 @@ mod settings;
 mod settings_rows;
 mod state;
 mod strip;
+mod timeline;
 mod transcript_pane;
 mod video_pane;
 pub(crate) mod widgets;
