@@ -825,14 +825,7 @@ fn list_calls(path: &std::path::Path, wavs: Option<&std::path::Path>) -> anyhow:
             eprintln!("call {k} did not decode");
             continue;
         };
-        let who = c.from.as_deref().or(c.to.as_deref()).unwrap_or(&c.system);
-        let who: String =
-            who.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-        let name = format!(
-            "{k:04}_{}_{who}_{:.4}MHz.wav",
-            when.replace(':', ""),
-            c.channel_hz as f64 / 1e6
-        );
+        let name = calllog::wav_name(c, k);
         if let Err(e) = mix::write_wav(&dir.join(&name), &speech) {
             eprintln!("{name}: {e}");
         }

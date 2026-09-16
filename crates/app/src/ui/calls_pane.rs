@@ -48,8 +48,9 @@ const COLS: [(&str, f32); 14] = [
 /// list: it is what the table is for, and the rest of the row is what tells
 /// you whether to press it. Behind it the columns are the live list's in the
 /// same order, so the eye reads the two tables the same way.
-const LOG_COLS: [(&str, f32); 8] = [
+const LOG_COLS: [(&str, f32); 9] = [
     ("play", 48.0),
+    ("save", 48.0),
     ("when", 150.0),
     ("system", 60.0),
     ("channel", 100.0),
@@ -63,6 +64,19 @@ const LOG_COLS: [(&str, f32); 8] = [
 /// how far the divider can be dragged. Neither half may be squeezed to
 /// nothing.
 const DEFAULT_LOG_FRAC: f32 = 0.6;
+
+/// Silence between two overs played as one conversation.
+///
+/// Long enough to hear as a break between speakers and short enough that an
+/// afternoon of a quiet talkgroup is still worth sitting through: the pauses
+/// as they happened would be the afternoon.
+const TIMELINE_GAP_S: f64 = 0.4;
+
+/// The most one conversation plays for, newest kept.
+///
+/// Ten minutes is a long listen and 115 MB of samples by the time the player
+/// has resampled it to the output rate. A longer one is a narrower filter.
+const TIMELINE_MAX_S: f64 = 600.0;
 const LOG_FRAC_RANGE: std::ops::RangeInclusive<f32> = 0.15..=0.85;
 
 /// What the list wants done that it cannot do itself.
@@ -386,15 +400,23 @@ impl CallList<'_> {
             .unwrap_or_else(crate::calllog::calls_dir);
         self.st.read_recordings(&dir, false);
 
+        // Filtered once a frame: the table, the count, what PLAY ALL joins
+        // and what EXPORT writes are all the same set, or a listener hears
+        // one conversation and saves another.
+        let shown = self.st.filtered();
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            let listed = self.st.recordings.len();
-            let seconds: f64 = self.st.recordings.iter().map(|e| e.call.seconds()).sum();
+            let seconds: f64 = shown.iter().map(|e| e.call.seconds()).sum();
+            let held = self.st.recordings.len();
+            let count = match shown.len() == held {
+                true => format!("{held} overs"),
+                false => format!("{} of {held} overs", shown.len()),
+            };
             theme::Line::new()
                 .legend("recorded")
-                .value(format!("{listed} overs"))
+                .value(count)
                 .gap(14.0)
-                .value(format!("{:.0} s", seconds))
+                .value(format!("{seconds:.0} s"))
                 .size(11.0)
                 .show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -404,8 +426,76 @@ impl CallList<'_> {
                 if ui.small_button("REFRESH").on_hover_text(dir.display().to_string()).clicked() {
                     self.st.read_recordings(&dir, true);
                 }
+                ui.add_space(8.0);
+                // Into a folder beside the recordings rather than through a
+                // file dialog: what is exported is a set of overs, and
+                // naming each one is not a question anybody wants asked.
+                let wavs = dir.join("wav");
+                if ui
+                    .add_enabled(!shown.is_empty(), egui::Button::new("EXPORT").small())
+                    .on_hover_text(format!("Write what is listed as WAVs in {}", wavs.display()))
+                    .clicked()
+                {
+                    self.st.log_note = match crate::calllog::export(&shown, &wavs) {
+                        Ok((done, 0)) => format!("{done} written to {}", wavs.display()),
+                        Ok((done, bad)) => {
+                            format!("{done} written to {}, {bad} would not decode", wavs.display())
+                        }
+                        Err(e) => format!("{}: {e}", wavs.display()),
+                    };
+                }
+                ui.add_space(8.0);
+                // The conversation rather than the over: filter to a group
+                // or a channel and this is that group's day, in order, with
+                // the pauses between overs standing in for the waiting.
+                if ui
+                    .add_enabled(!shown.is_empty(), egui::Button::new("PLAY ALL").small())
+                    .on_hover_text(
+                        "Play what is listed as one conversation, oldest first, up to the \
+                         newest ten minutes of it",
+                    )
+                    .clicked()
+                {
+                    match crate::calllog::timeline(&shown, TIMELINE_GAP_S, TIMELINE_MAX_S) {
+                        Some(s) => {
+                            let all: f64 = shown.iter().map(|e| e.call.seconds()).sum();
+                            self.st.log_note = match all > s.seconds() + 1.0 {
+                                true => format!(
+                                    "playing the newest {:.0} s of {:.0} s; narrow the filter \
+                                     for the rest",
+                                    s.seconds(),
+                                    all
+                                ),
+                                false => format!("{} overs, {:.0} s", shown.len(), s.seconds()),
+                            };
+                            self.cmds.push(Cmd::Play(std::sync::Arc::new(s)));
+                        }
+                        None => self.st.log_note = "none of those overs would decode".into(),
+                    }
+                }
             });
         });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            theme::Line::new().legend("filter").show(ui);
+            let mut clear = false;
+            widgets::field_then(
+                ui,
+                &mut self.st.filter,
+                "talkgroup, caller, system or frequency",
+                90.0,
+                |ui| {
+                    clear = ui.small_button("CLEAR").clicked();
+                },
+            );
+            if clear {
+                self.st.filter.clear();
+            }
+        });
+        if !self.st.log_note.is_empty() {
+            hint(ui, &self.st.log_note.clone());
+        }
         ui.add_space(4.0);
 
         if self.st.recordings.is_empty() {
@@ -420,8 +510,17 @@ impl CallList<'_> {
             return;
         }
 
+        if shown.is_empty() {
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                hint(ui, "Nothing recorded matches the filter.");
+            });
+            return;
+        }
+
         let width: f32 = LOG_COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
         let mut play = None;
+        let mut save = None;
         egui::ScrollArea::horizontal().id_salt("recordings").auto_shrink([false, false]).show(
             ui,
             |ui| {
@@ -439,7 +538,7 @@ impl CallList<'_> {
                     Stroke::new(1.0, theme::ETCH),
                 );
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for (n, e) in self.st.recordings.iter().enumerate() {
+                    for (n, e) in shown.iter().enumerate() {
                         let h = widgets::ROW_H.max(20.0);
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
                         if !ui.is_rect_visible(rect) {
@@ -449,23 +548,38 @@ impl CallList<'_> {
                         if n % 2 == 1 {
                             p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
                         }
-                        let mut x = rect.left() + 12.0 + LOG_COLS[0].1;
-                        for ((text, col), (_, w)) in log_cells(&e.call).iter().zip(&LOG_COLS[1..]) {
+                        let buttons = LOG_COLS[0].1 + LOG_COLS[1].1;
+                        let mut x = rect.left() + 12.0 + buttons;
+                        for ((text, col), (_, w)) in log_cells(&e.call).iter().zip(&LOG_COLS[2..]) {
                             widgets::cell(&p, rect, x, *w, text, *col);
                             x += w;
                         }
-                        let at = Rect::from_min_size(
-                            Pos2::new(rect.left() + 12.0, rect.top() + 1.0),
-                            Vec2::new(LOG_COLS[0].1 - 6.0, h - 2.0),
-                        );
-                        let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(at));
+                        let button_at = |i: usize| {
+                            let x: f32 = rect.left()
+                                + 12.0
+                                + LOG_COLS[..i].iter().map(|(_, w)| w).sum::<f32>();
+                            Rect::from_min_size(
+                                Pos2::new(x, rect.top() + 1.0),
+                                Vec2::new(LOG_COLS[i].1 - 6.0, h - 2.0),
+                            )
+                        };
+                        let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(button_at(0)));
                         sub.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if sub
                             .small_button("play")
                             .on_hover_text("Play this over through the speaker")
                             .clicked()
                         {
-                            play = Some(e.clone());
+                            play = Some((*e).clone());
+                        }
+                        let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(button_at(1)));
+                        sub.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        if sub
+                            .small_button("save")
+                            .on_hover_text("Write this over out as a WAV")
+                            .clicked()
+                        {
+                            save = Some((*e).clone());
                         }
                     }
                 });
@@ -478,8 +592,20 @@ impl CallList<'_> {
         if let Some(e) = play {
             match crate::calllog::speech_of(&e) {
                 Some(s) => self.cmds.push(Cmd::Play(std::sync::Arc::new(s))),
-                None => eprintln!("the recording did not read back: {}", e.file.display()),
+                None => {
+                    self.st.log_note = format!("{} did not read back", e.file.display());
+                }
             }
+        }
+        if let Some(e) = save {
+            let wavs = dir.join("wav");
+            self.st.log_note = match crate::calllog::export(std::slice::from_ref(&e), &wavs) {
+                Ok((1, _)) => {
+                    format!("{} written", wavs.join(crate::calllog::wav_name(&e.call, 0)).display())
+                }
+                Ok(_) => format!("{} would not decode", e.file.display()),
+                Err(err) => format!("{}: {err}", wavs.display()),
+            };
         }
     }
 
@@ -647,6 +773,44 @@ fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Colo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The filter narrows by anything on the row, in any order, and a word
+    /// that matches nothing leaves nothing.
+    #[test]
+    fn the_filter_matches_every_word_against_the_row() {
+        let call = |from: &str, to: &str, hz: u64, at_us: u64| crate::calllog::Entry {
+            call: crate::calllog::Call {
+                at_us,
+                channel_hz: hz,
+                duration_ms: 1_000,
+                peak: 0.5,
+                system: "M17".into(),
+                from: Some(from.into()),
+                to: Some(to.into()),
+                frames: Vec::new(),
+            },
+            file: std::path::PathBuf::from("day.wscal"),
+            at: 0,
+            len: 0,
+        };
+        let mut st = CallsState::default();
+        st.recordings =
+            vec![call("M0ABC", "ALL", 434_000_000, 2), call("M0XYZ", "GB7XX", 430_512_500, 1)];
+        assert_eq!(st.filtered().len(), 2, "an empty filter hides nothing");
+
+        st.filter = "m0abc".into();
+        assert_eq!(st.filtered().len(), 1);
+        assert_eq!(st.filtered()[0].call.from.as_deref(), Some("M0ABC"));
+
+        // Two words, neither in the order the row writes them: the caller and
+        // the frequency he was on.
+        st.filter = "430.5125 m0xyz".into();
+        assert_eq!(st.filtered().len(), 1);
+        assert_eq!(st.filtered()[0].call.to.as_deref(), Some("GB7XX"));
+
+        st.filter = "gb7xx m0abc".into();
+        assert!(st.filtered().is_empty(), "two words that are on different rows matched one");
+    }
 
     /// A row has exactly one cell per header, and the meter is on the level
     /// column.
