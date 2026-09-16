@@ -61,6 +61,8 @@ pub enum Icon {
     Transcript,
     /// A model driving the receiver.
     Agent,
+    /// Put a panel away, and bring it back: a column folding to the side.
+    Hide,
 }
 
 /// Side of the clickable square, in points.
@@ -116,6 +118,7 @@ impl Icon {
             // messages tab already is, and not a star, which reads as a
             // favourite.
             Icon::Agent => ph::ROBOT,
+            Icon::Hide => ph::SIDEBAR_SIMPLE,
         }
     }
 

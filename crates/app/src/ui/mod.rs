@@ -1474,7 +1474,14 @@ impl App {
     }
 
     /// Draw the channel strip, then hand the radio what it changed.
+    ///
+    /// Nothing at all when it is hidden: the panel is the strip, so putting
+    /// it away is not drawing it. What it was set to is still applied, since
+    /// every level lives on its node rather than in the panel.
     fn strip_view(&mut self, ui: &mut egui::Ui) {
+        if !self.settings.read(|s| s.strip) {
+            return;
+        }
         let acts = strip::Strip {
             st: &mut self.audio,
             radio: self.radio.as_ref(),
@@ -1488,6 +1495,7 @@ impl App {
             files: &mut self.pick_file,
             air: &self.air,
             air_fault: self.chat.config.voice_fault(),
+            settings: &self.settings,
         }
         .show(ui);
         for a in acts {

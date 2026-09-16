@@ -37,6 +37,11 @@ the code is in the commit log.
   transcriber, with the weights and the device it runs on, are in that record
   too, so they stay as they were left.
 
+### Added
+
+- The channel strip can be put away, from the button on it, and brought back
+  from the panels at the right of the top bar.
+
 ### Changed
 
 - The packet log folder, the unrecognised-burst filter and the raw capture

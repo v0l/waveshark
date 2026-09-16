@@ -49,7 +49,7 @@ const TAB_MOD: &str = "\u{2318}";
 const TAB_MOD: &str = "Ctrl+";
 
 const SPEED_W: f32 = 100.0;
-const PANELS_W: f32 = 88.0;
+const PANELS_W: f32 = 114.0;
 const UPDATE_W: f32 = 72.0;
 
 /// A receiver the interface put in the list itself, and can take out again.
@@ -429,9 +429,15 @@ impl App {
         let mut log = false;
         let mut data = false;
         let mut setup = false;
+        let mut strip = false;
+        let strip_on = self.settings.read(|s| s.strip);
         cell(ui, "panels", PANELS_W, |ui| {
             segment(ui, PANELS_W, |ui| {
                 use crate::icons::{Icon, icon_button_sized};
+                // The channel strip, which is the one panel that can be put
+                // away from inside itself: this is how it comes back.
+                strip = icon_button_sized(ui, Icon::Hide, "Channel strip", true, strip_on, ICON)
+                    .clicked();
                 // Only the switch that opens the log. What decodes and what
                 // runs where are questions about the packets, so they are
                 // asked in the window that shows them rather than up here.
@@ -464,6 +470,9 @@ impl App {
                 .clicked();
             });
         });
+        if strip {
+            self.settings.edit(|s| s.strip = !strip_on);
+        }
         if log {
             self.log.open = !self.log.open;
         }
