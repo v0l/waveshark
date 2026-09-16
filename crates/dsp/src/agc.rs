@@ -24,6 +24,10 @@ use crate::filter as dsp_filter;
 /// detector listens above them and the audio passes whole.
 const DETECT_HZ: f64 = 250.0;
 
+/// The most the output may reach, on everything in the block rather than on
+/// the part the detector listens to.
+const CEILING: f32 = 0.95;
+
 /// Gain control acting on a real audio stream.
 pub struct Agc {
     rate: f64,
@@ -34,6 +38,13 @@ pub struct Agc {
     /// decibel.
     detect: [dsp_filter::Biquad; 3],
     envelope: f32,
+    /// The same envelope on the block as it arrived, coded squelch and all.
+    ///
+    /// The gain follows the speech band, but it multiplies everything, and a
+    /// tone at ten times the amplitude of the speech clips at a gain the
+    /// speech needs: what comes out is a square wave at the tone's frequency
+    /// with the voice buried in it. This is what stops that.
+    whole: f32,
     gain: f32,
     target: f32,
     max_gain: f32,
@@ -57,6 +68,7 @@ impl Agc {
                 0.707,
             ); 3],
             envelope: 0.0,
+            whole: 0.0,
             gain: 1.0,
             // Well below full scale: this is the level speech peaks at, and
             // leaving headroom means an unusually loud syllable during the
@@ -104,6 +116,7 @@ impl Agc {
 
     pub fn reset(&mut self) {
         self.envelope = 0.0;
+        self.whole = 0.0;
         self.gain = 1.0;
         self.hang = 0;
         for b in &mut self.detect {
@@ -136,6 +149,9 @@ impl Agc {
             // under it; what it multiplies is the block as it arrived.
             let heard = self.detect.iter_mut().fold(*s, |x, b| b.process(x));
             let a = heard.abs();
+            let raw = s.abs();
+            self.whole +=
+                (raw - self.whole) * if raw > self.whole { self.attack } else { self.release };
             if a > self.envelope {
                 self.envelope += (a - self.envelope) * self.attack;
                 self.hang = self.hang_samples;
@@ -147,7 +163,8 @@ impl Agc {
             // The floor is what stops a silent channel from being multiplied
             // by an arbitrarily large number; the clamp is what stops it from
             // being multiplied by a merely very large one.
-            let want = self.target / self.envelope.max(1e-6);
+            // Never past the ceiling on what is actually in the block.
+            let want = (self.target / self.envelope.max(1e-6)).min(CEILING / self.whole.max(1e-6));
             self.gain = want.min(self.max_gain);
             *s *= self.gain;
         }
@@ -208,12 +225,12 @@ mod tests {
         };
         let n = (RATE * 2.0) as usize;
         let clean = speech(0.02, n);
-        // The same speech with a 100 Hz tone at ten times its amplitude, as
-        // a radio with the deviation split between them delivers it.
+        // The same speech with a 100 Hz tone twice its amplitude, as a radio
+        // with the deviation split between them delivers it.
         let with_tone: Vec<f32> = clean
             .iter()
             .enumerate()
-            .map(|(i, s)| s + 0.2 * (TAU * 100.0 * i as f64 / RATE).sin() as f32)
+            .map(|(i, s)| s + 0.04 * (TAU * 100.0 * i as f64 / RATE).sin() as f32)
             .collect();
 
         let mut a = Agc::voice(RATE);
@@ -228,6 +245,27 @@ mod tests {
             a.gain_db(),
             b.gain_db()
         );
+    }
+
+    /// Whatever the detector hears, the block that comes out fits.
+    ///
+    /// The gain follows the speech band and multiplies everything, so a tone
+    /// far louder than the speech would otherwise be amplified into a square
+    /// wave with the voice buried under it. The chain filters the tone out
+    /// before this stage; this is what happens when something else does not.
+    #[test]
+    fn nothing_is_amplified_past_full_scale() {
+        let n = (RATE * 2.0) as usize;
+        let mut buf: Vec<f32> = (0..n)
+            .map(|i| {
+                0.01 * (TAU * 700.0 * i as f64 / RATE).sin() as f32
+                    + 0.3 * (TAU * 100.0 * i as f64 / RATE).sin() as f32
+            })
+            .collect();
+        let mut a = Agc::voice(RATE);
+        a.process(&mut buf);
+        let settled = peak(&buf[buf.len() / 2..]);
+        assert!(settled <= 1.0, "the block came out at {settled:.2}");
     }
 
     #[test]

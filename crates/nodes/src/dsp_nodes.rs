@@ -738,8 +738,13 @@ impl Simple for AgcNode {
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
-        if i.spec.kind != PortKind::Real {
-            return Err(common::Error::other("agc needs a real input"));
+        // Audio, whether or not it has been labelled yet. A voice channel
+        // names its speech before the gain is set, because the stage that
+        // reads the coded squelch has to see it and the gain control must
+        // not: a tone ten times the size of the speech sets a gain that
+        // clips, and what comes out is the tone with the voice buried in it.
+        if !matches!(i.spec.kind, PortKind::Real | PortKind::Voice) {
+            return Err(common::Error::other("agc needs audio"));
         }
         self.agc = Agc::new(i.spec.rate, self.attack_ms, self.release_ms, self.hang_ms);
         self.agc.set_max_gain_db(self.max_gain_db);
@@ -747,8 +752,26 @@ impl Simple for AgcNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+        if let Some(voice) = i.as_voice() {
+            let out = o.voice_mut();
+            for v in voice {
+                let mut v = v.clone();
+                if self.enabled {
+                    self.agc.process(&mut v.pcm);
+                }
+                out.push(v);
+            }
+            if self.enabled {
+                c.tag(Tag::new(
+                    c.sample_index,
+                    "agc_gain_db",
+                    TagValue::Float(self.agc.gain_db() as f64),
+                ));
+            }
+            return Ok(());
+        }
         let out = o.real_mut();
-        out.extend_from_slice(i.as_real().unwrap());
+        out.extend_from_slice(i.as_real().unwrap_or(&[]));
         if !self.enabled {
             return Ok(());
         }
