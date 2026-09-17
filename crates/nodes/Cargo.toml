@@ -65,6 +65,12 @@ name = "split"
 
 
 
+# The pictures and the sound are what it prints, and both come out of the
+# container reader.
+[[example]]
+name = "dvbt_video"
+required-features = ["ffmpeg"]
+
 [[example]]
 name = "wifi_probe"
 
