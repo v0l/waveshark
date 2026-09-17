@@ -25,6 +25,9 @@ pub enum Transport {
     Gpsd(String),
     /// A serial port carrying NMEA, and the rate it runs at.
     Serial { path: String, baud: u32 },
+    /// A sub-ghz-modem on a serial port, whose NMEA arrives inside the
+    /// modem's own framing rather than as bare lines.
+    Modem { path: String, baud: u32 },
 }
 
 impl Transport {
@@ -48,6 +51,13 @@ impl Transport {
         let s = s.trim();
         if s.is_empty() {
             return None;
+        }
+        if let Some(rest) = s.strip_prefix("modem:") {
+            let (path, baud) = match rest.split_once('@') {
+                Some((p, b)) => (p.to_string(), b.parse().ok()?),
+                None => (rest.to_string(), crate::modem::BAUD),
+            };
+            return (!path.is_empty()).then_some(Self::Modem { path, baud });
         }
         if let Some(rest) = s.strip_prefix("gpsd:") {
             let host = if rest.contains(':') { rest.to_string() } else { format!("{rest}:2947") };
@@ -75,6 +85,7 @@ impl std::fmt::Display for Transport {
         match self {
             Self::Gpsd(h) => write!(f, "gpsd:{h}"),
             Self::Serial { path, baud } => write!(f, "{path}@{baud}"),
+            Self::Modem { path, baud } => write!(f, "modem:{path}@{baud}"),
         }
     }
 }
@@ -193,6 +204,7 @@ fn run(
         let opened: std::io::Result<Box<dyn Read + Send>> = match &cfg.transport {
             Transport::Gpsd(addr) => open_gpsd(addr),
             Transport::Serial { path, baud } => open_serial(path, *baud),
+            Transport::Modem { path, baud } => open_modem(path, *baud),
         };
         match opened {
             Ok(stream) => {
@@ -337,12 +349,26 @@ fn iso8601(s: &str) -> Option<u64> {
     )
 }
 
+/// A sub-ghz-modem, which answers with frames rather than lines.
+///
+/// The feed is asked for on every connect because the modem's own setting is
+/// only remembered across a reboot if somebody saved it, and a reconnect here
+/// is usually the board having been reset.
+fn open_modem(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
+    let port = open_port(path, baud, Duration::from_secs(10))?;
+    Ok(Box::new(crate::modem::Feed::start(port)?))
+}
+
 fn open_gpsd(addr: &str) -> std::io::Result<Box<dyn Read + Send>> {
     let mut sock = std::net::TcpStream::connect(addr)?;
     sock.set_read_timeout(Some(Duration::from_secs(30)))?;
     // Without a watch gpsd says hello and then nothing at all.
     sock.write_all(b"?WATCH={\"enable\":true,\"json\":true};\n")?;
     Ok(Box::new(sock))
+}
+
+fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
+    Ok(Box::new(open_port(path, baud, Duration::from_secs(10))?))
 }
 
 /// Open a serial port and put it in the shape NMEA arrives in: eight bits, no
@@ -352,8 +378,12 @@ fn open_gpsd(addr: &str) -> std::io::Result<Box<dyn Read + Send>> {
 /// USB CDC device ignores the baud rate and works either way, which is why
 /// leaving it out appears to work; a real UART on a header does not, and
 /// comes back as line noise that fails every checksum.
+///
+/// `idle` ends a read that has seen nothing, so a port with nothing on it
+/// does not hang the thread forever. A feed wants ten seconds of patience; a
+/// probe wants a fifth of a second and several tries.
 #[cfg(unix)]
-fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
+pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<std::fs::File> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
     let fd = file.as_raw_fd();
@@ -383,15 +413,15 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
         libc::cfsetospeed(&mut tty, speed);
         tty.c_cflag |= libc::CLOCAL | libc::CREAD;
         tty.c_cflag &= !libc::CRTSCTS;
-        // Block until at least one byte, with a ten second idle timeout, so a
-        // silent port ends the read rather than hanging the thread forever.
+        // VTIME is in tenths of a second, and a zero would mean no timeout at
+        // all, so anything under a tenth becomes one.
         tty.c_cc[libc::VMIN] = 0;
-        tty.c_cc[libc::VTIME] = 100;
+        tty.c_cc[libc::VTIME] = (idle.as_millis() / 100).clamp(1, 255) as _;
         if libc::tcsetattr(fd, libc::TCSANOW, &tty) != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }
-    Ok(Box::new(file))
+    Ok(file)
 }
 
 /// The same port on Windows: a DCB instead of a termios, and read timeouts
@@ -401,7 +431,7 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
 /// whatever the driver was installed with; only the four things NMEA fixes
 /// are written, and a driver that wanted RTS/CTS keeps it.
 #[cfg(windows)]
-fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
+pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<std::fs::File> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Devices::Communication::{
         COMMTIMEOUTS, DCB, GetCommState, SetCommState, SetCommTimeouts,
@@ -427,12 +457,12 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
         if SetCommState(handle, &dcb) == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // Ten seconds of silence ends the read, as VTIME does on unix, so a
-        // port with nothing on it does not hang the thread forever.
+        // Silence ends the read, as VTIME does on unix, so a port with
+        // nothing on it does not hang the thread forever.
         let timeouts = COMMTIMEOUTS {
             ReadIntervalTimeout: 0,
             ReadTotalTimeoutMultiplier: 0,
-            ReadTotalTimeoutConstant: 10_000,
+            ReadTotalTimeoutConstant: idle.as_millis().min(u32::MAX as u128) as u32,
             WriteTotalTimeoutMultiplier: 0,
             WriteTotalTimeoutConstant: 0,
         };
@@ -440,7 +470,7 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
             return Err(std::io::Error::last_os_error());
         }
     }
-    Ok(Box::new(file))
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -466,6 +496,23 @@ mod tests {
             Some(Transport::Gpsd("127.0.0.1:2947".into()))
         );
         assert_eq!(Transport::parse(""), None);
+        // A modem is a port with a framing on it, and keeps its own prefix so
+        // that a path alone is never opened as one: enabling a feed on
+        // somebody's u-blox would write bytes at a device that did not ask.
+        assert_eq!(
+            Transport::parse("modem:/dev/ttyACM0"),
+            Some(Transport::Modem { path: "/dev/ttyACM0".into(), baud: 115_200 })
+        );
+        assert_eq!(
+            Transport::parse("modem:/dev/ttyUSB1@9600"),
+            Some(Transport::Modem { path: "/dev/ttyUSB1".into(), baud: 9_600 })
+        );
+        assert_eq!(Transport::parse("modem:"), None);
+        // And what it prints is what it parses, for a settings file that has
+        // to survive a round trip.
+        for t in ["modem:/dev/ttyACM0@115200", "/dev/ttyACM0@9600", "gpsd:127.0.0.1:2947"] {
+            assert_eq!(Transport::parse(t).map(|p| p.to_string()).as_deref(), Some(t));
+        }
     }
 
     /// gpsd's own wire format, from a daemon watching a u-blox.

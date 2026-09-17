@@ -405,6 +405,17 @@ pub(super) struct LogState {
     pub sigid: Option<DecodeRecord>,
 }
 
+/// What a search for a modem on the serial ports found, or is still looking
+/// for.
+///
+/// The results are offered and never applied: a probe opens a port, and
+/// deciding which GPS the station reads is the operator's, so this holds
+/// candidates until one is picked.
+pub struct ModemScan {
+    pub done: std::sync::mpsc::Receiver<Vec<gps::Found>>,
+    pub found: Option<Vec<gps::Found>>,
+}
+
 /// The device database, as the interface holds it.
 ///
 /// The survey itself is a node on the radio thread; what lives here is where
@@ -434,6 +445,9 @@ pub struct SurveyState {
     /// apart from the live one so a half-written port does not restart the
     /// reader on every keystroke.
     pub gps_edit: Option<String>,
+    /// A search of the serial ports for a sub-ghz-modem, which takes a couple
+    /// of seconds per port and so runs off the frame.
+    pub gps_scan: Option<ModemScan>,
     /// The feed to wigle.net: who it uploads as, and what it has sent.
     pub wigle: WigleState,
     /// The feed to beacondb.net: whether its dialog is up, and what it has
@@ -578,6 +592,7 @@ impl Default for SurveyState {
             db: None,
             refreshed: None,
             gps_edit: None,
+            gps_scan: None,
             wigle: WigleState::default(),
             beacondb: BeaconDbState::default(),
             homeassistant: HomeAssistantState::default(),

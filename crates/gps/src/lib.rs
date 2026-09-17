@@ -12,6 +12,12 @@
 //! always there and is exclusive, so a receiver holding it stops anything
 //! else reading the same GPS.
 //!
+//! A third transport is a sub-ghz-modem, which is a LoRa board that will
+//! stream NMEA to the host inside its own framing. It is the same parser
+//! again: `modem` de-frames the feed back into sentences, and `modem::
+//! discover` is what finds one, since a board on a USB bridge looks like any
+//! other serial port until it is asked.
+//!
 //! # What a fix has to carry
 //!
 //! Latitude, longitude and the time it was taken, or it is not evidence about
@@ -24,8 +30,10 @@
 //! fields from the moment they are powered, and recording those as position
 //! zero puts a survey in the Gulf of Guinea.
 
+pub mod modem;
 pub mod nmea;
 pub mod source;
 
+pub use modem::{Found, GpsState, Info};
 pub use nmea::{Fix, Sentence, parse_sentence};
 pub use source::{Config, Sky, Source, Transport};

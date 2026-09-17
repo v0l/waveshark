@@ -6,8 +6,23 @@
 use super::*;
 use crate::agent::config::{Reading, Speech};
 use crate::ui::widgets::{
-    card, choice, field, field_then, footer, lamp, prose, secret, section, switch,
+    card, choice, field, field_then, footer, hint, lamp, prose, row, secret, section, switch,
 };
+
+/// Ask every USB serial port whether a sub-ghz-modem is on it.
+///
+/// Off the frame, because a probe waits two seconds for a board that resets
+/// when its port is opened and there can be half a dozen ports.
+fn scan_for_modems() -> crate::ui::state::ModemScan {
+    let (tx, done) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("modem-scan".into())
+        .spawn(move || {
+            let _ = tx.send(gps::modem::discover());
+        })
+        .ok();
+    crate::ui::state::ModemScan { done, found: None }
+}
 
 /// What the lamp says for a voice made here: the speaker, and whether its
 /// files are on disc or have still to be fetched.
@@ -1301,19 +1316,36 @@ impl App {
         let help = "A fix moves the station position, which is the position everything \
                     else works from. The reader always runs and looks for a gpsd on this \
                     machine, so nothing need be set here unless the receiver is a serial \
-                    port or a daemon elsewhere: a device path such as /dev/ttyACM0, or \
-                    gpsd:host.";
+                    port or a daemon elsewhere: a device path such as /dev/ttyACM0, \
+                    gpsd:host, or modem:/dev/ttyACM0 for a sub-ghz-modem. DETECT asks \
+                    every USB serial port whether a modem is on it.";
         let mut set: Option<Option<gps::Transport>> = None;
         let saved = self.setting(|s| s.gps.clone());
         row_help(ui, "gps", help, |ui| {
             let text = self.survey.gps_edit.get_or_insert_with(|| saved.clone());
             let (mut pressed, mut auto) = (false, false);
             let named = !saved.is_empty();
-            let reserve = if named { 92.0 } else { 44.0 };
+            let scanning = self
+                .survey
+                .gps_scan
+                .as_ref()
+                .is_some_and(|s: &crate::ui::state::ModemScan| s.found.is_none());
+            let reserve = if named { 178.0 } else { 130.0 };
             let r = field_then(ui, text, gps::Transport::LOCAL_GPSD, reserve, |ui| {
                 pressed = ui.small_button("SET").clicked();
                 if named {
                     auto = ui.small_button("AUTO").clicked();
+                }
+                if ui
+                    .add_enabled(!scanning, egui::Button::new("DETECT").small())
+                    .on_hover_text(
+                        "Opens each USB serial port in turn and asks for a modem's INFO. \
+                         A port another program is reading cannot be opened, so close \
+                         anything holding one first.",
+                    )
+                    .clicked()
+                {
+                    self.survey.gps_scan = Some(scan_for_modems());
                 }
             });
             let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1332,6 +1364,7 @@ impl App {
             self.set_gps(t);
             self.survey.gps_edit = None;
         }
+        self.modem_rows(ui);
         // What the link is doing, which is three different states an operator
         // has to be able to tell apart: nothing listening on the other end, a
         // receiver talking but with no sky, and a real fix.
@@ -1371,6 +1404,56 @@ impl App {
         // without it a fix arriving while nothing else is moving would sit
         // unshown until the pointer did.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
+    /// What DETECT found, offered rather than applied.
+    ///
+    /// A modem answering on a port is not a decision: the operator may be
+    /// running a real gpsd over a better receiver, and the board with no GNSS
+    /// on it is listed too so that finding it is not mistaken for finding
+    /// nothing. USE is what changes the station's source.
+    fn modem_rows(&mut self, ui: &mut egui::Ui) {
+        let Some(scan) = self.survey.gps_scan.as_mut() else {
+            return;
+        };
+        if scan.found.is_none() {
+            if let Ok(found) = scan.done.try_recv() {
+                scan.found = Some(found);
+            }
+        }
+        let Some(found) = scan.found.clone() else {
+            hint(ui, "asking the serial ports for a modem");
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            return;
+        };
+        if found.is_empty() {
+            hint(ui, "no modem answered on any usb serial port");
+            return;
+        }
+        let mut pick = None;
+        for f in &found {
+            let path = match &f.transport {
+                gps::Transport::Modem { path, .. } => path.clone(),
+                other => other.to_string(),
+            };
+            let usable = f.info.gps.has_receiver();
+            row(ui, "modem", |ui| {
+                if ui
+                    .add_enabled(usable, egui::Button::new("USE").small())
+                    .on_disabled_hover_text("this board has no GNSS receiver on it")
+                    .clicked()
+                {
+                    pick = Some(f.transport.clone());
+                }
+                let line = format!("{path}, {}", f.info.summary());
+                theme::Line::new().value(line).show(ui);
+            });
+        }
+        if let Some(t) = pick {
+            self.survey.gps_edit = Some(t.to_string());
+            self.set_gps(Some(t));
+            self.survey.gps_scan = None;
+        }
     }
 
     /// What is in the dataset cache, and the buttons that go and ask.

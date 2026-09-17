@@ -21,6 +21,8 @@ the code is in the commit log.
 - The recordings table filters by talkgroup, caller, system or frequency, and
   a row opens its own conversation. Overs are saved as the Opus they were
   recorded as, through a file dialog.
+- A sub-ghz-modem can be the station's GPS: DETECT in the position settings
+  finds one on a USB serial port and offers its fix feed.
 - Ford and Renault tyre pressure sensors, with pressure, temperature and
   whether the wheel is moving.
 - Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
