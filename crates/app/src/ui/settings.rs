@@ -1180,12 +1180,13 @@ impl App {
         Self::version_settings(ui);
     }
 
-    /// What this build is, and what the newest published release is.
+    /// What this build is, what the newest published release is, and the one
+    /// button that fetches it.
     ///
-    /// Nothing is downloaded here. The answer an operator wants is whether
-    /// the binary they are running is the current one, and where to get the
-    /// one that is; the archive's name is shown because a release carries one
-    /// per platform and picking the wrong one is the usual mistake.
+    /// The asset's name is shown because a release carries one per platform
+    /// and picking the wrong one is the usual mistake. Installing is the
+    /// system's job: this downloads the package and opens it, then closes the
+    /// window, because an installer cannot replace a program that is running.
     fn version_settings(ui: &mut egui::Ui) {
         let t = crate::i18n::t;
         let state = crate::update::state();
@@ -1219,15 +1220,18 @@ impl App {
                 crate::update::State::Newer(r) => {
                     lamp(ui, true, &format!("{} is available", r.version));
                     match &r.asset {
-                        Some(a) => reading(
-                            ui,
-                            "archive",
-                            format!("{} ({})", a.name, crate::data::fmt_bytes(a.bytes)),
-                        ),
+                        Some(a) => {
+                            reading(
+                                ui,
+                                "download",
+                                format!("{} ({})", a.name, crate::data::fmt_bytes(a.bytes)),
+                            );
+                            Self::install_row(ui, a);
+                        }
                         None => reading(
                             ui,
-                            "archive",
-                            format!("none for {} in that release", crate::update::platform()),
+                            "download",
+                            format!("nothing for {} in that release", crate::update::platform()),
                         ),
                     }
                     if !r.page.is_empty() && ui.button(legend("OPEN THE RELEASE")).clicked() {
@@ -1239,8 +1243,50 @@ impl App {
         });
         // The check runs on a thread of its own, so without this the answer
         // sits unshown until the pointer moves.
-        if busy {
+        if busy || matches!(crate::update::install_state(), crate::update::Install::Fetching { .. })
+        {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        }
+    }
+
+    /// The button that fetches the new version, and how far it has got.
+    fn install_row(ui: &mut egui::Ui, asset: &crate::update::Asset) {
+        use crate::update::{Install, Kind};
+        let installer = asset.kind == Kind::Installer;
+        match crate::update::install_state() {
+            Install::Idle => {
+                let label = if installer { "DOWNLOAD AND INSTALL" } else { "DOWNLOAD" };
+                if ui.button(legend(label)).clicked() {
+                    crate::update::install(asset.clone());
+                }
+            }
+            Install::Fetching { got, total } => {
+                let share = if total > 0 { got as f32 / total as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(share).desired_height(6.0));
+                reading(
+                    ui,
+                    "fetched",
+                    format!("{} of {}", crate::data::fmt_bytes(got), crate::data::fmt_bytes(total)),
+                );
+            }
+            Install::Launched(path) => {
+                // Windows locks the file of a running program and macOS
+                // refuses to replace a running bundle, so on those the last
+                // thing this window does is close. A Linux package manager
+                // replaces /usr/bin/waveshark under a running one without
+                // complaint, and closing the receiver to install would be
+                // rude rather than necessary.
+                let must_close = installer && (cfg!(windows) || cfg!(target_os = "macos"));
+                if must_close {
+                    lamp(ui, true, "the installer is open; WaveShark is closing");
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                } else if installer {
+                    lamp(ui, true, "handed to the system installer");
+                } else {
+                    lamp(ui, true, &format!("saved to {}", path.display()));
+                }
+            }
+            Install::Failed(e) => lamp(ui, false, &e),
         }
     }
 

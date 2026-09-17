@@ -6,11 +6,14 @@
 //! (`/releases/latest`, which skips drafts and pre-releases), so the check is
 //! a single unauthenticated GET and a version comparison.
 //!
-//! Nothing here downloads or replaces anything. It reports, and the pane that
-//! draws it offers the release page.
+//! The check itself replaces nothing. What it can do is fetch the installer
+//! this platform uses and hand it to the system: an installer knows how to
+//! replace a running program and a program does not know how to replace
+//! itself, least of all on Windows, where the file is locked while it runs.
 
 use parking_lot::RwLock;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -29,7 +32,7 @@ pub struct Release {
     pub tag: String,
     /// The release page, which is where a person goes.
     pub page: String,
-    /// The archive for this platform, when the release carries one. Absent
+    /// What this platform installs from, when the release carries it. Absent
     /// for a platform the workflow does not build, and for a release whose
     /// assets are still uploading.
     pub asset: Option<Asset>,
@@ -42,6 +45,17 @@ pub struct Asset {
     pub name: String,
     pub url: String,
     pub bytes: u64,
+    pub kind: Kind,
+}
+
+/// Whether the system can install the asset or the operator has to unpack it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A .msi, .dmg, .deb or .rpm: handing it to the desktop starts an
+    /// install.
+    Installer,
+    /// A .tar.gz or .zip, which is a folder and not an install.
+    Archive,
 }
 
 /// Where the check has got to. `Newer` is the only state that asks anything
@@ -109,6 +123,132 @@ pub fn check_now() {
     }
 }
 
+/// How far the download of an installer has got. Separate from [`State`],
+/// which says what the release is: an operator can ask for the installer and
+/// then press check again while it comes down.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Install {
+    #[default]
+    Idle,
+    /// Bytes so far, and the size the release said, which is what draws a bar.
+    Fetching {
+        got: u64,
+        total: u64,
+    },
+    /// Downloaded and handed to the desktop. WaveShark has to close for the
+    /// installer to replace it, so the pane that sees this closes the window.
+    Launched(PathBuf),
+    Failed(String),
+}
+
+static INSTALL: RwLock<Install> = RwLock::new(Install::Idle);
+static FETCHING: AtomicBool = AtomicBool::new(false);
+
+pub fn install_state() -> Install {
+    INSTALL.read().clone()
+}
+
+/// Fetch this platform's installer and hand it to the system.
+///
+/// Nothing is unpacked or overwritten here. The file goes beside the other
+/// downloads, under the cache directory, and then to whatever the desktop
+/// opens a package with: `msiexec` behind the .msi, Finder behind the .dmg,
+/// the distribution's package installer behind the .deb or .rpm.
+pub fn install(asset: Asset) {
+    if FETCHING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    *INSTALL.write() = Install::Fetching { got: 0, total: asset.bytes };
+    let started = std::thread::Builder::new().name("update-fetch".into()).spawn(move || {
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|rt| rt.block_on(download(&asset)))
+            .and_then(|path| hand_over(&path).map(|()| path));
+        *INSTALL.write() = match outcome {
+            Ok(path) => {
+                tracing::info!(file = %path.display(), "the installer is open");
+                Install::Launched(path)
+            }
+            Err(e) => {
+                tracing::warn!("the installer could not be fetched: {e}");
+                Install::Failed(e)
+            }
+        };
+        FETCHING.store(false, Ordering::Release);
+    });
+    if started.is_err() {
+        FETCHING.store(false, Ordering::Release);
+        *INSTALL.write() = Install::Failed("could not start the download".into());
+    }
+}
+
+async fn download(asset: &Asset) -> Result<PathBuf, String> {
+    let dir = crate::data::cache_dir().unwrap_or_else(std::env::temp_dir).join("updates");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(&asset.name);
+
+    // A release asset is tens of megabytes over a link that may be a phone,
+    // so the timeout is long and the file is written as it arrives rather
+    // than held whole in memory.
+    let http = httpc::client(Duration::from_secs(600)).map_err(|e| e.to_string())?;
+    let mut res = http
+        .get(&asset.url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let total = res.content_length().unwrap_or(asset.bytes);
+    let part = path.with_extension("part");
+    let mut file = tokio::fs::File::create(&part).await.map_err(|e| e.to_string())?;
+    let mut got = 0u64;
+    while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        got += chunk.len() as u64;
+        *INSTALL.write() = Install::Fetching { got, total };
+    }
+    use tokio::io::AsyncWriteExt;
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+    // The size the release published is the only check available without a
+    // signature, and a truncated installer is the failure worth catching:
+    // a proxy that answers an error page is otherwise run as a package.
+    if asset.bytes > 0 && got != asset.bytes {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("{got} bytes arrived of {} expected", asset.bytes));
+    }
+    std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Open the downloaded file with whatever the desktop installs packages with.
+fn hand_over(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // `start` is a shell builtin rather than a program, and the empty
+        // string is the window title `start` reads its first argument as.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    cmd.spawn().map(|_| ()).map_err(|e| format!("{e}: {}", path.display()))
+}
+
 async fn fetch() -> Result<Release, String> {
     // GitHub rejects a request with no agent, which is one of the reasons
     // every client here is built the same way.
@@ -152,17 +292,104 @@ fn parse(body: &str) -> Result<Release, String> {
     if version.is_empty() {
         return Err("the release has no tag".into());
     }
-    let asset = j
-        .assets
-        .into_iter()
-        .find(|a| a.name.starts_with(&format!("waveshark-{}", platform())))
-        .map(|a| Asset { name: a.name, url: a.browser_download_url, bytes: a.size });
+    let asset = pick(&j.assets);
     Ok(Release { version, tag: j.tag_name, page: j.html_url, asset, published: j.published_at })
 }
 
-/// The name the build workflow gives this platform's archive, which is what
-/// picks one asset out of the release.
+/// The one asset of a release this build installs from.
+///
+/// Every name is `waveshark-<platform><suffix>`, and the whole name is
+/// matched rather than its start: `waveshark-linux-x86_64.tar.gz` and
+/// `waveshark-linux-x86_64-cuda.tar.gz` share a prefix, and a plain build
+/// offered the CUDA archive gets a binary that will not start.
+///
+/// The first suffix this platform can use wins, so an installer is preferred
+/// to the archive of the same build.
+fn pick(assets: &[JsonAsset]) -> Option<Asset> {
+    let stem = format!("waveshark-{}", platform());
+    wanted().into_iter().find_map(|(suffix, kind)| {
+        let name = format!("{stem}{suffix}");
+        let a = assets.iter().find(|a| a.name == name)?;
+        Some(Asset {
+            name: a.name.clone(),
+            url: a.browser_download_url.clone(),
+            bytes: a.size,
+            kind,
+        })
+    })
+}
+
+/// The suffixes this platform can install from, best first.
+fn wanted() -> Vec<(&'static str, Kind)> {
+    if cfg!(target_os = "windows") {
+        vec![(".msi", Kind::Installer), (".zip", Kind::Archive)]
+    } else if cfg!(target_os = "macos") {
+        vec![(".dmg", Kind::Installer), (".tar.gz", Kind::Archive)]
+    } else {
+        let mut v = Vec::new();
+        // Which package a Linux machine can install is not a compile-time
+        // answer: one binary runs on both families, so ask the machine.
+        match family() {
+            Family::Debian => v.push((".deb", Kind::Installer)),
+            Family::Redhat => v.push((".rpm", Kind::Installer)),
+            Family::Other => {}
+        }
+        v.push((".tar.gz", Kind::Archive));
+        v
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Family {
+    Debian,
+    Redhat,
+    Other,
+}
+
+/// Which packaging family this machine uses, read from `/etc/os-release`.
+///
+/// `ID_LIKE` as well as `ID`, because a derivative names its parent there and
+/// there are far more derivatives than parents. Anything else is `Other`,
+/// which offers the archive rather than a package that would not install.
+fn family() -> Family {
+    let Ok(text) = std::fs::read_to_string("/etc/os-release") else {
+        return Family::Other;
+    };
+    let ids = text
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| *k == "ID" || *k == "ID_LIKE")
+        .flat_map(|(_, v)| v.trim_matches('"').split_whitespace())
+        .collect::<Vec<_>>();
+    if ids.iter().any(|id| matches!(*id, "debian" | "ubuntu" | "raspbian")) {
+        Family::Debian
+    } else if ids.iter().any(|id| matches!(*id, "rhel" | "fedora" | "centos" | "suse" | "opensuse"))
+    {
+        Family::Redhat
+    } else {
+        Family::Other
+    }
+}
+
+/// The name the build workflow gives this platform's assets, which is what
+/// picks them out of the release.
+///
+/// The CUDA builds are their own platform: they are a different binary, and
+/// one offered to the other leaves an operator with something that does not
+/// start.
 pub fn platform() -> &'static str {
+    if cfg!(feature = "cuda") { cuda_platform() } else { plain_platform() }
+}
+
+fn cuda_platform() -> &'static str {
+    match plain_platform() {
+        "windows-x86_64" => "windows-x86_64-cuda",
+        "linux-x86_64" => "linux-x86_64-cuda",
+        other => other,
+    }
+}
+
+fn plain_platform() -> &'static str {
     const OS: &str = if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -247,6 +474,31 @@ mod tests {
         assert!(!is_newer("nightly", "0.1.0"));
     }
 
+    /// Every asset a release carries, so the test runs the same on whichever
+    /// platform and feature set built it.
+    fn every_asset() -> Vec<JsonAsset> {
+        [
+            "waveshark-linux-x86_64.tar.gz",
+            "waveshark-linux-x86_64.deb",
+            "waveshark-linux-x86_64.rpm",
+            "waveshark-linux-x86_64-cuda.tar.gz",
+            "waveshark-linux-arm64.tar.gz",
+            "waveshark-windows-x86_64.zip",
+            "waveshark-windows-x86_64.msi",
+            "waveshark-windows-x86_64-cuda.zip",
+            "waveshark-macos-arm64.tar.gz",
+            "waveshark-macos-arm64.dmg",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| JsonAsset {
+            name: (*name).to_string(),
+            browser_download_url: format!("https://example.invalid/{name}"),
+            size: 100 + i as u64,
+        })
+        .collect()
+    }
+
     #[test]
     fn a_release_reads_its_tag_page_and_asset() {
         let body = r#"{
@@ -256,8 +508,12 @@ mod tests {
             "assets": [
                 {"name": "waveshark-linux-x86_64.tar.gz",
                  "browser_download_url": "https://example.invalid/l.tar.gz", "size": 12},
+                {"name": "waveshark-linux-x86_64-cuda.tar.gz",
+                 "browser_download_url": "https://example.invalid/lc.tar.gz", "size": 78},
                 {"name": "waveshark-windows-x86_64.zip",
                  "browser_download_url": "https://example.invalid/w.zip", "size": 34},
+                {"name": "waveshark-windows-x86_64-cuda.zip",
+                 "browser_download_url": "https://example.invalid/wc.zip", "size": 90},
                 {"name": "waveshark-macos-arm64.tar.gz",
                  "browser_download_url": "https://example.invalid/m.tar.gz", "size": 56}
             ]
@@ -267,8 +523,65 @@ mod tests {
         assert_eq!(r.tag, "v0.3.1");
         assert!(r.page.ends_with("v0.3.1"));
         let a = r.asset.expect("an asset for the platform this test runs on");
-        assert!(a.name.starts_with(&format!("waveshark-{}", platform())), "{}", a.name);
+        assert_eq!(a.kind, Kind::Archive, "{}", a.name);
+        assert_eq!(a.name, format!("waveshark-{}{}", platform(), archive_suffix()));
         assert!(a.bytes > 0);
+    }
+
+    fn archive_suffix() -> &'static str {
+        if cfg!(target_os = "windows") { ".zip" } else { ".tar.gz" }
+    }
+
+    #[test]
+    fn an_installer_is_preferred_to_the_archive() {
+        let a = pick(&every_asset()).expect("an asset for this platform");
+        // Every platform the workflow builds an installer for gets it. A
+        // Linux machine of neither packaging family, and the CUDA builds,
+        // which are published as archives alone, get the archive.
+        let installed = cfg!(target_os = "windows")
+            || cfg!(target_os = "macos")
+            || (cfg!(target_os = "linux") && family() != Family::Other);
+        let expected =
+            if installed && !cfg!(feature = "cuda") { Kind::Installer } else { Kind::Archive };
+        assert_eq!(a.kind, expected, "{}", a.name);
+        assert!(a.name.starts_with(&format!("waveshark-{}", platform())), "{}", a.name);
+    }
+
+    #[test]
+    fn a_plain_build_is_not_offered_the_cuda_asset() {
+        // The names share a prefix, so a match on the start of the name picks
+        // whichever GitHub listed first, and a binary linked against cudart
+        // does not start on a machine without it.
+        let assets = every_asset();
+        let chosen = pick(&assets).expect("an asset");
+        assert_eq!(chosen.name.contains("-cuda"), cfg!(feature = "cuda"), "{}", chosen.name);
+    }
+
+    #[test]
+    fn a_release_carrying_only_the_other_platforms_offers_nothing() {
+        let assets = vec![JsonAsset {
+            name: "waveshark-solaris-sparc.tar.gz".into(),
+            browser_download_url: "https://example.invalid/s".into(),
+            size: 1,
+        }];
+        assert!(pick(&assets).is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_packaging_family_is_read_from_os_release() {
+        // Whatever this machine is, the answer has to be one of the three and
+        // has to agree with what is offered.
+        let f = family();
+        let wants_deb = wanted().iter().any(|(s, _)| *s == ".deb");
+        let wants_rpm = wanted().iter().any(|(s, _)| *s == ".rpm");
+        match f {
+            Family::Debian => assert!(wants_deb && !wants_rpm),
+            Family::Redhat => assert!(wants_rpm && !wants_deb),
+            Family::Other => assert!(!wants_deb && !wants_rpm),
+        }
+        // The archive is always the last resort.
+        assert_eq!(wanted().last().map(|(s, _)| *s), Some(".tar.gz"));
     }
 
     #[test]

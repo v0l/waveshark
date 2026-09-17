@@ -48,14 +48,19 @@ LimeSDR both of those plus full duplex.
 
 ## Install
 
-Grab a build from [releases](https://github.com/v0l/waveshark/releases): Linux
-x86_64, Windows x86_64, or macOS on Apple silicon. Linux and Windows also have
-a CUDA build, which is the same receiver with the speech models and the key
-search on the GPU.
+Grab a build from [releases](https://github.com/v0l/waveshark/releases): a
+`.deb` or `.rpm` for Linux x86_64, an `.msi` for Windows x86_64, a `.dmg` for
+macOS on Apple silicon. Setup checks for a newer release and can fetch and
+open the one for the machine it is running on.
 
-The Linux binary links librtlsdr rather than bundling it, so install
-`librtlsdr0` or `rtl-sdr` for the udev rules that let you open a dongle without
-root. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
+The archives are still there for anyone who would rather unpack a folder, and
+Linux and Windows also have a CUDA build, as an archive only: it is the same
+receiver with the speech models and the key search on the GPU, and installing
+it over the plain one would be two packages fighting for the same path.
+
+The Linux packages pull in librtlsdr, which brings the udev rules that let you
+open a dongle without root; from the archive, install `librtlsdr0` or `rtl-sdr`
+yourself. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
 [Zadig](https://zadig.akeo.ie/) first or nothing can open the device. The
 Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
 is built without the driver. Only the macOS build shows pictures off a

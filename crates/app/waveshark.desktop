@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=WaveShark
+GenericName=Radio receiver
+Comment=A software defined radio receiver that decodes what it hears
+Exec=waveshark
+Icon=waveshark
+Terminal=false
+Categories=HamRadio;Network;Utility;
+Keywords=sdr;radio;scanner;rtlsdr;hackrf;

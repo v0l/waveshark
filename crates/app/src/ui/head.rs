@@ -536,7 +536,7 @@ impl App {
                     a.name
                 ),
                 None => format!(
-                    "{} is out; this is {}, and that release carries no {} archive.",
+                    "{} is out; this is {}, and that release carries nothing for {}.",
                     r.version,
                     crate::update::running(),
                     crate::update::platform()

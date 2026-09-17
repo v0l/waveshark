@@ -26,6 +26,11 @@ jobs:
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: --no-default-features --features limesdr,stt,mcp
+            # Installers are built for the plain builds alone. A second
+            # package of the same name that installs a different binary to
+            # the same path is a package manager's idea of a conflict, and
+            # the CUDA build is a different binary; it stays an archive.
+            installers: deb,rpm
           # The same again with the speech model on the card. A separate
           # asset rather than one binary that tries: candle links cudart and
           # cublas at load, so a CUDA build does not start on a machine
@@ -42,10 +47,12 @@ jobs:
             os: macos-14
             target: aarch64-apple-darwin
             features: --no-default-features --features limesdr,stt,mcp,ffmpeg
+            installers: dmg
           - name: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             features: --no-default-features --features stt,mcp
+            installers: msi
           - name: windows-x86_64-cuda
             os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -228,12 +235,72 @@ jobs:
           "@ | Out-File -Encoding utf8 stage\RUNNING.txt
           Compress-Archive -Path stage\* -DestinationPath waveshark-${{ matrix.name }}.zip
 
+      # The installers, built from the metadata in crates/app/Cargo.toml after
+      # the archive and never before it: the macOS step rewrites the binary to
+      # look for its libraries inside the bundle, and an archive made from that
+      # binary would not start. cargo-packager has no RPM, so that one package
+      # comes from cargo-generate-rpm reading the same manifest. Both tools are
+      # downloaded rather than compiled, and pinned, so a release is made with
+      # the packager it was tested with.
+      - uses: cargo-bins/cargo-binstall@main
+        if: matrix.installers
+      - name: Packaging tools
+        if: matrix.installers
+        shell: bash
+        run: |
+          cargo binstall -y --no-confirm cargo-packager@0.11.8
+          case '${{ matrix.installers }}' in
+            *rpm*) cargo binstall -y --no-confirm cargo-generate-rpm@0.21.0 ;;
+          esac
+
+      - name: Installers (linux)
+        if: runner.os == 'Linux' && matrix.installers
+        shell: bash
+        run: |
+          cargo packager -p app -r --target ${{ matrix.target }} -f deb -o "$PWD/dist"
+          mv dist/*.deb waveshark-${{ matrix.name }}.deb
+          # The RPM names Fedora's packages rather than what ldd found on this
+          # Debian runner, which is why its dependencies are written out.
+          cargo generate-rpm -p crates/app --target ${{ matrix.target }} \
+            -o waveshark-${{ matrix.name }}.rpm
+
+      - name: Installers (macos)
+        if: runner.os == 'macOS' && matrix.installers
+        env:
+          # Ad-hoc. Apple silicon kills a binary whose signature does not
+          # match its contents, and rewriting the load paths below changes
+          # them; nothing here is notarised, so this only gets it started.
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          brew install dylibbundler
+          mkdir -p dist-extra
+          dylibbundler -of -b -x target/${{ matrix.target }}/release/waveshark \
+            -d dist-extra -p @executable_path/../Resources/
+          cargo packager -p app -r --target ${{ matrix.target }} -f app -o "$PWD/dist"
+          codesign --force --deep --sign - dist/WaveShark.app
+          cargo packager -p app -r --target ${{ matrix.target }} -f dmg -o "$PWD/dist"
+          mv dist/*.dmg waveshark-${{ matrix.name }}.dmg
+
+      - name: Installers (windows)
+        if: runner.os == 'Windows' && matrix.installers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist-extra | Out-Null
+          Copy-Item "$env:VCPKG_BIN\*.dll" dist-extra\ -ErrorAction SilentlyContinue
+          Copy-Item stage\RUNNING.txt dist-extra\
+          cargo packager -p app -r --target ${{ matrix.target }} -f wix -o "$PWD\dist"
+          Move-Item dist\*.msi waveshark-${{ matrix.name }}.msi
+
       - uses: actions/upload-artifact@v4
         with:
           name: waveshark-${{ matrix.name }}
           path: |
             waveshark-*.tar.gz
             waveshark-*.zip
+            waveshark-*.deb
+            waveshark-*.rpm
+            waveshark-*.msi
+            waveshark-*.dmg
           if-no-files-found: error
 
   release:
@@ -262,3 +329,7 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.msi
+            artifacts/*.dmg
