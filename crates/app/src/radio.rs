@@ -516,6 +516,11 @@ pub enum Cmd {
     /// on the packet bus, so like the packet log this is a command to the
     /// radio thread rather than a setting the interface keeps.
     Survey(Option<std::path::PathBuf>),
+    /// Walk the dial across a band, or stop walking. The walk is a node on
+    /// the packet bus, so this is a command to the radio thread like the
+    /// survey; where it goes and what it does with a hit is the plan's,
+    /// because every step rebuilds the graph under it.
+    BandScan(crate::chain::BandScan),
     /// Upload what is heard to wigle.net as this account, or `None` to stop.
     /// The feed is a node on the packet bus, so this is a command like the
     /// survey rather than a setting the interface keeps to itself.
@@ -1029,6 +1034,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         fronts,
         feeds: Vec::new(),
         tx: None,
+        scan: Default::default(),
         edits: Default::default(),
         record,
         capture: false,
@@ -1313,6 +1319,9 @@ pub struct Status {
     pub wigle: parking_lot::Mutex<Option<nodes::WigleStatus>>,
     /// The same for the beaconDB feed.
     pub beacondb: parking_lot::Mutex<Option<nodes::BeaconDbStatus>>,
+    /// The walk over a band: where it is, what it has heard and whether it
+    /// has stopped on something.
+    pub band_scan: parking_lot::Mutex<Option<nodes::ScanStatus>>,
     /// And for the feed into the house: the broker, whether it is up, and
     /// how many devices have been announced to it.
     pub homeassistant: parking_lot::Mutex<Option<nodes::HomeAssistantStatus>>,
@@ -1468,6 +1477,7 @@ impl Default for Status {
             survey_heard: AtomicU64::new(0),
             wigle: parking_lot::Mutex::new(None),
             beacondb: parking_lot::Mutex::new(None),
+            band_scan: parking_lot::Mutex::new(None),
             homeassistant: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new(Strips::default()),
             call_levels: parking_lot::Mutex::new(Vec::new()),
@@ -1964,6 +1974,7 @@ impl Audio {
             transcribe_device: String::new(),
             feeds: Vec::new(),
             tx: None,
+            scan: Default::default(),
             settings: Default::default(),
         };
         let rx = crate::chain::Receiver::build(&plan, Default::default()).expect("audio chain");
@@ -2236,6 +2247,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // command.
             feeds: Vec::new(),
             tx: None,
+            scan: Default::default(),
             settings: Default::default(),
         };
         let scanners = crate::scanners::Scanners::load();
@@ -2510,6 +2522,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::BeaconDb(on) => {
                 self.plan.settings.beacondb = on;
                 self.rx.apply_settings(&self.plan);
+            }
+            Cmd::BandScan(scan) => {
+                if scan != self.plan.scan {
+                    self.plan.scan = scan;
+                    self.needs_rebuild = true;
+                }
             }
             Cmd::HomeAssistant(broker) => {
                 self.plan.settings.homeassistant = broker;
@@ -3130,7 +3148,29 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         if let Some(w) = self.rx.take_warnings().pop() {
             *self.status.error.lock() = Some(w);
         }
+        self.answer_requests();
         Flow::Go
+    }
+
+    /// Move the dial where a stage asked it to be.
+    ///
+    /// Only the walk over a band asks, and only while it is walking: a
+    /// decoder that wants a frequency in the span asks the same way, and
+    /// answering that would move the dial out from under whatever the
+    /// operator was listening to. The ask is clamped to what the tuner
+    /// reaches, so a band edge typed past it walks the part that exists.
+    fn answer_requests(&mut self) {
+        let reach = self.status.radio.lock().reach;
+        for (_stage, request) in self.rx.take_requests() {
+            let pipeline::Request::Retune { center_hz } = request else { continue };
+            if !self.plan.scan.running {
+                continue;
+            }
+            let hz = center_hz.clamp(reach.0, reach.1);
+            if hz > 0.0 {
+                self.want_center = Some(Hz(hz as u64));
+            }
+        }
     }
 
     /// The spectrum frame, and everything else read at the display's rate.
@@ -3156,6 +3196,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         {
             let now = self.rx.beacondb_status();
             let mut held = self.status.beacondb.lock();
+            if *held != now {
+                *held = now;
+            }
+        }
+        {
+            let now = self.rx.scan_status();
+            let mut held = self.status.band_scan.lock();
             if *held != now {
                 *held = now;
             }
@@ -3464,6 +3511,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
             // receiver, not about which band a block covers.
             band: (0.0, f64::INFINITY),
         }],
+        scan: Default::default(),
         edits: Default::default(),
         record: false,
         capture: false,
@@ -3732,6 +3780,58 @@ pub(crate) mod tests {
         radio.send(Cmd::Channels(vec![strip_channel(1, -150_000.0)]));
         until("three to go", || built() == 1);
         assert!(radio.status.running.load(Ordering::Relaxed));
+    }
+
+    /// The walk over a band moves the dial, on the radio thread.
+    ///
+    /// The node only asks; the thread is the only thing holding the device,
+    /// so a walk that is not answered here is a walk that never happens.
+    #[test]
+    fn a_band_walk_moves_the_dial_through_the_radio_thread() {
+        let dev = sources::FileRadio::silent(Hz(145_000_000), Sps(2_400_000)).as_fast_as_it_can();
+        let radio = Radio::on_device(Box::new(dev), Hz(145_000_000), Sps(2_400_000), 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        radio.send(Cmd::BandScan(crate::chain::BandScan {
+            running: true,
+            lo_hz: 144e6,
+            hi_hz: 146e6,
+            step_hz: 500_000.0,
+            dwell_s: 0.2,
+            on_hit: nodes::OnHit::Log,
+        }));
+        // Where the spectrum says the receiver is, in the order it went
+        // there. 144 to 146 MHz in half megahertz steps is four centres, the
+        // first of them half a step inside the low edge.
+        let stops = [144_250_000.0, 144_750_000.0, 145_250_000.0, 145_750_000.0];
+        let mut walked: Vec<f64> = Vec::new();
+        until("the dial to walk three steps", || {
+            for f in radio.frames.try_iter() {
+                if walked.last().is_none_or(|last| (last - f.center).abs() > 1.0) {
+                    walked.push(f.center);
+                }
+            }
+            walked.len() >= 4
+        });
+        assert_eq!(walked[0], 145_000_000.0, "the dial started somewhere else");
+        assert_eq!(walked[1], stops[0], "the first step is not the bottom of the band");
+        // Which of the four the rest are is the file's pace rather than the
+        // walk's: this radio hands over a capture as fast as the machine
+        // will read it, so the walk's own clock runs ahead of a dial that
+        // can only be retuned every 120 ms and some asks are overtaken.
+        for hz in &walked[1..] {
+            assert!(stops.contains(hz), "the dial went to {hz}, which is not a step of {stops:?}");
+        }
+        assert_eq!(radio.status.error.lock().clone(), None);
+        // And stopping the walk leaves the dial where it was.
+        radio.send(Cmd::BandScan(crate::chain::BandScan::default()));
+        let held = *walked.last().expect("somewhere");
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        for f in radio.frames.try_iter() {
+            if (f.center - held).abs() > 1.0 {
+                walked.push(f.center);
+            }
+        }
+        assert_eq!(walked.len(), 4, "the dial kept moving after the walk stopped: {walked:?}");
     }
 
     /// A capture through the whole receiver, on the radio thread.

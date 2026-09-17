@@ -2396,6 +2396,7 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
         Cmd::Wigle(now.wigle_on.then(|| account.clone())),
     );
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
+    when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
     let publish = now.publish();
     when(
         now.ha_on != was.ha_on || publish != was.publish(),
@@ -3177,6 +3178,7 @@ mod tests {
             Cmd::Audio { .. } => "audio",
             Cmd::Wigle(_) => "wigle",
             Cmd::BeaconDb(_) => "beacondb",
+            Cmd::BandScan(_) => "band_scan",
             Cmd::HomeAssistant(_) => "homeassistant",
             Cmd::RecordCalls(_) => "record_calls",
             Cmd::Transcribe { .. } => "transcribe",
@@ -3209,6 +3211,7 @@ mod tests {
             said,
             [
                 "audio",
+                "band_scan",
                 "beacondb",
                 "capture",
                 "capture_cap",
