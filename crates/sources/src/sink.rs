@@ -116,6 +116,7 @@ impl FileSink {
             gain_stages: Vec::new(),
             native_format: format,
             usable_bandwidth_ratio: 1.0,
+            tunable: true,
             tx: Some(TxInfo {
                 // Anything, because nothing is radiated: a file has no tuner
                 // and no band plan, and refusing a frequency here would only

@@ -278,6 +278,7 @@ fn describe(children: &[Box<dyn Device>], child_rate: Sps) -> DeviceInfo {
         // narrower than its sample rate by whatever the overlap costs.
         usable_bandwidth_ratio: (1.0 - OVERLAP) as f32
             * children.iter().map(|c| c.info().usable_bandwidth_ratio).fold(1.0f32, f32::min),
+        tunable: true,
         // Transmitting out of a stitched receiver is a different radio's job.
         tx: None,
     }
@@ -1139,6 +1140,7 @@ mod tests {
             gain_stages: Vec::new(),
             native_format: common::SampleFormat::Cu8,
             usable_bandwidth_ratio: 0.8,
+            tunable: true,
             tx: None,
         };
         let a: Box<dyn Device> =

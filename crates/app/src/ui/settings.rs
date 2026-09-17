@@ -2354,41 +2354,98 @@ impl App {
         }
     }
 
+    /// The one place a thing on the network is brought in.
+    ///
+    /// Two different things arrive over a socket and an operator has no way to
+    /// tell them apart from an address: a radio hands over samples and the
+    /// whole receiver runs on them here, where a packet feed hands over frames
+    /// somebody else has already demodulated, which only the packet bus sees.
+    /// So the first row is that choice, and the dialog routes it to the radio
+    /// list or to the feeds.
     pub(super) fn remote_modal(&mut self, ctx: &egui::Context) {
         let Some(mut edit) = self.remote.take() else {
             return;
         };
         let (mut close, mut add) = (false, false);
+        let mut link = None;
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(520.0);
-                modal_title(ui, "Add remote radio");
-                section(ui, "radio", "a receiver on the network, reached by address", |ui| {
-                    row_help(ui, "protocol", edit.kind.help(), |ui| {
-                        let opts = RemoteKind::ALL.iter().map(|k| (*k, k.label().to_string()));
-                        choice(ui, "remote-kind", &mut edit.kind, opts);
+                modal_title(ui, "Add over the network");
+                section(ui, "source", "what is at the other end of the socket", |ui| {
+                    row_help(ui, "brings", Over::HELP, |ui| {
+                        let opts = Over::ALL.iter().map(|o| (*o, o.label().to_string()));
+                        choice(ui, "remote-over", &mut edit.over, opts);
                     });
-                    let mut focus = None;
-                    row_help(ui, "address", edit.kind.help(), |ui| {
-                        let f = field(ui, &mut edit.host, edit.kind.placeholder());
-                        if f.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            add = true;
+                    match edit.over {
+                        Over::Samples => {
+                            row_help(ui, "protocol", edit.proto.help(), |ui| {
+                                let opts =
+                                    remote::Proto::ALL.iter().map(|p| (*p, p.name().to_string()));
+                                choice(ui, "remote-proto", &mut edit.proto, opts);
+                            });
+                            row_help(ui, "serves it", edit.proto.help(), |ui| {
+                                if server_row(ui, edit.proto.server()) {
+                                    link = Some(edit.proto.url().to_string());
+                                }
+                            });
                         }
-                        focus = Some(f);
-                    });
+                        Over::Frames => {
+                            row_help(ui, "format", FEED_HELP, |ui| {
+                                let opts = nodes::FEED_KINDS
+                                    .iter()
+                                    .map(|k| (k.name, k.name.to_string()))
+                                    .collect::<Vec<_>>();
+                                let mut name = edit.feed.name;
+                                if choice(ui, "remote-feed", &mut name, opts)
+                                    && let Some(k) = nodes::feed_kind(name)
+                                {
+                                    edit.feed = k;
+                                }
+                            });
+                            row_help(ui, "serves it", FEED_HELP, |ui| {
+                                if server_row(ui, edit.feed.server) {
+                                    link = Some(edit.feed.url.to_string());
+                                }
+                            });
+                        }
+                    }
+                    let mut focus = None;
+                    let placeholder = match edit.over {
+                        Over::Samples => edit.proto.placeholder().to_string(),
+                        Over::Frames => {
+                            format!("host, or host:port ({})", edit.feed.default_port)
+                        }
+                    };
                     row_help(
                         ui,
-                        "name",
-                        "What the radio list calls it. An address says which machine and \
-                         nothing about which aerial.",
+                        "address",
+                        "Where it is. A bare host gets the usual port.",
                         |ui| {
-                            let name = field(ui, &mut edit.label, "loft dongle");
-                            if name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            let f = field(ui, &mut edit.host, &placeholder);
+                            if f.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 add = true;
                             }
+                            focus = Some(f);
                         },
                     );
+                    if edit.over == Over::Samples {
+                        row_help(
+                            ui,
+                            "name",
+                            "What the radio list calls it. An address says which machine and \
+                             nothing about which aerial.",
+                            |ui| {
+                                let name = field(ui, &mut edit.label, "loft dongle");
+                                if name.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    add = true;
+                                }
+                            },
+                        );
+                    }
                     // Focused so the address can be typed straight away, but
                     // only while nothing else holds it: taking it back every
                     // frame would fight the buttons below.
@@ -2400,11 +2457,13 @@ impl App {
                     match &edit.err {
                         Some(e) => lamp(ui, false, e),
                         None if edit.host.trim().is_empty() => lamp(ui, false, "no address"),
-                        None => lamp(
-                            ui,
-                            true,
-                            &format!("{} at {}", edit.kind.label(), edit.host.trim()),
-                        ),
+                        None => {
+                            let what = match edit.over {
+                                Over::Samples => edit.proto.name(),
+                                Over::Frames => edit.feed.name,
+                            };
+                            lamp(ui, true, &format!("{what} at {}", edit.host.trim()))
+                        }
                     }
                 });
                 footer(ui, |ui| {
@@ -2416,11 +2475,18 @@ impl App {
                     }
                 });
             });
+        if let Some(url) = link {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+        }
         if r.should_close() {
             close = true;
         }
         if add {
-            match self.add_remote(ctx, &edit) {
+            let done = match edit.over {
+                Over::Samples => self.add_remote(ctx, &mut edit),
+                Over::Frames => self.add_feed(&edit),
+            };
+            match done {
                 Ok(()) => close = true,
                 Err(e) => edit.err = Some(e),
             }
@@ -2436,17 +2502,26 @@ impl App {
     /// remote radio that does not answer is an entry in a list with nothing
     /// behind it, and the operator finds out at the point of adding rather
     /// than later when the spectrum stays empty.
+    ///
+    /// What answered decides the protocol, whatever was picked: iqstreamd and
+    /// rtl_tcp both listen on 1234, so an address alone cannot say which is
+    /// there and the picker is a guess until something replies.
     fn add_remote(
         &mut self,
         ctx: &egui::Context,
-        edit: &RemoteEdit,
+        edit: &mut RemoteEdit,
     ) -> std::result::Result<(), String> {
-        match edit.kind {
-            RemoteKind::IqStream => {
-                iqnet::probe(&edit.host).map_err(|e| e.to_string())?;
-            }
-        }
-        let addr = crate::devices::add_stream(&edit.host, &edit.label)
+        let found = match edit.proto.probe(&edit.host) {
+            Ok(p) => p,
+            Err(chosen) => match remote::identify(&edit.host) {
+                Ok(other) => {
+                    edit.proto = other.proto;
+                    other
+                }
+                Err(_) => return Err(chosen.to_string()),
+            },
+        };
+        let addr = crate::devices::add_stream(found.proto, &edit.host, &edit.label)
             .ok_or_else(|| "expected host or host:port".to_string())?;
         self.devices = crate::devices::list();
         let found = self
@@ -2456,6 +2531,18 @@ impl App {
             .cloned()
             .ok_or_else(|| format!("{addr} did not answer"))?;
         self.select_device(ctx, found);
+        Ok(())
+    }
+
+    /// Attach the feed, which is a setting rather than a radio: the receiver
+    /// keeps running on whatever it is tuned to and the frames join the bus.
+    fn add_feed(&mut self, edit: &RemoteEdit) -> std::result::Result<(), String> {
+        let spec = super::parse_feed(&edit.host, edit.feed)
+            .ok_or_else(|| "expected host or host:port".to_string())?;
+        if self.setting(|s| s.feeds.clone()).contains(&spec) {
+            return Err("that feed is already attached".into());
+        }
+        self.settings.edit(|s| s.feeds.push(spec));
         Ok(())
     }
 
@@ -2901,46 +2988,58 @@ fn size_label(mb: Option<u64>) -> String {
     }
 }
 
-/// A radio reached over the network, as the dialog that creates one asks for
-/// it.
+/// What comes over the socket, which is the first thing the dialog asks.
 ///
-/// The protocol is a choice rather than an assumption: rtl_tcp and airspy's
-/// own network server are the same shape of thing, and the dialog is where
-/// they will be offered.
+/// Both answers are an address in a list and neither says which it is, so the
+/// difference is stated here rather than left to the operator: samples make
+/// this receiver run the whole chain, frames are somebody else's decode and
+/// reach the packet bus alone.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RemoteKind {
-    IqStream,
+pub enum Over {
+    Samples,
+    Frames,
 }
 
-impl RemoteKind {
-    pub const ALL: &'static [RemoteKind] = &[RemoteKind::IqStream];
+impl Over {
+    const ALL: &'static [Over] = &[Over::Samples, Over::Frames];
+
+    const HELP: &'static str = "Samples are a radio: the span, the spectrum, the decoders and \
+                                the audio all run here, on what its tuner hears. Frames are a \
+                                feed: another receiver has already demodulated them and only \
+                                the packet list, the map and the log see them.";
 
     fn label(self) -> &'static str {
         match self {
-            Self::IqStream => "iqstream",
+            Self::Samples => "samples, a radio",
+            Self::Frames => "frames, a packet feed",
         }
     }
+}
 
-    fn help(self) -> &'static str {
-        match self {
-            Self::IqStream => {
-                "One tuner shared with many readers, so a dongle already feeding a decoder \
-                 elsewhere can still be listened to here. The frequency and the span belong \
-                 to whoever owns that tuner and cannot be changed from this end."
-            }
-        }
-    }
+const FEED_HELP: &str = "The wire format the far end writes. Beast carries a signal \
+                                 level with every frame and AVR carries none.";
 
-    fn placeholder(self) -> &'static str {
-        match self {
-            Self::IqStream => "host, or host:port (1234)",
-        }
-    }
+/// The program to install at the far end, with a button to its page.
+///
+/// A protocol name is not enough to act on: SpyServer, rtl_tcp and readsb are
+/// names of programs before they are names of formats, and an operator
+/// reading one has nowhere to go.
+fn server_row(ui: &mut egui::Ui, server: &str) -> bool {
+    let mut open = false;
+    ui.horizontal(|ui| {
+        theme::Line::new().value(server).size(13.0).show(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            open = ui.small_button("PAGE").clicked();
+        });
+    });
+    open
 }
 
 #[derive(Clone)]
 pub struct RemoteEdit {
-    kind: RemoteKind,
+    over: Over,
+    proto: remote::Proto,
+    feed: &'static nodes::FeedKind,
     host: String,
     /// What to call it in the radio list. Optional, and worth having: an
     /// address says which machine and nothing about which aerial.
@@ -2952,7 +3051,14 @@ pub struct RemoteEdit {
 
 impl Default for RemoteEdit {
     fn default() -> Self {
-        Self { kind: RemoteKind::IqStream, host: String::new(), label: String::new(), err: None }
+        Self {
+            over: Over::Samples,
+            proto: remote::Proto::IqStream,
+            feed: nodes::FEED_KINDS[0],
+            host: String::new(),
+            label: String::new(),
+            err: None,
+        }
     }
 }
 

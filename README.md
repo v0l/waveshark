@@ -42,7 +42,7 @@ speech model transcribes what is said.
 ## Hardware
 
 Any RTL2832U dongle, a HackRF One, or a LimeSDR USB or Mini, and a tuner on
-another machine over iqstream with `--stream <host>`. A €30 RTL-SDR does all of
+another machine over rtl_tcp or iqstream with `--stream rtl_tcp://<host>`. A €30 RTL-SDR does all of
 the receiving above; a HackRF buys you wider spans and a transmitter, and a
 LimeSDR both of those plus full duplex.
 
@@ -196,7 +196,8 @@ somewhere else. The default reaches no further than this machine.
 --mode <mode>          wfm, nfm, am, usb, lsb or cw
 --span <khz>           nearest span, narrowed in software if the radio cannot
 --device <name>        pick a radio when several are plugged in
---stream <host>        offer an iqstream server as a radio
+--stream <host>        offer a network tuner as a radio, iqstream or
+                       rtl_tcp://<host>
 --location <lat,lon>   your position, for aircraft positions from a single frame
 --record [dir]         write every burst that decodes to a directory of captures
 --capture-iq           write the raw span from the moment the radio starts

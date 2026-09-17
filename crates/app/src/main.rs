@@ -999,8 +999,9 @@ struct Args {
     #[arg(long, value_name = "DB")]
     rf_gain: Option<f32>,
 
-    /// Offer an iqstream server as a radio, as host or host:port. Repeatable,
-    /// and added to whatever the session already holds
+    /// Offer a network tuner as a radio, as host, host:port, or
+    /// rtl_tcp://host:port. Repeatable, and added to whatever the session
+    /// already holds
     #[arg(long, value_name = "HOST")]
     stream: Vec<String>,
 
@@ -1332,9 +1333,14 @@ fn main() -> eframe::Result<()> {
     // Registered before anything enumerates: a radio on the network is
     // configuration, and nothing on the bus will reveal it.
     for s in &args.stream {
-        if devices::add_stream(s, "").is_none() {
-            eprintln!("--stream {s}: expected host or host:port");
-            std::process::exit(1);
+        match remote::parse_spec(s) {
+            Some((proto, addr)) => {
+                devices::add_stream(proto, &addr, "");
+            }
+            None => {
+                eprintln!("--stream {s}: expected host, host:port, or rtl_tcp://host:port");
+                std::process::exit(1);
+            }
         }
     }
     for c in &args.capture {

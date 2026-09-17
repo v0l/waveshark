@@ -10,6 +10,7 @@ pub mod error;
 pub mod iq;
 pub mod modulation;
 pub mod pulse;
+pub mod rtl;
 pub mod source;
 pub mod units;
 pub mod value;

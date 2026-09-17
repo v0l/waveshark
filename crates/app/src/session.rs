@@ -360,10 +360,10 @@ pub struct Session {
     pub view: ViewPrefs,
     /// Packet feeds from other receivers, as `format host:port`.
     pub feeds: Vec<nodes::FeedSpec>,
-    /// iqstream servers to offer as radios, as `host:port` and the name given
-    /// to that receiver. Configuration rather than discovery: nothing on the
-    /// bus says a tuner is on the network.
-    pub streams: Vec<(String, String)>,
+    /// Network tuners to offer as radios: which protocol, where, and the name
+    /// given to that receiver. Configuration rather than discovery: nothing
+    /// on the bus says a tuner is on the network.
+    pub streams: Vec<crate::devices::Remote>,
     /// Whether the operator owns the shape of the graph. The graph itself is
     /// in its own file: it is a drawing, not a setting.
     pub manual_chain: bool,
@@ -702,12 +702,12 @@ impl Session {
                     feeds.push(f);
                 }
             } else if k == "stream" {
-                // `host:port name of the receiver`, the name being everything
-                // after the first space and often absent.
-                match v.split_once(char::is_whitespace) {
-                    Some((addr, name)) => streams.push((addr.to_string(), name.trim().to_string())),
-                    None if !v.is_empty() => streams.push((v.to_string(), String::new())),
-                    None => {}
+                // `proto host:port name of the receiver`, the name being
+                // everything after the address and often absent. A line with
+                // no protocol is iqstream, which is what the setting meant
+                // before there was anything else to mean.
+                if let Some(r) = parse_stream(v) {
+                    streams.push(r);
                 }
             } else {
                 kv.insert(k, v);
@@ -987,11 +987,11 @@ impl Session {
         for f in &self.feeds {
             s.push_str(&format!("feed = {} {}\n", f.kind.name, f.address()));
         }
-        for (addr, name) in &self.streams {
-            if name.is_empty() {
-                s.push_str(&format!("stream = {addr}\n"));
+        for r in &self.streams {
+            if r.label.is_empty() {
+                s.push_str(&format!("stream = {} {}\n", r.proto, r.addr));
             } else {
-                s.push_str(&format!("stream = {addr} {name}\n"));
+                s.push_str(&format!("stream = {} {} {}\n", r.proto, r.addr, r.label));
             }
         }
         s
@@ -1018,6 +1018,28 @@ fn parse_feed(v: &str) -> Option<nodes::FeedSpec> {
     let kind = nodes::feed_kind(kind.trim())?;
     let (host, port) = addr.trim().rsplit_once(':')?;
     Some(nodes::FeedSpec::new(host, port.parse().ok()?, kind))
+}
+
+/// `rtl_tcp host:port name of the receiver`, as written by `render`.
+///
+/// A line that starts with an address rather than a protocol is a session
+/// written before there was more than one, and every one of those was
+/// iqstream.
+fn parse_stream(v: &str) -> Option<crate::devices::Remote> {
+    let mut rest = v.trim();
+    let mut proto = remote::Proto::IqStream;
+    if let Some((head, tail)) = rest.split_once(char::is_whitespace)
+        && let Some(p) = remote::Proto::parse(head)
+    {
+        proto = p;
+        rest = tail.trim();
+    }
+    let (addr, label) = match rest.split_once(char::is_whitespace) {
+        Some((addr, label)) => (addr, label.trim()),
+        None => (rest, ""),
+    };
+    let addr = proto.parse_addr(addr)?;
+    Some(crate::devices::Remote { proto, addr, label: label.to_string() })
 }
 
 fn parse_gain(v: &str) -> Option<GainMode> {
@@ -1136,12 +1158,43 @@ mod tests {
                 nodes::FeedSpec::new("pi.local", 30002, &nodes::feed_nodes::AVR),
             ],
             streams: vec![
-                ("radarpi:1234".into(), "Loft dongle".into()),
-                ("10.0.0.5:1234".into(), String::new()),
+                crate::devices::Remote {
+                    proto: remote::Proto::IqStream,
+                    addr: "radarpi:1234".into(),
+                    label: "Loft dongle".into(),
+                },
+                crate::devices::Remote {
+                    proto: remote::Proto::RtlTcp,
+                    addr: "10.0.0.5:1234".into(),
+                    label: String::new(),
+                },
             ],
             map_layers: vec![("rings".into(), true), ("airports".into(), false)],
         };
         assert_eq!(Session::parse(&s.render()), s);
+    }
+
+    /// A session written before there was a second protocol says an address
+    /// and nothing else, and every one of those was iqstream.
+    #[test]
+    fn a_stream_line_without_a_protocol_is_iqstream() {
+        let s = Session::parse("stream = radarpi:1234 Loft dongle\nstream = rtl_tcp://ignored\n");
+        assert_eq!(s.streams.len(), 2);
+        assert_eq!(s.streams[0].proto, remote::Proto::IqStream);
+        assert_eq!(s.streams[0].addr, "radarpi:1234");
+        assert_eq!(s.streams[0].label, "Loft dongle");
+        // A scheme is not the session file's spelling: the protocol is the
+        // first word, so this one keeps its default and the whole string is
+        // the address.
+        assert_eq!(s.streams[1].proto, remote::Proto::IqStream);
+
+        let s = Session::parse("stream = rtl_tcp mast:1234\nstream = iqstream loft:1234 Loft\n");
+        assert_eq!(s.streams.len(), 2);
+        assert_eq!(s.streams[0].proto, remote::Proto::RtlTcp);
+        assert_eq!(s.streams[0].addr, "mast:1234");
+        assert_eq!(s.streams[0].label, "");
+        assert_eq!(s.streams[1].proto, remote::Proto::IqStream);
+        assert_eq!(s.streams[1].label, "Loft");
     }
 
     #[test]

@@ -1693,12 +1693,10 @@ impl RadioControls {
                 (lo.is_finite() && hi > lo)
                     .then(|| ((lo + offset).max(0.0), (hi + offset).max(0.0)))
             }),
-            // A stream is pinned by whoever feeds it and a capture by
-            // whoever recorded it; both dials are readouts.
-            tunable: !matches!(
-                dev.info().kind,
-                common::device::DriverKind::IqStream | common::device::DriverKind::File
-            ),
+            // The driver's own answer: a capture is pinned by whoever
+            // recorded it and a shared network tuner by whoever feeds it,
+            // where an rtl_tcp server on the same kind of socket retunes.
+            tunable: dev.info().tunable,
             seams: dev.seams().iter().map(|h| h.as_f64()).collect(),
         }
     }
@@ -6848,6 +6846,7 @@ mod front_end_tests {
                     ],
                     native_format: common::SampleFormat::Cs8,
                     usable_bandwidth_ratio: 0.75,
+                    tunable: true,
                     tx: None,
                 },
                 tuning: common::Tuning::default(),

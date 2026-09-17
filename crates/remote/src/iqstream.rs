@@ -20,66 +20,22 @@
 //! and hands decoded buffers over a bounded channel, the same shape the USB
 //! drivers use.
 
-use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
+use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};
+use common::device::{
+    Device as DeviceTrait, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange,
+};
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use iqstream::client::{ClientConfig, IqStream};
 use iqstream::proto::Codec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
-
-/// The port `iqstreamd` listens on for control connections.
-pub const DEFAULT_PORT: u16 = 1234;
-
-/// How long to wait for a server to answer before calling it unreachable.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Blocks queued for the consumer. A block is tens of milliseconds, so this is
-/// a couple of seconds of slack before the oldest are dropped.
-const QUEUE_DEPTH: usize = 64;
 
 /// Bits per I or Q value asked of the server.
 ///
 /// Eight is the dongle's own resolution: fewer bits shrink the stream but cost
 /// decodes, and the receiver here is doing more than counting ADS-B messages.
 const BITS: u8 = 8;
-
-/// Add the default port to a bare host, and reject what is not an address.
-pub fn parse_addr(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.is_empty() || s.contains(char::is_whitespace) {
-        return None;
-    }
-    // A bracketed IPv6 literal already carries its own colons.
-    if s.starts_with('[') {
-        return Some(if s.ends_with(']') { format!("{s}:{DEFAULT_PORT}") } else { s.to_string() });
-    }
-    // More than one colon and no brackets is a bare IPv6 address, whose last
-    // group would otherwise read as a port.
-    if s.matches(':').count() > 1 {
-        return Some(format!("[{s}]:{DEFAULT_PORT}"));
-    }
-    match s.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {
-            Some(s.to_string())
-        }
-        _ => Some(format!("{s}:{DEFAULT_PORT}")),
-    }
-}
-
-/// What a server says about its stream, before anything subscribes for real.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Probe {
-    pub addr: String,
-    pub center: Hz,
-    pub rate: Sps,
-    /// Gain the source was started with, when it was told.
-    pub gain_db: Option<f32>,
-    /// Whether the server will accept a retune. False for every server that
-    /// takes its samples from another process's tuner, which is all of them.
-    pub tunable: bool,
-}
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
@@ -110,7 +66,7 @@ fn config(name: &str) -> ClientConfig {
 /// belong to the server, so they have to be read before anything can offer a
 /// span list or draw a spectrum.
 pub fn probe(addr: &str) -> Result<Probe> {
-    let addr = parse_addr(addr).ok_or(Error::NoDevice)?;
+    let addr = Proto::IqStream.parse_addr(addr).ok_or(Error::NoDevice)?;
     let rt = runtime()?;
     let a = addr.clone();
     rt.block_on(async move {
@@ -125,16 +81,21 @@ pub fn probe(addr: &str) -> Result<Probe> {
             return Err(Error::other(format!("{a} did not say what rate it is running at")));
         }
         Ok(Probe {
+            proto: Proto::IqStream,
             addr: a,
-            center: Hz(info.center_hz),
-            rate: Sps(info.sample_rate as u64),
+            center: Some(Hz(info.center_hz)),
+            rate: Some(Sps(info.sample_rate as u64)),
             gain_db: info.gain_db,
+            // The server's own word, and not the same question as whether the
+            // protocol can carry a retune: nothing serving a shared tuner
+            // says yes.
             tunable: info.tunable,
+            tuner: "remote".to_string(),
         })
     })
 }
 
-pub struct IqNet {
+pub struct Device {
     addr: String,
     info: DeviceInfo,
     /// The converter on the cable and the reference correction, which the
@@ -145,7 +106,7 @@ pub struct IqNet {
     streaming: Arc<AtomicBool>,
 }
 
-impl IqNet {
+impl Device {
     /// Connect once to learn what the server is streaming, and keep the
     /// address for the subscription the stream will open.
     pub fn open(addr: &str) -> Result<Self> {
@@ -158,17 +119,20 @@ impl IqNet {
             Some(g) => format!("iqstream {} at {g:.1} dB", p.addr),
             None => format!("iqstream {}", p.addr),
         };
+        // A server that did not say is still streaming something; the entry
+        // has to carry a number, and the dial cannot move it either way.
+        let (center, rate) = (p.center.unwrap_or(Hz(0)), p.rate.unwrap_or(Sps(1)));
         let info = DeviceInfo {
-            kind: DriverKind::IqStream,
+            kind: DriverKind::Network,
             id: format!("iqstream:{}", p.addr),
             label,
             tuner: "remote".to_string(),
             // One point wide, and true: the frequency is the source process's
             // to choose. A range covering the band would let the dial move to
             // somewhere the samples do not come from.
-            ranges: vec![TunerRange { range: p.center..=p.center, label: "pinned" }],
-            rates: vec![p.rate],
-            rate_range: p.rate..=p.rate,
+            ranges: vec![TunerRange { range: center..=center, label: "pinned" }],
+            rates: vec![rate],
+            rate_range: rate..=rate,
             // Gain belongs to whoever owns the tuner. Offering a slider that
             // moves nothing would be worse than offering none.
             gain_stages: Vec::new(),
@@ -176,13 +140,14 @@ impl IqNet {
             // Unknown from here: the server does not say what is feeding it.
             // The usual answer is an RTL-SDR, so assume its filtering.
             usable_bandwidth_ratio: 0.80,
+            tunable: false,
             tx: None,
         };
         Self {
             addr: p.addr.clone(),
             info,
-            center: p.center,
-            rate: p.rate,
+            center,
+            rate,
             streaming: Arc::new(AtomicBool::new(false)),
             tuning: Default::default(),
         }
@@ -193,7 +158,7 @@ impl IqNet {
     }
 }
 
-impl Device for IqNet {
+impl DeviceTrait for Device {
     fn tuning(&self) -> &common::Tuning {
         &self.tuning
     }
@@ -357,34 +322,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_bare_host_gets_the_default_port() {
-        assert_eq!(parse_addr("radarpi").as_deref(), Some("radarpi:1234"));
-        assert_eq!(parse_addr("10.0.0.5").as_deref(), Some("10.0.0.5:1234"));
-        assert_eq!(parse_addr(" radarpi:9000 ").as_deref(), Some("radarpi:9000"));
-        assert_eq!(parse_addr(""), None);
-        assert_eq!(parse_addr("two words"), None);
-    }
-
-    #[test]
-    fn an_ipv6_address_keeps_its_own_colons() {
-        // Splitting on the last colon would read fd00::1 as host "fd00:" on
-        // port ":1", which resolves to nothing and reports the wrong reason.
-        assert_eq!(parse_addr("fd00::1").as_deref(), Some("[fd00::1]:1234"));
-        assert_eq!(parse_addr("[fd00::1]:9000").as_deref(), Some("[fd00::1]:9000"));
-        assert_eq!(parse_addr("[fd00::1]").as_deref(), Some("[fd00::1]:1234"));
-    }
-
-    #[test]
     fn a_pinned_stream_refuses_a_rate_it_is_not_running() {
         // The span list is built from the device's own rate, so anything else
         // arriving here is a stale setting from another radio and taking it
         // would label every frequency on screen wrongly.
-        let mut d = IqNet::from_probe(&Probe {
+        let mut d = Device::from_probe(&Probe {
+            proto: Proto::IqStream,
             addr: "example:1234".into(),
-            center: Hz::mhz(1090),
-            rate: Sps(2_400_000),
+            center: Some(Hz::mhz(1090)),
+            rate: Some(Sps(2_400_000)),
             gain_db: Some(49.6),
             tunable: false,
+            tuner: "remote".into(),
         });
         assert!(d.set_rate(Sps(2_400_000)).is_ok());
         assert!(d.set_rate(Sps(2_048_000)).is_err());
@@ -392,5 +341,6 @@ mod tests {
         // per frame and an error there kills the receiver's thread.
         assert!(d.set_center(Hz::mhz(433)).is_ok());
         assert_eq!(d.center(), Hz::mhz(1090));
+        assert!(!d.info().tunable);
     }
 }
