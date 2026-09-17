@@ -350,8 +350,8 @@ impl FrontEnd {
 /// channel's squelch and every decoder's part-built frame; a full duplex
 /// radio goes on hearing the band while it transmits.
 fn tx_plan_for(ch: &ChannelSpec, center: Hz) -> Option<crate::chain::TxPlan> {
-    let mode = tx_mode_for(&ch.mode)?;
     let tx = ch.spec_to_transmit();
+    let mode = tx_mode_for(&ch.mode, tx.source)?;
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
     Some(crate::chain::TxPlan { spec: tx, mode, on_air })
 }
@@ -392,7 +392,7 @@ fn key_up(
     let on_air = Hz((center.as_f64() + ch.offset_hz + tx.shift_hz).max(0.0) as u64);
     // The channel's own mode, because a channel is one frequency and one
     // mode: a radio that listens in NFM and keys up in AM cannot be worked.
-    let mode = tx_mode_for(&ch.mode).ok_or_else(|| {
+    let mode = tx_mode_for(&ch.mode, tx.source).ok_or_else(|| {
         common::Error::other(format!("nothing here transmits {} yet", ch.mode.label()))
     })?;
     if !dev.info().can_transmit() {
@@ -866,13 +866,21 @@ pub enum TxMode {
     Digital(&'static str),
 }
 
-/// What a channel transmits, from what it receives.
+/// What a channel transmits, from what it receives and what it is sending.
 ///
 /// `None` for a mode with no modulator behind it yet: single sideband needs
 /// one, and a decode channel needs the protocol's encoder. Refusing is the
 /// point, since the alternative is keying up in a mode the other end cannot
 /// read.
-pub fn tx_mode_for(mode: &ChanMode) -> Option<TxMode> {
+///
+/// A `.sub` file is the exception, and the source is a parameter for it: its
+/// pulses are keyed carrier whatever the channel hears in, so a channel
+/// replaying a remote can listen on the classifier and decode the remotes
+/// around it rather than run an NFM demodulator it has no use for.
+pub fn tx_mode_for(mode: &ChanMode, source: TxSource) -> Option<TxMode> {
+    if source == TxSource::Sub {
+        return Some(TxMode::Carrier);
+    }
     match mode {
         ChanMode::Audio(Demod::Nfm) => Some(TxMode::Nfm),
         ChanMode::Audio(Demod::Wfm) => Some(TxMode::Wfm),

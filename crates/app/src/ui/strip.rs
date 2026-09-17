@@ -428,7 +428,8 @@ impl Strip<'_> {
         // and a line of apology take as much room as the controls do and
         // offer nothing: a channel that cannot transmit is a receiving
         // channel, which is what the rest of the strip already shows.
-        let Some(mode) = crate::radio::tx_mode_for(&ch.mode) else {
+        let sends = ch.tx.map(|t| t.source).unwrap_or(crate::radio::TxSource::Tone);
+        let Some(mode) = crate::radio::tx_mode_for(&ch.mode, sends) else {
             return false;
         };
         let tx = ch.tx.get_or_insert_with(crate::radio::TxSpec::default);

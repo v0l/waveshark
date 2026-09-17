@@ -1587,14 +1587,18 @@ impl App {
             None => {
                 let id = self.audio.next_id as u64;
                 self.audio.next_id += 1;
-                let mut c = fresh(id, hz, ChanMode::Audio(Demod::Nfm), Some(SUB_CHANNEL.into()));
+                // Auto on the receive side: a channel replaying a remote is
+                // pointed at a band of remotes, so what it hears is worth
+                // classifying and decoding. Transmitting is not the mode's
+                // question here, because a `.sub` file is keyed carrier
+                // whatever the channel listens in; see `tx_mode_for`.
+                let mut c = fresh(id, hz, ChanMode::Auto, Some(SUB_CHANNEL.into()));
                 // On, because the radio is only sent the channels that are:
                 // an off channel is not in the list and the key came back
                 // "there is no such channel to key". Muted instead, since
                 // nobody wants a remote's pulses through the speaker.
                 c.on = true;
                 c.muted = true;
-                c.voice = false;
                 self.audio.channels.push(c);
                 id
             }

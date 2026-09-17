@@ -790,7 +790,12 @@ impl App {
             .iter()
             .find(|c| c.id == id)
             .ok_or_else(|| format!("no channel {id}"))?;
-        if crate::radio::tx_mode_for(&c.mode).is_none() {
+        if crate::radio::tx_mode_for(
+            &c.mode,
+            c.tx.map(|t| t.source).unwrap_or(crate::radio::TxSource::Tone),
+        )
+        .is_none()
+        {
             return Err(format!(
                 "channel {id} is {}, which has no modulator behind it",
                 c.mode.label()
@@ -824,7 +829,10 @@ impl App {
                 .iter_mut()
                 .find(|c| c.id == id)
                 .ok_or_else(|| format!("no channel {id}"))?;
-            match crate::radio::tx_mode_for(&c.mode) {
+            match crate::radio::tx_mode_for(
+                &c.mode,
+                c.tx.map(|t| t.source).unwrap_or(crate::radio::TxSource::Tone),
+            ) {
                 None => {
                     return Err(format!(
                         "channel {id} is {}, which has no modulator behind it",
@@ -1108,7 +1116,8 @@ impl App {
                     // What keying this channel would do, and whether it is
                     // doing it. A mode with no modulator behind it cannot be
                     // keyed at all, which is worth saying before it is tried.
-                    "can_key": crate::radio::tx_mode_for(&c.mode).is_some(),
+                    "can_key": crate::radio::tx_mode_for(&c.mode, c.tx.map(|t| t.source).unwrap_or(crate::radio::TxSource::Tone))
+                        .is_some(),
                     "keyed": self.audio.keying.at == Some(c.id),
                     "tx_source": c.tx.map(|t| t.source.label()),
                 })
@@ -1539,7 +1548,9 @@ fn agent_transmit_modes(can_transmit: bool) -> Value {
     let mut rows: Vec<Value> = Vec::new();
     for d in [Demod::Nfm, Demod::Wfm, Demod::Am, Demod::Cw, Demod::Usb, Demod::Lsb] {
         let mode = ChanMode::Audio(d);
-        let Some(tx) = crate::radio::tx_mode_for(&mode) else { continue };
+        let Some(tx) = crate::radio::tx_mode_for(&mode, crate::radio::TxSource::Tone) else {
+            continue;
+        };
         rows.push(json!({
             "mode": mode_name(&mode),
             "label": tx.label(),
