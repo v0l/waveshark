@@ -31,6 +31,30 @@ pub struct ReedSolomon {
     r#gen: Vec<u16>,
 }
 
+/// Symbols in a CCSDS codeword, and how many of them are the message.
+pub const CCSDS_CODEWORD: usize = 255;
+pub const CCSDS_MESSAGE: usize = 223;
+const CCSDS_PARITY: usize = CCSDS_CODEWORD - CCSDS_MESSAGE;
+
+/// One codeword out of a block of `depth` interleaved ones: a downlink that
+/// interleaves spreads a burst of noise over every codeword rather than
+/// destroying one, so the symbols of codeword `lane` are every `depth`th
+/// byte of the block.
+pub fn deinterleave(block: &[u8], lane: usize, depth: usize) -> Vec<u8> {
+    block.iter().skip(lane).step_by(depth).copied().collect()
+}
+
+/// The other way about: put a corrected codeword's symbols back where they
+/// came from.
+pub fn interleave(word: &[u8], lane: usize, depth: usize, block: &mut [u8]) {
+    for (i, &b) in word.iter().enumerate() {
+        let at = i * depth + lane;
+        if at < block.len() {
+            block[at] = b;
+        }
+    }
+}
+
 /// The index of a zero element: not a power of alpha, so it sits one past the
 /// end of the log table.
 const fn a0(nn: usize) -> u16 {
@@ -115,6 +139,17 @@ impl ReedSolomon {
     /// and the six roots from alpha^120.
     pub fn vdl2() -> Self {
         Self::new(8, 0x187, 120, 1, 6, 0)
+    }
+
+    /// RS(255,223) as CCSDS 131.0-B specifies it for a telemetry frame:
+    /// GF(256) over 0x187, thirty-two parity symbols from the 112th root
+    /// with a primitive step of eleven, so sixteen wrong bytes in a codeword
+    /// are corrected.
+    ///
+    /// Every CCSDS downlink here is this code: an LMS6 radiosonde block and a
+    /// Meteor LRPT frame differ only in how many codewords are interleaved.
+    pub fn ccsds() -> Self {
+        Self::new(8, 0x187, 112, 11, CCSDS_PARITY, 0)
     }
 
     fn modnn(&self, mut x: usize) -> usize {

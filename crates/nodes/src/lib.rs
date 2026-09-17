@@ -38,6 +38,7 @@ pub mod iq_tx;
 pub mod keyed;
 pub mod lms6_nodes;
 pub mod lora_nodes;
+pub mod lrpt_nodes;
 pub mod m10_nodes;
 pub mod m17_nodes;
 pub mod mdc_nodes;
@@ -104,6 +105,7 @@ pub use imet_nodes::ImetNode;
 pub use keyed::{Keyed, keyed, keyed_mut};
 pub use lms6_nodes::Lms6Node;
 pub use lora_nodes::LoraNode;
+pub use lrpt_nodes::LrptNode;
 pub use m10_nodes::M10Node;
 pub use m17_nodes::M17Node;
 pub use mdc_nodes::MdcNode;
@@ -218,6 +220,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (sstv_nodes::DESC, sstv_nodes::build),
     (sstv_nodes::SSTV_TX, sstv_nodes::build_tx),
     (apt_nodes::DESC, apt_nodes::build),
+    (lrpt_nodes::DESC, lrpt_nodes::build),
     (wefax_nodes::DESC, wefax_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),

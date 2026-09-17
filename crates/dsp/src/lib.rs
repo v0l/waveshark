@@ -43,6 +43,7 @@ pub mod modes;
 pub mod msk;
 pub mod pocsag;
 pub mod pulse;
+pub mod qpsk;
 pub mod rds;
 pub mod resample;
 pub mod route;

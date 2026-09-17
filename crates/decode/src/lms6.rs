@@ -35,7 +35,7 @@ pub const MESSAGE: usize = 223;
 /// primitive step of eleven, and the codeword arrives with its symbols the
 /// other way round.
 pub fn code() -> ReedSolomon {
-    ReedSolomon::new(8, 0x187, 112, 11, CODEWORD - MESSAGE, 0)
+    ReedSolomon::ccsds()
 }
 
 /// Correct a block in place, and say how many symbols were wrong.
