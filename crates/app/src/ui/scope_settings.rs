@@ -13,7 +13,7 @@ pub(super) enum Action {
     ResetWaterfall,
     /// Write what the heatmap holds, in the colours and against the scale
     /// the waterfall is drawn with.
-    ExportHeatmap(crate::heatmap::Export),
+    ExportHeatmap,
 }
 
 /// The scope's settings, over the state they change.
@@ -167,15 +167,12 @@ impl ScopeSettings<'_> {
                     ),
                 },
             );
-            let write = "PNG is flat pixels with the axes burned in. HTML is the same \
-                         picture with the readings beside it, so a pointer over a point \
-                         gives the time, the frequency and the decibels.";
+            let write = "A page holding the readings themselves: it draws them at the \
+                         colours and scale set here, zooms and pans, and gives the time, \
+                         the frequency and the decibels under the pointer.";
             row_help(ui, "write", write, |ui| {
-                if ui.button("PNG").clicked() {
-                    self.acts.push(Action::ExportHeatmap(crate::heatmap::Export::Png));
-                }
-                if ui.button("HTML").clicked() {
-                    self.acts.push(Action::ExportHeatmap(crate::heatmap::Export::Html));
+                if ui.button("WRITE").clicked() {
+                    self.acts.push(Action::ExportHeatmap);
                 }
             });
             match (&status.error, &status.saved) {

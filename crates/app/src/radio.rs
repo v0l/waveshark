@@ -581,7 +581,6 @@ pub enum Cmd {
     /// interface is showing it. Done on this thread because the readings are
     /// a node's, and the node belongs to the graph running here.
     ExportHeatmap {
-        what: crate::heatmap::Export,
         ramp: crate::heatmap::Ramp,
         floor: f32,
         ceil: f32,
@@ -2696,10 +2695,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                     self.needs_rebuild = true;
                 }
             }
-            Cmd::ExportHeatmap { what, ramp, floor, ceil } => {
+            Cmd::ExportHeatmap { ramp, floor, ceil } => {
                 let dir = crate::heatmap::heatmaps_dir();
                 match self.rx.heatmap_mut() {
-                    Some(n) => match n.export(&dir, what, ramp, floor, ceil) {
+                    Some(n) => match n.export(&dir, ramp, floor, ceil) {
                         Ok(p) => tracing::info!("heatmap written: {}", p.display()),
                         Err(e) => {
                             *self.status.error.lock() = Some(format!("no heatmap written: {e}"))

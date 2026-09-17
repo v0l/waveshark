@@ -3099,7 +3099,11 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         s.insert("rows_per_sec".into(), pipeline::ParamValue::Float(plan.heat.rows_per_sec as f64));
         s.insert("budget_mb".into(), pipeline::ParamValue::Float(plan.heat.budget_mb as f64));
         p.add_derived(derived::HEATMAP, "heatmap", s);
-        p.connect(head, (derived::HEATMAP, 0));
+        // Off the spectrum rather than off the head: the recorder wants
+        // bins, and the transform that makes them is already running one
+        // stage up. That is also what makes a row and the waterfall line
+        // above it the same reading.
+        p.connect(Source::Stage(derived::SPECTRUM, 0), (derived::HEATMAP, 0));
     }
 
     // The front ends the scanner table put on this span. Which demodulator
@@ -4972,8 +4976,8 @@ pub(crate) mod tests {
         assert_eq!(st.budget, 8 << 20);
         let topo = rx.topology();
         let heat = topo.nodes.iter().find(|n| n.kind == "heatmap").expect("in the graph");
-        let dc = topo.nodes.iter().find(|n| n.kind == "dc_block").expect("the head");
-        assert!(feeds(dc, heat), "the heatmap reads the span, not a channel");
+        let spec = topo.nodes.iter().find(|n| n.kind == "spectrum").expect("the display");
+        assert!(feeds(spec, heat), "the recorder reads the display's own bins");
 
         // And switched off it is still there, so keeping readings again is a
         // setting rather than a rebuild that would lose them.

@@ -639,6 +639,40 @@ pub enum Update {
     Rows { first: usize },
 }
 
+/// One frame of a power spectrum, as it was measured.
+///
+/// The junction between whatever transforms samples and whatever wants bins:
+/// the waterfall draws them, the heatmap records them, and neither should
+/// run its own FFT over the same span. Not [`crate::Update`] or a real port:
+/// a frame arrives a few times a second in one lump, at the transform's own
+/// rate rather than the graph's, and it carries the span it covers.
+///
+/// The readings are unsmoothed. Averaging across frames is a property of a
+/// display, not of what was measured, so it belongs to whoever draws rather
+/// than to what is published.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpectrumFrame {
+    /// Unix microseconds the frame finished at.
+    pub at_us: u64,
+    /// Middle of the span, in hertz.
+    pub center_hz: f64,
+    /// What the frame covers, in hertz.
+    pub span_hz: f64,
+    /// Power in dBFS, lowest frequency first.
+    pub db: std::sync::Arc<Vec<f32>>,
+}
+
+impl SpectrumFrame {
+    /// The frequency the middle of a bin holds.
+    pub fn bin_hz(&self, bin: usize) -> f64 {
+        if self.db.is_empty() {
+            return self.center_hz;
+        }
+        let step = self.span_hz / self.db.len() as f64;
+        self.center_hz - self.span_hz / 2.0 + (bin as f64 + 0.5) * step
+    }
+}
+
 /// A picture as it was received, with what it was received from.
 ///
 /// The video counterpart of [`Voice`], and here for the same reason: a field

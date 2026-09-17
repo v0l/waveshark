@@ -16,9 +16,12 @@ the code is in the commit log.
   from before it triggered.
 - Several matching tuners offered as one wider receiver, drift between them
   measured on the band they share and taken out.
-- Heatmap export: the span kept as readings and written as a PNG, or as a page
-  that gives the time, frequency and decibels under the pointer. Four colour
-  ramps, the panel's own by default.
+- Heatmap export: the span kept as readings and written as a page that zooms,
+  pans and gives the time of day, frequency and decibels under a crosshair.
+  Moving the dial widens the picture rather than clearing it, so a band walk
+  draws the whole band, and a row is the same reading the waterfall drew, at
+  the FFT size the spectrum is set to. Four colour ramps, the panel's own by
+  default.
 - A channel view: what is on each Wi-Fi and Bluetooth channel, how loud, and
   how crowded it is.
 - A band walk in the scanner settings: the dial steps past the span, holds on

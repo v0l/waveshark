@@ -187,8 +187,11 @@ impl Simple for SpectrumNode {
         "spectrum"
     }
 
+    /// Not a sink any more: the frames it computes go out on a port, so a
+    /// recorder reads the transform the display is already running rather
+    /// than running a second one over the same samples.
     fn is_sink(&self) -> bool {
-        true
+        false
     }
 
     /// The transform cannot be resized, and one holding an average of
@@ -203,14 +206,20 @@ impl Simple for SpectrumNode {
         }
         self.rate = i.spec.rate;
         self.center = i.spec.center;
-        // A sink still declares an output spec, because the graph gives every
-        // node a slot. Nothing is written to it.
-        Ok(i.spec)
+        // Frames rather than samples: the rate a reader wants from this
+        // port is how many frames a second arrive, not the sample rate the
+        // transform ate.
+        let mut out = i.spec.with_kind(PortKind::Spectrum);
+        out.rate = f64::from(self.refresh_hz);
+        Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let iq = i.as_iq().unwrap_or(&[]);
         self.fresh = false;
+        if let Some(out) = o.spectrum_mut() {
+            out.clear();
+        }
         if !self.collecting {
             self.debt -= iq.len() as f64;
             if self.debt > 0.0 {
@@ -223,6 +232,18 @@ impl Simple for SpectrumNode {
             self.fresh = true;
             self.collecting = false;
             self.debt = self.rate / self.refresh_hz.max(1.0) as f64;
+            // Unsmoothed, because what is published is what was measured:
+            // the averaging above it is how this display reads, and a
+            // recorder taking a display's average would record a decision
+            // somebody made about flicker.
+            if let Some(out) = o.spectrum_mut() {
+                out.push(common::SpectrumFrame {
+                    at_us: now_us(),
+                    center_hz: self.center.as_f64(),
+                    span_hz: self.rate,
+                    db: std::sync::Arc::new(self.spec.frame_db()),
+                });
+            }
         }
         Ok(())
     }

@@ -1,0 +1,311 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WaveShark heatmap __TITLE__</title>
+<style>
+  :root { --chassis:#070909; --panel:#12161a; --etch:#242a30; --legend:#5d6b75;
+          --value:#9aa8b2; --readout:#efc02f; --trace:#4fd2e0 }
+  * { box-sizing:border-box }
+  body { background:var(--chassis); color:var(--value); margin:0;
+         font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
+  header { padding:14px 18px; border-bottom:1px solid var(--etch); background:var(--panel) }
+  h1 { margin:0 0 4px; font-size:15px; font-weight:600; letter-spacing:.04em;
+       color:var(--readout); text-transform:uppercase }
+  .facts { display:flex; flex-wrap:wrap; gap:6px 22px; color:var(--legend) }
+  .facts b { font-weight:400; color:var(--value) }
+  main { padding:14px 18px 18px }
+  #wrap { position:relative; border:1px solid var(--etch); background:#000 }
+  canvas { display:block; width:100%; height:calc(100vh - 215px); min-height:320px;
+           cursor:crosshair }
+  #bar { display:flex; flex-wrap:wrap; gap:6px 22px; align-items:center;
+         padding:10px 0 0; color:var(--legend) }
+  #read { color:var(--readout); min-width:34em }
+  button { font:inherit; color:var(--value); background:var(--panel);
+           border:1px solid var(--etch); padding:3px 10px; cursor:pointer }
+  button:hover { color:var(--readout); border-color:var(--readout) }
+  footer { padding:0 18px 22px; color:var(--legend) }
+</style>
+
+<header>
+  <h1>__TITLE__ heatmap</h1>
+  <div class="facts">
+    <span>span <b>__SPAN__</b></span>
+    <span>rows <b>__ROWS__</b></span>
+    <span>bins <b>__BINS__</b></span>
+    <span>from <b>__FROM__</b></span>
+    <span>to <b>__TO__</b></span>
+  </div>
+</header>
+
+<main>
+  <div id="wrap"><canvas id="c"></canvas></div>
+  <div id="bar">
+    <span id="read">move the pointer over the heatmap</span>
+    <button id="fit">FIT</button>
+    <span>wheel zooms, drag pans, shift-wheel zooms time only</span>
+  </div>
+</main>
+
+<footer>Written __MADE__ by WaveShark __VERSION__.</footer>
+
+<script type="application/gzip;base64" id="readings">__DATA__</script>
+
+<script type="module">
+const m = __META__;
+// The readings ride in a tag of their own, gzipped: one byte a bin over a
+// wide axis is tens of megabytes as text, and a page nobody can open is not
+// an export. Undone here with the browser's own inflater.
+const packed = Uint8Array.from(
+  atob(document.getElementById('readings').textContent.trim()), c => c.charCodeAt(0));
+const d = new Uint8Array(await new Response(
+  new Blob([packed]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+const c = document.getElementById('c'), g = c.getContext('2d');
+const read = document.getElementById('read');
+
+function ramp(t) {
+  const s = m.ramp;
+  let i = 0;
+  while (i + 2 < s.length && t > s[i + 1][0]) i++;
+  const a = s[i], b = s[i + 1];
+  const f = Math.min(1, Math.max(0, (t - a[0]) / (b[0] - a[0])));
+  return [0, 1, 2].map(k => Math.round(a[1][k] + (b[1][k] - a[1][k]) * f));
+}
+
+// The gutters the axes are drawn in, in device pixels.
+const L = 78, B = 30, T = 6, R = 10;
+let view = null;            // {x0,x1,y0,y1} in bins and rows
+let dpr = 1;
+
+function fit() {
+  view = { x0: 0, x1: m.bins, y0: 0, y1: m.rows };
+  draw();
+}
+
+function plot() {
+  return { x: L, y: T, w: c.width - L - R, h: c.height - T - B };
+}
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(c.clientWidth * dpr);
+  c.height = Math.round(c.clientHeight * dpr);
+  draw();
+}
+
+function hzAt(bin) { return m.center + (bin / m.bins - 0.5) * m.rate; }
+function fmtHz(hz) { return (hz / 1e6).toFixed(4) + ' MHz'; }
+function utc(ms, date) {
+  const s = new Date(ms).toISOString();
+  return date ? s.slice(0, 19).replace('T', ' ') : s.slice(11, 19);
+}
+
+// What was last painted, so a pointer moving over the picture redraws the
+// crosshair rather than the readings.
+let sharp = null, sharpKey = '';
+
+function viewKey(p) {
+  return [view.x0, view.x1, view.y0, view.y1, p.w, p.h].join('/');
+}
+
+/// Paint the visible readings, one pass over what the view covers.
+///
+/// From the decibels the page carries rather than from a picture of them:
+/// an image built once at a fixed size is a fixed resolution, and a band
+/// walk's axis is tens of thousands of bins wide, which is both past what a
+/// canvas may be and coarser than what was measured. A pixel here is the
+/// loudest reading under it, so a carrier one bin wide survives the whole
+/// band being on screen and zooming in shows the bins themselves.
+function render(p) {
+  const w = Math.max(1, Math.round(p.w)), h = Math.max(1, Math.round(p.h));
+  const img = new ImageData(w, h);
+  const bw = (view.x1 - view.x0) / w, rh = (view.y1 - view.y0) / h;
+  for (let y = 0; y < h; y++) {
+    const r0 = Math.max(0, Math.floor(view.y0 + y * rh));
+    const r1 = Math.min(m.rows, Math.max(r0 + 1, Math.ceil(view.y0 + (y + 1) * rh)));
+    for (let x = 0; x < w; x++) {
+      const b0 = Math.max(0, Math.floor(view.x0 + x * bw));
+      const b1 = Math.min(m.bins, Math.max(b0 + 1, Math.ceil(view.x0 + (x + 1) * bw)));
+      let best = 0;
+      for (let r = r0; r < r1; r++) {
+        const base = r * m.bins;
+        for (let b = b0; b < b1; b++) {
+          const v = d[base + b];
+          if (v > best) best = v;
+        }
+      }
+      // Zero is a bin the receiver was not listening to, which is chassis
+      // dark rather than the bottom of the ramp: a band walk's picture has
+      // to say where the dial was.
+      const rgb = best === 0 ? [7, 9, 13]
+        : ramp(Math.min(1, Math.max(0, (m.base + best * m.step - m.floor) / (m.ceil - m.floor))));
+      const q = (y * w + x) * 4;
+      img.data[q] = rgb[0]; img.data[q + 1] = rgb[1]; img.data[q + 2] = rgb[2]; img.data[q + 3] = 255;
+    }
+  }
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').putImageData(img, 0, 0);
+  return cv;
+}
+
+function draw() {
+  if (!view) return;
+  const p = plot();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.fillStyle = '#070909';
+  g.fillRect(0, 0, c.width, c.height);
+
+  const key = viewKey(p);
+  if (!sharp || sharpKey !== key) {
+    sharp = render(p);
+    sharpKey = key;
+  }
+  g.save();
+  g.beginPath(); g.rect(p.x, p.y, p.w, p.h); g.clip();
+  g.imageSmoothingEnabled = false;
+  g.drawImage(sharp, p.x, p.y);
+  g.restore();
+
+  g.strokeStyle = '#242a30';
+  g.lineWidth = 1;
+  g.strokeRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+  axes(p);
+  if (cursor) crosshair(p);
+}
+
+function axes(p) {
+  const f = 11 * dpr;
+  g.font = f + 'px ui-monospace,monospace';
+  g.fillStyle = '#5d6b75';
+  g.strokeStyle = '#242a30';
+
+  // Frequency along the bottom, at whichever step keeps the labels apart.
+  const spanHz = (view.x1 - view.x0) / m.bins * m.rate;
+  const stepHz = nice(spanHz / Math.max(2, Math.floor(p.w / (90 * dpr))));
+  const first = Math.ceil(hzAt(view.x0) / stepHz) * stepHz;
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  for (let hz = first; hz <= hzAt(view.x1); hz += stepHz) {
+    const bin = (hz - m.center) / m.rate * m.bins + m.bins / 2;
+    const x = p.x + (bin - view.x0) / (view.x1 - view.x0) * p.w;
+    g.beginPath(); g.moveTo(x, p.y + p.h); g.lineTo(x, p.y + p.h + 4 * dpr); g.stroke();
+    const lab = (hz / 1e6).toFixed(hzPlaces(stepHz));
+    // Kept inside the canvas: a label centred on the last tick runs off the
+    // right edge and is read as a different number.
+    const half = g.measureText(lab).width / 2;
+    g.fillText(lab, Math.min(c.width - half - 2, Math.max(half + 2, x)), p.y + p.h + 6 * dpr);
+  }
+
+  // Time down the left, as the clock read: a row is compared with a log.
+  const rowsShown = view.y1 - view.y0;
+  const step = Math.max(1, Math.round(rowsShown / Math.max(2, Math.floor(p.h / (64 * dpr)))));
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (let r = Math.ceil(view.y0); r < view.y1; r += step) {
+    const y = p.y + (r + .5 - view.y0) / rowsShown * p.h;
+    g.beginPath(); g.moveTo(p.x - 4 * dpr, y); g.lineTo(p.x, y); g.stroke();
+    g.fillText(utc(m.at[Math.min(m.rows - 1, r)]), p.x - 7 * dpr, y);
+  }
+}
+
+function hzPlaces(stepHz) {
+  if (stepHz >= 1e6) return 1;
+  if (stepHz >= 1e5) return 2;
+  if (stepHz >= 1e4) return 3;
+  return 4;
+}
+
+function nice(v) {
+  const e = Math.pow(10, Math.floor(Math.log10(Math.max(v, 1e-9))));
+  const n = v / e;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * e;
+}
+
+let cursor = null;
+
+function crosshair(p) {
+  const x = p.x + (cursor.bin + .5 - view.x0) / (view.x1 - view.x0) * p.w;
+  const y = p.y + (cursor.row + .5 - view.y0) / (view.y1 - view.y0) * p.h;
+  g.strokeStyle = '#efc02f';
+  g.globalAlpha = .65;
+  g.beginPath();
+  g.moveTo(x, p.y); g.lineTo(x, p.y + p.h);
+  g.moveTo(p.x, y); g.lineTo(p.x + p.w, y);
+  g.stroke();
+  g.globalAlpha = 1;
+}
+
+function at(e) {
+  const b = c.getBoundingClientRect(), p = plot();
+  const px = (e.clientX - b.left) * (c.width / b.width);
+  const py = (e.clientY - b.top) * (c.height / b.height);
+  return {
+    px, py,
+    bin: view.x0 + (px - p.x) / p.w * (view.x1 - view.x0),
+    row: view.y0 + (py - p.y) / p.h * (view.y1 - view.y0),
+    inside: px >= p.x && px <= p.x + p.w && py >= p.y && py <= p.y + p.h,
+  };
+}
+
+c.addEventListener('mousemove', e => {
+  const a = at(e);
+  if (!a.inside) { cursor = null; read.textContent = 'move the pointer over the heatmap'; draw(); return; }
+  const bin = Math.min(m.bins - 1, Math.max(0, Math.floor(a.bin)));
+  const row = Math.min(m.rows - 1, Math.max(0, Math.floor(a.row)));
+  cursor = { bin, row };
+  if (drag) {
+    const k = { x: (view.x1 - view.x0) / plot().w, y: (view.y1 - view.y0) / plot().h };
+    pan((drag.px - a.px) * k.x, (drag.py - a.py) * k.y);
+    drag = a;
+    return;
+  }
+  const raw = d[row * m.bins + bin];
+  const ago = (m.at[0] - m.at[row]) / 1000;
+  const level = raw === 0 ? 'not listening' : (m.base + raw * m.step).toFixed(1) + ' dBFS';
+  read.textContent = fmtHz(hzAt(bin + .5)) + '   ' + utc(m.at[row], true) + ' UTC'
+    + '  (-' + ago.toFixed(3) + ' s)   ' + level;
+  draw();
+});
+
+c.addEventListener('mouseleave', () => { cursor = null; draw(); });
+
+let drag = null;
+c.addEventListener('mousedown', e => { drag = at(e); c.style.cursor = 'grabbing'; });
+addEventListener('mouseup', () => { drag = null; c.style.cursor = 'crosshair'; });
+
+function pan(dx, dy) {
+  const w = view.x1 - view.x0, h = view.y1 - view.y0;
+  view.x0 = Math.min(m.bins - w, Math.max(0, view.x0 + dx));
+  view.y0 = Math.min(m.rows - h, Math.max(0, view.y0 + dy));
+  view.x1 = view.x0 + w; view.y1 = view.y0 + h;
+  draw();
+}
+
+c.addEventListener('wheel', e => {
+  e.preventDefault();
+  const a = at(e);
+  const k = Math.pow(1.0015, e.deltaY);
+  // Shift zooms time alone, because a long watch is a tall picture and a
+  // narrow band: the two axes are rarely wanted at the same scale.
+  if (!e.shiftKey) {
+    const w = Math.min(m.bins, Math.max(2, (view.x1 - view.x0) * k));
+    const f = (a.bin - view.x0) / (view.x1 - view.x0);
+    view.x0 = a.bin - f * w; view.x1 = view.x0 + w;
+  }
+  const h = Math.min(m.rows, Math.max(2, (view.y1 - view.y0) * k));
+  const fy = (a.row - view.y0) / (view.y1 - view.y0);
+  view.y0 = a.row - fy * h; view.y1 = view.y0 + h;
+  clamp();
+  draw();
+}, { passive: false });
+
+function clamp() {
+  const w = Math.min(m.bins, view.x1 - view.x0), h = Math.min(m.rows, view.y1 - view.y0);
+  view.x0 = Math.min(m.bins - w, Math.max(0, view.x0)); view.x1 = view.x0 + w;
+  view.y0 = Math.min(m.rows - h, Math.max(0, view.y0)); view.y1 = view.y0 + h;
+}
+
+c.addEventListener('dblclick', fit);
+document.getElementById('fit').addEventListener('click', fit);
+addEventListener('resize', resize);
+fit();
+resize();
+</script>

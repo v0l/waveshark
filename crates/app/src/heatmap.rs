@@ -48,30 +48,6 @@ pub fn heatmaps_dir() -> PathBuf {
     crate::picsave::pictures_dir().with_file_name("heatmaps")
 }
 
-/// Which file an export asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Export {
-    /// Flat pixels with the axes burned in.
-    #[default]
-    Png,
-    /// The same picture with the readings beside it, so a pointer over a
-    /// point gives the time, the frequency and the decibels.
-    Html,
-}
-
-impl Export {
-    pub fn label(self) -> &'static str {
-        match self {
-            Export::Png => "png",
-            Export::Html => "html",
-        }
-    }
-
-    pub fn extension(self) -> &'static str {
-        self.label()
-    }
-}
-
 /// A colour ramp, as data rather than as a painter: an export runs where
 /// there is no egui context and no pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -150,23 +126,50 @@ impl Ramp {
 }
 
 /// One spectrum row, as it was read.
+///
+/// A row covers the span the receiver was on when it was taken, which is not
+/// always the whole of the axis the heatmap has grown to: `bin0` is where it
+/// starts on that axis.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     /// Unix microseconds the row was finished at.
     pub at_us: u64,
+    /// First bin of the heatmap's axis this row holds a reading for.
+    pub bin0: usize,
     pub db: Vec<u8>,
 }
 
-/// The readings, bounded.
+/// A reading the receiver was not listening to. Zero is reserved for it, so
+/// a band walk's picture says where the dial was rather than drawing an
+/// empty span at the noise floor.
+pub const UNREAD: u8 = 0;
+
+/// The readings, bounded, on a frequency axis that grows.
+///
+/// The axis is absolute: a bin is a frequency, not an offset from wherever
+/// the dial happens to be, so moving the dial widens the picture instead of
+/// throwing it away. A row keeps only the bins it covered, and the export
+/// fills the rest with [`UNREAD`].
 #[derive(Clone, Debug)]
 pub struct Heat {
     rows: VecDeque<Row>,
     bins: usize,
+    /// Frequency of the low edge of bin zero.
+    base_hz: f64,
+    /// Width of a bin. Set by the first row and kept: a later span at a
+    /// different rate is resampled onto it rather than starting again.
+    step_hz: f64,
+    /// Where the receiver is now, for placing the next row.
     center: Hz,
     rate: f64,
     budget: usize,
     bytes: usize,
 }
+
+/// How wide the axis may grow, in bins. A walk across a whole band is worth
+/// keeping; a receiver dragged from 100 kHz to 6 GHz at a 1 kHz bin is six
+/// million columns of mostly nothing, which is a picture nobody can open.
+const MAX_BINS: usize = 1 << 17;
 
 impl Default for Heat {
     fn default() -> Self {
@@ -179,6 +182,8 @@ impl Heat {
         Self {
             rows: VecDeque::new(),
             bins: 0,
+            base_hz: 0.0,
+            step_hz: 0.0,
             center: Hz(0),
             rate: 0.0,
             budget: budget.max(1 << 16),
@@ -195,36 +200,89 @@ impl Heat {
         self.budget
     }
 
-    /// Where the readings were taken. A row is only meaningful against the
-    /// axis it was read on, so a retune or a change of bin count throws the
-    /// history away rather than exporting two different frequency axes as
-    /// one picture.
+    /// Where the readings are being taken now.
+    ///
+    /// A retune does not throw the history away: the next row lands at its
+    /// own frequency on the same axis, and the axis widens to hold it. That
+    /// is what makes a heatmap of a band walk, or of an evening spent moving
+    /// the dial, a picture of the band rather than of the last step.
     pub fn tuned(&mut self, center: Hz, rate: f64) {
-        if center == self.center && rate == self.rate {
-            return;
-        }
         self.center = center;
         self.rate = rate;
-        self.clear();
     }
 
     pub fn clear(&mut self) {
         self.rows.clear();
         self.bytes = 0;
+        self.bins = 0;
+        self.step_hz = 0.0;
+        self.base_hz = 0.0;
     }
 
     pub fn push(&mut self, at_us: u64, db: &[f32]) {
-        if db.is_empty() {
+        if db.is_empty() || self.rate <= 0.0 {
             return;
         }
-        if db.len() != self.bins {
+        let low = self.center.as_f64() - self.rate / 2.0;
+        if self.rows.is_empty() {
+            self.step_hz = self.rate / db.len() as f64;
+            self.base_hz = low;
             self.bins = db.len();
-            self.clear();
         }
-        let row = Row { at_us, db: db.iter().map(|v| quantise(*v)).collect() };
-        self.bytes += row.db.len();
-        self.rows.push_back(row);
+        // The row on this axis: where it starts, and how many bins of it
+        // there are at this axis's resolution.
+        let start = ((low - self.base_hz) / self.step_hz).round() as i64;
+        let width = (self.rate / self.step_hz).round().max(1.0) as i64;
+        let Some(shift) = self.widen(start, width) else {
+            // Further than the axis may stretch: this is a different watch,
+            // not a wider one.
+            self.clear();
+            self.step_hz = self.rate / db.len() as f64;
+            self.base_hz = low;
+            self.bins = db.len();
+            self.rows.push_back(Row {
+                at_us,
+                bin0: 0,
+                db: db.iter().map(|v| quantise(*v)).collect(),
+            });
+            self.bytes += db.len();
+            self.trim();
+            return;
+        };
+        let start = (start + shift) as usize;
+        // Nearest source bin per axis bin, which is a copy where the rate
+        // has not changed and a resample where it has.
+        let width = width as usize;
+        let mut out = Vec::with_capacity(width);
+        for i in 0..width {
+            let src = (i as f64 + 0.5) * db.len() as f64 / width as f64;
+            let v = db[(src as usize).min(db.len() - 1)];
+            out.push(quantise(v));
+        }
+        self.bytes += out.len();
+        self.rows.push_back(Row { at_us, bin0: start, db: out });
         self.trim();
+    }
+
+    /// Make room on the axis for a row at `start` of `width` bins, moving
+    /// the origin down if it starts below bin zero. The shift applied to
+    /// every existing row, or `None` if this would take the axis past
+    /// [`MAX_BINS`].
+    fn widen(&mut self, start: i64, width: i64) -> Option<i64> {
+        let below = (-start).max(0);
+        let above = (start + width - self.bins as i64).max(0);
+        let bins = self.bins as i64 + below + above;
+        if bins > MAX_BINS as i64 {
+            return None;
+        }
+        if below > 0 {
+            for r in &mut self.rows {
+                r.bin0 += below as usize;
+            }
+            self.base_hz -= below as f64 * self.step_hz;
+        }
+        self.bins = bins as usize;
+        Some(below)
     }
 
     fn trim(&mut self) {
@@ -248,17 +306,33 @@ impl Heat {
         self.bytes
     }
 
+    /// The middle of the axis, which is the middle of everything heard
+    /// rather than wherever the dial is now.
     pub fn center(&self) -> Hz {
-        self.center
+        Hz((self.base_hz + self.bins as f64 * self.step_hz / 2.0).max(0.0) as u64)
     }
 
+    /// What the axis covers, in hertz.
     pub fn rate(&self) -> f64 {
-        self.rate
+        self.bins as f64 * self.step_hz
     }
 
     /// Oldest to newest.
     pub fn row(&self, i: usize) -> Option<&Row> {
         self.rows.get(i)
+    }
+
+    /// One row across the whole axis, [`UNREAD`] where the receiver was not
+    /// listening at the time.
+    pub fn dense_row(&self, i: usize) -> Vec<u8> {
+        let mut out = vec![UNREAD; self.bins];
+        if let Some(r) = self.rows.get(i) {
+            let end = (r.bin0 + r.db.len()).min(self.bins);
+            if r.bin0 < end {
+                out[r.bin0..end].copy_from_slice(&r.db[..end - r.bin0]);
+            }
+        }
+        out
     }
 
     /// How long the history covers, from the oldest row to the newest.
@@ -274,95 +348,8 @@ impl Heat {
         if self.bins == 0 {
             return self.center.as_f64();
         }
-        let frac = bin as f64 / self.bins as f64 - 0.5;
-        self.center.as_f64() + frac * self.rate
+        self.base_hz + (bin as f64 + 0.5) * self.step_hz
     }
-
-    /// The readings as pixels, newest row first, with no axes.
-    fn pixels(&self, ramp: Ramp, floor: f32, ceil: f32) -> Vec<u8> {
-        let span = (ceil - floor).max(1.0);
-        let mut out = Vec::with_capacity(self.rows.len() * self.bins * 3);
-        for row in self.rows.iter().rev() {
-            for v in &row.db {
-                let t = (dequantise(*v) - floor) / span;
-                out.extend_from_slice(&ramp.sample(t));
-            }
-        }
-        out
-    }
-}
-
-/// How much of the picture the axes take.
-const LEFT: usize = 60;
-const BOTTOM: usize = 16;
-/// Chassis dark, so an export looks like the panel it came from.
-const PAPER: [u8; 3] = [7, 9, 13];
-const INK: [u8; 3] = [154, 168, 178];
-
-/// The picture, with the time down the left and the frequency along the
-/// bottom, as PNG bytes.
-pub fn png(heat: &Heat, ramp: Ramp, floor: f32, ceil: f32) -> Result<Vec<u8>> {
-    let (rows, bins) = (heat.rows(), heat.bins());
-    if rows == 0 || bins == 0 {
-        return Err(common::Error::other("nothing has been recorded yet"));
-    }
-    let (w, h) = (LEFT + bins, rows + BOTTOM);
-    let mut img = vec![0u8; w * h * 3];
-    for p in img.chunks_exact_mut(3) {
-        p.copy_from_slice(&PAPER);
-    }
-    let heat_px = heat.pixels(ramp, floor, ceil);
-    for y in 0..rows {
-        let src = y * bins * 3;
-        let dst = (y * w + LEFT) * 3;
-        img[dst..dst + bins * 3].copy_from_slice(&heat_px[src..src + bins * 3]);
-    }
-
-    // Five frequency ticks across the span, labelled in megahertz. Three
-    // decimals is a kilohertz, which is as fine as a label this size can be
-    // read and finer than a bin at any span the receiver samples.
-    let mut inked_to = 0;
-    for k in 0..=4 {
-        let bin = bins * k / 4;
-        let x = (LEFT + bin.min(bins - 1)).min(w - 1);
-        for y in rows..(rows + 4).min(h) {
-            put(&mut img, w, h, x, y, INK);
-        }
-        let label = format!("{:.3}", heat.bin_hz(bin) / 1e6);
-        let width = text_width(&label);
-        let lx = x.saturating_sub(width / 2).min(w.saturating_sub(width));
-        // A narrow span is a narrow picture, and two labels drawn over each
-        // other are worse than one: the tick is still there to read against.
-        if k > 0 && lx < inked_to + 4 {
-            continue;
-        }
-        inked_to = lx + width;
-        text(&mut img, w, h, lx, rows + 5, &label, INK);
-    }
-
-    // Time down the left, in seconds before the newest row, which is the
-    // reading somebody looking at a heatmap actually wants: a wall clock
-    // says when the file was written, not how long ago the burst was.
-    let newest = heat.row(rows - 1).map(|r| r.at_us).unwrap_or(0);
-    let step = (rows / 4).max(1);
-    for y in (0..rows).step_by(step) {
-        let at = heat.row(rows - 1 - y).map(|r| r.at_us).unwrap_or(newest);
-        let ago = (newest.saturating_sub(at)) as f64 / 1e6;
-        let label = match ago < 0.5 {
-            true => "0s".to_string(),
-            false => format!("-{ago:.0}s"),
-        };
-        for x in LEFT - 4..LEFT {
-            put(&mut img, w, h, x, y, INK);
-        }
-        text(&mut img, w, h, LEFT - 6 - text_width(&label), y.min(h - 6), &label, INK);
-    }
-
-    let mut out = Vec::new();
-    let enc = image::codecs::png::PngEncoder::new(&mut out);
-    image::ImageEncoder::write_image(enc, &img, w as u32, h as u32, image::ExtendedColorType::Rgb8)
-        .map_err(|e| common::Error::other(format!("cannot encode the heatmap: {e}")))?;
-    Ok(out)
 }
 
 /// The same picture with the readings beside it, in one file that opens
@@ -374,123 +361,78 @@ pub fn html(heat: &Heat, ramp: Ramp, floor: f32, ceil: f32) -> Result<String> {
     if rows == 0 || bins == 0 {
         return Err(common::Error::other("nothing has been recorded yet"));
     }
-    let picture = png(heat, ramp, floor, ceil)?;
     let b64 = base64::engine::general_purpose::STANDARD;
-    let img = b64.encode(&picture);
-    // Newest row first, to match the picture.
+    // Newest row first, so a page opens on what was just heard.
     let mut readings = Vec::with_capacity(rows * bins);
     let mut times = Vec::with_capacity(rows);
-    let newest = heat.row(rows - 1).map(|r| r.at_us).unwrap_or(0);
     for i in (0..rows).rev() {
         let r = heat.row(i).expect("row in range");
-        readings.extend_from_slice(&r.db);
-        times.push(format!("{:.3}", (newest.saturating_sub(r.at_us)) as f64 / 1e6));
+        readings.extend_from_slice(&heat.dense_row(i));
+        // Unix milliseconds, so the page can say the time and a reader can
+        // put a row beside a log line.
+        times.push((r.at_us / 1000).to_string());
     }
-    let data = b64.encode(&readings);
+    // Gzipped, because the readings are mostly a noise floor and unread
+    // axis: the 33 MB page that prompted this is a few hundred kilobytes
+    // once deflated, and every browser can undo it with DecompressionStream.
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    use std::io::Write as _;
+    gz.write_all(&readings)
+        .and_then(|()| gz.try_finish())
+        .map_err(|e| common::Error::other(format!("cannot compress the readings: {e}")))?;
+    let data =
+        b64.encode(gz.finish().map_err(|e| common::Error::other(format!("cannot compress: {e}")))?);
+    let made = now_us();
+    // The colours go as stops rather than as pixels: the page paints the
+    // readings itself, so the floor and the ceiling can be anything and the
+    // ramp is the same one the panel drew.
+    let stops: Vec<String> =
+        ramp.stops().iter().map(|(t, c)| format!("[{t},[{},{},{}]]", c[0], c[1], c[2])).collect();
     let meta = format!(
-        "{{\"center\":{},\"rate\":{},\"bins\":{},\"rows\":{},\"left\":{},\"bottom\":{},\
-         \"base\":{},\"step\":{},\"ago\":[{}]}}",
+        "{{\"waveshark\":\"{}\",\"generated\":{},\"center\":{},\"rate\":{},\"bins\":{},\
+         \"rows\":{},\"base\":{},\"step\":{},\"floor\":{},\"ceil\":{},\"ramp\":[{}],\
+         \"at\":[{}]}}",
+        crate::update::running(),
+        made / 1000,
         heat.center().as_f64(),
         heat.rate(),
         bins,
         rows,
-        LEFT,
-        BOTTOM,
         DB_BASE,
         DB_STEP,
+        floor,
+        ceil,
+        stops.join(","),
         times.join(",")
     );
-    Ok(format!(
-        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>WaveShark heatmap {:.4} MHz</title>\n\
-         <style>body{{background:#070909;color:#9aa8b2;font:12px monospace;margin:16px}}\
-         #p{{position:relative;display:inline-block}}#p img{{display:block;image-rendering:pixelated}}\
-         #r{{margin-top:8px;color:#efc02f}}</style>\n\
-         <div id=\"p\"><img id=\"i\" src=\"data:image/png;base64,{}\"></div>\n\
-         <div id=\"r\">move the pointer over the heatmap</div>\n\
-         <script>\nconst m={};\nconst d=Uint8Array.from(atob(\"{}\"),c=>c.charCodeAt(0));\n\
-         const i=document.getElementById('i'),r=document.getElementById('r');\n\
-         i.addEventListener('mousemove',e=>{{\n\
-         const b=i.getBoundingClientRect();\n\
-         const x=Math.floor((e.clientX-b.left)*i.naturalWidth/b.width)-m.left;\n\
-         const y=Math.floor((e.clientY-b.top)*i.naturalHeight/b.height);\n\
-         if(x<0||x>=m.bins||y<0||y>=m.rows){{r.textContent='outside the readings';return}}\n\
-         const hz=m.center+(x/m.bins-0.5)*m.rate;\n\
-         const db=m.base+d[y*m.bins+x]*m.step;\n\
-         const ago=m.ago[y]<0.05?'now':'-'+m.ago[y].toFixed(3)+' s';\n\
-         r.textContent=(hz/1e6).toFixed(4)+' MHz  '+ago+'  '+db.toFixed(1)+' dBFS';\n\
-         }});\n</script>\n",
-        heat.center().as_f64() / 1e6,
-        img,
-        meta,
-        data
-    ))
+    let newest = heat.row(rows - 1).map(|r| r.at_us).unwrap_or(made);
+    let oldest = heat.row(0).map(|r| r.at_us).unwrap_or(made);
+    let page = include_str!("heatmap.html")
+        .replace("__TITLE__", &format!("{:.4} MHz", heat.center().as_f64() / 1e6))
+        .replace("__SPAN__", &format!("{:.3} MHz", heat.rate() / 1e6))
+        .replace("__ROWS__", &rows.to_string())
+        .replace("__BINS__", &bins.to_string())
+        .replace("__FROM__", &format!("{} UTC", stamp(oldest)))
+        .replace("__TO__", &format!("{} UTC", stamp(newest)))
+        .replace("__MADE__", &format!("{} UTC", stamp(made)))
+        .replace("__VERSION__", crate::update::running())
+        .replace("__META__", &meta)
+        .replace("__DATA__", &data);
+    Ok(page)
 }
 
-fn put(img: &mut [u8], w: usize, h: usize, x: usize, y: usize, c: [u8; 3]) {
-    if x >= w || y >= h {
-        return;
-    }
-    let i = (y * w + x) * 3;
-    img[i..i + 3].copy_from_slice(&c);
-}
-
-/// Three pixels a glyph and one of gap, at double size.
-const SCALE: usize = 2;
-const GLYPH_W: usize = 3;
-const GLYPH_H: usize = 5;
-
-fn text_width(s: &str) -> usize {
-    s.chars().count() * (GLYPH_W + 1) * SCALE
-}
-
-fn text(img: &mut [u8], w: usize, h: usize, x: usize, y: usize, s: &str, c: [u8; 3]) {
-    let mut cx = x;
-    for ch in s.chars() {
-        let g = glyph(ch);
-        for (row, bits) in g.iter().enumerate() {
-            for col in 0..GLYPH_W {
-                if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
-                    continue;
-                }
-                for dy in 0..SCALE {
-                    for dx in 0..SCALE {
-                        put(img, w, h, cx + col * SCALE + dx, y + row * SCALE + dy, c);
-                    }
-                }
-            }
-        }
-        cx += (GLYPH_W + 1) * SCALE;
-    }
+/// A time as the page prints it: the date as well, because a picture
+/// outlives the day it was made.
+fn stamp(at_us: u64) -> String {
+    chrono::DateTime::from_timestamp((at_us / 1_000_000) as i64, 0)
+        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
 }
 
 /// A 3x5 font, enough for a frequency and a time. Burned into the picture
 /// rather than drawn with a real typeface because an export must not depend
 /// on a font being installed, and these are the only characters an axis
 /// label uses.
-fn glyph(c: char) -> [u8; GLYPH_H] {
-    match c {
-        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
-        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
-        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
-        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
-        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
-        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
-        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
-        '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
-        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
-        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
-        '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
-        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
-        ':' => [0b000, 0b010, 0b000, 0b010, 0b000],
-        'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
-        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
-        'k' => [0b100, 0b101, 0b110, 0b101, 0b101],
-        'z' => [0b111, 0b001, 0b010, 0b100, 0b111],
-        's' => [0b011, 0b100, 0b010, 0b001, 0b110],
-        _ => [0; GLYPH_H],
-    }
-}
-
 /// What the heatmap holds and where the last export went.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeatmapStatus {
@@ -504,43 +446,41 @@ pub struct HeatmapStatus {
     pub error: Option<String>,
 }
 
-/// The recorder: its own transform over the span, at its own rate.
+/// The recorder: the display's transform, kept at its own rate.
 ///
-/// Its own rather than the display's because the point of the thing is a
-/// heatmap of a night nobody watched, and because a waterfall scrolling at
-/// twenty rows a second would fill any budget in minutes.
+/// It reads a spectrum port rather than samples, so the bins it records are
+/// the bins the waterfall drew, at whatever size the operator set, and the
+/// FFT runs once for both. Its own rate still, because a waterfall scrolling
+/// at thirty rows a second would fill any budget in minutes and the point of
+/// the thing is a heatmap of a night nobody watched.
 pub struct HeatmapNode {
-    spec: dsp::Spectrum,
     heat: Heat,
     recording: bool,
     rows_per_sec: f32,
     rate: f64,
     center: Hz,
-    /// Samples still to be discarded before the next row is started, so the
-    /// transform runs at the row rate rather than at the block rate.
-    debt: f64,
-    collecting: bool,
+    /// When the last row was taken, for keeping one row per interval out of
+    /// however many frames the display produces.
+    last_row: u64,
     saved: Option<PathBuf>,
     error: Option<String>,
 }
 
 impl Default for HeatmapNode {
     fn default() -> Self {
-        Self::new(2048, DEFAULT_BUDGET)
+        Self::new(DEFAULT_BUDGET)
     }
 }
 
 impl HeatmapNode {
-    pub fn new(size: usize, budget: usize) -> Self {
+    pub fn new(budget: usize) -> Self {
         Self {
-            spec: dsp::Spectrum::new(size.clamp(64, 32_768).next_power_of_two()),
             heat: Heat::new(budget),
             recording: true,
             rows_per_sec: 2.0,
             rate: 0.0,
             center: Hz(0),
-            debt: 0.0,
-            collecting: true,
+            last_row: 0,
             saved: None,
             error: None,
         }
@@ -569,15 +509,8 @@ impl HeatmapNode {
 
     /// Write what has been recorded into `dir`, and remember where it went
     /// so the interface can say so without asking for the file back.
-    pub fn export(
-        &mut self,
-        dir: &Path,
-        what: Export,
-        ramp: Ramp,
-        floor: f32,
-        ceil: f32,
-    ) -> Result<PathBuf> {
-        let r = self.write(dir, what, ramp, floor, ceil);
+    pub fn export(&mut self, dir: &Path, ramp: Ramp, floor: f32, ceil: f32) -> Result<PathBuf> {
+        let r = self.write(dir, ramp, floor, ceil);
         match &r {
             Ok(p) => {
                 self.saved = Some(p.clone());
@@ -590,27 +523,16 @@ impl HeatmapNode {
         r
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        what: Export,
-        ramp: Ramp,
-        floor: f32,
-        ceil: f32,
-    ) -> Result<PathBuf> {
+    fn write(&self, dir: &Path, ramp: Ramp, floor: f32, ceil: f32) -> Result<PathBuf> {
         std::fs::create_dir_all(dir)?;
         let name = format!(
-            "heatmap_{}_{:.4}M_{:.0}k.{}",
+            "heatmap_{}_{:.4}M_{:.0}k.html",
             chrono::Utc::now().format("%Y%m%d-%H%M%S"),
             self.heat.center().as_f64() / 1e6,
             self.heat.rate() / 1e3,
-            what.extension()
         );
         let path = dir.join(name);
-        match what {
-            Export::Png => std::fs::write(&path, png(&self.heat, ramp, floor, ceil)?)?,
-            Export::Html => std::fs::write(&path, html(&self.heat, ramp, floor, ceil)?)?,
-        }
+        std::fs::write(&path, html(&self.heat, ramp, floor, ceil)?)?;
         Ok(path)
     }
 }
@@ -624,37 +546,34 @@ impl Simple for HeatmapNode {
         true
     }
 
+    /// Bins, not samples: the recorder reads the frames the spectrum stage
+    /// already computes rather than transforming the same span again, so a
+    /// row is the same reading the waterfall drew and the FFT is run once.
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
-        if i.spec.kind != PortKind::Iq {
-            return Err(common::Error::other("heatmap needs IQ"));
+        if i.spec.kind != PortKind::Spectrum {
+            return Err(common::Error::other("heatmap reads a spectrum"));
         }
-        self.rate = i.spec.rate;
-        self.center = i.spec.center;
-        self.heat.tuned(i.spec.center, i.spec.rate);
         Ok(i.spec)
     }
 
     fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        let iq = i.as_iq().unwrap_or(&[]);
-        if !self.recording || iq.is_empty() {
+        let frames = i.as_spectrum().unwrap_or(&[]);
+        if !self.recording {
             return Ok(());
         }
-        if !self.collecting {
-            self.debt -= iq.len() as f64;
-            if self.debt > 0.0 {
-                return Ok(());
+        for f in frames {
+            // One row per interval, out of however many the display asked
+            // for: a waterfall wants thirty a second and a night's watch
+            // wants one every ten.
+            let wait = (1e6 / self.rows_per_sec.max(0.02) as f64) as u64;
+            if self.last_row > 0 && f.at_us.saturating_sub(self.last_row) < wait {
+                continue;
             }
-            self.collecting = true;
-        }
-        if self.spec.process(iq) {
-            let at = now_us();
-            self.heat.push(at, self.spec.power_db());
-            self.collecting = false;
-            self.debt = self.rate / self.rows_per_sec.max(0.02) as f64;
-            // Each row is a fresh look rather than an average of the last
-            // half hour, which is what an exponential average across a row
-            // interval this long would be.
-            self.spec.reset();
+            self.last_row = f.at_us;
+            self.rate = f.span_hz;
+            self.center = Hz(f.center_hz.max(0.0) as u64);
+            self.heat.tuned(self.center, self.rate);
+            self.heat.push(f.at_us, &f.db);
         }
         Ok(())
     }
@@ -703,7 +622,6 @@ fn now_us() -> u64 {
 const RECORDING: &str = "recording";
 const ROWS_PER_SEC: &str = "rows_per_sec";
 const BUDGET_MB: &str = "budget_mb";
-const SIZE: &str = "size";
 
 pub const DESC: StageDesc = StageDesc {
     name: "heatmap",
@@ -714,9 +632,8 @@ pub const DESC: StageDesc = StageDesc {
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let size = s.i64_or(SIZE, 2048).clamp(64, 32_768) as usize;
     let mb = s.f64_or(BUDGET_MB, DEFAULT_BUDGET as f64 / (1 << 20) as f64).max(1.0);
-    let mut n = HeatmapNode::new(size, (mb * (1 << 20) as f64) as usize);
+    let mut n = HeatmapNode::new((mb * (1 << 20) as f64) as usize);
     n.set_recording(s.bool_or(RECORDING, true));
     n.set_rows_per_sec(s.f64_or(ROWS_PER_SEC, 2.0) as f32);
     Ok(Box::new(n))
@@ -761,6 +678,7 @@ mod tests {
     fn the_budget_drops_the_oldest_rows_and_nothing_else() {
         // 64 KB of budget and 1024 bins to a row is exactly 64 rows.
         let mut h = Heat::new(64 << 10);
+        h.tuned(Hz(433_000_000), 1_024_000.0);
         for i in 0..200u64 {
             h.push(1_000_000 + i * 500_000, &vec![-80.0f32; 1024]);
         }
@@ -771,18 +689,78 @@ mod tests {
         assert_eq!(h.seconds(), 31.5);
     }
 
+    /// The dial moving widens the axis instead of emptying it: a walk
+    /// across a band is one picture of the band, not a picture of the last
+    /// step. Every row keeps the bins it covered and nothing else.
     #[test]
-    fn a_retune_throws_the_history_away_because_the_axis_moved() {
+    fn a_retune_widens_the_axis_and_keeps_what_was_heard() {
         let mut h = Heat::default();
-        h.tuned(Hz(433_000_000), 2_400_000.0);
+        h.tuned(Hz(433_000_000), 1_000_000.0);
         for i in 0..10u64 {
-            h.push(i * 1000, &vec![-90.0f32; 256]);
+            h.push(i * 1000, &vec![-90.0f32; 100]);
         }
-        assert_eq!(h.rows(), 10);
-        h.tuned(Hz(433_000_000), 2_400_000.0);
-        assert_eq!(h.rows(), 10, "the same tuning is not a change");
-        h.tuned(Hz(434_000_000), 2_400_000.0);
-        assert_eq!(h.rows(), 0);
+        assert_eq!((h.rows(), h.bins()), (10, 100), "one span, its own bins");
+        assert_eq!(h.bytes(), 1000, "and only the bins each row covered");
+
+        // A megahertz up: the axis is now two megahertz wide, the old rows
+        // sit at the bottom of it and the new ones at the top.
+        h.tuned(Hz(434_000_000), 1_000_000.0);
+        h.push(20_000, &vec![-40.0f32; 100]);
+        assert_eq!((h.rows(), h.bins()), (11, 200));
+        assert_eq!(h.bytes(), 1100, "a row is still only the span it covered");
+        assert_eq!(h.rate(), 2_000_000.0);
+        assert_eq!(h.center(), Hz(433_500_000));
+        assert_eq!(h.row(0).expect("the first row").bin0, 0);
+        assert_eq!(h.row(10).expect("the new row").bin0, 100);
+
+        // And a megahertz below the first, which moves the origin down and
+        // takes every row with it.
+        h.tuned(Hz(432_000_000), 1_000_000.0);
+        h.push(30_000, &vec![-60.0f32; 100]);
+        assert_eq!((h.rows(), h.bins()), (12, 300));
+        assert_eq!(h.row(0).expect("the first row").bin0, 100, "shifted up the axis");
+        assert_eq!(h.row(11).expect("the newest row").bin0, 0);
+        assert_eq!(h.bin_hz(0), 431_500_000.0 + 5_000.0, "bin zero is the new low edge");
+    }
+
+    /// What a row does not cover reads as unlistened rather than as a quiet
+    /// band, which is the difference between a walk's picture and a lie.
+    #[test]
+    fn a_row_is_unread_where_the_receiver_was_not_listening() {
+        let mut h = Heat::default();
+        h.tuned(Hz(433_000_000), 1_000_000.0);
+        h.push(0, &vec![-90.0f32; 100]);
+        h.tuned(Hz(434_000_000), 1_000_000.0);
+        h.push(1000, &vec![-40.0f32; 100]);
+        let old = h.dense_row(0);
+        let new = h.dense_row(1);
+        assert_eq!(old.len(), 200);
+        // To the nearest step, which is what a byte a reading costs.
+        assert_eq!(dequantise(old[50]), -89.75);
+        assert_eq!(old[150], UNREAD, "the second span was not heard on the first row");
+        assert_eq!(new[50], UNREAD);
+        assert_eq!(dequantise(new[150]), -40.25);
+    }
+
+    /// A span at a different rate lands on the axis it finds rather than
+    /// starting a new one: the readings are resampled to the bin the
+    /// heatmap already has.
+    #[test]
+    fn a_wider_span_is_resampled_onto_the_axis_already_there() {
+        let mut h = Heat::default();
+        h.tuned(Hz(433_000_000), 1_000_000.0);
+        h.push(0, &vec![-90.0f32; 100]);
+        assert_eq!(h.bins(), 100, "10 kHz a bin");
+        // Twice the span at the same bin count is twice the bins on this
+        // axis, and it covers the first span.
+        h.tuned(Hz(433_000_000), 2_000_000.0);
+        h.push(1000, &vec![-50.0f32; 100]);
+        assert_eq!(h.bins(), 200);
+        assert_eq!(h.rate(), 2_000_000.0);
+        let new = h.dense_row(1);
+        assert_eq!(new.len(), 200);
+        assert_eq!(dequantise(new[0]), -50.0);
+        assert_eq!(dequantise(new[199]), -50.0);
     }
 
     #[test]
@@ -790,9 +768,11 @@ mod tests {
         let mut h = Heat::default();
         h.tuned(Hz(433_000_000), 2_400_000.0);
         h.push(0, &vec![-90.0f32; 1024]);
-        assert_eq!(h.bin_hz(0), 433_000_000.0 - 1_200_000.0);
-        assert_eq!(h.bin_hz(512), 433_000_000.0);
-        assert_eq!(h.bin_hz(768), 433_000_000.0 + 600_000.0);
+        // The middle of the bin, not its edge: a reading is of the whole
+        // bin and the axis is 2343.75 Hz a step here.
+        assert_eq!(h.bin_hz(0), 433_000_000.0 - 1_200_000.0 + 1171.875);
+        assert_eq!(h.bin_hz(512), 433_000_000.0 + 1171.875);
+        assert_eq!(h.bin_hz(768), 433_000_000.0 + 600_000.0 + 1171.875);
     }
 
     fn recorded() -> Heat {
@@ -807,28 +787,8 @@ mod tests {
     }
 
     #[test]
-    fn the_png_carries_the_readings_and_the_axes() {
-        let h = recorded();
-        let bytes = png(&h, Ramp::Chassis, -100.0, -20.0).expect("a picture");
-        let img = image::load_from_memory(&bytes).expect("valid png").to_rgb8();
-        assert_eq!(img.dimensions(), ((LEFT + 128) as u32, (20 + BOTTOM) as u32));
-        let hot = img.get_pixel((LEFT + 40) as u32, 0).0;
-        let cold = img.get_pixel((LEFT + 41) as u32, 0).0;
-        assert!(luma(hot) > luma(cold) + 50.0, "the loud bin is not hotter: {hot:?} {cold:?}");
-        // The axis margin is paper, not signal.
-        assert_eq!(img.get_pixel(2, 18).0, PAPER);
-        // And the labels are drawn in it: count the ink under the heatmap.
-        let ink = (0..img.width())
-            .flat_map(|x| (20..img.height()).map(move |y| (x, y)))
-            .filter(|(x, y)| img.get_pixel(*x, *y).0 == INK)
-            .count();
-        assert!(ink > 200, "the frequency axis has only {ink} inked pixels");
-    }
-
-    #[test]
     fn an_empty_heatmap_refuses_to_export() {
         let h = Heat::default();
-        assert!(png(&h, Ramp::Grey, -100.0, -20.0).is_err());
         assert!(html(&h, Ramp::Grey, -100.0, -20.0).is_err());
     }
 
@@ -836,74 +796,139 @@ mod tests {
     fn the_html_holds_the_picture_and_the_exact_readings() {
         let h = recorded();
         let page = html(&h, Ramp::Viridis, -100.0, -20.0).expect("a page");
-        assert!(page.contains("data:image/png;base64,"));
         assert!(page.contains("\"center\":433000000"));
+        // The page paints the readings itself, so it carries the ramp and
+        // the scale rather than a picture of them.
+        assert!(page.contains("\"ramp\":[["));
+        assert!(page.contains("\"floor\":-100"));
+        assert!(!page.contains("data:image/png"), "no picture to go stale against the readings");
         assert!(page.contains("\"bins\":128"));
         assert!(page.contains("\"rows\":20"));
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let start = page.find("atob(\"").expect("readings") + 6;
-        let end = page[start..].find('"').expect("closing quote") + start;
-        let data = b64.decode(&page[start..end]).expect("valid base64");
+        let data = readings_of(&page);
         assert_eq!(data.len(), 20 * 128);
         // Newest row first, and the loud bin reads what was put in it, to
         // the nearest step: -30 dBFS is not a multiple of DB_STEP above
         // DB_BASE and comes back as -29.75.
         assert_eq!(dequantise(data[40]), -29.75);
         assert_eq!(dequantise(data[41]), -95.0);
+        // The times are what the clock read, in Unix milliseconds, newest
+        // first: 2023-11-14 22:13:20 UTC, half a second between rows. A
+        // page of seconds-ago says nothing about when the file was made.
+        let at = page.find("\"at\":[").expect("row times") + 6;
+        let end = page[at..].find(']').expect("closing bracket") + at;
+        let times: Vec<u64> =
+            page[at..end].split(',').map(|v| v.parse().expect("a number")).collect();
+        assert_eq!(times.len(), 20);
+        assert_eq!(times[0], 1_700_000_009_500);
+        assert_eq!(times[19], 1_700_000_000_000);
+        // A crosshair follows the pointer, so a reading can be lined up
+        // against a frequency at one end and a time at the other.
+        assert!(page.contains("function crosshair"), "a crosshair follows the pointer");
+        assert!(page.contains("addEventListener('wheel'"), "the wheel zooms");
+        assert!(page.contains("function pan("), "and a drag pans");
+        // What made it and when, on the page and in its metadata: a file
+        // passed on to somebody else has to say where it came from.
+        assert!(page.contains(&format!("\"waveshark\":\"{}\"", crate::update::running())));
+        assert!(page.contains("\"generated\":"));
+        assert!(page.contains("from <b>2023-11-14 22:13:20 UTC</b>"), "when it starts");
+        assert!(page.contains("to <b>2023-11-14 22:13:29 UTC</b>"), "when it ends");
+        assert!(page.contains(&format!("by WaveShark {}", crate::update::running())));
     }
 
-    fn tone(n: usize, bin_frac: f32) -> Vec<C32> {
-        (0..n)
-            .map(|k| {
-                let p = std::f32::consts::TAU * bin_frac * k as f32;
-                C32::new(p.cos() * 0.5, p.sin() * 0.5)
-            })
-            .collect()
+    /// A walk's axis is tens of thousands of bins wide, and the page holds
+    /// every one of them: a reading folded away on the way out is a reading
+    /// nobody can get back.
+    #[test]
+    fn a_very_wide_axis_is_written_a_bin_at_a_time() {
+        let mut h = Heat::new(1 << 24);
+        // Twenty steps of 2 MHz at 1 kHz a bin: 40,000 bins of axis.
+        for step in 0..20u64 {
+            h.tuned(Hz(400_000_000 + step * 2_000_000), 2_000_000.0);
+            let mut row = vec![-95.0f32; 2000];
+            row[1000] = -20.0;
+            h.push(1_700_000_000_000_000 + step * 500_000, &row);
+        }
+        assert_eq!(h.bins(), 40_000);
+        let page = html(&h, Ramp::Viridis, -100.0, -20.0).expect("a page");
+        assert!(page.contains("\"bins\":40000"));
+        assert_eq!(readings_of(&page).len(), 20 * 40_000, "every bin of every row");
     }
 
-    fn feed(n: &mut HeatmapNode, iq: &[C32], rate: f64) {
-        let ins = [PortSpec { spec: StreamSpec::iq(rate, Hz(433_000_000)), latency: 0 }];
-        let mut out = Payload::Iq(Vec::new());
+    /// The readings a page carries: out of its own tag, base64 off, gzip
+    /// off. What the page's own script does, so the test reads what a
+    /// browser would.
+    fn readings_of(page: &str) -> Vec<u8> {
+        use base64::Engine as _;
+        use std::io::Read as _;
+        let tag = page.find("id=\"readings\">").expect("a readings tag") + 14;
+        let end = page[tag..].find("</script>").expect("closed") + tag;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(page[tag..end].trim())
+            .expect("valid base64");
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(raw.as_slice()).read_to_end(&mut out).expect("gzip");
+        out
+    }
+
+    /// One frame of the display's spectrum, as the stage above publishes it.
+    fn frame(at_us: u64, bins: usize) -> common::SpectrumFrame {
+        common::SpectrumFrame {
+            at_us,
+            center_hz: 433_000_000.0,
+            span_hz: 240_000.0,
+            db: std::sync::Arc::new(vec![-95.0f32; bins]),
+        }
+    }
+
+    fn feed(n: &mut HeatmapNode, frames: Vec<common::SpectrumFrame>) {
+        let spec = StreamSpec::iq(240_000.0, Hz(433_000_000)).with_kind(PortKind::Spectrum);
+        let ins = [PortSpec { spec, latency: 0 }];
+        let mut out = Payload::Spectrum(Vec::new());
         let (mut events, mut tags) = (Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &[], &mut events, &mut tags);
-        Simple::process(n, &Payload::Iq(iq.to_vec()), &mut out, &mut ctx).unwrap();
+        Simple::process(n, &Payload::Spectrum(frames), &mut out, &mut ctx).unwrap();
+    }
+
+    fn accept(n: &mut HeatmapNode) {
+        let spec = StreamSpec::iq(240_000.0, Hz(433_000_000)).with_kind(PortKind::Spectrum);
+        Node::negotiate(n, &[PortSpec { spec, latency: 0 }]).expect("a spectrum is accepted");
+    }
+
+    /// The display's frames come at its own rate; the recorder keeps one an
+    /// interval and drops the rest, which is what lets a waterfall at thirty
+    /// a second and a night's recording at one every ten share a transform.
+    #[test]
+    fn the_recorder_keeps_one_frame_an_interval_and_drops_the_rest() {
+        let mut n = HeatmapNode::new(1 << 20);
+        n.set_rows_per_sec(4.0);
+        accept(&mut n);
+        // Ten seconds of display frames at thirty a second.
+        let start = 1_700_000_000_000_000u64;
+        let frames: Vec<_> = (0..300).map(|i| frame(start + i * 33_333, 1024)).collect();
+        feed(&mut n, frames);
+        let s = n.status();
+        // Ten seconds of frames 33.3 ms apart, one kept every 250 ms: the
+        // first, then one whenever a quarter of a second has passed, which
+        // lands on every eighth frame and comes to 38.
+        assert_eq!(s.rows, 38);
+        assert_eq!(s.bins, 1024, "the display's bins, not a size of its own");
+        assert_eq!(s.bytes, 38 * 1024);
     }
 
     #[test]
-    fn the_recorder_keeps_one_row_per_interval_and_no_more() {
-        let rate = 240_000.0;
-        let mut n = HeatmapNode::new(1024, 1 << 20);
-        n.set_rows_per_sec(4.0);
-        Node::negotiate(
-            &mut n,
-            &[PortSpec { spec: StreamSpec::iq(rate, Hz(433_000_000)), latency: 0 }],
-        )
-        .expect("iq is accepted");
-        // Ten seconds of signal in blocks of 12000 samples, which is 50 ms.
-        for _ in 0..200 {
-            feed(&mut n, &tone(12_000, 0.1), rate);
-        }
-        let s = n.status();
-        // Four a second for ten seconds, less the first interval spent
-        // filling the transform.
-        assert_eq!(s.rows, 40);
-        assert_eq!(s.bins, 1024);
-        assert!(!s.recording || s.bytes == 40 * 1024);
+    fn a_heatmap_refuses_samples_because_it_reads_bins() {
+        let mut n = HeatmapNode::new(1 << 20);
+        let iq = [PortSpec { spec: StreamSpec::iq(240_000.0, Hz(433_000_000)), latency: 0 }];
+        assert!(Node::negotiate(&mut n, &iq).is_err(), "the transform is the stage above");
     }
 
     #[test]
     fn nothing_is_kept_while_the_recorder_is_off() {
-        let rate = 240_000.0;
-        let mut n = HeatmapNode::new(1024, 1 << 20);
+        let mut n = HeatmapNode::new(1 << 20);
         n.set_recording(false);
-        Node::negotiate(
-            &mut n,
-            &[PortSpec { spec: StreamSpec::iq(rate, Hz(433_000_000)), latency: 0 }],
-        )
-        .expect("iq is accepted");
-        for _ in 0..200 {
-            feed(&mut n, &tone(12_000, 0.1), rate);
-        }
+        accept(&mut n);
+        let start = 1_700_000_000_000_000u64;
+        feed(&mut n, (0..300).map(|i| frame(start + i * 33_333, 1024)).collect());
         assert_eq!(n.status().rows, 0);
     }
 
@@ -911,16 +936,14 @@ mod tests {
     fn an_export_writes_a_file_and_says_where_it_went() {
         let dir = std::env::temp_dir().join(format!("sr-heat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut n = HeatmapNode::new(256, 1 << 20);
+        let mut n = HeatmapNode::new(1 << 20);
         n.heat = recorded();
-        let png_path = n.export(&dir, Export::Png, Ramp::Chassis, -100.0, -20.0).expect("png");
-        let html_path = n.export(&dir, Export::Html, Ramp::Grey, -100.0, -20.0).expect("html");
-        assert!(png_path.to_string_lossy().ends_with(".png"));
-        assert!(html_path.to_string_lossy().ends_with(".html"));
-        assert!(png_path.to_string_lossy().contains("433.0000M"));
-        assert_eq!(n.status().saved, Some(html_path.clone()));
+        let path = n.export(&dir, Ramp::Grey, -100.0, -20.0).expect("a page");
+        assert!(path.to_string_lossy().ends_with(".html"));
+        assert!(path.to_string_lossy().contains("433.0000M"));
+        assert_eq!(n.status().saved, Some(path.clone()));
         assert_eq!(n.status().error, None);
-        assert!(std::fs::metadata(&png_path).expect("written").len() > 100);
+        assert!(std::fs::metadata(&path).expect("written").len() > 100);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

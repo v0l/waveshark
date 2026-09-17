@@ -19,6 +19,9 @@ pub struct Spectrum {
     /// biases the result low, because occasional deep nulls dominate a mean
     /// taken in dB but are negligible in power.
     avg: Vec<f32>,
+    /// The last frame on its own, unaveraged. What is published to whatever
+    /// records rather than draws: smoothing is a property of a display.
+    last: Vec<f32>,
     out: Vec<f32>,
     primed: bool,
     /// Samples carried between calls, so a frame can span input blocks.
@@ -40,6 +43,7 @@ impl Spectrum {
             win,
             buf: vec![C32::default(); size],
             avg: vec![0.0; size],
+            last: vec![0.0; size],
             out: vec![0.0; size],
             primed: false,
             pending: Vec::new(),
@@ -85,6 +89,7 @@ impl Spectrum {
             // Rotate so DC lands in the middle, matching how the span is drawn.
             let src_bin = (i + half) % self.size;
             let p = self.buf[src_bin].norm_sqr() * self.scale * self.scale;
+            self.last[i] = p;
             self.avg[i] += a * (p - self.avg[i]);
         }
         self.primed = true;
@@ -98,8 +103,14 @@ impl Spectrum {
         &self.out
     }
 
+    /// The last frame in dBFS, with no averaging across frames.
+    pub fn frame_db(&self) -> Vec<f32> {
+        self.last.iter().map(|p| 10.0 * (p + 1e-20).log10()).collect()
+    }
+
     pub fn reset(&mut self) {
         self.avg.fill(0.0);
+        self.last.fill(0.0);
         self.primed = false;
         self.pending.clear();
     }
