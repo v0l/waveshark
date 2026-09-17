@@ -21,7 +21,9 @@ the code is in the commit log.
 - A channel view: what is on each Wi-Fi and Bluetooth channel, how loud, and
   how crowded it is.
 - A band walk in the scanner settings: the dial steps past the span, holds on
-  what it hears or logs it and moves on, and each find can be ignored.
+  what it hears or logs it and moves on, and each find can be ignored. A step
+  counts as busy after the packets asked for, and a logging walk can sit out a
+  conversation.
 - Analogue FPV video named from its line rate, with its channel: R1, F4, A5.
 - P25 phase 1: the talkgroup, the radio id and the key a call is under,
   without speech.

@@ -20,7 +20,12 @@
 //!   exist and the decoder decides which applies.
 //! - **What to do with a hit is the operator's.** [`OnHit::Hold`] stops the
 //!   walk on the step so it can be listened to; [`OnHit::Log`] records it and
-//!   carries on.
+//!   carries on after [`Linger`].
+//!
+//! A step is called busy by a [`Lock`], not by the first packet: one decode
+//! can be a CRC-less protocol reading noise, and a burst arriving as the
+//! dial settles belongs to the step before. Mayhem's Recon draws the same
+//! distinction and offers the same two ways of counting.
 
 use common::{Packet, Result};
 use pipeline::event::{Event, Request};
@@ -38,6 +43,70 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 /// still filed under the frequency it was heard at, but the step it belongs
 /// to is the previous one and the walk does not hold on it.
 const SETTLE_S: f64 = 0.24;
+
+/// How many packets of a step make it busy, and whether they have to arrive
+/// one after another.
+///
+/// [`Lock::Continuous`] wants the packets in consecutive blocks, so a gap
+/// starts the count again: fast, and it drops a transmitter heard through bad
+/// reception. [`Lock::Sparse`] wants them any time before the step's listen
+/// runs out, which survives the gap and takes the whole listen to say no.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lock {
+    #[default]
+    Sparse,
+    Continuous,
+}
+
+impl Lock {
+    pub fn label(self) -> &'static str {
+        match self {
+            Lock::Sparse => "sparse",
+            Lock::Continuous => "continuous",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "sparse" | "any" => Some(Lock::Sparse),
+            "continuous" | "consecutive" => Some(Lock::Continuous),
+            _ => None,
+        }
+    }
+}
+
+/// How long a logging walk stays on a step it has locked, which the operator
+/// sets as one signed number of seconds.
+///
+/// Zero is what makes a fast map of a band: note it and move on. A positive
+/// number is a fixed stay. A negative one stays until that long passes with
+/// nothing further heard, each packet starting the count again, which is the
+/// only one of the three that follows a conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Linger {
+    #[default]
+    Now,
+    For(f64),
+    UntilQuiet(f64),
+}
+
+impl Linger {
+    pub fn seconds(self) -> f64 {
+        match self {
+            Linger::Now => 0.0,
+            Linger::For(s) => s,
+            Linger::UntilQuiet(s) => -s,
+        }
+    }
+
+    fn of_seconds(s: f64) -> Self {
+        match s {
+            s if s > 0.0 => Linger::For(s),
+            s if s < 0.0 => Linger::UntilQuiet(-s),
+            _ => Linger::Now,
+        }
+    }
+}
 
 /// Closest two hits can be and still be the same transmitter, where neither
 /// carries an identity.
@@ -165,11 +234,23 @@ pub struct BandScanNode {
     step_hz: f64,
     dwell_s: f64,
     on_hit: OnHit,
+    linger: Linger,
+    lock: Lock,
+    locks: u32,
     /// Where the walk believes the dial is. Zero until it has asked for
     /// anything, which is what makes the first block of a run a step.
     center_hz: f64,
     dwelt_s: f64,
     settling_s: f64,
+    /// Packets heard on this step, and how many blocks in a row have carried
+    /// one: the sparse count and the continuous one.
+    seen: u32,
+    run: u32,
+    /// Whether this step has turned up a transmitter the run had not heard.
+    fresh: bool,
+    /// Seconds since the step locked, and since the last packet on it.
+    locked_s: Option<f64>,
+    quiet_s: f64,
     /// Stopped on a hit, waiting to be let go.
     holding: bool,
     found: Vec<Found>,
@@ -192,9 +273,17 @@ impl BandScanNode {
             step_hz: 0.0,
             dwell_s: 2.0,
             on_hit: OnHit::default(),
+            linger: Linger::default(),
+            lock: Lock::default(),
+            locks: 1,
             center_hz: 0.0,
             dwelt_s: 0.0,
             settling_s: 0.0,
+            seen: 0,
+            run: 0,
+            fresh: false,
+            locked_s: None,
+            quiet_s: 0.0,
             holding: false,
             found: Vec::new(),
             ignore: Vec::new(),
@@ -264,6 +353,11 @@ impl BandScanNode {
         self.lo_hz + self.step_hz / 2.0
     }
 
+    /// Whether the step the walk is on has been called busy.
+    pub fn locked(&self) -> bool {
+        self.locked_s.is_some()
+    }
+
     /// Ask for the next centre, wrapping at the top edge.
     fn step(&mut self, c: &mut NodeCtx<'_>) {
         let next = match self.center_hz > 0.0 {
@@ -279,13 +373,17 @@ impl BandScanNode {
         self.center_hz = next;
         self.dwelt_s = 0.0;
         self.settling_s = SETTLE_S;
+        self.seen = 0;
+        self.run = 0;
+        self.fresh = false;
+        self.locked_s = None;
+        self.quiet_s = 0.0;
         self.steps += 1;
         c.emit(Event::Request(Request::Retune { center_hz: next }));
     }
 
-    /// File one packet under whatever names it, and say whether it was
-    /// something the walk had not already been told to ignore.
-    fn hit(&mut self, p: &Packet) -> bool {
+    /// File one packet under whatever names it, and say what it was worth.
+    fn hit(&mut self, p: &Packet) -> Heard {
         let named = p.decodes.iter().find_map(|d| {
             d.identity
                 .as_ref()
@@ -293,7 +391,7 @@ impl BandScanNode {
         });
         let key = named.unwrap_or(Key::Frequency(p.center_hz()));
         if self.ignored_key(&key) {
-            return false;
+            return Heard::Ignored;
         }
         let protocol = p.decodes.first().map(|d| d.protocol.to_string());
         if let Some(f) = self.found.iter_mut().find(|f| f.key.covers(&key)) {
@@ -306,8 +404,9 @@ impl BandScanNode {
             }
             // A transmitter heard again on a step already walked is not a
             // reason to stop a second time: what the operator has not seen
-            // is what is worth holding for.
-            return false;
+            // is what is worth holding for. It still counts towards the
+            // lock, because it is the step being busy that is in question.
+            return Heard::Again;
         }
         self.found.push(Found {
             key,
@@ -320,13 +419,19 @@ impl BandScanNode {
             heard: 1,
             step_hz: self.center_hz as u64,
         });
-        true
+        Heard::New
     }
 
     /// Let a held walk go on, without forgetting what it found.
     pub fn resume(&mut self) {
         self.holding = false;
         self.dwelt_s = self.dwell_s;
+        // The step has had its hearing: leaving the lock standing would hold
+        // the walk again on the next block that carries a packet.
+        self.locked_s = None;
+        self.fresh = false;
+        self.seen = 0;
+        self.run = 0;
     }
 
     /// Stop coming back to this one.
@@ -345,6 +450,17 @@ impl BandScanNode {
     fn ignore_list(&self) -> String {
         self.ignore.iter().map(Key::label).collect::<Vec<_>>().join(",")
     }
+}
+
+/// What one packet on a step was worth to the walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Heard {
+    /// On the operator's ignore list.
+    Ignored,
+    /// A transmitter this run has already listed.
+    Again,
+    /// One the operator has not seen yet.
+    New,
 }
 
 fn key_ignored(list: &[Key], k: &Key) -> bool {
@@ -380,6 +496,17 @@ impl Simple for BandScanNode {
             Param::float("hi_hz", self.hi_hz, 0.0..=6e9).unit("Hz").label("To"),
             Param::float("step_hz", self.step_hz, 0.0..=1e8).unit("Hz").label("Step"),
             Param::float("dwell_s", self.dwell_s, 0.1..=60.0).unit("s").label("Dwell"),
+            Param::int("locks", self.locks as i64, 1..=16).label("Packets to lock"),
+            Param::choice(
+                "lock",
+                match self.lock {
+                    Lock::Sparse => 0,
+                    Lock::Continuous => 1,
+                },
+                vec!["sparse".into(), "continuous".into()],
+            )
+            .label("Counted"),
+            Param::float("linger_s", self.linger.seconds(), -60.0..=60.0).unit("s").label("Linger"),
             Param::choice(
                 "on_hit",
                 match self.on_hit {
@@ -412,15 +539,39 @@ impl Simple for BandScanNode {
                 self.holding = false;
                 self.dwelt_s = 0.0;
                 self.settling_s = 0.0;
+                self.seen = 0;
+                self.run = 0;
+                self.fresh = false;
+                self.locked_s = None;
+                self.quiet_s = 0.0;
             }
             "lo_hz" => self.lo_hz = v.as_f64().unwrap_or(self.lo_hz),
             "hi_hz" => self.hi_hz = v.as_f64().unwrap_or(self.hi_hz),
             "step_hz" => self.step_hz = v.as_f64().unwrap_or(self.step_hz).max(0.0),
             "dwell_s" => self.dwell_s = v.as_f64().unwrap_or(self.dwell_s).max(0.1),
+            "locks" => {
+                self.locks = v.as_f64().unwrap_or(self.locks as f64).round().clamp(1.0, 16.0) as u32
+            }
+            // A choice arrives as an index from the chain view and as a
+            // label from a patch, and both have to land on the same variant.
+            "lock" => {
+                self.lock = match &v {
+                    ParamValue::Int(_) | ParamValue::Choice(_) => match v.as_i64() {
+                        Some(0) => Lock::Sparse,
+                        _ => Lock::Continuous,
+                    },
+                    _ => v.as_str().and_then(Lock::parse).unwrap_or(self.lock),
+                }
+            }
+            "linger_s" => {
+                self.linger = Linger::of_seconds(
+                    v.as_f64().unwrap_or(self.linger.seconds()).clamp(-60.0, 60.0),
+                )
+            }
             "on_hit" => {
                 self.on_hit = match &v {
-                    ParamValue::Int(i) => match i {
-                        0 => OnHit::Hold,
+                    ParamValue::Int(_) | ParamValue::Choice(_) => match v.as_i64() {
+                        Some(0) => OnHit::Hold,
                         _ => OnHit::Log,
                     },
                     _ => v.as_str().and_then(OnHit::parse).unwrap_or(self.on_hit),
@@ -447,6 +598,8 @@ impl Simple for BandScanNode {
         }
         if self.holding {
             out.push(("holding".into(), "yes".into()));
+        } else if self.locked() {
+            out.push(("locked".into(), "yes".into()));
         }
         out
     }
@@ -468,14 +621,54 @@ impl Simple for BandScanNode {
             return Ok(());
         }
         self.dwelt_s += c.block_seconds;
-        let mut fresh = false;
+        self.quiet_s += c.block_seconds;
+        if let Some(since) = self.locked_s.as_mut() {
+            *since += c.block_seconds;
+        }
+        let mut counted = 0u32;
         for p in i.as_packets().unwrap_or(&[]) {
-            fresh |= self.hit(p);
+            match self.hit(p) {
+                Heard::Ignored => {}
+                Heard::Again => counted += 1,
+                Heard::New => {
+                    counted += 1;
+                    self.fresh = true;
+                }
+            }
         }
-        if fresh && self.on_hit == OnHit::Hold {
-            self.holding = true;
+        match counted > 0 {
+            // A continuous count is consecutive blocks carrying a packet, so
+            // the gap it will not tolerate is one block of the graph rather
+            // than a number of its own.
+            true => {
+                self.seen += counted;
+                self.run += 1;
+                self.quiet_s = 0.0;
+            }
+            false => self.run = 0,
         }
-        if !self.holding && self.dwelt_s >= self.dwell_s {
+        let enough = match self.lock {
+            Lock::Sparse => self.seen >= self.locks,
+            Lock::Continuous => self.run >= self.locks,
+        };
+        if self.locked_s.is_none() && self.fresh && enough {
+            self.locked_s = Some(0.0);
+            if self.on_hit == OnHit::Hold {
+                self.holding = true;
+            }
+        }
+        if self.holding {
+            return Ok(());
+        }
+        let go = match self.locked_s {
+            Some(since) => match self.linger {
+                Linger::Now => true,
+                Linger::For(s) => since >= s,
+                Linger::UntilQuiet(s) => self.quiet_s >= s,
+            },
+            None => self.dwelt_s >= self.dwell_s,
+        };
+        if go {
             self.step(c);
         }
         Ok(())
@@ -496,6 +689,9 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     n.hi_hz = s.f64_or("hi_hz", 0.0);
     n.step_hz = s.f64_or("step_hz", 0.0);
     n.dwell_s = s.f64_or("dwell_s", 2.0);
+    n.locks = s.f64_or("locks", 1.0).round().clamp(1.0, 16.0) as u32;
+    n.lock = Lock::parse(s.str_or("lock", "sparse")).unwrap_or_default();
+    n.linger = Linger::of_seconds(s.f64_or("linger_s", 0.0).clamp(-60.0, 60.0));
     n.on_hit = OnHit::parse(s.str_or("on_hit", "hold")).unwrap_or_default();
     let ignore = s.str_or("ignore", "").to_string();
     n.set_ignore_list(&ignore);
@@ -637,27 +833,155 @@ mod tests {
         assert!(!n.holding());
     }
 
-    /// The other policy: write it down and keep going.
+    /// The other policy: write it down and keep going, which with the
+    /// default linger of zero is the same block it heard it on.
     #[test]
     fn logging_a_hit_keeps_the_walk_moving() {
         let mut n = walking(433.0, 435.0, 1.0, 1.0, OnHit::Log);
-        block(&mut n, Vec::new());
-        // Past the settle, then three blocks carrying the same transmitter.
+        assert_eq!(block(&mut n, Vec::new()), vec![433.5e6]);
         for _ in 0..3 {
             block(&mut n, Vec::new());
         }
-        for _ in 0..3 {
-            block(&mut n, vec![burst(433_920_000)]);
-        }
+        assert_eq!(block(&mut n, vec![burst(433_920_000)]), vec![434.5e6]);
         assert!(!n.holding());
-        assert_eq!(n.found().len(), 1, "one transmitter heard three times is one row");
-        assert_eq!(n.found()[0].heard, 3);
+        assert_eq!(n.found().len(), 1);
+        assert_eq!(n.found()[0].heard, 1);
+        // The same transmitter on the next step is one the operator has
+        // seen, so it does not lock a second time: that step runs its dwell
+        // out, which is the settle and ten blocks of a tenth of a second.
         let mut asked = Vec::new();
         for _ in 0..20 {
             asked.extend(block(&mut n, vec![burst(433_920_000)]));
         }
-        assert_eq!(asked.len(), 1, "the walk stopped moving: {asked:?}");
-        assert_eq!(asked[0], 434.5e6);
+        assert_eq!(asked, vec![433.5e6], "the walk did not step on the dwell");
+        assert_eq!(n.found().len(), 1, "one transmitter heard again is one row");
+        // 21 blocks carried it, and the six spent settling after the two
+        // steps are not attributed to the step being tuned to.
+        assert_eq!(n.found()[0].heard, 15);
+    }
+
+    /// A step is busy when the packets asked for have arrived, and a lone
+    /// packet is not enough where the operator asked for three: the same
+    /// stream locks a sparse count and never locks a continuous one, because
+    /// every other block is empty.
+    #[test]
+    fn a_gappy_transmitter_locks_a_sparse_count_and_not_a_continuous_one() {
+        for (lock, want) in [(Lock::Sparse, true), (Lock::Continuous, false)] {
+            let mut n = walking(433.0, 435.0, 1.0, 5.0, OnHit::Hold);
+            n.lock = lock;
+            n.locks = 3;
+            block(&mut n, Vec::new());
+            for _ in 0..3 {
+                block(&mut n, Vec::new());
+            }
+            // Packets in every other block: eight blocks, four packets.
+            for i in 0..8 {
+                let p = match i % 2 {
+                    0 => vec![burst(433_920_000)],
+                    _ => Vec::new(),
+                };
+                block(&mut n, p);
+            }
+            assert_eq!(n.holding(), want, "{} counted it wrong", lock.label());
+            assert_eq!(n.locked(), want);
+            // Either way the transmitter is written down on the first packet.
+            assert_eq!(n.found().len(), 1);
+            assert_eq!(n.found()[0].heard, 4);
+        }
+    }
+
+    /// Consecutive blocks do lock a continuous count, and three packets are
+    /// three blocks: the first two leave it walking.
+    #[test]
+    fn a_continuous_count_locks_on_consecutive_blocks() {
+        let mut n = walking(433.0, 435.0, 1.0, 5.0, OnHit::Hold);
+        n.lock = Lock::Continuous;
+        n.locks = 3;
+        block(&mut n, Vec::new());
+        for _ in 0..3 {
+            block(&mut n, Vec::new());
+        }
+        for _ in 0..2 {
+            block(&mut n, vec![burst(433_920_000)]);
+        }
+        assert!(!n.locked(), "two of three packets locked the step");
+        block(&mut n, vec![burst(433_920_000)]);
+        assert!(n.locked());
+        assert!(n.holding());
+    }
+
+    /// A positive linger is a fixed stay after the lock, counted from the
+    /// lock and not from the step.
+    #[test]
+    fn a_positive_linger_stays_for_that_long_and_then_steps() {
+        let mut n = walking(433.0, 435.0, 1.0, 5.0, OnHit::Log);
+        n.linger = Linger::For(0.5);
+        block(&mut n, Vec::new());
+        for _ in 0..3 {
+            block(&mut n, Vec::new());
+        }
+        assert!(block(&mut n, vec![burst(433_920_000)]).is_empty());
+        assert!(n.locked());
+        // Half a second is five blocks of a tenth, and the fifth steps.
+        for _ in 0..4 {
+            assert!(block(&mut n, Vec::new()).is_empty());
+        }
+        assert_eq!(block(&mut n, Vec::new()), vec![434.5e6]);
+    }
+
+    /// A negative linger stays until that long passes with nothing further,
+    /// and every packet starts the count again, so a transmitter talking
+    /// every quarter second holds a walk set to half a second.
+    #[test]
+    fn a_negative_linger_stays_until_the_step_goes_quiet() {
+        let mut n = walking(433.0, 435.0, 1.0, 5.0, OnHit::Log);
+        n.linger = Linger::UntilQuiet(0.5);
+        block(&mut n, Vec::new());
+        for _ in 0..3 {
+            block(&mut n, Vec::new());
+        }
+        let mut asked = Vec::new();
+        // Four seconds of a packet every other block, which is past the five
+        // second dwell's worth of blocks only because the lock replaces it.
+        for i in 0..40 {
+            let p = match i % 2 {
+                0 => vec![burst(433_920_000)],
+                _ => Vec::new(),
+            };
+            asked.extend(block(&mut n, p));
+        }
+        assert!(asked.is_empty(), "a talking transmitter did not hold the walk: {asked:?}");
+        assert_eq!(n.found()[0].heard, 20);
+        // Half a second of quiet from the last packet, which the block that
+        // ended the loop has a tenth of already.
+        for _ in 0..3 {
+            assert!(block(&mut n, Vec::new()).is_empty());
+        }
+        assert_eq!(block(&mut n, Vec::new()), vec![434.5e6]);
+    }
+
+    /// The signed number the operator sets and the three things it means.
+    #[test]
+    fn the_linger_is_one_signed_number() {
+        assert_eq!(Linger::of_seconds(0.0), Linger::Now);
+        assert_eq!(Linger::of_seconds(2.5), Linger::For(2.5));
+        assert_eq!(Linger::of_seconds(-2.5), Linger::UntilQuiet(2.5));
+        assert_eq!(Linger::of_seconds(-2.5).seconds(), -2.5);
+        assert_eq!(Linger::Now.seconds(), 0.0);
+        let mut n = BandScanNode::new();
+        n.set_param("linger_s", ParamValue::Float(-3.0)).unwrap();
+        assert_eq!(n.linger, Linger::UntilQuiet(3.0));
+        n.set_param("linger_s", ParamValue::Float(4.0)).unwrap();
+        assert_eq!(n.linger, Linger::For(4.0));
+        n.set_param("lock", ParamValue::Text("continuous".into())).unwrap();
+        assert_eq!(n.lock, Lock::Continuous);
+        // The chain view sends the position in the list rather than the word.
+        n.set_param("lock", ParamValue::Choice(0)).unwrap();
+        assert_eq!(n.lock, Lock::Sparse);
+        n.set_param("on_hit", ParamValue::Choice(1)).unwrap();
+        assert_eq!(n.on_hit, OnHit::Log);
+        n.set_param("locks", ParamValue::Int(40)).unwrap();
+        assert_eq!(n.locks, 16, "the count is clamped to what the parameter offers");
     }
 
     /// The same transmitter heard twice is one row, and two carriers further

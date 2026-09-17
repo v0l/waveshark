@@ -325,6 +325,14 @@ pub struct Session {
     pub scan_step_khz: f64,
     pub scan_dwell_s: f64,
     pub scan_hold: bool,
+    /// How many packets a step has to carry before it counts as busy, and
+    /// whether they have to arrive one after another.
+    pub scan_locks: f64,
+    pub scan_sparse: bool,
+    /// What a logging walk does once a step is busy, as one signed number of
+    /// seconds: zero moves on, positive stays that long, negative stays
+    /// until that long of quiet.
+    pub scan_linger_s: f64,
     /// Where every device heard is published, for Home Assistant to build.
     /// The password is in the clear here for the same reason the WiGLE token
     /// is: a keyring this program has no other use for.
@@ -460,6 +468,9 @@ impl Default for Session {
             scan_step_khz: 0.0,
             scan_dwell_s: 2.0,
             scan_hold: true,
+            scan_locks: 1.0,
+            scan_sparse: true,
+            scan_linger_s: 0.0,
             ha_host: String::new(),
             ha_port: String::new(),
             ha_user: String::new(),
@@ -560,6 +571,12 @@ impl Session {
                 true => nodes::OnHit::Hold,
                 false => nodes::OnHit::Log,
             },
+            locks: self.scan_locks.round().clamp(1.0, 16.0) as u32,
+            lock: match self.scan_sparse {
+                true => nodes::Lock::Sparse,
+                false => nodes::Lock::Continuous,
+            },
+            linger_s: self.scan_linger_s.clamp(-60.0, 60.0),
         }
     }
 
@@ -789,6 +806,9 @@ impl Session {
             scan_step_khz: f("scan_step_khz", d.scan_step_khz).max(0.0),
             scan_dwell_s: f("scan_dwell_s", d.scan_dwell_s).clamp(0.1, 60.0),
             scan_hold: kv.get("scan_hold").map(|v| *v == "true").unwrap_or(d.scan_hold),
+            scan_locks: f("scan_locks", d.scan_locks).clamp(1.0, 16.0),
+            scan_sparse: kv.get("scan_sparse").map(|v| *v == "true").unwrap_or(d.scan_sparse),
+            scan_linger_s: f("scan_linger_s", d.scan_linger_s).clamp(-60.0, 60.0),
             ha_host: kv.get("ha_host").map(|v| v.to_string()).unwrap_or_default(),
             ha_port: kv.get("ha_port").map(|v| v.to_string()).unwrap_or_default(),
             ha_user: kv.get("ha_user").map(|v| v.to_string()).unwrap_or_default(),
@@ -926,6 +946,9 @@ impl Session {
         s.push_str(&format!("scan_step_khz = {}\n", self.scan_step_khz));
         s.push_str(&format!("scan_dwell_s = {}\n", self.scan_dwell_s));
         s.push_str(&format!("scan_hold = {}\n", self.scan_hold));
+        s.push_str(&format!("scan_locks = {}\n", self.scan_locks));
+        s.push_str(&format!("scan_sparse = {}\n", self.scan_sparse));
+        s.push_str(&format!("scan_linger_s = {}\n", self.scan_linger_s));
         s.push_str(&format!("ha_buses = {}\n", self.ha_buses));
         if self.ha_on {
             s.push_str("ha_on = true\n");
@@ -1061,6 +1084,9 @@ mod tests {
             scan_step_khz: 250.0,
             scan_dwell_s: 3.5,
             scan_hold: false,
+            scan_locks: 3.0,
+            scan_sparse: false,
+            scan_linger_s: -4.0,
             ha_host: "homeassistant.local".into(),
             ha_port: "1883".into(),
             ha_user: "waveshark".into(),

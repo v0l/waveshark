@@ -261,7 +261,9 @@ impl App {
         let (mut on, mut lo, mut hi, mut step, mut dwell, mut hold) = self.setting(|s| {
             (s.scan_on, s.scan_lo_mhz, s.scan_hi_mhz, s.scan_step_khz, s.scan_dwell_s, s.scan_hold)
         });
-        let was = (on, lo, hi, step, dwell, hold);
+        let (mut locks, mut sparse, mut linger) =
+            self.setting(|s| (s.scan_locks, s.scan_sparse, s.scan_linger_s));
+        let was = (on, lo, hi, step, dwell, hold, locks, sparse, linger);
         let mut acts: Vec<Cmd> = Vec::new();
         let mut tune_to = None;
 
@@ -304,6 +306,46 @@ impl App {
                 |ui| {
                     ui.add(
                         egui::DragValue::new(&mut dwell).speed(0.1).range(0.1..=60.0).suffix(" s"),
+                    );
+                },
+            );
+            row_help(
+                ui,
+                "lock",
+                "How many packets a step has to carry before the walk calls it busy. \
+                 Counted together they can arrive any time during the dwell, which survives \
+                 bad reception; counted in a row a gap starts the count again, which is \
+                 faster and drops a signal heard in pieces.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut locks)
+                            .speed(0.1)
+                            .range(1.0..=16.0)
+                            .fixed_decimals(0)
+                            .prefix("heard "),
+                    );
+                    choice(
+                        ui,
+                        "scan_lock",
+                        &mut sparse,
+                        [(true, "together".to_string()), (false, "one after another".to_string())],
+                    );
+                },
+            );
+            row_help(
+                ui,
+                "linger",
+                "How long a logging walk stays on a step it heard something on. Zero notes \
+                 it and moves on, which maps a band fastest. A positive number stays that \
+                 long. A negative one stays until that many seconds pass with nothing \
+                 further, each burst starting the count again, which is the only setting \
+                 that follows a conversation.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut linger)
+                            .speed(0.1)
+                            .range(-60.0..=60.0)
+                            .suffix(" s"),
                     );
                 },
             );
@@ -420,7 +462,7 @@ impl App {
             });
         }
 
-        if (on, lo, hi, step, dwell, hold) != was {
+        if (on, lo, hi, step, dwell, hold, locks, sparse, linger) != was {
             self.settings.edit(|s| {
                 s.scan_on = on;
                 s.scan_lo_mhz = lo;
@@ -428,6 +470,9 @@ impl App {
                 s.scan_step_khz = step;
                 s.scan_dwell_s = dwell;
                 s.scan_hold = hold;
+                s.scan_locks = locks;
+                s.scan_sparse = sparse;
+                s.scan_linger_s = linger;
             });
         }
         for c in acts {

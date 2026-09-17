@@ -4013,6 +4013,7 @@ pub(crate) mod tests {
             step_hz: 500_000.0,
             dwell_s: 0.2,
             on_hit: nodes::OnHit::Log,
+            ..Default::default()
         }));
         // Where the spectrum says the receiver is, in the order it went
         // there. 144 to 146 MHz in half megahertz steps is four centres, the
