@@ -986,6 +986,8 @@ pub(super) struct AudioState {
     pub keying: Keying,
     /// The `.sub` file the SUB transmit source plays, as parsed.
     pub sub_pick: SubPick,
+    /// The capture the IQ transmit source replays.
+    pub capture_pick: CapturePick,
 }
 
 /// What the transmit key is doing: which channel it is keying, and whether it
@@ -1062,6 +1064,63 @@ impl SubPick {
     }
 }
 
+/// The capture loaded for the IQ transmit source.
+///
+/// The same shape as [`SubPick`] and for the same reason: the radio plays it
+/// and the strip has to say what is about to go on the air. What is held here
+/// is what the name resolved to, because a capture whose name does not carry
+/// its rate cannot be replayed at all and saying so at the dialog is the only
+/// place an operator can do anything about it.
+#[derive(Default)]
+pub(super) struct CapturePick {
+    pub file: Option<crate::radio::TxCapture>,
+    pub fault: Option<String>,
+    picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
+}
+
+impl CapturePick {
+    pub fn ask(&mut self, ctx: &egui::Context) {
+        if self.picking.is_some() {
+            return;
+        }
+        let start = crate::chain::default_capture_dir();
+        let _ = std::fs::create_dir_all(&start);
+        let ctx = ctx.clone();
+        self.picking = Some(poll_promise::Promise::spawn_thread("open tx capture", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Choose a capture to transmit")
+                .set_directory(&start)
+                .add_filter("IQ captures", &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-data"])
+                .pick_file();
+            ctx.request_repaint();
+            picked
+        }));
+    }
+
+    pub fn poll(&mut self, cmds: &mut Vec<crate::radio::Cmd>) {
+        if self.picking.as_ref().is_none_or(|p| p.ready().is_none()) {
+            return;
+        }
+        let Some(path) = self.picking.take().and_then(|p| p.block_and_take()) else {
+            return;
+        };
+        match crate::radio::TxCapture::open(&path) {
+            Some(c) => {
+                self.fault = None;
+                self.file = Some(c.clone());
+                cmds.push(crate::radio::Cmd::TxCapture(Some(c)));
+            }
+            None => {
+                self.fault = Some(format!(
+                    "{}: cannot tell its sample rate and format. Name it like \
+                     <what>_<centre>_<rate>.<format>, e.g. bench_433.92M_250k.cu8",
+                    path.display()
+                ))
+            }
+        }
+    }
+}
+
 impl Default for AudioState {
     fn default() -> Self {
         Self {
@@ -1077,6 +1136,7 @@ impl Default for AudioState {
             levels_rev: 0,
             keying: Keying::default(),
             sub_pick: SubPick::default(),
+            capture_pick: CapturePick::default(),
         }
     }
 }

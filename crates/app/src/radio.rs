@@ -445,7 +445,7 @@ fn key_up(
         }
         // The file is already on the node; there is nothing to hand in at
         // key-up.
-        TxSource::Sub | TxSource::Tone => None,
+        TxSource::Sub | TxSource::Tone | TxSource::Capture => None,
     };
 
     Ok((
@@ -671,6 +671,11 @@ pub enum Cmd {
     /// [`TxSource::Sub`]. `None` clears it. Handed in whole rather than as
     /// a path so the radio thread never parses mid-over.
     SubFile(Option<SubFile>),
+    /// The capture a channel on [`TxSource::Capture`] replays, or `None` to
+    /// send nothing. A plan value rather than a sink, unlike the `.sub` file:
+    /// a path is something a stage's settings can carry, so the chain view
+    /// says which file is loaded and a rebuild does not lose it.
+    TxCapture(Option<TxCapture>),
     /// Key a channel by id, or unkey with `None`.
     ///
     /// One command for the whole receiver rather than one per channel: every
@@ -842,6 +847,11 @@ pub enum TxSource {
     /// handed in whole by the interface, so the chain reads what was parsed
     /// rather than re-reading a path; see `Cmd::SubFile`.
     Sub,
+    /// A recorded span, sent back out as it stands. Nothing is modulated:
+    /// the file is already IQ, so the chain resamples it to the rate the
+    /// radio is transmitting at and the mixer behind it carries whatever
+    /// offset the operator wants it sent at. See `Cmd::TxCapture`.
+    Capture,
 }
 
 impl TxSource {
@@ -851,7 +861,49 @@ impl TxSource {
             Self::Mic => "MIC",
             Self::Agent => "AGENT",
             Self::Sub => "SUB",
+            Self::Capture => "IQ",
         }
+    }
+}
+
+/// A capture chosen to be transmitted: where it is, and what its name says it
+/// holds.
+///
+/// Resolved once in the interface, where `sources::parse_filename` already
+/// lives, rather than in the stage that plays it: a rate guessed on the radio
+/// thread puts a signal of the wrong width on the air and nothing downstream
+/// can tell.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TxCapture {
+    pub path: std::path::PathBuf,
+    pub rate: Sps,
+    /// What it was recorded at, where the name says. The difference between
+    /// this and where it is being sent is the operator's to set.
+    pub center: Option<Hz>,
+    pub seconds: f64,
+}
+
+impl TxCapture {
+    /// Read what a capture's name says it holds, or nothing where it does not
+    /// say enough to replay it.
+    pub fn open(path: &std::path::Path) -> Option<Self> {
+        let meta = sources::parse_filename(path);
+        let (rate, format) = (meta.rate?, meta.format?);
+        let len = std::fs::metadata(path).ok().filter(|m| m.is_file())?.len();
+        Some(Self {
+            path: path.to_path_buf(),
+            rate,
+            center: meta.center,
+            seconds: (len / format.bytes_per_sample() as u64) as f64 / rate.as_f64(),
+        })
+    }
+
+    /// What the strip calls it, which is the file's own name.
+    pub fn label(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
     }
 }
 
@@ -874,6 +926,10 @@ pub enum TxMode {
     Am,
     /// An unmodulated carrier, for measuring what the transmitter is doing.
     Carrier,
+    /// A recorded span played back as it stands. There is no modulator: the
+    /// file is IQ already, and what stands in that stage's place is the
+    /// mixer that moves it off the dial.
+    Iq,
     /// A protocol with a transmit chain of its own, named by its id: the
     /// stages come off the registry rather than from the list here, because
     /// a data mode's source is not a microphone and its modulator is not one
@@ -895,6 +951,12 @@ pub enum TxMode {
 pub fn tx_mode_for(mode: &ChanMode, source: TxSource) -> Option<TxMode> {
     if source == TxSource::Sub {
         return Some(TxMode::Carrier);
+    }
+    // A recording is already what went on the air, so the channel's mode says
+    // nothing about how to send it: whatever it was received in, it goes out
+    // as the samples that were written down.
+    if source == TxSource::Capture {
+        return Some(TxMode::Iq);
     }
     match mode {
         ChanMode::Audio(Demod::Nfm) => Some(TxMode::Nfm),
@@ -927,6 +989,7 @@ impl TxMode {
             Self::Wfm => "WFM",
             Self::Am => "AM",
             Self::Carrier => "CW",
+            Self::Iq => "IQ",
             Self::Digital(id) => nodes::protocol::all()
                 .iter()
                 .find(|p| p.id() == id)
@@ -1154,6 +1217,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         fronts,
         feeds: Vec::new(),
         tx: None,
+        tx_capture: None,
         scan: Default::default(),
         heat: Default::default(),
         edits: Default::default(),
@@ -2137,6 +2201,7 @@ impl Audio {
             transcribe_device: String::new(),
             feeds: Vec::new(),
             tx: None,
+            tx_capture: None,
             scan: Default::default(),
             settings: Default::default(),
         };
@@ -2420,6 +2485,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // command.
             feeds: Vec::new(),
             tx: None,
+            tx_capture: None,
             scan: Default::default(),
             settings: Default::default(),
         };
@@ -2598,6 +2664,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
             Cmd::SubFile(f) => {
                 self.tx.sub_file = f;
+                self.needs_rebuild = true;
+            }
+            // A rebuild rather than a parameter, because a capture chosen
+            // before the channel was set to send one has no stage to land on
+            // yet, and the stage is built from the plan either way.
+            Cmd::TxCapture(c) => {
+                self.plan.tx_capture = c;
                 self.needs_rebuild = true;
             }
             Cmd::TxGain(db) => {
@@ -3789,6 +3862,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         transcribe_device: String::new(),
         feeds: Vec::new(),
         tx: None,
+        tx_capture: None,
         settings: Default::default(),
     }
 }

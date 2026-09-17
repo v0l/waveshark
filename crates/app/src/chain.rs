@@ -350,6 +350,12 @@ pub struct Plan {
     /// like every other stage rather than living in a second graph the
     /// interface never sees.
     pub tx: Option<TxPlan>,
+    /// The capture a channel set to send one would replay.
+    ///
+    /// In the plan rather than on the sinks the `.sub` file rides on, because
+    /// it is a path and a rate and a stage's settings can carry those: the
+    /// chain view then says which file is loaded and a rebuild keeps it.
+    pub tx_capture: Option<crate::radio::TxCapture>,
     /// The walk over a band, if one was asked for: where it goes, how long
     /// it waits and what it does with what it hears.
     ///
@@ -518,6 +524,9 @@ impl TxPlan {
     /// the source has open.
     pub fn same_chain(&self, other: &Self) -> bool {
         let (a, b) = (&self.spec, &other.spec);
+        // A capture's file is a setting on its stage, so two chains that
+        // differ only by which file they play are still the same chain and
+        // the new path reaches the stage as a parameter.
         self.mode == other.mode
             && a.source == b.source
             && a.mic_gain == b.mic_gain
@@ -2798,8 +2807,9 @@ pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
         TxMode::Am => (300.0, 4_000.0),
         // Broadcast, where 15 kHz is the standard and the pilot is above it.
         TxMode::Wfm => (30.0, 15_000.0),
-        // No audio anywhere in it: what a data mode transmits is bytes.
-        TxMode::Digital(_) => (0.0, 0.0),
+        // No audio anywhere in it: a data mode transmits bytes and a
+        // recording is already IQ.
+        TxMode::Digital(_) | TxMode::Iq => (0.0, 0.0),
     }
 }
 
@@ -3010,7 +3020,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                         TxMode::Nfm | TxMode::Fm | TxMode::Carrier => 750.0,
                         TxMode::Wfm => 50.0,
                         TxMode::Am => 0.0,
-                        TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+                        TxMode::Digital(_) | TxMode::Iq => {
+                            unreachable!("a data mode and a recording took the branches above")
+                        }
                     };
                     s.insert("emphasis_us".into(), pipeline::ParamValue::Float(emphasis));
                     ("mic", s)
@@ -3034,19 +3046,38 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 // because every async OOK `.sub` is keyed carrier whatever
                 // protocol its capture was of.
                 TxSource::Sub => ("sub_tx", Settings::new()),
+                // A recording is sent as it stands, so the stage needs the
+                // file and the rate it was taken at and nothing else: what
+                // the samples mean was decided when they were recorded.
+                TxSource::Capture => {
+                    let mut s = Settings::new();
+                    let (path, rate) = match &plan.tx_capture {
+                        Some(c) => (c.path.display().to_string(), c.rate.as_f64()),
+                        None => (String::new(), 0.0),
+                    };
+                    s.insert("path".into(), pipeline::ParamValue::Text(path));
+                    s.insert("rate_sps".into(), pipeline::ParamValue::Float(rate));
+                    ("iq_tx", s)
+                }
             };
-            // A pulse source has no audio band to limit; the settings are
-            // only ever a microphone's and a tone's.
-            if tx.spec.source != TxSource::Sub {
+            // A pulse source and a recording have no audio band to limit; the
+            // settings are only ever a microphone's and a tone's.
+            if !matches!(tx.spec.source, TxSource::Sub | TxSource::Capture) {
                 settings.insert("low_hz".into(), pipeline::ParamValue::Float(band.0));
                 settings.insert("high_hz".into(), pipeline::ParamValue::Float(band.1));
             }
             p.add_derived(derived::TX_SOURCE, kind, settings);
             p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
 
-            // A `.sub` file is keyed carrier: its own pulses through the
-            // OOK keyer rather than one of the voice modulators.
-            let (mod_kind, m) = if tx.spec.source == TxSource::Sub {
+            // A recording needs no modulator at all: what stands in its place
+            // is the mixer that moves the file off the dial, so a capture made
+            // at one frequency can be sent at another. Zero by default, which
+            // sends it where it was recorded.
+            let (mod_kind, m) = if tx.spec.source == TxSource::Capture {
+                let mut m = Settings::new();
+                m.insert("shift_hz".into(), pipeline::ParamValue::Float(0.0));
+                ("mixer", m)
+            } else if tx.spec.source == TxSource::Sub {
                 let mut m = Settings::new();
                 m.insert("offset_hz".into(), pipeline::ParamValue::Float(0.0));
                 // The edges a remote puts on the air are microseconds, not
@@ -3063,7 +3094,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     TxMode::Fm => nodes::FM_DEVIATION_HZ,
                     TxMode::Wfm => nodes::WBFM_DEVIATION_HZ,
                     TxMode::Am => 0.0,
-                    TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+                    TxMode::Digital(_) | TxMode::Iq => {
+                        unreachable!("a data mode and a recording took the branches above")
+                    }
                 };
                 let mut m = Settings::new();
                 if deviation > 0.0 {
@@ -3073,7 +3106,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     match tx.mode {
                         TxMode::Nfm | TxMode::Fm | TxMode::Carrier | TxMode::Wfm => "fm_mod",
                         TxMode::Am => "am_mod",
-                        TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+                        TxMode::Digital(_) | TxMode::Iq => {
+                            unreachable!("a data mode and a recording took the branches above")
+                        }
                     },
                     m,
                 )
@@ -4266,6 +4301,10 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "mic" => "Microphone".into(),
         "mic_in" => "Microphone in".into(),
         "tone" => "Test tone".into(),
+        "iq_tx" => match std::path::Path::new(settings.str_or("path", "")).file_name() {
+            Some(n) => format!("Replay {}", n.to_string_lossy()),
+            None => "Replay a capture".into(),
+        },
         "fm_mod" => "FM modulator".into(),
         "am_mod" => "AM modulator".into(),
         "ook_mod" => "OOK keyer".into(),
@@ -4883,6 +4922,7 @@ pub(crate) mod tests {
             center,
             rate,
             zoom: 1,
+            tx_capture: None,
             dc_block: true,
             refresh_hz: 30.0,
             smoothing: DEFAULT_SMOOTHING,
@@ -6879,6 +6919,12 @@ pub fn transmit_graph(
         // A `.sub` source needs no audio at all: its file rides in `sub`,
         // the same slot the receiver's chain reads it from.
         (TxSource::Sub, _) => Box::new(nodes::SubTxNode::new(sub.as_ref().map(|f| f.file.clone()))),
+        // A recording is replayed by the graph the receiver draws, where the
+        // file is a setting on the stage. This builds a transmitter from
+        // nothing but a mode and a source, and it has no file to give one.
+        (TxSource::Capture, _) => {
+            return Err(common::Error::other("a capture transmits from the receiver's patch"));
+        }
     };
     let modulator: Box<dyn pipeline::Node> = if tx.source == TxSource::Sub {
         // A `.sub` file is keyed carrier whatever the channel's mode is:
@@ -6899,6 +6945,9 @@ pub fn transmit_graph(
                 return Err(common::Error::other(format!(
                     "{id} transmits from the receiver's patch"
                 )));
+            }
+            TxMode::Iq => {
+                return Err(common::Error::other("a capture transmits from the receiver's patch"));
             }
         }
     };
@@ -7520,6 +7569,83 @@ mod tx_in_graph_tests {
         for want in ["tx_clock", "tone", "fm_mod", "radio_tx"] {
             assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
         }
+    }
+
+    /// A recorded span goes back out as it stands.
+    ///
+    /// The chain is the point: no modulator, because the file is already IQ,
+    /// and a mixer in the modulator's place so a capture made at one dial
+    /// position can be sent at another. What reaches the antenna is the
+    /// file's own samples at the stage's level.
+    #[test]
+    fn a_capture_is_transmitted_as_the_samples_it_holds() {
+        let dir = std::env::temp_dir().join("sr_chain_tx_capture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench_446.05M_2000k.cu8");
+        // A quarter-scale constant, which is unmistakable in what comes back:
+        // 160 of 255 in offset binary is +0.25, and 128 is zero.
+        std::fs::write(&path, [160u8, 128u8].repeat(200_000)).unwrap();
+
+        let mut plan = plan_with_tx(TxSource::Capture);
+        plan.tx_capture = crate::radio::TxCapture::open(&path);
+        assert_eq!(plan.tx_capture.as_ref().map(|c| c.rate), Some(Sps(2_000_000)));
+        let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Capture)
+            .expect("a capture can be keyed on any channel");
+        assert_eq!(mode, TxMode::Iq);
+        plan.tx.as_mut().unwrap().mode = mode;
+        plan.channels[0].tx.as_mut().unwrap().source = TxSource::Capture;
+
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let topo = rx.tx_topology().expect("a transmit chain");
+        let kinds: Vec<&str> = topo.nodes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds, ["tx_clock", "iq_tx", "mixer", "radio_tx"]);
+
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())), "the capture channel was not keyed");
+        until("the capture on the air", || radio.samples() > 1_000);
+        rx.unkey();
+
+        let air = radio.transmitted();
+        assert!(air.len() > 1_000, "{} samples reached the antenna", air.len());
+        // 0.25 of full scale at the stage's own level, which is 0.8. A
+        // constant, because the mixer behind it is shifting by nothing: a
+        // capture goes out where it was recorded until somebody says
+        // otherwise.
+        let mid = air[air.len() / 2];
+        assert!((mid.re - 0.25 * 0.8).abs() < 0.02, "sent {mid:?}");
+        assert!(mid.im.abs() < 0.02, "sent {mid:?}");
+
+        // And the offset is that mixer's setting, like every other shift in
+        // the receiver: a quarter of the span moves the constant onto a
+        // phasor turning a quarter turn per sample.
+        let mixer = rx
+            .tx_topology()
+            .and_then(|t| t.nodes.iter().find(|n| n.kind == "mixer").map(|n| n.id.0))
+            .expect("the mixer stands where the modulator would");
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())));
+        rx.set_node_param(
+            mixer + crate::transmit::TX_ID_BASE,
+            "shift_hz",
+            pipeline::param::ParamValue::Float(500_000.0),
+        )
+        .unwrap();
+        // The setting is a message to the transmit thread, and a sink that
+        // does not pace itself writes a second of samples while it is in
+        // flight: what the shift did is in what went out after it landed.
+        assert!(rx.tx_settled());
+        let mark = radio.samples();
+        until("the shifted capture on the air", || radio.samples() > mark + 10_000);
+        rx.unkey();
+        let air = radio.transmitted();
+        let tail = &air[air.len() - 8..];
+        // 500 kHz at 2 MS/s is a quarter turn a sample, so each sample leads
+        // the one before it by a right angle and every fourth is back where
+        // it started.
+        let power = tail[0].norm_sqr();
+        let quarter =
+            tail.windows(2).all(|w| ((w[1] * w[0].conj()).im - power).abs() < 0.1 * power);
+        assert!(quarter, "the shift never reached the air: {tail:?}");
     }
 
     /// A television channel keys up as a multiplex, not as a microphone.

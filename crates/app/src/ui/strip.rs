@@ -419,6 +419,8 @@ impl Strip<'_> {
         source: Option<(usize, Vec<pipeline::param::Param>)>,
         sub_file: Option<&SubFile>,
         sub_pick: &mut super::state::SubPick,
+        capture: Option<&crate::radio::TxCapture>,
+        capture_pick: &mut super::state::CapturePick,
         files: &mut super::state::FilePick,
         air: &crate::agent::channel::AgentChannel,
         air_fault: Option<&'static str>,
@@ -455,7 +457,13 @@ impl Strip<'_> {
         if !digital {
             ui.horizontal(|ui| {
                 theme::Line::new().legend("src").show(ui);
-                for src in [TxSource::Mic, TxSource::Tone, TxSource::Agent, TxSource::Sub] {
+                for src in [
+                    TxSource::Mic,
+                    TxSource::Tone,
+                    TxSource::Agent,
+                    TxSource::Sub,
+                    TxSource::Capture,
+                ] {
                     if ui.selectable_label(tx.source == src, src.label()).clicked() {
                         tx.source = src;
                         changed = true;
@@ -535,6 +543,72 @@ impl Strip<'_> {
                             .clicked()
                     {
                         cmds.push(Cmd::Center(common::Hz(f.file.frequency)));
+                        changed = true;
+                    }
+                }
+            }
+            TxSource::Capture => {
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("iq").show(ui);
+                    if ui
+                        .button("OPEN")
+                        .on_hover_text("Choose a recorded span to send back out")
+                        .clicked()
+                    {
+                        capture_pick.ask(ui.ctx());
+                    }
+                    if capture.is_some()
+                        && ui.button("CLEAR").on_hover_text("Transmit nothing").clicked()
+                    {
+                        cmds.push(Cmd::TxCapture(None));
+                        capture_pick.file = None;
+                        changed = true;
+                    }
+                    let name = capture.map_or_else(
+                        || "nothing: choose a capture".to_string(),
+                        |c| format!("{} ({:.1}s)", c.label(), c.seconds),
+                    );
+                    theme::Line::new().value(name).size(11.0).elided(ui);
+                });
+                if let Some(f) = capture_pick.fault.as_deref() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(28.0);
+                        theme::Line::new().value(f).size(11.0).tint(theme::FAULT).wrapped(ui);
+                    });
+                }
+                // What is about to be radiated, said before the key is
+                // pressed: a recording is somebody else's transmission, and
+                // in most places sending it back out is an offence.
+                if let Some(c) = capture {
+                    let where_at = match c.center {
+                        Some(hz) => format!("recorded at {:.4} MHz", hz.as_f64() / 1e6),
+                        None => "recorded at an unknown frequency".to_string(),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_space(28.0);
+                        theme::Line::new()
+                            .value(format!(
+                                "{where_at}, sending on {:.4} MHz",
+                                (ch.freq + tx.shift_hz) / 1e6
+                            ))
+                            .size(11.0)
+                            .show(ui);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(28.0);
+                        theme::Line::new()
+                            .value("this puts somebody else's signal on the air")
+                            .size(11.0)
+                            .tint(theme::FAULT)
+                            .show(ui);
+                    });
+                    if c.center.is_some_and(|hz| hz.as_f64() != ch.freq + tx.shift_hz)
+                        && ui
+                            .button("TUNE")
+                            .on_hover_text("Move the dial to where the capture was made")
+                            .clicked()
+                    {
+                        cmds.push(Cmd::Center(c.center.expect("checked just above")));
                         changed = true;
                     }
                 }
@@ -1127,6 +1201,7 @@ impl Strip<'_> {
                                 }
                             }
                             let sub_file = self.st.sub_pick.file.clone();
+                            let capture = self.st.capture_pick.file.clone();
                             if can_tx
                                 && Self::channel_tx(
                                     ui,
@@ -1139,6 +1214,8 @@ impl Strip<'_> {
                                     tx_source(self.chain),
                                     sub_file.as_ref(),
                                     &mut self.st.sub_pick,
+                                    capture.as_ref(),
+                                    &mut self.st.capture_pick,
                                     self.files,
                                     self.air,
                                     self.air_fault,

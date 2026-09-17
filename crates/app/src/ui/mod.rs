@@ -2812,6 +2812,7 @@ impl eframe::App for App {
         self.pick_file.poll(&mut self.cmds);
         // The `.sub` dialog lands its file as a command like any other.
         self.audio.sub_pick.poll(&mut self.cmds);
+        self.audio.capture_pick.poll(&mut self.cmds);
         // And the save dialog writes the file it was given a name for.
         self.log.sub_save.poll();
         self.read_heard();
