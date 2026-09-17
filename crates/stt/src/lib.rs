@@ -57,7 +57,7 @@ fn dirs_home() -> std::path::PathBuf {
 pub fn best_device() -> candle_core::Device {
     #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
     if devices().iter().any(|d| matches!(d.choice, DeviceChoice::Cuda(_))) {
-        if let Ok(d) = candle_core::Device::new_cuda(0) {
+        if let Ok(d) = open_cuda(0) {
             if runs(&d) {
                 return d;
             }
@@ -72,6 +72,26 @@ pub fn best_device() -> candle_core::Device {
         tracing::warn!("Metal opened but cannot run kernels; transcribing on the CPU");
     }
     candle_core::Device::Cpu
+}
+
+/// A CUDA device this process opened, opened once and never given back.
+///
+/// The CUDA runtime is linked statically and tears its context down from an
+/// exit handler. cuBLAS destroying its handle after that happened segfaulted
+/// inside libcublasLt, which is what dropping the last `Device::Cuda` at
+/// shutdown did. Keeping each device here holds the count above zero, so the
+/// destroy never runs.
+#[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
+pub fn open_cuda(n: usize) -> Result<candle_core::Device, candle_core::Error> {
+    use std::sync::Mutex;
+    static OPEN: Mutex<Vec<(usize, candle_core::Device)>> = Mutex::new(Vec::new());
+    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, d)) = open.iter().find(|(i, _)| *i == n) {
+        return Ok(d.clone());
+    }
+    let d = candle_core::Device::new_cuda(n)?;
+    open.push((n, d.clone()));
+    Ok(d)
 }
 
 /// What a device is called, for a pane that has to say where the model is
