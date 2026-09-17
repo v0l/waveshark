@@ -280,6 +280,10 @@ pub struct Session {
     /// because it is where the receiver is listened to; off for anybody
     /// watching a wide span who wants the width back.
     pub strip: bool,
+    /// Whether the scripts panel is drawn down the left of the window. Off
+    /// until asked for: it lists files, and a receiver that has never
+    /// transmitted has none.
+    pub scripts: bool,
     /// Sound devices by name, empty for the system default.
     ///
     /// A name rather than an index for the same reason the radio is a label:
@@ -419,6 +423,7 @@ impl Default for Session {
             dc_block: true,
             decode_on: true,
             strip: true,
+            scripts: false,
             packet_log_on: false,
             survey_on: false,
             calls_on: false,
@@ -725,6 +730,7 @@ impl Session {
             decode_on: kv.get("decode").map(|v| *v == "true").unwrap_or(d.decode_on),
             dashboard: kv.get("dashboard").map(|v| *v == "true").unwrap_or(d.dashboard),
             strip: kv.get("strip").map(|v| *v == "true").unwrap_or(d.strip),
+            scripts: kv.get("scripts").map(|v| *v == "true").unwrap_or(d.scripts),
             packet_log_on: kv.get("packet_log_on").map(|v| *v == "true").unwrap_or(d.packet_log_on),
             survey_on: kv.get("survey_on").map(|v| *v == "true").unwrap_or(d.survey_on),
             calls_on: kv.get("calls_on").map(|v| *v == "true").unwrap_or(d.calls_on),
@@ -849,6 +855,7 @@ impl Session {
         s.push_str(&format!("decode = {}\n", self.decode_on));
         s.push_str(&format!("dashboard = {}\n", self.dashboard));
         s.push_str(&format!("strip = {}\n", self.strip));
+        s.push_str(&format!("scripts = {}\n", self.scripts));
         s.push_str(&format!("packet_log_on = {}\n", self.packet_log_on));
         s.push_str(&format!("survey_on = {}\n", self.survey_on));
         s.push_str(&format!("calls_on = {}\n", self.calls_on));
@@ -996,6 +1003,7 @@ mod tests {
             decode_on: false,
             dashboard: false,
             strip: false,
+            scripts: false,
             packet_log_on: true,
             calls_on: true,
             calls_dir: "/srv/calls".into(),

@@ -61,6 +61,8 @@ pub enum Icon {
     Transcript,
     /// A model driving the receiver.
     Agent,
+    /// The scripts panel: a file with code in it.
+    Scripts,
     /// Put a panel away, and bring it back: a column folding to the side.
     Hide,
 }
@@ -118,6 +120,7 @@ impl Icon {
             // messages tab already is, and not a star, which reads as a
             // favourite.
             Icon::Agent => ph::ROBOT,
+            Icon::Scripts => ph::FILE_CODE,
             Icon::Hide => ph::SIDEBAR_SIMPLE,
         }
     }
@@ -248,7 +251,7 @@ mod tests {
     /// Every icon in the top bar and the view strip, in the order they are
     /// drawn. Listed rather than derived so a new variant has to be added
     /// here, which is where the tests below then check it.
-    const ALL: [Icon; 24] = [
+    const ALL: [Icon; 25] = [
         Icon::Play,
         Icon::Stop,
         Icon::Sliders,
@@ -273,6 +276,7 @@ mod tests {
         Icon::Satellite,
         Icon::Key,
         Icon::Agent,
+        Icon::Scripts,
     ];
 
     #[test]
