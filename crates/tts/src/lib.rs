@@ -40,7 +40,7 @@ pub fn default_dir() -> std::path::PathBuf {
 /// than the speech it makes either way.
 pub fn best_device() -> candle_core::Device {
     #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
-    if let Ok(d) = candle_core::Device::new_cuda(0)
+    if let Ok(d) = open_cuda(0)
         && runs(&d)
     {
         return d;
@@ -52,6 +52,23 @@ pub fn best_device() -> candle_core::Device {
         return d;
     }
     candle_core::Device::Cpu
+}
+
+/// A CUDA device this process opened, opened once and never given back, for
+/// the reason `stt::open_cuda` gives: the statically linked CUDA runtime
+/// tears its context down at exit and a cuBLAS handle destroyed afterwards
+/// segfaults.
+#[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
+pub fn open_cuda(n: usize) -> Result<candle_core::Device, candle_core::Error> {
+    use std::sync::Mutex;
+    static OPEN: Mutex<Vec<(usize, candle_core::Device)>> = Mutex::new(Vec::new());
+    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, d)) = open.iter().find(|(i, _)| *i == n) {
+        return Ok(d.clone());
+    }
+    let d = candle_core::Device::new_cuda(n)?;
+    open.push((n, d.clone()));
+    Ok(d)
 }
 
 pub fn device_label(d: &candle_core::Device) -> String {

@@ -101,7 +101,7 @@ impl DeviceChoice {
         match self {
             Self::Auto => Ok(crate::best_device()),
             Self::Cpu => Ok(Device::Cpu),
-            Self::Cuda(i) => Device::new_cuda(i).map_err(err),
+            Self::Cuda(i) => crate::open_cuda(i).map_err(err),
             Self::Metal => Device::new_metal(0).map_err(err),
         }
     }
@@ -112,7 +112,7 @@ pub fn devices() -> Vec<(String, String)> {
     let mut out = vec![("auto".to_string(), "Fastest available".to_string())];
     #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
     for i in 0..8 {
-        match Device::new_cuda(i) {
+        match crate::open_cuda(i) {
             Ok(d) => out.push((format!("cuda:{i}"), crate::device_label(&d))),
             Err(_) => break,
         }

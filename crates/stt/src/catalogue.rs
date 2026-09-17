@@ -244,7 +244,7 @@ impl DeviceChoice {
                             "CUDA {n}: no such card, or no NVIDIA driver on this machine"
                         )));
                     }
-                    let d = Device::new_cuda(*n)
+                    let d = crate::open_cuda(*n)
                         .map_err(|e| common::Error::other(format!("CUDA {n}: {e}")))?;
                     if !crate::runs(&d) {
                         return Err(common::Error::other(format!(
@@ -305,10 +305,9 @@ fn enumerate() -> Vec<DeviceEntry> {
     #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
     {
         use candle_core::cuda_backend::cudarc::driver::CudaContext;
-        // A CUDA build links libcuda outright (candle asks cudarc for
-        // dynamic linking, not loading), so a machine without the driver
-        // never gets this far: the binary does not start. What can happen
-        // is a driver with no card behind it, which is a count of zero.
+        // The CUDA libraries are loaded when they are first wanted, so a
+        // machine with no driver reaches this and is told it has no device:
+        // the count is zero, as it is for a driver with no card behind it.
         let n = CudaContext::device_count().unwrap_or(0).max(0) as usize;
         for k in 0..n {
             let name = CudaContext::new(k)

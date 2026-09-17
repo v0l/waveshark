@@ -5600,7 +5600,11 @@ pub(crate) mod tests {
         // was cut where nobody paused, which is the failure this count is
         // here to catch; none means nothing reached the model at all.
         assert_eq!(said.len(), 1, "read as {text:?}");
-        assert!(words.contains("123"), "read as {text:?}");
+        // Spaces removed before looking for the digits: the model writes a
+        // spoken "one two three" as "123" or as "1 2 3" depending on what it
+        // makes of the pauses, and both are the number that was said.
+        let digits = words.replace(char::is_whitespace, "");
+        assert!(digits.contains("123"), "read as {text:?}");
         assert!(words.contains("test"), "read as {text:?}");
         // On the channel it was heard on, since the key is what the call
         // list and the transcript view meet on.
