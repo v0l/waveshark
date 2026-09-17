@@ -37,6 +37,9 @@ fn center_hz(plan: common::ChannelPlan, number: u16) -> Option<f64> {
         common::ChannelPlan::Ble => {
             dsp::ble::ADV_CHANNELS.iter().find(|(c, _)| u16::from(*c) == number).map(|&(_, hz)| hz)
         }
+        common::ChannelPlan::Ieee802154 => {
+            u8::try_from(number).ok().and_then(dsp::oqpsk::channel_2450_hz)
+        }
     }
 }
 
@@ -89,8 +92,9 @@ impl Channels<'_> {
                 hint(
                     ui,
                     "Nothing has named a channel yet. A transmitter appears here when a decode \
-                     says which channel of a plan it was working: 802.11 on 2.4 and 5 GHz, and \
-                     Bluetooth LE advertising. The receiver has to be on the band to hear one.",
+                     says which channel of a plan it was working: 802.11 on 2.4 and 5 GHz, \
+                     Bluetooth LE advertising, and 802.15.4. The receiver has to be on the \
+                     band to hear one.",
                 );
             });
             return act;
@@ -99,7 +103,11 @@ impl Channels<'_> {
         let now = super::devices_pane::now_us();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-                for plan in [common::ChannelPlan::Wifi, common::ChannelPlan::Ble] {
+                for plan in [
+                    common::ChannelPlan::Wifi,
+                    common::ChannelPlan::Ble,
+                    common::ChannelPlan::Ieee802154,
+                ] {
                     let loads: Vec<&nodes::ChannelLoad> =
                         st.loads.iter().filter(|l| l.plan == plan).collect();
                     if loads.is_empty() {
@@ -268,6 +276,9 @@ mod tests {
         // The three advertising channels, and nothing for a data channel a
         // receiver was never parked on.
         assert_eq!(center_hz(common::ChannelPlan::Ble, 38), Some(2_426e6));
+        assert_eq!(center_hz(common::ChannelPlan::Ieee802154, 11), Some(2_405e6));
+        assert_eq!(center_hz(common::ChannelPlan::Ieee802154, 26), Some(2_480e6));
+        assert_eq!(center_hz(common::ChannelPlan::Ieee802154, 27), None);
         assert_eq!(center_hz(common::ChannelPlan::Ble, 12), None);
         assert_eq!(center_hz(common::ChannelPlan::Wifi, 200), None);
     }

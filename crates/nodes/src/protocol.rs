@@ -517,6 +517,7 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::ais_nodes::Ais,
         &crate::uat_nodes::Uat,
         &crate::ble_nodes::Ble,
+        &crate::ieee802154_nodes::Ieee802154,
         &crate::wifi_nodes::Wifi,
         &crate::droneid_nodes::DroneId,
         &crate::video_nodes::Video,

@@ -13,6 +13,8 @@ the code is in the commit log.
 
 - DAB ensembles on band III: the ensemble name, its stations, their programme
   types and bit rates. No sound yet.
+- IEEE 802.15.4 at 2.4 GHz: the addresses and networks under Zigbee, Thread
+  and Matter.
 - The trace and the waterfall each choose what a point shows out of the frame
   behind it: the newest transform, the mean, or the loudest.
 - The memory bank reads Chirp, CSV, Freqman and SDR# lists, and exports as
@@ -41,8 +43,8 @@ the code is in the commit log.
   whole of it rather than a snapshot, so a burst of a few milliseconds is
   there. Four colour ramps, the panel's own by
   default.
-- A channel view: what is on each Wi-Fi and Bluetooth channel, how loud, and
-  how crowded it is.
+- A channel view: what is on each Wi-Fi, Bluetooth and 802.15.4 channel, how
+  loud, and how crowded it is.
 - A band walk in the scanner settings: the dial steps past the span, holds on
   what it hears or logs it and moves on, and each find can be ignored. A step
   counts as busy after the packets asked for, and a logging walk can sit out a

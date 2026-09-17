@@ -81,11 +81,12 @@ pub struct ChannelLoad {
 ///
 /// Wi-Fi numbers step 5 MHz, at 2.4 GHz and at 5 GHz alike, and a channel is
 /// 20 MHz: four numbers wide, so two each side. A BLE channel is as wide as
-/// the step between two of them, so it reaches nothing.
+/// the step between two of them, and an 802.15.4 one is narrower than its
+/// five megahertz step, so neither reaches its neighbour.
 fn spread(plan: ChannelPlan) -> u16 {
     match plan {
         ChannelPlan::Wifi => 2,
-        ChannelPlan::Ble => 0,
+        ChannelPlan::Ble | ChannelPlan::Ieee802154 => 0,
     }
 }
 

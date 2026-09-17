@@ -1385,16 +1385,19 @@ mod tests {
         // aircraft broadcasts inside the Wi-Fi and Bluetooth traffic rather
         // than instead of it.
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2426))]).unwrap();
-        assert_eq!(n.wide(), ["ble", "droneid"]);
+        assert_eq!(n.wide(), ["ble", "ieee802154", "droneid"]);
         // And it owns its channel from the moment the span reaches it,
         // rather than after something decodes there: the spectrum draws it
-        // as a locked channel and the detector stays out of it.
+        // as a locked channel and the detector stays out of it. The
+        // 802.15.4 channel in the same span is read without being owned, so
+        // the hoppers sharing those two megahertz keep their bursts.
         let locked = n.locked_channels();
-        assert_eq!(locked.len(), 1, "{locked:?}");
-        assert_eq!(locked[0].0, "ble");
-        assert!((locked[0].1 - 2_426_000_000.0).abs() < 1.0, "{locked:?}");
+        let ble: Vec<f64> = locked.iter().filter(|c| c.0 == "ble").map(|c| c.1).collect();
+        assert_eq!(ble.len(), 1, "{locked:?}");
+        assert!((ble[0] - 2_426_000_000.0).abs() < 1.0, "{locked:?}");
+        assert!(locked.iter().all(|c| c.0 != "ieee802154"), "{locked:?}");
         Node::negotiate(&mut n, &[spec(20_000_000.0, Hz::mhz(2450))]).unwrap();
-        assert!(n.wide().is_empty(), "no advertising channel inside that span");
+        assert_eq!(n.wide(), ["ieee802154"], "no advertising channel inside that span");
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(2426))]).unwrap();
         assert!(n.wide().is_empty(), "BLE needs 4 MS/s");
     }
