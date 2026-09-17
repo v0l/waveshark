@@ -299,6 +299,18 @@ pub trait Device: Send {
         self.set_center(hw)
     }
 
+    /// How long the tuner needs after a retune before its samples are worth
+    /// anything.
+    ///
+    /// The driver hands over what it collected while the synthesiser was
+    /// moving, and a wideband thump lands in every bin of the frame that
+    /// holds it. A receiver drops this much and starts again. Five
+    /// milliseconds covers a tuner that only reprograms a divider; one that
+    /// recalibrates its VCO says so by overriding this.
+    fn settle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(5)
+    }
+
     /// Where the receiver is, on the aerial's side.
     fn dial(&self) -> Hz {
         self.tuning().dial(self.center())

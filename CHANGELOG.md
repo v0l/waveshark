@@ -98,6 +98,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- A stripe across the waterfall and a jump in the trace when the dial moved.
 - A LimeSDR transmitted into an unselected port, so nothing left the socket.
 - A HackRF came back at its default gain and with the bias tee off after a
   span change.

@@ -463,6 +463,12 @@ fn key_up(
 /// and nothing moved. Where the device will not do it, the offset is applied
 /// to every frequency asked for instead, which is the same correction one
 /// step further out.
+/// Samples worth dropping after a retune: what the tuner says it needs, at
+/// the rate it is sampling.
+fn settle_samples(rate: f64, settle: std::time::Duration) -> usize {
+    (rate * settle.as_secs_f64()).max(0.0) as usize
+}
+
 /// Shortest gap between retunes.
 ///
 /// A retune is a blocking USB control transfer costing about 25 ms on the
@@ -2278,6 +2284,8 @@ struct RadioThread<'a, R: Fn()> {
     repaint: R,
     /// Where the dial has been asked to go, held until a retune is affordable.
     want_center: Option<Hz>,
+    /// Samples still to be dropped after a retune, while the tuner settles.
+    settle: usize,
     last_tune: std::time::Instant,
     tune_gap: std::time::Duration,
     last_chain: std::time::Instant,
@@ -2448,6 +2456,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             decodes,
             repaint,
             want_center: None,
+            settle: 0,
             last_tune: std::time::Instant::now() - gap,
             tune_gap: gap,
             last_chain: std::time::Instant::now(),
@@ -3047,6 +3056,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.remember_front();
         self.status.set_radio(RadioControls::read(self.dev.as_ref()));
         self.needs_rebuild = true;
+        // A span change reprograms the same synthesiser and filters a
+        // retune does, and leaves the same thump behind it.
+        self.settle = settle_samples(self.plan.rate, self.dev.settle());
         Flow::Go
     }
 
@@ -3071,6 +3083,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         }
         self.status.set_radio(RadioControls::read(self.dev.as_ref()));
         self.rx.remeasure_dc();
+        // An antenna port or a receive channel is a different front end;
+        // what arrives while it changes over is not the band.
+        self.settle = settle_samples(self.plan.rate, self.dev.settle());
         Flow::Go
     }
 
@@ -3163,6 +3178,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.needs_rebuild = true;
         self.want_center = None;
         self.last_tune = std::time::Instant::now();
+        self.settle = settle_samples(self.plan.rate, self.dev.settle());
         Ok(())
     }
 
@@ -3353,6 +3369,16 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     /// with it.
     fn process(&mut self, samples: &[C32]) -> Flow {
         let _g = tracing::info_span!("graph").entered();
+        // Nothing from the moment the dial moved. A synthesiser takes a
+        // while to settle and the driver hands over samples it collected
+        // before the retune landed, so the first block after one is the old
+        // band and a wideband thump. Fed to the graph it is a full-width
+        // stripe across the waterfall and a peak the spectrum holds for a
+        // frame, which is what made tuning look like it broke the average.
+        if self.settle > 0 {
+            self.settle = self.settle.saturating_sub(samples.len());
+            return Flow::Go;
+        }
         if let Err(e) = self.rx.process(samples) {
             *self.status.error.lock() = Some(format!("chain: {e}"));
             return Flow::Stop;
@@ -3835,6 +3861,20 @@ pub(crate) mod tests {
             // As the strip sends it: nobody has said anything about
             // transmitting, and the mode decides.
             tx: None,
+        }
+    }
+
+    /// The settle window is the time the tuner asked for, so it is the same
+    /// milliseconds of thrown-away transient at any sample rate, and a
+    /// board that recalibrates its VCO gets the longer window it needs.
+    #[test]
+    fn the_settle_window_is_what_the_tuner_asked_for() {
+        let ms = |n| std::time::Duration::from_millis(n);
+        assert_eq!(settle_samples(2_400_000.0, ms(5)), 12_000);
+        assert_eq!(settle_samples(250_000.0, ms(5)), 1_250);
+        assert_eq!(settle_samples(61_440_000.0, ms(60)), 3_686_400);
+        for rate in [250_000.0, 2_400_000.0, 61_440_000.0] {
+            assert!((settle_samples(rate, ms(60)) as f64 / rate - 0.06).abs() < 1e-9);
         }
     }
 
