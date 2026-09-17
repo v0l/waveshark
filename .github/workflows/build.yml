@@ -248,9 +248,9 @@ jobs:
         if: matrix.installers
         shell: bash
         run: |
-          cargo binstall -y --no-confirm cargo-packager@0.11.8
+          cargo binstall --no-confirm cargo-packager@0.11.8
           case '${{ matrix.installers }}' in
-            *rpm*) cargo binstall -y --no-confirm cargo-generate-rpm@0.21.0 ;;
+            *rpm*) cargo binstall --no-confirm cargo-generate-rpm@0.21.0 ;;
           esac
 
       - name: Installers (linux)
