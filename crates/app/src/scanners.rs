@@ -885,6 +885,19 @@ front    = pocsag
 channels = 439.9875 MHz
 margin   = 12.5 kHz
 
+[FLEX]
+# The Dutch P2000 network, the one FLEX channel with a fixed frequency across
+# a whole country and the busiest in Europe: fire, ambulance and police
+# dispatch at 1600 baud. Elsewhere FLEX is national and commercial, in the
+# same allocations POCSAG uses. The same warning applies: these pages carry
+# names, addresses and medical detail before anybody logs them.
+range    = 169.4 - 169.8 MHz
+span     = 100 kHz
+front    = flex
+channels = 169.65 MHz
+margin   = 12.5 kHz
+region   = europe
+
 [GSM]
 # One GSM carrier's beacon: the frequency correction tone, and the cell
 # identity and frame number in the synchronisation burst a frame later. Both
@@ -1148,6 +1161,7 @@ mod tests {
                 "VDL2",
                 "VDL2 Americas",
                 "POCSAG",
+                "FLEX",
                 "GSM",
                 "GSM 850",
                 "GSM 900",
@@ -1210,7 +1224,12 @@ mod tests {
         // Japan's, and 902-928 is American licence-free and the European GSM
         // uplink: a European pointed at 915 is hearing a handset, and running
         // a sensor scanner over it measures carriers they cannot use.
-        assert_eq!(at(Plan::Europe, 169_437_500.0), [Front::Auto]);
+        // 169.4 is the European sensor band and 169.65 the P2000 paging
+        // channel, which a 2.4 MHz span reaches from it, so both run.
+        assert_eq!(
+            at(Plan::Europe, 169_437_500.0),
+            [Front::protocol("flex", 169_650_000.0), Front::Auto]
+        );
         assert_eq!(at(Plan::Americas, 169_437_500.0), []);
         assert_eq!(at(Plan::Americas, 315_000_000.0), [Front::Auto]);
         assert_eq!(at(Plan::AsiaPacific, 315_000_000.0), [Front::Auto]);

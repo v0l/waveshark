@@ -25,6 +25,7 @@ pub mod elrs_nodes;
 pub mod epirb_nodes;
 pub mod feed_nodes;
 pub mod filter_nodes;
+pub mod flex_nodes;
 pub mod frame_meter;
 pub mod gsm_nodes;
 pub mod homeassistant_nodes;
@@ -83,6 +84,7 @@ pub use dsp_nodes::{
 pub use elrs_nodes::ElrsNode;
 pub use feed_nodes::{FEED_KINDS, FeedKind, FeedNode, FeedSpec, feed_kind};
 pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
+pub use flex_nodes::FlexNode;
 pub use frame_meter::FrameMeter;
 pub use homeassistant_nodes::{
     Broker, HomeAssistantNode, HomeAssistantStatus, Publish, Publisher as HomeAssistantPublisher,
@@ -210,6 +212,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (tetra_nodes::DESC, tetra_nodes::build),
     (dmr_nodes::DESC, dmr_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
+    (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
     (morse_nodes::DESC, morse_nodes::build),
     (nrf24_nodes::DESC, nrf24_nodes::build),

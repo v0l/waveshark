@@ -4097,6 +4097,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "ais" => "162 AIS".into(),
         "aprs" => "APRS".into(),
         "pocsag" => "Pager".into(),
+        "flex" => "FLEX pager".into(),
         "m17" => "M17".into(),
         "dmr" => "DMR".into(),
         "bank" => bank_label(settings.f64_or("channel_hz", 0.0)),

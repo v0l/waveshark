@@ -380,6 +380,81 @@ pub fn bch63_51(code: &mut [bool]) -> Option<u32> {
 /// of x^12+x^10+x^8+x^5+x^4+x^3+1, highest power in the top bit.
 pub const BCH_63_51_GEN: u64 = 0b1_0101_0011_1001;
 
+/// GF(32), built on x^5 + x^2 + 1, as the tables a BCH(31,21) decoder needs.
+/// The same pair as [`gf64`]: `exp[i]` is a^i, `log[e]` the power that made it.
+fn gf32() -> &'static ([u8; 32], [u8; 32]) {
+    static TABLES: std::sync::OnceLock<([u8; 32], [u8; 32])> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let (mut exp, mut log) = ([0u8; 32], [0u8; 32]);
+        let mut x = 1u8;
+        for (i, e) in exp.iter_mut().enumerate().take(31) {
+            *e = x;
+            log[x as usize] = i as u8;
+            x <<= 1;
+            if x & 0x20 != 0 {
+                x ^= 0x25;
+            }
+        }
+        exp[31] = exp[0];
+        (exp, log)
+    })
+}
+
+/// BCH(31,21) over GF(32), correcting up to two wrong bits.
+///
+/// The same shape as [`bch63_51`]: `code[i]` is the coefficient of x^i, so
+/// the ten parity bits sit at the low end and the twenty-one message bits
+/// above them. Paging carries this code twice over: POCSAG sends it most
+/// significant bit first, FLEX least significant bit first, and the two are
+/// therefore each other's word read backwards.
+///
+/// Returns how many bits were corrected, or `None` where the syndromes name
+/// no pair of positions, which is three wrong bits or more.
+pub fn bch31_21(code: &mut [bool]) -> Option<u32> {
+    if code.len() != 31 {
+        return None;
+    }
+    let (exp, log) = gf32();
+    let mul = |a: u8, b: u8| match a == 0 || b == 0 {
+        true => 0,
+        false => exp[(usize::from(log[a as usize]) + usize::from(log[b as usize])) % 31],
+    };
+    let syndrome = |power: usize| {
+        code.iter().enumerate().filter(|(_, b)| **b).fold(0u8, |s, (i, _)| s ^ exp[i * power % 31])
+    };
+    let (s1, s3) = (syndrome(1), syndrome(3));
+    if s1 == 0 {
+        return (s3 == 0).then_some(0);
+    }
+    let s1_cubed = mul(mul(s1, s1), s1);
+    if s1_cubed == s3 {
+        let at = usize::from(log[s1 as usize]);
+        code[at] = !code[at];
+        return Some(1);
+    }
+    let num = s1_cubed ^ s3;
+    let sigma2 = exp[(usize::from(log[num as usize]) + 31 - usize::from(log[s1 as usize])) % 31];
+    let mut found = Vec::with_capacity(2);
+    for at in 0..31usize {
+        let x = exp[(31 - at) % 31];
+        if 1 ^ mul(s1, x) ^ mul(sigma2, mul(x, x)) == 0 {
+            found.push(at);
+        }
+    }
+    if found.len() != 2 {
+        return None;
+    }
+    for at in found {
+        code[at] = !code[at];
+    }
+    Some(2)
+}
+
+/// Generator of the BCH(31,21) code [`bch31_21`] reads, the product of the
+/// minimal polynomials of a and a^3 over GF(32), which is
+/// x^10+x^9+x^8+x^6+x^5+x^3+1. Paging standards give it in octal as 03551.
+pub const BCH_31_21_GEN: u64 = 0x769;
+
 /// Generator of the BCH(127,106) code [`bch127_106`] reads: the product of
 /// the minimal polynomials of a, a^3 and a^5 over GF(128), which is
 /// x^21+x^18+x^17+x^15+x^14+x^12+x^11+x^8+x^7+x^6+x^5+x+1.
@@ -636,6 +711,67 @@ mod tests {
             two[a] = !two[a];
             two[b] = !two[b];
             assert_eq!(bch63_51(&mut two), Some(2), "two wrong bits at {a} and {b}");
+            assert_eq!(two, code);
+        }
+    }
+
+    /// The same exercise for BCH(31,21), the paging code, plus the eight
+    /// codewords multimon-ng's `bch_flex_encode` produces for the same
+    /// messages. Those pin the generator and the bit order together: FLEX
+    /// puts its message bits at 0 to 20 and its parity at 21 to 30, least
+    /// significant bit first on the air, so a FLEX word is this codeword
+    /// read from the top down.
+    #[test]
+    fn bch31_21_corrects_two_wrong_bits_and_matches_multimon() {
+        let encode = |message: &[bool]| {
+            let parity = bch_parity(message, BCH_31_21_GEN, 10);
+            let mut code: Vec<bool> = (0..10).map(|i| parity >> i & 1 != 0).collect();
+            code.extend(message.iter().rev().copied());
+            code
+        };
+        // (21-bit FLEX message, 31-bit FLEX codeword), from multimon-ng's
+        // bch.c compiled and run over the messages on the left.
+        let reference: [(u32, u32); 6] = [
+            (0x00_0001, 0x16E0_0001),
+            (0x10_0000, 0x4B70_0000),
+            (0x0A_AAAA, 0x270A_AAAA),
+            (0x01_2345, 0x3D41_2345),
+            (0x1F_FFFF, 0x7FFF_FFFF),
+            (0x0F_0F0F, 0x480F_0F0F),
+        ];
+        for (message, word) in reference {
+            // The message in transmission order: FLEX bit 0 goes first.
+            let bits: Vec<bool> = (0..21).map(|i| message >> i & 1 != 0).collect();
+            let code = encode(&bits);
+            let got = (0..31u32).fold(0u32, |w, i| w | u32::from(code[30 - i as usize]) << i);
+            assert_eq!(got, word, "message {message:#08x}");
+            let mut clean = code.clone();
+            assert_eq!(bch31_21(&mut clean), Some(0), "a clean codeword was corrected");
+        }
+
+        let mut seed = 0x0bad_c0de_1234_5678u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..64 {
+            let message: Vec<bool> = (0..21).map(|_| next() & 1 != 0).collect();
+            let code = encode(&message);
+            assert_eq!(code.len(), 31);
+            let (a, b) = ((next() % 31) as usize, (next() % 31) as usize);
+            let mut one = code.clone();
+            one[a] = !one[a];
+            assert_eq!(bch31_21(&mut one), Some(1), "one wrong bit at {a}");
+            assert_eq!(one, code);
+            if a == b {
+                continue;
+            }
+            let mut two = code.clone();
+            two[a] = !two[a];
+            two[b] = !two[b];
+            assert_eq!(bch31_21(&mut two), Some(2), "two wrong bits at {a} and {b}");
             assert_eq!(two, code);
         }
     }
