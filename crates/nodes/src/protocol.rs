@@ -623,6 +623,43 @@ mod tests {
         }
     }
 
+    /// Every transmit chain a protocol declares builds and negotiates, and
+    /// ends in baseband the radio can be handed.
+    ///
+    /// The transmit mirror of the chain test above, and worth as much: the
+    /// chain is drawn from the registry by name, so a source and a modulator
+    /// that disagree about their port kinds are a transmitter that refuses
+    /// to key with the operator's finger already on the button.
+    #[test]
+    fn every_transmit_chain_builds_and_ends_in_baseband() {
+        let reg = crate::registry();
+        let mut chains = 0;
+        for p in all() {
+            let Some(tx) = p.transmit() else { continue };
+            chains += 1;
+            // What the clock hands a transmit chain: the span's own rate,
+            // wide enough for the widest of these to fit its modulation in.
+            let rate = 8_000_000.0f64.max(p.shape().min_rate_hz);
+            let clock = pipeline::port::StreamSpec {
+                kind: PortKind::Real,
+                rate,
+                center: common::Hz(p.default_hz() as u64),
+                channels: 1,
+                flow: pipeline::port::Flow::Tx,
+                ..Default::default()
+            };
+            let g = crate::build_chain(clock, &[tx.source, tx.modulator], &reg)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
+            let (tail, _) = g.order().last().expect("a tail");
+            let out = g.spec_of(tail.out(0)).expect("an output");
+            assert_eq!(out.kind, PortKind::Iq, "{} transmits something else", p.id());
+            assert_eq!(out.rate, rate, "{} keys at a rate the radio is not", p.id());
+            assert!(out.bandwidth <= rate, "{} is wider than its stream", p.id());
+        }
+        // POCSAG, APRS, RTTY, BLE, SSTV and DVB-T.
+        assert_eq!(chains, 6, "protocols that transmit");
+    }
+
     /// Nothing is left out of the frame walk, and everything whose spectrum
     /// the pager bands swallow is offered a frame before the pager: 144 to
     /// 146 MHz sits inside the VHF paging allocation, the 420 to 430 MHz

@@ -309,7 +309,12 @@ impl FskModNode {
         let per_us = self.rate / 1e6;
         let (hi, lo) = (self.offset_hz + self.shift_hz / 2.0, self.offset_hz - self.shift_hz / 2.0);
         for p in &pkg.pulses {
-            let mark = ((p.mark as f64 * per_us).round() as usize).max(1);
+            // A zero mark is a real thing here, where it is not for a keyed
+            // carrier: both tones are carrier, so a pulse with no mark is a
+            // run of the lower tone and nothing more. A BLE preamble starts
+            // at zero and a forced one-sample mark put a spur of the upper
+            // tone in front of every packet.
+            let mark = (p.mark as f64 * per_us).round() as usize;
             let gap = (p.gap as f64 * per_us).round() as usize;
             for _ in 0..mark {
                 let c = self.carrier.step(hi, self.rate);

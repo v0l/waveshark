@@ -1565,13 +1565,18 @@ fn agent_transmit_modes(can_transmit: bool) -> Value {
             },
         }));
     }
-    for p in nodes::protocol::all().iter().filter(|p| p.transmit().is_some()) {
+    for p in nodes::protocol::all() {
+        let Some(tx) = p.transmit() else { continue };
         rows.push(json!({
             "mode": p.id(),
             "label": p.label(),
             "bandwidth_hz": ChanMode::Decode(p.id().to_string()).bandwidth(),
             "carries": "data",
-            "sources": ["file"],
+            // The stage that supplies the payload, which is where what goes
+            // out is set: a file for a multiplex, an address and a message
+            // for a pager. Named rather than described, since the stage's
+            // own parameters are the list of what it takes.
+            "sources": [tx.source.kind],
         }));
     }
     json!({ "can_transmit": can_transmit, "modes": rows })
@@ -1879,8 +1884,13 @@ mod tests {
         assert_eq!(nfm["sources"][2], "agent");
         let cw = rows.iter().find(|m| m["mode"] == "cw").expect("cw");
         assert_eq!(cw["sources"][0], "none", "a carrier has nothing fed to it");
-        let data = rows.iter().find(|m| m["carries"] == "data").expect("a data mode");
-        assert_eq!(data["sources"][0], "file");
+        // A data mode names the stage that supplies its payload, which is
+        // where an agent sets what goes out.
+        let dvbt = rows.iter().find(|m| m["mode"] == "dvbt").expect("dvbt");
+        assert_eq!(dvbt["sources"][0], "ts_source");
+        let pocsag = rows.iter().find(|m| m["mode"] == "pocsag").expect("pocsag");
+        assert_eq!(pocsag["sources"][0], "pocsag_tx");
+        assert_eq!(digital, 6, "protocols that transmit: {names:?}");
     }
 
     /// Unkeying is safe from anywhere: an agent that has lost track of what

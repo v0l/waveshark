@@ -62,6 +62,7 @@ pub mod survey_nodes;
 pub mod tetra_nodes;
 pub mod twotone_nodes;
 pub mod tx_nodes;
+pub mod tx_source;
 pub mod vdl2_nodes;
 pub mod video_nodes;
 pub mod wefax_nodes;
@@ -197,6 +198,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (dsp_nodes::AGC, dsp_nodes::build_agc),
     (dsp_nodes::SQUELCH, dsp_nodes::build_squelch),
     (wfm::DESC, wfm::build),
+    (wfm::RDS_TX, wfm::build_rds_tx),
     (filter_nodes::FIR_FILTER, filter_nodes::build_fir),
     (filter_nodes::IIR_FILTER, filter_nodes::build_iir),
     // The front ends the scanner table puts on a span. Registered like any
@@ -208,6 +210,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (gsm_nodes::DESC, gsm_nodes::build),
     (mic_in::DESC, mic_in::build),
     (sstv_nodes::DESC, sstv_nodes::build),
+    (sstv_nodes::SSTV_TX, sstv_nodes::build_tx),
     (apt_nodes::DESC, apt_nodes::build),
     (wefax_nodes::DESC, wefax_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
@@ -217,17 +220,21 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (dvbt_nodes::DVBT_MOD, dvbt_nodes::build_dvbt_mod),
     (video_nodes::DESC, video_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),
+    (ble_nodes::BLE_TX, ble_nodes::build_tx),
     (wifi_nodes::DESC, wifi_nodes::build),
     (droneid_nodes::DESC, droneid_nodes::build),
     (acars_nodes::DESC, acars_nodes::build),
     (aprs_nodes::DESC, aprs_nodes::build),
+    (aprs_nodes::APRS_TX, aprs_nodes::build_tx),
     (m17_nodes::DESC, m17_nodes::build),
     (tetra_nodes::DESC, tetra_nodes::build),
     (dmr_nodes::DESC, dmr_nodes::build),
     (p25_nodes::DESC, p25_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
+    (pocsag_nodes::POCSAG_TX, pocsag_nodes::build_tx),
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
+    (rtty_nodes::RTTY_TX, rtty_nodes::build_tx),
     (morse_nodes::DESC, morse_nodes::build),
     (mdc_nodes::DESC, mdc_nodes::build),
     (twotone_nodes::DESC, twotone_nodes::build),

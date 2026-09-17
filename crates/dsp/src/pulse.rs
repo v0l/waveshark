@@ -21,6 +21,44 @@
 
 pub use common::pulse::{Package, Pulse};
 
+/// NRZ bits at `baud` as mark and gap timings, the transmit mirror of the
+/// slicing above: a run of ones is a mark and the run of zeros after it is
+/// the gap.
+///
+/// The timings are whole microseconds, which no useful baud divides: a bit at
+/// 2400 baud is 416.67 us, and rounding each run on its own drifts by a
+/// microsecond every third bit until a receiver's clock recovery is chasing a
+/// rate that was never sent. So each edge is placed against the ideal
+/// timeline and the duration is the difference between two placed edges,
+/// which keeps the accumulated error under a microsecond however long the
+/// transmission is.
+///
+/// Leading zeros cannot be expressed, since a package starts with a mark;
+/// every protocol here opens with a preamble that starts at one, and one that
+/// did not would have to key its own idle first.
+pub fn nrz(bits: &[bool], baud: f64) -> Vec<Pulse> {
+    let mut out = Vec::new();
+    if bits.is_empty() || baud <= 0.0 {
+        return out;
+    }
+    let us_per_bit = 1e6 / baud;
+    // Where a bit index falls on the ideal timeline, rounded once.
+    let at = |i: usize| (i as f64 * us_per_bit).round() as u32;
+    let mut i = 0;
+    while i < bits.len() {
+        let ones = i;
+        while i < bits.len() && bits[i] {
+            i += 1;
+        }
+        let zeros = i;
+        while i < bits.len() && !bits[i] {
+            i += 1;
+        }
+        out.push(Pulse { mark: at(zeros) - at(ones), gap: at(i) - at(zeros) });
+    }
+    out
+}
+
 /// Amplitude to dB relative to a full scale sample.
 ///
 /// Amplitude, not power, so the reference is 1.0 rather than 0.5, and a signal
@@ -683,6 +721,28 @@ impl OokDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bits_become_runs_of_mark_and_gap() {
+        // 1 1 0 1 0 0 0 at 1000 baud: two ones, a zero, a one, three zeros.
+        let p = nrz(&[true, true, false, true, false, false, false], 1000.0);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], Pulse { mark: 2000, gap: 1000 });
+        assert_eq!(p[1], Pulse { mark: 1000, gap: 3000 });
+    }
+
+    /// 2400 baud is 416.666 us a bit, so a run rounded on its own loses a
+    /// third of a microsecond every time. Placing the edges instead holds the
+    /// last one of 4800 bits to within a microsecond of where it belongs,
+    /// where per-run rounding would be 800 us out, two symbols late.
+    #[test]
+    fn a_long_transmission_does_not_drift_off_its_clock() {
+        let bits: Vec<bool> = (0..4800).map(|i| i % 2 == 0).collect();
+        let p = nrz(&bits, 2400.0);
+        let total: u64 = p.iter().map(|x| u64::from(x.mark) + u64::from(x.gap)).sum();
+        let ideal = (4800.0 * 1e6 / 2400.0) as u64;
+        assert_eq!(total, ideal, "4800 bits at 2400 baud is two seconds of air");
+    }
 
     #[test]
     fn a_stream_that_begins_inside_a_transmission_is_passed_whole() {

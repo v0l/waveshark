@@ -211,6 +211,253 @@ impl Simple for SstvNode {
 
 pub struct Sstv;
 
+/// A picture, as the tones that send it.
+///
+/// The mirror of [`SstvNode`]: `decode::sstv::encode` builds the header, the
+/// VIS code and the lines, and the FM modulator puts them on a carrier. The
+/// picture is built once at [`AUDIO_HZ`], where the timings are whole enough
+/// samples to be exact, and read out at the radio's rate: a minute of Martin
+/// 1 is ten megabytes at 44.1 kHz and half a gigabyte at 2.4 MS/s, so a
+/// transmission generated at the stream's own rate could not be held.
+pub struct SstvTxNode {
+    path: String,
+    mode: &'static sstv::Mode,
+    /// The picture, row major RGB, `mode.width` by `mode.height`.
+    rgb: Vec<u8>,
+    /// The whole transmission at [`AUDIO_HZ`], built when the picture or the
+    /// mode changes.
+    audio: Vec<f32>,
+    /// How far through `audio` the transmission has been sent, in samples of
+    /// it.
+    at: f64,
+    rate: f64,
+    pace: crate::tx_source::Pace,
+}
+
+impl Default for SstvTxNode {
+    fn default() -> Self {
+        let mode = &sstv::MODES[0];
+        let mut n = Self {
+            path: String::new(),
+            mode,
+            rgb: Vec::new(),
+            audio: Vec::new(),
+            at: 0.0,
+            rate: 0.0,
+            pace: crate::tx_source::Pace::default(),
+        };
+        n.load();
+        n
+    }
+}
+
+impl SstvTxNode {
+    pub fn new(path: &str, mode: &'static sstv::Mode) -> Self {
+        let mut n = Self { path: path.into(), mode, ..Default::default() };
+        // The default built the test card in its own mode, so the picture
+        // and the transmission are rebuilt for the one asked for.
+        n.load();
+        n
+    }
+
+    /// Read the picture and build the transmission. A picture that will not
+    /// load is the test card, so a transmitter keyed with a bad path sends
+    /// something a receiver can show rather than silence nobody can debug.
+    fn load(&mut self) {
+        self.rgb = match self.path.is_empty() {
+            true => test_card(self.mode),
+            false => match read_picture(&self.path, self.mode) {
+                Some(rgb) => rgb,
+                None => {
+                    tracing::warn!("sstv_tx: {}: not a picture", self.path);
+                    test_card(self.mode)
+                }
+            },
+        };
+        self.audio = sstv::encode(&self.rgb, self.mode, AUDIO_HZ).unwrap_or_default();
+        self.at = 0.0;
+    }
+
+    /// How long one transmission takes, in seconds.
+    pub fn seconds(&self) -> f64 {
+        self.audio.len() as f64 / AUDIO_HZ
+    }
+
+    pub fn sent(&self) -> u64 {
+        self.pace.sent()
+    }
+}
+
+/// Eight colour bars, which is what a receiver needs to show that everything
+/// between the two ends is working and that the channels are in step.
+fn test_card(mode: &sstv::Mode) -> Vec<u8> {
+    const BARS: [[u8; 3]; 8] = [
+        [255, 255, 255],
+        [255, 255, 0],
+        [0, 255, 255],
+        [0, 255, 0],
+        [255, 0, 255],
+        [255, 0, 0],
+        [0, 0, 255],
+        [0, 0, 0],
+    ];
+    let mut rgb = vec![0u8; mode.width * mode.height * 3];
+    for y in 0..mode.height {
+        for x in 0..mode.width {
+            rgb[(y * mode.width + x) * 3..][..3].copy_from_slice(&BARS[x * 8 / mode.width]);
+        }
+    }
+    rgb
+}
+
+/// A picture from a file, scaled to the mode by nearest neighbour. Nearest
+/// rather than filtered because the tone meter reading it back is several
+/// pixels wide already, so a smoother scale buys nothing a receiver sees.
+fn read_picture(path: &str, mode: &sstv::Mode) -> Option<Vec<u8>> {
+    let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
+    let img = img.to_rgb8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut rgb = vec![0u8; mode.width * mode.height * 3];
+    for y in 0..mode.height {
+        let sy = (y * h / mode.height).min(h - 1);
+        for x in 0..mode.width {
+            let sx = (x * w / mode.width).min(w - 1);
+            rgb[(y * mode.width + x) * 3..][..3]
+                .copy_from_slice(&img.get_pixel(sx as u32, sy as u32).0);
+        }
+    }
+    Some(rgb)
+}
+
+impl Simple for SstvTxNode {
+    fn name(&self) -> &str {
+        SSTV_TX.name
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let what = match self.path.is_empty() {
+            true => "the test card".to_string(),
+            false => std::path::Path::new(&self.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.path.clone()),
+        };
+        vec![
+            ("sending".into(), format!("{what} in {}", self.mode.name)),
+            ("pictures".into(), self.pace.sent().to_string()),
+        ]
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.rate <= 0.0 {
+            return Err(common::Error::other("sstv_tx needs a clock to send against"));
+        }
+        self.rate = i.spec.rate;
+        let mut out = i.spec.with_kind(PortKind::Real);
+        out.flow = pipeline::port::Flow::Tx;
+        out.channels = 1;
+        out.bandwidth = 2.0 * TONE_HIGH_HZ;
+        Ok(out)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        if self.audio.is_empty() || self.rate <= 0.0 {
+            return Ok(());
+        }
+        let step = AUDIO_HZ / self.rate;
+        let out = o.real_mut();
+        for _ in 0..i.len() {
+            if self.at >= self.audio.len() as f64 {
+                // Between pictures the carrier carries silence rather than
+                // stopping: a transmission that keys down per picture would
+                // rebuild the graph's burst detector's idea of the channel
+                // every two minutes.
+                self.pace.clock(1, self.rate);
+                if self.pace.due() {
+                    self.pace.spent(0.0);
+                    self.at = 0.0;
+                }
+                out.push(0.0);
+                continue;
+            }
+            if self.at == 0.0 {
+                self.pace.spent(self.seconds() * 1e6);
+            }
+            // Linear between the samples of a 44.1 kHz picture. The tones
+            // are under 2.5 kHz and the rate above is at least forty times
+            // that, so what the interpolation leaves is far outside the
+            // channel filter of anything reading it.
+            let k = self.at as usize;
+            let f = (self.at - k as f64) as f32;
+            let a = self.audio[k];
+            let b = *self.audio.get(k + 1).unwrap_or(&0.0);
+            out.push(a + (b - a) * f);
+            self.at += step;
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.at = 0.0;
+        self.pace.reset();
+    }
+
+    fn params(&self) -> Vec<pipeline::param::Param> {
+        use pipeline::param::Param;
+        vec![
+            Param::text(PICTURE, self.path.clone()).label("Picture"),
+            Param::choice(
+                MODE,
+                sstv::MODES.iter().position(|m| m.vis == self.mode.vis).unwrap_or(0),
+                sstv::MODES.iter().map(|m| m.name.to_string()).collect(),
+            )
+            .label("Mode"),
+            Param::float(PAUSE_MS, self.pace.pause_ms(), 0.0..=600_000.0)
+                .label("Between pictures")
+                .unit("ms"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: pipeline::param::ParamValue) -> Result<()> {
+        use pipeline::param::ParamValue;
+        match name {
+            PICTURE => {
+                let want = match value {
+                    ParamValue::Text(t) => t,
+                    _ => return Err(common::Error::other("sstv_tx: a picture is a path")),
+                };
+                if want != self.path {
+                    self.path = want;
+                    self.load();
+                }
+            }
+            MODE => {
+                let k = value.as_i64().unwrap_or(0).clamp(0, sstv::MODES.len() as i64 - 1);
+                let want = &sstv::MODES[k as usize];
+                // A mode this receiver can read and not send is refused
+                // rather than quietly swapped: an operator who picked Robot
+                // 36 is owed the reason it did not go out.
+                if sstv::encode(&[], want, AUDIO_HZ).is_none() {
+                    return Err(common::Error::other(format!(
+                        "sstv_tx: {} sends colour differences this cannot build",
+                        want.name
+                    )));
+                }
+                if want.vis != self.mode.vis {
+                    self.mode = want;
+                    self.load();
+                }
+            }
+            PAUSE_MS => self.pace.set_pause_ms(value.as_f64().unwrap_or(5_000.0)),
+            _ => return Err(common::Error::other(format!("sstv_tx: unknown parameter {name:?}"))),
+        }
+        Ok(())
+    }
+}
+
 impl Protocol for Sstv {
     fn id(&self) -> &'static str {
         "sstv"
@@ -247,10 +494,23 @@ impl Protocol for Sstv {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// The picture into the FM modulator, at the deviation the receiving
+    /// discriminator is scaled for.
+    fn transmit(&self) -> Option<crate::protocol::TxChain> {
+        Some(crate::protocol::TxChain {
+            source: NodeSpec::new(SSTV_TX.name),
+            modulator: NodeSpec::new(crate::mod_nodes::FM_MOD.name).f("deviation_hz", DEVIATION_HZ),
+        })
+    }
 }
 
 /// The carrier this stage is pointed at.
 const CHANNEL_HZ: &str = "channel_hz";
+
+/// What the transmit side is set with.
+const PICTURE: &str = "picture";
+const MODE: &str = "mode";
+const PAUSE_MS: &str = "pause_ms";
 
 pub const DESC: StageDesc = StageDesc {
     name: "sstv",
@@ -259,8 +519,24 @@ pub const DESC: StageDesc = StageDesc {
     feeds_bus: false,
 };
 
+pub const SSTV_TX: StageDesc = StageDesc {
+    name: "sstv_tx",
+    summary: "Send a picture as SSTV: Martin and Scottie modes",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     Ok(Box::new(SstvNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let k = s.i64_or(MODE, 0).clamp(0, sstv::MODES.len() as i64 - 1) as usize;
+    let mut n = SstvTxNode::new(s.str_or(PICTURE, ""), &sstv::MODES[k]);
+    // A picture is a minute or two of air, so a repeat every five seconds
+    // is a transmitter sending back to back and not a pause worth naming.
+    n.pace.set_pause_ms(s.f64_or(PAUSE_MS, 5_000.0));
+    Ok(Box::new(n))
 }
 
 #[cfg(test)]
@@ -300,5 +576,63 @@ mod tests {
         let audio = PortSpec { spec, latency: 0 };
         let out = n.negotiate(&audio).expect("audio");
         assert_eq!(out.kind, PortKind::Video);
+    }
+
+    /// Sent by the transmit stage and read back by the receive stage. Twelve
+    /// seconds of a Martin 2 transmission rather than the whole minute, since
+    /// what is being checked is that the header, the VIS code and the line
+    /// timings agree, and every line after the first few says the same thing
+    /// again at the cost of a second of test time each.
+    #[test]
+    fn a_picture_this_receiver_sent_is_a_picture_this_receiver_reads() {
+        let rate = 44_100.0;
+        let martin2 = sstv::MODES.iter().find(|m| m.name == "Martin 2").unwrap();
+        let mut tx = SstvTxNode::new("", martin2);
+        let mut spec = StreamSpec::iq(rate, Hz(0));
+        spec.kind = PortKind::Real;
+        let audio_spec = tx.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
+        assert_eq!(audio_spec.kind, PortKind::Real);
+        // The test card in Martin 2: 0.88 s of header and VIS, then 256
+        // lines of 0.2268 s.
+        assert!((tx.seconds() - 58.94).abs() < 0.01, "{} s", tx.seconds());
+
+        let mut rx = SstvNode::new(14_230_000.0);
+        rx.negotiate(&PortSpec { spec: audio_spec, latency: 0 }).unwrap();
+        let ins = [PortSpec { spec, latency: 0 }];
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let mut rows = 0usize;
+        let mut mode = None;
+        for _ in 0..(12.0 * rate / 4096.0) as usize {
+            let mut audio = Payload::Real(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(&mut tx, &Payload::Real(vec![0.0; 4096]), &mut audio, &mut ctx)
+                .unwrap();
+            let mut video = Payload::Video(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(&mut rx, &audio, &mut video, &mut ctx).unwrap();
+            if let Payload::Video(frames) = video {
+                for f in frames {
+                    mode = f.label.clone();
+                    rows += f.lines_seen;
+                }
+            }
+        }
+        assert_eq!(mode.as_deref(), Some("Martin 2"), "the VIS code named the mode");
+        // Twelve seconds less the 0.88 s header, at 0.2268 s a line, is 49;
+        // the last two are still being read when the audio runs out, since a
+        // line is published once the one after it has started.
+        assert_eq!(rows, 47, "lines off the air");
+    }
+
+    /// A Robot mode is refused rather than sent as something no receiver
+    /// would show.
+    #[test]
+    fn a_mode_the_transmitter_cannot_send_is_refused_with_why() {
+        use pipeline::param::ParamValue;
+        let mut n = SstvTxNode::default();
+        let robot = sstv::MODES.iter().position(|m| m.name == "Robot 36").unwrap();
+        let e = n.set_param(MODE, ParamValue::Int(robot as i64)).unwrap_err();
+        assert!(e.to_string().contains("Robot 36"), "{e}");
+        assert_eq!(n.mode.name, "Martin 1", "the mode it was on is kept");
     }
 }
