@@ -64,6 +64,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- A HackRF came back at its default gain and with the bias tee off after a
+  span change.
 - The Windows installer offered a repair rather than an upgrade over a
   release candidate.
 - A CUDA build was offered the plain download, and a plain build the CUDA
