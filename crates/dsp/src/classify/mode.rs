@@ -148,6 +148,34 @@ pub static MODES: &[Mode] = &[
         note: "15 kHz subcarrier spacing",
     },
     Mode {
+        name: "FPV video",
+        // Analogue video on an FM carrier, in the band the model aircraft
+        // channels occupy. A, B, E, F and R put about forty named channels
+        // between 5.645 and 5.945 GHz, and nothing else licence-free there
+        // carries a line rate.
+        family: Modulation::Fm,
+        baud: None,
+        tone_sep_hz: None,
+        sweep_hz_per_s: None,
+        symbol_period_s: None,
+        duration_s: None,
+        centre_hz: r(5.6e9, 5.95e9),
+        note: "analogue video, about 20 MHz wide",
+    },
+    Mode {
+        name: "Analogue video",
+        // The same shape anywhere else: a security camera on 1.2 GHz, a bench
+        // pattern generator, a surviving television transmitter.
+        family: Modulation::Fm,
+        baud: None,
+        tone_sep_hz: None,
+        sweep_hz_per_s: None,
+        symbol_period_s: None,
+        duration_s: None,
+        centre_hz: None,
+        note: "line sync at 15.6 kHz on an FM carrier",
+    },
+    Mode {
         name: "DMR / NXDN / P25 phase 2",
         family: Modulation::Fsk4,
         baud: r(3600.0, 5200.0),

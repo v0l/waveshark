@@ -16,6 +16,7 @@ the code is in the commit log.
   ramps, the panel's own by default.
 - A band walk in the scanner settings: the dial steps past the span, holds on
   what it hears or logs it and moves on, and each find can be ignored.
+- Analogue FPV video named from its line rate, with its channel: R1, F4, A5.
 - FLEX paging at 1600 and 3200 baud, two and four level, in the message view.
 - Morse off the air: a CW channel read as text, at the speed it was sent.
 - Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.

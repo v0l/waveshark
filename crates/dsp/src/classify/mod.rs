@@ -50,6 +50,7 @@ mod ofdm;
 mod phase;
 mod steady;
 mod tones;
+pub mod video;
 mod zoom;
 
 pub use common::Modulation;
@@ -80,6 +81,7 @@ pub fn hypotheses() -> &'static [&'static dyn Hypothesis] {
         &dsss::Dsss,
         &steady::NoiseLike,
         &steady::Carrier,
+        &video::FmVideo,
     ]
 }
 
@@ -179,6 +181,10 @@ pub struct Features {
     /// The lag of that peak, in seconds. A symbol period, if it is real: 66.7
     /// us for LTE's 15 kHz subcarriers, 4 us for 802.11a and its descendants.
     pub cyclic_period_s: f32,
+    /// Fraction of the window a line sync train explains, which is the one
+    /// structure analogue video has. Zero for everything that is not video,
+    /// and zero on a channel too narrow or a receiver too slow to look.
+    pub video_lines: f32,
     /// The same test on envelope power rather than on the complex samples.
     ///
     /// A spreading code repeats in the envelope, but its data flips the sign
@@ -618,6 +624,14 @@ impl Classifier {
         let (fit, rate_hz_s) = chirp_fit(&self.freq_hi, self.rate);
         f.chirp_fit = fit;
         f.chirp_rate = rate_hz_s;
+
+        // The line test sorts the whole window, so it is gated on the two
+        // things that must hold before a picture could be there at all.
+        if self.rate >= video::MIN_RATE && f.bandwidth_hz >= video::MIN_BANDWIDTH_HZ {
+            let freq = std::mem::take(&mut self.freq);
+            f.video_lines = video::line_coverage(&freq, self.rate);
+            self.freq = freq;
+        }
 
         if baud > 0.0 && separation > 0.0 {
             // The modulation index compares the tone separation, which is
@@ -1738,6 +1752,66 @@ mod tests {
         let mut g = Gen::new(0.01);
         g.tone(1_000.0, 1.0, 64);
         assert_eq!(classify(&g.out).modulation, Modulation::Unknown);
+    }
+
+    /// An FM carrier deviated by composite video, as an FPV transmitter
+    /// sends it: 20 MS/s, 4 MHz of deviation, sync 4.7 us below blanking.
+    fn fpv_video(rate: f64, noise: f32, lines: usize) -> Vec<C32> {
+        let base = video::composite(crate::video::Standard::Pal, rate, 4e6, lines);
+        let mut seed = 0x9E37_79B9u32;
+        let mut rng = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / 8.4e6 - 1.0) * noise
+        };
+        let mut phase = 0.0f64;
+        base.iter()
+            .map(|&hz| {
+                phase = (phase + std::f64::consts::TAU * hz as f64 / rate)
+                    .rem_euclid(std::f64::consts::TAU);
+                C32::new(phase.cos() as f32 + rng(), phase.sin() as f32 + rng())
+            })
+            .collect()
+    }
+
+    fn classify_wide(iq: &[C32], rate: f64) -> BurstClass {
+        let cfg = ClassifyConfig { channel_hz: rate as f32, ..Default::default() };
+        Classifier::new(rate, cfg).classify(iq)
+    }
+
+    #[test]
+    fn an_fpv_transmitter_is_named_by_its_line_rate() {
+        let rate = 20e6;
+        let c = classify_wide(&fpv_video(rate, 0.05, 16), rate);
+        assert_eq!(c.modulation, Modulation::Fm);
+        assert!(c.features.video_lines > 0.8, "coverage {}", c.features.video_lines);
+        let m = mode::identify(c.modulation, &c.features, 5.8e9).expect("a mode");
+        assert_eq!(m.name, "FPV video");
+        // The same shape off the model aircraft band is video and not FPV.
+        let m = mode::identify(c.modulation, &c.features, 1.28e9).expect("a mode");
+        assert_eq!(m.name, "Analogue video");
+    }
+
+    /// A quarter of a second of noise across the whole span, the input a
+    /// stepped search over forty FPV channels mostly sees.
+    #[test]
+    fn noise_on_an_fpv_channel_is_never_video() {
+        let rate = 20e6;
+        let mut g = Gen::new(1.0);
+        g.tone(0.0, 0.0, 1 << 15);
+        let c = classify_wide(&g.out, rate);
+        assert_ne!(c.modulation, Modulation::Fm);
+        assert_eq!(c.features.video_lines, 0.0);
+        assert_eq!(mode::identify(c.modulation, &c.features, 5.8e9).map(|m| m.name), None);
+    }
+
+    /// Keyed signals share the band with video and must not borrow its name.
+    #[test]
+    fn keying_is_not_video() {
+        for iq in [ook(0.0), fsk(20_000.0, 2), fsk(20_000.0, 4), psk(2)] {
+            let c = classify(&iq);
+            assert_eq!(c.features.video_lines, 0.0, "{:?} claimed a line rate", c.modulation);
+            assert_ne!(c.modulation, Modulation::Fm);
+        }
     }
 
     #[test]

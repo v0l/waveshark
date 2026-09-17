@@ -55,7 +55,7 @@ pub enum Modulation {
     /// Two tones in an audio channel, which is what a packet radio keys
     /// through an FM receiver.
     ///
-    /// This and the four below the classifier never returns: it works on RF
+    /// This and the three below the classifier never returns: it works on RF
     /// and cannot tell a Gaussian filter from a plain one, let alone that a
     /// signal was keyed at audio. They exist because a demodulator that was
     /// built for one of them knows, and a packet list saying `AFSK` for an
@@ -70,7 +70,8 @@ pub enum Modulation {
     /// Pulse position keying, which is how Mode S carries its bits.
     Ppm,
     /// Frequency modulated speech, which is what a demodulated voice call
-    /// was carried by.
+    /// was carried by, and analogue video, which the classifier does return:
+    /// a line sync train in the frequency track is structure it can measure.
     Fm,
 }
 

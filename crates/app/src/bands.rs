@@ -1129,10 +1129,25 @@ impl Numbering {
                 }
                 Some(format!("{} {}", self.word, first + i))
             }
-            Numbers::Named(list) => list
-                .iter()
-                .find(|(_, f)| (hz - f).abs() <= near)
-                .map(|(name, _)| format!("{} {name}", self.word)),
+            Numbers::Named(list) => {
+                let (name, at) =
+                    list.iter().min_by(|a, b| (hz - a.1).abs().total_cmp(&(hz - b.1).abs()))?;
+                // The closest, and only where nothing else is nearly as
+                // close. FPV channels from different bands sit as little as
+                // 1 MHz apart while the channel is 20 MHz wide, so a quarter
+                // of the width would name one of a pair arbitrarily; half the
+                // distance to the next distinct channel cannot. Channels at
+                // the same frequency under two names are one channel, and the
+                // first name wins rather than the bound collapsing to zero.
+                let gap = list
+                    .iter()
+                    .map(|(_, f)| (f - at).abs())
+                    .filter(|g| *g > 1.0e3)
+                    .fold(f64::INFINITY, f64::min);
+                // Strictly inside, so the midpoint between two channels is
+                // neither rather than whichever the table lists first.
+                ((hz - at).abs() < near.min(gap / 2.0)).then(|| format!("{} {name}", self.word))
+            }
         }
     }
 
@@ -1345,6 +1360,68 @@ const LPD433: Numbering = Numbering {
     width: 25_000.0,
 };
 
+/// The model aircraft video channels at 5.8 GHz, which is what an operator
+/// says: R1, F4, A5. Five bands of eight, laid down by the transmitters
+/// themselves rather than by a regulator, so they overlap each other and
+/// several sit outside any 5.8 GHz licence-free allocation: E5 to E8 are
+/// above 5.875 and R1 and E1 to E4 below 5.725. Naming a channel is not
+/// saying it may be used.
+///
+/// A, B, E and F are the Boscam, Fatshark and ImmersionRC sets a decade of
+/// gear ships with; R is Raceband, spaced 37 MHz so eight aircraft can fly at
+/// once. F8 and R7 are the same frequency under two names.
+const FPV_5G8: Numbering = Numbering {
+    lo: 5.640e9,
+    hi: 5.950e9,
+    word: "ch",
+    what: Numbers::Named(&[
+        ("A1", 5865.0e6),
+        ("A2", 5845.0e6),
+        ("A3", 5825.0e6),
+        ("A4", 5805.0e6),
+        ("A5", 5785.0e6),
+        ("A6", 5765.0e6),
+        ("A7", 5745.0e6),
+        ("A8", 5725.0e6),
+        ("B1", 5733.0e6),
+        ("B2", 5752.0e6),
+        ("B3", 5771.0e6),
+        ("B4", 5790.0e6),
+        ("B5", 5809.0e6),
+        ("B6", 5828.0e6),
+        ("B7", 5847.0e6),
+        ("B8", 5866.0e6),
+        ("E1", 5705.0e6),
+        ("E2", 5685.0e6),
+        ("E3", 5665.0e6),
+        ("E4", 5645.0e6),
+        ("E5", 5885.0e6),
+        ("E6", 5905.0e6),
+        ("E7", 5925.0e6),
+        ("E8", 5945.0e6),
+        ("F1", 5740.0e6),
+        ("F2", 5760.0e6),
+        ("F3", 5780.0e6),
+        ("F4", 5800.0e6),
+        ("F5", 5820.0e6),
+        ("F6", 5840.0e6),
+        ("F7", 5860.0e6),
+        ("F8", 5880.0e6),
+        ("R1", 5658.0e6),
+        ("R2", 5695.0e6),
+        ("R3", 5732.0e6),
+        ("R4", 5769.0e6),
+        ("R5", 5806.0e6),
+        ("R6", 5843.0e6),
+        ("R7", 5880.0e6),
+        ("R8", 5917.0e6),
+    ]),
+    // What an analogue transmitter occupies, which is most of the 20 MHz
+    // step: the deviation is a few megahertz either side of the carrier and
+    // the audio subcarrier sits 6.5 MHz up.
+    width: 20.0e6,
+};
+
 /// American television: channels 2 to 6 and 7 to 13 on VHF, each 6 MHz, with
 /// the FM broadcast band in the gap.
 const VHF_TV_LOW: Numbering = Numbering {
@@ -1425,12 +1502,13 @@ const UHF_TV_JP: Numbering = Numbering {
     width: 6.0e6,
 };
 
-const EUROPE_CHANNELS: &[Numbering] = &[CB_40, MARINE_SHIP, DAB_BLOCKS, LPD433, PMR446, UHF_TV_8];
+const EUROPE_CHANNELS: &[Numbering] =
+    &[CB_40, MARINE_SHIP, DAB_BLOCKS, LPD433, PMR446, UHF_TV_8, FPV_5G8];
 
 const AMERICAS_CHANNELS: &[Numbering] =
-    &[CB_40, MARINE_SHIP, VHF_TV_LOW, VHF_TV_MID, VHF_TV_HIGH, LPD433, FRS_GMRS, UHF_TV_6];
+    &[CB_40, MARINE_SHIP, VHF_TV_LOW, VHF_TV_MID, VHF_TV_HIGH, LPD433, FRS_GMRS, UHF_TV_6, FPV_5G8];
 
-const ASIA_PACIFIC_CHANNELS: &[Numbering] = &[CB_40, MARINE_SHIP, LPD433, UHF_TV_JP];
+const ASIA_PACIFIC_CHANNELS: &[Numbering] = &[CB_40, MARINE_SHIP, LPD433, UHF_TV_JP, FPV_5G8];
 
 impl Plan {
     pub const fn channels(self) -> &'static [Numbering] {
@@ -1576,6 +1654,61 @@ mod tests {
                 plan.id()
             );
         }
+    }
+
+    /// The video channels a model aircraft transmitter is set to, which is
+    /// the answer a sweep of 5.8 GHz has to give: R1, not 5658 MHz.
+    #[test]
+    fn an_fpv_channel_is_called_what_the_transmitter_calls_it() {
+        use Plan::*;
+        let cases: &[(f64, &str)] = &[
+            (5658.0e6, "ch R1"),
+            (5732.0e6, "ch R3"),
+            (5917.0e6, "ch R8"),
+            (5800.0e6, "ch F4"),
+            (5740.0e6, "ch F1"),
+            (5865.0e6, "ch A1"),
+            (5725.0e6, "ch A8"),
+            (5733.0e6, "ch B1"),
+            (5645.0e6, "ch E4"),
+            (5945.0e6, "ch E8"),
+        ];
+        for (hz, want) in cases {
+            for plan in Plan::ALL {
+                assert_eq!(
+                    channel_at_in(plan, *hz).as_deref(),
+                    Some(*want),
+                    "{:.3} MHz in {}",
+                    hz / 1e6,
+                    plan.id()
+                );
+            }
+        }
+        // F8 and R7 are one frequency under two names, and the first name in
+        // the table is the one given rather than neither.
+        assert_eq!(channel_at_in(Europe, 5880.0e6).as_deref(), Some("ch F8"));
+        // The tuner can be asked for one by name.
+        assert_eq!(channel_hz_in(Europe, 5.6e9, 6.0e9, "R4"), Some(5769.0e6));
+        assert_eq!(channel_hz_in(Europe, 5.6e9, 6.0e9, "Z1"), None);
+    }
+
+    /// Channels from different FPV bands sit 1 MHz apart where the channel
+    /// itself is 20 MHz wide, so a reading between two of them is neither
+    /// rather than whichever the table happens to list first.
+    #[test]
+    fn a_reading_between_two_fpv_channels_is_neither() {
+        use Plan::*;
+        // B1 is 5733 and R3 is 5732: half a megahertz off both.
+        assert_eq!(channel_at_in(Europe, 5732.5e6).as_deref(), None);
+        // A7 at 5745 and F1 at 5740 are 5 MHz apart, so 2.5 MHz off each.
+        assert_eq!(channel_at_in(Europe, 5742.5e6).as_deref(), None);
+        // Well clear of the closest channel, which is A4 at 5805.
+        assert_eq!(channel_at_in(Europe, 5812.0e6).as_deref(), None);
+        // A receiver a little off a channel is still on it: R8 is 5917 and
+        // its nearest neighbour E7 is 8 MHz up, so 2 MHz off names R8 and
+        // the 4 MHz midpoint names neither.
+        assert_eq!(channel_at_in(Europe, 5919.0e6).as_deref(), Some("ch R8"));
+        assert_eq!(channel_at_in(Europe, 5921.0e6).as_deref(), None);
     }
 
     /// Between two channels is not either of them: a signal 2 MHz off a
