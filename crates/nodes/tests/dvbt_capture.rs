@@ -104,10 +104,15 @@ fn run(
         Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("the stage runs");
         frames.extend(out[1].as_video().unwrap_or(&[]).iter().cloned());
         // Every block carries exactly what the block covers: the bus mixes a
-        // block at a time and throws away anything longer.
+        // block at a time and throws away anything longer. Only with ffmpeg:
+        // the container reader is what makes sound out of the multiplex, and
+        // without it the port is there and empty.
         let sound = out[2].as_real().unwrap_or(&[]);
-        let want = (ctx.block_seconds * decode::media::SOUND_HZ as f64).round() as usize;
-        assert_eq!(sound.len(), want, "sound handed over in one block");
+        #[cfg(feature = "ffmpeg")]
+        {
+            let want = (ctx.block_seconds * decode::media::SOUND_HZ as f64).round() as usize;
+            assert_eq!(sound.len(), want, "sound handed over in one block");
+        }
         pcm.extend_from_slice(sound);
     }
     // The capture ends inside a picture's own run of packets, so the last is
@@ -297,14 +302,13 @@ fn the_stage_puts_a_picture_on_the_video_port() {
 fn the_service_can_be_asked_for_by_number_or_by_position() {
     use nodes::dvbt_nodes::{DvbtNode, SERVICE, Want};
     use pipeline::ParamValue;
-    use pipeline::node::{Node, NodeCtx, PortSpec};
-    use pipeline::port::{Payload, PortKind, StreamSpec};
+    use pipeline::node::Node;
 
     let Some(samples) = samples() else { return skip() };
-    let spec = PortSpec {
-        spec: StreamSpec::iq(nodes::dvbt_nodes::RATE_HZ, common::Hz(429_000_000)),
-        latency: 0,
-    };
+    // A picture is decoded by the container reader, so a build without
+    // ffmpeg watches the same service and hands over no frames. What is
+    // pinned either way is where the node points.
+    let showing = usize::from(cfg!(feature = "ffmpeg"));
     // The tables, and the pictures, for whatever the node was asked for.
     let one = |want: Option<ParamValue>| -> (DvbtNode, usize) {
         let (node, frames, _) = run(&samples, want);
@@ -315,7 +319,7 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
     let (node, pictures) = one(None);
     assert_eq!(node.wanted(), &Want::Any);
     assert_eq!(node.watching(), Some(49));
-    assert_eq!(pictures, 1);
+    assert_eq!(pictures, showing);
     // And says what it found, as a choice a menu can draw: the receiver's
     // own entry first, then the one service this multiplex describes.
     let params = Node::params(&node);
@@ -332,7 +336,7 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
     let (node, pictures) = one(Some(ParamValue::Int(1)));
     assert_eq!(node.wanted(), &Want::Id(1), "unnamed here, so it is asked for by number");
     assert_eq!(node.watching(), Some(49), "the video of service 1");
-    assert_eq!(pictures, 1);
+    assert_eq!(pictures, showing);
     assert_eq!(Node::params(&node)[0].value, ParamValue::Choice(1), "second in the list");
 
     // And by the name the list shows, which is what an agent has to hand.
