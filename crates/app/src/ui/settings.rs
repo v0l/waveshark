@@ -6,7 +6,8 @@
 use super::*;
 use crate::agent::config::{Reading, Speech};
 use crate::ui::widgets::{
-    card, choice, field, field_then, footer, hint, lamp, prose, row, secret, section, switch,
+    card, choice, field, field_then, footer, hint, lamp, prose, row, row_help, secret, section,
+    switch,
 };
 
 /// Ask every USB serial port whether a sub-ghz-modem is on it.
@@ -234,6 +235,182 @@ impl App {
         }
     }
 
+    /// The walk over a band: where the dial goes when it is let off the span,
+    /// and what it heard on the way.
+    fn band_walk(&mut self, ui: &mut egui::Ui) {
+        let status = self.radio.as_ref().and_then(|r| r.status.band_scan.lock().clone());
+        let (mut on, mut lo, mut hi, mut step, mut dwell, mut hold) = self.setting(|s| {
+            (s.scan_on, s.scan_lo_mhz, s.scan_hi_mhz, s.scan_step_khz, s.scan_dwell_s, s.scan_hold)
+        });
+        let was = (on, lo, hi, step, dwell, hold);
+        let mut acts: Vec<Cmd> = Vec::new();
+        let mut tune_to = None;
+
+        section(ui, "band walk", "step the dial past the span until something answers", |ui| {
+            row_help(
+                ui,
+                "band",
+                "The edges the dial walks between. Each step tunes a span, so a band wider \
+                 than the span takes several, and the walk starts again at the bottom when \
+                 it reaches the top.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut lo).speed(0.1).range(0.0..=6000.0).suffix(" MHz"),
+                    );
+                    theme::Line::new().legend("to").size(11.0).show(ui);
+                    ui.add(
+                        egui::DragValue::new(&mut hi).speed(0.1).range(0.0..=6000.0).suffix(" MHz"),
+                    );
+                },
+            );
+            row_help(
+                ui,
+                "step",
+                "How far the dial moves each time. Zero steps by the span the radio is \
+                 sampling, which covers the band without leaving anything untuned.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut step)
+                            .speed(10.0)
+                            .range(0.0..=100_000.0)
+                            .suffix(" kHz"),
+                    );
+                },
+            );
+            row_help(
+                ui,
+                "dwell",
+                "How long each step is listened to before the next one. A burst nobody \
+                 transmitted during the dwell is a step that heard nothing.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut dwell).speed(0.1).range(0.1..=60.0).suffix(" s"),
+                    );
+                },
+            );
+            row_help(
+                ui,
+                "on a hit",
+                "Whether the walk stays on a step that turned something up, so it can be \
+                 listened to, or writes it down and carries on.",
+                |ui| {
+                    choice(
+                        ui,
+                        "scan_on_hit",
+                        &mut hold,
+                        [
+                            (true, "hold there".to_string()),
+                            (false, "log it and move on".to_string()),
+                        ],
+                    );
+                },
+            );
+            switch(
+                ui,
+                "walk",
+                &mut on,
+                "step the dial",
+                "The dial moves on its own while this is on, so whatever you were listening \
+                 to is left behind.",
+            );
+            match &status {
+                Some(st) if st.running => {
+                    let at = st
+                        .center_hz
+                        .map(|c| format!("{:.4} MHz", c / 1e6))
+                        .unwrap_or_else(|| "starting".into());
+                    match st.holding {
+                        true => {
+                            lamp(ui, true, &format!("held at {at}"));
+                            if ui.button("RESUME").clicked() {
+                                acts.push(Cmd::StageParam(
+                                    crate::chain::derived::SCAN,
+                                    "holding".into(),
+                                    pipeline::ParamValue::Bool(false),
+                                ));
+                            }
+                        }
+                        false => lamp(
+                            ui,
+                            true,
+                            &format!("at {at}, {} steps taken, {} to a pass", st.steps, st.stops),
+                        ),
+                    }
+                }
+                Some(_) => lamp(ui, false, "the dial stays where you put it"),
+                None => lamp(ui, false, "no receiver running, so nothing is walking"),
+            }
+        });
+
+        if let Some(st) = status.as_ref().filter(|st| !st.found.is_empty()) {
+            ui.add_space(6.0);
+            for f in &st.found {
+                let mhz = f.center_hz as f64 / 1e6;
+                card(
+                    ui,
+                    Some(theme::TRACE),
+                    |ui| {
+                        theme::Line::new()
+                            .value(format!("{mhz:.4} MHz"))
+                            .size(12.0)
+                            .gap(12.0)
+                            .heard(f.protocol.clone().unwrap_or_else(|| "unclaimed".into()))
+                            .size(11.0)
+                            .show(ui);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("IGNORE").clicked() {
+                                let mut list: Vec<String> =
+                                    st.ignore.iter().map(nodes::Key::label).collect();
+                                list.push(f.key.label());
+                                acts.push(Cmd::StageParam(
+                                    crate::chain::derived::SCAN,
+                                    "ignore".into(),
+                                    pipeline::ParamValue::Text(list.join(",")),
+                                ));
+                            }
+                            if ui.button("TUNE").clicked() {
+                                tune_to = Some(mhz);
+                            }
+                        });
+                    },
+                    |ui| {
+                        theme::Line::new()
+                            .legend("heard")
+                            .value(f.heard.to_string())
+                            .size(11.0)
+                            .gap(16.0)
+                            .legend("snr")
+                            .value(format!("{:.0} dB", f.snr_db))
+                            .size(11.0)
+                            .gap(16.0)
+                            .legend("as")
+                            .value(f.key.label())
+                            .size(11.0)
+                            .show(ui);
+                    },
+                );
+                ui.add_space(4.0);
+            }
+        }
+
+        if (on, lo, hi, step, dwell, hold) != was {
+            self.settings.edit(|s| {
+                s.scan_on = on;
+                s.scan_lo_mhz = lo;
+                s.scan_hi_mhz = hi;
+                s.scan_step_khz = step;
+                s.scan_dwell_s = dwell;
+                s.scan_hold = hold;
+            });
+        }
+        for c in acts {
+            self.send(c);
+        }
+        if let Some(mhz) = tune_to {
+            self.retune(mhz * 1e6);
+        }
+    }
+
     fn scanner_settings(&mut self, ui: &mut egui::Ui) {
         let (center, rate) = (self.center, self.rate);
         // Taken out of `self` so the closures below can borrow the rest of
@@ -270,6 +447,8 @@ impl App {
                 ),
             }
         });
+        ui.add_space(8.0);
+        self.band_walk(ui);
         ui.add_space(8.0);
 
         let mut remove = None;
