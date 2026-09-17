@@ -109,6 +109,10 @@ struct Meta {
     /// to a wrong answer, but it would otherwise be revalidated forever.
     #[serde(default)]
     files: u64,
+    /// What those files come to on disc. Zero in a tree unpacked by an
+    /// older build, which reads it back off the directory once.
+    #[serde(default)]
+    bytes: u64,
     /// Unix seconds at the last successful check, new bytes or not.
     checked: u64,
     /// Why the last attempt was refused, when it was. The same rule as a
@@ -124,6 +128,8 @@ pub struct Status {
     /// The commit the tree is at, when a tree is held.
     pub commit: Option<String>,
     pub files: Option<u64>,
+    /// What the tree comes to on disc.
+    pub bytes: Option<u64>,
     /// Unix seconds at the last successful check.
     pub checked: Option<u64>,
 }
@@ -190,12 +196,38 @@ pub fn held(repo: &'static Repo, cache: &crate::cache::Cache) -> Option<Tree> {
 
 /// What is held and when it was checked, for the row that reports it.
 pub fn status(repo: &'static Repo, cache: &crate::cache::Cache) -> Status {
-    let m = read_meta(repo, cache);
+    let mut m = read_meta(repo, cache);
+    // A tree unpacked before the size was recorded: measure it once and
+    // write it down, rather than walking twenty thousand files every time
+    // the settings pane draws a frame.
+    if let Some(meta) = m.as_mut()
+        && meta.files > 0
+        && meta.bytes == 0
+    {
+        meta.bytes = tree_bytes(&repo.cache_dir(cache));
+        write_meta(repo, cache, meta);
+    }
     Status {
         commit: m.as_ref().and_then(|m| m.commit.clone()),
         files: m.as_ref().map(|m| m.files),
+        bytes: m.as_ref().map(|m| m.bytes),
         checked: m.as_ref().map(|m| m.checked),
     }
+}
+
+/// What a tree occupies, added up from the files themselves.
+fn tree_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut total = 0;
+    for e in entries.flatten() {
+        let p = e.path();
+        match e.metadata() {
+            Ok(m) if m.is_dir() => total += tree_bytes(&p),
+            Ok(m) => total += m.len(),
+            Err(_) => {}
+        }
+    }
+    total
 }
 
 /// Files under the tree with this extension, relative to the extraction
@@ -288,7 +320,13 @@ fn fetch(
     }
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::rename(&tmp, &dir).map_err(|e| Error::Io(dir.display().to_string(), e))?;
-    let meta = Meta { commit: Some(commit.clone()), files, checked: now(), refused: None };
+    let meta = Meta {
+        commit: Some(commit.clone()),
+        files,
+        bytes: tree_bytes(&dir),
+        checked: now(),
+        refused: None,
+    };
     write_meta(repo, cache, &meta);
     tracing::info!(repo = repo.dir, files, from = %repo.tarball, "repository downloaded");
     Ok(Some(Tree { dir, commit }))
@@ -798,7 +836,7 @@ mod tests {
         write_meta(
             repo_at(&d),
             &cache,
-            &Meta { commit: Some("abc".into()), files: 3, checked: 1, refused: None },
+            &Meta { commit: Some("abc".into()), files: 3, bytes: 3, checked: 1, refused: None },
         );
         // With the dot or without it, and whatever case the file is in: a
         // traded capture is as likely to be .SUB as .sub.

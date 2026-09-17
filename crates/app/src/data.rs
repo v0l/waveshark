@@ -715,6 +715,15 @@ pub fn status() -> Vec<Row> {
             let mut bytes = 0;
             let mut oldest: Option<u64> = None;
             let mut present = true;
+            // A repository is a tree rather than a file, so what is held
+            // and when it was checked are recorded beside the tree: read
+            // there, or the row reads "never" over a download that landed.
+            if let Which::Repo(r) = which {
+                let st = cache.map(|c| git::status(r, c)).unwrap_or_default();
+                bytes = st.bytes.unwrap_or(0);
+                oldest = st.checked.filter(|c| *c > 0);
+                present = st.files.is_some_and(|f| f > 0);
+            }
             for src in which.sources() {
                 let s = cache.map(|c| c.status(&src)).unwrap_or_default();
                 match s.bytes {
