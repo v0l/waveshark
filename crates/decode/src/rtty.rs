@@ -244,9 +244,52 @@ pub fn encode(text: &str) -> Vec<u8> {
     out
 }
 
+/// The keyed line that carries `codes`: true is mark, false is space.
+///
+/// The asynchronous discipline the teleprinter brought with it. Each
+/// character is a space start element, five data elements least significant
+/// first, and a mark stop element of [`Stop`] bit times; the line rests at
+/// mark between characters, which is what the receiver's framer hunts the
+/// next start edge against.
+///
+/// `per_bit` elements are produced per bit time, because a stop element is
+/// one and a half bits and whole bits cannot say that: two is enough for
+/// every [`Stop`] here, and the caller then keys at `per_bit * baud`.
+pub fn line(codes: &[u8], stop: Stop, per_bit: usize) -> Vec<bool> {
+    let per_bit = per_bit.max(1);
+    let stop_elements = (stop.bits() * per_bit as f64).round() as usize;
+    // Idle mark before the first start edge, so a receiver has a reference
+    // for what mark is before it has to decide a data bit.
+    let mut out = vec![true; 8 * per_bit];
+    for &code in codes {
+        out.extend(std::iter::repeat_n(false, per_bit));
+        for b in 0..5 {
+            out.extend(std::iter::repeat_n(code >> b & 1 == 1, per_bit));
+        }
+        out.extend(std::iter::repeat_n(true, stop_elements));
+    }
+    out.extend(std::iter::repeat_n(true, 8 * per_bit));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every character is a start element, five data elements and a stop of
+    /// one and a half, which at half-bit resolution is 2 + 10 + 3.
+    #[test]
+    fn a_keyed_line_is_a_start_five_data_and_a_stop_per_character() {
+        let idle = 16;
+        let bits = line(&[0b10101], Stop::OneAndHalf, 2);
+        assert_eq!(bits.len(), idle + 15 + idle);
+        assert_eq!(&bits[idle..idle + 2], &[false, false], "the start element is a space");
+        // Least significant data element first: 1, 0, 1, 0, 1.
+        let data: Vec<bool> = bits[idle + 2..idle + 12].iter().step_by(2).copied().collect();
+        assert_eq!(data, vec![true, false, true, false, true]);
+        assert_eq!(&bits[idle + 12..idle + 15], &[true; 3], "a stop of one and a half bits");
+        assert_eq!(line(&[0], Stop::Two, 2).len(), idle + 16 + idle);
+    }
 
     #[test]
     fn a_shift_decides_which_character_a_code_is() {

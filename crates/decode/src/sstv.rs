@@ -380,6 +380,75 @@ fn align_sync(
     Some((start, at.abs_diff(from), found))
 }
 
+/// The audio that sends `rgb` in `mode`: the calibration header, the VIS
+/// code, then a line at a time.
+///
+/// The inverse of [`decode`] for the modes that send three full-width
+/// channels, which is Martin and Scottie. A Robot mode sends luminance and
+/// two half-width colour differences and is refused rather than sent wrong.
+///
+/// `rgb` is row major, three bytes a pixel, `mode.width` by `mode.height`; a
+/// picture short of that is sent as far as it goes and the rest black.
+pub fn encode(rgb: &[u8], mode: &Mode, rate: f64) -> Option<Vec<f32>> {
+    if mode.colour != Colour::Gbr || mode.channels != 3 {
+        return None;
+    }
+    let mut out =
+        Vec::with_capacity(((HDR_SIZE + mode.height as f64 * mode.line_time) * rate) as usize);
+    let mut phase = 0.0f64;
+    // Where the tone that has been written should have ended, in seconds.
+    // A pixel at 11 kHz is two and a half samples long, so a tone rounded on
+    // its own runs a fifth over and a picture ends a quarter of a minute
+    // late; each tone is written up to its place on the timeline instead.
+    let mut elapsed = 0.0f64;
+    let mut tone = |hz: f64, seconds: f64, out: &mut Vec<f32>| {
+        elapsed += seconds;
+        let until = (elapsed * rate).round() as usize;
+        // Phase continuous across every tone, because a picture is read by a
+        // frequency meter and a step is a frequency of its own.
+        while out.len() < until {
+            phase += std::f64::consts::TAU * hz / rate;
+            out.push(phase.sin() as f32);
+        }
+    };
+
+    tone(1900.0, BREAK_OFFSET, &mut out);
+    tone(1200.0, LEADER_OFFSET - BREAK_OFFSET, &mut out);
+    tone(1900.0, VIS_START_OFFSET - LEADER_OFFSET, &mut out);
+    tone(1200.0, HDR_SIZE - VIS_START_OFFSET, &mut out);
+    // Seven bits least significant first, then a parity bit making the count
+    // of ones even. A one is 1100 Hz.
+    let mut ones = 0;
+    for b in 0..7 {
+        let one = mode.vis >> b & 1 == 1;
+        ones += u32::from(one);
+        tone(if one { 1100.0 } else { 1300.0 }, VIS_BIT, &mut out);
+    }
+    tone(if ones % 2 == 1 { 1100.0 } else { 1300.0 }, VIS_BIT, &mut out);
+
+    // The channel order is green, blue, red, and the offsets say when each
+    // goes out; anything between them is the separator tone.
+    let plane = [1usize, 2, 0];
+    let pixel_time = mode.pixel_time();
+    for y in 0..mode.height {
+        tone(1200.0, mode.sync_pulse, &mut out);
+        let mut at = mode.sync_pulse;
+        let mut order: Vec<usize> = (0..3).collect();
+        order.sort_by(|a, b| mode.offsets[*a].total_cmp(&mode.offsets[*b]));
+        for chan in order {
+            tone(1500.0, mode.offsets[chan] - at, &mut out);
+            for x in 0..mode.width {
+                let i = (y * mode.width + x) * 3 + plane[chan];
+                let v = f64::from(rgb.get(i).copied().unwrap_or(0));
+                tone(1500.0 + 800.0 * v / 255.0, pixel_time, &mut out);
+            }
+            at = mode.offsets[chan] + mode.scan_time;
+        }
+        tone(1500.0, mode.line_time - at, &mut out);
+    }
+    Some(out)
+}
+
 /// Decode the first picture in `audio`, or `None` where there is no header.
 ///
 /// The whole-buffer form of [`Receiver`], and the same code: a test that
@@ -830,6 +899,94 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picture sent and read back. The mode is Martin 2 because it is the
+    /// shortest of the full-width modes at 58 seconds, and the rate is what
+    /// an SSTV program uses.
+    #[test]
+    fn a_picture_this_encoder_sent_comes_back_off_the_tones() {
+        let mode = MODES.iter().find(|m| m.name == "Martin 2").unwrap();
+        // Eight vertical bars of a flat colour each, which is a picture
+        // whose every pixel has a known value and whose edges show a line
+        // read at the wrong offset.
+        let bars: [[u8; 3]; 8] = [
+            [255, 255, 255],
+            [255, 255, 0],
+            [0, 255, 255],
+            [0, 255, 0],
+            [255, 0, 255],
+            [255, 0, 0],
+            [0, 0, 255],
+            [0, 0, 0],
+        ];
+        let mut rgb = vec![0u8; mode.width * mode.height * 3];
+        for y in 0..mode.height {
+            for x in 0..mode.width {
+                let bar = bars[x * 8 / mode.width];
+                rgb[(y * mode.width + x) * 3..][..3].copy_from_slice(&bar);
+            }
+        }
+
+        let rate = 44_100.0;
+        let audio = encode(&rgb, mode, rate).expect("a full width mode encodes");
+        // Two leaders, a break, the VIS code, then 256 lines.
+        let seconds = audio.len() as f64 / rate;
+        assert!(
+            (seconds - (HDR_SIZE + 8.0 * VIS_BIT + 256.0 * mode.line_time)).abs() < 0.01,
+            "{seconds} s"
+        );
+
+        let got = decode(&audio, rate).expect("a picture");
+        assert_eq!(got.mode.name, "Martin 2", "the VIS code named the mode");
+        // Every line but the last: the sampling window is several pixels
+        // wide, so reading the final line needs audio from after the
+        // transmission that a file ending at the picture does not have.
+        assert_eq!(got.lines, mode.height - 1);
+
+        // What comes back is the right colour at the right place, but
+        // compressed toward mid grey: black reads 35 and white 215 rather
+        // than 0 and 255. That is the tone meter's peak estimator, which
+        // interpolates over three bins of a window only about a kilohertz
+        // wide, and it is why the off-air mode tests match a bar by which
+        // colour is nearest rather than by its value. Pinned here because it
+        // is measured from a picture whose every pixel is known.
+        let centre = |b: usize, y: usize| -> [u8; 3] {
+            let x = b * mode.width / 8 + mode.width / 16;
+            got.rgb[(y * mode.width + x) * 3..][..3].try_into().unwrap()
+        };
+        let mut checked = 0;
+        for y in [8, 128, 247] {
+            for (b, want) in bars.iter().enumerate() {
+                let px = centre(b, y);
+                for c in 0..3 {
+                    let sent = f64::from(want[c]);
+                    let expect = 35.0 + sent * (215.0 - 35.0) / 255.0;
+                    assert!(
+                        (f64::from(px[c]) - expect).abs() <= 6.0,
+                        "bar {b} at line {y} channel {c}: {} not near {expect:.0}",
+                        px[c]
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 24, "eight bars on three lines");
+        // The bars are in the order they were sent, which is what a channel
+        // out of step would break however the levels came out.
+        assert!(centre(0, 128)[0] > centre(7, 128)[0], "white brighter than black");
+        assert!(centre(3, 128)[1] > centre(3, 128)[2], "the green bar has no blue");
+    }
+
+    /// A Robot mode sends luminance and two half-width colour differences,
+    /// which this encoder does not build, so it refuses rather than sending
+    /// a picture no receiver would show.
+    #[test]
+    fn a_mode_the_encoder_cannot_send_is_refused() {
+        let robot = MODES.iter().find(|m| m.name == "Robot 36").unwrap();
+        assert!(encode(&[0; 320 * 240 * 3], robot, 11_025.0).is_none());
+        let robot72 = MODES.iter().find(|m| m.name == "Robot 72").unwrap();
+        assert!(encode(&[0; 320 * 240 * 3], robot72, 11_025.0).is_none());
+    }
 
     /// The VIS codes are what a receiver keys off, so a wrong one here is a
     /// picture decoded at the wrong speed and nothing else to say so.

@@ -41,6 +41,33 @@ impl std::fmt::Display for Address {
     }
 }
 
+impl std::str::FromStr for Address {
+    type Err = ();
+
+    /// `EI2ABC-9`, or `EI2ABC` for SSID zero, and a trailing `*` on a path
+    /// address for one that has already repeated the frame, which is how
+    /// every APRS log prints one.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        let s = s.trim();
+        let (s, repeated) = match s.strip_suffix('*') {
+            Some(rest) => (rest, true),
+            None => (s, false),
+        };
+        let (call, ssid) = match s.split_once('-') {
+            Some((c, n)) => (c, n.parse::<u8>().map_err(|_| ())?),
+            None => (s, 0),
+        };
+        let call = call.trim().to_ascii_uppercase();
+        if call.is_empty() || call.len() > 6 || !call.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(());
+        }
+        match ssid > 15 {
+            true => Err(()),
+            false => Ok(Address { call, ssid, repeated }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub destination: Address,
@@ -145,28 +172,69 @@ pub fn parse(bytes: &[u8]) -> Result<Frame, ParseError> {
     })
 }
 
+/// An unnumbered information frame carrying `info`, ready for the check
+/// sequence and the flags `dsp::hdlc::encode_frame` puts around it.
+///
+/// The inverse of [`parse`] for the one frame type APRS sends. The address
+/// bytes are shifted left the way the parser unshifts them, the low bit of
+/// the last one terminates the list, and the two bits above the SSID are the
+/// reserved ones every station sets.
+pub fn encode(destination: &Address, source: &Address, path: &[Address], info: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ADDR_LEN * (2 + path.len()) + 2 + info.len());
+    let all: Vec<&Address> = [destination, source].into_iter().chain(path).collect();
+    let n = all.len();
+    for (i, a) in all.into_iter().enumerate() {
+        for c in format!("{:<6}", a.call).bytes().take(6) {
+            out.push(c << 1);
+        }
+        out.push(
+            0x60 | (a.ssid & 0x0F) << 1 | u8::from(i + 1 == n) | if a.repeated { 0x80 } else { 0 },
+        );
+    }
+    // UI, and no layer 3 above, which is what APRS declares.
+    out.push(0x03);
+    out.push(0xF0);
+    out.extend_from_slice(info);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Build a frame the way a transmitter does, so the test starts from the
-    /// wire format rather than from this parser's assumptions.
+    fn addr(call: &str, ssid: u8) -> Address {
+        Address { call: call.into(), ssid, repeated: false }
+    }
+
     fn build(dest: (&str, u8), src: (&str, u8), path: &[(&str, u8)], info: &[u8]) -> Vec<u8> {
-        let mut f = Vec::new();
-        let mut addrs: Vec<(&str, u8)> = vec![dest, src];
-        addrs.extend_from_slice(path);
-        let n = addrs.len();
-        for (i, (call, ssid)) in addrs.into_iter().enumerate() {
-            let padded = format!("{call:<6}");
-            for c in padded.bytes().take(6) {
-                f.push(c << 1);
-            }
-            f.push(0x60 | (ssid << 1) | u8::from(i + 1 == n));
-        }
-        f.push(0x03);
-        f.push(0xF0);
-        f.extend_from_slice(info);
-        f
+        let path: Vec<Address> = path.iter().map(|(c, s)| addr(c, *s)).collect();
+        encode(&addr(dest.0, dest.1), &addr(src.0, src.1), &path, info)
+    }
+
+    /// The wire format, spelled out, so the encoder these tests build their
+    /// frames with is checked against the bytes rather than against the
+    /// parser that shares its assumptions.
+    #[test]
+    fn an_encoded_frame_is_the_bytes_that_go_on_the_air() {
+        let raw = build(("APRS", 0), ("EI2ABC", 9), &[], b"hi");
+        assert_eq!(&raw[..6], &[b'A' << 1, b'P' << 1, b'R' << 1, b'S' << 1, b' ' << 1, b' ' << 1]);
+        assert_eq!(raw[6], 0x60, "the destination is not the last address");
+        assert_eq!(raw[13], 0x60 | 9 << 1 | 1, "the source ends the list");
+        assert_eq!(&raw[14..], &[0x03, 0xF0, b'h', b'i']);
+    }
+
+    #[test]
+    fn a_callsign_parses_once_with_its_ssid_and_its_repeated_mark() {
+        use std::str::FromStr;
+        assert_eq!(Address::from_str("EI2ABC-9").unwrap(), addr("EI2ABC", 9));
+        assert_eq!(Address::from_str("aprs").unwrap(), addr("APRS", 0));
+        assert_eq!(
+            Address::from_str("WIDE1-1*").unwrap(),
+            Address { call: "WIDE1".into(), ssid: 1, repeated: true }
+        );
+        assert!(Address::from_str("TOOLONGCALL").is_err());
+        assert!(Address::from_str("EI2ABC-16").is_err());
+        assert!(Address::from_str("").is_err());
     }
 
     #[test]

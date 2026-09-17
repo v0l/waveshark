@@ -309,6 +309,34 @@ impl Advertisement {
     }
 }
 
+/// The PDU an advertiser sends: a connectable undirected advertisement from
+/// `address`, carrying the general discoverable flags and a name.
+///
+/// The inverse of [`parse`] for the one PDU type a transmitter has any
+/// business sending unsolicited. The length byte is the payload's, which is
+/// the trap: it counts the address and the data structures and not itself.
+pub fn encode_adv_ind(address: Address, name: &str) -> Vec<u8> {
+    let mut pdu = vec![0x00, 0x00];
+    if address.random {
+        pdu[0] |= 0x40;
+    }
+    pdu.extend_from_slice(&address.bytes);
+    // Flags: general discoverable, BR/EDR not supported, which is what a
+    // low energy only device advertises.
+    pdu.extend_from_slice(&[0x02, 0x01, 0x06]);
+    let name = name.as_bytes();
+    // 31 bytes of advertising data less the three the flags took and the two
+    // this structure's own header takes.
+    let name = &name[..name.len().min(26)];
+    if !name.is_empty() {
+        pdu.push(name.len() as u8 + 1);
+        pdu.push(0x09);
+        pdu.extend_from_slice(name);
+    }
+    pdu[1] = (pdu.len() - 2) as u8;
+    pdu
+}
+
 /// The company identifiers seen often enough to be worth naming.
 ///
 /// Deliberately short. The SIG's list is four figures long and changes every

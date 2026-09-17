@@ -29,6 +29,10 @@ rayon.workspace = true
 # M17 voice is Codec 2 3200, whose frame is exactly the 8 bytes M17 puts in
 # half a stream frame. Pure Rust, so it costs the build nothing.
 codec2 = "0.3.1"
+# Reading a picture an operator picked, for the SSTV transmitter. PNG and
+# JPEG only: what is wanted is a file a camera or a screenshot produced, and
+# the rest of the crate's formats are decoders nothing here asks for.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # Publishing what was heard to Home Assistant. No TLS features: a broker on
 # the same house network is reached over plain MQTT, and pulling rustls in
 # for it would cost every build that never speaks to one.

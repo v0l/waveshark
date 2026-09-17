@@ -3,6 +3,7 @@
 pub mod block;
 pub mod demod;
 pub mod group;
+pub mod tx;
 
 pub use block::{BlockSync, Group, Offset};
 pub use demod::RdsDemod;
