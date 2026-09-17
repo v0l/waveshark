@@ -1072,6 +1072,7 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         position: None,
         report: common::ReportDetail::Bare,
         identity: None,
+        channel: None,
         // A traffic burst is 60 ms of one timeslot, and it says whether the
         // network had granted the channel for speech. It says nothing about
         // the cipher: the grant named that, and a burst reporting "clear"

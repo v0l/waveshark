@@ -244,7 +244,8 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     if r.aggregated {
         fields.push(("aggregated".into(), Value::Int(1)));
     }
-    if let Some(ch) = channel_of(center.as_f64()) {
+    let heard_channel = channel_of(center.as_f64());
+    if let Some(ch) = heard_channel {
         fields.push(("channel".into(), Value::Int(i64::from(ch))));
     }
     if let Some(n) = &f.network {
@@ -313,9 +314,26 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let who_addr = f.source().unwrap_or(f.addr1);
     let mut who = common::Identity::new("wifi", who_addr.to_string());
     who.name = f.network.as_ref().and_then(|n| n.ssid.clone());
+    let mut d = Decoded::bytes(protocol, center, 0.0, r.mpdu.clone());
+    if let Some(ch) = heard_channel {
+        // What a beacon says about its own security is a statement about the
+        // network, so it travels with the channel rather than being read
+        // back out of a field name. A frame that is not a beacon says
+        // nothing either way, which is what `Unsaid` is for.
+        let secrecy = match f.network.as_ref() {
+            Some(n) if n.rsn => common::Secrecy::Encrypted(Some("wpa2".into())),
+            Some(n) if n.privacy => common::Secrecy::Encrypted(Some("wep".into())),
+            Some(_) => common::Secrecy::Clear,
+            None => common::Secrecy::Unsaid,
+        };
+        d = d.on_channel(
+            common::ChannelUse::new(common::ChannelPlan::Wifi, ch, CHANNEL_WIDTH_HZ as u32)
+                .claiming(f.network.as_ref().and_then(|n| n.channel).map(u16::from))
+                .protected_by(secrecy),
+        );
+    }
     Some(
-        Decoded::bytes(protocol, center, 0.0, r.mpdu.clone())
-            .with_link(link)
+        d.with_link(link)
             .by(who)
             .with_detail(detail)
             .with_fields(fields)

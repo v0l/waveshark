@@ -1045,6 +1045,10 @@ struct Args {
     #[arg(long)]
     control: bool,
 
+    /// Open on the channels: what is on each one, and how crowded it is
+    #[arg(long)]
+    channels: bool,
+
     /// Start the radio as soon as the window opens, without a click on play
     #[arg(long)]
     run: bool,
@@ -1567,6 +1571,9 @@ fn main() -> eframe::Result<()> {
             }
             if args.control {
                 app.show_control();
+            }
+            if args.channels {
+                app.show_channels();
             }
             if args.run {
                 app.start_on_open();

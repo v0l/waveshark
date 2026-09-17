@@ -52,6 +52,9 @@ pub enum Icon {
     Video,
     Links,
     Devices,
+    /// What is on each channel: bars of unequal height, which no other tab
+    /// is.
+    Channels,
     Satellite,
     Key,
     /// A model control link: a stick on a gimbal, which no other tab is.
@@ -106,6 +109,7 @@ impl Icon {
             Icon::Video => ph::MONITOR_PLAY,
             Icon::Links => ph::SHARE_NETWORK,
             Icon::Devices => ph::DEVICE_MOBILE,
+            Icon::Channels => ph::CHART_BAR,
             Icon::Key => ph::KEY,
             Icon::Control => ph::JOYSTICK,
             // A ringed planet rather than a dish, which Phosphor has not got.
@@ -273,6 +277,7 @@ mod tests {
         Icon::Video,
         Icon::Links,
         Icon::Devices,
+        Icon::Channels,
         Icon::Satellite,
         Icon::Key,
         Icon::Agent,

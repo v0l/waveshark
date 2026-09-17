@@ -433,6 +433,7 @@ pub mod args {
         Messages,
         Links,
         Devices,
+        Channels,
         Satellites,
         Video,
         Keys,

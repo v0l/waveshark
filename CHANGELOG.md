@@ -18,6 +18,8 @@ the code is in the commit log.
 - Heatmap export: the span kept as readings and written as a PNG, or as a page
   that gives the time, frequency and decibels under the pointer. Four colour
   ramps, the panel's own by default.
+- A channel view: what is on each Wi-Fi and Bluetooth channel, how loud, and
+  how crowded it is.
 - A band walk in the scanner settings: the dial steps past the span, holds on
   what it hears or logs it and moves on, and each find can be ignored.
 - Analogue FPV video named from its line rate, with its channel: R1, F4, A5.

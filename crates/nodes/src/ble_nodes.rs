@@ -201,7 +201,8 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         f.append(&mut fields);
         fields = f;
     }
-    if let Some(ch) = channel_of(center.as_f64()) {
+    let channel = channel_of(center.as_f64());
+    if let Some(ch) = channel {
         fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
     }
     let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
@@ -215,9 +216,16 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut who = common::Identity::new("ble", adv.address.to_string());
     who.name = adv.name.clone();
     who.vendor = adv.company.and_then(pdu::company_name).map(str::to_string);
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec());
+    if let Some(ch) = channel {
+        d = d.on_channel(common::ChannelUse::new(
+            common::ChannelPlan::Ble,
+            u16::from(ch),
+            CHANNEL_WIDTH_HZ as u32,
+        ));
+    }
     Some(
-        Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-            .with_link(link)
+        d.with_link(link)
             .by(who)
             .with_detail(detail)
             .with_fields(fields)

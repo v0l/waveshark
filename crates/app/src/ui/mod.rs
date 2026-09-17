@@ -30,6 +30,7 @@ mod agent_settings;
 mod burst;
 mod calls_pane;
 mod chain_pane;
+mod channels_pane;
 mod control_pane;
 mod dashboard_pane;
 mod devices_pane;
@@ -105,6 +106,9 @@ pub struct App {
     transcript: state::TranscriptState,
     messages: state::MessagesState,
     links: state::LinksState,
+    /// What the channel view is filtered by. The rows themselves are the
+    /// node's and are read off the radio every frame.
+    channel_filter: String,
     control: state::ControlState,
     video: video_pane::VideoState,
     #[allow(dead_code)]
@@ -318,6 +322,8 @@ enum View {
     Messages,
     Links,
     Devices,
+    /// What is on each channel, and how crowded it is.
+    Channels,
     Satellites,
     Video,
     Keys,
@@ -339,6 +345,7 @@ impl View {
             View::Messages => "Messages",
             View::Links => "Data links",
             View::Devices => "Devices",
+            View::Channels => "Channels",
             View::Satellites => "Satellites",
             View::Video => "Video",
             View::Keys => "Keys",
@@ -361,6 +368,7 @@ impl View {
             View::Map => Icon::Map,
             View::Links => Icon::Links,
             View::Devices => Icon::Devices,
+            View::Channels => Icon::Channels,
             View::Satellites => Icon::Satellite,
             View::Keys => Icon::Key,
             View::Control => Icon::Control,
@@ -382,6 +390,7 @@ impl View {
             View::Map => "Everything that reported a position",
             View::Links => "Who is talking to whom",
             View::Devices => "Transmitters seen, and where they were",
+            View::Channels => "What is on each channel, and how crowded it is",
             View::Satellites => "Passes overhead, and what they send",
             View::Keys => "Encryption seen, and the keys held",
             View::Control => "Where the sticks are, on every handset heard",
@@ -406,6 +415,7 @@ impl View {
             View::Map,
             View::Links,
             View::Devices,
+            View::Channels,
             View::Control,
             View::Satellites,
             View::Keys,
@@ -593,6 +603,7 @@ impl Default for App {
             // opens on last night rather than on nothing.
             messages: state::MessagesState::loaded(),
             links: state::LinksState::default(),
+            channel_filter: String::new(),
             control: state::ControlState::default(),
             video: video_pane::VideoState::default(),
             keys: state::KeysState::default(),
@@ -1986,6 +1997,21 @@ impl App {
         }
     }
 
+    /// Draw what is on each channel, then do what a click asked for.
+    fn channels_view(&mut self, ui: &mut egui::Ui) {
+        let status = self.radio.as_ref().and_then(|r| r.status.channel_map.lock().clone());
+        let act = (channels_pane::Channels { status, filter: &mut self.channel_filter }).show(ui);
+        match act {
+            Some(channels_pane::Action::Clear) => self.send(Cmd::StageParam(
+                crate::chain::derived::CHANNELS,
+                "clear".into(),
+                pipeline::ParamValue::Bool(true),
+            )),
+            Some(channels_pane::Action::Tune(hz)) => self.retune(hz),
+            None => {}
+        }
+    }
+
     /// Draw the device database, then do what a click asked for.
     fn devices_view(&mut self, ui: &mut egui::Ui) {
         let counts = match self.radio.as_ref() {
@@ -2794,6 +2820,7 @@ impl eframe::App for App {
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
+                    View::Channels => self.channels_view(ui),
                     View::Control => control_pane::ControlView { st: &mut self.control }.show(ui),
                     View::Satellites => self.sats_view(ui),
                     View::Video => self.video_view(ui),
@@ -2930,6 +2957,11 @@ impl App {
             View::Map => self.map.tracks.len() as u64,
             View::Links => self.links.list.len() as u64,
             View::Devices => self.survey.rows.len() as u64,
+            View::Channels => self
+                .radio
+                .as_ref()
+                .and_then(|r| r.status.channel_map.lock().as_ref().map(|c| c.stations.len() as u64))
+                .unwrap_or(0),
             View::Control => self.control.list.len() as u64,
             View::Satellites => u64::from(self.sats.tracking.is_some()),
             View::Keys => self.keys.store.channels().len() as u64,
@@ -3068,6 +3100,10 @@ impl App {
 
     pub fn show_links(&mut self) {
         self.set_view(View::Links);
+    }
+
+    pub fn show_channels(&mut self) {
+        self.set_view(View::Channels);
     }
 
     pub fn show_control(&mut self) {
@@ -3968,7 +4004,7 @@ mod tests {
     #[test]
     fn every_view_has_a_tab_of_its_own() {
         let tabs: Vec<View> = View::ROWS.into_iter().flatten().copied().collect();
-        assert_eq!(tabs.len(), 14);
+        assert_eq!(tabs.len(), 15);
         for v in [
             View::Dashboard,
             View::Spectrum,
@@ -3979,6 +4015,7 @@ mod tests {
             View::Messages,
             View::Links,
             View::Devices,
+            View::Channels,
             View::Satellites,
             View::Video,
             View::Keys,

@@ -16,6 +16,7 @@ pub mod bank_node;
 pub mod beacondb_nodes;
 pub mod ble_nodes;
 pub mod capture_nodes;
+pub mod channel_nodes;
 pub mod decode_nodes;
 pub mod dfm_nodes;
 pub mod dmr_nodes;
@@ -78,6 +79,7 @@ pub use bank_node::BankNode;
 pub use beacondb_nodes::{BeaconDbNode, BeaconDbStatus};
 pub use ble_nodes::BleNode;
 pub use capture_nodes::IqCaptureNode;
+pub use channel_nodes::{ChannelLoad, ChannelMapNode, ChannelStatus, Station};
 pub use decode_nodes::{
     AskDetectNode, BurstRouteNode, FskDetectNode, ProtocolDecodeNode, PulseDetectNode, UNKNOWN,
 };
@@ -262,6 +264,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (capture_nodes::DESC, capture_nodes::build),
     (survey_nodes::DESC, survey_nodes::build),
     (scan_nodes::DESC, scan_nodes::build),
+    (channel_nodes::DESC, channel_nodes::build),
     (wigle_nodes::DESC, wigle_nodes::build),
     (beacondb_nodes::DESC, beacondb_nodes::build),
     (homeassistant_nodes::DESC, homeassistant_nodes::build),

@@ -355,6 +355,75 @@ pub struct Airtime {
     pub codec: Option<&'static str>,
 }
 
+/// The channel plan a number is counted in.
+///
+/// Channel 6 on Wi-Fi and channel 6 on a Bluetooth advertising plan are not
+/// the same place, so a number without its plan cannot be grouped or drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ChannelPlan {
+    /// 802.11 channels: 1 to 14 on a 5 MHz grid at 2.4 GHz, and 32 upwards
+    /// at 5 GHz. One plan rather than two, because the numbers do not
+    /// collide and a receiver hearing both is on one dial.
+    Wifi,
+    /// Bluetooth LE: 37, 38 and 39 advertise, 0 to 36 carry data.
+    Ble,
+}
+
+impl ChannelPlan {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChannelPlan::Wifi => "wi-fi",
+            ChannelPlan::Ble => "bluetooth le",
+        }
+    }
+}
+
+/// The channel a transmission was on, where the protocol counts channels a
+/// person can name.
+///
+/// The decoder's own statement, as [`Airtime::voice`] is for a call: a view
+/// broken down by channel reads this and nothing else. It has to carry both
+/// numbers, because they disagree. The channel a frame was heard on is the
+/// one the tuner was parked on, and an access point on 6 is heard on 1
+/// through the skirt of a 20 MHz filter; the channel it claims is the one it
+/// is really working, which only a frame that says so can give.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelUse {
+    pub plan: ChannelPlan,
+    /// The channel it was heard on.
+    pub heard: u16,
+    /// The channel the transmitter says it is on, where it says.
+    pub claims: Option<u16>,
+    /// How wide a channel of this plan is, which is what decides how many
+    /// neighbours it sits on.
+    pub width_hz: u32,
+    /// What protects the traffic, where the protocol says: a network's own
+    /// statement about itself, not a guess from the payload.
+    pub secrecy: Secrecy,
+}
+
+impl ChannelUse {
+    pub fn new(plan: ChannelPlan, heard: u16, width_hz: u32) -> Self {
+        Self { plan, heard, claims: None, width_hz, secrecy: Secrecy::Unsaid }
+    }
+
+    pub fn claiming(mut self, claims: Option<u16>) -> Self {
+        self.claims = claims;
+        self
+    }
+
+    pub fn protected_by(mut self, s: Secrecy) -> Self {
+        self.secrecy = s;
+        self
+    }
+
+    /// The channel the transmitter is working: what it claims, or where it
+    /// was heard when it claims nothing.
+    pub fn working(&self) -> u16 {
+        self.claims.unwrap_or(self.heard)
+    }
+}
+
 /// A successfully decoded frame from some protocol.
 ///
 /// The conclusion and nothing else. How strongly it was heard, the samples it
@@ -410,6 +479,9 @@ pub struct Decoded {
     /// How long it held the channel, and whether it carried speech. What the
     /// call list measures.
     pub airtime: Option<Airtime>,
+    /// The channel it was on, where the protocol has a channel plan. What a
+    /// view broken down by channel reads.
+    pub channel: Option<ChannelUse>,
     /// Whether the text this frame carries is somebody writing to somebody.
     ///
     /// The message view's entry condition, as `Airtime::voice` is the call
@@ -440,6 +512,7 @@ impl Decoded {
             report: ReportDetail::Bare,
             identity: None,
             airtime: None,
+            channel: None,
             written: false,
         }
     }
@@ -482,6 +555,12 @@ impl Decoded {
 
     pub fn with_airtime(mut self, a: Airtime) -> Self {
         self.airtime = Some(a);
+        self
+    }
+
+    /// Which channel of the protocol's plan this was on.
+    pub fn on_channel(mut self, c: ChannelUse) -> Self {
+        self.channel = Some(c);
         self
     }
 
