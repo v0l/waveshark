@@ -267,6 +267,12 @@ pub struct Session {
     /// the packet log: it is switched on to catch something that happens
     /// rarely, and a restart in between should not quietly stop it.
     pub capture_on: bool,
+    /// Whether the span is kept as readings for a heatmap, how often a row
+    /// is taken and how much of it is held. Remembered for the reason the
+    /// capture switch is: what an export wants is the hours already gone.
+    pub heat_on: bool,
+    pub heat_rows_per_sec: f32,
+    pub heat_cap_mb: u64,
     /// Whether the dashboard is one of the views, and so the one the receiver
     /// opens on. On for a new install, and off for anyone who turned it off.
     pub dashboard: bool,
@@ -369,6 +375,8 @@ pub struct ViewPrefs {
     /// Spectrum frames per second, and the averaging applied to them.
     pub refresh: f32,
     pub smoothing: f32,
+    /// The colours the waterfall and an exported heatmap are drawn in.
+    pub ramp: crate::heatmap::Ramp,
 }
 
 impl Default for ViewPrefs {
@@ -382,6 +390,7 @@ impl Default for ViewPrefs {
             ceil: -20.0,
             refresh: 30.0,
             smoothing: 0.35,
+            ramp: crate::heatmap::Ramp::Chassis,
         }
     }
 }
@@ -421,6 +430,9 @@ impl Default for Session {
             survey_path: String::new(),
             list_unknown: true,
             capture_on: false,
+            heat_on: true,
+            heat_rows_per_sec: 2.0,
+            heat_cap_mb: (crate::heatmap::DEFAULT_BUDGET >> 20) as u64,
             dashboard: true,
             audio_out: String::new(),
             audio_in: String::new(),
@@ -507,6 +519,15 @@ impl Session {
         match self.survey_path.trim() {
             "" => crate::packetlog::PacketLog::default_survey_path(),
             path => Some(PathBuf::from(path)),
+        }
+    }
+
+    /// What the heatmap recorder should be keeping.
+    pub fn heat_plan(&self) -> crate::chain::HeatPlan {
+        crate::chain::HeatPlan {
+            recording: self.heat_on,
+            rows_per_sec: self.heat_rows_per_sec,
+            budget_mb: self.heat_cap_mb,
         }
     }
 
@@ -718,6 +739,14 @@ impl Session {
             survey_path: kv.get("survey_path").map(|v| v.to_string()).unwrap_or_default(),
             list_unknown: kv.get("list_unknown").map(|v| *v == "true").unwrap_or(d.list_unknown),
             capture_on: kv.get("capture_on").map(|v| *v == "true").unwrap_or(d.capture_on),
+            heat_on: kv.get("heat_on").map(|v| *v == "true").unwrap_or(d.heat_on),
+            heat_rows_per_sec: f("heat_rows_per_sec", d.heat_rows_per_sec as f64).clamp(0.02, 20.0)
+                as f32,
+            heat_cap_mb: kv
+                .get("heat_cap_mb")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.heat_cap_mb)
+                .clamp(1, 4096),
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
@@ -762,6 +791,7 @@ impl Session {
                 ceil: f("ceiling", d.view.ceil as f64).clamp(-140.0, 20.0) as f32,
                 refresh: f("refresh", d.view.refresh as f64).clamp(1.0, 120.0) as f32,
                 smoothing: f("smoothing", d.view.smoothing as f64).clamp(0.01, 1.0) as f32,
+                ramp: kv.get("ramp").map(|v| crate::heatmap::Ramp::parse(v)).unwrap_or(d.view.ramp),
             },
             feeds,
             streams,
@@ -839,6 +869,10 @@ impl Session {
         s.push_str(&format!("ceiling = {}\n", v.ceil));
         s.push_str(&format!("refresh = {}\n", v.refresh));
         s.push_str(&format!("smoothing = {}\n", v.smoothing));
+        s.push_str(&format!("ramp = {}\n", v.ramp.label()));
+        s.push_str(&format!("heat_on = {}\n", self.heat_on));
+        s.push_str(&format!("heat_rows_per_sec = {}\n", self.heat_rows_per_sec));
+        s.push_str(&format!("heat_cap_mb = {}\n", self.heat_cap_mb));
         if self.manual_chain {
             s.push_str("manual_chain = true\n");
         }
@@ -997,6 +1031,9 @@ mod tests {
             ha_buses: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
+            heat_on: false,
+            heat_rows_per_sec: 0.5,
+            heat_cap_mb: 128,
             view: ViewPrefs {
                 rows_per_sec: 40.0,
                 wf_rows: 1024,
@@ -1006,6 +1043,7 @@ mod tests {
                 ceil: -14.0,
                 refresh: 60.0,
                 smoothing: 0.5,
+                ramp: crate::heatmap::Ramp::Inferno,
             },
             manual_chain: true,
             feeds: vec![

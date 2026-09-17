@@ -4,6 +4,7 @@
 //! frame. Scrolling by rewriting one row and moving a cursor keeps the cost
 //! independent of history depth.
 
+use crate::heatmap::Ramp;
 use egui::{Color32, ColorImage, Pos2, TextureHandle, TextureOptions};
 
 /// Widest texture asked for. wgpu reports 8192 as the limit on the hardware
@@ -11,6 +12,7 @@ use egui::{Color32, ColorImage, Pos2, TextureHandle, TextureOptions};
 const MAX_WIDTH: usize = 8192;
 
 pub struct Waterfall {
+    ramp: Ramp,
     width: usize,
     /// Spectrum bins per column, above one only when a row is wider than a
     /// texture may be.
@@ -31,6 +33,7 @@ pub struct Waterfall {
 impl Waterfall {
     pub fn new(height: usize) -> Self {
         Self {
+            ramp: Ramp::default(),
             width: 0,
             factor: 1,
             height,
@@ -79,11 +82,24 @@ impl Waterfall {
         let row = self.cursor * self.width;
         for (i, chunk) in db.chunks(factor).enumerate() {
             let v = chunk.iter().copied().fold(f32::MIN, f32::max);
-            self.pixels[row + i] = colormap(((v - floor) / span).clamp(0.0, 1.0));
+            self.pixels[row + i] = paint(self.ramp, ((v - floor) / span).clamp(0.0, 1.0));
         }
         self.dirty_row = Some(self.cursor);
         self.cursor = (self.cursor + 1) % self.height;
         self.filled = (self.filled + 1).min(self.height);
+    }
+
+    /// Colour rows arriving from now on with this ramp.
+    ///
+    /// The history goes: a row is kept as pixels, so what is already on
+    /// screen cannot be coloured again. The readings a ramp can be chosen
+    /// for afterwards are the heatmap's, which keeps decibels instead.
+    pub fn set_ramp(&mut self, ramp: Ramp) {
+        if ramp == self.ramp {
+            return;
+        }
+        self.ramp = ramp;
+        self.clear();
     }
 
     /// Change how many rows of history are kept.
@@ -219,31 +235,17 @@ impl Waterfall {
 
 /// Cold cyan for noise, hot amber for signal, white at the top.
 ///
-/// Built from the theme's two accents rather than a stock inferno ramp, so the
-/// waterfall says the same thing the rest of the panel does: cyan is what the
-/// radio hears, amber is where the energy is. Brightness rises monotonically
-/// so features stay readable in greyscale and for colour-deficient viewers.
+/// The panel's own ramp, which is the default everywhere: cyan is what the
+/// radio hears and amber is where the energy is, the same as the rest of the
+/// chassis. The stops live with the other ramps in [`crate::heatmap`], since
+/// an export colours the same readings where there is no egui to ask.
 pub fn colormap(t: f32) -> Color32 {
-    const STOPS: [(f32, [f32; 3]); 6] = [
-        // Most bins in any span are noise, so the ramp stays dark well past
-        // the midpoint. Brightening early spends the whole scale on the noise
-        // floor and leaves signals nowhere to go.
-        (0.00, [0.031, 0.039, 0.051]),
-        (0.35, [0.047, 0.125, 0.161]),
-        (0.60, [0.078, 0.376, 0.486]),
-        (0.78, [0.180, 0.612, 0.745]),
-        (0.90, [0.941, 0.627, 0.188]),
-        (1.00, [1.0, 0.965, 0.878]),
-    ];
-    let t = t.clamp(0.0, 1.0);
-    let mut i = 0;
-    while i + 2 < STOPS.len() && t > STOPS[i + 1].0 {
-        i += 1;
-    }
-    let (a, b) = (STOPS[i], STOPS[i + 1]);
-    let f = ((t - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
-    let c = |x: usize| ((a.1[x] + (b.1[x] - a.1[x]) * f) * 255.0) as u8;
-    Color32::from_rgb(c(0), c(1), c(2))
+    paint(Ramp::Chassis, t)
+}
+
+fn paint(ramp: Ramp, t: f32) -> Color32 {
+    let [r, g, b] = ramp.sample(t);
+    Color32::from_rgb(r, g, b)
 }
 
 #[cfg(test)]
@@ -262,6 +264,18 @@ mod tests {
             assert!(l >= prev - 1.0, "luma dipped at t={}: {l} after {prev}", i as f32 / 100.0);
             prev = l;
         }
+    }
+
+    #[test]
+    fn a_ramp_change_starts_the_history_again() {
+        let mut w = Waterfall::new(8);
+        w.push(&[-50.0; 16], -100.0, 0.0);
+        w.set_ramp(Ramp::Chassis);
+        assert_eq!(w.filled, 1, "the same ramp is not a change");
+        w.set_ramp(Ramp::Viridis);
+        assert_eq!(w.filled, 0, "rows kept as pixels cannot be coloured again");
+        w.push(&[-50.0; 16], -100.0, 0.0);
+        assert_eq!(w.pixels[0], paint(Ramp::Viridis, 0.5));
     }
 
     #[test]

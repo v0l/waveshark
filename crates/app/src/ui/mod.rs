@@ -280,6 +280,12 @@ const REFRESH: [(&str, f32); 4] = [("10", 10.0), ("20", 20.0), ("30", 30.0), ("6
 /// Waterfall scroll rates in rows per second.
 const SPEEDS: [(&str, f32); 5] =
     [("5", 5.0), ("10", 10.0), ("20", 20.0), ("40", 40.0), ("80", 80.0)];
+/// Heatmap row rates. Slower than the waterfall by design: what is exported
+/// is hours rather than the last half minute.
+const HEAT_ROWS: [(&str, f32); 5] =
+    [("4/s", 4.0), ("2/s", 2.0), ("1/s", 1.0), ("every 2 s", 0.5), ("every 10 s", 0.1)];
+/// What the readings may take, in megabytes.
+const HEAT_CAPS: [u64; 5] = [8, 32, 128, 512, 2048];
 
 /// What the main pane shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2401,6 +2407,7 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     );
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
     when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
+    when(now.heat_plan() != was.heat_plan(), Cmd::Heatmap(now.heat_plan()));
     let publish = now.publish();
     when(
         now.ha_on != was.ha_on || publish != was.publish(),
@@ -3183,6 +3190,8 @@ mod tests {
             Cmd::Wigle(_) => "wigle",
             Cmd::BeaconDb(_) => "beacondb",
             Cmd::BandScan(_) => "band_scan",
+            Cmd::Heatmap(_) => "heatmap",
+            Cmd::ExportHeatmap { .. } => "export_heatmap",
             Cmd::HomeAssistant(_) => "homeassistant",
             Cmd::RecordCalls(_) => "record_calls",
             Cmd::Transcribe { .. } => "transcribe",
@@ -3223,6 +3232,7 @@ mod tests {
                 "decode",
                 "feeds",
                 "gps",
+                "heatmap",
                 "homeassistant",
                 "location",
                 "log_cap",

@@ -11,6 +11,9 @@ the code is in the commit log.
 
 ### Added
 
+- Heatmap export: the span kept as readings and written as a PNG, or as a page
+  that gives the time, frequency and decibels under the pointer. Four colour
+  ramps, the panel's own by default.
 - A band walk in the scanner settings: the dial steps past the span, holds on
   what it hears or logs it and moves on, and each find can be ignored.
 - FLEX paging at 1600 and 3200 baud, two and four level, in the message view.

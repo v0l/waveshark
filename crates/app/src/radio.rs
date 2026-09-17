@@ -507,6 +507,18 @@ pub enum Cmd {
     Record(Option<(std::path::PathBuf, Option<u64>)>),
     /// Start or stop writing the raw span to a file.
     CaptureIq(bool),
+    /// What the heatmap recorder keeps: whether it is running, how often it
+    /// takes a row and how much it may hold.
+    Heatmap(crate::chain::HeatPlan),
+    /// Write what the heatmap holds as a file, coloured and scaled as the
+    /// interface is showing it. Done on this thread because the readings are
+    /// a node's, and the node belongs to the graph running here.
+    ExportHeatmap {
+        what: crate::heatmap::Export,
+        ramp: crate::heatmap::Ramp,
+        floor: f32,
+        ceil: f32,
+    },
     /// Size the capture folder may reach before writing stops, in bytes.
     CaptureCap(u64),
     /// Where the receiver is, in degrees, which lets the flight tracker
@@ -1035,6 +1047,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         feeds: Vec::new(),
         tx: None,
         scan: Default::default(),
+        heat: Default::default(),
         edits: Default::default(),
         record,
         capture: false,
@@ -1322,6 +1335,8 @@ pub struct Status {
     /// The walk over a band: where it is, what it has heard and whether it
     /// has stopped on something.
     pub band_scan: parking_lot::Mutex<Option<nodes::ScanStatus>>,
+    /// What the heatmap holds and where the last export went.
+    pub heatmap: parking_lot::Mutex<Option<crate::heatmap::HeatmapStatus>>,
     /// And for the feed into the house: the broker, whether it is up, and
     /// how many devices have been announced to it.
     pub homeassistant: parking_lot::Mutex<Option<nodes::HomeAssistantStatus>>,
@@ -1478,6 +1493,7 @@ impl Default for Status {
             wigle: parking_lot::Mutex::new(None),
             beacondb: parking_lot::Mutex::new(None),
             band_scan: parking_lot::Mutex::new(None),
+            heatmap: parking_lot::Mutex::new(None),
             homeassistant: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new(Strips::default()),
             call_levels: parking_lot::Mutex::new(Vec::new()),
@@ -1965,6 +1981,7 @@ impl Audio {
             edits: Default::default(),
             record: false,
             capture: false,
+            heat: Default::default(),
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
             log: false,
@@ -2234,6 +2251,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             edits: crate::patch::Edits::load().map(|(e, _)| e).unwrap_or_default(),
             record: false,
             capture: false,
+            heat: Default::default(),
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: capture_format_for(dev.info().native_format),
             // Switched on as soon as the interface says where to write; the
@@ -2522,6 +2540,27 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::BeaconDb(on) => {
                 self.plan.settings.beacondb = on;
                 self.rx.apply_settings(&self.plan);
+            }
+            Cmd::Heatmap(heat) => {
+                if heat != self.plan.heat {
+                    self.plan.heat = heat;
+                    self.needs_rebuild = true;
+                }
+            }
+            Cmd::ExportHeatmap { what, ramp, floor, ceil } => {
+                let dir = crate::heatmap::heatmaps_dir();
+                match self.rx.heatmap_mut() {
+                    Some(n) => match n.export(&dir, what, ramp, floor, ceil) {
+                        Ok(p) => tracing::info!("heatmap written: {}", p.display()),
+                        Err(e) => {
+                            *self.status.error.lock() = Some(format!("no heatmap written: {e}"))
+                        }
+                    },
+                    None => {
+                        *self.status.error.lock() =
+                            Some("the heatmap recorder is not in the graph".into())
+                    }
+                }
             }
             Cmd::BandScan(scan) => {
                 if scan != self.plan.scan {
@@ -3208,6 +3247,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
         }
         {
+            let now = self.rx.heatmap_status();
+            let mut held = self.status.heatmap.lock();
+            if *held != now {
+                *held = now;
+            }
+        }
+        {
             let now = self.rx.homeassistant_status();
             let mut held = self.status.homeassistant.lock();
             if *held != now {
@@ -3512,6 +3558,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
             band: (0.0, f64::INFINITY),
         }],
         scan: Default::default(),
+        heat: Default::default(),
         edits: Default::default(),
         record: false,
         capture: false,
