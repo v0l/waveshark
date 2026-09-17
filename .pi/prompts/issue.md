@@ -20,6 +20,26 @@ next oldest.
 
 With a number given, `gh issue view N` and take it.
 
+## An open issue may already be built
+
+GitHub only closes an issue when the commit reaches it, so work committed here
+and not yet pushed leaves its issue open. The list is not evidence: before
+taking a number, ask the history whether it is already done.
+
+```sh
+git log --oneline --all --grep="Closes #<N>\b"
+```
+
+A commit there means the work is on `master` and the issue is open only because
+nothing has been pushed. Do not build it again, do not "finish" it and do not
+reopen the design: say in one line which commit closed it, and move to the next
+oldest issue. The same goes for an issue whose feature you find already in the
+code with tests beside it, whatever the commit message says.
+
+When picking with no number, run the grep for each candidate as you walk up the
+list, and report the ones you passed over as already built so they can be
+closed on the next push.
+
 ## Worktree
 
 One issue, one worktree, one branch, off `master`. The issue number goes at
