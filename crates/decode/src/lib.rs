@@ -49,6 +49,7 @@ pub mod lora_li;
 pub mod lorawan;
 pub mod m10;
 pub mod m17;
+pub mod mdc1200;
 #[cfg(feature = "ffmpeg")]
 pub mod media;
 pub mod meisei;
@@ -78,6 +79,7 @@ pub mod tea;
 pub mod tetra;
 #[cfg(feature = "ffmpeg")]
 pub mod transcode;
+pub mod twotone;
 pub mod vdl2;
 pub mod video_channels;
 pub mod vocoder;

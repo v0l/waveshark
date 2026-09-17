@@ -36,6 +36,7 @@ pub mod lms6_nodes;
 pub mod lora_nodes;
 pub mod m10_nodes;
 pub mod m17_nodes;
+pub mod mdc_nodes;
 pub mod meisei_nodes;
 pub mod mic_in;
 pub mod mod_nodes;
@@ -57,6 +58,7 @@ pub mod sstv_nodes;
 pub mod sub_tx;
 pub mod survey_nodes;
 pub mod tetra_nodes;
+pub mod twotone_nodes;
 pub mod tx_nodes;
 pub mod vdl2_nodes;
 pub mod video_nodes;
@@ -98,6 +100,7 @@ pub use lms6_nodes::Lms6Node;
 pub use lora_nodes::LoraNode;
 pub use m10_nodes::M10Node;
 pub use m17_nodes::M17Node;
+pub use mdc_nodes::MdcNode;
 pub use meisei_nodes::MeiseiNode;
 pub use mic_in::MicInNode;
 pub use mod_nodes::{
@@ -220,6 +223,8 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
     (morse_nodes::DESC, morse_nodes::build),
+    (mdc_nodes::DESC, mdc_nodes::build),
+    (twotone_nodes::DESC, twotone_nodes::build),
     (nrf24_nodes::DESC, nrf24_nodes::build),
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),

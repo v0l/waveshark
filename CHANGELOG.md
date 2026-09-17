@@ -23,6 +23,9 @@ the code is in the commit log.
   without speech.
 - FLEX paging at 1600 and 3200 baud, two and four level, in the message view.
 - Morse off the air: a CW channel read as text, at the speed it was sent.
+- MDC-1200: the unit id a Motorola radio sends when its key goes down.
+- Two-tone paging: the pair that opens a fire or ambulance pager, named from
+  an operator's list.
 - Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
 - Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.

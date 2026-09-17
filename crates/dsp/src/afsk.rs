@@ -1,4 +1,9 @@
-//! Bell 202 AFSK at 1200 baud, which is what APRS rides on.
+//! Two audio tones and a bit clock, which is what APRS rides on.
+//!
+//! Bell 202 is one keying of it and the default here; MDC-1200 is another,
+//! 1200 Hz against 1800 Hz at the same 1200 baud, and an iMet sonde a third.
+//! The tones and the baud are a parameter ([`Tones`]) because nothing in the
+//! correlator pair cares which two frequencies it is told to watch.
 //!
 //! Two layers of modulation, and keeping them straight is most of the work.
 //! The radio channel is ordinary narrowband FM, so the first step is the same
@@ -36,6 +41,22 @@ pub const BAUD: f64 = 1200.0;
 /// document uses.
 pub const MARK_HZ: f64 = 1200.0;
 pub const SPACE_HZ: f64 = 2200.0;
+
+/// One keying: the two tones and the rate they are sent at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tones {
+    /// The tone a one is sent as, the lower of the two by convention.
+    pub mark_hz: f64,
+    pub space_hz: f64,
+    pub baud: f64,
+}
+
+/// Bell 202: 1200 Hz and 2200 Hz at 1200 baud, which is AX.25 on 2 m.
+pub const BELL202: Tones = Tones { mark_hz: MARK_HZ, space_hz: SPACE_HZ, baud: BAUD };
+
+/// CCIR fast FSK: 1200 Hz and 1800 Hz at 1200 baud, phase continuous, which
+/// is what MDC-1200 and MPT1327 key inside an FM voice channel.
+pub const FFSK1200: Tones = Tones { mark_hz: 1200.0, space_hz: 1800.0, baud: BAUD };
 
 /// Whether a packet's reported centre says it came off the 2 m packet
 /// segment.
@@ -162,15 +183,19 @@ pub struct AfskBits {
 
 impl AfskBits {
     pub fn new(rate: f64, cfg: AfskConfig) -> Self {
+        Self::with_tones(rate, BELL202, cfg)
+    }
+
+    pub fn with_tones(rate: f64, tones: Tones, cfg: AfskConfig) -> Self {
         // Integrate over exactly one symbol. Shorter and the two tones are not
         // resolved; longer and the correlator straddles a transition and reads
         // both tones at once.
-        let window = ((rate / BAUD).round() as usize).max(2);
+        let window = ((rate / tones.baud).round() as usize).max(2);
         Self {
             cfg,
-            mark: Tone::new(MARK_HZ, rate, window),
-            space: Tone::new(SPACE_HZ, rate, window),
-            sps: (rate / BAUD) as f32,
+            mark: Tone::new(tones.mark_hz, rate, window),
+            space: Tone::new(tones.space_hz, rate, window),
+            sps: (rate / tones.baud) as f32,
             since: 0.0,
             last_sign: false,
         }
@@ -264,13 +289,18 @@ pub fn encode(frame: &[u8], rate: f64, lead_flags: usize) -> Vec<f32> {
     // AX.25 bytes go on the air least significant bit first.
     let data: Vec<bool> = (0..frame.len() * 8).map(|i| frame[i / 8] >> (i % 8) & 1 == 1).collect();
     let lead: Vec<bool> = std::iter::repeat_n(hdlc::flag_bits(), lead_flags).flatten().collect();
-    let levels = hdlc::encode_frame(&data, &lead);
+    modulate(&hdlc::encode_frame(&data, &lead), rate, BELL202)
+}
 
-    let sps = rate / BAUD;
+/// Symbols to audio, phase continuous across every boundary: true is the
+/// mark tone. A discontinuity at a transition costs the next several bits in
+/// any receiver that integrates phase, which is what reads fast FSK.
+pub fn modulate(levels: &[bool], rate: f64, tones: Tones) -> Vec<f32> {
+    let sps = rate / tones.baud;
     let mut out = Vec::with_capacity((levels.len() as f64 * sps) as usize);
     let mut phase = 0.0f64;
-    for &level in &levels {
-        let f = if level { MARK_HZ } else { SPACE_HZ };
+    for &level in levels {
+        let f = if level { tones.mark_hz } else { tones.space_hz };
         for _ in 0..sps as usize {
             phase += std::f64::consts::TAU * f / rate;
             out.push(phase.sin() as f32);
