@@ -179,6 +179,11 @@ impl ScopeNode {
             at += take;
         }
         if any {
+            // The newest transform into the average, which is the trace
+            // this has always drawn. A channel scope is watched live; the
+            // detectors belong to the span's own spectrum.
+            let frame = self.spec.take();
+            self.spec.fold(&frame.sample);
             let db = self.spec.power_db();
             // Floored where a 24 bit converter's noise would be. An empty
             // wire transforms to -200 dB with a DC bin of numerical dust

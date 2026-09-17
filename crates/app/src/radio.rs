@@ -574,6 +574,13 @@ pub enum Cmd {
     /// What starts a capture file: the switch, or energy in the span with
     /// its threshold, pre-roll and hang.
     CaptureTrigger(crate::chain::CapturePlan),
+    /// What the trace and the waterfall each take out of a spectrum frame:
+    /// the newest transform, the mean of the frame, or the loudest each bin
+    /// reached in it.
+    Detectors {
+        trace: dsp::spectrum::Detector,
+        waterfall: dsp::spectrum::Detector,
+    },
     /// What the heatmap recorder keeps: whether it is running, how often it
     /// takes a row and how much it may hold.
     Heatmap(crate::chain::HeatPlan),
@@ -939,6 +946,10 @@ pub struct ChannelState {
 /// One spectrum update.
 pub struct Frame {
     pub db: Vec<f32>,
+    /// The same frame as the waterfall reads it, which is a different
+    /// detector: a trace is watched to judge a level and a waterfall to
+    /// notice that something happened.
+    pub wf: Vec<f32>,
     pub adc: nodes::AdcHealth,
     pub center: f64,
     pub rate: f64,
@@ -1130,6 +1141,8 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         dc_block: false,
         refresh_hz: 30.0,
         smoothing: crate::chain::DEFAULT_SMOOTHING,
+        trace: dsp::spectrum::Detector::Average,
+        wf_detector: dsp::spectrum::Detector::Peak,
         fft: 1024,
         channels: Vec::new(),
         fronts,
@@ -2099,6 +2112,8 @@ impl Audio {
             dc_block: false,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
+            trace: dsp::spectrum::Detector::Average,
+            wf_detector: dsp::spectrum::Detector::Peak,
             fft: 1024,
             channels: vec![spec],
             fronts: Vec::new(),
@@ -2368,6 +2383,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             dc_block: true,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
+            trace: dsp::spectrum::Detector::Average,
+            wf_detector: dsp::spectrum::Detector::Peak,
             fft,
             channels: Vec::new(),
             // Resolved from the scanner table below, once the tuning is known.
@@ -2688,6 +2705,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::BeaconDb(on) => {
                 self.plan.settings.beacondb = on;
                 self.rx.apply_settings(&self.plan);
+            }
+            Cmd::Detectors { trace, waterfall } => {
+                self.plan.trace = trace;
+                self.plan.wf_detector = waterfall;
+                self.rx.set_detectors(trace, waterfall);
             }
             Cmd::Heatmap(heat) => {
                 if heat != self.plan.heat {
@@ -3461,6 +3483,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         let extra = self.rx.patch_spectra();
         let f = Frame {
             db: self.rx.power_db().to_vec(),
+            wf: self.rx.waterfall_db().to_vec(),
             adc: self.rx.adc(),
             center: self.plan.center.as_f64(),
             rate: if seen > 0.0 { seen } else { self.plan.eff_rate() },
@@ -3715,6 +3738,8 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         dc_block: false,
         refresh_hz: 30.0,
         smoothing: crate::chain::DEFAULT_SMOOTHING,
+        trace: dsp::spectrum::Detector::Average,
+        wf_detector: dsp::spectrum::Detector::Peak,
         fft: 1024,
         channels: Vec::new(),
         fronts: vec![crate::scanners::FrontAt {

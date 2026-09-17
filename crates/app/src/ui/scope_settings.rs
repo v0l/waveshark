@@ -6,6 +6,7 @@
 use super::state::ScopeState;
 use super::*;
 use crate::ui::widgets::{choice, lamp, section, switch};
+use dsp::spectrum::Detector;
 
 /// What the panels want done that they cannot do themselves.
 pub(super) enum Action {
@@ -55,7 +56,21 @@ impl ScopeSettings<'_> {
                     self.st.refresh = v;
                 }
             });
-            row_help(ui, "averaging", "How much of the last frame the next one keeps.", |ui| {
+            let what = "What one point of the trace shows out of the transforms behind it. \
+                        Sample is the newest of them, average their mean power, peak the \
+                        loudest each bin reached. Average is a steady floor; peak finds a \
+                        burst shorter than a frame and reads the floor high.";
+            row_help(ui, "detector", what, |ui| {
+                let mut d = self.st.trace;
+                let opts = Detector::ALL.map(|v| (v, v.label().to_string()));
+                if choice(ui, "trace", &mut d, opts) {
+                    self.st.trace = d;
+                }
+            });
+            let smooth = "How much of the last drawn frame the next one keeps. This acts \
+                          on frames after the detector above has already decided what each \
+                          one holds.";
+            row_help(ui, "smoothing", smooth, |ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
                 let slider = egui::Slider::new(&mut self.st.smoothing, 0.02..=1.0);
                 ui.add(slider.show_value(false));
@@ -83,6 +98,16 @@ impl ScopeSettings<'_> {
                 let opts = SPEEDS.iter().map(|(n, f)| (*f, format!("{n} rows/s")));
                 if choice(ui, "rows", &mut v, opts) {
                     self.st.rows_per_sec = v;
+                }
+            });
+            let what = "What a row shows out of the frames behind it. Peak is what finds a \
+                        transmission: a burst of a few milliseconds is in one frame of the \
+                        many a row is made of.";
+            row_help(ui, "detector", what, |ui| {
+                let mut d = self.st.wf_detector;
+                let opts = Detector::ALL.map(|v| (v, v.label().to_string()));
+                if choice(ui, "wfdet", &mut d, opts) {
+                    self.st.wf_detector = d;
                 }
             });
             row_help(ui, "history", "Rows kept, scrolled back to with the wheel.", |ui| {

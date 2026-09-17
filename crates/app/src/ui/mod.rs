@@ -308,6 +308,21 @@ const SUB_CHANNEL: &str = "SUB";
 /// rather than cut off by the key coming up on the final mark.
 const SUB_TAIL: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// The window a set of readings wants drawn against: a floor under the
+/// quiet bins and a ceiling over the loud ones, or `None` for readings with
+/// nothing finite in them.
+fn window_for(db: &[f32]) -> Option<(f32, f32)> {
+    let mut v: Vec<f32> = db.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
+    let lo = pct(0.10) - 6.0;
+    let hi = (pct(0.999) + PEAK_HEADROOM_DB).max(lo + MIN_SPAN_DB);
+    Some((lo, hi))
+}
+
 /// What the main pane shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
@@ -1383,6 +1398,8 @@ impl App {
             self.rate = f.rate;
             if self.scope.auto_scale {
                 self.rescale(&f.db);
+                let wf = if f.wf.len() == f.db.len() { &f.wf } else { &f.db };
+                self.rescale_waterfall(wf);
             }
             self.slide_waterfall(f.center, f.db.len());
 
@@ -1395,12 +1412,9 @@ impl App {
                 // The waterfall tops out below the trace's ceiling: the plot
                 // wants headroom so peaks are not clipped flat, the colour
                 // ramp wants the opposite or its hottest colours go unused.
+                let (floor, ceil) = self.waterfall_window();
                 let pending = std::mem::take(&mut self.scope.wf_pending);
-                self.scope.wf.push(
-                    &pending,
-                    self.scope.floor,
-                    self.scope.ceil - self.scope.wf_top_offset,
-                );
+                self.scope.wf.push(&pending, floor, ceil);
                 self.scope.wf_pending = pending;
                 self.scope.wf_pending.fill(f32::MIN);
                 self.scope.wf_last = Some(std::time::Instant::now());
@@ -1476,12 +1490,15 @@ impl App {
         // A frame from a different place is not the same row. Peak-holding
         // across a retune would smear the old span's carriers onto the new
         // one's frequencies.
-        if self.scope.wf_pending.len() != f.db.len() || self.scope.wf_pending_center != f.center {
-            self.scope.wf_pending = f.db.clone();
+        // The waterfall's own reading of the frame, which is whatever
+        // detector it is set to rather than the trace's.
+        let db = if f.wf.len() == f.db.len() { &f.wf } else { &f.db };
+        if self.scope.wf_pending.len() != db.len() || self.scope.wf_pending_center != f.center {
+            self.scope.wf_pending = db.clone();
             self.scope.wf_pending_center = f.center;
             return;
         }
-        for (a, b) in self.scope.wf_pending.iter_mut().zip(&f.db) {
+        for (a, b) in self.scope.wf_pending.iter_mut().zip(db) {
             *a = a.max(*b);
         }
     }
@@ -1503,16 +1520,32 @@ impl App {
     /// Track percentiles, not extremes: one strong carrier would otherwise
     /// flatten everything else in the span.
     fn rescale(&mut self, db: &[f32]) {
-        let mut v: Vec<f32> = db.iter().copied().filter(|x| x.is_finite()).collect();
-        if v.is_empty() {
-            return;
-        }
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pct = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
-        let lo = pct(0.10) - 6.0;
-        let hi = (pct(0.999) + PEAK_HEADROOM_DB).max(lo + MIN_SPAN_DB);
+        let Some((lo, hi)) = window_for(db) else { return };
         self.scope.floor += (lo - self.scope.floor) * 0.05;
         self.scope.ceil += (hi - self.scope.ceil) * 0.05;
+    }
+
+    /// The same, for the colours, against the waterfall's own readings.
+    ///
+    /// Its own because the two detectors are not the same numbers: a peak
+    /// waterfall under an average trace sits 10 to 20 dB above it on a busy
+    /// band, and coloured against the trace's window every row came out at
+    /// the top of the ramp. What the operator sets by hand is one window
+    /// and applies to both; what the receiver works out for itself is one
+    /// window each.
+    fn rescale_waterfall(&mut self, db: &[f32]) {
+        let Some((lo, hi)) = window_for(db) else { return };
+        self.scope.wf_floor += (lo - self.scope.wf_floor) * 0.05;
+        self.scope.wf_ceil += (hi - self.scope.wf_ceil) * 0.05;
+    }
+
+    /// What the waterfall's colours run between: its own window while the
+    /// scale follows the signal, and the operator's otherwise.
+    fn waterfall_window(&self) -> (f32, f32) {
+        match self.scope.auto_scale {
+            true => (self.scope.wf_floor, self.scope.wf_ceil - self.scope.wf_top_offset),
+            false => (self.scope.floor, self.scope.ceil - self.scope.wf_top_offset),
+        }
     }
 
     /// Draw the channel strip, then hand the radio what it changed.
@@ -2502,6 +2535,10 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     // back as an edit with the rest of the graph.
     when(now.view.refresh != was.view.refresh, Cmd::Refresh(now.view.refresh));
     when(now.view.smoothing != was.view.smoothing, Cmd::Smoothing(now.view.smoothing));
+    when(
+        now.view.trace != was.view.trace || now.view.wf_detector != was.view.wf_detector,
+        Cmd::Detectors { trace: now.view.trace, waterfall: now.view.wf_detector },
+    );
     // What writes to disk.
     when(now.log_cap_mb != was.log_cap_mb, Cmd::PacketLogCap(now.log_cap_mb.map(|mb| mb << 20)));
     when(
@@ -3345,6 +3382,7 @@ mod tests {
             Cmd::Manual(_) => "manual",
             Cmd::Refresh(_) => "refresh",
             Cmd::Smoothing(_) => "smoothing",
+            Cmd::Detectors { .. } => "detectors",
             Cmd::PacketLogCap(_) => "log_cap",
             Cmd::CaptureCap(_) => "capture_cap",
             Cmd::CaptureIq(_) => "capture",
@@ -3399,6 +3437,7 @@ mod tests {
                 "capture_trigger",
                 "dc_block",
                 "decode",
+                "detectors",
                 "feeds",
                 "gps",
                 "heatmap",
@@ -3532,6 +3571,33 @@ mod tests {
         assert!(a.sub_until.is_none());
         assert_eq!(a.cmds.iter().filter(|c| matches!(c, Cmd::Key(None))).count(), 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two detectors are two sets of numbers, so the colours are worked out
+    /// from the waterfall's own readings: a peak waterfall runs 10 to 20 dB
+    /// above an average trace on a busy band, and coloured against the
+    /// trace's window every row came out at the top of the ramp.
+    #[test]
+    fn the_waterfall_is_coloured_against_its_own_readings() {
+        let mut a = app();
+        let quiet: Vec<f32> = (0..64).map(|_| -95.0).collect();
+        let loud: Vec<f32> = (0..64).map(|_| -45.0).collect();
+        // Enough frames for the smoothing to arrive at each window.
+        for _ in 0..400 {
+            a.rescale(&quiet);
+            a.rescale_waterfall(&loud);
+        }
+        let (floor, ceil) = a.waterfall_window();
+        assert!(floor > -70.0, "the waterfall's own floor, not the trace's: {floor:.1}");
+        assert!(a.scope.floor < -90.0, "and the trace keeps its own: {:.1}", a.scope.floor);
+        assert!(ceil > floor, "a window with room in it");
+
+        // Set by hand, one window applies to both: the operator asked for
+        // these decibels, not for two guesses.
+        a.scope.auto_scale = false;
+        let (floor, ceil) = a.waterfall_window();
+        assert_eq!(floor, a.scope.floor);
+        assert_eq!(ceil, a.scope.ceil - a.scope.wf_top_offset);
     }
 
     fn app() -> App {
