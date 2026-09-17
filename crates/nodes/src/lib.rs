@@ -120,7 +120,7 @@ pub use pocsag_nodes::PocsagNode;
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 pub use rs41_nodes::Rs41Node;
 pub use rtty_nodes::RttyNode;
-pub use scan_nodes::{BandScanNode, Found, Key, OnHit, ScanStatus};
+pub use scan_nodes::{BandScanNode, Found, Key, Linger, Lock, OnHit, ScanStatus};
 pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use sink_nodes::{
     AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode,

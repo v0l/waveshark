@@ -430,6 +430,13 @@ pub struct BandScan {
     pub step_hz: f64,
     pub dwell_s: f64,
     pub on_hit: nodes::OnHit,
+    /// How many packets make a step busy, and whether they have to arrive
+    /// one after another.
+    pub locks: u32,
+    pub lock: nodes::Lock,
+    /// How long a logging walk stays on a step it locked, as the one signed
+    /// number the operator sets.
+    pub linger_s: f64,
 }
 
 impl Default for BandScan {
@@ -443,6 +450,9 @@ impl Default for BandScan {
             step_hz: 0.0,
             dwell_s: 2.0,
             on_hit: nodes::OnHit::Hold,
+            locks: 1,
+            lock: nodes::Lock::Sparse,
+            linger_s: 0.0,
         }
     }
 }
@@ -3337,6 +3347,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         w.insert("hi_hz".into(), pipeline::ParamValue::Float(plan.scan.hi_hz));
         w.insert("step_hz".into(), pipeline::ParamValue::Float(plan.scan.step_hz));
         w.insert("dwell_s".into(), pipeline::ParamValue::Float(plan.scan.dwell_s));
+        w.insert("locks".into(), pipeline::ParamValue::Float(plan.scan.locks as f64));
+        w.insert("lock".into(), pipeline::ParamValue::Text(plan.scan.lock.label().into()));
+        w.insert("linger_s".into(), pipeline::ParamValue::Float(plan.scan.linger_s));
         w.insert("on_hit".into(), pipeline::ParamValue::Text(plan.scan.on_hit.label().into()));
         let walk = p.add_derived(derived::SCAN, "band_scan", w);
         p.connect(Source::Stage(rows, 0), (walk, 0));
@@ -4889,6 +4902,9 @@ pub(crate) mod tests {
             step_hz: 2e6,
             dwell_s: 0.2,
             on_hit: nodes::OnHit::Log,
+            locks: 3,
+            lock: nodes::Lock::Continuous,
+            linger_s: -4.0,
         };
         let rx = Receiver::build(&plan, Default::default()).expect("a receiver that walks");
         let topo = rx.topology();
@@ -4896,6 +4912,19 @@ pub(crate) mod tests {
             topo.nodes.iter().find(|n| n.kind == "band_scan").expect("the walk is in the graph");
         let rows = topo.nodes.iter().find(|n| n.kind == "dedupe").expect("the dedupe");
         assert!(feeds(rows, walk), "the walk reads the bus after the duplicates are dropped");
+        // How a step is called busy and what happens then is the plan's, so
+        // the node is holding what the operator set and not its defaults.
+        let param = |name: &str| walk.params.iter().find(|p| p.name == name).expect(name);
+        assert_eq!(param("locks").value.as_f64(), Some(3.0));
+        assert_eq!(param("linger_s").value.as_f64(), Some(-4.0));
+        let lock = param("lock");
+        let picked = match &lock.range {
+            pipeline::param::ParamRange::Choices(c) => {
+                c[lock.value.as_i64().expect("a position") as usize].clone()
+            }
+            _ => panic!("the count is a choice"),
+        };
+        assert_eq!(picked, "continuous");
         let st = rx.scan_status().expect("the walk reports itself");
         assert!(st.running);
         // 430 to 440 MHz in 2 MHz steps: five centres, 431 to 439.
@@ -4965,6 +4994,7 @@ pub(crate) mod tests {
             step_hz: 2e6,
             dwell_s: 0.2,
             on_hit: nodes::OnHit::Log,
+            ..Default::default()
         };
         let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver that walks");
         // Blocks of a tenth of a second of silence at the plan's rate: the
