@@ -812,7 +812,8 @@ impl App {
             c.tx = Some(spec);
         }
         self.send_channels();
-        self.audio.keying = super::state::Keying { at: Some(id), latched: true };
+        self.audio.keying =
+            super::state::Keying { at: Some(id), latched: true, ..Default::default() };
         self.send(Cmd::Key(Some(id)));
         Ok(json!({ "keyed": id, "source": spec.source.label() }))
     }
@@ -1888,7 +1889,7 @@ mod tests {
     #[test]
     fn unkeying_takes_the_transmitter_off_air() {
         let mut a = app();
-        a.audio.keying = super::state::Keying { at: Some(7), latched: true };
+        a.audio.keying = super::state::Keying { at: Some(7), latched: true, ..Default::default() };
         call(&mut a, Action::Unkey).unwrap();
         assert_eq!(a.audio.keying.at, None);
         assert!(!a.audio.keying.latched);

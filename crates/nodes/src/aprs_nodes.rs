@@ -19,6 +19,7 @@ use dsp::afsk::{AfskConfig, AfskDemod};
 use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
@@ -298,6 +299,180 @@ impl Protocol for Aprs {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// The frame as Bell 202 audio, then the deviation a 2 m packet channel
+    /// is keyed at. The tones are audio, so what puts them on the air is the
+    /// same FM modulator a voice channel uses.
+    fn transmit(&self) -> Option<crate::protocol::TxChain> {
+        Some(crate::protocol::TxChain {
+            source: NodeSpec::new(APRS_TX.name),
+            modulator: NodeSpec::new(crate::mod_nodes::FM_MOD.name)
+                .f("deviation_hz", DEVIATION_HZ)
+                .f("offset_hz", 0.0),
+        })
+    }
+}
+
+/// A beacon as Bell 202 audio.
+///
+/// The transmit mirror of [`AprsNode`] and built from the same layers read
+/// back: [`decode::ax25::encode`] lays out the frame, `dsp::hdlc` stuffs it
+/// and adds the check sequence, and `dsp::afsk` turns the bits into the two
+/// tones. What leaves is audio, because on a packet channel the data is in
+/// the audio and the carrier is ordinary narrowband FM.
+///
+/// The audio is built once for a whole frame and handed out a block at a
+/// time, because a frame is a quarter of a second and a block is a
+/// millisecond or two.
+pub struct AprsTxNode {
+    source: String,
+    destination: String,
+    path: String,
+    info: String,
+    rate: f64,
+    audio: Vec<f32>,
+    at: usize,
+    /// Samples of silence left before the beacon goes again.
+    rest: usize,
+    sent: u64,
+}
+
+/// Flags in front of a frame, which is what the far end's clock settles on.
+/// A tenth of a second at 1200 baud, which is what a TNC sends.
+const LEAD_FLAGS: usize = 16;
+
+/// Silence between one beacon and the next while the key is held, in
+/// seconds. A tracker beacons every minute or two; this is only what keeps
+/// two frames from arriving as one.
+const BEACON_GAP_S: f64 = 2.0;
+
+impl Default for AprsTxNode {
+    fn default() -> Self {
+        Self::new("N0CALL", "APRS", "WIDE1-1", "")
+    }
+}
+
+impl AprsTxNode {
+    pub fn new(source: &str, destination: &str, path: &str, info: &str) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            path: path.into(),
+            info: info.into(),
+            rate: 0.0,
+            audio: Vec::new(),
+            at: 0,
+            rest: 0,
+            sent: 0,
+        }
+    }
+
+    /// The frame the settings describe, or `None` where a callsign will not
+    /// parse or there is nothing to say. Refusing is the point: a station
+    /// identifies itself or it does not transmit.
+    fn frame(&self) -> Option<Vec<u8>> {
+        if self.info.is_empty() {
+            return None;
+        }
+        let path: std::result::Result<Vec<ax25::Address>, ()> =
+            self.path.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::parse).collect();
+        Some(ax25::encode(&ax25::ui(
+            self.destination.parse().ok()?,
+            self.source.parse().ok()?,
+            path.ok()?,
+            self.info.as_bytes(),
+        )))
+    }
+
+    /// Build the audio for one beacon at the rate the chain runs at.
+    fn reload(&mut self) {
+        self.at = 0;
+        self.rest = 0;
+        self.audio = match (self.rate > 0.0, self.frame()) {
+            (true, Some(f)) => dsp::afsk::encode(&f, self.rate, LEAD_FLAGS),
+            _ => Vec::new(),
+        };
+    }
+}
+
+impl Simple for AprsTxNode {
+    fn name(&self) -> &str {
+        APRS_TX.name
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let what = match self.frame() {
+            Some(_) => format!("{} to {}", self.source, self.destination),
+            None => "nothing to beacon".into(),
+        };
+        vec![("beaconing".into(), what), ("sent".into(), self.sent.to_string())]
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.rate <= 0.0 {
+            return Err(common::Error::other("aprs_tx needs a clock to key against"));
+        }
+        self.rate = i.spec.rate;
+        self.reload();
+        let mut out = i.spec.with_kind(PortKind::Real);
+        out.bandwidth = CHANNEL_WIDTH_HZ;
+        Ok(out)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        let want = i.len();
+        if want == 0 {
+            return Ok(());
+        }
+        let out = o.real_mut();
+        if self.audio.is_empty() {
+            // Nothing to say is silence, not a refusal: the chain is drawn
+            // whether or not there is a beacon in it.
+            out.resize(out.len() + want, 0.0);
+            return Ok(());
+        }
+        let mut left = want;
+        while left > 0 {
+            if self.rest > 0 {
+                let n = self.rest.min(left);
+                out.resize(out.len() + n, 0.0);
+                self.rest -= n;
+                left -= n;
+                continue;
+            }
+            let n = (self.audio.len() - self.at).min(left);
+            out.extend_from_slice(&self.audio[self.at..self.at + n]);
+            self.at += n;
+            left -= n;
+            if self.at >= self.audio.len() {
+                self.at = 0;
+                self.sent += 1;
+                self.rest = (BEACON_GAP_S * self.rate) as usize;
+            }
+        }
+        Ok(())
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::text(SOURCE, self.source.clone()).label("From"),
+            Param::text(DESTINATION, self.destination.clone()).label("To"),
+            Param::text(PATH, self.path.clone()).label("Path"),
+            Param::text(INFO, self.info.clone()).label("Report"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        let v = value.as_str().unwrap_or_default().to_string();
+        match name {
+            SOURCE => self.source = v,
+            DESTINATION => self.destination = v,
+            PATH => self.path = v,
+            INFO => self.info = v,
+            _ => return Err(common::Error::other(format!("aprs_tx: unknown parameter {name:?}"))),
+        }
+        self.reload();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +562,83 @@ mod tests {
         assert_eq!(get("from"), Some(common::Value::Text("EI2ABC-9".into())));
     }
 
+    /// The transmitter into the receiver: a beacon keyed by the chain the
+    /// protocol declares, read back by the node that reads real stations,
+    /// with the check sequence the receiver insists on computed over what
+    /// was actually sent.
+    #[test]
+    fn a_beacon_keyed_by_the_transmit_chain_is_read_back() {
+        let (rate, center) = (96_000.0, 144_800_000.0);
+        let report = "!5338.00N/00615.00W-waveshark";
+        // A 45-byte frame with 16 lead flags is 500 bits at 1200 baud,
+        // which is 0.42 s; a second holds one beacon and part of the gap
+        // after it.
+        let air = crate::tx_nodes::transmit_for(
+            &Aprs,
+            rate,
+            Hz(center as u64),
+            1.0,
+            &[
+                (SOURCE, ParamValue::Text("MI0ABC-9".into())),
+                (PATH, ParamValue::Text("WIDE1-1".into())),
+                (INFO, ParamValue::Text(report.into())),
+            ],
+        );
+        assert_eq!(air.len(), 98_304, "a second of samples at {rate}");
+
+        let mut node = AprsNode::new(center);
+        node.negotiate(&spec(rate, center)).unwrap();
+        let ins = [spec(rate, center)];
+        let tags = Vec::new();
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        for chunk in air.chunks(4_096) {
+            let input = Payload::Iq(chunk.to_vec());
+            let mut out = Payload::Frames(Vec::new());
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            node.process(&input, &mut out, &mut ctx).unwrap();
+            if let Payload::Frames(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes));
+            }
+        }
+
+        assert_eq!(frames.len(), 1, "one beacon in a second");
+        let parsed = ax25::parse(&frames[0]).expect("an AX.25 frame");
+        assert_eq!(parsed.source.to_string(), "MI0ABC-9");
+        assert_eq!(parsed.destination.to_string(), "APRS");
+        assert_eq!(parsed.path.len(), 1);
+        assert_eq!(parsed.path[0].to_string(), "WIDE1-1");
+        assert_eq!(parsed.info, report.as_bytes());
+        let d = aprs_decoded(&parsed, &frames[0], Hz(center as u64));
+        assert_eq!(d.protocol, "APRS-Position");
+        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
+        assert_eq!(get("lon"), Some(common::Value::Float(-6.25)));
+        assert_eq!(get("from"), Some(common::Value::Text("MI0ABC-9".into())));
+    }
+
+    /// A station with nothing to say transmits nothing, rather than keying a
+    /// carrier or a frame with an empty report in it.
+    #[test]
+    fn a_beacon_with_no_report_is_silence() {
+        let rate = 96_000.0;
+        let mut n = AprsTxNode::default();
+        n.negotiate(&PortSpec {
+            spec: StreamSpec { kind: PortKind::Real, rate, ..Default::default() },
+            latency: 0,
+        })
+        .unwrap();
+        let ins = [spec(rate, DEFAULT_HZ)];
+        let tags = Vec::new();
+        let mut out = Payload::empty_of(PortKind::Real);
+        let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+        let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+        Simple::process(&mut n, &Payload::Real(vec![0.0; 4_096]), &mut out, &mut ctx).unwrap();
+        let audio = out.as_real().unwrap();
+        assert_eq!(audio.len(), 4_096, "a block of time is a block of audio");
+        assert!(audio.iter().all(|&v| v == 0.0), "silence, not a carrier");
+    }
+
     /// AX.25 that is not APRS still reaches the log, because it passed a real
     /// integrity check and something is out there transmitting it.
     #[test]
@@ -415,4 +667,26 @@ pub const DESC: StageDesc = StageDesc {
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     Ok(Box::new(AprsNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
+/// Who is beaconing, to whom, by what path, and what they are saying.
+const SOURCE: &str = "source";
+const DESTINATION: &str = "destination";
+const PATH: &str = "path";
+const INFO: &str = "info";
+
+pub const APRS_TX: StageDesc = StageDesc {
+    name: "aprs_tx",
+    summary: "Beacon an AX.25 UI frame as Bell 202 audio, ready for an FM carrier",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AprsTxNode::new(
+        s.str_or(SOURCE, "N0CALL"),
+        s.str_or(DESTINATION, "APRS"),
+        s.str_or(PATH, "WIDE1-1"),
+        s.str_or(INFO, ""),
+    )))
 }

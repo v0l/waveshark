@@ -15,6 +15,7 @@
 //! table adds an encoder and reuses this carrier.
 
 use crate::mod_nodes::OokModNode;
+use common::pulse::Package;
 use common::{C32, Result};
 use pipeline::Graph;
 use pipeline::graph::Topology;
@@ -1259,6 +1260,146 @@ mod mic_tests {
         let peak = out[1_000..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - 1.0).abs() < 0.05, "0.5 at twice gain came out at {peak}");
     }
+}
+
+/// A transmission's bits, handed out at the rate they are keyed at.
+///
+/// Every data source in a transmit chain has the same problem: it holds a
+/// whole transmission, and the chain asks it for one block of time at a
+/// time. A POCSAG batch at 1200 baud is most of a second, and a source that
+/// answered the first block with all of it would hand the radio a second of
+/// samples every few milliseconds. So the block's length in seconds is what
+/// decides how many bits leave, exactly as [`crate::dvbt_nodes::TsSourceNode`]
+/// paces a multiplex against its bit rate.
+///
+/// Held here rather than in each protocol's node because the pacing is the
+/// same for POCSAG, RTTY and BLE, and the only thing that differs is what
+/// encoded the bits.
+pub struct Keyer {
+    baud: f64,
+    bits: Vec<bool>,
+    at: usize,
+    /// Bits owed from the blocks already clocked, as a fraction so a baud
+    /// that does not divide a block still comes out at the right rate.
+    owed: f64,
+    /// Bit periods of idle left before the transmission starts again.
+    rest: f64,
+    /// Idle between one pass and the next, in bit periods. A key held down
+    /// sends again rather than falling silent, which is what a pager
+    /// transmitter and a beacon both do.
+    gap_bits: f64,
+    passes: u64,
+}
+
+impl Keyer {
+    pub fn new(baud: f64, gap_bits: f64) -> Self {
+        Self {
+            baud: baud.max(1.0),
+            bits: Vec::new(),
+            at: 0,
+            owed: 0.0,
+            rest: 0.0,
+            gap_bits: gap_bits.max(0.0),
+            passes: 0,
+        }
+    }
+
+    /// What to key from now on, from the top.
+    pub fn load(&mut self, bits: Vec<bool>) {
+        self.bits = bits;
+        self.at = 0;
+        self.owed = 0.0;
+        self.rest = 0.0;
+    }
+
+    pub fn set_baud(&mut self, baud: f64) {
+        self.baud = baud.max(1.0);
+    }
+
+    pub fn baud(&self) -> f64 {
+        self.baud
+    }
+
+    /// Times the transmission has been sent whole, which is what says a key
+    /// held down is repeating rather than stalled.
+    pub fn passes(&self) -> u64 {
+        self.passes
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        !self.bits.is_empty()
+    }
+
+    /// The timings for one block: `samples` of clock at `rate`.
+    pub fn take(&mut self, samples: usize, rate: f64) -> Package {
+        if self.bits.is_empty() || rate <= 0.0 {
+            return Package::default();
+        }
+        self.owed += samples as f64 / rate * self.baud;
+        let mut out: Vec<bool> = Vec::new();
+        while self.owed >= 1.0 {
+            self.owed -= 1.0;
+            if self.rest > 0.0 {
+                self.rest -= 1.0;
+                out.push(false);
+                continue;
+            }
+            out.push(self.bits[self.at]);
+            self.at += 1;
+            if self.at >= self.bits.len() {
+                self.at = 0;
+                self.passes += 1;
+                self.rest = self.gap_bits;
+            }
+        }
+        dsp::pulse::keyed(&out, self.baud)
+    }
+}
+
+/// Run a protocol's declared transmit chain for `seconds` and collect what
+/// would go to the antenna.
+///
+/// Built through the registry from [`crate::protocol::Protocol::transmit`],
+/// so a round trip test proves the stage names and settings a protocol
+/// declares are the ones that exist and negotiate, not a chain the test
+/// assembled for itself.
+#[cfg(test)]
+pub(crate) fn transmit_for(
+    p: &dyn crate::protocol::Protocol,
+    rate: f64,
+    center: common::Hz,
+    seconds: f64,
+    set: &[(&str, ParamValue)],
+) -> Vec<C32> {
+    let mut tx = p.transmit().unwrap_or_else(|| panic!("{} does not transmit", p.id()));
+    // What an operator types into the source's card before keying.
+    for (k, v) in set {
+        tx.source.settings.insert((*k).into(), v.clone());
+    }
+    let clock = StreamSpec {
+        kind: PortKind::Real,
+        rate,
+        center,
+        channels: 1,
+        flow: Flow::Tx,
+        domain: Domain::Baseband,
+        ..Default::default()
+    };
+    let mut g = crate::build_chain(clock, &[tx.source, tx.modulator], &crate::registry())
+        .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
+    let block = 4_096;
+    let blocks = (seconds * rate / block as f64).ceil() as usize;
+    let mut out = Vec::with_capacity(blocks * block);
+    for _ in 0..blocks {
+        {
+            let buf = g.input_buf();
+            buf.clear();
+            buf.real_mut().resize(block, 0.0);
+        }
+        g.run().expect("the transmit chain runs");
+        out.extend_from_slice(g.output().as_iq().unwrap_or(&[]));
+    }
+    out
 }
 
 /// The head of a transmit chain: a block of time, from a block of samples.

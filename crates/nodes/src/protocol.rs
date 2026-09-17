@@ -623,6 +623,41 @@ mod tests {
         }
     }
 
+    /// Every protocol that says it transmits names stages that exist and
+    /// negotiate from the transmit clock to samples for the radio.
+    ///
+    /// The chain view, the mode menu and the radio all take a protocol at
+    /// its word here, and a transmit chain is only built when a key goes
+    /// down, so a name that is not in the registry would be a panic at the
+    /// worst moment rather than a refusal.
+    #[test]
+    fn every_transmit_chain_builds_and_ends_in_samples() {
+        let reg = crate::registry();
+        let mut keyed = Vec::new();
+        for p in all() {
+            let Some(tx) = p.transmit() else { continue };
+            keyed.push(p.id());
+            let rate = p.shape().min_rate_hz.max(48_000.0);
+            let clock = pipeline::port::StreamSpec {
+                kind: PortKind::Real,
+                rate,
+                center: common::Hz(p.default_hz() as u64),
+                channels: 1,
+                flow: pipeline::port::Flow::Tx,
+                domain: pipeline::port::Domain::Baseband,
+                ..Default::default()
+            };
+            let g = crate::build_chain(clock, &[tx.source, tx.modulator], &reg)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
+            let (tail, _) = g.order().last().expect("a tail");
+            let out = g.spec_of(tail.out(0)).expect("an output");
+            assert_eq!(out.kind, PortKind::Iq, "{} does not end in samples", p.id());
+            assert_eq!(out.rate, rate, "{} transmits at the wrong rate", p.id());
+            assert_eq!(out.flow, pipeline::port::Flow::Tx, "{} is not a transmission", p.id());
+        }
+        assert_eq!(keyed, ["dvbt", "aprs", "pocsag", "rtty"], "what this build can key up");
+    }
+
     /// Nothing is left out of the frame walk, and everything whose spectrum
     /// the pager bands swallow is offered a frame before the pager: 144 to
     /// 146 MHz sits inside the VHF paging allocation, the 420 to 430 MHz

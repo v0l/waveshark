@@ -990,11 +990,16 @@ pub(super) struct AudioState {
 
 /// What the transmit key is doing: which channel it is keying, and whether it
 /// is being held or was latched with a right click.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Keying {
     pub at: Option<u64>,
     /// Latched, so letting the pointer go leaves the carrier up.
     pub latched: bool,
+    /// What is being typed into a data mode's fields, by parameter name,
+    /// until it is sent. The running stage holds what was sent, and a field
+    /// that read it back every frame could not be typed into: the first
+    /// keystroke would be replaced by the stage's own answer.
+    pub fields: std::collections::HashMap<String, String>,
 }
 
 /// The `.sub` file loaded for the SUB transmit source, as the interface
