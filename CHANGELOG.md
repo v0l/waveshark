@@ -25,6 +25,9 @@ the code is in the commit log.
   as it stands, at the frequency the file names. RAW plays its recorded
   timings; Princeton, CAME, Nice FLO, Holtek, Ansonic, BETT, Linear and
   LinearDelta3 key files are re-encoded from their key.
+- Script repositories as a dataset: a git branch's tree downloaded into the
+  cache and listed by extension. The NullSec Flipper Suite is the first
+  repository in the table.
 - The agent and the MCP server reach the settings: the scanner table, the
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.

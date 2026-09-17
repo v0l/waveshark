@@ -13,6 +13,7 @@
 use datasets::airports::Airport;
 use datasets::cells::{Cells, Operators};
 use datasets::gateways::{Gateway, HostFile};
+use datasets::git;
 use datasets::radioid::{Repeater, Users};
 use datasets::sigid;
 use datasets::tle;
@@ -292,6 +293,10 @@ pub enum Which {
     Transmitters,
     /// Where weather balloons are released, and when.
     LaunchSites,
+    /// One repository of scripts, as a tree in the cache. A row each, like
+    /// the gateways: each repository is published, refreshed and credited
+    /// on its own.
+    Repo(&'static git::Repo),
 }
 
 impl Which {
@@ -307,6 +312,7 @@ impl Which {
             v.extend([Which::CellOperators, Which::CellTowers, Which::Artemis, Which::SigIdUnid]);
             v.extend(datasets::tle::GROUPS.iter().copied().map(Which::Satellites));
             v.extend([Which::Transmitters, Which::LaunchSites]);
+            v.extend(git::REPOS.iter().copied().map(Which::Repo));
             v
         })
     }
@@ -330,6 +336,7 @@ impl Which {
             Which::Satellites(g) => format!("satellites-{}", slug(g.name)),
             Which::Transmitters => "satellite-transmitters".into(),
             Which::LaunchSites => "launch-sites".into(),
+            Which::Repo(r) => format!("repo-{}", slug(r.dir)),
             Which::CellOperators => "mobile-networks".into(),
             Which::CellTowers => "cell-towers".into(),
             Which::Artemis => "identified-signals".into(),
@@ -347,6 +354,7 @@ impl Which {
             Which::Satellites(g) => format!("{} satellites", g.name),
             Which::Transmitters => "Satellite transmitters".into(),
             Which::LaunchSites => "Radiosonde launch sites".into(),
+            Which::Repo(r) => r.name.into(),
             Which::CellOperators => "Mobile networks".into(),
             Which::CellTowers => "Cell towers".into(),
             Which::Artemis => "Identified signals".into(),
@@ -366,6 +374,7 @@ impl Which {
             Which::CellTowers => "opencellid.org",
             Which::Artemis => "github.com/AresValley/Artemis-DB",
             Which::SigIdUnid => "sigidwiki.com",
+            Which::Repo(r) => r.publisher,
             _ => "radioid.net",
         }
     }
@@ -386,6 +395,7 @@ impl Which {
             Which::CellTowers => "https://opencellid.org/",
             Which::Artemis => "https://github.com/AresValley/Artemis-DB",
             Which::SigIdUnid => "https://www.sigidwiki.com/",
+            Which::Repo(r) => r.page,
             _ => "https://radioid.net/",
         }
     }
@@ -472,6 +482,7 @@ impl Which {
             Which::Artemis => ("Artemis-DB", "sigidwiki.com"),
             Which::SigIdUnid => ("sigidwiki.com", "contributors"),
             Which::Gateway(h) => (h.name, h.publisher),
+            Which::Repo(r) => (r.publisher, "each repository's own"),
             Which::Satellites(g) => (g.credit_name, g.credit_licence),
             Which::Transmitters => ("SatNOGS DB", "CC BY-SA 4.0"),
             Which::LaunchSites => ("SondeHub", "CC BY-SA 2.0"),
@@ -536,6 +547,7 @@ impl Which {
                  picks a frequency on the day, so the band is still scanned; this says where \
                  to expect one and when."
             }
+            Which::Repo(r) => r.about,
             Which::CellOperators => {
                 "Which network an MCC and MNC belong to, so a decoded GSM beacon reads as an \
                  operator and a country rather than two numbers. Also what picks the cell \
@@ -579,6 +591,10 @@ impl Which {
             },
             Which::Artemis => vec![sigid::artemis_source()],
             Which::SigIdUnid => vec![sigid::unid_source()],
+            // A repository is a directory tree with its own lifecycle in
+            // `datasets::git`, not a single file `cache::status` can read;
+            // `rows` and the tree itself say what is held.
+            Which::Repo(_) => Vec::new(),
         }
     }
 
@@ -628,6 +644,10 @@ impl Which {
             Which::Satellites(g) => SATS[group_index(g)].read().as_ref().map(|s| s.len()),
             Which::Transmitters => TRANSMITTERS.read().as_ref().map(|t| t.len()),
             Which::LaunchSites => LAUNCH_SITES.read().as_ref().map(|s| s.len()),
+            // The files in the tree, which is what a directory browser
+            // will list; one number for the row, from the status the tree
+            // carries beside it.
+            Which::Repo(r) => cache().and_then(|c| git::status(r, c).files).map(|n| n as usize),
             Which::CellOperators => OPERATORS.read().as_ref().map(|o| o.len()),
             Which::CellTowers => CELLS.read().as_ref().map(|c| c.len()),
             Which::Artemis => ARTEMIS.read().as_ref().map(|s| s.len()),
@@ -764,6 +784,10 @@ fn load(which: Which, when: When) {
 fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> {
     use datasets::{airports, cells, gateways, radioid};
     match which {
+        Which::Repo(r) => {
+            git::get(r, cache)?;
+            git::refresh(r, cache, when)?;
+        }
         Which::Airports => {
             if airports().is_empty() {
                 publish_airports(airports::load(cache)?);
@@ -1064,7 +1088,11 @@ mod tests {
             // The cell export is the exception, and deliberately: its URL
             // carries a token and an MCC, so there is nothing to fetch until
             // both exist and the pane says which one is missing.
-            if w == Which::CellTowers {
+            //
+            // A repository is the second exception: it is a tree in
+            // `datasets::git` rather than a file `cache::status` can ask
+            // about, and its own `sources` answer is empty on purpose.
+            if w == Which::CellTowers || matches!(w, Which::Repo(_)) {
                 continue;
             }
             assert!(!w.sources().is_empty(), "{} has no source", w.label());
