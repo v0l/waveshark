@@ -25,6 +25,8 @@ the code is in the commit log.
   recorded as, through a file dialog.
 - A sub-ghz-modem can be the station's GPS: DETECT in the position settings
   finds one on a USB serial port and offers its fix feed.
+- COSPAS-SARSAT 406 MHz distress beacons: EPIRB, PLB and ELT identities, with
+  their position on the map.
 - Ford and Renault tyre pressure sensors, with pressure, temperature and
   whether the wheel is moving.
 - Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
@@ -44,6 +46,11 @@ the code is in the commit log.
   next release from each.
 - Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
   macOS. Setup fetches the one this machine installs from and opens it.
+
+### Changed
+
+- The map draws anything that says where it was, so the iMet, Graw, Meteomodem,
+  Meisei, MRZ and LMS6 sondes appear beside the Vaisala ones.
 
 ### Fixed
 

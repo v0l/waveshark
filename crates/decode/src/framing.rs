@@ -164,6 +164,60 @@ fn runs(bits: &BitBuffer) -> impl Iterator<Item = (usize, usize)> + '_ {
     })
 }
 
+/// How well a run of biphase-L chips ends with `sync` keyed into it, and
+/// which way up the keying would have to have been.
+///
+/// Biphase-L carries two chips a bit, so a sync word matched on the chips
+/// rather than on bits answers three questions at once: where the word is,
+/// which of each pair of chips opens a bit, and whether the demodulator had
+/// the modulation the right way up. None of the three is knowable earlier.
+///
+/// What comes back is the number of the `2 * sync.len()` chips that
+/// disagree, at the better of the two polarities. A count of wrong signs
+/// rather than a correlation of the soft values, because it is then the same
+/// threshold whatever the gain.
+///
+/// A caller comparing this against a threshold has to compare neighbouring
+/// positions too. A sync word that opens with a run of identical bits keys
+/// alternating chips, and that pattern shifted a chip and turned upside down
+/// is itself: the 24-bit preamble of a 406 MHz beacon differs from its own
+/// shifted inverse in four chips of forty-eight, so a threshold alone
+/// accepts the alignment one chip early and every bit after it is rubbish.
+pub fn biphase_l_match(chips: &[f32], sync: &[bool]) -> Option<(usize, bool)> {
+    let want = sync.len() * 2;
+    if chips.len() < want {
+        return None;
+    }
+    let tail = &chips[chips.len() - want..];
+    let (mut upright, mut upside_down) = (0usize, 0usize);
+    for (i, chip) in tail.iter().enumerate() {
+        // The high chip opens a one and the low chip opens a zero.
+        let high = (i % 2 == 0) == sync[i / 2];
+        match high == (*chip > 0.0) {
+            true => upside_down += 1,
+            false => upright += 1,
+        }
+    }
+    Some(match upright <= upside_down {
+        true => (upright, false),
+        false => (upside_down, true),
+    })
+}
+
+/// Bits out of biphase-L chips, `inverted` as the sync word said.
+///
+/// A pair of chips at the same level is a chip that was misread, and the
+/// stronger of the two is the one to believe: the transition is in the
+/// middle of the bit, so the difference between the halves is the bit.
+pub fn biphase_l_bits(chips: &[f32], inverted: bool) -> BitBuffer {
+    let mut bits = BitBuffer::with_capacity(chips.len() / 2);
+    for pair in chips.chunks_exact(2) {
+        let step = pair[0] - pair[1];
+        bits.push((step > 0.0) != inverted);
+    }
+    bits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +337,58 @@ mod tests {
         let f = frame_from_preamble(&bits, MIN_PREAMBLE_BITS).expect("framing");
         assert_eq!(f.start, 5);
         assert!(f.preamble_bits >= 40, "found only {} bits", f.preamble_bits);
+    }
+
+    /// Chips as a transmitter keys them, and as a demodulator hands them
+    /// over: the high chip of a pair opens a one.
+    fn keyed(bits: &[bool]) -> Vec<f32> {
+        bits.iter()
+            .flat_map(|b| [*b, !*b])
+            .map(|high| match high {
+                true => 1.1,
+                false => -1.1,
+            })
+            .collect()
+    }
+
+    /// A sync word is found at its own alignment and nowhere else, either
+    /// way up, and the bits after it come back.
+    #[test]
+    fn a_sync_word_is_found_in_biphase_chips_either_way_up() {
+        let sync = [true, true, true, false, false, true, false, true];
+        let message = [true, false, false, true, true, false, true, false];
+        let mut air: Vec<f32> = vec![0.2, -0.2, 0.1, -0.1];
+        air.extend(keyed(&sync));
+        air.extend(keyed(&message));
+
+        let at = 4 + sync.len() * 2;
+        assert_eq!(biphase_l_match(&air[..at], &sync), Some((0, false)));
+        assert_eq!(biphase_l_match(&air[..at - 2], &sync), Some((8, false)), "two chips early");
+        assert_eq!(biphase_l_match(&air[..at + 2], &sync), Some((8, false)), "two chips late");
+
+        let read = biphase_l_bits(&air[at..], false);
+        assert_eq!(read.len(), message.len());
+        assert_eq!((0..read.len()).filter_map(|i| read.get(i)).collect::<Vec<_>>(), message);
+
+        // The same signal upside down says so, and the bits still come back.
+        let flipped: Vec<f32> = air.iter().map(|c| -c).collect();
+        assert_eq!(biphase_l_match(&flipped[..at], &sync), Some((0, true)));
+        let read = biphase_l_bits(&flipped[at..], true);
+        assert_eq!((0..read.len()).filter_map(|i| read.get(i)).collect::<Vec<_>>(), message);
+    }
+
+    /// A word of ones keys alternating chips, and that pattern one chip out
+    /// and upside down is itself but for the bits at the ends. This is why
+    /// a caller has to compare neighbouring positions rather than take the
+    /// first that passes a threshold.
+    #[test]
+    fn a_run_of_ones_reads_almost_as_well_one_chip_out() {
+        let sync: Vec<bool> = vec![true; 15];
+        let mut air = vec![-1.1f32];
+        air.extend(keyed(&sync));
+        assert_eq!(biphase_l_match(&air, &sync), Some((0, false)));
+        // Not merely close: one chip out and upside down, a run of ones is
+        // exactly itself, and no threshold can tell the two apart.
+        assert_eq!(biphase_l_match(&air[..air.len() - 1], &sync), Some((0, true)), "one chip out");
     }
 }

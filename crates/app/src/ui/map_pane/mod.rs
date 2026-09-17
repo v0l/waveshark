@@ -444,6 +444,9 @@ impl Map<'_> {
                         crate::tracks::Detail::MeshCore { role, .. } => {
                             (role.to_string(), theme::LEGEND)
                         }
+                        // The protocol said where it was and not what it is,
+                        // and the packet list is where its fields are.
+                        crate::tracks::Detail::Device => (dash.clone(), theme::LEGEND),
                     };
                     let kind = match a.kind() {
                         Kind::Aircraft => "air",
@@ -451,6 +454,7 @@ impl Map<'_> {
                         Kind::Vehicle => "land",
                         Kind::Station => "fixed",
                         Kind::Sonde => "balloon",
+                        Kind::Transmitter => "heard",
                     };
                     let text = [
                         (a.label.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),
