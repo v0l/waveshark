@@ -51,6 +51,7 @@ pub mod spectrum;
 pub mod squelch;
 pub mod ssb;
 pub mod stereo;
+pub mod subcarrier;
 pub mod tetra;
 pub mod tone;
 pub(crate) mod twolevel;

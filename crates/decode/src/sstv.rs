@@ -14,6 +14,7 @@
 //! colaclanth's Python `sstv` decoder, which is also what the capture test
 //! compares pictures with.
 
+use crate::linescan::luma;
 use dsp::tone::ToneMeter;
 
 /// Which order a mode sends its three channels in, and what they mean.
@@ -240,12 +241,6 @@ fn fill_gaps(row: &mut [u8], gaps: &[bool]) -> usize {
         }
     }
     holes
-}
-
-/// A pixel's brightness from its tone: 1500 Hz is black, 2300 Hz white.
-fn luma(hz: f64) -> u8 {
-    let v = ((hz - 1500.0) / 3.1372549).round();
-    v.clamp(0.0, 255.0) as u8
 }
 
 /// Where the calibration header ends, searching from the start of `audio`.
@@ -879,16 +874,5 @@ mod tests {
         let gaps = [true; 4];
         assert_eq!(fill_gaps(&mut row, &gaps), 4);
         assert_eq!(row, [7u8; 4]);
-    }
-
-    #[test]
-    fn black_is_1500_hz_and_white_is_2300() {
-        assert_eq!(luma(1500.0), 0);
-        assert_eq!(luma(2300.0), 255);
-        assert_eq!(luma(1900.0), 128);
-        // Anything outside the band is clamped rather than wrapped, so a sync
-        // pulse read as a pixel is black and not white.
-        assert_eq!(luma(1200.0), 0);
-        assert_eq!(luma(2500.0), 255);
     }
 }
