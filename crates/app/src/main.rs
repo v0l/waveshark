@@ -935,11 +935,11 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
     Ok(nodes::Publish { broker, spaces: session::DEFAULT_HA_SPACES.into(), buses: true })
 }
 
-/// `8931` or `127.0.0.1:8931`, for the MCP server's address.
+/// `8931` or `127.0.0.1:8931`, for a server's address.
 ///
-/// A bare port means loopback: an agent socket that carries the whole
-/// receiver should not be offered to a network by leaving a host out.
-#[cfg(feature = "mcp")]
+/// A bare port means loopback: a socket that drives the receiver should not
+/// be offered to a network by leaving a host out.
+///
 /// Where to serve something, or nowhere.
 ///
 /// A word for "nowhere" is an answer to the question the option asks rather
@@ -947,7 +947,6 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Listen(pub Option<std::net::SocketAddr>);
 
-#[cfg(feature = "mcp")]
 impl std::str::FromStr for Listen {
     type Err = String;
 
@@ -1104,6 +1103,13 @@ struct Args {
     /// which on a Bluetooth band is every handset walking past
     #[arg(long, value_name = "SPACES")]
     ha_spaces: Option<String>,
+    /// Serve a KISS TNC on this address, so packet software can use the
+    /// radio: a port, or host:port. Loopback unless a host is given. Off
+    /// unless this says otherwise, since it is also how a client keys the
+    /// transmitter
+    #[arg(long, value_name = "ADDR", default_value = "off")]
+    kiss_listen: Listen,
+
     /// Serve MCP on this address, so an agent can drive this receiver:
     /// a port, or host:port. Loopback unless a host is given. Served on
     /// 127.0.0.1:8931 unless this says otherwise, and `off` turns it off
@@ -1569,6 +1575,9 @@ fn main() -> eframe::Result<()> {
             // uses, and a port on 127.0.0.1 reaches no further than this
             // machine. A port already in use is said once and carried on
             // from, because it is not a reason to refuse to be a receiver.
+            if let Some(addr) = args.kiss_listen.0 {
+                app.serve_kiss(addr);
+            }
             #[cfg(feature = "mcp")]
             if let Some(addr) = args.mcp_listen.0 {
                 if let Err(e) = app.serve_mcp(addr) {

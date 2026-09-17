@@ -51,6 +51,7 @@ pub mod inmarsat;
 pub mod jpeg;
 #[cfg(feature = "tea")]
 pub mod keystream;
+pub mod kiss;
 pub mod linescan;
 pub mod lms6;
 pub mod lora;

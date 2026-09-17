@@ -655,6 +655,8 @@ pub enum Cmd {
     /// serving it. The listening socket outlives the graph, so turning it off
     /// only takes the stage out; the port is given up when the process ends.
     IqStream(Option<crate::chain::IqStreamPlan>),
+    /// Where to serve a KISS TNC, or `None` to serve none.
+    Kiss(Option<std::net::SocketAddr>),
     /// The scanner table, as the complete set for the same reason feeds are:
     /// the graph is rebuilt from a plan, so a change is the new table rather
     /// than an instruction to edit one row of it.
@@ -1258,6 +1260,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         fronts,
         feeds: Vec::new(),
         iqstream: None,
+        kiss: None,
         tx: None,
         tx_capture: None,
         scan: Default::default(),
@@ -2251,6 +2254,7 @@ impl Audio {
             transcribe_device: String::new(),
             feeds: Vec::new(),
             iqstream: None,
+            kiss: None,
             tx: None,
             tx_capture: None,
             scan: Default::default(),
@@ -2539,6 +2543,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // command.
             feeds: Vec::new(),
             iqstream: None,
+            kiss: None,
             tx: None,
             tx_capture: None,
             scan: Default::default(),
@@ -2893,6 +2898,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::IqStream(serving) => {
                 if serving != self.plan.iqstream {
                     self.plan.iqstream = serving;
+                    self.needs_rebuild = true;
+                }
+            }
+            Cmd::Kiss(addr) => {
+                if addr != self.plan.kiss {
+                    self.plan.kiss = addr;
                     self.needs_rebuild = true;
                 }
             }
@@ -3979,6 +3990,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         transcribe_model: String::new(),
         transcribe_device: String::new(),
         feeds: Vec::new(),
+        kiss: None,
         tx: None,
         tx_capture: None,
         settings: Default::default(),
