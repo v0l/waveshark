@@ -13,8 +13,8 @@ pub enum DriverKind {
     RtlSdr,
     HackRf,
     LimeSdr,
-    /// A tuner on another machine, reached over the network with iqstream.
-    IqStream,
+    /// A tuner on another machine, reached over the network.
+    Network,
     File,
     Synthetic,
     /// Several tuners on adjacent slices, presented as one wider radio.
@@ -27,7 +27,7 @@ impl DriverKind {
             Self::RtlSdr => "rtlsdr",
             Self::HackRf => "hackrf",
             Self::LimeSdr => "limesdr",
-            Self::IqStream => "iqstream",
+            Self::Network => "network",
             Self::File => "file",
             Self::Synthetic => "synthetic",
             Self::Combined => "combined",
@@ -214,6 +214,11 @@ pub struct DeviceInfo {
     /// HackRF's usable span is well under its nominal rate; the channelizer
     /// uses this to avoid detecting garbage at the band edges.
     pub usable_bandwidth_ratio: f32,
+    /// Whether the dial moves this device. False where the frequency belongs
+    /// to somebody else: a capture, or a network server fed by another
+    /// process's tuner. A driver's property rather than a driver kind's,
+    /// because rtl_tcp retunes and iqstream does not.
+    pub tunable: bool,
     /// Present only on a radio that transmits.
     pub tx: Option<TxInfo>,
 }
@@ -560,6 +565,7 @@ mod tuning_tests {
                     gain_stages: Vec::new(),
                     native_format: crate::SampleFormat::Cs8,
                     usable_bandwidth_ratio: 0.75,
+                    tunable: true,
                     tx: None,
                 },
                 center: Hz(100_000_000),

@@ -142,6 +142,7 @@ impl FileRadio {
             gain_stages: Vec::new(),
             native_format: SampleFormat::Cf32,
             usable_bandwidth_ratio: 1.0,
+            tunable: true,
             tx: Some(TxInfo {
                 // Anything: nothing is radiated, and refusing a frequency
                 // here would only stop a test being written.

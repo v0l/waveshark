@@ -693,8 +693,8 @@ impl App {
         // A radio on the network cannot be found by looking at the bus, so the
         // saved servers have to be registered before the list is built. Added
         // rather than set: the command line may already have put one there.
-        for (addr, name) in &s.streams {
-            crate::devices::add_stream(addr, name);
+        for r in &s.streams {
+            crate::devices::add_stream(r.proto, &r.addr, &r.label);
         }
         let devices = crate::devices::list();
         // The saved radio may not be plugged in any more, in which case the
@@ -779,8 +779,7 @@ impl App {
         let prefs = self.scope.prefs();
         let layers = self.map.map.layers.saved();
         let manual = self.chain.edit.manual;
-        let streams: Vec<(String, String)> =
-            crate::devices::streams().into_iter().map(|r| (r.addr, r.label)).collect();
+        let streams = crate::devices::streams();
         let ppm = self.ppm_by_device.clone();
         let offset = self.offset_by_device.clone();
         self.settings.edit(|s| {

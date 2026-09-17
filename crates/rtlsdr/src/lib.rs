@@ -17,7 +17,8 @@
 //! and doing it here means the channel carries ready-to-use buffers instead of
 //! forcing every downstream consumer to know about `cu8`.
 
-use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
+use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream};
+use common::rtl::{self, Tuner};
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use rtlsdr_sys as ffi;
@@ -108,32 +109,6 @@ pub fn enumerate() -> Vec<Enumerated> {
         .collect()
 }
 
-fn tuner_name(t: ffi::rtlsdr_tuner) -> &'static str {
-    match t.0 {
-        1 => "E4000",
-        2 => "FC0012",
-        3 => "FC0013",
-        4 => "FC2580",
-        5 => "R820T",
-        6 => "R828D",
-        _ => "unknown",
-    }
-}
-
-/// Tunable span per tuner, in hertz. These are the manufacturer figures that
-/// librtlsdr will actually accept, not the optimistic datasheet ones.
-fn tuner_ranges(t: ffi::rtlsdr_tuner) -> Vec<TunerRange> {
-    match t.0 {
-        // E4000 has a genuine hole around the 1100-1250 MHz IF region.
-        1 => vec![
-            TunerRange { range: Hz::mhz(52)..=Hz::mhz(1100), label: "low" },
-            TunerRange { range: Hz::mhz(1250)..=Hz::mhz(2200), label: "high" },
-        ],
-        5 | 6 => vec![TunerRange { range: Hz::mhz(24)..=Hz::mhz(1766), label: "main" }],
-        _ => vec![TunerRange { range: Hz::mhz(22)..=Hz::mhz(1100), label: "main" }],
-    }
-}
-
 pub struct RtlSdr {
     handle: Arc<Handle>,
     info: DeviceInfo,
@@ -181,7 +156,7 @@ impl RtlSdr {
         if n <= 0 {
             return Err(Error::UnsupportedTuner(format!(
                 "{} reports no gain steps",
-                tuner_name(tuner)
+                Tuner::from_code(tuner.0 as u32).name()
             )));
         }
         let mut raw_gains = vec![0i32; n as usize];
@@ -200,19 +175,10 @@ impl RtlSdr {
             kind: DriverKind::RtlSdr,
             id: if serial.is_empty() { format!("rtlsdr:{index}") } else { serial },
             label: label.trim().to_string(),
-            tuner: tuner_name(tuner).to_string(),
-            ranges: tuner_ranges(tuner),
-            // The RTL2832U accepts 225001-300000 and 900001-3200000 S/s, but
-            // above 2.4 MS/s most USB 2.0 host controllers cannot sustain the
-            // bulk rate and you get silent sample loss. These are the rates
-            // worth offering.
-            rates: [
-                240_000, 960_000, 1_024_000, 1_200_000, 2_048_000, 2_400_000, 2_560_000, 3_200_000,
-            ]
-            .into_iter()
-            .map(Sps)
-            .collect(),
-            rate_range: Sps(225_001)..=Sps(3_200_000),
+            tuner: Tuner::from_code(tuner.0 as u32).name().to_string(),
+            ranges: Tuner::from_code(tuner.0 as u32).ranges(),
+            rates: rtl::RATES.to_vec(),
+            rate_range: rtl::RATE_RANGE,
             gain_stages: vec![common::GainStage {
                 name: "tuner".to_string(),
                 label: "Tuner RF".to_string(),
@@ -224,10 +190,8 @@ impl RtlSdr {
                 auto: true,
             }],
             native_format: SampleFormat::Cu8,
-            // The RTL2832U has no analogue anti-alias filter worth the name;
-            // the outer ~20% of the span is contaminated by the decimation
-            // filter's transition and by the DC spur's skirt.
-            usable_bandwidth_ratio: 0.80,
+            usable_bandwidth_ratio: rtl::USABLE_BANDWIDTH_RATIO,
+            tunable: true,
             tx: None,
         };
 

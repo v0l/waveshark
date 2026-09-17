@@ -17,6 +17,9 @@ pub struct Entry {
     pub rates: std::ops::RangeInclusive<Sps>,
     /// Where to reach it, for a radio that is not on this machine.
     pub addr: Option<String>,
+    /// What is listening there. Set with `addr` and nothing else: the port
+    /// cannot say which server answers on it.
+    pub proto: Option<remote::Proto>,
     /// The capture this entry replays, for a receiver that is a file.
     pub path: Option<std::path::PathBuf>,
     /// The one frequency this device delivers, when the tuner is somebody
@@ -34,7 +37,17 @@ impl Entry {
         label: String,
         rates: std::ops::RangeInclusive<Sps>,
     ) -> Self {
-        Self { kind, index, label, rates, addr: None, path: None, pinned: None, parts: Vec::new() }
+        Self {
+            kind,
+            index,
+            label,
+            rates,
+            addr: None,
+            proto: None,
+            path: None,
+            pinned: None,
+            parts: Vec::new(),
+        }
     }
 }
 
@@ -64,6 +77,7 @@ fn combinations(hw: &[Entry]) -> Vec<Entry> {
             // span, and a narrower one is one of the radios on its own.
             rates: span..=span,
             addr: None,
+            proto: None,
             path: None,
             pinned: None,
             parts,
@@ -148,6 +162,7 @@ impl Capture {
             label: format!("{name} ({:.1}s)", self.seconds),
             rates: self.rate..=self.rate,
             addr: None,
+            proto: None,
             path: Some(self.path.clone()),
             // A recording was taken at one frequency and cannot be moved off
             // it. Retuning would leave the dial saying one thing while the
@@ -202,7 +217,7 @@ pub fn captures() -> Vec<Capture> {
     CAPTURES.lock().clone()
 }
 
-/// iqstream servers to offer alongside whatever is plugged in.
+/// Network tuners to offer alongside whatever is plugged in.
 ///
 /// A network radio cannot be discovered by looking at the bus, so the list is
 /// configuration: it comes from the session file and the command line, and the
@@ -216,6 +231,9 @@ static STREAMS: parking_lot::Mutex<Vec<Remote>> = parking_lot::Mutex::new(Vec::n
 /// one on the mast has to remember which host is which.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
+    /// Which server is at that address, since the port does not say: iqstream
+    /// and rtl_tcp both take 1234.
+    pub proto: remote::Proto,
     pub addr: String,
     /// Empty when it has never been named, in which case the address is shown.
     pub label: String,
@@ -227,22 +245,22 @@ pub fn streams() -> Vec<Remote> {
 
 /// Add one server, or rename one already there. Returns the address as it will
 /// be listed, which is not always what was typed: a bare host gains a port.
-pub fn add_stream(addr: &str, label: &str) -> Option<String> {
-    let a = iqnet::parse_addr(addr)?;
+pub fn add_stream(proto: remote::Proto, addr: &str, label: &str) -> Option<String> {
+    let a = proto.parse_addr(addr)?;
     let label = label.trim().to_string();
     let mut v = STREAMS.lock();
-    match v.iter_mut().find(|r| r.addr == a) {
+    match v.iter_mut().find(|r| r.addr == a && r.proto == proto) {
         // A name typed the second time is a rename, not a duplicate: the
         // address is the identity.
         Some(r) if !label.is_empty() => r.label = label,
         Some(_) => {}
-        None => v.push(Remote { addr: a.clone(), label }),
+        None => v.push(Remote { proto, addr: a.clone(), label }),
     }
     Some(a)
 }
 
-pub fn remove_stream(addr: &str) {
-    STREAMS.lock().retain(|r| r.addr != addr);
+pub fn remove_stream(proto: remote::Proto, addr: &str) {
+    STREAMS.lock().retain(|r| !(r.addr == addr && r.proto == proto));
 }
 
 /// Ask a server what it is streaming so the entry can carry its rate and its
@@ -253,25 +271,36 @@ pub fn remove_stream(addr: &str) {
 /// else is switched off.
 fn stream_entry(index: usize, r: &Remote) -> Entry {
     let name = if r.label.is_empty() { r.addr.clone() } else { r.label.clone() };
-    match iqnet::probe(&r.addr) {
+    match r.proto.probe(&r.addr) {
+        // A server that owns its own tuning says where it is and what rate it
+        // is running; one this end tunes says neither, and the entry offers
+        // the whole of what the tuner will do.
         Ok(p) => Entry {
-            kind: DriverKind::IqStream,
+            kind: DriverKind::Network,
             index,
-            label: format!("{name} {:.3} MHz", p.center.as_f64() / 1e6),
-            rates: p.rate..=p.rate,
+            label: match p.center {
+                Some(c) => format!("{name} {:.3} MHz", c.as_f64() / 1e6),
+                None => format!("{name} ({})", p.tuner),
+            },
+            rates: match p.rate {
+                Some(rate) => rate..=rate,
+                None => RTL_RATES,
+            },
             addr: Some(p.addr),
+            proto: Some(r.proto),
             path: None,
-            pinned: Some(p.center),
+            pinned: p.center.filter(|_| !p.tunable),
             parts: Vec::new(),
         },
         Err(e) => {
-            tracing::debug!("iqstream {}: {e}", r.addr);
+            tracing::debug!("{} {}: {e}", r.proto, r.addr);
             Entry {
-                kind: DriverKind::IqStream,
+                kind: DriverKind::Network,
                 index,
                 label: format!("{name} (offline)"),
                 rates: RTL_RATES,
                 addr: Some(r.addr.clone()),
+                proto: Some(r.proto),
                 path: None,
                 pinned: None,
                 parts: Vec::new(),
@@ -292,9 +321,9 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
         DriverKind::HackRf => Ok(Box::new(hackrf::HackRfDevice::open(e.index)?)),
         #[cfg(feature = "limesdr")]
         DriverKind::LimeSdr => Ok(Box::new(limesdr::LimeSdr::open(e.index)?)),
-        DriverKind::IqStream => {
+        DriverKind::Network => {
             let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
-            Ok(Box::new(iqnet::IqNet::open(addr)?))
+            e.proto.ok_or(Error::NoDevice)?.open(addr)
         }
         DriverKind::Combined => {
             let mut kids = Vec::with_capacity(e.parts.len());
@@ -585,17 +614,32 @@ mod tests {
 
     #[test]
     fn a_network_radio_is_listed_from_configuration_rather_than_the_bus() {
+        use remote::Proto;
         // The same server written two ways is one server, or a session that
         // saves what it loads grows a duplicate radio at every start.
-        assert_eq!(add_stream("radarpi.test", "Loft").as_deref(), Some("radarpi.test:1234"));
-        assert_eq!(add_stream("radarpi.test:1234", "Mast").as_deref(), Some("radarpi.test:1234"));
+        let iqs = Proto::IqStream;
+        assert_eq!(add_stream(iqs, "radarpi.test", "Loft").as_deref(), Some("radarpi.test:1234"));
+        assert_eq!(
+            add_stream(iqs, "radarpi.test:1234", "Mast").as_deref(),
+            Some("radarpi.test:1234")
+        );
         let mine: Vec<Remote> =
             streams().into_iter().filter(|r| r.addr == "radarpi.test:1234").collect();
         assert_eq!(mine.len(), 1);
         // The second name renames the radio rather than adding another.
         assert_eq!(mine[0].label, "Mast");
-        assert!(add_stream("  ", "").is_none());
-        remove_stream("radarpi.test:1234");
+        assert_eq!(mine[0].proto, Proto::IqStream);
+        // The same address on the other protocol is another radio: 1234 is
+        // both servers' default port and only one of them is there.
+        add_stream(Proto::RtlTcp, "radarpi.test:1234", "Mast rtl_tcp");
+        let both: Vec<Remote> =
+            streams().into_iter().filter(|r| r.addr == "radarpi.test:1234").collect();
+        assert_eq!(both.len(), 2);
+        assert!(add_stream(iqs, "  ", "").is_none());
+        // Forgetting one leaves the other: the address is not the identity.
+        remove_stream(Proto::RtlTcp, "radarpi.test:1234");
+        assert_eq!(streams().iter().filter(|r| r.addr == "radarpi.test:1234").count(), 1);
+        remove_stream(iqs, "radarpi.test:1234");
         assert!(!streams().iter().any(|r| r.addr == "radarpi.test:1234"));
     }
 

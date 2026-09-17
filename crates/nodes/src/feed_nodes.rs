@@ -38,6 +38,10 @@ pub struct FeedKind {
     pub name: &'static str,
     /// Where it is usually served, so an address can be given without one.
     pub default_port: u16,
+    /// The program that serves it, and where to read about it. A format name
+    /// says nothing about what has to be running at the far end.
+    pub server: &'static str,
+    pub url: &'static str,
     /// What the far end is tuned to. Everything here carries Mode S so far;
     /// a feed of something else brings its own frequency.
     pub center_hz: u64,
@@ -55,6 +59,8 @@ const MODES_HZ: u64 = 1_090_000_000;
 pub static BEAST: FeedKind = FeedKind {
     name: "beast",
     default_port: 30005,
+    server: "dump1090 or readsb",
+    url: "https://github.com/wiedehopf/readsb",
     center_hz: MODES_HZ,
     bandwidth_hz: MODES_BAND_HZ,
     parse: parse_beast,
@@ -63,6 +69,8 @@ pub static BEAST: FeedKind = FeedKind {
 pub static AVR: FeedKind = FeedKind {
     name: "avr",
     default_port: 30002,
+    server: "dump1090 or readsb",
+    url: "https://github.com/wiedehopf/readsb",
     center_hz: MODES_HZ,
     bandwidth_hz: MODES_BAND_HZ,
     parse: parse_avr,

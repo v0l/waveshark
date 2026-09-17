@@ -314,7 +314,6 @@ dependencies = [
  "hound",
  "httpc",
  "image",
- "iqnet",
  "libc",
  "limesdr",
  "nodes",
@@ -324,6 +323,7 @@ dependencies = [
  "pipeline",
  "poll-promise",
  "rayon",
+ "remote",
  "reqwest",
  "rfd",
  "rmcp",
@@ -3219,17 +3219,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
-name = "iqnet"
-version = "0.3.0"
-dependencies = [
- "common",
- "crossbeam-channel",
- "iqstream",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "iqstream"
 version = "0.1.0"
 source = "git+https://github.com/v0l/iqstream#bf4b8b5ae2ae0276e357c0ec15b2048e3f1a8f8c"
@@ -5002,6 +4991,17 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "remote"
+version = "0.3.0"
+dependencies = [
+ "common",
+ "crossbeam-channel",
+ "iqstream",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "renderdoc-sys"

@@ -180,6 +180,7 @@ impl HackRfDevice {
             ],
             native_format: SampleFormat::Cs8,
             usable_bandwidth_ratio: USABLE_RATIO,
+            tunable: true,
             tx: Some(TxInfo {
                 ranges: vec![TunerRange {
                     range: Hz(FREQ_MIN)..=Hz(FREQ_MAX),

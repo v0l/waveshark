@@ -59,7 +59,9 @@ const UPDATE_W: f32 = 72.0;
 /// here, so the × beside them is the only way to be rid of them.
 #[derive(Clone, Debug)]
 enum Forget {
-    Remote(String),
+    /// The protocol as well as the address: two servers may be at the same
+    /// one, since iqstream and rtl_tcp share a default port.
+    Remote(remote::Proto, String),
     Capture(std::path::PathBuf),
 }
 
@@ -171,9 +173,9 @@ impl App {
                         // here too: nothing else in the interface knows they
                         // exist.
                         let forgettable = d
-                            .addr
-                            .clone()
-                            .map(Forget::Remote)
+                            .proto
+                            .zip(d.addr.clone())
+                            .map(|(p, a)| Forget::Remote(p, a))
                             .or_else(|| d.path.clone().map(Forget::Capture));
                         match forgettable {
                             Some(what) => {
@@ -256,7 +258,7 @@ impl App {
         }
         if let Some(what) = forget {
             match what {
-                Forget::Remote(addr) => crate::devices::remove_stream(&addr),
+                Forget::Remote(proto, addr) => crate::devices::remove_stream(proto, &addr),
                 Forget::Capture(path) => crate::devices::remove_capture(&path),
             }
             let c = ui.ctx().clone();
