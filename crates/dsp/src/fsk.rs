@@ -480,6 +480,176 @@ impl BitSync {
     }
 }
 
+/// Narrow-shift two-level FSK on complex baseband: a correlator at each
+/// tone, and a bit clock.
+///
+/// [`BitSync`] discriminates and slices, which wants a shift of about the
+/// baud or more and a stream that is balanced between the two tones. RTTY is
+/// neither: 170 Hz of shift at 45 baud is a modulation index near four, and
+/// the line rests on the mark tone between overs, so the slow mean a
+/// discriminator centres on walks onto the mark and the slicer then reads
+/// noise as data.
+///
+/// A correlator pair has no such reference to lose. Each tone is integrated
+/// over one symbol and the stronger wins, exactly as [`crate::afsk`] tells
+/// 1200 Hz from 2200 Hz, except that the tones here are a shift either side
+/// of the channel centre rather than audio frequencies. What comes out is
+/// symbols; the start and stop framing above is the caller's.
+///
+/// The tones are where the operator tuned, and there is no search: measured
+/// on a keyed 170 Hz shift at 45.45 baud, an over reads whole up to 25 Hz
+/// off channel and loses characters beyond that.
+pub struct TonePair {
+    mark: ComplexTone,
+    space: ComplexTone,
+    sps: f32,
+    /// How far the clock is taken to be through a symbol when a transition
+    /// is seen, in samples.
+    after_edge: f32,
+    since: f32,
+    last_sign: bool,
+    min_level: f32,
+    margin: f32,
+    clock_gain: f32,
+}
+
+impl TonePair {
+    /// Tones a `shift_hz` apart, straddling the middle of the stream, keyed
+    /// at `baud`. The mark is the higher of the two, which is how every
+    /// RTTY station keys and how a shift is quoted.
+    pub fn new(rate: f64, baud: f64, shift_hz: f64) -> Self {
+        let sps = rate / baud;
+        // Two cycles of the shift, or a whole symbol where that is shorter.
+        //
+        // A boxcar correlator is blind at every multiple of the reciprocal
+        // of its window, so a window of a whole symbol resolves a 45 baud
+        // station to about 45 Hz and a station tuned 40 Hz off its channel
+        // lands in the first null and reads as neither tone. Two cycles of
+        // the shift puts the *other* tone in a null, where it belongs, and
+        // widens the room a mistuned station has: measured on a keyed 170 Hz
+        // shift at 45.45 baud, a whole symbol reads nothing 25 Hz off and
+        // this reads the over whole.
+        let window = (sps.round() as usize).min((2.0 * rate / shift_hz) as usize).max(2);
+        Self {
+            mark: ComplexTone::new(shift_hz / 2.0, rate, window),
+            space: ComplexTone::new(-shift_hz / 2.0, rate, window),
+            sps: sps as f32,
+            // A correlator is a sliding window ending at the sample it
+            // reports, so its verdict changes about half a window after the
+            // tone did. Counting from there, the end of the symbol, where
+            // the window covers that symbol and nothing else, is a symbol
+            // less half a window away.
+            after_edge: (window as f64 / 2.0).min(sps - 1.0).max(0.0) as f32,
+            since: 0.0,
+            last_sign: true,
+            // Both correlators are normalised by the window, so this is a
+            // level in the same units as the input samples rather than a
+            // number that changes with the rate.
+            min_level: 1e-5,
+            margin: DEFAULT_MARGIN,
+            clock_gain: 0.35,
+        }
+    }
+
+    /// How far apart the two correlators must be to have decided anything.
+    /// See [`DEFAULT_MARGIN`].
+    pub fn with_margin(mut self, margin: f32) -> Self {
+        self.margin = margin;
+        self
+    }
+
+    /// Four samples a symbol, below which the clock has nothing to work
+    /// with and the correlators no longer resolve the two tones.
+    pub fn usable(&self) -> bool {
+        self.sps >= 4.0
+    }
+
+    pub fn reset(&mut self) {
+        self.mark.reset();
+        self.space.reset();
+        self.since = 0.0;
+        self.last_sign = true;
+    }
+
+    /// Decide a symbol at every bit instant in this block of baseband.
+    pub fn process(&mut self, iq: &[C32], out: &mut Vec<crate::afsk::Symbol>) {
+        if !self.usable() {
+            return;
+        }
+        for &x in iq {
+            let m = self.mark.push(x);
+            let s = self.space.push(x);
+            let sign = m > s;
+            if sign != self.last_sign {
+                self.since += self.clock_gain * (self.after_edge - self.since);
+                self.last_sign = sign;
+            }
+            self.since += 1.0;
+            if self.since < self.sps {
+                continue;
+            }
+            self.since -= self.sps;
+            let sum = m + s;
+            let quiet = sum < self.min_level || (m - s).abs() < self.margin * sum;
+            out.push(crate::afsk::Symbol { mark: sign, quiet });
+        }
+    }
+}
+
+/// How much one correlator must beat the other by, as a fraction of the two
+/// together, before the symbol has been decided.
+///
+/// This is what keeps an asynchronous framer above from reading noise. Over
+/// noise the two correlators are independent and this ratio is spread evenly
+/// across the whole range, so a threshold of a half calls about half of all
+/// noise symbols undecided, and a character needs seven in a row. A keyed
+/// tone beats the other correlator outright even when the station is
+/// mistuned by a quarter of the shift.
+pub const DEFAULT_MARGIN: f32 = 0.5;
+
+/// One tone correlator over complex baseband: a sliding integration against
+/// a reference at `freq`, whose magnitude says how much of that tone is
+/// there. The complex twin of [`crate::afsk`]'s, and it needs no quadrature
+/// pair because the input already has both.
+struct ComplexTone {
+    step: f64,
+    phase: f64,
+    hist: Vec<C32>,
+    pos: usize,
+    sum: C32,
+    scale: f32,
+}
+
+impl ComplexTone {
+    fn new(freq: f64, rate: f64, window: usize) -> Self {
+        Self {
+            step: -std::f64::consts::TAU * freq / rate,
+            phase: 0.0,
+            hist: vec![C32::new(0.0, 0.0); window],
+            pos: 0,
+            sum: C32::new(0.0, 0.0),
+            scale: 1.0 / window as f32,
+        }
+    }
+
+    fn push(&mut self, x: C32) -> f32 {
+        let (s, c) = self.phase.sin_cos();
+        self.phase = (self.phase + self.step).rem_euclid(std::f64::consts::TAU);
+        let v = x * C32::new(c as f32, s as f32);
+        self.sum += v - self.hist[self.pos];
+        self.hist[self.pos] = v;
+        self.pos = (self.pos + 1) % self.hist.len();
+        self.sum.norm_sqr() * self.scale * self.scale
+    }
+
+    fn reset(&mut self) {
+        self.hist.fill(C32::new(0.0, 0.0));
+        self.sum = C32::new(0.0, 0.0);
+        self.pos = 0;
+        self.phase = 0.0;
+    }
+}
+
 /// Key `bits` as two-level FSK at `baud`, for tests and for anything that
 /// wants to make a signal.
 pub fn modulate(bits: &[bool], rate: f64, baud: f64, deviation_hz: f64, amp: f32) -> Vec<C32> {
@@ -671,6 +841,59 @@ mod tests {
         // the tuning error, not a correction of it: the loop only needs the
         // mean to be close enough that the slicer is not biased.
         assert!((sync.offset_hz() - 900.0).abs() < 150.0, "{} Hz", sync.offset_hz());
+    }
+
+    /// A narrow shift at a low baud, which is RTTY: 170 Hz apart at 45.45
+    /// baud is where a discriminator gives up and the correlator pair does
+    /// not. The station is mistuned by 40 Hz, a quarter of the shift, which
+    /// is about as far out as an operator leaves it.
+    #[test]
+    fn the_tone_pair_reads_a_narrow_shift() {
+        let (rate, baud, shift) = (8_000.0, 45.45, 170.0);
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let bits: Vec<bool> = (0..200)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed & 1 != 0
+            })
+            .collect();
+        let iq = modulate(&bits, rate, baud, shift / 2.0, 0.5);
+        let mut ph = 0.0f64;
+        let iq: Vec<C32> = iq
+            .iter()
+            .map(|s| {
+                ph += std::f64::consts::TAU * 40.0 / rate;
+                s * C32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+
+        let mut tp = TonePair::new(rate, baud, shift);
+        assert!(tp.usable());
+        let mut got = Vec::new();
+        for block in iq.chunks(512) {
+            tp.process(block, &mut got);
+        }
+        assert!(got.len() >= 198, "{} symbols out of 200", got.len());
+        let levels: Vec<bool> = got.iter().map(|s| s.mark).collect();
+        let want = &bits[4..190];
+        let at = (0..levels.len().saturating_sub(want.len()))
+            .find(|&k| levels[k..k + want.len()] == *want)
+            .expect("the keyed symbols are not in what came out");
+        assert!(at < 8, "it took {at} symbols to line up");
+        assert!(got.iter().all(|s| !s.quiet), "a keyed carrier read as silence");
+    }
+
+    /// An empty channel is silence rather than a run of marks, which is what
+    /// an asynchronous framer above needs to know the line is resting.
+    #[test]
+    fn the_tone_pair_calls_an_empty_channel_quiet() {
+        let mut tp = TonePair::new(8_000.0, 45.45, 170.0);
+        let mut got = Vec::new();
+        tp.process(&vec![C32::new(0.0, 0.0); 8_000], &mut got);
+        assert!(got.len() > 40, "{} symbols in a second", got.len());
+        assert!(got.iter().all(|s| s.quiet), "silence read as signal");
     }
 
     /// Four samples a symbol is the floor, and below it the demodulator
