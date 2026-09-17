@@ -87,6 +87,7 @@ pub mod tetra;
 #[cfg(feature = "ffmpeg")]
 pub mod transcode;
 pub mod twotone;
+pub mod uat;
 pub mod vdl2;
 pub mod video_channels;
 pub mod vocoder;

@@ -650,6 +650,277 @@ impl ComplexTone {
     }
 }
 
+/// One framing a [`SyncDetector`] looks for: a sync word and the payload
+/// that follows it.
+#[derive(Clone, Copy, Debug)]
+pub struct SyncPattern {
+    /// The sync word, in the order it is keyed, in the low `bits` bits.
+    pub word: u64,
+    /// How long the sync word is, at most 64.
+    pub bits: u32,
+    /// Payload bits that follow it, fixed by the framing.
+    pub payload_bits: usize,
+    /// Sync bits allowed to be wrong and the word still be this one.
+    pub max_errors: u32,
+}
+
+impl SyncPattern {
+    fn mask(&self) -> u64 {
+        if self.bits >= 64 { u64::MAX } else { (1u64 << self.bits) - 1 }
+    }
+}
+
+/// A payload read off the air behind a sync word.
+#[derive(Clone, Debug)]
+pub struct SyncBurst {
+    /// Which of the detector's patterns matched.
+    pub pattern: usize,
+    /// Sync bits that were wrong.
+    pub errors: u32,
+    pub bits: Vec<bool>,
+    /// Input sample the sync word started at.
+    pub at_sample: u64,
+    /// Input samples the sync word and the payload together occupied.
+    pub len_samples: usize,
+}
+
+/// A pattern matched, waiting for its payload to arrive.
+#[derive(Clone, Copy)]
+struct Pending {
+    pattern: usize,
+    errors: u32,
+    /// Resampled index of the first payload bit's sample.
+    first: u64,
+    /// Resampled index of the last one.
+    last: u64,
+    /// The threshold this frame's bits are sliced against, measured off the
+    /// sync word rather than off the stream: a payload that is mostly one
+    /// tone drags a running mean onto itself, and the sync word is the one
+    /// place in the frame where both levels are known.
+    mid: f32,
+    at_sample: u64,
+}
+
+/// Two-level FSK carrying fixed-length frames behind a sync word.
+///
+/// [`BitSync`] recovers a clock from the signal and hands back bits with no
+/// framing; that wants four samples a symbol. A link keyed near a megabit
+/// does not get four samples a symbol from a receiver running at a couple of
+/// megasamples, so this takes the other approach: discriminate, resample to
+/// exactly two samples a bit, and correlate a sync word against the hard
+/// decisions at each of the two phases. Two samples a bit is the floor, and
+/// what UAT at 1.041667 Mbit/s leaves at 2.4 MS/s.
+///
+/// Nothing here knows what it is reading. It is given sync words, payload
+/// lengths and a baud; UAT's two framings are one configuration of it.
+pub struct SyncDetector {
+    rate: f64,
+    baud: f64,
+    patterns: Vec<SyncPattern>,
+    /// Resampled samples per input sample.
+    step: f64,
+    /// Input samples per resampled sample, for reporting a frame's place in
+    /// the stream it was read from.
+    per_out: f64,
+    acc: f64,
+    prev: C32,
+    last_f: f32,
+    /// Slow mean of the discriminator, which is the tuning error between
+    /// this receiver and the transmitter, and the threshold a sync word is
+    /// hard-decided against.
+    dc: f32,
+    dc_alpha: f32,
+    ring: Vec<f32>,
+    mask: usize,
+    /// Resampled samples written since the detector was built.
+    idx: u64,
+    /// Hard decisions, one register per phase of the two samples a bit.
+    reg: [u64; 2],
+    pending: Vec<Pending>,
+    blank_until: u64,
+    in_sample: u64,
+}
+
+/// How many matches may be waiting for their payloads at once.
+///
+/// A 36-bit sync word allowing four wrong bits matches noise about once in a
+/// million samples, so a second match inside a 4.4 ms uplink frame is rare
+/// and a third rarer still; the cap only stops a pathological signal growing
+/// the list without limit.
+const MAX_PENDING: usize = 4;
+
+impl SyncDetector {
+    pub fn new(rate: f64, baud: f64, patterns: Vec<SyncPattern>) -> Self {
+        let longest =
+            patterns.iter().map(|p| p.payload_bits + p.bits as usize).max().unwrap_or(1024);
+        let cap = (2 * longest + 64).next_power_of_two();
+        Self {
+            rate,
+            baud,
+            patterns,
+            step: 2.0 * baud / rate,
+            per_out: rate / (2.0 * baud),
+            acc: 0.0,
+            prev: C32::new(1.0, 0.0),
+            last_f: 0.0,
+            dc: 0.0,
+            // Sixty-four bits, as elsewhere in this module: long enough that
+            // a sync word cannot pull it, short enough to follow a tuner.
+            dc_alpha: 1.0 / 128.0,
+            ring: vec![0.0; cap],
+            mask: cap - 1,
+            idx: 0,
+            reg: [0; 2],
+            pending: Vec::new(),
+            blank_until: 0,
+            in_sample: 0,
+        }
+    }
+
+    /// Two input samples a bit is the floor: below it the two phases are the
+    /// same phase and there is nothing to correlate.
+    pub fn usable(&self) -> bool {
+        self.rate / self.baud >= 2.0
+    }
+
+    pub fn reset(&mut self) {
+        self.acc = 0.0;
+        self.prev = C32::new(1.0, 0.0);
+        self.last_f = 0.0;
+        self.dc = 0.0;
+        self.ring.fill(0.0);
+        self.idx = 0;
+        self.reg = [0; 2];
+        self.pending.clear();
+        self.blank_until = 0;
+        self.in_sample = 0;
+    }
+
+    /// Read `input`, appending every frame whose sync word matched.
+    pub fn process(&mut self, input: &[C32], out: &mut Vec<SyncBurst>) {
+        self.process_valid(input, out, &|_| true);
+    }
+
+    /// The same, with `accept` deciding which frames are real.
+    ///
+    /// A frame `accept` believes blanks the air it occupied, so a sync word
+    /// found inside a payload cannot cut a frame in half. A frame it rejects
+    /// blanks nothing, because the evidence that a match was noise is the
+    /// check `accept` runs and there is none here.
+    pub fn process_valid(
+        &mut self,
+        input: &[C32],
+        out: &mut Vec<SyncBurst>,
+        accept: &dyn Fn(&SyncBurst) -> bool,
+    ) {
+        if !self.usable() {
+            return;
+        }
+        for &x in input {
+            let d = x * self.prev.conj();
+            self.prev = x;
+            let f = if d.norm_sqr() > 0.0 { d.arg() } else { 0.0 };
+            let before = self.acc;
+            self.acc += self.step;
+            let mut k = 1.0;
+            while self.acc >= 1.0 {
+                // Where between the last input sample and this one the
+                // output sample falls.
+                let t = ((k - before) / self.step).clamp(0.0, 1.0) as f32;
+                let v = self.last_f + (f - self.last_f) * t;
+                self.push(v, out, accept);
+                self.acc -= 1.0;
+                k += 1.0;
+            }
+            self.last_f = f;
+            self.in_sample += 1;
+        }
+    }
+
+    fn push(&mut self, v: f32, out: &mut Vec<SyncBurst>, accept: &dyn Fn(&SyncBurst) -> bool) {
+        let n = self.idx;
+        self.ring[(n as usize) & self.mask] = v;
+        self.idx = n + 1;
+        self.dc += self.dc_alpha * (v - self.dc);
+        let phase = (n & 1) as usize;
+        self.reg[phase] = (self.reg[phase] << 1) | u64::from(v > self.dc);
+
+        self.complete(n, out, accept);
+        if n < self.blank_until || self.pending.len() >= MAX_PENDING {
+            return;
+        }
+        for (i, p) in self.patterns.iter().enumerate() {
+            if n + 1 < 2 * u64::from(p.bits) {
+                continue;
+            }
+            let errors = ((self.reg[phase] ^ p.word) & p.mask()).count_ones();
+            if errors > p.max_errors {
+                continue;
+            }
+            let Some(mid) = self.sync_mid(n, p) else { continue };
+            let first = n + 2;
+            let pending = Pending {
+                pattern: i,
+                errors,
+                first,
+                last: n + 2 * p.payload_bits as u64,
+                mid,
+                // The sync word began two samples a bit ago, counted back
+                // through the resampler into the stream that was handed in.
+                at_sample: self
+                    .in_sample
+                    .saturating_sub((2.0 * f64::from(p.bits) * self.per_out) as u64),
+            };
+            self.pending.push(pending);
+            break;
+        }
+    }
+
+    /// The level halfway between the two tones, measured over the sync word
+    /// whose bits are known.
+    fn sync_mid(&self, n: u64, p: &SyncPattern) -> Option<f32> {
+        let (mut mark, mut space) = (0.0f32, 0.0f32);
+        let (mut marks, mut spaces) = (0u32, 0u32);
+        for k in 0..u64::from(p.bits) {
+            let v = self.ring[((n - 2 * k) as usize) & self.mask];
+            if (p.word >> k) & 1 == 1 {
+                mark += v;
+                marks += 1;
+            } else {
+                space += v;
+                spaces += 1;
+            }
+        }
+        if marks == 0 || spaces == 0 {
+            return None;
+        }
+        Some((mark / marks as f32 + space / spaces as f32) / 2.0)
+    }
+
+    fn complete(&mut self, n: u64, out: &mut Vec<SyncBurst>, accept: &dyn Fn(&SyncBurst) -> bool) {
+        let Some(i) = self.pending.iter().position(|p| p.last == n) else { return };
+        let p = self.pending.remove(i);
+        let count = ((p.last - p.first) / 2 + 1) as usize;
+        let bits = (0..count)
+            .map(|k| self.ring[((p.first + 2 * k as u64) as usize) & self.mask] > p.mid)
+            .collect();
+        let pattern = self.patterns[p.pattern];
+        let burst = SyncBurst {
+            pattern: p.pattern,
+            errors: p.errors,
+            bits,
+            at_sample: p.at_sample,
+            len_samples: ((pattern.bits as usize + pattern.payload_bits) as f64 * self.rate
+                / self.baud) as usize,
+        };
+        if accept(&burst) {
+            self.blank_until = p.last + 1;
+            self.pending.retain(|q| q.first > p.last);
+            out.push(burst);
+        }
+    }
+}
+
 /// Key `bits` as two-level FSK at `baud`, for tests and for anything that
 /// wants to make a signal.
 pub fn modulate(bits: &[bool], rate: f64, baud: f64, deviation_hz: f64, amp: f32) -> Vec<C32> {
@@ -906,6 +1177,135 @@ mod tests {
         let mut bits = Vec::new();
         slow.process(&vec![C32::new(0.5, 0.0); 1000], &mut bits);
         assert!(bits.is_empty());
+    }
+
+    /// A megabit link read at two samples a bit, which is what a 978 MHz
+    /// UAT frame is at 2.4 MS/s.
+    mod sync {
+        use super::super::*;
+
+        const RATE: f64 = 2_400_000.0;
+        const BAUD: f64 = 1_041_667.0;
+        const SYNC: u64 = 0xEAC_DDA_4E2;
+
+        fn pattern(payload_bits: usize, max_errors: u32) -> SyncPattern {
+            SyncPattern { word: SYNC, bits: 36, payload_bits, max_errors }
+        }
+
+        fn bits_of(word: u64, n: u32) -> Vec<bool> {
+            (0..n).rev().map(|k| (word >> k) & 1 == 1).collect()
+        }
+
+        fn noise(n: usize, seed: u64, amp: f32) -> Vec<C32> {
+            let mut s = seed;
+            let mut rng = move || {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((s >> 33) as f32 / (1u64 << 30) as f32 - 1.0) * amp
+            };
+            (0..n).map(|_| C32::new(rng(), rng())).collect()
+        }
+
+        /// A payload keyed behind its sync word comes back bit for bit.
+        #[test]
+        fn a_frame_behind_a_sync_word_reads_back_whole() {
+            let payload: Vec<bool> = (0..240).map(|i| (i * 7 + i / 3) % 3 != 0).collect();
+            let mut air = bits_of(SYNC, 36);
+            air.extend_from_slice(&payload);
+            let iq = modulate(&air, RATE, BAUD, 312_500.0, 1.0);
+
+            let mut det = SyncDetector::new(RATE, BAUD, vec![pattern(240, 4)]);
+            let mut out = Vec::new();
+            det.process(&noise(4096, 1, 0.01), &mut out);
+            det.process(&iq, &mut out);
+            det.process(&noise(4096, 2, 0.01), &mut out);
+
+            assert_eq!(out.len(), 1, "one frame off the air");
+            assert_eq!(out[0].pattern, 0);
+            assert_eq!(out[0].errors, 0);
+            assert_eq!(out[0].bits, payload);
+        }
+
+        /// The two framings a UAT receiver looks for are told apart by their
+        /// sync words, and each reads only its own length.
+        #[test]
+        fn two_patterns_are_told_apart_by_their_sync_words() {
+            const UPLINK: u64 = 0x153_225_B1D;
+            let payload: Vec<bool> = (0..384).map(|i| i % 5 < 2).collect();
+            let mut air = bits_of(UPLINK, 36);
+            air.extend_from_slice(&payload);
+            let iq = modulate(&air, RATE, BAUD, 312_500.0, 1.0);
+
+            let mut det = SyncDetector::new(
+                RATE,
+                BAUD,
+                vec![
+                    pattern(384, 4),
+                    SyncPattern { word: UPLINK, bits: 36, payload_bits: 384, max_errors: 4 },
+                ],
+            );
+            let mut out = Vec::new();
+            det.process(&noise(4096, 3, 0.01), &mut out);
+            det.process(&iq, &mut out);
+            det.process(&noise(4096, 4, 0.01), &mut out);
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].pattern, 1, "the ground station's word, not the aircraft's");
+            assert_eq!(out[0].bits, payload);
+        }
+
+        /// A frame a mile off the tuned frequency still reads: the sync word
+        /// is sliced against a running mean, so a tuning error moves both
+        /// tones together and cancels.
+        #[test]
+        fn a_frame_off_frequency_still_reads() {
+            let payload: Vec<bool> = (0..240).map(|i| i % 4 < 2).collect();
+            let mut air = bits_of(SYNC, 36);
+            air.extend_from_slice(&payload);
+            // 40 kHz of tuning error, which is 40 ppm at 978 MHz.
+            let iq: Vec<C32> = modulate(&air, RATE, BAUD, 312_500.0, 1.0)
+                .iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let ph = std::f64::consts::TAU * 40_000.0 * i as f64 / RATE;
+                    x * C32::new(ph.cos() as f32, ph.sin() as f32)
+                })
+                .collect();
+            let mut det = SyncDetector::new(RATE, BAUD, vec![pattern(240, 4)]);
+            let mut out = Vec::new();
+            det.process(&noise(4096, 5, 0.01), &mut out);
+            det.process(&iq, &mut out);
+            det.process(&noise(4096, 6, 0.01), &mut out);
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].bits, payload);
+        }
+
+        /// Noise is not a frame. A 36-bit word allowing four wrong bits
+        /// matches noise about once in a million samples, which over two
+        /// seconds at 2.4 MS/s is a handful of candidates and no more; what
+        /// throws them away is the check the caller runs, so this pins the
+        /// number reaching that check rather than nought.
+        #[test]
+        fn noise_offers_only_a_handful_of_candidates() {
+            let mut det = SyncDetector::new(RATE, BAUD, vec![pattern(240, 4)]);
+            let mut out = Vec::new();
+            for block in 0..48 {
+                det.process(&noise(100_000, 100 + block, 0.2), &mut out);
+            }
+            // Measured on this stream: 4 candidates in 4.8 million samples.
+            assert!(out.len() <= 12, "{} candidates off noise", out.len());
+            // And none of them with a sync word that matched exactly.
+            assert_eq!(out.iter().filter(|b| b.errors == 0).count(), 0);
+        }
+
+        /// Fewer than two samples a bit is not a stream this can read, and
+        /// it says so rather than returning bits it did not see.
+        #[test]
+        fn it_refuses_a_stream_below_two_samples_a_bit() {
+            let mut det = SyncDetector::new(1_500_000.0, BAUD, vec![pattern(240, 4)]);
+            assert!(!det.usable());
+            let mut out = Vec::new();
+            det.process(&noise(100_000, 7, 0.5), &mut out);
+            assert_eq!(out.len(), 0);
+        }
     }
 
     #[test]

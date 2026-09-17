@@ -67,6 +67,7 @@ pub mod survey_nodes;
 pub mod tetra_nodes;
 pub mod twotone_nodes;
 pub mod tx_nodes;
+pub mod uat_nodes;
 pub mod vdl2_nodes;
 pub mod video_nodes;
 pub mod wefax_nodes;
@@ -217,6 +218,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     // anywhere rather than only where the table would have.
     (modes_nodes::DESC, modes_nodes::build),
     (ais_nodes::DESC, ais_nodes::build),
+    (uat_nodes::DESC, uat_nodes::build),
     (gsm_nodes::DESC, gsm_nodes::build),
     (mic_in::DESC, mic_in::build),
     (sstv_nodes::DESC, sstv_nodes::build),
