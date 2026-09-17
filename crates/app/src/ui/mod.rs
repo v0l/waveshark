@@ -93,6 +93,8 @@ pub struct App {
     log: state::LogState,
     survey: state::SurveyState,
     map: map_pane::MapState,
+    /// The .sub files this machine holds, as the panel lists them.
+    scripts: scripts_pane::ScriptsState,
     sats: state::SatsState,
     calls: state::CallsState,
     transcript: state::TranscriptState,
@@ -567,6 +569,7 @@ impl Default for App {
             survey: state::SurveyState::default(),
             sats: state::SatsState::default(),
             map: map_pane::MapState::default(),
+            scripts: scripts_pane::ScriptsState::default(),
             rt: background_runtime(),
             calls: state::CallsState::default(),
             transcript: state::TranscriptState::default(),
@@ -1513,6 +1516,29 @@ impl App {
             match a {
                 strip::Action::Channels => self.send_channels(),
                 strip::Action::Open(w) => self.open = Some(w),
+            }
+        }
+    }
+
+    /// Draw the scripts panel, and act on what it asked for.
+    ///
+    /// Nothing at all when it is hidden, like the strip: the panel is the
+    /// list, so putting it away is not drawing it.
+    fn scripts_view(&mut self, ui: &mut egui::Ui) {
+        if !self.settings.read(|s| s.scripts) {
+            return;
+        }
+        let acts = scripts_pane::Scripts {
+            st: &mut self.scripts,
+            cmds: &mut self.cmds,
+            center: self.center,
+            acts: Vec::new(),
+        }
+        .show(ui);
+        for a in acts {
+            match a {
+                scripts_pane::Action::Hide => self.settings.edit(|s| s.scripts = false),
+                scripts_pane::Action::Open(w) => self.open = Some(w),
             }
         }
     }
@@ -2650,6 +2676,10 @@ impl eframe::App for App {
         {
             let _s = tracing::info_span!("strip").entered();
             self.strip_view(ui);
+        }
+        {
+            let _s = tracing::info_span!("scripts").entered();
+            self.scripts_view(ui);
         }
         {
             let _s = tracing::info_span!("log").entered();
