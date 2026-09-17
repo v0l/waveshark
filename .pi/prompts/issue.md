@@ -22,11 +22,17 @@ With a number given, `gh issue view N` and take it.
 
 ## Worktree
 
-One issue, one worktree, one branch, off `master`:
+One issue, one worktree, one branch, off `master`. The issue number goes at
+the front of both names, so a directory listing says which issue each tree is
+for and an abandoned one can be traced back:
 
 ```sh
-git worktree add -b <short-name> ../super-radio-<short-name> master
+git worktree add -b <N>-<short-name> ../super-radio-<N>-<short-name> master
 ```
+
+For issue 18 "Read Morse off the air" that is `18-cw` and
+`../super-radio-18-cw`. A worktree without its number is a worktree to move
+before doing any work in it.
 
 Work there and nowhere else. Never commit to `master` and never touch another
 worktree's files.
