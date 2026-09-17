@@ -21,6 +21,8 @@ the code is in the commit log.
 - The recordings table filters by talkgroup, caller, system or frequency, and
   a row opens its own conversation. Overs are saved as the Opus they were
   recorded as, through a file dialog.
+- COSPAS-SARSAT 406 MHz distress beacons: EPIRB, PLB and ELT identities, with
+  their position on the map.
 - Ford and Renault tyre pressure sensors, with pressure, temperature and
   whether the wheel is moving.
 - Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
