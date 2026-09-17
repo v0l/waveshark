@@ -340,6 +340,15 @@ pub struct Plan {
     /// like every other stage rather than living in a second graph the
     /// interface never sees.
     pub tx: Option<TxPlan>,
+    /// The walk over a band, if one was asked for: where it goes, how long
+    /// it waits and what it does with what it hears.
+    ///
+    /// A plan value rather than an edit because the walk moves the dial, so
+    /// every step rebuilds the graph: a switch kept only as an edit would
+    /// have to survive the rebuild it caused. The ignore list is the
+    /// exception and stays an edit, since it is the operator's and outlives
+    /// any one walk.
+    pub scan: BandScan,
     /// Which calls are heard, which pictures are watched, where the survey
     /// is written and who it is uploaded as.
     ///
@@ -349,6 +358,34 @@ pub struct Plan {
     /// and a survey is an open file. [`Receiver::apply_settings`] is the one
     /// thing that hands them to the nodes.
     pub settings: PlanSettings,
+}
+
+/// A walk over a band: what the operator asked the dial to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandScan {
+    pub running: bool,
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    /// Zero for a step as wide as the span the radio is sampling, which is
+    /// what covers the band without gaps.
+    pub step_hz: f64,
+    pub dwell_s: f64,
+    pub on_hit: nodes::OnHit,
+}
+
+impl Default for BandScan {
+    fn default() -> Self {
+        Self {
+            running: false,
+            // The 70 cm band, which is where a receiver with nothing else
+            // asked of it is most likely to hear something.
+            lo_hz: 430e6,
+            hi_hz: 440e6,
+            step_hz: 0.0,
+            dwell_s: 2.0,
+            on_hit: nodes::OnHit::Hold,
+        }
+    }
 }
 
 /// What the receiver is doing that no stage setting can carry.
@@ -1360,7 +1397,13 @@ impl Receiver {
                 // interface can read it, and said out loud so it is not
                 // silently dropped.
                 pipeline::event::Event::Request(request) => {
-                    self.warnings.push(format!("{stage} asks: {}", describe(&request)));
+                    // A retune the walk asked for is answered rather than
+                    // reported: the dial moving is what it is for, and a
+                    // warning per step would fill the line the operator
+                    // reads faults on.
+                    if !matches!(request, pipeline::Request::Retune { .. }) {
+                        self.warnings.push(format!("{stage} asks: {}", describe(&request)));
+                    }
                     self.requests.push((stage, request));
                 }
                 _ => {}
@@ -1377,9 +1420,8 @@ impl Receiver {
 
     /// What decoders asked of the receiver since the last call.
     ///
-    /// Nothing reads this yet: a decoder can ask the receiver to move the
-    /// dial, and what it asked is kept here for whatever does that.
-    #[allow(dead_code)]
+    /// Read by the radio thread, which answers a retune from the walk over a
+    /// band and leaves the rest for whatever can do them.
     pub fn take_requests(&mut self) -> Vec<(String, pipeline::Request)> {
         std::mem::take(&mut self.requests)
     }
@@ -2337,6 +2379,11 @@ impl Receiver {
         Some(self.beacondb_node()?.status())
     }
 
+    /// What the walk over a band is doing and what it has turned up.
+    pub fn scan_status(&self) -> Option<nodes::ScanStatus> {
+        Some(self.stage::<nodes::BandScanNode>(derived::SCAN)?.status())
+    }
+
     pub fn homeassistant_status(&self) -> Option<nodes::HomeAssistantStatus> {
         Some(self.homeassistant_node()?.status())
     }
@@ -2681,6 +2728,8 @@ pub mod derived {
     pub const CALL_LOG: u64 = Patch::DERIVED_BASE + 27;
     /// Everything somebody wrote, on its way to a file a day.
     pub const MESSAGES: u64 = Patch::DERIVED_BASE + 28;
+    /// The walk over a band, reading what each step turned up.
+    pub const SCAN: u64 = Patch::DERIVED_BASE + 30;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -3120,6 +3169,21 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // And the house is a fourth, on the packets half of its feed.
         p.connect(Source::Stage(rows, 0), (derived::HOMEASSISTANT, 0));
 
+        // The walk over a band is a fifth: what a step turned up is whatever
+        // reached the bus on it, so the walk asks the same question the
+        // packet list answers rather than searching for energy itself. Drawn
+        // whether or not it is walking, like the survey, so starting one is a
+        // setting on a stage that is already there.
+        let mut w = Settings::new();
+        w.insert("running".into(), pipeline::ParamValue::Bool(plan.scan.running));
+        w.insert("lo_hz".into(), pipeline::ParamValue::Float(plan.scan.lo_hz));
+        w.insert("hi_hz".into(), pipeline::ParamValue::Float(plan.scan.hi_hz));
+        w.insert("step_hz".into(), pipeline::ParamValue::Float(plan.scan.step_hz));
+        w.insert("dwell_s".into(), pipeline::ParamValue::Float(plan.scan.dwell_s));
+        w.insert("on_hit".into(), pipeline::ParamValue::Text(plan.scan.on_hit.label().into()));
+        let walk = p.add_derived(derived::SCAN, "band_scan", w);
+        p.connect(Source::Stage(rows, 0), (walk, 0));
+
         // And what somebody wrote is a fifth. On, like the packet log: the
         // bursts these were decoded from are already being written down, and
         // a line of text beside them costs nothing and is the half anybody
@@ -3214,6 +3278,12 @@ pub fn operator_owns(st: &crate::patch::Stage, name: &str, base: &crate::patch::
     // file written by an older build stops overriding what the record says.
     if st.id == derived::CALL_LOG || st.id == derived::TRANSCRIBE {
         return !matches!(name, "enabled" | "model" | "device" | "dir");
+    }
+    // Where the walk goes and what it does there is the plan's, written
+    // again on every step; what the operator never wants to see again is
+    // theirs and outlives the walk that found it.
+    if st.id == derived::SCAN {
+        return name == "ignore";
     }
     // A fader's level and mute are the operator's wherever the fader is;
     // its name and whether it is speech follow the strip.
@@ -4601,6 +4671,7 @@ pub(crate) mod tests {
             transcribe_device: String::new(),
             feeds: Vec::new(),
             tx: None,
+            scan: Default::default(),
             settings: Default::default(),
         }
     }
@@ -4613,6 +4684,72 @@ pub(crate) mod tests {
         p.fronts.clear();
         p.edits = crate::patch::Edits::diff(&patch, &derived_patch(&p), operator_owns);
         p
+    }
+
+    /// The walk is a consumer of the packet bus like the survey, drawn
+    /// whether or not it is walking, and it takes the band off the plan.
+    #[test]
+    fn the_band_walk_is_drawn_on_the_bus_and_carries_the_plan() {
+        let mut plan = plan(2_400_000.0, Hz::mhz(433));
+        plan.scan = BandScan {
+            running: true,
+            lo_hz: 430e6,
+            hi_hz: 440e6,
+            step_hz: 2e6,
+            dwell_s: 0.2,
+            on_hit: nodes::OnHit::Log,
+        };
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver that walks");
+        let topo = rx.topology();
+        let walk =
+            topo.nodes.iter().find(|n| n.kind == "band_scan").expect("the walk is in the graph");
+        let rows = topo.nodes.iter().find(|n| n.kind == "dedupe").expect("the dedupe");
+        assert!(feeds(rows, walk), "the walk reads the bus after the duplicates are dropped");
+        let st = rx.scan_status().expect("the walk reports itself");
+        assert!(st.running);
+        // 430 to 440 MHz in 2 MHz steps: five centres, 431 to 439.
+        assert_eq!(st.stops, 5);
+        assert_eq!(st.found.len(), 0);
+
+        // And switched off it is still there, so starting one is a setting
+        // rather than a rebuild.
+        plan.scan.running = false;
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver that does not walk");
+        assert!(rx.topology().nodes.iter().any(|n| n.kind == "band_scan"));
+        assert_eq!(rx.scan_status().map(|s| s.running), Some(false));
+    }
+
+    /// A walk asks the dial to move, and the ask reaches the radio thread
+    /// through the requests rather than through a warning.
+    #[test]
+    fn a_walking_receiver_asks_the_dial_to_move() {
+        let mut plan = plan(2_400_000.0, Hz::mhz(433));
+        plan.scan = BandScan {
+            running: true,
+            lo_hz: 430e6,
+            hi_hz: 440e6,
+            step_hz: 2e6,
+            dwell_s: 0.2,
+            on_hit: nodes::OnHit::Log,
+        };
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver that walks");
+        // Blocks of a tenth of a second of silence at the plan's rate: the
+        // walk is paced by the graph's own clock, so a quiet band still
+        // steps.
+        let quiet = vec![C32::new(0.0, 0.0); 240_000];
+        let mut asked: Vec<f64> = Vec::new();
+        for _ in 0..12 {
+            rx.process(&quiet).expect("a block");
+            asked.extend(rx.take_requests().into_iter().filter_map(|(_, r)| match r {
+                pipeline::Request::Retune { center_hz } => Some(center_hz),
+                _ => None,
+            }));
+        }
+        // The first block asks for the first centre, then one every settle
+        // plus dwell: 0.24 s and 0.2 s, which is five blocks of a tenth.
+        assert_eq!(asked, vec![431e6, 433e6, 435e6], "asked for {asked:?}");
+        assert_eq!(rx.take_warnings().len(), 0, "a step is not a warning");
+        assert_eq!(rx.scan_status().map(|s| s.steps), Some(3));
     }
 
     #[test]

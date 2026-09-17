@@ -302,6 +302,15 @@ pub struct Session {
     /// Whether observations are submitted to beacondb.net. No credential:
     /// beaconDB takes them from anybody, so this is the whole setting.
     pub beacondb_on: bool,
+    /// The walk over a band: where it goes, how long it waits on a step, and
+    /// whether it stops on what it hears or writes it down and carries on.
+    /// A step of zero is one as wide as the span the radio is sampling.
+    pub scan_on: bool,
+    pub scan_lo_mhz: f64,
+    pub scan_hi_mhz: f64,
+    pub scan_step_khz: f64,
+    pub scan_dwell_s: f64,
+    pub scan_hold: bool,
     /// Where every device heard is published, for Home Assistant to build.
     /// The password is in the clear here for the same reason the WiGLE token
     /// is: a keyring this program has no other use for.
@@ -423,6 +432,12 @@ impl Default for Session {
             wigle_donate: false,
             wigle_on: false,
             beacondb_on: false,
+            scan_on: false,
+            scan_lo_mhz: 430.0,
+            scan_hi_mhz: 440.0,
+            scan_step_khz: 0.0,
+            scan_dwell_s: 2.0,
+            scan_hold: true,
             ha_host: String::new(),
             ha_port: String::new(),
             ha_user: String::new(),
@@ -492,6 +507,28 @@ impl Session {
         match self.survey_path.trim() {
             "" => crate::packetlog::PacketLog::default_survey_path(),
             path => Some(PathBuf::from(path)),
+        }
+    }
+
+    /// The walk over a band as it was typed, in the units the receiver works
+    /// in. A low edge above the high one is a band nobody can walk, and the
+    /// pair is put back in order here so the lamp on the card is the only
+    /// place that has to say so.
+    pub fn band_scan(&self) -> crate::chain::BandScan {
+        let (lo, hi) = match self.scan_lo_mhz <= self.scan_hi_mhz {
+            true => (self.scan_lo_mhz, self.scan_hi_mhz),
+            false => (self.scan_hi_mhz, self.scan_lo_mhz),
+        };
+        crate::chain::BandScan {
+            running: self.scan_on,
+            lo_hz: lo * 1e6,
+            hi_hz: hi * 1e6,
+            step_hz: self.scan_step_khz * 1e3,
+            dwell_s: self.scan_dwell_s,
+            on_hit: match self.scan_hold {
+                true => nodes::OnHit::Hold,
+                false => nodes::OnHit::Log,
+            },
         }
     }
 
@@ -691,6 +728,12 @@ impl Session {
             wigle_donate: kv.get("wigle_donate").map(|v| *v == "true").unwrap_or(false),
             wigle_on: kv.get("wigle_on").map(|v| *v == "true").unwrap_or(false),
             beacondb_on: kv.get("beacondb_on").map(|v| *v == "true").unwrap_or(false),
+            scan_on: kv.get("scan_on").map(|v| *v == "true").unwrap_or(false),
+            scan_lo_mhz: f("scan_lo_mhz", d.scan_lo_mhz),
+            scan_hi_mhz: f("scan_hi_mhz", d.scan_hi_mhz),
+            scan_step_khz: f("scan_step_khz", d.scan_step_khz).max(0.0),
+            scan_dwell_s: f("scan_dwell_s", d.scan_dwell_s).clamp(0.1, 60.0),
+            scan_hold: kv.get("scan_hold").map(|v| *v == "true").unwrap_or(d.scan_hold),
             ha_host: kv.get("ha_host").map(|v| v.to_string()).unwrap_or_default(),
             ha_port: kv.get("ha_port").map(|v| v.to_string()).unwrap_or_default(),
             ha_user: kv.get("ha_user").map(|v| v.to_string()).unwrap_or_default(),
@@ -808,6 +851,14 @@ impl Session {
         if self.beacondb_on {
             s.push_str("beacondb_on = true\n");
         }
+        if self.scan_on {
+            s.push_str("scan_on = true\n");
+        }
+        s.push_str(&format!("scan_lo_mhz = {}\n", self.scan_lo_mhz));
+        s.push_str(&format!("scan_hi_mhz = {}\n", self.scan_hi_mhz));
+        s.push_str(&format!("scan_step_khz = {}\n", self.scan_step_khz));
+        s.push_str(&format!("scan_dwell_s = {}\n", self.scan_dwell_s));
+        s.push_str(&format!("scan_hold = {}\n", self.scan_hold));
         s.push_str(&format!("ha_buses = {}\n", self.ha_buses));
         if self.ha_on {
             s.push_str("ha_on = true\n");
@@ -929,6 +980,12 @@ mod tests {
             wigle_on: true,
             beacondb_on: true,
             beacondb_lookup: true,
+            scan_on: true,
+            scan_lo_mhz: 144.0,
+            scan_hi_mhz: 146.0,
+            scan_step_khz: 250.0,
+            scan_dwell_s: 3.5,
+            scan_hold: false,
             ha_host: "homeassistant.local".into(),
             ha_port: "1883".into(),
             ha_user: "waveshark".into(),
