@@ -157,16 +157,6 @@ section = "hamradio"
 # on a machine that cannot get them.
 depends = ["librtlsdr0 | librtlsdr2", "libasound2 | libasound2t64", "libusb-1.0-0"]
 
-[package.metadata.packager.dmg]
-# The window the operator sees when the image opens: the bundle on the left,
-# Applications on the right, which is the whole instruction.
-window-size = { width = 660, height = 400 }
-app-position = { x = 180, y = 170 }
-application-folder-position = { x = 480, y = 170 }
-
-# The RPM, which cargo-packager does not build. Run from the workspace root as
-# `cargo generate-rpm -p crates/app --target <triple>`, which rewrites the
-# `target/release` prefix below to the target's directory.
 [package.metadata.generate-rpm]
 name = "waveshark"
 assets = [

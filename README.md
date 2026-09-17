@@ -70,6 +70,17 @@ Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
 is built without the driver. Only the macOS build shows pictures off a
 multiplex, because it is the only one whose ffmpeg is new enough.
 
+The macOS app is signed but not notarised, so the first open needs a right
+click and Open, or:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/WaveShark.app
+```
+
+The app carries its own copies of ffmpeg, librtlsdr and LimeSuite. The bare
+macOS binary does not: it reads them from Homebrew, so `brew install ffmpeg
+librtlsdr limesuite` before running that one.
+
 From source:
 
 ```sh
