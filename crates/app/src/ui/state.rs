@@ -1153,6 +1153,13 @@ impl FilePick {
     }
 }
 
+/// What a frequency list dialog came back with: channels to merge into the
+/// bank, or a sentence saying why there are none.
+pub(super) enum ListIo {
+    Read(Box<crate::memory::formats::Read>, crate::memory::formats::Format),
+    Said(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

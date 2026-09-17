@@ -82,6 +82,7 @@ base64 = "0.22"
 # lot of unread axis, which deflate takes to a fraction of their size.
 flate2 = "1.1"
 reqwest.workspace = true
+csv.workspace = true
 httpc.workspace = true
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 

@@ -209,6 +209,10 @@ pub struct App {
     /// The memory bank, and the group the next save goes into.
     memory: crate::memory::Memory,
     memory_group: String,
+    /// A frequency list being read or written, while its dialog is up, and
+    /// what the last one came to.
+    memory_io: Option<poll_promise::Promise<state::ListIo>>,
+    memory_note: String,
     /// Where the packet log is being pointed, while it is being typed. Apart
     /// from the setting so a half-written path does not move the log on every
     /// keystroke.
@@ -664,6 +668,8 @@ impl Default for App {
             scanners: crate::scanners::Scanners::default(),
             memory: Default::default(),
             memory_group: crate::memory::UNGROUPED.into(),
+            memory_io: None,
+            memory_note: String::new(),
             log_dir_edit: String::new(),
             station_edit: None,
             agent: asks,
@@ -2802,6 +2808,7 @@ impl eframe::App for App {
         // is open. Both used to be read only under --soak, so the call list
         // and the transcript filled in a soak run and stayed empty in use.
         self.poll_capture(ui.ctx());
+        self.poll_memory_io();
         self.pick_file.poll(&mut self.cmds);
         // The `.sub` dialog lands its file as a command like any other.
         self.audio.sub_pick.poll(&mut self.cmds);
