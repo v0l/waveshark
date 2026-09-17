@@ -1633,6 +1633,7 @@ mod tests {
                 report: common::ReportDetail::Bare,
                 identity: None,
                 iq: None,
+                pulses: None,
                 audio: None,
                 airtime: None,
             },

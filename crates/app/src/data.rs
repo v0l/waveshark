@@ -911,7 +911,7 @@ fn publish_airports(v: Vec<Airport>) {
     *AIRPORTS.write() = Vec::leak(v);
 }
 
-fn cache() -> Option<&'static Cache> {
+pub(crate) fn cache() -> Option<&'static Cache> {
     static CACHE: OnceLock<Option<Cache>> = OnceLock::new();
     CACHE
         .get_or_init(|| match Cache::at_default_dir() {

@@ -22,9 +22,10 @@ the code is in the commit log.
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
 - Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.
 - Flipper `.sub` files on the transmit strip: a saved capture or key file keyed
-  as it stands, at the frequency the file names. RAW plays its recorded
-  timings; Princeton, CAME, Nice FLO, Holtek, Ansonic, BETT, Linear and
-  LinearDelta3 key files are re-encoded from their key.
+  as it stands, at the frequency the file names. A heard burst is written back
+  out as one from the packet list, as a key file where a remote was decoded.
+  RAW plays its recorded timings; Princeton, CAME, Nice FLO, Holtek, Ansonic,
+  BETT, Linear and LinearDelta3 key files are re-encoded from their key.
 - Script repositories as a dataset: a git branch's tree downloaded into the
   cache and listed by extension. The NullSec Flipper Suite is the first
   repository in the table.

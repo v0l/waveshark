@@ -410,6 +410,71 @@ pub(super) struct LogState {
     pub print_since: Instant,
     /// The packet the signal identification modal is open on, if it is.
     pub sigid: Option<DecodeRecord>,
+    /// The `.sub` file being written out of a packet, if one is.
+    pub sub_save: SubSave,
+}
+
+/// Writing one packet out as a Flipper `.sub` file.
+///
+/// The text is built before the dialog opens, so what is saved is the packet
+/// the operator was looking at rather than whichever row the list has
+/// scrolled to by the time they choose a name.
+#[derive(Default)]
+pub(super) struct SubSave {
+    going: Option<(String, poll_promise::Promise<Option<std::path::PathBuf>>)>,
+    /// The last file written or the reason none was, for the line under the
+    /// button. Kept until the next save, so a path stays readable.
+    pub said: Option<String>,
+}
+
+impl SubSave {
+    /// Ask where to write `text`, offering `stem` as the name.
+    pub fn ask(&mut self, ctx: &egui::Context, text: String, stem: String) {
+        if self.going.is_some() {
+            return;
+        }
+        let start = crate::chain::default_sub_dir();
+        let _ = std::fs::create_dir_all(&start);
+        let ctx = ctx.clone();
+        self.going = Some((
+            text,
+            poll_promise::Promise::spawn_thread("save sub", move || {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Write this burst as a Flipper .sub file")
+                    .set_directory(&start)
+                    .set_file_name(format!("{stem}.sub"))
+                    .add_filter("Flipper SubGhz", &["sub"])
+                    .save_file();
+                // Nothing is drawing while the dialog is up, so the frame
+                // that reads this has to be asked for.
+                ctx.request_repaint();
+                picked
+            }),
+        ));
+    }
+
+    /// Write the file, once the dialog has said where.
+    pub fn poll(&mut self) {
+        if self.going.as_ref().is_none_or(|(_, p)| p.ready().is_none()) {
+            return;
+        }
+        let Some((text, promise)) = self.going.take() else {
+            return;
+        };
+        let Some(path) = promise.block_and_take() else {
+            return;
+        };
+        // The dialog's own name is taken as given except for the suffix: a
+        // file without it is one the Flipper will not list.
+        let path = match path.extension() {
+            Some(e) if e.eq_ignore_ascii_case("sub") => path,
+            _ => path.with_extension("sub"),
+        };
+        self.said = Some(match std::fs::write(&path, text) {
+            Ok(()) => format!("wrote {}", path.display()),
+            Err(e) => format!("could not write {}: {e}", path.display()),
+        });
+    }
 }
 
 /// What a search for a modem on the serial ports found, or is still looking
@@ -615,6 +680,7 @@ impl Default for LogState {
             origin: Instant::now(),
             selected: None,
             sigid: None,
+            sub_save: SubSave::default(),
             inspector_h: 116.0 + super::BURST_VIEW_H + 24.0,
             open: true,
             print: false,

@@ -1002,6 +1002,11 @@ pub struct DecodeRecord {
     /// The burst's samples, for the view that shows a packet, when the
     /// front end kept them.
     pub iq: Option<std::sync::Arc<common::IqBurst>>,
+    /// The keying as the front end timed it, for a burst that arrived as
+    /// widths rather than as bytes. What a `.sub` file is written from: for
+    /// a keyed remote the widths are the signal, and the samples are far
+    /// too much to keep for every row.
+    pub pulses: Option<std::sync::Arc<common::Package>>,
     /// What was said, for a voice protocol. This is the payload of such a
     /// transmission: the bytes of a vocoded stream say nothing to anybody.
     pub audio: Option<std::sync::Arc<common::Speech>>,
@@ -1070,6 +1075,7 @@ impl DecodeRecord {
             report: common::ReportDetail::Bare,
             identity: None,
             iq: None,
+            pulses: None,
             audio: None,
             airtime: None,
         }
@@ -6465,7 +6471,10 @@ mod front_end_tests {
                     id: "stub".into(),
                     label: "Stub".into(),
                     tuner: "none".into(),
-                    ranges: vec![TunerRange { label: "rx", range: Hz(1_000_000)..=Hz(6_000_000_000) }],
+                    ranges: vec![TunerRange {
+                        label: "rx",
+                        range: Hz(1_000_000)..=Hz(6_000_000_000),
+                    }],
                     rates: Vec::new(),
                     rate_range: Sps(2_000_000)..=Sps(20_000_000),
                     gain_stages: vec![
