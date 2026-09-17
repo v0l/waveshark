@@ -31,6 +31,7 @@ pub mod dmr_bp;
 pub mod droneid;
 pub mod dtmf;
 pub mod dvbt;
+pub mod eas;
 pub mod elrs;
 pub mod epirb;
 pub mod flex;

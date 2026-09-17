@@ -54,6 +54,11 @@ pub struct Tones {
 /// Bell 202: 1200 Hz and 2200 Hz at 1200 baud, which is AX.25 on 2 m.
 pub const BELL202: Tones = Tones { mark_hz: MARK_HZ, space_hz: SPACE_HZ, baud: BAUD };
 
+/// SAME: the header bursts an EAS or NOAA Weather Radio alert opens with.
+/// The only keying here whose mark is the *higher* tone, which is what the
+/// standard says and what the bit decisions above it assume.
+pub const SAME: Tones = Tones { mark_hz: 2083.3, space_hz: 1562.5, baud: 520.83 };
+
 /// CCIR fast FSK: 1200 Hz and 1800 Hz at 1200 baud, phase continuous, which
 /// is what MDC-1200 and MPT1327 key inside an FM voice channel.
 pub const FFSK1200: Tones = Tones { mark_hz: 1200.0, space_hz: 1800.0, baud: BAUD };

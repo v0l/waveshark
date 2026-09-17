@@ -23,6 +23,7 @@ pub mod dmr_nodes;
 pub mod droneid_nodes;
 pub mod dsp_nodes;
 pub mod dvbt_nodes;
+pub mod eas_nodes;
 pub mod elrs_nodes;
 pub mod epirb_nodes;
 pub mod feed_nodes;
@@ -238,6 +239,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
     (morse_nodes::DESC, morse_nodes::build),
+    (eas_nodes::DESC, eas_nodes::build),
     (mdc_nodes::DESC, mdc_nodes::build),
     (twotone_nodes::DESC, twotone_nodes::build),
     (nrf24_nodes::DESC, nrf24_nodes::build),
