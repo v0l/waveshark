@@ -260,6 +260,18 @@ signal will not allow exactness, pin a floor and a ceiling with a comment
 saying which. A skip for an absent fixture prints the name and
 `run testdata/fetch.sh`.
 
+`tools/coverage.sh` says which lines no test reaches. It runs the tests under
+`cargo llvm-cov` once and reports three ways: a per-crate table, `gaps` for the
+files with the most unread lines, and an HTML report under `target/llvm-cov`.
+`gaps` and `crates` read the last run's data, so they cost nothing to repeat.
+
+Take a number with the corpus in mind. Without `testdata/` the fixture-gated
+tests skip and their decoders read far colder than they are, which is why the
+script counts the absent captures and says so. Instrumentation also slows the
+signal path enough that a stage measuring its own throughput can miss its
+asserted count, so the run is `--no-fail-fast` and a failure is reported after
+the table rather than losing it.
+
 Tests that time the audio chain check `cfg!(debug_assertions)` and skip, so run
 those in release. The rest need no release build: the dev profile compiles the
 signal path at `opt-level = 3`.
