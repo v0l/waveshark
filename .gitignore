@@ -34,3 +34,5 @@ __pycache__/
 # Speech model weights fetched at run time, never committed.
 crates/app/whisper-base.en/model.safetensors
 crates/app/whisper-base.en/tokenizer.json
+# The same model fetched from the workspace root, where a test run leaves it.
+whisper-base.en/
