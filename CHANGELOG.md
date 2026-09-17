@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- A band walk in the scanner settings: the dial steps past the span, holds on
+  what it hears or logs it and moves on, and each find can be ignored.
 - Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
 - Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.

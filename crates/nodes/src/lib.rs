@@ -46,6 +46,7 @@ pub mod pocsag_nodes;
 pub mod protocol;
 pub mod rs41_nodes;
 pub mod rtty_nodes;
+pub mod scan_nodes;
 pub mod scope_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
@@ -106,6 +107,7 @@ pub use pocsag_nodes::PocsagNode;
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 pub use rs41_nodes::Rs41Node;
 pub use rtty_nodes::RttyNode;
+pub use scan_nodes::{BandScanNode, Found, Key, OnHit, ScanStatus};
 pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use sink_nodes::{
     AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode,
@@ -239,6 +241,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (scope_nodes::DESC, scope_nodes::build),
     (capture_nodes::DESC, capture_nodes::build),
     (survey_nodes::DESC, survey_nodes::build),
+    (scan_nodes::DESC, scan_nodes::build),
     (wigle_nodes::DESC, wigle_nodes::build),
     (beacondb_nodes::DESC, beacondb_nodes::build),
     (homeassistant_nodes::DESC, homeassistant_nodes::build),
