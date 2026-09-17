@@ -43,6 +43,7 @@ pub mod modes_nodes;
 pub mod morse_nodes;
 pub mod mrz_nodes;
 pub mod nrf24_nodes;
+pub mod p25_nodes;
 pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod protocol;
@@ -214,6 +215,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (m17_nodes::DESC, m17_nodes::build),
     (tetra_nodes::DESC, tetra_nodes::build),
     (dmr_nodes::DESC, dmr_nodes::build),
+    (p25_nodes::DESC, p25_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),

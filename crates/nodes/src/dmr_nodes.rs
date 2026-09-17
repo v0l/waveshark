@@ -32,6 +32,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::dmr::{self, LinkControl};
+use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
 use dsp::m17::rrc_taps;
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -390,87 +391,6 @@ const SYNCS: [(&str, &str, bool); 6] = [
     ("T1_voice", "330333303000303033300000", true),
     ("T2_voice", "300300000333003333033300", true),
 ];
-
-/// Streaming Gardner symbol-timing recovery on the discriminator output.
-///
-/// Runs across blocks: the loop state (fractional read position, period,
-/// previous symbol) survives from one `process` call to the next, so the
-/// clock tracks the difference between the two crystals over a whole call
-/// rather than restarting every block the way a per-burst detector would.
-struct SymbolSync {
-    sps: f64,
-    period: f64,
-    pos: f64,
-    prev: f32,
-    /// Samples not yet consumed, with `pos` indexing into them.
-    buf: Vec<f32>,
-    /// Running mean square, for normalising the timing error.
-    power: f32,
-    loop_gain: f64,
-}
-
-impl SymbolSync {
-    fn new(rate: f64) -> Self {
-        let sps = rate / BAUD;
-        Self {
-            sps,
-            period: sps,
-            pos: sps,
-            prev: 0.0,
-            buf: Vec::new(),
-            power: 1e-6,
-            loop_gain: 0.003,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.period = self.sps;
-        self.pos = self.sps;
-        self.prev = 0.0;
-        self.buf.clear();
-        self.power = 1e-6;
-    }
-
-    fn interp(&self, p: f64) -> f32 {
-        if p <= 0.0 {
-            return *self.buf.first().unwrap_or(&0.0);
-        }
-        let i = p.floor() as usize;
-        if i + 1 >= self.buf.len() {
-            return *self.buf.last().unwrap_or(&0.0);
-        }
-        let f = (p - i as f64) as f32;
-        self.buf[i] * (1.0 - f) + self.buf[i + 1] * f
-    }
-
-    /// Feed discriminator samples, append recovered symbol values to `out`.
-    fn push(&mut self, samples: &[f32], out: &mut Vec<f32>) {
-        self.buf.extend_from_slice(samples);
-        // Need half a period of history behind `pos` for the Gardner midpoint
-        // and one sample ahead for interpolation.
-        while self.pos + 1.0 < self.buf.len() as f64 {
-            if self.pos - self.period * 0.5 < 0.0 {
-                break;
-            }
-            let cur = self.interp(self.pos);
-            let mid = self.interp(self.pos - self.period * 0.5);
-            out.push(cur);
-            self.power = 0.999 * self.power + 0.001 * cur * cur;
-            let e = ((cur - self.prev) * mid / self.power.max(1e-6)).clamp(-1.0, 1.0) as f64;
-            self.prev = cur;
-            self.pos += self.period - self.loop_gain * e * self.sps;
-            // Keep the period near nominal; the crystals differ by ppm, not %.
-            self.period = self.sps;
-        }
-        // Drain consumed samples so the buffer stays bounded, keeping a period
-        // of history behind the read position.
-        let keep_from = (self.pos - self.period).floor().max(0.0) as usize;
-        if keep_from > 0 && keep_from <= self.buf.len() {
-            self.buf.drain(..keep_from);
-            self.pos -= keep_from as f64;
-        }
-    }
-}
 
 /// Finds bursts in the symbol stream and reads what they carry.
 ///
@@ -875,7 +795,7 @@ pub struct DmrNode {
     decim: FirDecim,
     fm: FmDemod,
     rrc: FirDecimReal,
-    sync: SymbolSync,
+    sync: SymbolClock,
     framer: Framer,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
@@ -923,7 +843,7 @@ impl DmrNode {
             decim: FirDecim::design_hz(AUDIO_HZ, 1, FILTER_CUTOFF_HZ, 60.0),
             fm: FmDemod::new(AUDIO_HZ, DEVIATION_HZ),
             rrc: FirDecimReal::new(rrc_taps(AUDIO_HZ / BAUD, RRC_ALPHA, 8), 1),
-            sync: SymbolSync::new(AUDIO_HZ),
+            sync: SymbolClock::new(AUDIO_HZ, BAUD),
             framer: Framer::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
@@ -1223,7 +1143,7 @@ impl Node for DmrNode {
         self.decim = FirDecim::design_hz(rate, factor, FILTER_CUTOFF_HZ, 60.0);
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.rrc = FirDecimReal::new(rrc_taps(audio_rate / BAUD, RRC_ALPHA, 8), 1);
-        self.sync = SymbolSync::new(audio_rate);
+        self.sync = SymbolClock::new(audio_rate, BAUD);
         self.framer = Framer::new();
         self.in_rate = rate;
         self.audio_rate = audio_rate;

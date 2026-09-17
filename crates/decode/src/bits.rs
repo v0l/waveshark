@@ -634,6 +634,167 @@ pub fn hamming84(code: u8) -> Option<Hamming84> {
     Some(Hamming84 { nibble: (code ^ 0x80 >> at) >> 4, corrected: true })
 }
 
+/// Hamming(10,6,3) as P25 keys its hex words (TIA-102.BAAA clause 7.3): six
+/// data bits followed by four parity bits, one wrong bit corrected and two
+/// detected. The generator's rows are the ones the standard prints, so the
+/// parity of data bit `i` is `H10_6_TAILS[i]`.
+const H10_6_TAILS: [u8; 6] = [0xE, 0xD, 0xB, 0x7, 0x3, 0xC];
+
+/// The four parity bits of a six-bit hex word.
+pub fn hamming10_6_parity(hex: u8) -> u8 {
+    (0..6).filter(|i| hex >> (5 - i) & 1 != 0).fold(0u8, |p, i| p ^ H10_6_TAILS[i])
+}
+
+/// Read a ten-bit Hamming(10,6,3) word: the six data bits, and how many bits
+/// were corrected. `None` where the syndrome names no single position, which
+/// is two bits wrong.
+///
+/// `code` is the word as it arrived, the data in bits 9 to 4 and the parity
+/// in bits 3 to 0.
+pub fn hamming10_6(code: u16) -> Option<(u8, u32)> {
+    let hex = (code >> 4) as u8 & 0x3f;
+    let syndrome = hamming10_6_parity(hex) ^ (code as u8 & 0xf);
+    if syndrome == 0 {
+        return Some((hex, 0));
+    }
+    if let Some(bit) = H10_6_TAILS.iter().position(|t| *t == syndrome) {
+        return Some((hex ^ (1 << (5 - bit)), 1));
+    }
+    // A syndrome that is one parity bit is that parity bit wrong, and the
+    // data stands. Anything else is two bits wrong or more.
+    matches!(syndrome, 1 | 2 | 4 | 8).then_some((hex, 1))
+}
+
+/// The BCH(63,16,23) code P25 protects its network identifier with
+/// (TIA-102.BAAA clause 7.1), as one basis codeword per message bit.
+///
+/// The generator is the product of the minimal polynomials of a, a^3, ... ,
+/// a^21 over GF(64), which is what a t=11 code of length 63 asks for, and
+/// comes out at degree 47. Computed rather than written down so the code is
+/// its own statement of which roots it has.
+fn bch63_16_basis() -> &'static [u64; 16] {
+    static BASIS: std::sync::OnceLock<[u64; 16]> = std::sync::OnceLock::new();
+    BASIS.get_or_init(|| {
+        let (exp, _) = gf64();
+        // Multiply two GF(2) polynomials held as bit masks.
+        let mul = |a: u64, b: u64| {
+            let mut out = 0u64;
+            for i in 0..64 {
+                if a >> i & 1 != 0 {
+                    out ^= b << i;
+                }
+            }
+            out
+        };
+        // The minimal polynomial of a^power: the product of (x - a^j) over
+        // its conjugates, built in GF(64) and coming out with binary
+        // coefficients.
+        let minimal = |power: usize| {
+            let mut roots = Vec::new();
+            let mut j = power % 63;
+            loop {
+                if !roots.contains(&j) {
+                    roots.push(j);
+                }
+                j = j * 2 % 63;
+                if j == power % 63 {
+                    break;
+                }
+            }
+            // Coefficients in GF(64), lowest power first.
+            let mut poly = vec![1u8];
+            for r in roots {
+                let root = exp[r];
+                let mut next = vec![0u8; poly.len() + 1];
+                for (i, &c) in poly.iter().enumerate() {
+                    next[i + 1] ^= c;
+                    next[i] ^= gf64_mul(c, root);
+                }
+                poly = next;
+            }
+            poly.iter().enumerate().fold(0u64, |m, (i, &c)| m | u64::from(c & 1) << i)
+        };
+        let mut generator = 1u64;
+        for power in (1..=21).step_by(2) {
+            let m = minimal(power);
+            // The minimal polynomials of the odd powers are distinct or
+            // equal, never partly shared, so a product of the new ones is
+            // their least common multiple.
+            if !divides(m, generator) {
+                generator = mul(generator, m);
+            }
+        }
+        debug_assert_eq!(63 - degree(generator), 16, "the generator is not degree 47");
+        let mut basis = [0u64; 16];
+        for (i, row) in basis.iter_mut().enumerate() {
+            let message = 1u64 << (62 - i);
+            *row = message | modulo(message, generator);
+        }
+        basis
+    })
+}
+
+fn gf64_mul(a: u8, b: u8) -> u8 {
+    let (exp, log) = gf64();
+    match a == 0 || b == 0 {
+        true => 0,
+        false => exp[(usize::from(log[a as usize]) + usize::from(log[b as usize])) % 63],
+    }
+}
+
+fn degree(poly: u64) -> usize {
+    63 - poly.leading_zeros() as usize
+}
+
+fn modulo(mut value: u64, generator: u64) -> u64 {
+    let d = degree(generator);
+    while value != 0 && degree(value) >= d {
+        value ^= generator << (degree(value) - d);
+    }
+    value
+}
+
+fn divides(divisor: u64, value: u64) -> bool {
+    value != 0 && modulo(value, divisor) == 0
+}
+
+/// The BCH(63,16,23) codeword a sixteen-bit message makes, the message in
+/// the top bits and the 47 parity bits below it.
+pub fn bch63_16_encode(message: u16) -> u64 {
+    bch63_16_basis()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| message >> (15 - i) & 1 != 0)
+        .fold(0u64, |cw, (_, row)| cw ^ row)
+}
+
+/// Read a BCH(63,16,23) codeword: the message, and how many bits were
+/// wrong. `None` where no codeword is within the eleven bits the code
+/// corrects, which on P25 is a network identifier read out of noise.
+///
+/// `code` is the 63 bits as they arrived, the first in bit 62. The search is
+/// over all 65536 codewords in Gray code order, one exclusive-or and one
+/// population count each, which is both the optimal decoder and quicker to
+/// be sure of than a syndrome decoder for eleven errors.
+pub fn bch63_16(code: u64) -> Option<(u16, u32)> {
+    let basis = bch63_16_basis();
+    let (mut message, mut codeword) = (0u16, 0u64);
+    let (mut best, mut best_message) = (u32::MAX, 0u16);
+    for step in 0..1u32 << 16 {
+        let d = (codeword ^ code).count_ones();
+        if d < best {
+            best = d;
+            best_message = message;
+        }
+        let bit = step.trailing_ones() as usize;
+        if bit < 16 {
+            message ^= 1 << (15 - bit);
+            codeword ^= basis[bit];
+        }
+    }
+    (best <= 11).then_some((best_message, best))
+}
+
 /// LSB-first CRC-8, rtl_433's `crc8le`: the same polynomial division as
 /// [`crc8`] run through the byte from the other end, which is what a device
 /// that transmits its bits least significant first computes.
@@ -1006,5 +1167,77 @@ mod tests {
     fn reflect8_reverses_bit_order() {
         assert_eq!(reflect8(0b1000_0001), 0b1000_0001);
         assert_eq!(reflect8(0b1100_0000), 0b0000_0011);
+    }
+
+    /// Every hex word survives its own parity, and every single wrong bit in
+    /// the ten is put back. Two wrong bits in the data are refused or land on
+    /// another word: the code's distance is 3, so it cannot do better.
+    #[test]
+    fn hamming_10_6_corrects_one_bit_of_ten() {
+        let mut corrected = 0;
+        for hex in 0u8..64 {
+            let word = u16::from(hex) << 4 | u16::from(hamming10_6_parity(hex));
+            assert_eq!(hamming10_6(word), Some((hex, 0)));
+            for bit in 0..10 {
+                assert_eq!(hamming10_6(word ^ 1 << bit), Some((hex, 1)), "hex {hex} bit {bit}");
+                corrected += 1;
+            }
+        }
+        assert_eq!(corrected, 640);
+        // Two wrong bits are past a distance-3 code: of the 45 pairs of
+        // positions, 21 leave a syndrome no single bit could and are
+        // refused, and the other 24 read back as a different hex word. The
+        // Reed-Solomon over the words is what catches those.
+        let word = u16::from(0b10_1100u8) << 4 | u16::from(hamming10_6_parity(0b10_1100));
+        let mut refused = 0;
+        let mut wrong_word = 0;
+        for a in 0..10 {
+            for b in (a + 1)..10 {
+                match hamming10_6(word ^ 1 << a ^ 1 << b) {
+                    None => refused += 1,
+                    Some((hex, _)) => {
+                        assert_ne!(hex, 0b10_1100, "two wrong bits read as the word sent");
+                        wrong_word += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!((refused, wrong_word), (21, 24));
+    }
+
+    /// The network identifier code: eleven wrong bits of 63 still read back
+    /// the NAC and the DUID, and twelve are past what it can promise.
+    #[test]
+    fn bch_63_16_corrects_eleven_bits() {
+        // 0x293 is the default NAC, and 5 the DUID of a voice frame.
+        let message = 0x293 << 4 | 5;
+        let code = bch63_16_encode(message);
+        assert_eq!(bch63_16(code), Some((message, 0)));
+        for errors in 1..=11u32 {
+            // Spread the wrong bits across the word rather than bunching
+            // them, which is the pattern a fade leaves.
+            let mut wrong = code;
+            for i in 0..errors {
+                wrong ^= 1 << (i * 5 % 63);
+            }
+            assert_eq!(bch63_16(wrong), Some((message, errors)), "{errors} wrong bits");
+        }
+        let mut wrong = code;
+        for i in 0..12u32 {
+            wrong ^= 1 << (i * 5 % 63);
+        }
+        assert_ne!(bch63_16(wrong), Some((message, 12)), "twelve bits is past the code");
+        // Noise is mostly refused rather than read as some other frame: a
+        // word is within eleven bits of a codeword one time in two hundred,
+        // which is why a P25 framer asks for the sync word as well.
+        // Measured over ten thousand random words.
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let read = (0..10_000)
+            .filter(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                bch63_16(seed >> 1).is_some()
+            })
+            .count();
+        assert_eq!(read, 52, "a NAC read out of noise");
     }
 }

@@ -490,6 +490,109 @@ fn recover(shaped: &[f32], sps: f64, loop_gain: f32, out: &mut Vec<f32>) {
     }
 }
 
+/// Streaming symbol-timing recovery on a discriminator's output, for the
+/// protocols whose transmission is longer than a burst.
+///
+/// [`C4fmDetector`] gates on the envelope and recovers a whole burst at once,
+/// which suits a packet. A voice call is seconds of continuous carrier with
+/// framing inside it, so the clock has to survive from one block to the next:
+/// the fractional read position, the period and the previous symbol are kept,
+/// and the Gardner loop tracks the difference between the two crystals across
+/// the whole call rather than restarting every block.
+///
+/// DMR and P25 phase 1 both key four levels at 4800 baud and both read this
+/// way; the caller decides what a level means.
+pub struct SymbolClock {
+    sps: f64,
+    period: f64,
+    pos: f64,
+    prev: f32,
+    /// Samples not yet consumed, with `pos` indexing into them.
+    buf: Vec<f32>,
+    /// Running mean square, for normalising the timing error.
+    power: f32,
+    loop_gain: f64,
+}
+
+impl SymbolClock {
+    pub fn new(rate: f64, baud: f64) -> Self {
+        let sps = rate / baud;
+        Self {
+            sps,
+            period: sps,
+            pos: sps,
+            prev: 0.0,
+            buf: Vec::new(),
+            power: 1e-6,
+            loop_gain: 0.003,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.period = self.sps;
+        self.pos = self.sps;
+        self.prev = 0.0;
+        self.buf.clear();
+        self.power = 1e-6;
+    }
+
+    pub fn samples_per_symbol(&self) -> f64 {
+        self.sps
+    }
+
+    fn read(&self, p: f64) -> f32 {
+        if p <= 0.0 {
+            return *self.buf.first().unwrap_or(&0.0);
+        }
+        let i = p.floor() as usize;
+        if i + 1 >= self.buf.len() {
+            return *self.buf.last().unwrap_or(&0.0);
+        }
+        let f = (p - i as f64) as f32;
+        self.buf[i] * (1.0 - f) + self.buf[i + 1] * f
+    }
+
+    /// Feed discriminator samples, appending recovered symbol values to `out`.
+    pub fn push(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+        self.buf.extend_from_slice(samples);
+        // Need half a period of history behind `pos` for the Gardner midpoint
+        // and one sample ahead for interpolation.
+        while self.pos + 1.0 < self.buf.len() as f64 {
+            if self.pos - self.period * 0.5 < 0.0 {
+                break;
+            }
+            let cur = self.read(self.pos);
+            let mid = self.read(self.pos - self.period * 0.5);
+            out.push(cur);
+            self.power = 0.999 * self.power + 0.001 * cur * cur;
+            let e = ((cur - self.prev) * mid / self.power.max(1e-6)).clamp(-1.0, 1.0) as f64;
+            self.prev = cur;
+            self.pos += self.period - self.loop_gain * e * self.sps;
+            // Keep the period near nominal; the crystals differ by ppm, not %.
+            self.period = self.sps;
+        }
+        // Drain consumed samples so the buffer stays bounded, keeping a period
+        // of history behind the read position.
+        let keep_from = (self.pos - self.period).floor().max(0.0) as usize;
+        if keep_from > 0 && keep_from <= self.buf.len() {
+            self.buf.drain(..keep_from);
+            self.pos -= keep_from as f64;
+        }
+    }
+}
+
+/// Number the symbols of a window 0 (lowest frequency) to 3, by fitting four
+/// evenly spaced levels to the window itself.
+///
+/// The window has to hold all four levels for the inner pair to land in the
+/// right place, so it is a frame or more and never a sync word, which keys
+/// only the outer two. `None` where there is too little to fit.
+pub fn slice(window: &[f32]) -> Option<Vec<u8>> {
+    let mut scratch = Vec::new();
+    let fit = fourlevel::levels(&mut scratch, window)?;
+    Some(window.iter().map(|&v| fit.index(v)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
