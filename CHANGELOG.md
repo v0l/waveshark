@@ -15,6 +15,7 @@ the code is in the commit log.
   behind it: the newest transform, the mean, or the loudest.
 - The memory bank reads Chirp, CSV, Freqman and SDR# lists, and exports as
   Chirp CSV.
+- Transmit a recorded capture: pick a file on a channel and send it back out.
 - A dataset that is downloading says how far it has got, in bytes and as a bar.
 - Transmit six protocols this receiver reads, on a channel already decoding
   one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements, SSTV
@@ -103,6 +104,7 @@ the code is in the commit log.
 ### Fixed
 
 - A stripe across the waterfall and a jump in the trace when the dial moved.
+- A mixer's frequency shift did nothing until the graph was rebuilt around it.
 - A LimeSDR transmitted into an unselected port, so nothing left the socket.
 - A HackRF came back at its default gain and with the bias tee off after a
   span change.

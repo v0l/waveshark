@@ -45,12 +45,17 @@ const HYSTERESIS_DB: &str = "hysteresis_db";
 /// so the usual arrangement is to tune deliberately off and correct here.
 pub struct MixerNode {
     shift_hz: f64,
+    /// The rate the stream negotiated at, kept because a shift set while the
+    /// graph is running has to be turned into a phase step here: without it
+    /// the oscillator went on running at whatever the last negotiation set,
+    /// and a shift changed by hand moved nothing.
+    rate: f64,
     mixer: Mixer,
 }
 
 impl MixerNode {
     pub fn new(shift_hz: f64) -> Self {
-        Self { shift_hz, mixer: Mixer::new(shift_hz, 1.0) }
+        Self { shift_hz, rate: 0.0, mixer: Mixer::new(shift_hz, 1.0) }
     }
 }
 
@@ -63,6 +68,7 @@ impl Simple for MixerNode {
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("mixer needs an IQ input"));
         }
+        self.rate = i.spec.rate;
         self.mixer.set_shift(self.shift_hz, i.spec.rate);
         // The centre frequency moves with the shift, so anything downstream
         // reporting "where did this come from" stays correct.
@@ -101,6 +107,9 @@ impl Simple for MixerNode {
             SHIFT_HZ => {
                 self.shift_hz =
                     v.as_f64().ok_or_else(|| common::Error::other("expected a number"))?;
+                if self.rate > 0.0 {
+                    self.mixer.set_shift(self.shift_hz, self.rate);
+                }
                 Ok(())
             }
             _ => Err(common::Error::other(format!("mixer: unknown parameter {name:?}"))),
@@ -1243,6 +1252,45 @@ pub const SQUELCH: StageDesc = StageDesc {
 pub fn build_squelch(s: &Settings) -> Result<Box<dyn Node>> {
     let kind = s.str_or(KIND, SquelchKind::Noise.label()).parse().unwrap_or(SquelchKind::Noise);
     Ok(Box::new(SquelchNode::new(kind, s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32)))
+}
+
+#[cfg(test)]
+mod mixer_tests {
+    use super::*;
+
+    fn spec(rate: f64) -> PortSpec {
+        PortSpec { spec: StreamSpec { kind: PortKind::Iq, rate, ..Default::default() }, latency: 0 }
+    }
+
+    fn block(n: &mut MixerNode, len: usize) -> Vec<common::C32> {
+        let input = Payload::Iq(vec![common::C32::new(1.0, 0.0); len]);
+        let mut out = Payload::empty_of(PortKind::Iq);
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let ins = [spec(1_000.0)];
+        let ctx = &mut NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+        Simple::process(n, &input, &mut out, ctx).unwrap();
+        out.as_iq().unwrap().to_vec()
+    }
+
+    /// A shift set while the graph runs moves the signal.
+    ///
+    /// It did not: the oscillator was only given its step at negotiation, so
+    /// a shift changed by hand set a number nothing read and the samples came
+    /// out where they went in. The transmit chain's offset is this setting.
+    #[test]
+    fn a_shift_set_after_negotiation_reaches_the_samples() {
+        let mut n = MixerNode::new(0.0);
+        Simple::negotiate(&mut n, &spec(1_000.0)).unwrap();
+        let flat = block(&mut n, 8);
+        assert!(flat.iter().all(|s| s.im.abs() < 1e-6), "nothing shifted and it moved: {flat:?}");
+
+        Simple::set_param(&mut n, SHIFT_HZ, ParamValue::Float(250.0)).unwrap();
+        let turned = block(&mut n, 8);
+        // 250 Hz at 1 kS/s is a quarter turn per sample, so the fourth sample
+        // is back where the first was and the second is on the imaginary axis.
+        assert!((turned[1].im.abs() - 1.0).abs() < 0.01, "{:?}", turned[1]);
+        assert!((turned[4].re - turned[0].re).abs() < 0.01, "{:?}", turned[4]);
+    }
 }
 
 #[cfg(test)]

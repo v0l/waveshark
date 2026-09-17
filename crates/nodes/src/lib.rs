@@ -33,6 +33,7 @@ pub mod gsm_nodes;
 pub mod homeassistant_nodes;
 pub mod ident_nodes;
 pub mod imet_nodes;
+pub mod iq_tx;
 pub mod keyed;
 pub mod lms6_nodes;
 pub mod lora_nodes;
@@ -184,6 +185,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (pocsag_nodes::POCSAG_TX, pocsag_nodes::build_tx),
     (rtty_nodes::RTTY_TX, rtty_nodes::build_tx),
     (aprs_nodes::APRS_TX, aprs_nodes::build_tx),
+    (iq_tx::IQ_TX, iq_tx::build_iq_tx),
     (mod_nodes::OOK_MOD, mod_nodes::build_ook_mod),
     (mod_nodes::FSK_MOD, mod_nodes::build_fsk_mod),
     (mod_nodes::ASK_MOD, mod_nodes::build_ask_mod),
