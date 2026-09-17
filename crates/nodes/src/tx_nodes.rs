@@ -1430,6 +1430,321 @@ pub(crate) fn transmit_for(
     out
 }
 
+/// What the speaker is playing, in dBFS, for whatever has to decide about
+/// the microphone.
+///
+/// Shared rather than wired for the same reason the monitor's queue is: the
+/// speaker is a stage in the receiver's graph and this is read on the
+/// transmitter's thread, and a wire cannot cross one.
+pub type Heard = std::sync::Arc<std::sync::atomic::AtomicU32>;
+
+/// Key the transmitter from the level of the voice.
+///
+/// The decision is [`dsp::vox::Vox`]; what this adds is where it sits. The
+/// stage is between the microphone and the modulator, so the level it tests
+/// is the audio that would go on air, gain, limiter and speech filter
+/// included: a threshold set against the meter is set against the same
+/// number the decision is made on.
+///
+/// It passes the audio through untouched and keys nothing itself. What the
+/// key does is the radio's business, and this says only whether it should be
+/// down; see `crate::transmit` and `Radio::vox`.
+pub struct VoxNode {
+    vox: dsp::vox::Vox,
+    threshold: f32,
+    tail_ms: f64,
+    anti_trip: bool,
+    /// Length and pitch of the courtesy tone sent at the end of an over, or
+    /// zero length for none. On a channel with no squelch tail the far end
+    /// has nothing else to tell it the over finished.
+    roger_ms: f64,
+    roger_hz: f64,
+    rate: f64,
+    heard: Heard,
+    open: bool,
+    /// Samples of roger beep still to send. The key is held down for them,
+    /// since a beep sent after the carrier drops is not sent at all.
+    beep: usize,
+    /// Whether this block carried any of the beep, which is what holds the
+    /// key down over the block that finishes it: the samples are queued
+    /// before anybody asks again, and unkeying on the same block cuts the
+    /// tone off in the radio's own buffer.
+    beeping: bool,
+    phase: f64,
+}
+
+impl Default for VoxNode {
+    fn default() -> Self {
+        Self::new(DEFAULT_VOX_THRESHOLD, DEFAULT_VOX_TAIL_MS)
+    }
+}
+
+impl VoxNode {
+    pub fn new(threshold: f32, tail_ms: f64) -> Self {
+        Self {
+            // Rebuilt at negotiation, where the rate the tail is counted in
+            // is known.
+            vox: dsp::vox::Vox::new(1.0, threshold, tail_ms),
+            threshold,
+            tail_ms,
+            anti_trip: true,
+            roger_ms: 0.0,
+            roger_hz: 1_000.0,
+            rate: 0.0,
+            heard: Heard::default(),
+            open: false,
+            beep: 0,
+            beeping: false,
+            phase: 0.0,
+        }
+    }
+
+    /// Where to read what the speaker is playing, for anti-trip.
+    pub fn watch(&mut self, heard: Heard) {
+        self.heard = heard;
+    }
+
+    pub fn heard(&self) -> Heard {
+        self.heard.clone()
+    }
+
+    /// Whether the key should be down: the voice, or the beep that ends it.
+    pub fn is_open(&self) -> bool {
+        self.open || self.beeping
+    }
+
+    /// The level the decision is being made on, as an amplitude in 0..1, so
+    /// the meter beside the threshold shows the number being compared.
+    pub fn level(&self) -> f32 {
+        db_amplitude(self.vox.level_db())
+    }
+
+    /// Whether the key is being held up because the receiver is playing
+    /// something.
+    pub fn held_off(&self) -> bool {
+        self.vox.is_held()
+    }
+
+    fn heard_db(&self) -> f32 {
+        let a = f32::from_bits(self.heard.load(std::sync::atomic::Ordering::Relaxed));
+        match a > 0.0 {
+            true => 20.0 * a.log10(),
+            false => f32::NEG_INFINITY,
+        }
+    }
+}
+
+fn db_amplitude(db: f32) -> f32 {
+    match db.is_finite() {
+        true => 10f32.powf(db / 20.0).clamp(0.0, 1.0),
+        false => 0.0,
+    }
+}
+
+impl Simple for VoxNode {
+    fn name(&self) -> &str {
+        "vox"
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                "key".into(),
+                match (self.is_open(), self.held_off()) {
+                    (true, _) => "down".into(),
+                    (false, true) => "held off".to_string(),
+                    (false, false) => "up".into(),
+                },
+            ),
+            ("level".into(), format!("{:.0} dB", self.vox.level_db())),
+        ]
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Real {
+            return Err(common::Error::other("vox runs on a real audio stream"));
+        }
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("vox needs the rate its tail is counted in"));
+        }
+        self.rate = input.spec.rate;
+        self.vox = dsp::vox::Vox::new(self.rate, self.threshold, self.tail_ms);
+        self.vox.set_anti_trip(self.anti_trip);
+        Ok(input.spec)
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(audio) = input.as_real() else {
+            return Ok(());
+        };
+        if audio.is_empty() {
+            return Ok(());
+        }
+        let was = self.open;
+        self.open = self.vox.update(audio, self.heard_db(), audio.len());
+        if was && !self.open && self.roger_ms > 0.0 {
+            self.beep = (self.rate * self.roger_ms / 1000.0) as usize;
+            self.phase = 0.0;
+        }
+        let out = output.real_mut();
+        out.extend_from_slice(audio);
+        self.beeping = self.beep > 0;
+        if self.beep == 0 {
+            return Ok(());
+        }
+        // The beep replaces the audio rather than adding to it: what it is
+        // laid over is the tail of an over that has already finished, and a
+        // courtesy tone mixed with the last syllable is neither.
+        let n = self.beep.min(out.len());
+        let step = std::f64::consts::TAU * self.roger_hz / self.rate.max(1.0);
+        for s in out.iter_mut().take(n) {
+            *s = 0.5 * self.phase.sin() as f32;
+            self.phase += step;
+        }
+        self.beep -= n;
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.vox.reset();
+        self.open = false;
+        self.beep = 0;
+        self.beeping = false;
+        self.phase = 0.0;
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::float(THRESHOLD, self.threshold as f64, 0.0..=1.0).label("Vox threshold"),
+            Param::float(TAIL_MS, self.tail_ms, 0.0..=5_000.0).label("Vox tail").unit("ms"),
+            Param::bool(ANTI_TRIP, self.anti_trip).label("Ignore the speaker"),
+            Param::float(ROGER_MS, self.roger_ms, 0.0..=1_000.0).label("Roger beep").unit("ms"),
+            Param::float(ROGER_HZ, self.roger_hz, 300.0..=3_000.0)
+                .label("Roger beep pitch")
+                .unit("Hz"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            THRESHOLD => {
+                self.threshold = value.as_f64().unwrap_or(0.1).clamp(0.0, 1.0) as f32;
+                self.vox.set_threshold(self.threshold);
+            }
+            TAIL_MS => {
+                self.tail_ms = value.as_f64().unwrap_or(0.0).clamp(0.0, 5_000.0);
+                self.vox.set_tail_ms(self.rate.max(1.0), self.tail_ms);
+            }
+            ANTI_TRIP => {
+                self.anti_trip = value.as_bool().unwrap_or(true);
+                self.vox.set_anti_trip(self.anti_trip);
+            }
+            ROGER_MS => self.roger_ms = value.as_f64().unwrap_or(0.0).clamp(0.0, 1_000.0),
+            ROGER_HZ => self.roger_hz = value.as_f64().unwrap_or(1_000.0).clamp(300.0, 3_000.0),
+            _ => return Err(common::Error::other(format!("vox: unknown parameter {name:?}"))),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod vox_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+    const BLOCK: usize = 960;
+
+    fn run(node: &mut VoxNode, amp: f32, blocks: usize) -> (usize, Vec<f32>) {
+        let spec = StreamSpec {
+            kind: PortKind::Real,
+            rate: RATE,
+            flow: Flow::Tx,
+            bandwidth: 6_000.0,
+            ..Default::default()
+        };
+        if node.rate <= 0.0 {
+            Simple::negotiate(node, &PortSpec { spec, latency: 0 }).unwrap();
+        }
+        let block: Vec<f32> = (0..BLOCK)
+            .map(|i| amp * (std::f32::consts::TAU * 400.0 * i as f32 / RATE as f32).sin())
+            .collect();
+        let mut down = 0;
+        let mut last = Vec::new();
+        for _ in 0..blocks {
+            let input = Payload::Real(block.clone());
+            let mut out = Payload::Real(Vec::new());
+            let (mut ev, mut tg) = (Vec::new(), Vec::new());
+            let ins = [PortSpec { spec, latency: 0 }];
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(node, &input, &mut out, &mut ctx).unwrap();
+            if node.is_open() {
+                down += 1;
+            }
+            let Payload::Real(v) = out else { unreachable!() };
+            last = v;
+        }
+        (down, last)
+    }
+
+    /// Speech keys it, the audio goes through unchanged, and silence lets it
+    /// up after the tail.
+    #[test]
+    fn a_voice_keys_the_stage_and_the_audio_passes_through() {
+        let mut node = VoxNode::new(0.1, 200.0);
+        let (down, out) = run(&mut node, 0.5, 10);
+        assert_eq!(down, 10, "the key was not down for every block of speech");
+        assert_eq!(out.len(), BLOCK);
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "the audio came through at {peak}");
+        // 200 ms of tail at 20 ms a block, less the block it fell in.
+        let (down, _) = run(&mut node, 0.0, 40);
+        assert_eq!(down, 9, "200 ms of tail, in blocks of 20 ms");
+    }
+
+    /// What the speaker is playing raises the threshold, so the station being
+    /// listened to does not key the transmitter.
+    #[test]
+    fn the_speaker_holds_the_key_up() {
+        let mut node = VoxNode::new(0.02, 200.0);
+        // The speaker at half scale; the microphone hears it ten decibels
+        // down, which is what `amp` is here.
+        node.heard().store(0.5f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let (down, _) = run(&mut node, 0.16, 20);
+        assert_eq!(down, 0, "the receiver's own audio keyed the transmitter");
+        // The speaker stops and the same level at the microphone keys it.
+        node.heard().store(0.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let (down, _) = run(&mut node, 0.16, 20);
+        assert_eq!(down, 20, "a voice in a quiet room did not key");
+    }
+
+    /// The over ends with a courtesy tone, and the key stays down for it.
+    #[test]
+    fn the_roger_beep_is_sent_before_the_key_comes_up() {
+        let mut node = VoxNode::new(0.1, 0.0);
+        Node::set_param(&mut node, ROGER_MS, ParamValue::Float(100.0)).unwrap();
+        let (down, _) = run(&mut node, 0.5, 5);
+        assert_eq!(down, 5);
+        // No tail, so the key comes up on the first silent block and the beep
+        // holds it down for five more: 100 ms at 20 ms a block.
+        let (down, out) = run(&mut node, 0.0, 20);
+        assert_eq!(down, 5, "100 ms of roger beep, in blocks of 20 ms");
+        assert_eq!(out.len(), BLOCK, "the beep changed the block's length");
+        assert!(!node.is_open(), "the key stayed down after the beep");
+
+        // And with no beep asked for, the key comes up at once.
+        let mut bare = VoxNode::new(0.1, 0.0);
+        let (down, _) = run(&mut bare, 0.5, 5);
+        assert_eq!(down, 5);
+        let (down, _) = run(&mut bare, 0.0, 20);
+        assert_eq!(down, 0, "the key hung on with no beep to send");
+    }
+}
+
 /// The head of a transmit chain: a block of time, from a block of samples.
 ///
 /// A transmitter has nothing upstream of it, but a graph node has an input,
@@ -1491,6 +1806,21 @@ const LEVEL: &str = "level";
 const OFFSET_HZ: &str = "offset_hz";
 const SHIFT_HZ: &str = "shift_hz";
 const ENABLED: &str = "enabled";
+const THRESHOLD: &str = "threshold";
+const TAIL_MS: &str = "tail_ms";
+const ANTI_TRIP: &str = "anti_trip";
+const ROGER_MS: &str = "roger_ms";
+const ROGER_HZ: &str = "roger_hz";
+
+/// Where a vox starts: a voice at a hand's width from the microphone reads
+/// about a tenth of full scale through the speech filter, and a room with
+/// nobody in it a hundredth.
+pub const DEFAULT_VOX_THRESHOLD: f32 = 0.05;
+
+/// And how long it holds after a voice stops. Long enough to cross the gap
+/// between two sentences, short enough that the over does not end with a
+/// second of the room.
+pub const DEFAULT_VOX_TAIL_MS: f64 = 700.0;
 
 /// A comfortable hand speed, and what a keyer starts at.
 pub const DEFAULT_WPM: f32 = 20.0;
@@ -1531,6 +1861,25 @@ pub const TONE: StageDesc = StageDesc {
 
 pub fn build_tone(s: &Settings) -> Result<Box<dyn Node>> {
     Ok(Box::new(ToneNode::new(s.f64_or(HZ, 1_000.0), s.f64_or(LEVEL, 0.8) as f32)))
+}
+
+pub const VOX: StageDesc = StageDesc {
+    name: "vox",
+    summary: "Key the transmitter while somebody is talking, ignoring what \
+              the speaker is playing",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_vox(s: &Settings) -> Result<Box<dyn Node>> {
+    let mut n = VoxNode::new(
+        s.f64_or(THRESHOLD, DEFAULT_VOX_THRESHOLD as f64) as f32,
+        s.f64_or(TAIL_MS, DEFAULT_VOX_TAIL_MS),
+    );
+    Node::set_param(&mut n, ANTI_TRIP, ParamValue::Bool(s.bool_or(ANTI_TRIP, true)))?;
+    Node::set_param(&mut n, ROGER_MS, ParamValue::Float(s.f64_or(ROGER_MS, 0.0)))?;
+    Node::set_param(&mut n, ROGER_HZ, ParamValue::Float(s.f64_or(ROGER_HZ, 1_000.0)))?;
+    Ok(Box::new(n))
 }
 
 pub const MORSE_TX: StageDesc = StageDesc {

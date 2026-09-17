@@ -132,8 +132,8 @@ pub use sub_tx::SubTxNode;
 pub use survey_nodes::SurveyNode;
 pub use tetra_nodes::TetraNode;
 pub use tx_nodes::{
-    MIC_GAIN_MAX, MicNode, MorseKeyNode, MorseTxNode, ToneNode, TxClockNode, TxMonitorNode,
-    TxSinkNode,
+    DEFAULT_VOX_TAIL_MS, DEFAULT_VOX_THRESHOLD, Heard, MIC_GAIN_MAX, MicNode, MorseKeyNode,
+    MorseTxNode, ToneNode, TxClockNode, TxMonitorNode, TxSinkNode, VoxNode,
 };
 pub use vdl2_nodes::Vdl2Node;
 pub use video_nodes::VideoNode;
@@ -179,6 +179,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (tx_nodes::TX_CLOCK, tx_nodes::build_tx_clock),
     (tx_nodes::TX_MONITOR, tx_nodes::build_tx_monitor),
     (tx_nodes::TONE, tx_nodes::build_tone),
+    (tx_nodes::VOX, tx_nodes::build_vox),
     (tx_nodes::MORSE_TX, tx_nodes::build_morse_tx),
     (tx_nodes::MORSE_KEY, tx_nodes::build_morse_key),
     (sub_tx::SUB_TX, sub_tx::build_sub_tx),

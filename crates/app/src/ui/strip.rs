@@ -401,6 +401,93 @@ impl Strip<'_> {
         r.on_hover_text(why);
     }
 
+    /// The vox: a switch, and a threshold set against the level it is being
+    /// compared with.
+    ///
+    /// The fader's handle is the threshold and the bar behind it is the
+    /// audio the vox is deciding on, which is the audio that would go on air
+    /// rather than the raw microphone: a threshold set against a different
+    /// number than the one being compared is a threshold nobody trusts.
+    fn channel_vox(
+        ui: &mut egui::Ui,
+        tx: &mut crate::radio::TxSpec,
+        (level, held): (f32, bool),
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("vox").show(ui);
+            let text = if tx.vox.on { "ON" } else { "OFF" };
+            if ui
+                .selectable_label(tx.vox.on, text)
+                .on_hover_text("Let speech key the channel instead of a hand")
+                .clicked()
+            {
+                tx.vox.on = !tx.vox.on;
+                changed = true;
+            }
+            if !tx.vox.on {
+                return;
+            }
+            let mut t = tx.vox.threshold;
+            if ui.add(Fader::new(&mut t, level).width(VU_W)).changed() {
+                tx.vox.threshold = t.clamp(0.0, 1.0);
+                changed = true;
+            }
+        });
+        if !tx.vox.on {
+            return changed;
+        }
+        // What anti-trip is doing right now, in the one place it can be seen.
+        // Without it a vox that will not key while a station is being
+        // listened to looks broken.
+        if held {
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                theme::Line::new()
+                    .value("held up while the receiver is playing")
+                    .size(11.0)
+                    .tint(theme::TRACE)
+                    .show(ui);
+            });
+        }
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("tail").show(ui);
+            let mut ms = tx.vox.tail_ms;
+            if ui
+                .add(egui::DragValue::new(&mut ms).speed(10.0).range(0.0..=5_000.0).suffix(" ms"))
+                .on_hover_text("How long the key stays down after a voice stops")
+                .changed()
+            {
+                tx.vox.tail_ms = ms;
+                changed = true;
+            }
+            let text = if tx.vox.anti_trip { "SPKR" } else { "OPEN" };
+            if ui
+                .selectable_label(tx.vox.anti_trip, text)
+                .on_hover_text("Ignore what the speaker is playing; turn it off for a headset")
+                .clicked()
+            {
+                tx.vox.anti_trip = !tx.vox.anti_trip;
+                changed = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut ms = tx.vox.roger_ms;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut ms).speed(5.0).range(0.0..=1_000.0).suffix(" ms"),
+                    )
+                    .on_hover_text("A courtesy tone at the end of an over, or zero for none")
+                    .changed()
+                {
+                    tx.vox.roger_ms = ms;
+                    changed = true;
+                }
+                theme::Line::new().legend("roger").show(ui);
+            });
+        });
+        changed
+    }
+
     /// Drawn on every channel of a radio that can transmit, and on none of a
     /// radio that cannot: a key that always fails is worse than no key, since
     /// the operator learns to press it.
@@ -414,6 +501,7 @@ impl Strip<'_> {
         keyed: Option<u64>,
         mic: f32,
         mic_clipped: bool,
+        vox: (f32, bool),
         keying: &mut crate::ui::state::Keying,
         cmds: &mut Vec<Cmd>,
         source: Option<(usize, Vec<pipeline::param::Param>)>,
@@ -700,6 +788,7 @@ impl Strip<'_> {
                             .show(ui);
                     });
                 }
+                changed |= Self::channel_vox(ui, tx, vox);
             }
             TxSource::Tone => {
                 ui.horizontal(|ui| {
@@ -953,6 +1042,18 @@ impl Strip<'_> {
                 let mic_clipped = self
                     .radio
                     .is_some_and(|r| r.status.mic_clipped.load(std::sync::atomic::Ordering::Relaxed));
+                // What the vox is deciding on, and whether the receiver's own
+                // audio is what is holding the key up.
+                let vox = self
+                    .radio
+                    .map(|r| {
+                        let o = std::sync::atomic::Ordering::Relaxed;
+                        (
+                            f32::from_bits(r.status.vox_level.load(o)),
+                            r.status.vox_held.load(o),
+                        )
+                    })
+                    .unwrap_or((0.0, false));
                 let mut remove = None;
                 let mut tune = None;
                 for (i, ch) in self.st.channels.iter_mut().enumerate() {
@@ -1209,6 +1310,7 @@ impl Strip<'_> {
                                     keyed,
                                     mic,
                                     mic_clipped,
+                                    vox,
                                     &mut self.st.keying,
                                     self.cmds,
                                     tx_source(self.chain),

@@ -57,6 +57,7 @@ pub mod tetra;
 pub mod tone;
 pub(crate) mod twolevel;
 pub mod video;
+pub mod vox;
 pub mod wifi;
 pub mod window;
 pub mod wmbus;

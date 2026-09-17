@@ -47,6 +47,18 @@ pub struct Readings {
     /// level against.
     pub mic_peak: AtomicU32,
     pub mic_clipped: AtomicBool,
+    /// Whether the chain has a vox in it at all, since the rest of these
+    /// mean nothing without one.
+    pub vox: AtomicBool,
+    /// Whether the vox says the key should be down. Read by the radio loop,
+    /// which is the only thing that can key: this thread holds the chain and
+    /// not the radio's dial.
+    pub vox_open: AtomicBool,
+    /// The level it is deciding on, as `f32` bits, for the control the
+    /// threshold is set on, and whether the receiver playing is what is
+    /// holding the key up.
+    pub vox_level: AtomicU32,
+    pub vox_held: AtomicBool,
     /// Blocks the radio refused, which is how a device unplugged in the
     /// middle of an over shows up: the stream reports every write failing
     /// and there is nothing else to notice it by.
@@ -384,6 +396,17 @@ fn read_off(g: &mut Graph, readings: &Readings) -> bool {
     if let Some((peak, clipped)) = mic {
         readings.mic_peak.store(peak.to_bits(), Ordering::Relaxed);
         readings.mic_clipped.store(clipped, Ordering::Relaxed);
+    }
+    let vox = g
+        .by_tag(crate::chain::derived::VOX)
+        .and_then(|id| g.node_mut(id))
+        .and_then(|n| n.as_any_mut().downcast_mut::<nodes::VoxNode>())
+        .map(|v| (v.is_open(), v.level(), v.held_off()));
+    readings.vox.store(vox.is_some(), Ordering::Relaxed);
+    if let Some((open, level, held)) = vox {
+        readings.vox_open.store(open, Ordering::Relaxed);
+        readings.vox_level.store(level.to_bits(), Ordering::Relaxed);
+        readings.vox_held.store(held, Ordering::Relaxed);
     }
     *readings.topo.lock() = Some(g.topology());
     *readings.scopes.lock() = scope_frames(g);
