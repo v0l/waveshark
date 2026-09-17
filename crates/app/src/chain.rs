@@ -7353,7 +7353,7 @@ mod tx_in_graph_tests {
             voice: false,
             tx: Some(TxSpec::default()),
         }];
-        let mode = crate::radio::tx_mode_for(&plan.channels[0].mode)
+        let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
             .expect("a television channel can be keyed");
         assert_eq!(mode, TxMode::Digital("dvbt"));
         assert_eq!(mode.label(), "dvbt", "the button says what the mode menu says");
@@ -7470,7 +7470,8 @@ mod tx_in_graph_tests {
         }];
         plan.tx = Some(TxPlan {
             spec: TxSpec::default(),
-            mode: crate::radio::tx_mode_for(&plan.channels[0].mode).expect("it transmits"),
+            mode: crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+                .expect("it transmits"),
             on_air: Hz(474_000_000),
         });
 
@@ -7569,7 +7570,8 @@ mod tx_in_graph_tests {
         }];
         plan.tx = Some(TxPlan {
             spec: TxSpec::default(),
-            mode: crate::radio::tx_mode_for(&plan.channels[0].mode).expect("it transmits"),
+            mode: crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+                .expect("it transmits"),
             on_air: Hz(770_000_000),
         });
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
@@ -7943,7 +7945,8 @@ mod tx_in_graph_tests {
         }];
         plan.tx = Some(TxPlan {
             spec: TxSpec::default(),
-            mode: crate::radio::tx_mode_for(&plan.channels[0].mode).expect("it transmits"),
+            mode: crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+                .expect("it transmits"),
             on_air: Hz(474_000_000),
         });
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
