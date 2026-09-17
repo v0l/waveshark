@@ -1503,6 +1503,9 @@ pub struct RadioControls {
     /// Whether the tuner can be moved at all. A network stream is pinned by
     /// whoever feeds it, and its dial is a readout.
     pub tunable: bool,
+    /// Where one tuner's span ends and the next begins, on a receiver made of
+    /// several. Empty for one radio.
+    pub seams: Vec<f64>,
 }
 
 impl Default for RadioControls {
@@ -1517,6 +1520,7 @@ impl Default for RadioControls {
             reach: (24e6, 1766e6),
             tx_reach: None,
             tunable: true,
+            seams: Vec::new(),
         }
     }
 }
@@ -1567,6 +1571,7 @@ impl RadioControls {
                 dev.info().kind,
                 common::device::DriverKind::IqStream | common::device::DriverKind::File
             ),
+            seams: dev.seams().iter().map(|h| h.as_f64()).collect(),
         }
     }
 }

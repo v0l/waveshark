@@ -17,6 +17,8 @@ pub enum DriverKind {
     IqStream,
     File,
     Synthetic,
+    /// Several tuners on adjacent slices, presented as one wider radio.
+    Combined,
 }
 
 impl DriverKind {
@@ -28,6 +30,7 @@ impl DriverKind {
             Self::IqStream => "iqstream",
             Self::File => "file",
             Self::Synthetic => "synthetic",
+            Self::Combined => "combined",
         }
     }
 }
@@ -399,6 +402,16 @@ pub trait Device: Send {
 
     fn ppm(&self) -> f64 {
         0.0
+    }
+
+    /// Dial frequencies where one tuner's span ends and the next begins.
+    ///
+    /// Empty for a radio that is one tuner. A receiver made of several has a
+    /// join at each meeting point, where either side carries its own DC spike
+    /// and filter rolloff and the two slip against each other because the
+    /// crystals are not locked, so nothing should be placed across one.
+    fn seams(&self) -> Vec<Hz> {
+        Vec::new()
     }
 
     /// Whether changing the sample rate needs the stream stopped first.
