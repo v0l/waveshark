@@ -11,10 +11,12 @@ changelog says and what a commit message may contain. Nothing below repeats it.
 
 ## Pick
 
-With no number given, run `gh issue list` and read the few that look bounded,
-then say which you are taking and why in one line before starting. Prefer an
-issue whose evidence can be synthesised or already sits in `testdata`, over one
-that needs a capture nobody has recorded.
+With no number given, run `gh issue list` and take the oldest open issue first:
+sort by number ascending (`gh issue list --limit 100 | sort -n`) and start at
+the lowest. Say which you are taking in one line before starting. Skip one only
+when it cannot be worked now, for instance when it needs a capture nobody has
+recorded or hardware that is not here; say why you skipped it and move to the
+next oldest.
 
 With a number given, `gh issue view N` and take it.
 

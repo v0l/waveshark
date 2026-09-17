@@ -231,8 +231,15 @@ jobs:
           mkdir -p dmgroot
           cp -R dist/WaveShark.app dmgroot/
           ln -s /Applications dmgroot/Applications
-          hdiutil create -volname WaveShark -srcfolder dmgroot -ov -format UDZO \
-            waveshark-${{ matrix.name }}.dmg
+          sync
+          # "Resource busy" here is the indexer or an earlier volume still
+          # letting go of the folder, and it passes on the next attempt.
+          for try in 1 2 3; do
+            hdiutil create -volname WaveShark -srcfolder dmgroot -fs HFS+ -ov \
+              -format UDZO waveshark-${{ matrix.name }}.dmg && break
+            sleep 10
+          done
+          test -f waveshark-${{ matrix.name }}.dmg
 
       - name: Installers (windows)
         if: runner.os == 'Windows' && matrix.installers
