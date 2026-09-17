@@ -94,6 +94,23 @@ impl ReedSolomon {
         me
     }
 
+    /// RS(24,12,13) over GF(64), which P25 puts over a link control
+    /// (TIA-102.BAAA clause 7.4): twelve hex words of link control and
+    /// twelve of parity, shortened from (63,51), six words correctable.
+    ///
+    /// The words go in the order they arrive over the air, which is the link
+    /// control's own order followed by the parity words from the last to the
+    /// first.
+    pub fn p25_lc() -> Self {
+        Self::new(6, 0x43, 1, 1, 12, 39)
+    }
+
+    /// RS(24,16,9) over GF(64), which P25 puts over an encryption sync:
+    /// sixteen hex words and eight of parity, four words correctable.
+    pub fn p25_es() -> Self {
+        Self::new(6, 0x43, 1, 1, 8, 39)
+    }
+
     /// RS(255,249) as VDL Mode 2 keys it: GF(256) with field polynomial 0x187
     /// and the six roots from alpha^120.
     pub fn vdl2() -> Self {
