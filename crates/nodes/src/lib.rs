@@ -9,6 +9,7 @@
 pub mod acars_nodes;
 pub mod ais_nodes;
 pub mod aprs_nodes;
+pub mod apt_nodes;
 pub mod auto;
 pub mod bank;
 pub mod bank_node;
@@ -62,6 +63,7 @@ pub mod twotone_nodes;
 pub mod tx_nodes;
 pub mod vdl2_nodes;
 pub mod video_nodes;
+pub mod wefax_nodes;
 pub mod wfm;
 pub mod wifi_nodes;
 pub mod wigle_nodes;
@@ -204,6 +206,8 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (gsm_nodes::DESC, gsm_nodes::build),
     (mic_in::DESC, mic_in::build),
     (sstv_nodes::DESC, sstv_nodes::build),
+    (apt_nodes::DESC, apt_nodes::build),
+    (wefax_nodes::DESC, wefax_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),
     (ident_nodes::DESC, ident_nodes::build),

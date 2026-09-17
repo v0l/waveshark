@@ -21,6 +21,8 @@ the code is in the commit log.
 - Analogue FPV video named from its line rate, with its channel: R1, F4, A5.
 - P25 phase 1: the talkgroup, the radio id and the key a call is under,
   without speech.
+- NOAA APT passes and HF weather fax charts, drawn on the video pane as they
+  are received.
 - FLEX paging at 1600 and 3200 baud, two and four level, in the message view.
 - Morse off the air: a CW channel read as text, at the speed it was sent.
 - MDC-1200: the unit id a Motorola radio sends when its key goes down.

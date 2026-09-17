@@ -2667,6 +2667,9 @@ fn sat_mode(mode: datasets::satnogs::Mode) -> ChanMode {
         // AX.25 at 1200 baud is what AFSK on a satellite nearly always is,
         // and the APRS front end is the one that reads it.
         M::Afsk => front("aprs"),
+        // The picture the weather birds send, which is the one satellite
+        // mode with a decoder of its own here.
+        M::Apt => front("apt"),
         M::Fsk
         | M::Gfsk
         | M::Gmsk
@@ -2677,7 +2680,6 @@ fn sat_mode(mode: datasets::satnogs::Mode) -> ChanMode {
         | M::Ask
         | M::Dvb
         | M::Sstv
-        | M::Apt
         | M::Lrpt
         | M::Hrpt
         | M::Duv

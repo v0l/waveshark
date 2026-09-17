@@ -521,6 +521,8 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::video_nodes::Video,
         &crate::acars_nodes::Acars,
         &crate::sstv_nodes::Sstv,
+        &crate::apt_nodes::Apt,
+        &crate::wefax_nodes::Wefax,
         &crate::vdl2_nodes::Vdl2,
         &crate::dvbt_nodes::Dvbt,
         &crate::aprs_nodes::Aprs,
