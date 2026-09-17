@@ -25,9 +25,26 @@ pub struct Waterfall {
     tex: Option<TextureHandle>,
     /// Whole texture needs re-uploading (resize, clear, or a pan).
     dirty_all: bool,
-    /// Only this row changed since the last upload.
-    dirty_row: Option<usize>,
+    /// Rows written since the last upload: where the run starts in the ring
+    /// and how many there are.
+    ///
+    /// A run rather than a single row, because rows are written whether or
+    /// not the waterfall is on screen: a view left for a minute comes back
+    /// to a hundred rows in the ring that the texture has never seen, and
+    /// uploading only the newest left the rest showing whatever was in the
+    /// ring a lap ago.
+    dirty: Option<(usize, usize)>,
     row_buf: Vec<Color32>,
+}
+
+/// One run of rows into the texture, starting at `row`.
+fn upload(tex: &mut TextureHandle, pixels: &[Color32], width: usize, row: usize, rows: usize) {
+    if rows == 0 || width == 0 {
+        return;
+    }
+    let mut img = ColorImage::filled([width, rows], Color32::BLACK);
+    img.pixels.copy_from_slice(&pixels[row * width..(row + rows) * width]);
+    tex.set_partial([0, row], img, TextureOptions::LINEAR);
 }
 
 impl Waterfall {
@@ -42,7 +59,7 @@ impl Waterfall {
             filled: 0,
             tex: None,
             dirty_all: true,
-            dirty_row: None,
+            dirty: None,
             row_buf: Vec::new(),
         }
     }
@@ -52,7 +69,7 @@ impl Waterfall {
         self.cursor = 0;
         self.filled = 0;
         self.dirty_all = true;
-        self.dirty_row = None;
+        self.dirty = None;
     }
 
     /// Add one spectrum row, mapping dB through the given display range.
@@ -84,7 +101,22 @@ impl Waterfall {
             let v = chunk.iter().copied().fold(f32::MIN, f32::max);
             self.pixels[row + i] = paint(self.ramp, ((v - floor) / span).clamp(0.0, 1.0));
         }
-        self.dirty_row = Some(self.cursor);
+        if self.dirty_all {
+            // The whole texture is going up anyway; a run inside it is not
+            // worth keeping.
+            self.dirty = None;
+        }
+        self.dirty = match self.dirty {
+            // The run grows with the ring; a lap of it is the whole
+            // texture, and one upload is cheaper than a hundred partial
+            // ones anyway.
+            Some((start, n)) if n + 1 < self.height => Some((start, n + 1)),
+            Some(_) => {
+                self.dirty_all = true;
+                None
+            }
+            None => Some((self.cursor, 1)),
+        };
         self.cursor = (self.cursor + 1) % self.height;
         self.filled = (self.filled + 1).min(self.height);
     }
@@ -114,7 +146,7 @@ impl Waterfall {
         self.filled = 0;
         self.tex = None;
         self.dirty_all = true;
-        self.dirty_row = None;
+        self.dirty = None;
     }
 
     pub fn height(&self) -> usize {
@@ -177,12 +209,15 @@ impl Waterfall {
             img.pixels.copy_from_slice(&self.pixels);
             tex.set(img, TextureOptions::LINEAR);
             self.dirty_all = false;
-            self.dirty_row = None;
-        } else if let Some(r) = self.dirty_row.take() {
-            self.row_buf.copy_from_slice(&self.pixels[r * self.width..(r + 1) * self.width]);
-            let mut img = ColorImage::filled([self.width, 1], Color32::BLACK);
-            img.pixels.copy_from_slice(&self.row_buf);
-            tex.set_partial([0, r], img, TextureOptions::LINEAR);
+            self.dirty = None;
+        } else if let Some((start, n)) = self.dirty.take() {
+            // In two pieces where the run wrapped the ring, because a
+            // partial upload is a rectangle and the ring is not.
+            let first = n.min(self.height - start);
+            upload(tex, &self.pixels, self.width, start, first);
+            if n > first {
+                upload(tex, &self.pixels, self.width, 0, n - first);
+            }
         }
 
         if self.filled == 0 {
@@ -346,10 +381,34 @@ mod tests {
         let mut w = Waterfall::new(8);
         w.push(&[-50.0; 16], -100.0, 0.0);
         w.dirty_all = false;
-        w.dirty_row = None;
+        w.dirty = None;
         w.push(&[-50.0; 16], -100.0, 0.0);
-        assert_eq!(w.dirty_row, Some(1), "one changed row should be a partial upload");
+        assert_eq!(w.dirty, Some((1, 1)), "one changed row should be a partial upload");
         assert!(!w.dirty_all, "a single row must not force a full re-upload");
+    }
+
+    /// Rows are written whether or not the pane is drawing, so the ones
+    /// written while another view was open have to reach the texture when it
+    /// comes back. Uploading only the newest left the rest of the ring
+    /// showing what it held a lap ago.
+    #[test]
+    fn rows_written_while_nothing_drew_are_all_uploaded() {
+        let mut w = Waterfall::new(8);
+        w.push(&[-50.0; 16], -100.0, 0.0);
+        w.dirty_all = false;
+        w.dirty = None;
+        for _ in 0..4 {
+            w.push(&[-50.0; 16], -100.0, 0.0);
+        }
+        assert_eq!(w.dirty, Some((1, 4)), "every row since the last upload");
+        assert!(!w.dirty_all);
+
+        // Longer than the ring is one upload of the whole thing.
+        for _ in 0..8 {
+            w.push(&[-50.0; 16], -100.0, 0.0);
+        }
+        assert!(w.dirty_all, "a lap of the ring is the whole texture");
+        assert_eq!(w.dirty, Some((4, 1)), "and the run starts again under it");
     }
 
     #[test]
