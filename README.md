@@ -52,9 +52,9 @@ Grab a build from [releases](https://github.com/v0l/waveshark/releases): a
 `.deb` or `.rpm` for Linux x86_64, an `.msi` for Windows x86_64, a `.dmg` for
 macOS on Apple silicon. Setup checks for a newer release and can fetch and
 open the one for the machine it is running on. The bare binary is published
-beside each installer for anyone who would rather not install anything; on
-Windows it needs `rtlsdr.dll` and `libusb-1.0.dll`, which are assets of the
-same release.
+beside each installer for anyone who would rather not install anything; the
+Windows one is a zip, because the `.exe` will not start without `rtlsdr.dll`
+and `libusb-1.0.dll` beside it. Every asset carries the version in its name.
 
 One build per platform, card or no card. The speech models run on an NVIDIA
 GPU when the CUDA 12 runtime is on the machine and on the CPU when it is not,

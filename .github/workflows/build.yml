@@ -147,27 +147,45 @@ jobs:
       # and a resolver free to pick a newer one has picked a crate needing a
       # compiler newer than the job has. That failure reads as "unstable
       # feature" in a dependency nobody here wrote.
+      # Every asset carries the version, so a downloaded file still says what
+      # it is a year later and two releases cannot share a name in a download
+      # folder. Taken from the manifest rather than the tag, because the
+      # branch builds have no tag and the RPM step already reads it there.
+      # Read before the Windows installer step rewrites the manifest to drop
+      # a release candidate's suffix.
+      - name: Version
+        shell: bash
+        run: |
+          ver=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "app") | .version')
+          echo "VER=$ver" >> "$GITHUB_ENV"
+          echo "ASSET=waveshark-$ver-${{ matrix.name }}" >> "$GITHUB_ENV"
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p app ${{ matrix.features }}
 
       # A release carries files, not folders: the installer for the platform,
       # and the binary itself for anyone who would rather not install one.
-      # Windows needs its two vcpkg DLLs beside the .exe, so those are assets
-      # of their own; everything else a folder used to carry is in the README.
+      # The Windows binary needs its two vcpkg DLLs beside it or it will not
+      # start, so that one is a zip of the three rather than three assets a
+      # person has to know to collect. Everything else a folder used to carry
+      # is in the README.
       - name: Binary (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/waveshark waveshark-${{ matrix.name }}
-          chmod +x waveshark-${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/waveshark "$ASSET"
+          chmod +x "$ASSET"
 
       - name: Binary (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" waveshark-${{ matrix.name }}.exe
-          Copy-Item "$env:VCPKG_BIN\rtlsdr.dll" .
-          Copy-Item "$env:VCPKG_BIN\libusb-1.0.dll" .
+          New-Item -ItemType Directory -Force ziproot | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" ziproot\
+          Copy-Item "$env:VCPKG_BIN\rtlsdr.dll" ziproot\
+          Copy-Item "$env:VCPKG_BIN\libusb-1.0.dll" ziproot\
+          Compress-Archive -Path ziproot\* -DestinationPath "$env:ASSET.zip"
 
       # The installers, built from the metadata in crates/app/Cargo.toml after
       # the binary is copied out and never before it: the macOS step rewrites
@@ -193,7 +211,7 @@ jobs:
         shell: bash
         run: |
           cargo packager -p app -r --target ${{ matrix.target }} -f deb -o "$PWD/dist"
-          mv dist/*.deb waveshark-${{ matrix.name }}.deb
+          mv dist/*.deb "$ASSET.deb"
           # The RPM names Fedora's packages rather than what ldd found on this
           # Debian runner, which is why its dependencies are written out.
           #
@@ -201,11 +219,9 @@ jobs:
           # refuses one in a version, so 0.3.1-rc1 is 0.3.1~rc1 here, which is
           # the same thing in RPM's ordering: a tilde sorts below the release
           # it leads to.
-          ver=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "app") | .version')
           cargo generate-rpm -p crates/app --target ${{ matrix.target }} \
-            -s "version = '${ver//-/\~}'" \
-            -o waveshark-${{ matrix.name }}.rpm
+            -s "version = '${VER//-/\~}'" \
+            -o "$ASSET.rpm"
 
       - name: Installers (macos)
         if: runner.os == 'macOS' && matrix.installers
@@ -236,10 +252,10 @@ jobs:
           # letting go of the folder, and it passes on the next attempt.
           for try in 1 2 3; do
             hdiutil create -volname WaveShark -srcfolder dmgroot -fs HFS+ -ov \
-              -format UDZO waveshark-${{ matrix.name }}.dmg && break
+              -format UDZO "$ASSET.dmg" && break
             sleep 10
           done
-          test -f waveshark-${{ matrix.name }}.dmg
+          test -f "$ASSET.dmg"
 
       - name: Installers (windows)
         if: runner.os == 'Windows' && matrix.installers
@@ -247,26 +263,38 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist-extra | Out-Null
           Copy-Item "$env:VCPKG_BIN\*.dll" dist-extra\ -ErrorAction SilentlyContinue
-          # An MSI product version is three numbers and nothing else, so a
-          # release candidate is packaged as the release it leads to. The
-          # binary was built before this and still says what it is.
+          # An MSI product version is major.minor.build and nothing else: the
+          # installer reads only those three fields and ignores a fourth. The
+          # patch number already sits in the build field, so a release
+          # candidate's number goes in there with it, as patch * 1000 + rc,
+          # and the release itself as patch * 1000 + 999. That keeps the
+          # ordering an upgrade needs: 0.3.1-rc1 is 0.3.1001, rc2 is 0.3.1002
+          # and 0.3.1 is 0.3.1999, so each install replaces the one before it.
+          # Without this every candidate and the release share a product
+          # version, and msiexec offers a repair instead of an upgrade.
+          #
+          # The build field stops at 65535, which caps the patch number at 65.
+          # The binary was built before this rewrite and still says what it is.
           $toml = Get-Content Cargo.toml -Raw
-          Set-Content Cargo.toml ($toml -replace '(?m)^version = "(\d+\.\d+\.\d+)[^"]*"', 'version = "$1"')
+          # Only a plain version or a numbered release candidate: anything
+          # else would land on the release's own number and install over it.
+          if ($toml -notmatch '(?m)^version = "(\d+)\.(\d+)\.(\d+)(?:-rc\.?(\d+))?"\r?$') {
+            throw "the manifest version is not one this can package: $env:VER"
+          }
+          $major, $minor, $patch = $Matches[1], $Matches[2], [int]$Matches[3]
+          $rc = if ($Matches[4]) { [int]$Matches[4] } else { 999 }
+          if ($patch -gt 65) { throw "a patch number over 65 overflows the MSI build field" }
+          if ($rc -gt 999) { throw "a release candidate over 999 does not fit" }
+          $product = "$major.$minor.$($patch * 1000 + $rc)"
+          Write-Host "MSI product version $product for $env:VER"
+          Set-Content Cargo.toml ($toml -replace '(?m)^version = "[^"]*"', "version = `"$product`"")
           cargo packager -p app -r --target ${{ matrix.target }} -f wix -o "$PWD\dist"
-          Move-Item dist\*.msi waveshark-${{ matrix.name }}.msi
+          Move-Item dist\*.msi "$env:ASSET.msi"
 
       - uses: actions/upload-artifact@v4
         with:
           name: waveshark-${{ matrix.name }}
-          path: |
-            waveshark-${{ matrix.name }}
-            waveshark-${{ matrix.name }}.exe
-            waveshark-${{ matrix.name }}.deb
-            waveshark-${{ matrix.name }}.rpm
-            waveshark-${{ matrix.name }}.msi
-            waveshark-${{ matrix.name }}.dmg
-            rtlsdr.dll
-            libusb-1.0.dll
+          path: waveshark-${{ env.VER }}-${{ matrix.name }}*
           if-no-files-found: error
 
   release:
@@ -297,7 +325,4 @@ jobs:
           # can be published and installed without offering itself to anybody
           # running the last real one.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            artifacts/waveshark-*
-            artifacts/rtlsdr.dll
-            artifacts/libusb-1.0.dll
+          files: artifacts/waveshark-*

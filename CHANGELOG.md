@@ -55,9 +55,13 @@ the code is in the commit log.
 
 - The map draws anything that says where it was, so the iMet, Graw, Meteomodem,
   Meisei, MRZ and LMS6 sondes appear beside the Vaisala ones.
+- Every download carries its version in the name, and the Windows binary is a
+  zip holding the two DLLs it will not start without.
 
 ### Fixed
 
+- The Windows installer offered a repair rather than an upgrade over a
+  release candidate.
 - A CUDA build was offered the plain download, and a plain build the CUDA
   one.
 - The hiss on the end of every over: the squelch no longer hangs on to a

@@ -54,7 +54,8 @@ pub enum Kind {
     /// A .msi, .dmg, .deb or .rpm: handing it to the desktop starts an
     /// install.
     Installer,
-    /// The binary itself, which is saved and not installed.
+    /// The binary itself, or the zip the Windows one is published in with
+    /// the libraries it will not start without. Saved, not installed.
     Binary,
 }
 
@@ -309,21 +310,22 @@ fn parse(body: &str) -> Result<Release, String> {
     if version.is_empty() {
         return Err("the release has no tag".into());
     }
-    let asset = pick(&j.assets);
+    let asset = pick(&j.assets, &version);
     Ok(Release { version, tag: j.tag_name, page: j.html_url, asset, published: j.published_at })
 }
 
 /// The one asset of a release this build installs from.
 ///
-/// Every name is `waveshark-<platform><suffix>`, and the whole name is
-/// matched rather than its start, because `waveshark-linux-x86_64` is a
-/// prefix of `waveshark-linux-arm64`'s neighbours in the list and of every
+/// Every name is `waveshark-<version>-<platform><suffix>`, the version being
+/// the release's own tag without its `v`, and the whole name is matched
+/// rather than its start, because `waveshark-0.3.0-linux-x86_64` is a prefix
+/// of `waveshark-0.3.0-linux-arm64`'s neighbours in the list and of every
 /// package built from it.
 ///
 /// The first suffix this platform can use wins, so an installer is preferred
 /// to the bare binary.
-fn pick(assets: &[JsonAsset]) -> Option<Asset> {
-    let stem = format!("waveshark-{}", platform());
+fn pick(assets: &[JsonAsset], version: &str) -> Option<Asset> {
+    let stem = format!("waveshark-{version}-{}", platform());
     wanted().into_iter().find_map(|(suffix, kind)| {
         let name = format!("{stem}{suffix}");
         let a = assets.iter().find(|a| a.name == name)?;
@@ -337,10 +339,12 @@ fn pick(assets: &[JsonAsset]) -> Option<Asset> {
 }
 
 /// The suffixes this platform can install from, best first. The last is
-/// always the bare binary, which every release carries.
+/// always the bare binary, which every release carries; on Windows that is
+/// the zip, because the `.exe` alone will not start without the two DLLs
+/// published inside it.
 fn wanted() -> Vec<(&'static str, Kind)> {
     if cfg!(target_os = "windows") {
-        vec![(".msi", Kind::Installer), (".exe", Kind::Binary)]
+        vec![(".msi", Kind::Installer), (".zip", Kind::Binary)]
     } else if cfg!(target_os = "macos") {
         vec![(".dmg", Kind::Installer), ("", Kind::Binary)]
     } else {
@@ -476,18 +480,21 @@ mod tests {
         assert!(!is_newer("nightly", "0.1.0"));
     }
 
+    /// The version every fixture in these tests is named for.
+    const V: &str = "0.3.1";
+
     /// Every asset a release carries, so the test runs the same on whichever
     /// platform and feature set built it.
     fn every_asset() -> Vec<JsonAsset> {
         [
-            "waveshark-linux-x86_64",
-            "waveshark-linux-x86_64.deb",
-            "waveshark-linux-x86_64.rpm",
-            "waveshark-linux-arm64",
-            "waveshark-windows-x86_64.exe",
-            "waveshark-windows-x86_64.msi",
-            "waveshark-macos-arm64",
-            "waveshark-macos-arm64.dmg",
+            "waveshark-0.3.1-linux-x86_64",
+            "waveshark-0.3.1-linux-x86_64.deb",
+            "waveshark-0.3.1-linux-x86_64.rpm",
+            "waveshark-0.3.1-linux-arm64",
+            "waveshark-0.3.1-windows-x86_64.zip",
+            "waveshark-0.3.1-windows-x86_64.msi",
+            "waveshark-0.3.1-macos-arm64",
+            "waveshark-0.3.1-macos-arm64.dmg",
         ]
         .iter()
         .enumerate()
@@ -506,11 +513,11 @@ mod tests {
             "html_url": "https://github.com/v0l/waveshark/releases/tag/v0.3.1",
             "published_at": "2025-01-02T03:04:05Z",
             "assets": [
-                {"name": "waveshark-linux-x86_64",
+                {"name": "waveshark-0.3.1-linux-x86_64",
                  "browser_download_url": "https://example.invalid/l", "size": 12},
-                {"name": "waveshark-windows-x86_64.exe",
-                 "browser_download_url": "https://example.invalid/w.exe", "size": 34},
-                {"name": "waveshark-macos-arm64",
+                {"name": "waveshark-0.3.1-windows-x86_64.zip",
+                 "browser_download_url": "https://example.invalid/w.zip", "size": 34},
+                {"name": "waveshark-0.3.1-macos-arm64",
                  "browser_download_url": "https://example.invalid/m", "size": 56}
             ]
         }"#;
@@ -521,17 +528,29 @@ mod tests {
         let a = r.asset.expect("an asset for the platform this test runs on");
         // A release with no installers still offers the binary.
         assert_eq!(a.kind, Kind::Binary, "{}", a.name);
-        assert_eq!(a.name, format!("waveshark-{}{}", platform(), binary_suffix()));
+        assert_eq!(a.name, format!("waveshark-{V}-{}{}", platform(), binary_suffix()));
         assert!(a.bytes > 0);
     }
 
     fn binary_suffix() -> &'static str {
-        if cfg!(target_os = "windows") { ".exe" } else { "" }
+        if cfg!(target_os = "windows") { ".zip" } else { "" }
+    }
+
+    /// An asset of the release before this one must not be offered, which is
+    /// what a match on the platform alone would do with two releases' files
+    /// in one list.
+    #[test]
+    fn only_this_releases_assets_are_offered() {
+        let mut assets = every_asset();
+        for a in &mut assets {
+            a.name = a.name.replace("0.3.1", "0.3.0");
+        }
+        assert!(pick(&assets, V).is_none());
     }
 
     #[test]
     fn an_installer_is_preferred_to_the_binary() {
-        let a = pick(&every_asset()).expect("an asset for this platform");
+        let a = pick(&every_asset(), V).expect("an asset for this platform");
         // Every platform the workflow builds an installer for gets it; a
         // Linux machine of neither packaging family gets the binary.
         let installed = cfg!(target_os = "windows")
@@ -539,26 +558,26 @@ mod tests {
             || (cfg!(target_os = "linux") && family() != Family::Other);
         let expected = if installed { Kind::Installer } else { Kind::Binary };
         assert_eq!(a.kind, expected, "{}", a.name);
-        assert!(a.name.starts_with(&format!("waveshark-{}", platform())), "{}", a.name);
+        assert!(a.name.starts_with(&format!("waveshark-{V}-{}", platform())), "{}", a.name);
     }
 
     #[test]
     fn another_platforms_asset_is_never_offered() {
         // The names share a prefix, so a match on the start of the name would
         // pick whichever GitHub listed first.
-        let chosen = pick(&every_asset()).expect("an asset");
-        let rest = chosen.name.trim_start_matches(&format!("waveshark-{}", platform()));
+        let chosen = pick(&every_asset(), V).expect("an asset");
+        let rest = chosen.name.trim_start_matches(&format!("waveshark-{V}-{}", platform()));
         assert!(rest.is_empty() || rest.starts_with('.'), "{}", chosen.name);
     }
 
     #[test]
     fn a_release_carrying_only_the_other_platforms_offers_nothing() {
         let assets = vec![JsonAsset {
-            name: "waveshark-solaris-sparc".into(),
+            name: "waveshark-0.3.1-solaris-sparc".into(),
             browser_download_url: "https://example.invalid/s".into(),
             size: 1,
         }];
-        assert!(pick(&assets).is_none());
+        assert!(pick(&assets, V).is_none());
     }
 
     #[test]
@@ -581,7 +600,7 @@ mod tests {
     #[test]
     fn a_release_without_this_platform_still_reads() {
         let body = r#"{"tag_name": "v9.0.0", "html_url": "", "published_at": "",
-                       "assets": [{"name": "waveshark-solaris-sparc",
+                       "assets": [{"name": "waveshark-9.0.0-solaris-sparc",
                                    "browser_download_url": "https://example.invalid/s", "size": 1}]}"#;
         let r = parse(body).expect("parses");
         assert_eq!(r.version, "9.0.0");
