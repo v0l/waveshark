@@ -51,6 +51,9 @@ pub struct Squelch {
     /// a squelch that does not work.
     hang_samples: u64,
     hang: u64,
+    /// How far under the closing threshold means the signal has gone rather
+    /// than dipped. See [`GONE_BELOW_DB`].
+    gone_below_db: f32,
     /// Where the mute ramp currently sits, 0 muted and 1 open.
     ramp: f32,
     step: f32,
@@ -88,6 +91,7 @@ impl Squelch {
             // word.
             hang_samples: (rate * 0.5) as u64,
             hang: 0,
+            gone_below_db: GONE_BELOW_DB,
             ramp: 0.0,
             step: (1.0 / (rate * ramp_ms / 1000.0).max(1.0)) as f32,
         }
@@ -116,6 +120,21 @@ impl Squelch {
         }
     }
 
+    /// How far under the threshold counts as the signal having gone rather
+    /// than dipped, which shuts the gate without waiting for the hang.
+    /// Infinite for a measurement where nothing is silence: a microphone with
+    /// nobody at it reads far under any threshold, and the hang is exactly
+    /// what has to survive that.
+    pub fn set_gone_below_db(&mut self, db: f32) {
+        self.gone_below_db = db;
+    }
+
+    /// How long the decision holds after the level falls under the closing
+    /// threshold.
+    pub fn set_hang_ms(&mut self, rate: f64, ms: f64) {
+        self.hang_samples = (rate * ms / 1000.0).max(0.0) as u64;
+    }
+
     /// The smoothed measurement the decision is made on, in dB.
     ///
     /// Worth showing on a meter rather than the raw figure: a control set
@@ -141,7 +160,7 @@ impl Squelch {
         if self.level >= self.open_at {
             self.open = true;
             self.hang = self.hang_samples;
-        } else if self.level < self.close_at - GONE_BELOW_DB {
+        } else if self.level < self.close_at - self.gone_below_db {
             // The transmitter has stopped, not dipped. Holding the mute open
             // through the hang is what puts half a second of hiss on the end
             // of every over: an FM discriminator with no carrier on it is

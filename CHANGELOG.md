@@ -16,6 +16,8 @@ the code is in the commit log.
 - The memory bank reads Chirp, CSV, Freqman and SDR# lists, and exports as
   Chirp CSV.
 - Transmit a recorded capture: pick a file on a channel and send it back out.
+- VOX: speech keys the transmit channel, with a tail, a roger beep and the
+  receiver's own audio kept out of it.
 - A dataset that is downloading says how far it has got, in bytes and as a bar.
 - Transmit six protocols this receiver reads, on a channel already decoding
   one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements, SSTV

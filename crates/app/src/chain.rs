@@ -222,6 +222,11 @@ pub struct Receiver {
     /// no microphone to give it skips the stage: the chain after it was then
     /// built unfed, and keying transmitted a carrier with nothing on it.
     mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
+    /// What the speaker is playing, for a vox deciding whether the
+    /// microphone is hearing a voice or hearing the receiver. Published here
+    /// rather than wired, because the stage that reads it runs on the
+    /// transmitter's thread.
+    heard: nodes::Heard,
     /// What the agent has queued to say, held for the same reason the
     /// microphone is. The transmit stage is built on every rebuild, so the
     /// source it reads from has to be something the receiver holds rather
@@ -531,6 +536,7 @@ impl TxPlan {
             && a.source == b.source
             && a.mic_gain == b.mic_gain
             && a.tone_hz == b.tone_hz
+            && a.vox == b.vox
             // A different file is a different chain, even though nothing
             // in the stages' settings says so: the file rides on the sinks.
             && a.source != crate::radio::TxSource::Sub
@@ -622,6 +628,17 @@ pub struct TxState {
     pub mic_peak: f32,
 }
 
+/// What a vox in the transmit chain is deciding, for whoever keys and for
+/// the control the threshold is set on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VoxState {
+    pub open: bool,
+    /// The smoothed level the decision is made on, as an amplitude.
+    pub level: f32,
+    /// Whether the key is up only because the receiver is playing something.
+    pub held: bool,
+}
+
 /// One feed, as the interface sees it.
 #[derive(Clone, Debug)]
 pub struct FeedStatus {
@@ -681,6 +698,7 @@ impl Receiver {
             pending_speaker: None,
             pending_tx: None,
             mic: None,
+            heard: nodes::Heard::default(),
             voice: None,
             log_dir: sinks.packet_log,
             log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
@@ -835,6 +853,24 @@ impl Receiver {
         })
     }
 
+    /// What the speaker is playing, as an amplitude, for anti-trip. Written
+    /// every block by the radio loop, which is where the speaker's own level
+    /// is read.
+    pub fn set_heard(&self, level: f32) {
+        self.heard.store(level.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// What the vox is deciding: whether the key should be down, the level it
+    /// is deciding on, and the threshold in force, which anti-trip raises.
+    pub fn vox_state(&self) -> Option<VoxState> {
+        let r = self.tx.readings();
+        r.vox.load(std::sync::atomic::Ordering::Relaxed).then(|| VoxState {
+            open: r.vox_open.load(std::sync::atomic::Ordering::Relaxed),
+            level: f32::from_bits(r.vox_level.load(std::sync::atomic::Ordering::Relaxed)),
+            held: r.vox_held.load(std::sync::atomic::Ordering::Relaxed),
+        })
+    }
+
     /// Whether the microphone's signal is arriving already clipped.
     pub fn mic_clipped(&self) -> bool {
         self.tx.readings().mic_clipped.load(std::sync::atomic::Ordering::Relaxed)
@@ -932,6 +968,15 @@ impl Receiver {
                         .and_then(|n| n.as_any_mut().downcast_mut::<nodes::TxSinkNode>())
                 {
                     sink.send_to(sent);
+                }
+                // The vox reads the speaker off the receiver's side of the
+                // fence, the way the monitor's queue crosses it.
+                if let Some(v) = graph
+                    .by_tag(derived::VOX)
+                    .and_then(|id| graph.node_mut(id))
+                    .and_then(|n| n.as_any_mut().downcast_mut::<nodes::VoxNode>())
+                {
+                    v.watch(self.heard.clone());
                 }
                 self.tx.set_chain(transmit, graph, idle, mic);
                 if let Some(stream) = stream {
@@ -2842,8 +2887,11 @@ pub mod derived {
     pub const TX_SOURCE: u64 = Patch::DERIVED_BASE + 11;
     pub const TX_MOD: u64 = Patch::DERIVED_BASE + 12;
     pub const TX_RADIO: u64 = Patch::DERIVED_BASE + 13;
+    /// Between the microphone and the modulator when a voice keys the
+    /// channel rather than a hand.
+    pub const VOX: u64 = Patch::DERIVED_BASE + 33;
     /// The stages that transmit, which are run on a thread of their own.
-    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, TX_MOD, TX_RADIO];
+    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, TX_MOD, TX_RADIO];
     /// What is going out, drawn on the span the receiver is deaf to while it
     /// goes out. In front of the head, so everything downstream sees it.
     pub const TX_MONITOR: u64 = Patch::DERIVED_BASE + 19;
@@ -3068,6 +3116,22 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             }
             p.add_derived(derived::TX_SOURCE, kind, settings);
             p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
+            // A voice keying the channel decides on the audio that would go
+            // on air, so the stage is after the microphone's gain, limiter
+            // and speech filter rather than on the raw microphone: the
+            // threshold is then set against the level the meter shows.
+            let mut modulates = Source::Stage(derived::TX_SOURCE, 0);
+            if tx.spec.source == TxSource::Mic && tx.spec.vox.on {
+                let v = &tx.spec.vox;
+                let mut s = Settings::new();
+                s.insert("threshold".into(), pipeline::ParamValue::Float(f64::from(v.threshold)));
+                s.insert("tail_ms".into(), pipeline::ParamValue::Float(v.tail_ms));
+                s.insert("anti_trip".into(), pipeline::ParamValue::Bool(v.anti_trip));
+                s.insert("roger_ms".into(), pipeline::ParamValue::Float(v.roger_ms));
+                p.add_derived(derived::VOX, "vox", s);
+                p.connect(modulates, (derived::VOX, 0));
+                modulates = Source::Stage(derived::VOX, 0);
+            }
 
             // A recording needs no modulator at all: what stands in its place
             // is the mixer that moves the file off the dial, so a capture made
@@ -3114,7 +3178,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 )
             };
             p.add_derived(derived::TX_MOD, mod_kind, m);
-            p.connect(Source::Stage(derived::TX_SOURCE, 0), (derived::TX_MOD, 0));
+            p.connect(modulates, (derived::TX_MOD, 0));
         }
 
         p.add_derived(derived::TX_RADIO, TX_RADIO, Settings::new());
@@ -8217,6 +8281,96 @@ mod tx_in_graph_tests {
             (hz - 2_000.0).abs() < 120.0,
             "the air carried {hz:.0} Hz: the agent is 2000 and the microphone is 700"
         );
+    }
+
+    /// A voice on the microphone says the key should be down, and the room
+    /// going quiet says it should come up.
+    ///
+    /// The stage is in the chain the receiver runs before it is keyed, which
+    /// is what makes a vox possible at all: it is measuring the audio that
+    /// would go on air while nothing is going out.
+    #[test]
+    fn a_voice_on_the_microphone_asks_for_the_key() {
+        let mut plan = plan_with_tx(TxSource::Mic);
+        let vox = crate::radio::VoxSpec {
+            on: true,
+            threshold: 0.1,
+            tail_ms: 100.0,
+            anti_trip: true,
+            roger_ms: 0.0,
+        };
+        let spec = TxSpec { source: TxSource::Mic, vox, ..Default::default() };
+        plan.channels[0].tx = Some(spec);
+        plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
+
+        // Half a second of speech and then a room with nobody in it.
+        let mut pcm: Vec<f32> = (0..24_000)
+            .map(|i| 0.5 * (std::f32::consts::TAU * 400.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        pcm.extend(std::iter::repeat_n(0.0, 96_000));
+        let src: std::sync::Arc<dyn audio::AudioSource> =
+            std::sync::Arc::new(audio::Canned::new(pcm, 48_000.0, false));
+
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        rx.set_microphone(Some(src));
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+        assert!(
+            rx.tx_topology().is_some_and(|t| t.nodes.iter().any(|n| n.kind == "vox")),
+            "the vox is not in the chain"
+        );
+
+        until("the voice to ask for the key", || rx.vox_state().is_some_and(|v| v.open));
+        let heard = rx.vox_state().expect("a vox in the chain");
+        assert!(heard.level > 0.1, "it keyed on a level of {}", heard.level);
+        assert!(!rx.keyed(), "the stage keyed the radio itself");
+
+        until("the key to come up when the room is quiet", || {
+            rx.vox_state().is_some_and(|v| !v.open)
+        });
+    }
+
+    /// What the speaker is playing raises the threshold, so the station being
+    /// listened to does not ask for the key.
+    #[test]
+    fn the_speaker_does_not_ask_for_the_key() {
+        let mut plan = plan_with_tx(TxSource::Mic);
+        let vox = crate::radio::VoxSpec {
+            on: true,
+            threshold: 0.02,
+            tail_ms: 100.0,
+            anti_trip: true,
+            roger_ms: 0.0,
+        };
+        let spec = TxSpec { source: TxSource::Mic, vox, ..Default::default() };
+        plan.channels[0].tx = Some(spec);
+        plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
+
+        // The speaker's own audio leaking into the microphone 10 dB down.
+        let pcm: Vec<f32> = (0..96_000)
+            .map(|i| 0.16 * (std::f32::consts::TAU * 400.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let src: std::sync::Arc<dyn audio::AudioSource> =
+            std::sync::Arc::new(audio::Canned::new(pcm, 48_000.0, true));
+
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        rx.set_microphone(Some(src));
+        // What the receiver is playing, as the radio loop publishes it every
+        // block off the speaker.
+        rx.set_heard(0.5);
+        rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
+        until("the vox to have measured something", || {
+            rx.vox_state().is_some_and(|v| v.level > 0.01)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let state = rx.vox_state().expect("a vox in the chain");
+        assert!(!state.open, "the receiver's own audio asked for the key");
+        assert!(state.held, "nothing said why the key was up");
+
+        // The speaker stops and the same level at the microphone keys it.
+        rx.set_heard(0.0);
+        until("the key once the speaker is quiet", || rx.vox_state().is_some_and(|v| v.open));
     }
 
     /// A transmitter told there is nothing to transmit stops transmitting.

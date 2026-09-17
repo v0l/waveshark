@@ -814,6 +814,42 @@ pub struct TxSpec {
     /// channel into a dummy load and another into an antenna do not need the
     /// gain moved between them.
     pub trim_db: f32,
+    /// Whether speech keys the channel, and how.
+    pub vox: VoxSpec,
+}
+
+/// What lets a voice key the transmitter instead of a hand.
+///
+/// Only under [`TxSource::Mic`]: a tone has no pauses to key between, and
+/// the agent already decides when it is talking.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VoxSpec {
+    pub on: bool,
+    /// The level a voice has to reach, as an amplitude in 0..1: the same
+    /// scale the meter beside the control shows, because a threshold set
+    /// against a different number than the one being compared is a threshold
+    /// nobody trusts.
+    pub threshold: f32,
+    /// How long the key stays down after the voice drops under it, so a gap
+    /// between two sentences is not two overs.
+    pub tail_ms: f64,
+    /// Whether what the speaker is playing raises the threshold. Off for a
+    /// headset, where nothing coming out of it reaches the microphone.
+    pub anti_trip: bool,
+    /// A courtesy tone at the end of an over, or zero for none.
+    pub roger_ms: f64,
+}
+
+impl Default for VoxSpec {
+    fn default() -> Self {
+        Self {
+            on: false,
+            threshold: nodes::DEFAULT_VOX_THRESHOLD,
+            tail_ms: nodes::DEFAULT_VOX_TAIL_MS,
+            anti_trip: true,
+            roger_ms: 0.0,
+        }
+    }
 }
 
 impl Default for TxSpec {
@@ -827,6 +863,7 @@ impl Default for TxSpec {
             shift_hz: 0.0,
             tone_hz: 1_000.0,
             trim_db: 0.0,
+            vox: VoxSpec::default(),
         }
     }
 }
@@ -1489,6 +1526,13 @@ pub struct Status {
     pub mic_level: AtomicU32,
     /// The microphone is arriving clipped from the capture side.
     pub mic_clipped: AtomicBool,
+    /// What a vox is deciding on, as f32 bits, whether it says the key
+    /// should be down, and whether it is being held up by the receiver's own
+    /// audio. The level is not the microphone's: it is the audio that would
+    /// go on air, which is the number the threshold is compared with.
+    pub vox_level: AtomicU32,
+    pub vox_open: AtomicBool,
+    pub vox_held: AtomicBool,
     /// The radio's transmit gain, in dB, as the device took it.
     pub tx_gain_db: AtomicU32,
     /// The levels as the nodes hold them, republished when a setting made
@@ -1752,6 +1796,9 @@ impl Default for Status {
             tx_underruns: AtomicU64::new(0),
             mic_level: AtomicU32::new(0),
             mic_clipped: AtomicBool::new(false),
+            vox_level: AtomicU32::new(0),
+            vox_open: AtomicBool::new(false),
+            vox_held: AtomicBool::new(false),
             tx_gain_db: AtomicU32::new(0),
             patch: parking_lot::Mutex::new(None),
             levels: parking_lot::Mutex::new(Levels::default()),
@@ -2287,6 +2334,9 @@ struct Tx {
     /// moment past the key coming up: the audio already in the demodulator
     /// when the key lifted is still the receiver's own voice.
     last_on_air: Option<std::time::Instant>,
+    /// The channel a voice keyed, so the same voice stopping lets it up and
+    /// a hand on the key is left alone.
+    vox_keyed: Option<u64>,
 }
 
 /// How long past the key coming up the transcriber stays deaf.
@@ -2513,6 +2563,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 blocks_since_key: 0,
                 keying_for: None,
                 last_keyed: None,
+                vox_keyed: None,
                 last_on_air: None,
             },
             voice: None,
@@ -2568,6 +2619,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
             let _b = tracing::info_span!("block").entered();
             self.meter_mic();
+            self.vox();
             // Whether the monitor stage draws what is going out on the span.
             // Only while the radio is deaf: a full duplex one hears its own
             // transmission for real, and mirroring on top of that would draw
@@ -3438,6 +3490,56 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.status.mic_clipped.store(self.rx.keyed() && self.rx.mic_clipped(), Ordering::Relaxed);
     }
 
+    /// Key and unkey from the vox, if a channel has one.
+    ///
+    /// The decision is the vox stage's, taken on the audio that would go out;
+    /// what this does is the half a node cannot, because keying retunes a
+    /// half duplex radio and hands its stream over, and only this thread
+    /// holds the device.
+    ///
+    /// A key pressed by hand is left alone: an operator who keys a vox
+    /// channel gets the over they asked for, and the vox lets it up when they
+    /// stop talking, which is what every radio with both does.
+    fn vox(&mut self) {
+        let Some(state) = self.rx.vox_state() else {
+            self.tx.vox_keyed = None;
+            return;
+        };
+        self.status.vox_level.store(state.level.to_bits(), Ordering::Relaxed);
+        self.status.vox_open.store(state.open, Ordering::Relaxed);
+        self.status.vox_held.store(state.held, Ordering::Relaxed);
+        let keyed = self.status.keyed.load(Ordering::Relaxed);
+        match (state.open, keyed) {
+            (true, 0) => {
+                // The channel the drawn transmit chain belongs to, which is
+                // the one the vox is measuring for.
+                let Some(id) = self.vox_channel() else { return };
+                self.tx.vox_keyed = Some(id);
+                self.key(id);
+            }
+            (false, k) if k != 0 && self.tx.vox_keyed == Some(k) => {
+                self.tx.vox_keyed = None;
+                self.unkey();
+            }
+            _ => {}
+        }
+    }
+
+    /// The channel a vox would key: the one the transmit chain was drawn for,
+    /// by the same rule [`derive_tx`] picks it.
+    fn vox_channel(&self) -> Option<u64> {
+        let has_vox = |c: &&ChannelSpec| {
+            c.tx.is_some_and(|t| t.source == TxSource::Mic && t.vox.on)
+                && tx_plan_for(c, self.plan.center).is_some()
+        };
+        let last = self
+            .tx
+            .last_keyed
+            .and_then(|id| self.plan.channels.iter().find(|c| c.id == id))
+            .filter(has_vox);
+        last.or_else(|| self.plan.channels.iter().find(has_vox)).map(|c| c.id)
+    }
+
     /// Put the block through the graph, which is everything the receiver does
     /// with it.
     fn process(&mut self, samples: &[C32]) -> Flow {
@@ -3735,8 +3837,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         let left = self.rx.replay().map(|r| r.left()).unwrap_or(0.0);
         self.status.replay_left_s.store((left as f32).to_bits(), Ordering::Relaxed);
         if let Some(s) = self.rx.speaker() {
-            Status::set_level(&self.status.out_level, s.peak());
-            self.status.audio_backlog.store(s.backlog().max(0) as u64, Ordering::Relaxed);
+            let (peak, backlog) = (s.peak(), s.backlog());
+            Status::set_level(&self.status.out_level, peak);
+            self.status.audio_backlog.store(backlog.max(0) as u64, Ordering::Relaxed);
+            // What a vox has to take out of its decision: the receiver's own
+            // audio, a metre from the microphone.
+            self.rx.set_heard(peak);
         }
     }
 

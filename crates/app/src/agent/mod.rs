@@ -380,6 +380,14 @@ pub mod args {
         pub mic_gain: Option<f32>,
         /// Level into the modulator in dB, for trimming deviation.
         pub trim_db: Option<f32>,
+        /// Let speech key the channel under `mic`, instead of a hand on the
+        /// key.
+        pub vox: Option<bool>,
+        /// The level speech has to reach to key it, from 0 to 1, against the
+        /// audio that would go out.
+        pub vox_threshold: Option<f32>,
+        /// How long the key stays down after a voice stops, in ms.
+        pub vox_tail_ms: Option<f32>,
         /// What a digital mode transmits, as a path on this machine: a
         /// transport stream for DVB-T, or anything ffmpeg can open, which is
         /// re-encoded into one. Empty goes back to the test card.

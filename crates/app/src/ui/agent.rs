@@ -900,6 +900,15 @@ impl App {
         if let Some(db) = a.trim_db {
             spec.trim_db = db.clamp(0.0, 20.0);
         }
+        if let Some(on) = a.vox {
+            spec.vox.on = on;
+        }
+        if let Some(t) = a.vox_threshold {
+            spec.vox.threshold = t.clamp(0.0, 1.0);
+        }
+        if let Some(ms) = a.vox_tail_ms {
+            spec.vox.tail_ms = f64::from(ms).clamp(0.0, 5_000.0);
+        }
         c.tx = Some(spec);
         self.send_channels();
         Ok(json!({
@@ -907,6 +916,9 @@ impl App {
             "tone_hz": spec.tone_hz,
             "mic_gain": spec.mic_gain,
             "trim_db": spec.trim_db,
+            "vox": spec.vox.on,
+            "vox_threshold": spec.vox.threshold,
+            "vox_tail_ms": spec.vox.tail_ms,
             "file": a.file,
         }))
     }
@@ -1743,6 +1755,9 @@ mod tests {
                 tone_hz: Some(1_200.0),
                 mic_gain: Some(2.0),
                 trim_db: None,
+                vox: Some(true),
+                vox_threshold: Some(0.2),
+                vox_tail_ms: Some(400.0),
                 file: None,
             }),
         )
@@ -1750,9 +1765,13 @@ mod tests {
         assert_eq!(set["source"], "MIC");
         assert_eq!(set["tone_hz"], 1_200.0);
         assert_eq!(set["mic_gain"], 2.0);
+        assert_eq!(set["vox"], true);
+        assert_eq!(set["vox_tail_ms"], 400.0);
         let tx = a.audio.channels[0].tx.expect("a transmit spec");
         assert_eq!(tx.source, crate::radio::TxSource::Mic);
         assert_eq!(tx.tone_hz, 1_200.0);
+        assert!(tx.vox.on);
+        assert_eq!(tx.vox.threshold, 0.2);
 
         let err = call(
             &mut a,
@@ -1762,6 +1781,9 @@ mod tests {
                 tone_hz: Some(20.0),
                 mic_gain: None,
                 trim_db: None,
+                vox: None,
+                vox_threshold: None,
+                vox_tail_ms: None,
                 file: None,
             }),
         )
