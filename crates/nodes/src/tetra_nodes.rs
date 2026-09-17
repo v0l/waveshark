@@ -1753,8 +1753,16 @@ mod tests {
     /// The identity harvester: a clear SSI in a registration, then the
     /// encrypted identity that follows, become a pair. Three pairs are
     /// gathered, and once the secret is known every ESI de-anonymises.
+    ///
+    /// Asked for by name, with `--ignored`: the third pair starts the 2^40
+    /// meet-in-the-middle on the GPU, which is the work this test is about
+    /// reaching and not the work it asserts. Left to run with the rest, the
+    /// sweep is still dispatching when the harness exits and the Vulkan
+    /// driver is torn down underneath it, which ends the run in a signal
+    /// whatever the tests said.
     #[cfg(feature = "tea")]
     #[test]
+    #[ignore = "starts the 2^40 identity sweep; run it by name"]
     fn harvests_id_pairs_and_deanonymises() {
         use decode::ta61::encrypt_id;
         use decode::tetra::MmPdu;
