@@ -261,7 +261,15 @@ jobs:
           mv dist/*.deb waveshark-${{ matrix.name }}.deb
           # The RPM names Fedora's packages rather than what ldd found on this
           # Debian runner, which is why its dependencies are written out.
+          #
+          # RPM reads a hyphen as the separator before the release number and
+          # refuses one in a version, so 0.3.1-rc1 is 0.3.1~rc1 here, which is
+          # the same thing in RPM's ordering: a tilde sorts below the release
+          # it leads to.
+          ver=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "app") | .version')
           cargo generate-rpm -p crates/app --target ${{ matrix.target }} \
+            -s "version = '${ver//-/\~}'" \
             -o waveshark-${{ matrix.name }}.rpm
 
       - name: Installers (macos)
