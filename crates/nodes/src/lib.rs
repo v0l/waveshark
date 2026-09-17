@@ -39,6 +39,7 @@ pub mod meisei_nodes;
 pub mod mic_in;
 pub mod mod_nodes;
 pub mod modes_nodes;
+pub mod morse_nodes;
 pub mod mrz_nodes;
 pub mod nrf24_nodes;
 pub mod packet_nodes;
@@ -100,6 +101,7 @@ pub use mod_nodes::{
     OokModNode, WBFM_DEVIATION_HZ,
 };
 pub use modes_nodes::ModeSNode;
+pub use morse_nodes::MorseNode;
 pub use mrz_nodes::MrzNode;
 pub use nrf24_nodes::Nrf24Node;
 pub use packet_nodes::{DedupeNode, PacketDecodeNode};
@@ -209,6 +211,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (dmr_nodes::DESC, dmr_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
+    (morse_nodes::DESC, morse_nodes::build),
     (nrf24_nodes::DESC, nrf24_nodes::build),
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),

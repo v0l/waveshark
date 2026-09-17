@@ -43,8 +43,25 @@ impl ToneMeter {
     /// asks the same few lengths many thousands of times.
     pub fn peak_hz(&mut self, samples: &[f32]) -> f64 {
         let n = samples.len();
+        let mut mags = Vec::new();
+        self.magnitudes(samples, &mut mags);
+        let peak = mags
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.bin_hz(&mags, peak, n)
+    }
+
+    /// Every bin of the window's magnitude spectrum up to Nyquist, appended
+    /// to `out`. For a caller choosing a tone by something other than which
+    /// is loudest: a keyed tone is the one whose level moves, and only the
+    /// whole spectrum says which that is.
+    pub fn magnitudes(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+        let n = samples.len();
         if n < 4 {
-            return 0.0;
+            return;
         }
         let planner = &mut self.planner;
         let fft = self.plans.entry(n).or_insert_with(|| planner.plan_fft_forward(n)).clone();
@@ -56,14 +73,21 @@ impl ToneMeter {
 
         // Real input, so only the first half says anything.
         let half = n / 2 + 1;
-        let mags: Vec<f32> = self.buf[..half].iter().map(|c| c.norm()).collect();
-        let peak = mags
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        (interpolate(&mags, peak) * self.rate) / n as f64
+        out.extend(self.buf[..half].iter().map(|c| c.norm()));
+    }
+
+    /// Where a peak at bin `at` of an `n` point window really sits, in
+    /// hertz, with its neighbours saying where between the bins it is.
+    pub fn bin_hz(&self, mags: &[f32], at: usize, n: usize) -> f64 {
+        if mags.is_empty() || n == 0 {
+            return 0.0;
+        }
+        (interpolate(mags, at.min(mags.len() - 1)) * self.rate) / n as f64
+    }
+
+    /// The bin a frequency falls in, for a window of `n` samples.
+    pub fn bin_of(&self, hz: f64, n: usize) -> usize {
+        ((hz * n as f64 / self.rate).round().max(0.0)) as usize
     }
 }
 

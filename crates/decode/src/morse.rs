@@ -107,18 +107,60 @@ pub fn encode(text: &str, wpm: f32) -> Package {
     Package { pulses, ..Default::default() }
 }
 
-/// Read timings back as text.
+/// The dot length a burst was sent at, in microseconds.
 ///
-/// The dot length is measured from the burst rather than given, because a
-/// received transmission is at whatever speed the operator was sending at,
-/// and that is rarely the speed the receiver expected. The shortest mark is
-/// the dot: dashes are three times longer, and a burst with no dots at all
-/// (an unbroken run of dashes) is rare enough to be worth getting wrong.
+/// Measured from the burst rather than given, because a received
+/// transmission is at whatever speed the operator was sending at, and that
+/// is rarely the speed the receiver expected. The shortest mark is the dot:
+/// dashes are three times longer, and a burst with no dots at all (an
+/// unbroken run of dashes) is rare enough to be worth getting wrong.
+pub fn dot_of(pkg: &Package) -> u32 {
+    pkg.pulses.iter().map(|p| p.mark).min().unwrap_or(0).max(1)
+}
+
+/// The speed a dot length is, in words a minute. The inverse of [`dot_us`].
+pub fn wpm(dot_us: u32) -> f32 {
+    1_200_000.0 / dot_us.max(1) as f32
+}
+
+/// How much of a burst sits on the 1:3:7 grid a keyed letter is made of.
+///
+/// Morse carries no check of any kind, so this is the only evidence there is
+/// that a burst was sent by somebody rather than assembled out of noise and
+/// filter skirts. A mark is a dot or a dash and a gap is one, three or seven
+/// dots; a timing that is none of those, at the dot length the burst itself
+/// measures, was not keyed by a person.
+///
+/// The last gap is the silence that ended the burst and says nothing.
+pub fn fits(pkg: &Package) -> f32 {
+    if pkg.pulses.len() < 2 {
+        return 0.0;
+    }
+    let dot = dot_of(pkg) as f32;
+    // Measured on a synthetic 18 wpm over: a station in the channel scores
+    // 1.0 even with a fist skewed 15% each way, and a strong station a
+    // kilohertz outside it, heard as blips through the filter skirt, scores
+    // 0.52 to 0.72. A tighter tolerance than 40% starts costing the fist.
+    let near = |v: f32, of: &[f32]| of.iter().any(|g| (v - g).abs() / g <= 0.4);
+    let mut good = 0usize;
+    let mut total = 0usize;
+    for (i, p) in pkg.pulses.iter().enumerate() {
+        total += 1;
+        good += usize::from(near(p.mark as f32 / dot, &[1.0, 3.0]));
+        if i + 1 < pkg.pulses.len() {
+            total += 1;
+            good += usize::from(near(p.gap as f32 / dot, &[1.0, 3.0, 7.0]));
+        }
+    }
+    good as f32 / total as f32
+}
+
+/// Read timings back as text.
 pub fn decode(pkg: &Package) -> String {
     if pkg.pulses.is_empty() {
         return String::new();
     }
-    let dot = pkg.pulses.iter().map(|p| p.mark).min().unwrap_or(1).max(1) as f32;
+    let dot = dot_of(pkg) as f32;
     let mut out = String::new();
     let mut pat = String::new();
 
@@ -161,6 +203,10 @@ mod tests {
         let pkg = encode("PARIS", 1.0);
         let total: u64 = pkg.pulses.iter().map(|p| p.mark as u64 + p.gap as u64).sum();
         assert_eq!(total, 60_000_000, "PARIS at 1 wpm is not a minute long");
+        // And the speed is read back off the timings, which is how a
+        // receiver reports what it heard.
+        assert_eq!(dot_of(&pkg), 1_200_000);
+        assert!((wpm(dot_of(&encode("PARIS", 18.0))) - 18.0).abs() < 0.01);
     }
 
     #[test]
@@ -177,6 +223,31 @@ mod tests {
     #[test]
     fn a_character_with_no_morse_equivalent_is_skipped_not_guessed() {
         assert_eq!(decode(&encode("A#B", 20.0)), "AB");
+    }
+
+    /// What separates a keyed burst from a burst of noise, since nothing in
+    /// Morse checks. The numbers are what the receiver's front end tests
+    /// against.
+    #[test]
+    fn only_timings_on_the_grid_look_like_a_person_sending() {
+        assert_eq!(fits(&encode("CQ DE MI0ABC", 18.0)), 1.0);
+        let mut fist = encode("CQ DE MI0ABC", 18.0);
+        for (i, p) in fist.pulses.iter_mut().enumerate() {
+            let skew = if i % 2 == 0 { 1.15 } else { 0.85 };
+            p.mark = (p.mark as f32 * skew) as u32;
+            p.gap = (p.gap as f32 * skew) as u32;
+        }
+        assert_eq!(fits(&fist), 1.0, "a hand sending is still on the grid");
+
+        // Blips of random length separated by silences, which is what a
+        // strong station outside the channel looks like through the skirt.
+        let junk = Package {
+            pulses: (0..8)
+                .map(|i| Pulse { mark: 12_000 + i * 9_000, gap: 200_000 + i * 40_000 })
+                .collect(),
+            ..Default::default()
+        };
+        assert!(fits(&junk) < 0.5, "noise scored {}", fits(&junk));
     }
 
     #[test]
