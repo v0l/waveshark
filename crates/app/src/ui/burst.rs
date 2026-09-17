@@ -77,6 +77,27 @@ pub(super) struct Asked {
     pub play: bool,
     /// Open the signal identification modal on this packet.
     pub sigid: bool,
+    /// Write this burst out as a Flipper `.sub` file.
+    pub save_sub: bool,
+}
+
+/// What a `.sub` file written from this packet would hold, or `None` for a
+/// packet that cannot be one: no timings kept, and no key recovered.
+///
+/// A key file where a decoder read the code, because that is the file a
+/// Flipper can edit and put back in a remote; the timings as heard
+/// otherwise, which is all that can honestly be said about a burst nothing
+/// claimed.
+pub(super) fn sub_save(rec: &DecodeRecord) -> Option<decode::subghz::Save> {
+    let body = rec
+        .model
+        .and_then(|m| decode::subghz::key_of_decode(m, &rec.fields))
+        .or_else(|| rec.pulses.as_ref().map(|p| decode::subghz::Body::Raw((**p).clone())))?;
+    Some(decode::subghz::Save {
+        frequency: rec.freq.max(0.0) as u64,
+        preset: decode::subghz::Preset::of_modulation(rec.modulation),
+        body,
+    })
 }
 
 /// The detail pane under the packet list.
@@ -130,12 +151,26 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
     // Anything not verified is open to question: a burst nothing claimed,
     // and a decode from a protocol with no check, which reads framing off
     // whatever carries its sync word and cannot say whose it is.
-    if rec.crc != Some(true) {
+    let save = sub_save(rec);
+    if rec.crc != Some(true) || save.is_some() {
         ui.horizontal(|ui| {
-            asked.sigid = ui
-                .button("CHECK SIGID")
-                .on_hover_text("what the signal identification wiki lists near this burst")
-                .clicked();
+            if rec.crc != Some(true) {
+                asked.sigid = ui
+                    .button("CHECK SIGID")
+                    .on_hover_text("what the signal identification wiki lists near this burst")
+                    .clicked();
+            }
+            if let Some(save) = &save {
+                let what = match &save.body {
+                    decode::subghz::Body::Key { protocol, .. } => {
+                        format!("a {protocol} key file a Flipper can replay and edit")
+                    }
+                    decode::subghz::Body::Raw(p) => {
+                        format!("the {} timings of this burst, as heard", p.pulses.len() * 2)
+                    }
+                };
+                asked.save_sub = ui.button("SAVE .SUB").on_hover_text(what).clicked();
+            }
         });
         ui.add_space(4.0);
     }
@@ -567,5 +602,39 @@ mod tests {
         assert_eq!(field_value(&Value::Float(1.5e-7)), "1.500e-7");
         assert_eq!(field_value(&Value::Int(42_000)), "42000");
         assert_eq!(field_value(&Value::Text("KE0ABC".into())), "KE0ABC");
+    }
+
+    /// What the SAVE .SUB button offers, per packet: the key where a remote
+    /// was decoded, the timings where only a burst was heard, and nothing
+    /// at all for a protocol that arrived as bytes.
+    #[test]
+    fn a_decoded_remote_saves_as_a_key_and_a_bare_burst_as_timings() {
+        use decode::subghz::Body;
+        let mut rec = DecodeRecord::for_test(433_920_000.0, "Princeton");
+        rec.fields = vec![("code".to_string(), Value::Int(0xa1_3f_08))];
+        let save = sub_save(&rec).expect("a decoded remote is a key file");
+        assert_eq!(save.frequency, 433_920_000);
+        assert_eq!(
+            save.body,
+            Body::Key { protocol: "Princeton", bit: 24, key: 0x5e_c0_f7, te: Some(400) }
+        );
+
+        // The same burst with nothing claiming it: the widths, as heard.
+        let pulses = vec![
+            common::pulse::Pulse { mark: 350, gap: 350 },
+            common::pulse::Pulse { mark: 700, gap: 10_000 },
+        ];
+        let mut heard = DecodeRecord::for_test(433_920_000.0, nodes::UNKNOWN);
+        heard.pulses = Some(std::sync::Arc::new(common::Package {
+            pulses: pulses.clone(),
+            ..Default::default()
+        }));
+        match sub_save(&heard).expect("a burst with timings is a raw file").body {
+            Body::Raw(p) => assert_eq!(p.pulses, pulses),
+            other => panic!("expected raw timings, got {other:?}"),
+        }
+
+        // A frame protocol with no timings kept has no file to write.
+        assert!(sub_save(&DecodeRecord::for_test(868_000_000.0, "POCSAG")).is_none());
     }
 }

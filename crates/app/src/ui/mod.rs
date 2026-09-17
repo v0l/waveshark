@@ -43,6 +43,7 @@ mod packets;
 mod sats_pane;
 mod scope;
 mod scope_settings;
+mod scripts_pane;
 mod settings;
 mod settings_rows;
 mod state;
@@ -2619,6 +2620,8 @@ impl eframe::App for App {
         self.pick_file.poll(&mut self.cmds);
         // The `.sub` dialog lands its file as a command like any other.
         self.audio.sub_pick.poll(&mut self.cmds);
+        // And the save dialog writes the file it was given a name for.
+        self.log.sub_save.poll();
         self.read_heard();
         self.read_said();
         self.soak_check(ui.ctx());
@@ -3403,6 +3406,7 @@ mod tests {
             report: common::ReportDetail::Bare,
             identity: None,
             iq: None,
+            pulses: None,
             audio: None,
             airtime: None,
         }

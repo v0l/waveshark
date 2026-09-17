@@ -4659,6 +4659,7 @@ fn record(
         report: d.report.clone(),
         identity: d.identity.clone(),
         iq: p.samples().cloned(),
+        pulses: p.package().map(|pkg| std::sync::Arc::new(pkg.clone())),
         audio: p.audio.clone(),
         airtime: d.airtime.clone(),
     }
@@ -4688,6 +4689,15 @@ pub fn default_capture_dir() -> PathBuf {
     crate::packetlog::PacketLog::default_dir()
         .map(|d| d.with_file_name("captures"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-captures"))
+}
+
+/// Where `.sub` files written from packets go, and where the scripts panel
+/// looks for the operator's own: beside the captures, because a saved key is
+/// a recording of a transmission like any other.
+pub fn default_sub_dir() -> PathBuf {
+    crate::packetlog::PacketLog::default_dir()
+        .map(|d| d.with_file_name("sub"))
+        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-sub"))
 }
 
 /// The spectrum stage the waterfall is drawn from: the receiver's own,

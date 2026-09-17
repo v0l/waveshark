@@ -162,6 +162,15 @@ impl Log<'_> {
         if asked.sigid {
             self.st.sigid = Some(rec.clone());
         }
+        if asked.save_sub {
+            if let Some(save) = super::burst::sub_save(rec) {
+                let stem = save.file_stem(rec.protocol(), std::time::SystemTime::now());
+                self.st.sub_save.ask(ui.ctx(), save.text(), stem);
+            }
+        }
+        if let Some(said) = &self.st.sub_save.said {
+            theme::Line::new().legend("sub").note(said).size(11.0).show(&mut child);
+        }
     }
 
     fn log_header(&mut self, ui: &mut egui::Ui) {
