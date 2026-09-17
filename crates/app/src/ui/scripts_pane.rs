@@ -29,8 +29,13 @@ pub(super) struct ScriptsState {
     /// thousand files sixty times a second to draw a list that changes when
     /// a dataset is downloaded.
     scanned: bool,
-    /// Directories drawn open, by their path under a root.
+    /// Directories drawn open, by their path under a root. A directory
+    /// starts closed, so a repository of hundreds of files opens as a
+    /// handful of folders.
     open: std::collections::HashSet<String>,
+    /// Sources drawn closed. The other way round from the folders inside
+    /// them: a source nobody can see is a panel that looks empty.
+    shut: std::collections::HashSet<String>,
     /// The file the panel is showing, parsed.
     picked: Option<(std::path::PathBuf, Result<SubFile, String>)>,
     /// Only what a text search is narrowed to, when one is typed.
@@ -90,14 +95,18 @@ pub(super) enum Action {
     Hide,
     /// Open the datasets settings, which is where a repository is fetched.
     Open(Settings),
+    /// Key this file, at the frequency it names, now.
+    Transmit(SubFile),
 }
 
 /// The panel, over the files it lists.
 pub(super) struct Scripts<'a> {
     pub st: &'a mut ScriptsState,
-    pub cmds: &'a mut Vec<Cmd>,
-    /// Where the dial is, so a file somewhere else says so.
-    pub center: f64,
+    /// What the radio can transmit, so a file it cannot reach says so rather
+    /// than offering a button that fails when it is pressed.
+    pub tx_range: Option<(f64, f64)>,
+    /// Whether something is keyed already. One transmitter, one key.
+    pub keyed: bool,
     pub acts: Vec<Action>,
 }
 
@@ -192,7 +201,27 @@ impl<'a> Scripts<'a> {
         // that folder once.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for root in &self.st.roots {
-            row(ui, width, 0, &root.name, theme::LEGEND, false);
+            // The top level is where a file came from: a repository somebody
+            // publishes, or this receiver's own saves. Two sources with the
+            // same folder names in them are two trees, not one merged one.
+            let key = format!("{}\u{1}", root.name);
+            let shut = self.st.shut.contains(&key) && filter.is_empty();
+            let mark = if shut { "\u{25b8} " } else { "\u{25be} " };
+            let count = root.files.len();
+            if row_with(
+                ui,
+                width,
+                0,
+                &format!("{mark}{}", root.name),
+                &count.to_string(),
+                theme::LEGEND,
+                false,
+            ) {
+                toggle = Some(key);
+            }
+            if shut {
+                continue;
+            }
             for rel in &root.files {
                 if !filter.is_empty() && !rel.to_lowercase().contains(&filter) {
                     continue;
@@ -218,7 +247,7 @@ impl<'a> Scripts<'a> {
                         let full = root.dir.join(rel);
                         let on = self.st.picked.as_ref().is_some_and(|(p, _)| *p == full);
                         let name = part.trim_end_matches(".sub").trim_end_matches(".SUB");
-                        if row(ui, width, depth + 1, name, theme::VALUE, on) {
+                        if row(ui, width, depth + 2, name, theme::VALUE, on) {
                             pick = Some(full);
                         }
                         break;
@@ -231,7 +260,8 @@ impl<'a> Scripts<'a> {
                     // and the rest see it already on screen.
                     if seen.insert(key.clone()) {
                         let mark = if open { "\u{25be} " } else { "\u{25b8} " };
-                        if row(ui, width, depth, &format!("{mark}{part}"), theme::LEGEND, false) {
+                        if row(ui, width, depth + 1, &format!("{mark}{part}"), theme::LEGEND, false)
+                        {
                             toggle = Some(key.clone());
                         }
                     }
@@ -242,8 +272,14 @@ impl<'a> Scripts<'a> {
             }
         }
         if let Some(k) = toggle {
-            if !self.st.open.remove(&k) {
-                self.st.open.insert(k);
+            // A source's key ends at the separator; anything after it is a
+            // folder inside one.
+            let set = match k.ends_with('\u{1}') {
+                true => &mut self.st.shut,
+                false => &mut self.st.open,
+            };
+            if !set.remove(&k) {
+                set.insert(k);
             }
         }
         if let Some(p) = pick {
@@ -274,7 +310,16 @@ impl<'a> Scripts<'a> {
             }
             Ok(f) => {
                 let mhz = f.file.frequency as f64 / 1e6;
-                let on_dial = (f.file.frequency as f64 - self.center).abs() < 1.0;
+                let hz = f.file.frequency as f64;
+                // What stops it going out, if anything does.
+                let stop = match self.tx_range {
+                    None => Some("this radio does not transmit".to_string()),
+                    Some((lo, hi)) if hz < lo || hz > hi => {
+                        Some(format!("{mhz:.4} MHz is outside what this radio transmits"))
+                    }
+                    _ if self.keyed => Some("something is keyed already".to_string()),
+                    _ => None,
+                };
                 let file = f.clone();
                 widgets::card(
                     ui,
@@ -299,21 +344,23 @@ impl<'a> Scripts<'a> {
                             .value(file.file.preset.label())
                             .size(11.0)
                             .show(ui);
+                        // One button, because there is only one thing to do
+                        // with a file: send it. The dial, the channel and the
+                        // key are all consequences of that, and an operator
+                        // who has to arrange them by hand is doing the
+                        // receiver's bookkeeping for it.
                         ui.horizontal(|ui| {
-                            if ui
-                                .button("LOAD")
-                                .on_hover_text("Put this file on the transmit strip")
-                                .clicked()
-                            {
-                                self.cmds.push(Cmd::SubFile(Some(file.clone())));
+                            let go = ui
+                                .add_enabled(stop.is_none(), egui::Button::new("TX"))
+                                .on_hover_text(format!(
+                                    "Key this file at {mhz:.4} MHz for {:.2} s",
+                                    file.file.duration().as_secs_f64()
+                                ));
+                            if go.clicked() {
+                                self.acts.push(Action::Transmit(file.clone()));
                             }
-                            if !on_dial
-                                && ui
-                                    .button("TUNE")
-                                    .on_hover_text("Move the dial to the file's own frequency")
-                                    .clicked()
-                            {
-                                self.cmds.push(Cmd::Center(common::Hz(file.file.frequency)));
+                            if let Some(why) = &stop {
+                                theme::Line::new().note(why).size(11.0).elided(ui);
                             }
                         });
                     },
@@ -386,6 +433,21 @@ fn row(
     colour: egui::Color32,
     selected: bool,
 ) -> bool {
+    row_with(ui, width, depth, text, "", colour, selected)
+}
+
+/// A row with a figure at the right end, which a long name is cut short
+/// before rather than pushing off the edge.
+#[allow(clippy::too_many_arguments)]
+fn row_with(
+    ui: &mut egui::Ui,
+    width: f32,
+    depth: usize,
+    text: &str,
+    right: &str,
+    colour: egui::Color32,
+    selected: bool,
+) -> bool {
     let h = widgets::ROW_H.max(18.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -398,13 +460,17 @@ fn row(
         p.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x24, 0x27, 0x2D));
     }
     let x = rect.left() + 4.0 + depth as f32 * 12.0;
+    let right_w = if right.is_empty() { 0.0 } else { 34.0 };
     widgets::cell(
         &p,
         rect,
         x,
-        rect.right() - x,
+        rect.right() - x - right_w,
         text,
         if selected { theme::READOUT } else { colour },
     );
+    if !right.is_empty() {
+        widgets::cell(&p, rect, rect.right() - right_w, right_w, right, theme::LEGEND);
+    }
     resp.clicked()
 }

@@ -511,6 +511,7 @@ impl Strip<'_> {
                     if let Some(f) = sub_file {
                         if ui.button("CLEAR").on_hover_text("Transmit nothing").clicked() {
                             cmds.push(Cmd::SubFile(None));
+                            sub_pick.file = None;
                             changed = true;
                         }
                         theme::Line::new()
