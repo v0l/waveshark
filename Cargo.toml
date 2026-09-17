@@ -61,7 +61,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1-rc2"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
