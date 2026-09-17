@@ -691,6 +691,15 @@ impl Device for LimeSdr {
         &self.info
     }
 
+    /// A LimeSDR retune recalibrates the VCO inside `LMS_SetLOFrequency`,
+    /// which takes tens of milliseconds, and the stream goes on delivering
+    /// what the board collected through it. Sixty covers that with room:
+    /// three waterfall rows at the default rate, against a bright stripe
+    /// across every row otherwise.
+    fn settle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(60)
+    }
+
     fn set_center(&mut self, f: Hz) -> Result<()> {
         if !self.info.covers(f) {
             return Err(Error::FreqOutOfRange { req: f, lo: Hz(FREQ_MIN), hi: Hz(FREQ_MAX) });
