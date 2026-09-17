@@ -23,15 +23,30 @@
 //!   that has been silent a minute is gone; a Class B vessel reports every
 //!   thirty seconds and is still there ten minutes later. A limit that says
 //!   how far a thing can have moved is right for both, and the number is not.
+//!
+//! The rule that follows from all three: a decode that names a transmitter
+//! and says where it was is a track, whatever protocol it came from. The
+//! tracker holds no list of protocols it will draw, and a new decoder needs
+//! nothing here. What it does hold is the handful of protocols whose
+//! identities are numbers rather than strings, or that need work nothing
+//! else needs, and everything else is a [`TrackId::Device`].
 
 use decode::adsb;
 
 /// Which track a decode's identity names.
 ///
 /// The identity spaces are the decoders' own, so this is the one place that
-/// maps them onto the tracker's ids. A space the map does not draw returns
-/// `None`, which is most of them: a meter and a pager are devices, not
-/// things on a map.
+/// maps them onto the tracker's ids. The named variants exist because their
+/// protocols issue identities the map has to read as numbers, or because the
+/// tracker does work for them that nothing else needs: a Mode S address is
+/// hexadecimal, an MMSI is decimal, and only ADS-B needs its two halves
+/// pairing.
+///
+/// Everything else is a [`TrackId::Device`], and that is the point: a decode
+/// that says where its transmitter was is a track, whatever protocol it came
+/// from. A device only reaches the map if a position comes with it, which is
+/// what keeps the pagers and the meters off it without the tracker having to
+/// hold a list of protocols it likes.
 fn track_id(who: &common::Identity) -> Option<TrackId> {
     match who.space.as_str() {
         "adsb" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Icao),
@@ -49,7 +64,7 @@ fn track_id(who: &common::Identity) -> Option<TrackId> {
             }
             Some(TrackId::MeshCore(key))
         }
-        _ => None,
+        space => Some(TrackId::Device { space: space.to_string(), id: who.id.clone() }),
     }
 }
 
@@ -177,6 +192,10 @@ pub enum Kind {
     /// that already has aeroplanes on it a balloon drawn as one is a lie
     /// about what is up there.
     Sonde,
+    /// A transmitter that said where it was and nothing about what it is.
+    /// Drawn as a plain mark, because inventing a shape for it would be
+    /// claiming to know.
+    Transmitter,
 }
 
 impl Kind {
@@ -199,6 +218,10 @@ impl Kind {
             // rather than a landing. It stays on the map long enough to be
             // found again as it comes down.
             Kind::Sonde => std::time::Duration::from_secs(600),
+            // Whatever it is, it said so once: a distress beacon transmits
+            // every fifty seconds and is worth keeping on the map long after
+            // the last burst.
+            Kind::Transmitter => std::time::Duration::from_secs(3600),
         }
     }
 
@@ -217,6 +240,9 @@ impl Kind {
             // A balloon rises at 5 m/s and the jet stream it drifts in runs
             // to about 200 knots; twice that is wrong rather than windy.
             Kind::Sonde => 400.0,
+            // Nothing is known about what it is, so only a fix that could
+            // not be the same thing at all is refused.
+            Kind::Transmitter => 600.0,
         }
     }
 }
@@ -245,6 +271,10 @@ pub enum TrackId {
     MeshCore([u8; 32]),
     /// A radiosonde's serial, printed on the case and the only name it has.
     Sonde(String),
+    /// Anything else that named itself and said where it was: a distress
+    /// beacon's 15 hex characters, and whatever the next protocol issues.
+    /// The space is the decoder's own, so two protocols cannot collide.
+    Device { space: String, id: String },
 }
 
 impl TrackId {
@@ -259,12 +289,13 @@ impl TrackId {
             // nodes with the same hash apart.
             TrackId::MeshCore(k) => format!("{:02x}:{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3]),
             TrackId::Sonde(s) => s.clone(),
+            TrackId::Device { id, .. } => id.clone(),
         }
     }
 
     /// Which system the track was heard on. A map with aircraft, ships and
     /// two kinds of mesh on it needs to say which is which somewhere.
-    pub fn system(&self) -> &'static str {
+    pub fn system(&self) -> String {
         match self {
             TrackId::Icao(_) => "ADS-B",
             TrackId::Mmsi(_) => "AIS",
@@ -272,7 +303,9 @@ impl TrackId {
             TrackId::Mesh(_) => "Meshtastic",
             TrackId::MeshCore(_) => "MeshCore",
             TrackId::Sonde(_) => "Radiosonde",
+            TrackId::Device { space, .. } => return space.to_uppercase(),
         }
+        .to_string()
     }
 }
 
@@ -336,6 +369,10 @@ pub enum Detail {
     /// network. What it is decides how it is drawn: a repeater, a room
     /// server or a sensor is installed somewhere, a chat node is carried.
     MeshCore { role: &'static str, fixed: bool },
+    /// Something that reported a position and said nothing else about
+    /// itself. What it is called is in the identity, and what it is is not
+    /// in the message at all.
+    Device,
     /// A radiosonde under a balloon: climbing to about 35 km, bursting, and
     /// coming down under a parachute somewhere downwind.
     Sonde {
@@ -398,6 +435,7 @@ impl Detail {
                 }
             }
             Detail::Sonde { .. } => Kind::Sonde,
+            Detail::Device => Kind::Transmitter,
         }
     }
 }
@@ -622,6 +660,13 @@ impl Tracks {
         let Some(id) = track_id(who) else {
             return false;
         };
+        // A protocol the tracker knows nothing about is a track when it says
+        // where it was, and nothing at all when it does not. This is what
+        // keeps a pager, a meter or a tyre valve off the map: each names
+        // itself in every packet and none of them has ever said where it is.
+        if matches!(id, TrackId::Device { .. }) && d.position.is_none() {
+            return false;
+        }
         let detail = match &d.report {
             common::ReportDetail::Vessel {
                 heading_deg,
@@ -736,7 +781,8 @@ impl Tracks {
                     comment: None,
                     fixed: false,
                 },
-                _ => return false,
+                TrackId::Device { .. } => Detail::Device,
+                TrackId::Sonde(_) | TrackId::MeshCore(_) => return false,
             },
             common::ReportDetail::Aircraft {
                 altitude_ft,
@@ -1382,6 +1428,55 @@ mod tests {
         assert_eq!(n.kind(), Kind::Station);
         let (lat, lon) = n.position.expect("placed");
         assert!((lat - 53.608448).abs() < 1e-6 && (lon + 6.684672).abs() < 1e-6);
+    }
+
+    /// Any protocol that names a transmitter and says where it was is a
+    /// track, without the tracker knowing anything about it: a 406 MHz
+    /// distress beacon here, and whatever the next one turns out to be.
+    #[test]
+    fn a_protocol_the_tracker_has_never_heard_of_is_still_a_track() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        let beacon = || common::Identity::new("epirb", "1D043C4802FFBFF").named("EPIRB");
+        let placed = common::Decoded::bytes("epirb", common::Hz(406_025_000), 0.0, vec![])
+            .by(beacon())
+            .at_position(common::Position { lat: 53.36, lon: -10.19, ..Default::default() });
+        assert!(t.update_decoded(&placed, now));
+
+        let list = t.active(now);
+        assert_eq!(list.len(), 1, "{} tracks", list.len());
+        let b = &list[0];
+        assert_eq!(b.id, TrackId::Device { space: "epirb".into(), id: "1D043C4802FFBFF".into() });
+        assert_eq!(b.id.text(), "1D043C4802FFBFF");
+        assert_eq!(b.id.system(), "EPIRB");
+        assert_eq!(b.label.as_deref(), Some("EPIRB"));
+        assert_eq!(b.kind(), Kind::Transmitter);
+        let (lat, lon) = b.position.expect("placed");
+        assert!((lat - 53.36).abs() < 1e-6 && (lon + 10.19).abs() < 1e-6);
+
+        // The same beacon again, two minutes later and a mile away: one
+        // track with a trail, not two marks.
+        let later = now + std::time::Duration::from_secs(120);
+        let moved = common::Decoded::bytes("epirb", common::Hz(406_025_000), 0.0, vec![])
+            .by(beacon())
+            .at_position(common::Position { lat: 53.38, lon: -10.19, ..Default::default() });
+        assert!(t.update_decoded(&moved, later));
+        let list = t.active(later);
+        assert_eq!(list.len(), 1, "{} tracks", list.len());
+        assert_eq!(list[0].messages, 2);
+        assert_eq!(list[0].trail.len(), 2);
+    }
+
+    /// A device that names itself in every packet and never says where it
+    /// is stays off the map: a pager, a meter, a tyre valve.
+    #[test]
+    fn a_device_that_reports_no_position_is_not_a_track() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        let d = common::Decoded::bytes("pocsag", common::Hz(153_350_000), 0.0, vec![])
+            .by(common::Identity::new("pocsag", "1234567"));
+        assert!(!t.update_decoded(&d, now));
+        assert_eq!(t.active(now).len(), 0);
     }
 
     #[test]
