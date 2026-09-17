@@ -315,7 +315,7 @@ mod imp {
                 return;
             }
             let pairs = self.crypto.id_pairs.clone();
-            match Ta61Gpu::spawn(pairs, 0..1u64 << 40, 1 << 22) {
+            match Ta61Gpu::spawn(pairs, 0..1u64 << 40, 1 << 28) {
                 Some(p) => self.crypto.id_search = Some((colour, p)),
                 None => self.crypto.id_gpu_answered = true,
             }
@@ -513,7 +513,7 @@ mod imp {
                 // finishes the search, it is run exactly once.
                 (false, false) => {
                     self.crypto.gpu_attempted = true;
-                    match GpuSearch::spawn(frames.clone(), 0..1u64 << 32, 1 << 20) {
+                    match GpuSearch::spawn(frames.clone(), 0..1u64 << 32, 1 << 28) {
                         Some(p) => {
                             self.crypto.recovery = Some((colour, sig, RecoveryJob::Gpu(frames, p)));
                         }

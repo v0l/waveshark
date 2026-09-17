@@ -69,7 +69,7 @@ fn encrypt_id(clo: u32, chi: u32, ssi: u32) -> u32 {
     return ((s[0] ^ c2) << 16u) | ((s[1] ^ c5) << 8u) | (s[2] ^ c0);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= params.count) { return; }

@@ -113,7 +113,7 @@ fn block_on<F: std::future::Future>(mut fut: F) -> F::Output {
 
 const MAX_FRAMES: usize = 8;
 const MAX_KS: usize = 8;
-const WORKGROUP: u32 = 64;
+const WORKGROUP: u32 = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -346,12 +346,21 @@ impl GpuSearch {
                 ],
             });
 
+            // A dispatch is capped at 65535 groups; a chunk above that is
+            // split into dispatches inside one pass, so one readback covers
+            // the whole chunk either way.
+            let per_dispatch = (WORKGROUP * 65535) as u64;
             let mut enc = device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &bind, &[]);
-                pass.dispatch_workgroups(count.div_ceil(WORKGROUP), 1, 1);
+                let mut done = 0u64;
+                while done < count as u64 {
+                    let n = (count as u64 - done).min(per_dispatch) as u32;
+                    pass.dispatch_workgroups(n.div_ceil(WORKGROUP), 1, 1);
+                    done += n as u64;
+                }
             }
             enc.copy_buffer_to_buffer(&found, 0, &readback, 0, 4);
             enc.copy_buffer_to_buffer(&reg_out, 0, &readback, 4, 4);
@@ -565,7 +574,13 @@ impl Ta61Gpu {
                 let mut pass = enc.begin_compute_pass(&Default::default());
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &binding, &[]);
-                pass.dispatch_workgroups(count.div_ceil(WORKGROUP), 1, 1);
+                let per_dispatch = (WORKGROUP * 65535) as u64;
+                let mut done = 0u64;
+                while done < count as u64 {
+                    let n = (count as u64 - done).min(per_dispatch) as u32;
+                    pass.dispatch_workgroups(n.div_ceil(WORKGROUP), 1, 1);
+                    done += n as u64;
+                }
             }
             enc.copy_buffer_to_buffer(&found, 0, &readback, 0, 4);
             enc.copy_buffer_to_buffer(&c_lo, 0, &readback, 4, 4);
@@ -705,6 +720,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[ignore] // run with: cargo test -p decode --features tea --lib gpu -- --ignored --nocapture
+    fn measures_tea1_throughput() {
+        let Some(gpu) = GpuSearch::new() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let ts = |frame| Timestamp { tn: 1, frame, multiframe: 30, hyperframe: 110, uplink: false };
+        // Two 8-byte frames give a 64-bit constraint, so no register in a
+        // 2^32 sweep survives by chance and the full rejection cost is
+        // what is measured. The key (0x111) sits outside the swept range.
+        let frames = vec![
+            Collision { ts: ts(6), ct: hex("151ef027151ef027") },
+            Collision { ts: ts(7), ct: hex("4d00159e4d00159e") },
+        ];
+        let span: u64 =
+            std::env::var("SPAN").map(|v| 1u64 << v.parse::<u32>().unwrap()).unwrap_or(1 << 28);
+        let chunk: u32 = 1 << 21;
+        let t = std::time::Instant::now();
+        let got = gpu.search(&frames, span..span * 2, chunk);
+        let dt = t.elapsed();
+        assert_eq!(got, None, "64-bit constraint leaves no chance survivor");
+        eprintln!(
+            "tea1: 2^{} registers in {:.3}s = {:.2} Mkeys/s (2^32 in {:.1}s)",
+            span.trailing_zeros(),
+            dt.as_secs_f64(),
+            span as f64 / dt.as_secs_f64() / 1e6,
+            dt.as_secs_f64() * (1u64 << 32) as f64 / span as f64
+        );
     }
 
     #[test]
