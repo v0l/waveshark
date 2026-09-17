@@ -28,6 +28,7 @@ pub mod dtmf;
 pub mod dvbt;
 pub mod filter;
 pub mod fir;
+pub mod flex;
 pub mod fourlevel;
 pub mod fsk;
 pub mod gate;
