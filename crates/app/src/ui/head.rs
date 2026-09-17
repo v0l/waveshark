@@ -437,16 +437,15 @@ impl App {
         cell(ui, "panels", PANELS_W, |ui| {
             segment(ui, PANELS_W, |ui| {
                 use crate::icons::{Icon, icon_button_sized};
-                // The channel strip, which is the one panel that can be put
-                // away from inside itself: this is how it comes back.
-                strip = icon_button_sized(ui, Icon::Hide, "Channel strip", true, strip_on, ICON)
-                    .clicked();
-                // The .sub files this machine holds, which is a panel for
-                // the same reason the strip is: it is returned to between
-                // overs rather than opened and closed.
+                // The two panels, in the order they stand on the screen:
+                // the scripts down the left, the channel strip down the
+                // right. Both can be put away from inside themselves, and
+                // this is how they come back.
                 scripts =
                     icon_button_sized(ui, Icon::Scripts, "Scripts panel", true, scripts_on, ICON)
                         .clicked();
+                strip = icon_button_sized(ui, Icon::Hide, "Channel strip", true, strip_on, ICON)
+                    .clicked();
                 // Only the switch that opens the log. What decodes and what
                 // runs where are questions about the packets, so they are
                 // asked in the window that shows them rather than up here.
