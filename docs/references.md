@@ -33,6 +33,7 @@ holds the rows, the terms and the credit each is shown with.
 | Radiosonde launch sites | SondeHub (Project Horus) | CC BY-SA 2.0, visible credit and link required | `api.v2.sondehub.org/sites` |
 | Satellites the TinyGS network tracks | TinyGS | open network, elements published for its own stations | `api.tinygs.com/v1/tinygs_supported.txt` |
 | Catalogue of objects in orbit | Space-Track (US Space Force) | their user agreement, an account of your own, no redistribution | `space-track.org/basicspacedata/query/class/gp/…`, logged in, fewer than 30 requests a minute |
+| Script repositories | the repository's own publisher, e.g. `bad-antics/nullsec-flipper-suite` | each repository's own licence; the repo's content, not waveshark's | the repository's branch tarball, e.g. `codeload.github.com/<owner>/<repo>/tar.gz/refs/heads/main`, validated by the branch HEAD commit id |
 | Map tiles | OpenStreetMap contributors | ODbL, tile usage policy | `tile.openstreetmap.org` |
 
 Two things go out rather than come in. `api.wigle.net/api/v2/file/upload`
