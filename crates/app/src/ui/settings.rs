@@ -2551,6 +2551,18 @@ impl App {
             }
             None => (false, 0, 0, false, None),
         };
+        let (armed, bursts, level_db, threshold_db) = match &self.radio {
+            Some(r) => {
+                use std::sync::atomic::Ordering;
+                (
+                    r.status.capture_armed.load(Ordering::Relaxed),
+                    r.status.capture_bursts.load(Ordering::Relaxed),
+                    f32::from_bits(r.status.capture_level_db.load(Ordering::Relaxed)),
+                    f32::from_bits(r.status.capture_threshold_db.load(Ordering::Relaxed)),
+                )
+            }
+            None => (false, 0, f32::NEG_INFINITY, f32::NEG_INFINITY),
+        };
         section(ui, "raw capture", "the whole span to one file, as it arrives", |ui| {
             // What was asked for rather than what the node reports: a radio
             // that is not running has no capture node to ask, and a switch
@@ -2561,6 +2573,90 @@ impl App {
                        through the same graph, so a decoder can be changed and tried again.";
             if switch(ui, "capture", &mut on, "the raw span", why) {
                 self.set_capture(on);
+            }
+            let mut arm = self.setting(|s| s.capture_arm);
+            let was = arm;
+            let trigger_help = "On the switch, the file is everything from the moment it \
+                                goes on. Armed on energy, the receiver waits and writes a \
+                                file per burst, with the signal from before the trigger in \
+                                front of it: that is how to catch something that happens \
+                                twice a night without recording the night.";
+            row_help(ui, "start on", trigger_help, |ui| {
+                choice(
+                    ui,
+                    "capture_trigger",
+                    &mut arm.trigger,
+                    [
+                        (nodes::capture_nodes::Trigger::Switch, "the switch".to_string()),
+                        (nodes::capture_nodes::Trigger::Energy, "energy".to_string()),
+                    ],
+                );
+            });
+            if arm.trigger == nodes::capture_nodes::Trigger::Energy {
+                let ref_help = "Above the floor follows the band as it gets busier and \
+                                survives a gain change. In dBFS is the number to set when \
+                                the floor itself is what moved.";
+                row_help(ui, "threshold", ref_help, |ui| {
+                    choice(
+                        ui,
+                        "capture_reference",
+                        &mut arm.reference,
+                        [
+                            (nodes::capture_nodes::Reference::Floor, "over the floor".to_string()),
+                            (nodes::capture_nodes::Reference::Absolute, "in dBFS".to_string()),
+                        ],
+                    );
+                });
+                let db_help = "How loud the span has to get before a file is opened. The \
+                               detector opens a channel at 8 dB over the floor, so much \
+                               above 10 dB is a capture that misses what the receiver \
+                               heard.";
+                row_help(ui, "at", db_help, |ui| {
+                    let mut db = arm.threshold_db as f64;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut db)
+                                .speed(0.5)
+                                .range(-120.0..=60.0)
+                                .suffix(" dB"),
+                        )
+                        .changed()
+                    {
+                        arm.threshold_db = db as f32;
+                    }
+                });
+                let window_help = "How much of the signal before the trigger goes in the \
+                                   file, and how long the span may stay quiet before it \
+                                   is closed. A short pre-roll loses the head of the \
+                                   burst, which is where the sync word is.";
+                row_help(ui, "window", window_help, |ui| {
+                    let (mut pre, mut hang) = (arm.pre_ms as f64, arm.hang_ms as f64);
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut pre)
+                                .speed(10.0)
+                                .range(0.0..=5_000.0)
+                                .suffix(" ms before"),
+                        )
+                        .changed()
+                    {
+                        arm.pre_ms = pre as f32;
+                    }
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut hang)
+                                .speed(10.0)
+                                .range(0.0..=30_000.0)
+                                .suffix(" ms after"),
+                        )
+                        .changed()
+                    {
+                        arm.hang_ms = hang as f32;
+                    }
+                });
+            }
+            if arm != was {
+                self.settings.edit(|s| s.capture_arm = arm);
             }
             let cap_help = "What the whole folder may take. Nothing here is deleted: a \
                             capture is evidence of a signal that may not come again, so \
@@ -2599,8 +2695,26 @@ impl App {
             if let Some(f) = &cap_file {
                 reading(ui, "file", f);
             }
+            if arm.trigger == nodes::capture_nodes::Trigger::Energy && cap_on {
+                reading(ui, "files", bursts.to_string());
+            }
             if cap_full {
                 lamp(ui, false, "stopped: the folder is at its limit");
+            } else if armed {
+                // What the setting comes to right now, which is the only way
+                // to tell a threshold nothing will ever reach from one the
+                // noise crosses: both look the same as a number in a box.
+                match threshold_db.is_finite() {
+                    true => lamp(
+                        ui,
+                        true,
+                        &format!(
+                            "armed at {threshold_db:.0} dBFS, span at {:.0} dBFS",
+                            level_db.max(-199.0)
+                        ),
+                    ),
+                    false => lamp(ui, false, "waiting for a floor to measure the threshold from"),
+                }
             } else if cap_on {
                 lamp(ui, true, "writing");
             }

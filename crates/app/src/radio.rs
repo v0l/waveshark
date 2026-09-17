@@ -571,6 +571,9 @@ pub enum Cmd {
     Record(Option<(std::path::PathBuf, Option<u64>)>),
     /// Start or stop writing the raw span to a file.
     CaptureIq(bool),
+    /// What starts a capture file: the switch, or energy in the span with
+    /// its threshold, pre-roll and hang.
+    CaptureTrigger(crate::chain::CapturePlan),
     /// What the heatmap recorder keeps: whether it is running, how often it
     /// takes a row and how much it may hold.
     Heatmap(crate::chain::HeatPlan),
@@ -1140,6 +1143,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         capture: false,
         capture_dir: crate::chain::default_capture_dir(),
         capture_format: common::SampleFormat::Cu8,
+        capture_arm: Default::default(),
         log: false,
         calls: None,
         transcribe: false,
@@ -1370,6 +1374,14 @@ pub struct Status {
     pub capture_folder: AtomicU64,
     pub capture_full: AtomicBool,
     pub capture_file: parking_lot::Mutex<Option<String>>,
+    /// An armed capture: waiting for a signal, how many files it has opened,
+    /// and what its threshold and the span come to right now. The levels are
+    /// dBFS as `f32` bits, and the threshold is `f32::NEG_INFINITY` until a
+    /// relative one has a floor to be relative to.
+    pub capture_armed: AtomicBool,
+    pub capture_bursts: AtomicU64,
+    pub capture_level_db: std::sync::atomic::AtomicU32,
+    pub capture_threshold_db: std::sync::atomic::AtomicU32,
     /// Size of the day's log file, and whether it has stopped growing.
     pub log_bytes: AtomicU64,
     pub log_full: std::sync::atomic::AtomicBool,
@@ -1635,6 +1647,10 @@ impl Default for Status {
             capture_folder: AtomicU64::new(0),
             capture_full: AtomicBool::new(false),
             capture_file: parking_lot::Mutex::new(None),
+            capture_armed: AtomicBool::new(false),
+            capture_bursts: AtomicU64::new(0),
+            capture_level_db: std::sync::atomic::AtomicU32::new(f32::NEG_INFINITY.to_bits()),
+            capture_threshold_db: std::sync::atomic::AtomicU32::new(f32::NEG_INFINITY.to_bits()),
             log_bytes: AtomicU64::new(0),
             log_full: std::sync::atomic::AtomicBool::new(false),
             feeds: parking_lot::Mutex::new(Vec::new()),
@@ -2085,6 +2101,7 @@ impl Audio {
             heat: Default::default(),
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
+            capture_arm: Default::default(),
             log: false,
             calls: None,
             transcribe: false,
@@ -2359,6 +2376,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             heat: Default::default(),
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: capture_format_for(dev.info().native_format),
+            capture_arm: Default::default(),
             // Switched on as soon as the interface says where to write; the
             // default is on, and the command arrives with the first frame.
             log: false,
@@ -2644,6 +2662,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::CaptureIq(on) => {
                 self.plan.capture = on;
                 self.rx.set_capture(on);
+            }
+            // No rebuild either, and for a stronger reason: an armed capture
+            // is waiting for a transmission that may come at any moment.
+            Cmd::CaptureTrigger(arm) => {
+                self.plan.capture_arm = arm;
+                self.rx.set_capture_trigger(arm);
             }
             Cmd::Location(lat, lon) => self.rx.set_location(lat, lon),
             Cmd::Survey(path) => {
@@ -3450,6 +3474,14 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 .capture_folder
                 .store(cap.map(|c| c.folder_bytes()).unwrap_or(0), Ordering::Relaxed);
             self.status.capture_full.store(cap.is_some_and(|c| c.is_full()), Ordering::Relaxed);
+            self.status.capture_armed.store(cap.is_some_and(|c| c.is_armed()), Ordering::Relaxed);
+            self.status
+                .capture_bursts
+                .store(cap.map(|c| c.bursts()).unwrap_or(0), Ordering::Relaxed);
+            let level = cap.map(|c| c.level_db()).unwrap_or(f32::NEG_INFINITY);
+            let threshold = cap.and_then(|c| c.threshold_dbfs()).unwrap_or(f32::NEG_INFINITY);
+            self.status.capture_level_db.store(level.to_bits(), Ordering::Relaxed);
+            self.status.capture_threshold_db.store(threshold.to_bits(), Ordering::Relaxed);
             *self.status.capture_file.lock() =
                 cap.and_then(|c| c.path()).map(|p| p.display().to_string());
         }
@@ -3684,6 +3716,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         capture: false,
         capture_dir: crate::chain::default_capture_dir(),
         capture_format: common::SampleFormat::Cu8,
+        capture_arm: Default::default(),
         log: false,
         calls: None,
         transcribe: false,

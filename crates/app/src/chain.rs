@@ -319,6 +319,8 @@ pub struct Plan {
     /// A twelve bit converter written as bytes throws away its bottom
     /// four bits, and on a quiet band those were the whole signal.
     pub capture_format: common::SampleFormat,
+    /// What starts a capture, and on what terms when that is energy.
+    pub capture_arm: CapturePlan,
     /// How much of the span is kept as readings for a heatmap export. A plan
     /// value rather than an edit for the reason the walk's settings are one:
     /// a retune rebuilds the graph, and the history it throws away is the
@@ -383,6 +385,36 @@ impl Default for HeatPlan {
             // budget below holds a little over two hours.
             rows_per_sec: 2.0,
             budget_mb: (crate::heatmap::DEFAULT_BUDGET >> 20) as u64,
+        }
+    }
+}
+
+/// What starts a raw capture.
+///
+/// A plan value rather than an edit, for the reason the walk's settings are
+/// one: a capture is armed to catch a transmission that happens once every
+/// few hours, and a retune in the meantime must not disarm it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapturePlan {
+    pub trigger: nodes::capture_nodes::Trigger,
+    pub reference: nodes::capture_nodes::Reference,
+    /// dB over the tracked floor, or dBFS, depending on the reference.
+    pub threshold_db: f32,
+    pub pre_ms: f32,
+    pub hang_ms: f32,
+}
+
+impl Default for CapturePlan {
+    fn default() -> Self {
+        Self {
+            trigger: nodes::capture_nodes::Trigger::Switch,
+            reference: nodes::capture_nodes::Reference::Floor,
+            // 10 dB over the floor: the detector opens a channel at 8 dB, so
+            // anything this misses is something no decoder was going to read
+            // either.
+            threshold_db: 10.0,
+            pre_ms: 500.0,
+            hang_ms: 1_000.0,
         }
     }
 }
@@ -1886,6 +1918,23 @@ impl Receiver {
         self.capture().is_some_and(|n| n.is_enabled() && !n.is_full())
     }
 
+    /// Change what starts a capture, without a rebuild: an armed capture is
+    /// waiting for something that may happen at any moment, and rebuilding
+    /// the graph to change its threshold would drop the source it is
+    /// listening to.
+    pub fn set_capture_trigger(&mut self, arm: CapturePlan) {
+        use pipeline::ParamValue::{Float, Text};
+        for (name, v) in [
+            ("trigger", Text(arm.trigger.as_str().into())),
+            ("reference", Text(arm.reference.as_str().into())),
+            ("threshold_db", Float(arm.threshold_db as f64)),
+            ("pre_ms", Float(arm.pre_ms as f64)),
+            ("hang_ms", Float(arm.hang_ms as f64)),
+        ] {
+            self.set_derived_param(derived::CAPTURE, name, v);
+        }
+    }
+
     /// Add the capture folder up again, for the status that reports it
     /// against the limit. Throttled inside the node.
     pub fn refresh_capture_folder(&mut self) {
@@ -3015,6 +3064,12 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             "format".into(),
             pipeline::ParamValue::Text(plan.capture_format.extension().into()),
         );
+        let arm = plan.capture_arm;
+        s.insert("trigger".into(), pipeline::ParamValue::Text(arm.trigger.as_str().into()));
+        s.insert("reference".into(), pipeline::ParamValue::Text(arm.reference.as_str().into()));
+        s.insert("threshold_db".into(), pipeline::ParamValue::Float(arm.threshold_db as f64));
+        s.insert("pre_ms".into(), pipeline::ParamValue::Float(arm.pre_ms as f64));
+        s.insert("hang_ms".into(), pipeline::ParamValue::Float(arm.hang_ms as f64));
         p.add_derived(derived::CAPTURE, "iq_capture", s);
         p.connect(head, (derived::CAPTURE, 0));
     }
@@ -4785,6 +4840,7 @@ pub(crate) mod tests {
             heat: Default::default(),
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
+            capture_arm: CapturePlan::default(),
             log: false,
             calls: None,
             transcribe: false,
@@ -5127,6 +5183,40 @@ pub(crate) mod tests {
         assert!(!rx.capturing(), "the stage comes back as the graph draws it");
         rx.set_capture(true);
         assert!(rx.capturing());
+    }
+
+    /// Arming is a parameter, for the same reason switching on is: an armed
+    /// capture is waiting for a transmission, and a rebuild would drop the
+    /// source it is waiting on. It is also a plan value, so a retune leaves
+    /// it armed.
+    #[test]
+    fn arming_the_capture_neither_rebuilds_nor_is_lost_in_a_rebuild() {
+        use nodes::capture_nodes::{Reference, Trigger};
+        let mut plan = plan(2_400_000.0, Hz::mhz(433));
+        let mut rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        assert_eq!(rx.capture().unwrap().trigger(), Trigger::Switch);
+
+        let arm = CapturePlan {
+            trigger: Trigger::Energy,
+            reference: Reference::Absolute,
+            threshold_db: -42.0,
+            pre_ms: 250.0,
+            hang_ms: 750.0,
+        };
+        rx.set_capture_trigger(arm);
+        rx.set_capture(true);
+        let cap = rx.capture().unwrap();
+        assert_eq!(cap.trigger(), Trigger::Energy);
+        assert_eq!(cap.threshold_dbfs(), Some(-42.0));
+        assert!(cap.is_armed(), "switched on and armed is waiting, not writing");
+        assert_eq!(cap.bursts(), 0);
+
+        plan.capture_arm = arm;
+        plan.capture = true;
+        rx.rebuild(&plan).expect("rebuilt");
+        let cap = rx.capture().unwrap();
+        assert_eq!(cap.trigger(), Trigger::Energy, "a retune disarmed the capture");
+        assert_eq!(cap.threshold_dbfs(), Some(-42.0));
     }
 
     #[test]

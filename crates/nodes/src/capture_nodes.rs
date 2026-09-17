@@ -23,8 +23,88 @@ use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// What opens a file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Trigger {
+    /// The operator's switch: every sample from the moment it goes on, to one
+    /// file.
+    #[default]
+    Switch,
+    /// Power in the span: one file per burst, holding the pre-roll before it
+    /// and the tail after it.
+    Energy,
+}
+
+impl Trigger {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "switch" => Some(Self::Switch),
+            "energy" => Some(Self::Energy),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Energy => "energy",
+        }
+    }
+}
+
+/// What the trigger's threshold is measured against.
+///
+/// Both, because neither answers on its own: a level above the floor survives
+/// a gain change and follows a band as it gets busier, and a level in dBFS is
+/// the number an operator can reason about when the floor itself is what
+/// moved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Reference {
+    #[default]
+    Floor,
+    Absolute,
+}
+
+impl Reference {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "floor" => Some(Self::Floor),
+            "absolute" => Some(Self::Absolute),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Floor => "floor",
+            Self::Absolute => "absolute",
+        }
+    }
+}
+
+/// How long a frame of the trigger's power measurement is.
+///
+/// Two milliseconds, because the measurement has to be short against the
+/// shortest thing worth catching and long enough to average a modulated
+/// carrier: a 20 ms POCSAG codeword covers ten frames, and a frame of 20 ms
+/// measured a 5 ms burst 6 dB low in the test below.
+const FRAME_MS: f64 = 2.0;
+
+/// Frames per sub-window and sub-windows held by the floor tracker. The
+/// product is its memory, so at 2 ms a frame this is eight seconds, which has
+/// to stay longer than the longest transmission or an over is learned as
+/// noise (see `dsp::detect::NoiseFloor`).
+const FLOOR_SUB_LEN: usize = 32;
+const FLOOR_SUB_COUNT: usize = 128;
+
+/// How much signal the pre-roll may hold, whatever is asked for. Five seconds
+/// of a 2.4 MS/s span is 96 MB of `C32` in memory, which is already more than
+/// a trigger needs to keep the head of a burst.
+const MAX_PRE_MS: f64 = 5_000.0;
 
 /// How much of the disk the capture folder may take.
 ///
@@ -75,6 +155,28 @@ pub struct IqCaptureNode {
     error: Option<String>,
     reported: bool,
     buf: Vec<u8>,
+    trigger: Trigger,
+    reference: Reference,
+    /// dB above the tracked floor, or dBFS, depending on the reference.
+    threshold_db: f32,
+    pre_ms: f64,
+    hang_ms: f64,
+    /// The trigger's own floor tracker, fed the span's power a frame at a
+    /// time. Separate from the detector's: this one measures the whole span
+    /// rather than a channel, which is what the file holds.
+    floor: dsp::detect::NoiseFloor,
+    /// Samples held back so the head of a burst is in its file.
+    pre_roll: VecDeque<C32>,
+    /// Samples of a frame not yet complete, so the measurement is always over
+    /// the same length whatever the block size is.
+    pending: Vec<C32>,
+    /// Samples since the last frame above the threshold, against the hang.
+    quiet: u64,
+    /// The last frame's power and the floor under it, both dBFS, for the card.
+    level_db: f32,
+    floor_db: f32,
+    /// Files opened by the trigger since the graph was built.
+    bursts: u64,
 }
 
 impl IqCaptureNode {
@@ -95,6 +197,18 @@ impl IqCaptureNode {
             error: None,
             reported: false,
             buf: Vec::new(),
+            trigger: Trigger::Switch,
+            reference: Reference::Floor,
+            threshold_db: 10.0,
+            pre_ms: 500.0,
+            hang_ms: 1_000.0,
+            floor: dsp::detect::NoiseFloor::new(FLOOR_SUB_LEN, FLOOR_SUB_COUNT),
+            pre_roll: VecDeque::new(),
+            pending: Vec::new(),
+            quiet: 0,
+            level_db: f32::NEG_INFINITY,
+            floor_db: f32::NEG_INFINITY,
+            bursts: 0,
         }
     }
 
@@ -119,6 +233,66 @@ impl IqCaptureNode {
     pub fn with_enabled(mut self, on: bool) -> Self {
         self.enabled = on;
         self
+    }
+
+    /// What opens a file, and on what terms when that is energy.
+    pub fn with_trigger(mut self, t: Trigger) -> Self {
+        self.trigger = t;
+        self
+    }
+
+    pub fn with_threshold(mut self, reference: Reference, db: f32) -> Self {
+        self.reference = reference;
+        self.threshold_db = db;
+        self
+    }
+
+    /// How much of the signal before the trigger goes in the file, and how
+    /// long the power may stay under the threshold before it is closed.
+    pub fn with_window(mut self, pre_ms: f64, hang_ms: f64) -> Self {
+        self.pre_ms = pre_ms.clamp(0.0, MAX_PRE_MS);
+        self.hang_ms = hang_ms.max(0.0);
+        self
+    }
+
+    pub fn trigger(&self) -> Trigger {
+        self.trigger
+    }
+
+    /// Waiting for a signal: armed, switched on, and not writing.
+    pub fn is_armed(&self) -> bool {
+        self.trigger == Trigger::Energy && self.enabled && !self.full && self.sink.is_none()
+    }
+
+    /// Writing a file right now, however it was started.
+    pub fn is_recording(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Files the trigger has opened, which is what says whether it is set too
+    /// low: a threshold under the floor makes one long file, and one over
+    /// every signal makes none.
+    pub fn bursts(&self) -> u64 {
+        self.bursts
+    }
+
+    /// The last frame's power in dBFS, and the floor under it.
+    pub fn level_db(&self) -> f32 {
+        self.level_db
+    }
+
+    pub fn floor_db(&self) -> f32 {
+        self.floor_db
+    }
+
+    /// What the threshold comes to right now in dBFS, which is the number the
+    /// card shows: a level above the floor means nothing until the floor is
+    /// known, so this is `None` until the tracker has seen its whole window.
+    pub fn threshold_dbfs(&self) -> Option<f32> {
+        match self.reference {
+            Reference::Absolute => Some(self.threshold_db),
+            Reference::Floor => self.floor.is_ready().then_some(self.floor_db + self.threshold_db),
+        }
     }
 
     /// The file being written, once there is one.
@@ -210,6 +384,7 @@ impl IqCaptureNode {
         }
         self.enabled = on;
         self.close();
+        self.rearm();
         if on {
             self.full = false;
             self.error = None;
@@ -228,15 +403,27 @@ impl IqCaptureNode {
     /// needs no arguments.
     fn open(&mut self, at_us: u64) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        let name = format!(
-            "{}_{}_{:.4}M_{:.0}k.{}",
-            self.name,
-            stamp(at_us),
-            self.center.as_f64() / 1e6,
-            self.rate / 1e3,
-            self.format.extension(),
-        );
-        let path = self.dir.join(name);
+        let name = |stamp: &str| {
+            format!(
+                "{}_{stamp}_{:.4}M_{:.0}k.{}",
+                self.name,
+                self.center.as_f64() / 1e6,
+                self.rate / 1e3,
+                self.format.extension(),
+            )
+        };
+        let at = stamp(at_us);
+        let mut path = self.dir.join(name(&at));
+        // An armed capture writes a file per burst and two bursts can fall in
+        // the same millisecond, which named them the same thing and lost the
+        // first. The counter goes inside the time token, where
+        // `sources::parse_filename` will not read it as a rate.
+        for n in 2.. {
+            if !path.exists() {
+                break;
+            }
+            path = self.dir.join(name(&format!("{at}-{n}")));
+        }
         self.older = self.measure();
         self.measured = Some(std::time::Instant::now());
         if self.budget > 0 && self.older >= self.budget {
@@ -259,6 +446,78 @@ impl IqCaptureNode {
             samples: 0,
         });
         Ok(())
+    }
+
+    /// Samples in one measured frame at the rate in force.
+    fn frame_len(&self) -> usize {
+        ((self.rate * FRAME_MS / 1e3) as usize).max(64)
+    }
+
+    fn pre_samples(&self) -> usize {
+        (self.rate * self.pre_ms.clamp(0.0, MAX_PRE_MS) / 1e3) as usize
+    }
+
+    fn hang_samples(&self) -> u64 {
+        (self.rate * self.hang_ms.max(0.0) / 1e3) as u64
+    }
+
+    /// One measured frame of the span: what it came to, whether that is a
+    /// signal, and where the samples go.
+    fn armed_frame(&mut self, iq: &[C32], c: &mut NodeCtx<'_>) {
+        let power = iq.iter().map(|s| s.norm_sqr()).sum::<f32>() / iq.len() as f32;
+        let floor = self.floor.update(power.max(f32::MIN_POSITIVE));
+        self.level_db = 10.0 * power.max(1e-20).log10();
+        self.floor_db = 10.0 * floor.max(1e-20).log10();
+        let over = match self.reference {
+            Reference::Absolute => self.level_db >= self.threshold_db,
+            // Nothing triggers until the tracker has seen its whole window:
+            // the first estimate rests on a handful of frames and sits far
+            // too low, so an armed capture would open a file every time a
+            // stream started.
+            Reference::Floor => {
+                self.floor.is_ready() && self.level_db - self.floor_db >= self.threshold_db
+            }
+        };
+        if over {
+            self.quiet = 0;
+        } else {
+            self.quiet += iq.len() as u64;
+        }
+        if self.sink.is_none() {
+            if !over {
+                let keep = self.pre_samples();
+                self.pre_roll.extend(iq.iter().copied());
+                while self.pre_roll.len() > keep {
+                    self.pre_roll.pop_front();
+                }
+                return;
+            }
+            if let Err(e) = self.open(now_us()) {
+                self.fail(format!("cannot open a capture in {}: {e}", self.dir.display()), c);
+                return;
+            }
+            self.bursts += 1;
+            let roll: Vec<C32> = self.pre_roll.drain(..).collect();
+            if !roll.is_empty() {
+                self.write_or_fail(&roll, c);
+            }
+        }
+        self.write_or_fail(iq, c);
+        // The hang is written rather than trimmed: the tail of a burst is
+        // where a decoder's trailing bits are, and a file that stops at the
+        // last loud frame has lost them.
+        if !over && self.quiet >= self.hang_samples() {
+            self.close();
+            self.pre_roll.clear();
+        }
+    }
+
+    fn write_or_fail(&mut self, iq: &[C32], c: &mut NodeCtx<'_>) {
+        if let Err(e) = self.write(iq) {
+            let path = self.path().map(|p| p.display().to_string()).unwrap_or_default();
+            self.fail(format!("cannot write {path}: {e}"), c);
+            self.close();
+        }
     }
 
     fn write(&mut self, iq: &[C32]) -> Result<()> {
@@ -297,6 +556,9 @@ impl Simple for IqCaptureNode {
         // the name has to be right about every sample in it.
         if i.spec.rate != self.rate || i.spec.center != self.center {
             self.close();
+            // A new rate is a new frame length, so the tracked floor and the
+            // pre-roll are measurements of something else.
+            self.rearm();
         }
         self.rate = i.spec.rate;
         self.center = i.spec.center;
@@ -308,6 +570,23 @@ impl Simple for IqCaptureNode {
         if !self.enabled || self.full || iq.is_empty() {
             return Ok(());
         }
+        if self.trigger == Trigger::Energy {
+            // Measured a frame at a time whatever the block size is, so the
+            // threshold means the same thing on every source. Samples that do
+            // not fill a frame wait for the next block rather than being
+            // measured over a shorter window, and stay in order behind it.
+            let mut pending = std::mem::take(&mut self.pending);
+            pending.extend_from_slice(iq);
+            let n = self.frame_len();
+            let mut at = 0;
+            while at + n <= pending.len() && !self.full {
+                self.armed_frame(&pending[at..at + n], c);
+                at += n;
+            }
+            pending.drain(..at);
+            self.pending = pending;
+            return Ok(());
+        }
         // Opened on the first block rather than at negotiation, so a graph
         // that is built and thrown away leaves no empty file behind.
         if self.sink.is_none() {
@@ -316,16 +595,13 @@ impl Simple for IqCaptureNode {
                 return Ok(());
             }
         }
-        if let Err(e) = self.write(iq) {
-            let path = self.path().map(|p| p.display().to_string()).unwrap_or_default();
-            self.fail(format!("cannot write {path}: {e}"), c);
-            self.close();
-        }
+        self.write_or_fail(iq, c);
         Ok(())
     }
 
     fn reset(&mut self) {
         self.close();
+        self.rearm();
     }
 
     fn params(&self) -> Vec<Param> {
@@ -335,6 +611,29 @@ impl Simple for IqCaptureNode {
                 .unit("MB")
                 .label("Stop when the folder reaches")
                 .log(),
+            Param::choice(
+                TRIGGER,
+                match self.trigger {
+                    Trigger::Switch => 0,
+                    Trigger::Energy => 1,
+                },
+                vec!["switch".into(), "energy".into()],
+            )
+            .label("Start a file on"),
+            Param::choice(
+                REFERENCE,
+                match self.reference {
+                    Reference::Floor => 0,
+                    Reference::Absolute => 1,
+                },
+                vec!["floor".into(), "absolute".into()],
+            )
+            .label("Threshold is"),
+            Param::float(THRESHOLD_DB, self.threshold_db as f64, -120.0..=60.0)
+                .unit("dB")
+                .label("Trigger at"),
+            Param::float(PRE_MS, self.pre_ms, 0.0..=MAX_PRE_MS).unit("ms").label("Keep before"),
+            Param::float(HANG_MS, self.hang_ms, 0.0..=30_000.0).unit("ms").label("Hold after"),
         ]
     }
 
@@ -346,6 +645,42 @@ impl Simple for IqCaptureNode {
             }
             BUDGET_MB => {
                 self.budget = (v.as_f64().unwrap_or(0.0).max(0.0) * (1 << 20) as f64) as u64;
+                Ok(())
+            }
+            TRIGGER => {
+                let was = self.trigger;
+                self.trigger = match &v {
+                    ParamValue::Int(0) => Trigger::Switch,
+                    ParamValue::Int(_) => Trigger::Energy,
+                    _ => v.as_str().and_then(Trigger::parse).unwrap_or(self.trigger),
+                };
+                if self.trigger != was {
+                    // The file open under one trigger was started on terms
+                    // the other does not hold, so it is finished here rather
+                    // than grown by a rule it was not opened under.
+                    self.close();
+                    self.rearm();
+                }
+                Ok(())
+            }
+            REFERENCE => {
+                self.reference = match &v {
+                    ParamValue::Int(0) => Reference::Floor,
+                    ParamValue::Int(_) => Reference::Absolute,
+                    _ => v.as_str().and_then(Reference::parse).unwrap_or(self.reference),
+                };
+                Ok(())
+            }
+            THRESHOLD_DB => {
+                self.threshold_db = v.as_f64().unwrap_or(self.threshold_db as f64) as f32;
+                Ok(())
+            }
+            PRE_MS => {
+                self.pre_ms = v.as_f64().unwrap_or(self.pre_ms).clamp(0.0, MAX_PRE_MS);
+                Ok(())
+            }
+            HANG_MS => {
+                self.hang_ms = v.as_f64().unwrap_or(self.hang_ms).max(0.0);
                 Ok(())
             }
             _ => Err(Error::other(format!("iq_capture: unknown parameter {name:?}"))),
@@ -364,20 +699,34 @@ impl IqCaptureNode {
         self.error = Some(message);
         self.full = true;
     }
+
+    /// Forget what the trigger measured, without touching what is on disk.
+    fn rearm(&mut self) {
+        self.floor.reset();
+        self.pre_roll.clear();
+        self.pending.clear();
+        self.quiet = 0;
+        self.level_db = f32::NEG_INFINITY;
+        self.floor_db = f32::NEG_INFINITY;
+    }
 }
 
-/// UTC as `YYYYmmdd-HHMMSS`.
+/// UTC as `YYYYmmdd-HHMMSS-mmm`.
 ///
 /// The hyphen is not decoration: `sources::parse_filename` reads the
 /// frequency and rate out of a name by looking for numeric tokens, and a bare
 /// run of digits is a perfectly good number. One was read as a sample rate of
 /// 1 Hz once already, in the burst recorder.
+///
+/// The milliseconds are not decoration either: an armed capture writes a file
+/// per burst, and two bursts in the same second gave the same name, so the
+/// second one silently replaced the first.
 fn stamp(at_us: u64) -> String {
     let secs = (at_us / 1_000_000) as i64;
     let nanos = (at_us % 1_000_000) as u32 * 1_000;
     chrono::DateTime::from_timestamp(secs, nanos)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-        .format("%Y%m%d-%H%M%S")
+        .format("%Y%m%d-%H%M%S-%3f")
         .to_string()
 }
 
@@ -525,11 +874,228 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Noise at about -40 dBFS a sample, which is what the floor tracker has
+    /// to settle on before anything can trigger.
+    fn noise(n: usize, seed: &mut u32) -> Vec<C32> {
+        (0..n)
+            .map(|_| {
+                let mut r = || {
+                    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (*seed >> 8) as f32 / (1 << 23) as f32 - 1.0
+                };
+                C32::new(r() * 0.01, r() * 0.01)
+            })
+            .collect()
+    }
+
+    /// Enough noise for `dsp::detect::NoiseFloor` to have its whole window,
+    /// which at 2 ms a frame is 8.2 s: 32 frames a sub-window, 128 of them.
+    fn settle(n: &mut IqCaptureNode, rate: f64, ins: &[PortSpec], seed: &mut u32) {
+        let frames = FLOOR_SUB_LEN * FLOOR_SUB_COUNT + 1;
+        let block = (rate * FRAME_MS / 1e3) as usize;
+        for _ in 0..frames {
+            feed(n, &noise(block, seed), ins);
+        }
+    }
+
+    fn armed(dir: &Path, rate: f64) -> IqCaptureNode {
+        IqCaptureNode::new(dir)
+            .with_trigger(Trigger::Energy)
+            .with_threshold(Reference::Floor, 10.0)
+            .with_window(100.0, 40.0)
+            .with_budget(1 << 30)
+            .with_name(&format!("armed{}", rate as u64))
+    }
+
+    fn files(d: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .map(|r| r.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// A burst either side of a quiet gap is two files, each holding the
+    /// signal and the pre-roll in front of it and nothing like the whole run.
+    #[test]
+    fn a_burst_makes_a_file_and_the_silence_between_makes_none() {
+        let d = dir("armed-bursts");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate);
+        Node::negotiate(&mut n, &ins).unwrap();
+        let mut seed = 1;
+        settle(&mut n, rate, &ins, &mut seed);
+        assert!(n.is_armed(), "nothing was written by the noise");
+        assert_eq!(files(&d).len(), 0);
+
+        // Two 20 ms tones, 200 ms of noise apart. The hang is 40 ms, so the
+        // gap closes the first file well before the second tone arrives.
+        let burst = (rate * 0.020) as usize;
+        for pass in 0..2 {
+            feed(&mut n, &tone(burst), &ins);
+            assert!(n.is_recording(), "the tone did not open a file on pass {pass}");
+            for _ in 0..10 {
+                feed(&mut n, &noise((rate * 0.020) as usize, &mut seed), &ins);
+            }
+            assert!(!n.is_recording(), "the file stayed open through the silence");
+        }
+        assert_eq!(n.bursts(), 2, "one file per burst");
+        let files = files(&d);
+        assert_eq!(files.len(), 2);
+        for f in &files {
+            let buf = sources::FileSource::open(f).unwrap().read_all().unwrap();
+            assert_eq!(buf.rate.0, rate as u64);
+            // The burst, the 100 ms of pre-roll in front of it and the 40 ms
+            // hang behind it, to a frame: 16,000 samples, against the 84,000
+            // the whole run put through the node.
+            assert!(
+                (14_000..18_000).contains(&buf.samples.len()),
+                "{} holds {} samples",
+                f.display(),
+                buf.samples.len()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The point of the pre-roll: the first sample of the burst is not the
+    /// first sample of the file, so the head of a frame is not lost to the
+    /// time the trigger took to decide.
+    #[test]
+    fn the_file_starts_before_the_signal_did() {
+        let d = dir("armed-preroll");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate).with_window(100.0, 40.0);
+        Node::negotiate(&mut n, &ins).unwrap();
+        let mut seed = 7;
+        settle(&mut n, rate, &ins, &mut seed);
+        feed(&mut n, &tone((rate * 0.020) as usize), &ins);
+        Simple::reset(&mut n);
+        let f = files(&d).remove(0);
+        let buf = sources::FileSource::open(&f).unwrap().read_all().unwrap();
+        // 100 ms of pre-roll at 100 kS/s, held to the frame the trigger
+        // measures in: 10,000 samples, and never more than one frame short.
+        let pre = (rate * 0.100) as usize;
+        assert!(buf.samples.len() > pre, "{} samples, pre-roll {pre}", buf.samples.len());
+        let head = &buf.samples[..pre - 200];
+        let loud = head.iter().filter(|s| s.norm_sqr() > 0.01).count();
+        assert_eq!(loud, 0, "the pre-roll is not noise, so it is not the pre-roll");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Minutes of noise and nothing else. The threshold is relative, so a
+    /// receiver left armed on an empty channel must write nothing at all
+    /// rather than one file the size of the night.
+    #[test]
+    fn noise_alone_writes_nothing() {
+        let d = dir("armed-noise");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate);
+        Node::negotiate(&mut n, &ins).unwrap();
+        let mut seed = 99;
+        // Five minutes at 100 kS/s.
+        for _ in 0..1_500 {
+            feed(&mut n, &noise((rate * 0.200) as usize, &mut seed), &ins);
+        }
+        assert_eq!(n.bursts(), 0);
+        assert_eq!(files(&d).len(), 0, "noise triggered the capture");
+        assert!(n.is_armed());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An absolute threshold does not wait for the floor, and says what it
+    /// resolved to straight away. The tone is 0.5 in each component, so its
+    /// power is 0.25 and its level -6.02 dBFS: -10 dBFS triggers on it and
+    /// 0 dBFS does not.
+    #[test]
+    fn an_absolute_threshold_triggers_without_a_learned_floor() {
+        let d = dir("armed-absolute");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate).with_threshold(Reference::Absolute, -10.0);
+        Node::negotiate(&mut n, &ins).unwrap();
+        assert_eq!(n.threshold_dbfs(), Some(-10.0));
+        feed(&mut n, &tone((rate * 0.010) as usize), &ins);
+        assert!(n.is_recording());
+        assert_eq!(n.bursts(), 1);
+        assert!((n.level_db() - -6.02).abs() < 0.1, "{} dBFS", n.level_db());
+
+        let mut seed = 3;
+        let mut over = armed(&d, rate).with_threshold(Reference::Absolute, 0.0);
+        Node::negotiate(&mut over, &ins).unwrap();
+        feed(&mut over, &tone((rate * 0.010) as usize), &ins);
+        feed(&mut over, &noise((rate * 0.010) as usize, &mut seed), &ins);
+        assert_eq!(over.bursts(), 0, "a threshold above the signal still triggered");
+        Simple::reset(&mut n);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The budget is the budget however the file was started, and a full
+    /// folder stops an armed capture rather than letting the trigger open
+    /// another file.
+    #[test]
+    fn the_budget_still_stops_an_armed_capture() {
+        let d = dir("armed-budget");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate).with_budget(4_000).with_threshold(Reference::Absolute, -10.0);
+        Node::negotiate(&mut n, &ins).unwrap();
+        for _ in 0..4 {
+            feed(&mut n, &tone(2_000), &ins);
+        }
+        assert!(n.is_full());
+        assert!(!n.is_armed(), "a full capture still reports itself as waiting");
+        let written: u64 =
+            files(&d).iter().filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum();
+        assert_eq!(written, 4_000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A block is not a frame: the same signal must trigger the same way
+    /// whether the source delivers it in one block or in twenty.
+    #[test]
+    fn the_block_size_does_not_change_what_triggers() {
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let burst = (rate * 0.020) as usize;
+        let mut written = Vec::new();
+        for (name, block) in [("armed-block-one", burst), ("armed-block-many", 137)] {
+            let d = dir(name);
+            let mut n = armed(&d, rate).with_threshold(Reference::Absolute, -10.0);
+            Node::negotiate(&mut n, &ins).unwrap();
+            let iq = tone(burst);
+            for chunk in iq.chunks(block) {
+                feed(&mut n, chunk, &ins);
+            }
+            // Silence long enough for the hang to close the file.
+            let mut seed = 5;
+            for _ in 0..10 {
+                feed(&mut n, &noise((rate * 0.020) as usize, &mut seed), &ins);
+            }
+            assert_eq!(n.bursts(), 1, "{name}");
+            let f = files(&d).remove(0);
+            written.push(sources::FileSource::open(&f).unwrap().read_all().unwrap().samples.len());
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        // Within one frame of each other: a block that does not divide into
+        // frames leaves its remainder for the next block.
+        let frame = (rate * FRAME_MS / 1e3) as usize;
+        assert!(
+            written[0].abs_diff(written[1]) <= frame,
+            "{} against {} samples",
+            written[0],
+            written[1]
+        );
+    }
+
     #[test]
     fn the_stamp_is_not_read_back_as_a_frequency() {
         // 2024-05-01 12:34:56 UTC.
-        let s = stamp(1_714_566_896_000_000);
-        assert_eq!(s, "20240501-123456");
+        let s = stamp(1_714_566_896_250_000);
+        assert_eq!(s, "20240501-123456-250");
         let name = format!("capture_{s}_433.4750M_2400k.cu8");
         let meta = sources::parse_filename(Path::new(&name));
         assert_eq!(meta.center, Some(Hz(433_475_000)));
@@ -543,11 +1109,17 @@ const NAME: &str = "name";
 const FORMAT: &str = "format";
 const BUDGET_MB: &str = "budget_mb";
 const ENABLED: &str = "enabled";
+const TRIGGER: &str = "trigger";
+const REFERENCE: &str = "reference";
+const THRESHOLD_DB: &str = "threshold_db";
+const PRE_MS: &str = "pre_ms";
+const HANG_MS: &str = "hang_ms";
 
 pub const DESC: StageDesc = StageDesc {
     name: "iq_capture",
-    summary: "Write the span to a file as it arrives, so a signal \
-              nothing decodes can be worked on off the air",
+    summary: "Write the span to a file as it arrives, or a file per burst \
+              when armed on energy, so a signal nothing decodes can be \
+              worked on off the air",
     category: Category::Sink,
     feeds_bus: false,
 };
@@ -558,11 +1130,16 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
         SampleFormat::from_extension(s.str_or(FORMAT, default.extension())).unwrap_or(default);
     let mb = s.f64_or(BUDGET_MB, 0.0);
     let budget = if mb > 0.0 { (mb * (1u64 << 20) as f64) as u64 } else { DEFAULT_BUDGET };
+    let trigger = Trigger::parse(s.str_or(TRIGGER, "switch")).unwrap_or_default();
+    let reference = Reference::parse(s.str_or(REFERENCE, "floor")).unwrap_or_default();
     Ok(Box::new(
         IqCaptureNode::new(s.str_or(DIR, "."))
             .with_name(s.str_or(NAME, "capture"))
             .with_format(format)
             .with_budget(budget)
-            .with_enabled(s.bool_or(ENABLED, true)),
+            .with_enabled(s.bool_or(ENABLED, true))
+            .with_trigger(trigger)
+            .with_threshold(reference, s.f64_or(THRESHOLD_DB, 10.0) as f32)
+            .with_window(s.f64_or(PRE_MS, 500.0), s.f64_or(HANG_MS, 1_000.0)),
     ))
 }
