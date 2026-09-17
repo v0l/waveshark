@@ -22,27 +22,27 @@ jobs:
           # and a newer image would link a soname the machine running the
           # binary has to have as well. So a released Linux binary decodes a
           # multiplex and shows no pictures; a build from source shows them.
+          # CUDA is in the build rather than beside it. The patched candle in
+          # the root manifest loads the CUDA libraries at run time, so this
+          # one binary starts on a machine with no card and says it has no
+          # device; with a card and the CUDA 12 runtime it reads speech on
+          # the GPU. The toolkit is needed to build the kernels, not to run
+          # them.
+          #
+          # No ffmpeg: this image's is 4.4 and ffmpeg-sys wants 5.1 or newer,
+          # and a newer image would link a soname the machine running the
+          # binary has to have as well. So a released Linux binary decodes a
+          # multiplex and shows no pictures; a build from source shows them.
           - name: linux-x86_64
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            features: --no-default-features --features limesdr,stt,mcp
-            # Installers are built for the plain builds alone. A second
-            # package of the same name that installs a different binary to
-            # the same path is a package manager's idea of a conflict, and
-            # the CUDA build is a different binary; it stays an archive.
-            installers: deb,rpm
-          # The same again with the speech model on the card. A separate
-          # asset rather than one binary that tries: candle links cudart and
-          # cublas at load, so a CUDA build does not start on a machine
-          # without them, and most machines are without them.
-          - name: linux-x86_64-cuda
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: --no-default-features --features limesdr,stt,cuda,mcp
             cuda: '12.8.1'
+            installers: deb,rpm
           # Apple silicon only. The Intel runners are on their way out and
           # nobody has an Intel Mac to check the result on, and a binary
-          # nobody has started is not a release asset.
+          # nobody has started is not a release asset. No CUDA here: a Mac
+          # reads speech on Metal, which `stt` turns on by itself.
           - name: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
@@ -51,13 +51,9 @@ jobs:
           - name: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
-            features: --no-default-features --features stt,mcp
-            installers: msi
-          - name: windows-x86_64-cuda
-            os: windows-2022
-            target: x86_64-pc-windows-msvc
             features: --no-default-features --features stt,cuda,mcp
             cuda: '12.8.1'
+            installers: msi
 
     steps:
       - uses: actions/checkout@v4
@@ -154,92 +150,31 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p app ${{ matrix.features }}
 
-      - name: Stage (unix)
+      # A release carries files, not folders: the installer for the platform,
+      # and the binary itself for anyone who would rather not install one.
+      # Windows needs its two vcpkg DLLs beside the .exe, so those are assets
+      # of their own; everything else a folder used to carry is in the README.
+      - name: Binary (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p stage
-          cp target/${{ matrix.target }}/release/waveshark stage/
-          cp README.md LICENSE* stage/ 2>/dev/null || true
-          # The desktop entry a Linux user writes points at an icon file, so
-          # the archive carries one.
-          cp assets/logo/waveshark-icon.png stage/ 2>/dev/null || true
-          cat > stage/RUNNING.txt <<'EOF'
-          waveshark links librtlsdr at run time rather than bundling it,
-          because the copy that matches your udev rules and your USB stack is
-          the one already on your machine.
+          cp target/${{ matrix.target }}/release/waveshark waveshark-${{ matrix.name }}
+          chmod +x waveshark-${{ matrix.name }}
 
-            Debian/Ubuntu   sudo apt install librtlsdr0 libasound2
-            Fedora          sudo dnf install rtl-sdr alsa-lib
-            Arch            sudo pacman -S rtl-sdr alsa-lib
-            macOS           brew install librtlsdr limesuite
-
-          Verified against the built binary, which links librtlsdr.so.0,
-          libasound.so.2 and libusb-1.0.so.0 and nothing else out of the
-          ordinary. The macOS build is linked against Homebrew's librtlsdr
-          and LimeSuite, so both have to be installed for it to start.
-
-          The Linux build carries no ffmpeg, so a broadcast multiplex is
-          decoded but its pictures are not shown; the macOS build shows them,
-          as does a build from source.
-
-          The -cuda build runs the speech model on an NVIDIA card and also
-          links the CUDA 12 runtime: libcudart.so.12, libcublas.so.12,
-          libcublasLt.so.12, libcurand.so.10 and libnvrtc.so.12, with a
-          driver of 570 or later. Without those it does not start; the
-          plain build is the same receiver reading speech on the CPU.
-
-            Debian/Ubuntu   sudo apt install cuda-runtime-12-8   (NVIDIA's repo)
-            Fedora          sudo dnf install cuda-runtime-12-8   (NVIDIA's repo)
-            Arch            sudo pacman -S cuda
-
-          On Linux a plain user needs permission to claim the device. The
-          rtl-sdr package usually installs the udev rules that grant it; if
-          the radio is only visible as root, that is what is missing.
-
-          On macOS the binary is not signed or notarised, so Gatekeeper
-          refuses it on the first run. Clear the download flag once:
-
-            xattr -dr com.apple.quarantine waveshark
-          EOF
-          tar -C stage -czf waveshark-${{ matrix.name }}.tar.gz .
-
-      # The DLLs go in the zip: there is no system package to point a Windows
-      # user at, so an executable on its own would not start.
-      - name: Stage (windows)
+      - name: Binary (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force stage | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" stage\
-          Copy-Item "$env:VCPKG_BIN\*.dll" stage\ -ErrorAction SilentlyContinue
-          Copy-Item README.md stage\ -ErrorAction SilentlyContinue
-          Copy-Item assets\logo\waveshark-icon.png stage\ -ErrorAction SilentlyContinue
-          @"
-          Plug the radio in before starting waveshark.
-
-          The -cuda build runs the speech model on an NVIDIA card and needs
-          the CUDA 12 runtime DLLs (cudart64_12, cublas64_12, cublasLt64_12,
-          curand64_10, nvrtc64_120_0) on the PATH, which the CUDA Toolkit
-          12.8 installer puts there, and a driver of 570 or later. The
-          plain build reads speech on the CPU and needs neither.
-
-          This build carries no ffmpeg, so a broadcast multiplex is decoded
-          but its pictures are not shown. The macOS build does show them, as
-          does a build from source.
-
-          Windows needs WinUSB bound to the device rather than the DVB-T
-          driver it ships with. Use Zadig (https://zadig.akeo.ie) and replace
-          the driver on the RTL2832U interface with WinUSB. Without this the
-          device enumerates but cannot be opened.
-          "@ | Out-File -Encoding utf8 stage\RUNNING.txt
-          Compress-Archive -Path stage\* -DestinationPath waveshark-${{ matrix.name }}.zip
+          Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" waveshark-${{ matrix.name }}.exe
+          Copy-Item "$env:VCPKG_BIN\rtlsdr.dll" .
+          Copy-Item "$env:VCPKG_BIN\libusb-1.0.dll" .
 
       # The installers, built from the metadata in crates/app/Cargo.toml after
-      # the archive and never before it: the macOS step rewrites the binary to
-      # look for its libraries inside the bundle, and an archive made from that
-      # binary would not start. cargo-packager has no RPM, so that one package
-      # comes from cargo-generate-rpm reading the same manifest. Both tools are
+      # the binary is copied out and never before it: the macOS step rewrites
+      # the binary to look for its libraries inside the bundle, and the copy
+      # published on its own has to be the one that reads them from Homebrew.
+      # cargo-packager has no RPM, so that one package comes from
+      # cargo-generate-rpm reading the same manifest. Both tools are
       # downloaded rather than compiled, and pinned, so a release is made with
       # the packager it was tested with.
       - uses: cargo-bins/cargo-binstall@main
@@ -295,7 +230,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist-extra | Out-Null
           Copy-Item "$env:VCPKG_BIN\*.dll" dist-extra\ -ErrorAction SilentlyContinue
-          Copy-Item stage\RUNNING.txt dist-extra\
           cargo packager -p app -r --target ${{ matrix.target }} -f wix -o "$PWD\dist"
           Move-Item dist\*.msi waveshark-${{ matrix.name }}.msi
 
@@ -303,12 +237,14 @@ jobs:
         with:
           name: waveshark-${{ matrix.name }}
           path: |
-            waveshark-*.tar.gz
-            waveshark-*.zip
-            waveshark-*.deb
-            waveshark-*.rpm
-            waveshark-*.msi
-            waveshark-*.dmg
+            waveshark-${{ matrix.name }}
+            waveshark-${{ matrix.name }}.exe
+            waveshark-${{ matrix.name }}.deb
+            waveshark-${{ matrix.name }}.rpm
+            waveshark-${{ matrix.name }}.msi
+            waveshark-${{ matrix.name }}.dmg
+            rtlsdr.dll
+            libusb-1.0.dll
           if-no-files-found: error
 
   release:
@@ -340,9 +276,6 @@ jobs:
           # running the last real one.
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            artifacts/*.tar.gz
-            artifacts/*.zip
-            artifacts/*.deb
-            artifacts/*.rpm
-            artifacts/*.msi
-            artifacts/*.dmg
+            artifacts/waveshark-*
+            artifacts/rtlsdr.dll
+            artifacts/libusb-1.0.dll

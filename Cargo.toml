@@ -186,3 +186,16 @@ opt-level = 3
 # over again.
 [profile.test]
 opt-level = 3
+
+# candle links the CUDA libraries: libcudart and libcublas end up in the
+# binary's import table, so the loader resolves them before main runs and a
+# build with CUDA in it does not start on a machine with no NVIDIA runtime.
+# This fork changes two lines, cudarc's linking feature and the runtime the
+# compiled kernels link against, so both are loaded at run time instead. One
+# build then serves every machine: with no card, candle reports no CUDA device
+# and the speech models run on the CPU.
+[patch.crates-io]
+candle-core = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
+candle-kernels = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
+candle-nn = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
+candle-transformers = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }

@@ -40,13 +40,21 @@ without touching it? If not, it is in the wrong file.
 `tea` is TETRA decryption, `ambe` is DMR speech through `crates/mbe`. Both
 default on, so `cargo test` at the root builds them; `crates/mbe` is not a
 default workspace member and `cargo test -p mbe` must be asked for by name.
-Releases build `--no-default-features --features limesdr,stt,mcp`, with
+Releases build `--no-default-features --features limesdr,stt,cuda,mcp`, with
 `ffmpeg` added on macOS alone: Homebrew has a new enough one, where the
 release's Linux image has ffmpeg 4.4 and Windows has none at all, so those
 binaries show no pictures off a multiplex. Windows drops `limesdr` too, since
-LimeSuite is not packaged for it, and Linux and Windows each get a second
-build with `cuda` added. `mcp` is the agent server behind `--mcp-listen`,
-which serves 127.0.0.1:8931 unless told an address or `off`.
+LimeSuite is not packaged for it, and macOS drops `cuda` for Metal. `mcp` is
+the agent server behind `--mcp-listen`, which serves 127.0.0.1:8931 unless
+told an address or `off`.
+
+One build serves a machine with a card and one without. The `[patch.crates-io]`
+in the root manifest points candle at a fork whose CUDA libraries are loaded
+when a device is first asked for rather than named in the import table, so a
+build with `cuda` on starts where there is no NVIDIA runtime and reads speech
+on the CPU. Building it still needs the toolkit, because the kernels are
+compiled. `readelf -d` naming libcudart or libcublas means the fork has been
+lost and the release binary will not start on most machines.
 
 ## Everything the receiver does is a node
 
