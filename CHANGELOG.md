@@ -12,6 +12,7 @@ the code is in the commit log.
 ### Added
 
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
+- Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.
 - The agent and the MCP server reach the settings: the scanner table, the
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.

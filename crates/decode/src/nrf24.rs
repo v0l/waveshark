@@ -87,6 +87,8 @@ pub struct Packet {
     /// readings of the same frame under different splits give different
     /// address and payload bytes but the same `raw`. Compare packets on this.
     pub raw: Vec<u8>,
+    /// The check that decided all of it.
+    pub crc: u16,
     /// Where in the bit stream the preamble began.
     pub start: usize,
 }
@@ -99,6 +101,35 @@ impl Packet {
     pub fn split_is_a_guess(&self) -> bool {
         true
     }
+
+    /// The frame as it went out, everything after the preamble: still
+    /// scrambled, still in the order the chip sent it, check included.
+    ///
+    /// This is what a front end puts on the bus, because it is the part that
+    /// is determined. Anything that reads it back gets the same CRC to check
+    /// and the same split to guess at.
+    pub fn on_air(&self) -> Vec<u8> {
+        let mut out = self.raw.clone();
+        out.extend(self.crc.to_be_bytes());
+        out
+    }
+
+    /// How many bits the frame occupied, preamble and all.
+    pub fn bits(&self) -> usize {
+        PREAMBLE_BITS + (self.raw.len() + 2) * 8
+    }
+}
+
+/// Read a packet out of the bytes a front end put on the bus, which are the
+/// frame without its preamble. The CRC is checked again here: a reader that
+/// took the front end's word for it would have no evidence of its own.
+pub fn from_on_air(bytes: &[u8]) -> Option<Packet> {
+    let mut bits: Vec<bool> =
+        (0..PREAMBLE_BITS).map(|k| PREAMBLE >> (PREAMBLE_BITS - 1 - k) & 1 != 0).collect();
+    for b in bytes {
+        bits.extend((0..8).rev().map(|k| b >> k & 1 != 0));
+    }
+    decode(&bits, 0)
 }
 
 /// Read one XN297 packet from a bit stream, most significant bit first.
@@ -156,6 +187,7 @@ pub fn decode(bits: &[bool], from: usize) -> Option<Packet> {
                     payload,
                     scrambled,
                     raw: raw[..total - 2].to_vec(),
+                    crc: sent,
                     start,
                 });
             }
@@ -340,6 +372,26 @@ mod tests {
         }
         let rate = passed as f64 / trials as f64;
         assert!(rate < 0.02, "{passed} of {trials} noise packets passed, {rate:.4}");
+    }
+
+    /// What a front end puts on the bus is what a reader of the bus decodes
+    /// again, check and all.
+    #[test]
+    fn a_frame_off_the_bus_reads_back_the_same() {
+        let addr = [0xa4, 0x03, 0x55, 0x11, 0x22];
+        let payload: Vec<u8> = (0..15).map(|i| i * 7 + 1).collect();
+        let bits = encode(&addr, &payload, true);
+        let p = decode(&bits, 0).expect("a packet");
+        assert_eq!(p.bits(), bits.len());
+        let again = from_on_air(&p.on_air()).expect("the same packet off the bus");
+        assert_eq!(again.address, addr);
+        assert_eq!(again.payload, payload);
+        assert_eq!(again.crc, p.crc);
+        // A byte changed anywhere fails the check rather than reading as
+        // some other length.
+        let mut bent = p.on_air();
+        bent[4] ^= 0x10;
+        assert!(from_on_air(&bent).is_none());
     }
 
     #[test]
