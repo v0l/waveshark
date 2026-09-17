@@ -99,7 +99,26 @@ git commit -m "<imperative subject under 70 characters>" -m "Closes #N"
 No trailers, no body beyond the `Closes` line unless there is a measured number
 the diff cannot show. Do not push unless asked.
 
+## File what you left behind
+
+Work that was deliberately not done is an issue, not a sentence in the report
+nobody will read again: the correction the decoder computes and does not
+apply, the second packet form it drops, the fault in somebody else's file you
+walked past. File each one with `gh issue create` before reporting, labelled
+as the thing it is (`enhancement`, `bug`, `protocol`, `testing`).
+
+An issue says where it stands in the code, naming the file and the function
+that would change; what a reader would have to know that is not in the code,
+with its source; and what would settle it, including the capture or the
+hardware it needs where it needs one. No plan of work and no design nobody
+has measured. One issue per thing, and nothing that the commit just made
+untrue.
+
+Do not file a wish. Something you merely did not get to, or that would be
+nice, belongs nowhere: an issue is a thing somebody could pick up and finish
+with what is written in it.
+
 ## Report
 
-Say what layer each piece landed at, the numbers the tests pin, and anything
-you found on the way that is worth its own issue. Keep it to a few lines.
+Say what layer each piece landed at, the numbers the tests pin, and the issue
+numbers you filed. Keep it to a few lines.
