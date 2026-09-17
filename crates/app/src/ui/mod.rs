@@ -241,6 +241,9 @@ pub enum Settings {
     PacketLog,
     /// The scanner table: which front end runs on which frequency.
     Scanners,
+    /// The walk over a band: where the dial goes when it is let off the span,
+    /// and what it heard on the way.
+    BandWalk,
     /// The memory bank: saved channels, in groups.
     Memory,
     /// The dataset cache: what is held on disc, how old it is, and refresh.
@@ -261,6 +264,7 @@ impl Settings {
             "radio" => Self::Radio,
             "log" | "packet_log" => Self::PacketLog,
             "scanners" => Self::Scanners,
+            "walk" | "band_walk" => Self::BandWalk,
             "memory" => Self::Memory,
             "data" => Self::Data,
             "agent" => Self::Agent,
