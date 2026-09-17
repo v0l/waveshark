@@ -2957,7 +2957,13 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             let (mod_kind, m) = if tx.spec.source == TxSource::Sub {
                 let mut m = Settings::new();
                 m.insert("offset_hz".into(), pipeline::ParamValue::Float(0.0));
-                m.insert("ramp_us".into(), pipeline::ParamValue::Float(500.0));
+                // The edges a remote puts on the air are microseconds, not
+                // the milliseconds a Morse keyer is shaped for: a 500 us
+                // ramp on a 390 us mark never reaches full carrier and the
+                // far side reads a short mark where a long one was sent.
+                // Measured end to end, transmit to replay: 20 us keeps every
+                // Princeton frame decodable while still shaping the step.
+                m.insert("ramp_us".into(), pipeline::ParamValue::Float(20.0));
                 ("ook_mod", m)
             } else {
                 let deviation = match tx.mode {
@@ -6629,6 +6635,7 @@ pub fn transmit_graph(
     center: Hz,
     stream: Box<dyn common::TxStream>,
     mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
+    sub: Option<&crate::radio::SubFile>,
 ) -> Result<Graph> {
     use crate::radio::{TxMode, TxSource};
 
@@ -6673,14 +6680,16 @@ pub fn transmit_graph(
             return Err(common::Error::other("the agent has nothing open to transmit from"));
         }
         (TxSource::Tone, _) => Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
-        // A `.sub` source needs no audio at all; its file is handed in on
-        // the node rather than in `mic`.
-        (TxSource::Sub, _) => Box::new(nodes::SubTxNode::default()),
+        // A `.sub` source needs no audio at all: its file rides in `sub`,
+        // the same slot the receiver's chain reads it from.
+        (TxSource::Sub, _) => Box::new(nodes::SubTxNode::new(sub.as_ref().map(|f| f.file.clone()))),
     };
     let modulator: Box<dyn pipeline::Node> = if tx.source == TxSource::Sub {
         // A `.sub` file is keyed carrier whatever the channel's mode is:
         // its pulses are what a remote sent, not audio to deviation.
-        Box::new(nodes::OokModNode::new(0.0, 1.0, 500.0))
+        // Short edges: a remote's marks are hundreds of microseconds, and the
+        // 500 us ramp a Morse keyer wants clips them into the wrong symbol.
+        Box::new(nodes::OokModNode::new(0.0, 1.0, 20.0))
     } else {
         match mode {
             TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
@@ -6805,8 +6814,9 @@ mod tx_tests {
 
     fn transmit(tx: TxSpec, mode: TxMode, rate: f64, blocks: usize) -> Vec<C32> {
         let (mut dev, buf) = sink(rate);
-        let mut g = transmit_graph(&tx, mode, rate, Hz(145_500_000), dev.start_tx().unwrap(), None)
-            .unwrap();
+        let mut g =
+            transmit_graph(&tx, mode, rate, Hz(145_500_000), dev.start_tx().unwrap(), None, None)
+                .unwrap();
         for _ in 0..blocks {
             let b = g.input_buf();
             b.clear();
@@ -6892,6 +6902,7 @@ mod tx_tests {
             Hz(145_500_000),
             dev.start_tx().unwrap(),
             Some(src),
+            None,
         )
         .unwrap();
         for _ in 0..5 {
@@ -6931,6 +6942,7 @@ mod tx_tests {
             Hz(145_500_000),
             dev.start_tx().unwrap(),
             None,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -6962,6 +6974,7 @@ mod tx_tests {
             Hz(446_050_000),
             dev.start_tx().unwrap(),
             Some(src),
+            None,
         )
         .unwrap();
         for _ in 0..4 {
@@ -7039,12 +7052,133 @@ mod tx_tests {
             Hz(145_500_000),
             dev.start_tx().unwrap(),
             None,
+            None,
         )
         .unwrap();
         let topo = g.topology();
         let names: Vec<&str> = topo.nodes.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(names, ["tone", "fm_mod", "radio_tx"]);
         assert!(g.output_spec().is_tx());
+    }
+
+    /// A `.sub` file transmitted and received again, end to end.
+    ///
+    /// The transmission is keyed through the real transmit chain into an
+    /// in-memory capture, written to a `.cu8` named the convention
+    /// `sources::parse_filename` reads, and replayed through
+    /// [`crate::radio::replay`], which is the same chain the live receiver
+    /// runs. What comes back has to be the code the file carried, which is
+    /// the whole point of a transmitter: what a decoder on the far side
+    /// reads is what a receiver was given.
+    ///
+    /// The code is the Flipper corpus princeton key (TE 400,
+    /// `0x95d5d4`). The decoder reports the complement of the key, short
+    /// mark 0 on the air, which the encoder tests pin against the same
+    /// corpus.
+    #[test]
+    fn a_transmitted_sub_file_decodes_back_off_the_recording() {
+        let file = decode::subghz::SubGhz {
+            frequency: 433_920_000,
+            preset: decode::subghz::Preset::Ook,
+            protocol: "Princeton".into(),
+            bursts: vec![decode::protocols::keyfob::encode_frame(
+                decode::Protocol::timing(&decode::protocols::Princeton),
+                &{
+                    let mut b = decode::bits::BitBuffer::with_capacity(24);
+                    for i in (0..24).rev() {
+                        b.push(0x95_d5_d4 >> i & 1 == 1);
+                    }
+                    b
+                },
+                3,
+            )],
+        };
+        let sub = crate::radio::SubFile { path: "corpus.sub".into(), file };
+
+        // Key it: two blocks of clock at 1 MS/s. Each block plays the whole
+        // file, which is how every pulse source here paces itself: the sink
+        // blocks, and the file is 130 ms against a 100 ms block.
+        let rate = 1_000_000.0;
+        let tx = TxSpec { source: TxSource::Sub, ..Default::default() };
+        let (mut dev, buf) = sink(rate);
+        // Keyed 100 kHz above the centre the capture is named at, so the
+        // carrier is off DC: the extraction filter is flattest away from
+        // zero, and a mark keyed exactly at DC is shortened by its roll-off
+        // enough to turn long marks into short ones on the far side.
+        let mut g = transmit_graph(
+            &tx,
+            TxMode::Nfm,
+            rate,
+            Hz(433_820_000),
+            dev.start_tx().unwrap(),
+            None,
+            Some(&sub),
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let b = g.input_buf();
+            b.clear();
+            b.real_mut().resize(100_000, 0.0);
+            g.run().unwrap();
+        }
+        let id = g.order().last().map(|(id, _)| id).unwrap();
+        if let Some(n) = g.node_mut(id)
+            && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
+        {
+            s.finish(std::time::Duration::from_millis(50));
+        }
+        assert!(!buf.lock().is_empty(), "nothing was transmitted");
+
+        // A synthesised capture needs the two things every real one has and
+        // a keyed graph does not: a noise floor for the source detector to
+        // measure (its thresholds are SNR, and against exact zeros it has
+        // nothing to ratio), and a carrier off the centre, where the
+        // extraction filter's response is flattest. Blended here rather than
+        // keyed: this is a property of the test's recording, not of the
+        // transmitter.
+        let mut samples = Vec::new();
+        common::SampleFormat::Cs8.convert(&buf.lock(), &mut samples);
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for s in &mut samples {
+            *s = common::C32::new(
+                s.re + (next() - 0.5) as f32 * 0.04,
+                s.im + (next() - 0.5) as f32 * 0.04,
+            );
+        }
+
+        // Write the capture where the replay reads it, named so the file
+        // carries its own centre and rate.
+        let dir = std::env::temp_dir().join("waveshark-sub-e2e");
+        let _ = std::fs::create_dir_all(&dir);
+        // The sink encodes Cs8, so the file is named `.cs8` to match: a name
+        // saying one format and bytes in another is a capture that decodes
+        // as noise, which is what the file format is for saying at all.
+        let path = dir.join("princeton_433.92M_1000k.cs8");
+        let mut bytes = Vec::new();
+        common::SampleFormat::Cs8.encode(&samples, &mut bytes);
+        std::fs::write(&path, &bytes).expect("write the capture");
+
+        // Replay through the receiver the live one runs, and read the code
+        // back off the decode.
+        let rows = crate::radio::replay(&path).expect("replay the capture");
+        let codes: Vec<i64> = rows
+            .iter()
+            .filter(|r| r.model == Some("Princeton"))
+            .filter_map(|r| r.fields.iter().find(|(n, _)| n == "code"))
+            .filter_map(|(_, v)| match v {
+                common::Value::Int(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        assert!(!codes.is_empty(), "no Princeton decode in {rows:?}");
+        assert!(codes.iter().all(|c| *c == 0x6a_2a_2b), "codes: {codes:?}");
+        let _ = std::fs::remove_file(&path);
     }
 }
 
