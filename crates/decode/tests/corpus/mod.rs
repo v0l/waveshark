@@ -252,13 +252,29 @@ fn detect(iq: &[C32], rate: f64, out: &mut Vec<Package>) {
             let ook = PulseConfig {
                 reset_us,
                 min_pulses: 8,
+                // The lowest floor the live router would choose for itself.
+                // This harness has no classifier to measure a burst's rate
+                // with, so it takes the floor a fast one would ask for: at the
+                // stock 100 us every pulse of an ERT meter's 30 us keying is
+                // thrown away. Measured over the corpus it costs nothing here
+                // either, taking yield from 102 to 104 decodes against 86 in
+                // the reference and unverified claims from 17 to 16.
+                min_mark_us: 20,
                 merge_dropouts: merge,
                 measured_noise_floor: floor,
                 ..Default::default()
             };
-            OokDetector::new(rate, ook).process(&env, out);
+            // Flushed, because a file ends where a live stream would go quiet:
+            // a capture whose burst runs to the last sample otherwise produces
+            // nothing at all. rtl_433's ERT recordings are all like that, the
+            // transmission being longer than the silence around it.
+            let mut d = OokDetector::new(rate, ook);
+            d.process(&env, out);
+            d.flush(out);
             let fsk = FskConfig { reset_us, min_pulses: 8, ..Default::default() };
-            FskDetector::new(rate, fsk).process(&iq, out);
+            let mut d = FskDetector::new(rate, fsk);
+            d.process(&iq, out);
+            d.flush(out);
         }
     }
 }
@@ -763,6 +779,38 @@ pub static SPECS: &[ModelSpec] = &[
             ("flags", "flags", Text),
             ("pressure_kPa", "pressure_kpa", Num),
             ("temperature_C", "temperature_c", Num),
+        ],
+    },
+    ModelSpec {
+        rtl: "ERT-SCM",
+        ours: "ERT-SCM",
+        fields: &[
+            ("id", "id", Num),
+            ("ert_type", "ert_type", Num),
+            ("consumption_data", "consumption", Num),
+            ("physical_tamper", "physical_tamper", Num),
+            ("encoder_tamper", "encoder_tamper", Num),
+        ],
+    },
+    ModelSpec {
+        rtl: "SCMplus",
+        ours: "ERT-SCM+",
+        fields: &[
+            ("id", "id", Num),
+            ("Consumption", "consumption", Num),
+            ("MeterType", "commodity", Text),
+        ],
+    },
+    ModelSpec {
+        rtl: "IDM",
+        ours: "ERT-IDM",
+        fields: &[
+            ("id", "id", Num),
+            ("ApplicationVersion", "app_version", Num),
+            ("ConsumptionIntervalCount", "interval_count", Num),
+            ("LastConsumptionCount", "consumption", Num),
+            ("TransmitTimeOffset", "transmit_offset", Num),
+            ("MeterType", "commodity", Text),
         ],
     },
     ModelSpec {

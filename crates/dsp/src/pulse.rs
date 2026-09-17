@@ -450,9 +450,10 @@ impl Default for PulseConfig {
             // A little longer is safer: some protocols use long inter-symbol
             // gaps and would otherwise be split mid-packet.
             reset_us: 4_000,
-            // Below about 100 us is noise for practically every ISM protocol:
-            // the fastest common OOK symbol is around 100 us and anything
-            // briefer is a threshold crossing, not a transmission.
+            // Below about 100 us is noise for most ISM protocols: the common
+            // OOK symbol is around 100 us and anything briefer is a threshold
+            // crossing. A burst measured to be keyed faster than that lowers
+            // the floor for itself; see `BurstRouter::run_ook`.
             min_mark_us: 100,
             min_pulses: 4,
             hysteresis: 0.2,

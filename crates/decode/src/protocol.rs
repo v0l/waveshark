@@ -199,6 +199,9 @@ impl Protocols {
         p.add(Box::new(Ism868Link));
         p.add(Box::new(Esl::sub_ghz_38k()));
         p.add(Box::new(Esl::sub_ghz_250k()));
+        p.add(Box::new(ErtScm));
+        p.add(Box::new(ErtScmPlus));
+        p.add(Box::new(ErtIdm));
         p.add(Box::new(Hanshow::uplink_500k()));
         p.add(Box::new(Hanshow::uplink_100k()));
         p
