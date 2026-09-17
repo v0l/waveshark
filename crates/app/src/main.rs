@@ -899,7 +899,8 @@ fn replay(path: &str) -> anyhow::Result<()> {
 /// `LAT,LON` in decimal degrees, from the command line or the station field.
 /// A GPS source as the operator writes one on the command line.
 fn parse_gps(s: &str) -> Result<gps::Transport, String> {
-    gps::Transport::parse(s).ok_or_else(|| format!("{s:?} is not a serial port or a gpsd address"))
+    gps::Transport::parse(s)
+        .ok_or_else(|| format!("{s:?} is not a serial port, a modem or a gpsd address"))
 }
 
 /// `homeassistant.local`, `host:1883`, or `mqtt://user:pass@host:1883`.
@@ -1119,7 +1120,8 @@ struct Args {
 
     /// Read the receiver's own position from a GPS other than the local gpsd,
     /// which is looked for anyway: a serial port (/dev/ttyACM0, or
-    /// /dev/ttyUSB0@4800) or a gpsd address (gpsd:host:port)
+    /// /dev/ttyUSB0@4800), a sub-ghz-modem (modem:/dev/ttyACM0) or a gpsd
+    /// address (gpsd:host:port)
     #[arg(long, value_name = "SOURCE", value_parser = parse_gps)]
     gps: Option<gps::Transport>,
 
