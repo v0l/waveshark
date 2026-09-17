@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- Morse off the air: a CW channel read as text, at the speed it was sent.
 - Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
 - Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.
