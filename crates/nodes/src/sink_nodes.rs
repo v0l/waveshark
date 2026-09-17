@@ -15,6 +15,7 @@
 
 use common::{C32, Error, Result};
 use dsp::Spectrum;
+use dsp::spectrum::Detector;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -99,17 +100,42 @@ pub struct SpectrumNode {
     fresh: bool,
     /// Frames per second worth producing.
     refresh_hz: f32,
-    /// Samples still to be discarded before starting the next frame.
+    /// Samples still to go before the next frame is published.
     ///
-    /// Without this the FFT runs on every sample the radio delivers, which at
-    /// 2.4 MS/s and a 4096-point transform is around 1200 frames a second for
-    /// a display that shows thirty. The samples in between are not signal
-    /// being missed: a spectrum frame is a snapshot, and the ones nobody sees
-    /// cost a core to compute.
+    /// Only the publishing is gated. Every sample is transformed and folded
+    /// into the frame being built, so a burst between two published frames
+    /// is in the next one rather than lost.
     debt: f64,
-    /// True while a frame is part-collected, which must be finished before
-    /// the gate applies again.
-    collecting: bool,
+    /// What the trace shows out of each frame, and what the waterfall does.
+    ///
+    /// Two settings because the two are read for different things: a trace
+    /// is watched to judge a level, a waterfall to notice that something
+    /// happened. The same split a spectrum analyser makes between its
+    /// detector and its trace mode.
+    trace: Detector,
+    wf: Detector,
+    /// The waterfall's own reading of the last frame, which the host takes
+    /// beside the trace.
+    wf_db: Vec<f32>,
+}
+
+/// The detectors, as a picker's options.
+fn detectors() -> Vec<String> {
+    Detector::ALL.iter().map(|d| d.label().to_string()).collect()
+}
+
+fn index_of(d: Detector) -> usize {
+    Detector::ALL.iter().position(|x| *x == d).unwrap_or(0)
+}
+
+/// Whichever detector a setting names, by index or by name: a patch holds
+/// the index, and a saved record or an agent says the word.
+fn detector_at(v: &ParamValue) -> Detector {
+    if let Some(name) = v.as_str() {
+        return Detector::parse(name);
+    }
+    let i = v.as_i64().unwrap_or(0).max(0) as usize;
+    Detector::ALL.get(i).copied().unwrap_or_default()
 }
 
 /// The transform size a spectrum stage's description asks for, rounded down
@@ -132,8 +158,33 @@ impl SpectrumNode {
             fresh: false,
             refresh_hz: 30.0,
             debt: 0.0,
-            collecting: true,
+            trace: Detector::Average,
+            wf: Detector::Peak,
+            wf_db: Vec::new(),
         }
+    }
+
+    /// What the trace takes out of a frame.
+    pub fn set_trace(&mut self, d: Detector) {
+        self.trace = d;
+    }
+
+    pub fn trace(&self) -> Detector {
+        self.trace
+    }
+
+    /// What the waterfall takes out of the same frame.
+    pub fn set_waterfall(&mut self, d: Detector) {
+        self.wf = d;
+    }
+
+    pub fn waterfall(&self) -> Detector {
+        self.wf
+    }
+
+    /// The waterfall's reading of the last published frame.
+    pub fn waterfall_db(&self) -> &[f32] {
+        &self.wf_db
     }
 
     /// How often a frame is worth producing.
@@ -214,36 +265,48 @@ impl Simple for SpectrumNode {
         Ok(out)
     }
 
+    /// Every sample is transformed, and a frame is published at the display
+    /// rate holding everything since the last one.
+    ///
+    /// The transform used to run on one block in thirty and the rest were
+    /// thrown away, which is fine for a display and wrong for anything that
+    /// records: a burst is milliseconds long and would be seen only if it
+    /// landed in the sampled block. What is published is the loudest each
+    /// bin reached over the interval, and the mean beside it; the display's
+    /// own smoothing is applied per published frame instead of per
+    /// transform, so the picture reads the same at any sample rate.
+    ///
+    /// Measured at 1.1% of a core at 2.4 MS/s and 1024 bins, and 1.3% at
+    /// 16384, by `dsp::spectrum::tests::what_full_coverage_costs`. The old
+    /// gate saved that and cost every burst between frames.
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let iq = i.as_iq().unwrap_or(&[]);
         self.fresh = false;
         if let Some(out) = o.spectrum_mut() {
             out.clear();
         }
-        if !self.collecting {
-            self.debt -= iq.len() as f64;
-            if self.debt > 0.0 {
-                return Ok(());
-            }
-            self.collecting = true;
-        }
-        if self.spec.process(iq) {
+        if !iq.is_empty() {
+            self.spec.process(iq);
             self.adc = AdcHealth::measure(iq);
-            self.fresh = true;
-            self.collecting = false;
-            self.debt = self.rate / self.refresh_hz.max(1.0) as f64;
-            // Unsmoothed, because what is published is what was measured:
-            // the averaging above it is how this display reads, and a
-            // recorder taking a display's average would record a decision
-            // somebody made about flicker.
-            if let Some(out) = o.spectrum_mut() {
-                out.push(common::SpectrumFrame {
-                    at_us: now_us(),
-                    center_hz: self.center.as_f64(),
-                    span_hz: self.rate,
-                    db: std::sync::Arc::new(self.spec.frame_db()),
-                });
-            }
+        }
+        self.debt -= iq.len() as f64;
+        if self.debt > 0.0 || self.spec.pending_frames() == 0 {
+            return Ok(());
+        }
+        self.debt = self.rate / self.refresh_hz.max(1.0) as f64;
+        let frame = self.spec.take();
+        self.spec.fold(self.trace.of(&frame));
+        self.wf_db.clear();
+        self.wf_db.extend_from_slice(self.wf.of(&frame));
+        self.fresh = true;
+        if let Some(out) = o.spectrum_mut() {
+            out.push(common::SpectrumFrame {
+                at_us: now_us(),
+                center_hz: self.center.as_f64(),
+                span_hz: self.rate,
+                db: std::sync::Arc::new(frame.peak),
+                mean_db: std::sync::Arc::new(frame.mean),
+            });
         }
         Ok(())
     }
@@ -251,7 +314,6 @@ impl Simple for SpectrumNode {
     fn reset(&mut self) {
         self.spec.reset();
         self.fresh = false;
-        self.collecting = true;
         self.debt = 0.0;
     }
 
@@ -262,6 +324,9 @@ impl Simple for SpectrumNode {
             Param::float("refresh", self.refresh_hz as f64, 1.0..=120.0)
                 .unit("Hz")
                 .label("Frames a second"),
+            Param::choice("trace", index_of(self.trace), detectors()).label("What the trace shows"),
+            Param::choice("waterfall", index_of(self.wf), detectors())
+                .label("What the waterfall shows"),
         ]
     }
 
@@ -273,6 +338,14 @@ impl Simple for SpectrumNode {
             }
             "refresh" => {
                 self.set_refresh(v.as_f64().unwrap_or(30.0) as f32);
+                Ok(())
+            }
+            "trace" => {
+                self.trace = detector_at(&v);
+                Ok(())
+            }
+            "waterfall" => {
+                self.wf = detector_at(&v);
                 Ok(())
             }
             _ => Err(Error::other(format!("spectrum: unknown parameter {name:?}"))),

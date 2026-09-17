@@ -393,6 +393,10 @@ pub struct ViewPrefs {
     pub smoothing: f32,
     /// The colours the waterfall and an exported heatmap are drawn in.
     pub ramp: crate::heatmap::Ramp,
+    /// What the trace and the waterfall each take out of a frame: the
+    /// newest transform, the mean of the frame, or its loudest.
+    pub trace: dsp::spectrum::Detector,
+    pub wf_detector: dsp::spectrum::Detector,
 }
 
 impl Default for ViewPrefs {
@@ -407,6 +411,8 @@ impl Default for ViewPrefs {
             refresh: 30.0,
             smoothing: 0.35,
             ramp: crate::heatmap::Ramp::Chassis,
+            trace: dsp::spectrum::Detector::Average,
+            wf_detector: dsp::spectrum::Detector::Peak,
         }
     }
 }
@@ -838,6 +844,14 @@ impl Session {
                 refresh: f("refresh", d.view.refresh as f64).clamp(1.0, 120.0) as f32,
                 smoothing: f("smoothing", d.view.smoothing as f64).clamp(0.01, 1.0) as f32,
                 ramp: kv.get("ramp").map(|v| crate::heatmap::Ramp::parse(v)).unwrap_or(d.view.ramp),
+                trace: kv
+                    .get("trace")
+                    .map(|v| dsp::spectrum::Detector::parse(v))
+                    .unwrap_or(d.view.trace),
+                wf_detector: kv
+                    .get("waterfall_detector")
+                    .map(|v| dsp::spectrum::Detector::parse(v))
+                    .unwrap_or(d.view.wf_detector),
             },
             feeds,
             streams,
@@ -923,6 +937,8 @@ impl Session {
         s.push_str(&format!("refresh = {}\n", v.refresh));
         s.push_str(&format!("smoothing = {}\n", v.smoothing));
         s.push_str(&format!("ramp = {}\n", v.ramp.label()));
+        s.push_str(&format!("trace = {}\n", v.trace.label()));
+        s.push_str(&format!("waterfall_detector = {}\n", v.wf_detector.label()));
         s.push_str(&format!("heat_on = {}\n", self.heat_on));
         s.push_str(&format!("heat_rows_per_sec = {}\n", self.heat_rows_per_sec));
         s.push_str(&format!("heat_cap_mb = {}\n", self.heat_cap_mb));
@@ -1111,6 +1127,8 @@ mod tests {
                 refresh: 60.0,
                 smoothing: 0.5,
                 ramp: crate::heatmap::Ramp::Inferno,
+                trace: dsp::spectrum::Detector::Peak,
+                wf_detector: dsp::spectrum::Detector::Sample,
             },
             manual_chain: true,
             feeds: vec![

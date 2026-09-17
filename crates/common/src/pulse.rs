@@ -658,8 +658,13 @@ pub struct SpectrumFrame {
     pub center_hz: f64,
     /// What the frame covers, in hertz.
     pub span_hz: f64,
-    /// Power in dBFS, lowest frequency first.
+    /// The loudest each bin reached over the frame's own interval, in
+    /// dBFS, lowest frequency first. What finds a transmission: a burst of
+    /// a few milliseconds inside a frame of a hundred reads at its own
+    /// level here and is 14 dB down in the mean.
     pub db: std::sync::Arc<Vec<f32>>,
+    /// Mean power over the same interval, which is what measures a floor.
+    pub mean_db: std::sync::Arc<Vec<f32>>,
 }
 
 impl SpectrumFrame {

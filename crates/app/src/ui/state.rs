@@ -82,8 +82,17 @@ pub(super) struct ScopeState {
     pub rows_per_sec: f32,
     pub refresh: f32,
     pub smoothing: f32,
+    /// What the trace and the waterfall each take out of a frame.
+    pub trace: dsp::spectrum::Detector,
+    pub wf_detector: dsp::spectrum::Detector,
     pub floor: f32,
     pub ceil: f32,
+    /// The window the waterfall's colours run between while the scale
+    /// follows the signal, worked out from its own readings: its detector
+    /// is not the trace's, and a peak waterfall coloured against an average
+    /// trace's window comes out at the top of the ramp everywhere.
+    pub wf_floor: f32,
+    pub wf_ceil: f32,
     pub auto_scale: bool,
     /// The colours a row is drawn in, which an export is offered as its
     /// default: what is on screen is what somebody means by "this one".
@@ -124,8 +133,12 @@ impl Default for ScopeState {
             rows_per_sec: 20.0,
             refresh: 30.0,
             smoothing: 0.35,
+            trace: dsp::spectrum::Detector::Average,
+            wf_detector: dsp::spectrum::Detector::Peak,
             floor: -90.0,
             ceil: -20.0,
+            wf_floor: -90.0,
+            wf_ceil: -20.0,
             auto_scale: true,
             ramp: crate::heatmap::Ramp::Chassis,
             fft: 2048,
@@ -155,6 +168,8 @@ impl ScopeState {
         self.ceil = v.ceil;
         self.refresh = v.refresh;
         self.smoothing = v.smoothing;
+        self.trace = v.trace;
+        self.wf_detector = v.wf_detector;
         self.fft = fft;
         self.fft_size = fft;
     }
@@ -171,6 +186,8 @@ impl ScopeState {
             ceil: self.ceil,
             refresh: self.refresh,
             smoothing: self.smoothing,
+            trace: self.trace,
+            wf_detector: self.wf_detector,
         }
     }
 }

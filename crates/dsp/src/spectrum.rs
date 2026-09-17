@@ -5,6 +5,63 @@ use common::C32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
+/// What a run of transforms came to, in dBFS, read three ways.
+///
+/// The same split a spectrum analyser makes, where a trace point covers a
+/// bucket of samples and a detector says what the point shows: the loudest
+/// finds a burst, the mean measures a floor, and the newest is the band as
+/// it is at this instant, jitter and all.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub peak: Vec<f32>,
+    pub mean: Vec<f32>,
+    pub sample: Vec<f32>,
+}
+
+/// Which of a frame's readings a display takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Detector {
+    /// The newest transform: what the band is doing now, and what this
+    /// drew before there was a choice.
+    Sample,
+    /// Mean power over the frame. A steady floor, and a burst pulled down
+    /// by however little of the frame it occupied.
+    #[default]
+    Average,
+    /// The loudest each bin reached. Finds a transmission shorter than the
+    /// frame, at the price of a floor that reads high.
+    Peak,
+}
+
+impl Detector {
+    pub const ALL: [Detector; 3] = [Detector::Sample, Detector::Average, Detector::Peak];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Detector::Sample => "sample",
+            Detector::Average => "average",
+            Detector::Peak => "peak",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "sample" => Detector::Sample,
+            "peak" => Detector::Peak,
+            _ => Detector::Average,
+        }
+    }
+
+    /// The reading this detector takes out of a frame.
+    pub fn of(self, f: &Frame) -> &[f32] {
+        match self {
+            Detector::Sample => &f.sample,
+            Detector::Average => &f.mean,
+            Detector::Peak => &f.peak,
+        }
+    }
+}
+
 /// Windowed, overlapped, averaged FFT producing dBFS bins in display order
 /// (negative frequencies first, DC in the middle).
 pub struct Spectrum {
@@ -19,9 +76,24 @@ pub struct Spectrum {
     /// biases the result low, because occasional deep nulls dominate a mean
     /// taken in dB but are negligible in power.
     avg: Vec<f32>,
-    /// The last frame on its own, unaveraged. What is published to whatever
-    /// records rather than draws: smoothing is a property of a display.
+    /// Loudest and total linear power per bin since the last frame was
+    /// taken, and how many transforms went into them.
+    ///
+    /// Every transform lands here, so nothing that happened between two
+    /// published frames is lost: a heatmap is read to find transmissions,
+    /// and a burst shorter than the gap between frames is exactly what it
+    /// is being read for.
+    peak: Vec<f32>,
+    sum: Vec<f32>,
+    /// The most recent transform on its own, which is what the display's
+    /// average advances from.
+    ///
+    /// A display wants the band as it is now: averaging a frame's worth of
+    /// transforms into it flattens exactly the short bursts an operator is
+    /// watching for, which is the opposite of what a heatmap wants from the
+    /// same seconds.
     last: Vec<f32>,
+    taken: u32,
     out: Vec<f32>,
     primed: bool,
     /// Samples carried between calls, so a frame can span input blocks.
@@ -43,7 +115,10 @@ impl Spectrum {
             win,
             buf: vec![C32::default(); size],
             avg: vec![0.0; size],
+            peak: vec![0.0; size],
+            sum: vec![0.0; size],
             last: vec![0.0; size],
+            taken: 0,
             out: vec![0.0; size],
             primed: false,
             pending: Vec::new(),
@@ -55,7 +130,7 @@ impl Spectrum {
         self.size
     }
 
-    /// Consume samples, averaging every full frame with 50% overlap.
+    /// Consume samples, transforming every full frame with 50% overlap.
     ///
     /// Leftovers are carried to the next call, so the FFT may be larger than
     /// the blocks the radio delivers. Without that, asking for 16384 bins
@@ -83,16 +158,18 @@ impl Spectrum {
         }
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
 
-        let a = if self.primed { self.smoothing } else { 1.0 };
         let half = self.size / 2;
         for i in 0..self.size {
             // Rotate so DC lands in the middle, matching how the span is drawn.
             let src_bin = (i + half) % self.size;
             let p = self.buf[src_bin].norm_sqr() * self.scale * self.scale;
+            if p > self.peak[i] {
+                self.peak[i] = p;
+            }
+            self.sum[i] += p;
             self.last[i] = p;
-            self.avg[i] += a * (p - self.avg[i]);
         }
-        self.primed = true;
+        self.taken += 1;
     }
 
     /// Averaged spectrum in dBFS, lowest frequency first.
@@ -103,14 +180,61 @@ impl Spectrum {
         &self.out
     }
 
-    /// The last frame in dBFS, with no averaging across frames.
-    pub fn frame_db(&self) -> Vec<f32> {
-        self.last.iter().map(|p| 10.0 * (p + 1e-20).log10()).collect()
+    /// Whether anything has been transformed since the last [`Self::take`].
+    pub fn pending_frames(&self) -> u32 {
+        self.taken
+    }
+
+    /// Everything transformed since the last call, as decibels, and start
+    /// again: the loudest each bin reached, and its mean power.
+    ///
+    /// The peak is what finds transmissions and the mean is what measures a
+    /// floor, and the two answer different questions of the same seconds:
+    /// a remote keyed for 20 ms inside a half-second row is 14 dB down in
+    /// the mean and at its own level in the peak. Taking also advances the
+    /// What is drawn from it is the caller's choice of detector, handed
+    /// back through [`Self::fold`], which is what the `smoothing` control
+    /// acts on.
+    pub fn take(&mut self) -> Frame {
+        let n = self.taken.max(1) as f32;
+        let mut peak = vec![0.0f32; self.size];
+        let mut mean = vec![0.0f32; self.size];
+        let mut sample = vec![0.0f32; self.size];
+        for i in 0..self.size {
+            let m = self.sum[i] / n;
+            peak[i] = 10.0 * (self.peak[i] + 1e-20).log10();
+            mean[i] = 10.0 * (m + 1e-20).log10();
+            sample[i] = 10.0 * (self.last[i] + 1e-20).log10();
+        }
+        self.peak.fill(0.0);
+        self.sum.fill(0.0);
+        self.taken = 0;
+        Frame { peak, mean, sample }
+    }
+
+    /// Advance the smoothed trace by one frame of whatever was chosen.
+    ///
+    /// Per frame drawn rather than per transform: the transform rate is the
+    /// sample rate divided by the FFT size, so smoothing applied there
+    /// meant a control that acted differently on every radio and every
+    /// span. A frame is what somebody looking at the screen counts in.
+    pub fn fold(&mut self, db: &[f32]) {
+        let a = if self.primed { self.smoothing } else { 1.0 };
+        self.primed = true;
+        for (o, &d) in self.avg.iter_mut().zip(db) {
+            // Averaged in power, never in decibels: a mean of logarithms is
+            // dragged down by deep nulls that carry almost no power.
+            let p = 10f32.powf(d / 10.0);
+            *o += a * (p - *o);
+        }
     }
 
     pub fn reset(&mut self) {
         self.avg.fill(0.0);
+        self.peak.fill(0.0);
+        self.sum.fill(0.0);
         self.last.fill(0.0);
+        self.taken = 0;
         self.primed = false;
         self.pending.clear();
     }
@@ -210,7 +334,8 @@ mod tests {
         let mut s = Spectrum::new(1024);
         s.smoothing = 1.0;
         assert!(s.process(&tone(8192, 100.0, 1024, 1.0)));
-        let peak = s.power_db().iter().cloned().fold(f32::MIN, f32::max);
+        let frame = s.take();
+        let peak = frame.peak.iter().cloned().fold(f32::MIN, f32::max);
         assert!(peak.abs() < 0.5, "full scale tone read {peak:.2} dBFS");
     }
 
@@ -226,9 +351,51 @@ mod tests {
             produced |= s.process(chunk);
         }
         assert!(produced, "no frame from blocks smaller than the FFT");
-        let db = s.power_db();
+        let db = s.take().peak;
         let idx = db.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(idx, 2048 + 400);
+    }
+
+    /// What transforming every sample costs, which is what buys a heatmap
+    /// that sees a 20 ms burst. Measured here so the number in the comment
+    /// beside the spectrum node is one somebody took.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn what_full_coverage_costs() {
+        for size in [1024usize, 4096, 16384] {
+            let mut s = Spectrum::new(size);
+            let sig = tone(1 << 20, 100.0, size, 1.0);
+            let t = std::time::Instant::now();
+            s.process(&sig);
+            s.take();
+            let secs = t.elapsed().as_secs_f64();
+            let rate = 2_400_000.0;
+            println!(
+                "{size:>6} bins: {:.1} Ms/s, {:.1}% of a core at 2.4 MS/s",
+                sig.len() as f64 / secs / 1e6,
+                rate * secs / sig.len() as f64 * 100.0
+            );
+        }
+    }
+
+    /// What the display draws is the band as it is now, not the mean of the
+    /// frame: the same transforms feed the heatmap's peak, and averaging
+    /// them into the trace would flatten the bursts an operator watches for.
+    #[test]
+    fn the_display_average_follows_the_newest_transform() {
+        let mut s = Spectrum::new(256);
+        s.smoothing = 1.0;
+        // A frame's worth of silence, then a full-scale tone at the end.
+        s.process(&tone(2048, 32.0, 256, 0.0));
+        s.process(&tone(1024, 32.0, 256, 1.0));
+        let frame = s.take();
+        s.fold(&frame.sample);
+        let drawn = s.power_db().iter().cloned().fold(f32::MIN, f32::max);
+        let peak = frame.peak.iter().cloned().fold(f32::MIN, f32::max);
+        let mean = frame.mean.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(drawn.abs() < 0.5, "the trace shows the tone that is there now: {drawn:.1}");
+        assert!(peak.abs() < 0.5, "and so does the peak: {peak:.1}");
+        assert!(mean < drawn - 3.0, "while the mean is pulled down by the silence: {mean:.1}");
     }
 
     #[test]
@@ -246,7 +413,7 @@ mod tests {
         s.smoothing = 1.0;
         let dc = vec![C32::new(1.0, 0.0); 2048];
         s.process(&dc);
-        let db = s.power_db();
+        let db = s.take().peak;
         let idx = db.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(idx, 128, "DC ended up in bin {idx}, not the centre");
     }
@@ -256,7 +423,7 @@ mod tests {
         let mut s = Spectrum::new(512);
         s.smoothing = 1.0;
         s.process(&tone(8192, 64.0, 512, 1.0));
-        let db = s.power_db();
+        let db = s.take().peak;
         let idx = db.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(idx, 256 + 64, "positive tone landed in bin {idx}");
     }
@@ -273,6 +440,10 @@ mod tests {
         for i in 0..400 {
             let amp = if i % 2 == 0 { 1.0 } else { 0.0 };
             s.process(&tone(2048, 32.0, 256, amp));
+            // The display average advances a frame at a time, which is when
+            // the readings are taken rather than when a transform runs.
+            let f = s.take();
+            s.fold(&f.sample);
         }
         let peak = s.power_db().iter().cloned().fold(f32::MIN, f32::max);
         assert!((peak + 3.0).abs() < 2.0, "expected about -3 dBFS, got {peak:.2}");

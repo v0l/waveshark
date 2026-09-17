@@ -459,9 +459,13 @@ pub struct HeatmapNode {
     rows_per_sec: f32,
     rate: f64,
     center: Hz,
-    /// When the last row was taken, for keeping one row per interval out of
-    /// however many frames the display produces.
-    last_row: u64,
+    /// The row being built: the loudest each bin has reached since it
+    /// started, and when that was.
+    pending: Vec<f32>,
+    row_started: u64,
+    /// The last frame folded in, which is when a row ended by a retune is
+    /// stamped.
+    last_seen: u64,
     saved: Option<PathBuf>,
     error: Option<String>,
 }
@@ -480,10 +484,25 @@ impl HeatmapNode {
             rows_per_sec: 2.0,
             rate: 0.0,
             center: Hz(0),
-            last_row: 0,
+            pending: Vec::new(),
+            row_started: 0,
+            last_seen: 0,
             saved: None,
             error: None,
         }
+    }
+
+    /// Keep the row being built, stamped at `at_us`, and start another.
+    fn keep(&mut self, at_us: u64) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.heat.tuned(self.center, self.rate);
+        let row = std::mem::take(&mut self.pending);
+        self.heat.push(at_us, &row);
+        self.pending = row;
+        self.pending.fill(f32::MIN);
+        self.row_started = at_us;
     }
 
     pub fn set_recording(&mut self, on: bool) {
@@ -556,24 +575,45 @@ impl Simple for HeatmapNode {
         Ok(i.spec)
     }
 
+    /// Every frame is folded into the row being built, and the row is kept
+    /// when its interval is up.
+    ///
+    /// The loudest each bin reached, never the last frame of the interval:
+    /// a heatmap is read to find transmissions, and a remote keyed for 20 ms
+    /// inside a half-second row exists in exactly one of the frames it is
+    /// made of. Dropping the other twenty-nine is how a night's recording
+    /// ends up showing an empty band that was not empty.
     fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         let frames = i.as_spectrum().unwrap_or(&[]);
         if !self.recording {
             return Ok(());
         }
+        let wait = (1e6 / self.rows_per_sec.max(0.02) as f64) as u64;
         for f in frames {
-            // One row per interval, out of however many the display asked
-            // for: a waterfall wants thirty a second and a night's watch
-            // wants one every ten.
-            let wait = (1e6 / self.rows_per_sec.max(0.02) as f64) as u64;
-            if self.last_row > 0 && f.at_us.saturating_sub(self.last_row) < wait {
-                continue;
+            // A retune or a resize ends the row where it is: two spans
+            // folded together would be a row of neither.
+            let moved = self.rate != f.span_hz
+                || self.center.as_f64() != f.center_hz
+                || self.pending.len() != f.db.len();
+            if moved && !self.pending.is_empty() {
+                self.keep(self.last_seen);
             }
-            self.last_row = f.at_us;
-            self.rate = f.span_hz;
-            self.center = Hz(f.center_hz.max(0.0) as u64);
-            self.heat.tuned(self.center, self.rate);
-            self.heat.push(f.at_us, &f.db);
+            if moved {
+                self.rate = f.span_hz;
+                self.center = Hz(f.center_hz.max(0.0) as u64);
+                self.pending = vec![f32::MIN; f.db.len()];
+                self.row_started = f.at_us;
+            }
+            for (a, b) in self.pending.iter_mut().zip(f.db.iter()) {
+                *a = a.max(*b);
+            }
+            self.last_seen = f.at_us;
+            if self.row_started == 0 {
+                self.row_started = f.at_us;
+            }
+            if f.at_us.saturating_sub(self.row_started) >= wait {
+                self.keep(f.at_us);
+            }
         }
         Ok(())
     }
@@ -877,6 +917,7 @@ mod tests {
             center_hz: 433_000_000.0,
             span_hz: 240_000.0,
             db: std::sync::Arc::new(vec![-95.0f32; bins]),
+            mean_db: std::sync::Arc::new(vec![-95.0f32; bins]),
         }
     }
 
@@ -907,12 +948,41 @@ mod tests {
         let frames: Vec<_> = (0..300).map(|i| frame(start + i * 33_333, 1024)).collect();
         feed(&mut n, frames);
         let s = n.status();
-        // Ten seconds of frames 33.3 ms apart, one kept every 250 ms: the
-        // first, then one whenever a quarter of a second has passed, which
-        // lands on every eighth frame and comes to 38.
-        assert_eq!(s.rows, 38);
+        // Ten seconds of frames 33.3 ms apart, a row whenever a quarter of
+        // a second of them has been folded together: every eighth frame,
+        // which comes to 37.
+        assert_eq!(s.rows, 37);
         assert_eq!(s.bins, 1024, "the display's bins, not a size of its own");
-        assert_eq!(s.bytes, 38 * 1024);
+        assert_eq!(s.bytes, 37 * 1024);
+    }
+
+    /// A burst exists in one of the frames a row is made of, so the row is
+    /// the loudest each bin reached rather than whichever frame the clock
+    /// landed on. Sampling instead of folding is how an overnight heatmap
+    /// shows an empty band that was not empty.
+    #[test]
+    fn a_burst_in_any_frame_reaches_the_row() {
+        let mut n = HeatmapNode::new(1 << 20);
+        n.set_rows_per_sec(2.0);
+        accept(&mut n);
+        let start = 1_700_000_000_000_000u64;
+        let frames: Vec<_> = (0..20)
+            .map(|i| {
+                let mut db = vec![-95.0f32; 64];
+                // One frame in the middle of the first row carries a burst.
+                if i == 5 {
+                    db[20] = -30.0;
+                }
+                let mut f = frame(start + i * 33_333, 64);
+                f.db = std::sync::Arc::new(db);
+                f
+            })
+            .collect();
+        feed(&mut n, frames);
+        assert_eq!(n.status().rows, 1, "half a second of frames is one row");
+        let row = n.heat.dense_row(0);
+        assert_eq!(dequantise(row[20]), -29.75, "the burst is in the row");
+        assert_eq!(dequantise(row[21]), -95.0, "and the quiet bins are the floor");
     }
 
     #[test]

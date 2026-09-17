@@ -11,6 +11,9 @@ the code is in the commit log.
 
 ### Added
 
+- The trace and the waterfall each choose what a point shows out of the frame
+  behind it: the newest transform, the mean, or the loudest.
+
 - A dataset that is downloading says how far it has got, in bytes and as a bar.
 - The raw capture can be armed on energy: a file per burst, holding the signal
   from before it triggered.
@@ -19,8 +22,9 @@ the code is in the commit log.
 - Heatmap export: the span kept as readings and written as a page that zooms,
   pans and gives the time of day, frequency and decibels under a crosshair.
   Moving the dial widens the picture rather than clearing it, so a band walk
-  draws the whole band, and a row is the same reading the waterfall drew, at
-  the FFT size the spectrum is set to. Four colour ramps, the panel's own by
+  draws the whole band, and a row is the loudest each bin reached over the
+  whole of it rather than a snapshot, so a burst of a few milliseconds is
+  there. Four colour ramps, the panel's own by
   default.
 - A channel view: what is on each Wi-Fi and Bluetooth channel, how loud, and
   how crowded it is.

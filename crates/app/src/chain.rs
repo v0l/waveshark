@@ -292,6 +292,9 @@ pub struct Plan {
     pub refresh_hz: f32,
     /// How much of the last spectrum frame the next one keeps.
     pub smoothing: f32,
+    /// What the trace and the waterfall each take out of a frame.
+    pub trace: dsp::spectrum::Detector,
+    pub wf_detector: dsp::spectrum::Detector,
     pub fft: usize,
     pub channels: Vec<ChannelSpec>,
     /// The front ends to run, from the scanner table for this span. Empty is
@@ -1609,6 +1612,12 @@ impl Receiver {
         self.spectrum_mut().map(|s| s.power_db()).unwrap_or(&[])
     }
 
+    /// What the waterfall draws, which is its own detector's reading of the
+    /// same frame the trace came from.
+    pub fn waterfall_db(&mut self) -> &[f32] {
+        self.spectrum_mut().map(|s| s.waterfall_db()).unwrap_or(&[])
+    }
+
     pub fn adc(&mut self) -> nodes::AdcHealth {
         self.spectrum_mut().map(|s| s.adc()).unwrap_or_default()
     }
@@ -2194,6 +2203,20 @@ impl Receiver {
             derived::SPECTRUM,
             "refresh",
             pipeline::ParamValue::Float(hz as f64),
+        );
+    }
+
+    /// What the trace and the waterfall show, on the running graph.
+    pub fn set_detectors(&mut self, trace: dsp::spectrum::Detector, wf: dsp::spectrum::Detector) {
+        self.set_derived_param(
+            derived::SPECTRUM,
+            "trace",
+            pipeline::ParamValue::Text(trace.label().into()),
+        );
+        self.set_derived_param(
+            derived::SPECTRUM,
+            "waterfall",
+            pipeline::ParamValue::Text(wf.label().into()),
         );
     }
 
@@ -2923,6 +2946,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // node held came back at its default every time the dial moved.
     spectrum.insert("refresh".into(), pipeline::ParamValue::Float(plan.refresh_hz as f64));
     spectrum.insert("smoothing".into(), pipeline::ParamValue::Float(plan.smoothing as f64));
+    spectrum.insert("trace".into(), pipeline::ParamValue::Text(plan.trace.label().into()));
+    spectrum
+        .insert("waterfall".into(), pipeline::ParamValue::Text(plan.wf_detector.label().into()));
     p.add_derived(derived::SPECTRUM, "spectrum", spectrum);
     p.connect(head, (derived::SPECTRUM, 0));
 
@@ -4860,6 +4886,8 @@ pub(crate) mod tests {
             dc_block: true,
             refresh_hz: 30.0,
             smoothing: DEFAULT_SMOOTHING,
+            trace: dsp::spectrum::Detector::Average,
+            wf_detector: dsp::spectrum::Detector::Peak,
             fft: 1024,
             channels: Vec::new(),
             fronts: vec![crate::scanners::FrontAt {
@@ -7164,7 +7192,9 @@ mod tx_tests {
         let mut spec = dsp::spectrum::Spectrum::new(N);
         spec.smoothing = 1.0;
         spec.process(&iq[40_000..]);
-        let db = spec.power_db();
+        // The mean of every transform rather than the loudest: this is a
+        // measurement of where the power sits, not a search for a burst.
+        let db = spec.take().mean;
         let power: Vec<f64> = db.iter().map(|d| 10f64.powf(*d as f64 / 10.0)).collect();
         let total: f64 = power.iter().sum();
         // The 12.5 kHz channel, in bins either side of centre.
