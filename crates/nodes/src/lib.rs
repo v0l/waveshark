@@ -43,6 +43,7 @@ pub mod packet_nodes;
 pub mod pocsag_nodes;
 pub mod protocol;
 pub mod rs41_nodes;
+pub mod rtty_nodes;
 pub mod scope_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
@@ -101,6 +102,7 @@ pub use packet_nodes::{DedupeNode, PacketDecodeNode};
 pub use pocsag_nodes::PocsagNode;
 pub use protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 pub use rs41_nodes::Rs41Node;
+pub use rtty_nodes::RttyNode;
 pub use scope_nodes::{ScopeFrame, ScopeNode};
 pub use sink_nodes::{
     AdcHealth, DcBlockNode, PacketBusNode, PacketSink, Ring, RingNode, SpectrumNode,
@@ -201,6 +203,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (tetra_nodes::DESC, tetra_nodes::build),
     (dmr_nodes::DESC, dmr_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
+    (rtty_nodes::DESC, rtty_nodes::build),
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),
     (wmbus_nodes::DESC, wmbus_nodes::build),
