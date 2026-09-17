@@ -43,6 +43,7 @@ pub mod m17;
 pub mod mixer;
 pub mod modes;
 pub mod msk;
+pub mod oqpsk;
 pub mod pocsag;
 pub mod pulse;
 pub mod qpsk;

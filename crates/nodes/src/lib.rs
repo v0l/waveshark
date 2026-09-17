@@ -35,6 +35,7 @@ pub mod frame_meter;
 pub mod gsm_nodes;
 pub mod homeassistant_nodes;
 pub mod ident_nodes;
+pub mod ieee802154_nodes;
 pub mod imet_nodes;
 pub mod iq_tx;
 pub mod keyed;
@@ -236,6 +237,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (video_nodes::DESC, video_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),
     (ble_nodes::BLE_TX, ble_nodes::build_tx),
+    (ieee802154_nodes::DESC, ieee802154_nodes::build),
     (wifi_nodes::DESC, wifi_nodes::build),
     (droneid_nodes::DESC, droneid_nodes::build),
     (acars_nodes::DESC, acars_nodes::build),

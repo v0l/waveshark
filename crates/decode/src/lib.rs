@@ -44,6 +44,7 @@ pub mod geo;
 #[cfg(feature = "tea")]
 pub mod gpu;
 pub mod gsm;
+pub mod ieee802154;
 pub mod imet;
 pub mod inmarsat;
 pub mod jpeg;

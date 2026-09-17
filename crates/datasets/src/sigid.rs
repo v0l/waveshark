@@ -246,6 +246,7 @@ pub fn wiki_modulations(m: common::Modulation) -> &'static [&'static str] {
         M::Gmsk => &["GMSK", "MSK"],
         M::Psk2 => &["BPSK", "PSK", "DPSK", "SDPSK"],
         M::Psk4 => &["QPSK", "PSK", "OQPSK", "DQPSK"],
+        M::Oqpsk => &["OQPSK", "O-QPSK", "QPSK", "DSSS", "MSK"],
         M::Dqpsk => &["DQPSK", "QPSK", "PSK"],
         M::D8psk => &["D8PSK", "8PSK", "PSK"],
         M::Chirp | M::Css => &["FMCW", "CSS", "LFM"],

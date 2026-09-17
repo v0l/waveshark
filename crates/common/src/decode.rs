@@ -367,6 +367,9 @@ pub enum ChannelPlan {
     Wifi,
     /// Bluetooth LE: 37, 38 and 39 advertise, 0 to 36 carry data.
     Ble,
+    /// IEEE 802.15.4 at 2450 MHz: 11 to 26, five megahertz apart. The link
+    /// under Zigbee, Thread and Matter.
+    Ieee802154,
 }
 
 impl ChannelPlan {
@@ -374,6 +377,7 @@ impl ChannelPlan {
         match self {
             ChannelPlan::Wifi => "wi-fi",
             ChannelPlan::Ble => "bluetooth le",
+            ChannelPlan::Ieee802154 => "802.15.4",
         }
     }
 }

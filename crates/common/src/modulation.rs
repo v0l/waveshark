@@ -65,6 +65,11 @@ pub enum Modulation {
     Gfsk,
     /// Minimum shift keying through a Gaussian filter, as GSM and AIS key.
     Gmsk,
+    /// Quadrature phase keying with the arms offset half a symbol and the
+    /// chips shaped as half sines, which is how 802.15.4 keys. The same
+    /// waveform as MSK, and named apart because the decoder that read it
+    /// knows which of the two it was built for.
+    Oqpsk,
     /// Chirp spread spectrum as LoRa and ELRS name it.
     Css,
     /// Pulse position keying, which is how Mode S carries its bits.
@@ -96,6 +101,7 @@ impl Modulation {
             Modulation::Afsk => "AFSK",
             Modulation::Gfsk => "GFSK",
             Modulation::Gmsk => "GMSK",
+            Modulation::Oqpsk => "O-QPSK",
             Modulation::Css => "CSS",
             Modulation::Ppm => "PPM",
             Modulation::Fm => "FM",
@@ -107,7 +113,7 @@ impl Modulation {
     pub fn family(self) -> Self {
         match self {
             Self::Gfsk | Self::Afsk => Self::Fsk2,
-            Self::Gmsk => Self::Msk,
+            Self::Gmsk | Self::Oqpsk => Self::Msk,
             Self::Css => Self::Chirp,
             other => other,
         }
@@ -154,6 +160,7 @@ impl Modulation {
             "4FSK" | "FSK4" | "C4FM" => Some(Self::Fsk4),
             "MSK" => Some(Self::Msk),
             "GMSK" => Some(Self::Gmsk),
+            "OQPSK" => Some(Self::Oqpsk),
             "BPSK" | "PSK2" => Some(Self::Psk2),
             "QPSK" | "PSK4" => Some(Self::Psk4),
             "PI4DQPSK" | "DQPSK" => Some(Self::Dqpsk),
@@ -173,7 +180,7 @@ impl Modulation {
 
     /// Every verdict, so a caller can round-trip or list them without
     /// keeping its own copy of the set.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Ook,
         Self::Ask,
         Self::Fsk2,
@@ -192,6 +199,7 @@ impl Modulation {
         Self::Afsk,
         Self::Gfsk,
         Self::Gmsk,
+        Self::Oqpsk,
         Self::Css,
         Self::Ppm,
         Self::Fm,
