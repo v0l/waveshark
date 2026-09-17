@@ -43,6 +43,11 @@ the code is in the commit log.
 - Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
   macOS. Setup fetches the one this machine installs from and opens it.
 
+### Changed
+
+- The map draws anything that says where it was, so the iMet, Graw, Meteomodem,
+  Meisei, MRZ and LMS6 sondes appear beside the Vaisala ones.
+
 ### Fixed
 
 - A CUDA build was offered the plain download, and a plain build the CUDA

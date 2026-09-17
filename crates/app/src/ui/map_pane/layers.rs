@@ -755,6 +755,11 @@ impl Layer for TrackLayer<'_> {
                 crate::tracks::Kind::Vessel | crate::tracks::Kind::Vehicle => {
                     a.speed_kt.filter(|v| *v > 0.0).map(|kt| format!("{kt:.0} kt"))
                 }
+                // Nothing is known about it beyond where it was, and a
+                // speed is only there if the message carried one.
+                crate::tracks::Kind::Transmitter => {
+                    a.speed_kt.filter(|v| *v > 0.0).map(|kt| format!("{kt:.0} kt"))
+                }
                 crate::tracks::Kind::Station => None,
             };
             if let Some(t) = under {
