@@ -73,6 +73,13 @@ the code is in the commit log.
   than 3.5 GB, and ahead of real time without a card. Describing a voice in
   a sentence is gone, and so is the precision setting.
 
+## [0.3.1-rc1] - 2026-09-17
+
+### Added
+
+- A test build of the installers. What is in it is still listed under
+  [Unreleased].
+
 ## [0.3.0] - 2026-09-16
 
 ### Added
