@@ -527,6 +527,7 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::wefax_nodes::Wefax,
         &crate::vdl2_nodes::Vdl2,
         &crate::dvbt_nodes::Dvbt,
+        &crate::dab_nodes::DabProtocol,
         &crate::aprs_nodes::Aprs,
         &crate::pocsag_nodes::Pocsag,
         &crate::flex_nodes::Flex,

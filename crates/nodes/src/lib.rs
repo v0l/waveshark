@@ -18,6 +18,7 @@ pub mod beacondb_nodes;
 pub mod ble_nodes;
 pub mod capture_nodes;
 pub mod channel_nodes;
+pub mod dab_nodes;
 pub mod decode_nodes;
 pub mod dfm_nodes;
 pub mod dmr_nodes;
@@ -228,6 +229,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (wefax_nodes::DESC, wefax_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),
+    (dab_nodes::DESC, dab_nodes::build),
     (ident_nodes::DESC, ident_nodes::build),
     (dvbt_nodes::TS_SOURCE, dvbt_nodes::build_ts_source),
     (dvbt_nodes::DVBT_MOD, dvbt_nodes::build_dvbt_mod),

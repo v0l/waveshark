@@ -56,6 +56,34 @@ impl Iterator for Pn9 {
     }
 }
 
+/// DAB's energy dispersal sequence, EN 300 401 clause 11.1.2: the same nine
+/// bit polynomial as PN9 seeded all ones, shifted the other way about and
+/// read a bit at a time rather than a byte. A multiplex is XORed with it so
+/// that a silent service cannot put a line in the spectrum.
+pub struct Prbs9(u16);
+
+impl Default for Prbs9 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Prbs9 {
+    pub fn new() -> Self {
+        Self(0x1ff)
+    }
+}
+
+impl Iterator for Prbs9 {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        let out = (((self.0 >> 8) ^ (self.0 >> 4)) & 1) as u8;
+        self.0 = ((self.0 << 1) | out as u16) & 0x1ff;
+        Some(out)
+    }
+}
+
 /// XOR `data` with PN9. Applying this to whitened data recovers the original.
 pub fn pn9(data: &[u8]) -> Vec<u8> {
     data.iter().zip(Pn9::new()).map(|(b, k)| b ^ k).collect()
