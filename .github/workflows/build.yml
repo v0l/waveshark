@@ -230,6 +230,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist-extra | Out-Null
           Copy-Item "$env:VCPKG_BIN\*.dll" dist-extra\ -ErrorAction SilentlyContinue
+          # An MSI product version is three numbers and nothing else, so a
+          # release candidate is packaged as the release it leads to. The
+          # binary was built before this and still says what it is.
+          $toml = Get-Content Cargo.toml -Raw
+          Set-Content Cargo.toml ($toml -replace '(?m)^version = "(\d+\.\d+\.\d+)[^"]*"', 'version = "$1"')
           cargo packager -p app -r --target ${{ matrix.target }} -f wix -o "$PWD\dist"
           Move-Item dist\*.msi waveshark-${{ matrix.name }}.msi
 
