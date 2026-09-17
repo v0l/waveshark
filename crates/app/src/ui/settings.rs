@@ -230,6 +230,7 @@ impl App {
             st: &mut self.scope,
             settings: self.settings.clone(),
             rate: self.rate,
+            heat: self.radio.as_ref().and_then(|r| r.status.heatmap.lock().clone()),
             acts: Vec::new(),
         };
         if spectrum {
@@ -241,6 +242,14 @@ impl App {
         for a in acts {
             match a {
                 scope_settings::Action::ResetWaterfall => self.reset_waterfall(),
+                // Coloured and scaled as the waterfall is showing it, because
+                // what somebody means by "export this" is what they can see.
+                scope_settings::Action::ExportHeatmap(what) => self.send(Cmd::ExportHeatmap {
+                    what,
+                    ramp: self.scope.ramp,
+                    floor: self.scope.floor,
+                    ceil: self.scope.ceil - self.scope.wf_top_offset,
+                }),
             }
         }
     }

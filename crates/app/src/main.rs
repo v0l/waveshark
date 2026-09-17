@@ -34,6 +34,7 @@ mod control;
 mod data;
 mod devices;
 mod dial;
+mod heatmap;
 mod i18n;
 mod icons;
 mod keystore;

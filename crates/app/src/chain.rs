@@ -319,6 +319,11 @@ pub struct Plan {
     /// A twelve bit converter written as bytes throws away its bottom
     /// four bits, and on a quiet band those were the whole signal.
     pub capture_format: common::SampleFormat,
+    /// How much of the span is kept as readings for a heatmap export. A plan
+    /// value rather than an edit for the reason the walk's settings are one:
+    /// a retune rebuilds the graph, and the history it throws away is the
+    /// history somebody was recording.
+    pub heat: HeatPlan,
     /// Log every burst the front ends detect.
     pub log: bool,
     /// Where every over heard is kept as Opus, when it is kept at all. Here
@@ -358,6 +363,28 @@ pub struct Plan {
     /// and a survey is an open file. [`Receiver::apply_settings`] is the one
     /// thing that hands them to the nodes.
     pub settings: PlanSettings,
+}
+
+/// What the heatmap recorder is keeping.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeatPlan {
+    pub recording: bool,
+    pub rows_per_sec: f32,
+    pub budget_mb: u64,
+}
+
+impl Default for HeatPlan {
+    fn default() -> Self {
+        Self {
+            // On, because the export somebody wants is of the hour that has
+            // already passed, and nothing can be recorded backwards.
+            recording: true,
+            // Two rows a second over 2048 bins is 4 kB/s, so the default
+            // budget below holds a little over two hours.
+            rows_per_sec: 2.0,
+            budget_mb: (crate::heatmap::DEFAULT_BUDGET >> 20) as u64,
+        }
+    }
 }
 
 /// A walk over a band: what the operator asked the dial to do.
@@ -2384,6 +2411,15 @@ impl Receiver {
         Some(self.stage::<nodes::BandScanNode>(derived::SCAN)?.status())
     }
 
+    /// What the heatmap holds, and where the last export went.
+    pub fn heatmap_status(&self) -> Option<crate::heatmap::HeatmapStatus> {
+        Some(self.stage::<crate::heatmap::HeatmapNode>(derived::HEATMAP)?.status())
+    }
+
+    pub fn heatmap_mut(&mut self) -> Option<&mut crate::heatmap::HeatmapNode> {
+        self.stage_mut::<crate::heatmap::HeatmapNode>(derived::HEATMAP)
+    }
+
     pub fn homeassistant_status(&self) -> Option<nodes::HomeAssistantStatus> {
         Some(self.homeassistant_node()?.status())
     }
@@ -2685,6 +2721,8 @@ pub mod derived {
     pub const TRACKS: u64 = Patch::DERIVED_BASE + 7;
     pub const CAPTURE: u64 = Patch::DERIVED_BASE + 8;
     pub const SURVEY: u64 = Patch::DERIVED_BASE + 14;
+    /// The span kept as readings, for a heatmap export.
+    pub const HEATMAP: u64 = Patch::DERIVED_BASE + 31;
     /// Where the live transcriber is drawn, when the build has one.
     #[cfg(feature = "stt")]
     pub const TRANSCRIBE: u64 = Patch::DERIVED_BASE + 15;
@@ -2933,6 +2971,17 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         );
         p.add_derived(derived::CAPTURE, "iq_capture", s);
         p.connect(head, (derived::CAPTURE, 0));
+    }
+
+    // The heatmap recorder, on the same terms and for the same reason: what
+    // is worth exporting is what was heard before anybody thought to ask.
+    {
+        let mut s = Settings::new();
+        s.insert("recording".into(), pipeline::ParamValue::Bool(plan.heat.recording));
+        s.insert("rows_per_sec".into(), pipeline::ParamValue::Float(plan.heat.rows_per_sec as f64));
+        s.insert("budget_mb".into(), pipeline::ParamValue::Float(plan.heat.budget_mb as f64));
+        p.add_derived(derived::HEATMAP, "heatmap", s);
+        p.connect(head, (derived::HEATMAP, 0));
     }
 
     // The front ends the scanner table put on this span. Which demodulator
@@ -4091,6 +4140,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "packet_bus" => "Packet log".into(),
         "video_bus" => "Video".into(),
         "picture_save" => "Pictures".into(),
+        "heatmap" => "Heatmap".into(),
         "wfm_demod" => "WFM demod".into(),
         "ssb_demod" => "SSB demodulator".into(),
         "mode_s" => "1090 Mode S".into(),
@@ -4212,6 +4262,7 @@ pub fn registry() -> pipeline::registry::Registry {
         },
     );
     r.register(crate::picsave::DESC, crate::picsave::build);
+    r.register(crate::heatmap::DESC, crate::heatmap::build);
     crate::mix::register(&mut r);
     r.register(crate::calllog::DESC, crate::calllog::build);
     r.register(crate::messagelog::DESC, crate::messagelog::build);
@@ -4663,6 +4714,7 @@ pub(crate) mod tests {
             }],
             record: false,
             capture: false,
+            heat: Default::default(),
             capture_dir: crate::chain::default_capture_dir(),
             capture_format: common::SampleFormat::Cu8,
             log: false,
@@ -4718,6 +4770,29 @@ pub(crate) mod tests {
         let rx = Receiver::build(&plan, Default::default()).expect("a receiver that does not walk");
         assert!(rx.topology().nodes.iter().any(|n| n.kind == "band_scan"));
         assert_eq!(rx.scan_status().map(|s| s.running), Some(false));
+    }
+
+    /// The heatmap recorder hangs off the head, so it keeps the span rather
+    /// than one channel, and it carries what the plan set.
+    #[test]
+    fn the_heatmap_is_drawn_on_the_span_and_carries_the_plan() {
+        let mut plan = plan(2_400_000.0, Hz::mhz(433));
+        plan.heat = HeatPlan { recording: true, rows_per_sec: 4.0, budget_mb: 8 };
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver that records");
+        let st = rx.heatmap_status().expect("the heatmap reports itself");
+        assert!(st.recording);
+        assert_eq!(st.rows, 0);
+        assert_eq!(st.budget, 8 << 20);
+        let topo = rx.topology();
+        let heat = topo.nodes.iter().find(|n| n.kind == "heatmap").expect("in the graph");
+        let dc = topo.nodes.iter().find(|n| n.kind == "dc_block").expect("the head");
+        assert!(feeds(dc, heat), "the heatmap reads the span, not a channel");
+
+        // And switched off it is still there, so keeping readings again is a
+        // setting rather than a rebuild that would lose them.
+        plan.heat.recording = false;
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver that does not");
+        assert_eq!(rx.heatmap_status().map(|s| s.recording), Some(false));
     }
 
     /// A walk asks the dial to move, and the ask reaches the radio thread

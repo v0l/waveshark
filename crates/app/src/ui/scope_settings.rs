@@ -5,12 +5,15 @@
 
 use super::state::ScopeState;
 use super::*;
-use crate::ui::widgets::{choice, section, switch};
+use crate::ui::widgets::{choice, lamp, section, switch};
 
 /// What the panels want done that they cannot do themselves.
 pub(super) enum Action {
     /// The span or the bin count changed, so old rows no longer line up.
     ResetWaterfall,
+    /// Write what the heatmap holds, in the colours and against the scale
+    /// the waterfall is drawn with.
+    ExportHeatmap(crate::heatmap::Export),
 }
 
 /// The scope's settings, over the state they change.
@@ -20,6 +23,8 @@ pub(super) struct ScopeSettings<'a> {
     /// receiver rather than of the drawing, but it is set beside it.
     pub settings: crate::session::Settings,
     pub rate: f64,
+    /// What the heatmap recorder is holding, for the card that writes it out.
+    pub heat: Option<crate::heatmap::HeatmapStatus>,
     pub acts: Vec<Action>,
 }
 
@@ -97,6 +102,17 @@ impl ScopeSettings<'_> {
                     self.st.rows_per_sec
                 ),
             );
+            let ramp = "The colours a row is drawn in. Every one brightens with the signal, \
+                        so a burst is a burst in any of them. A change starts the history \
+                        again, because a row is kept as pixels.";
+            row_help(ui, "colours", ramp, |ui| {
+                let mut r = self.st.ramp;
+                let opts = crate::heatmap::Ramp::ALL.map(|v| (v, v.label().to_string()));
+                if choice(ui, "ramp", &mut r, opts) {
+                    self.st.ramp = r;
+                    self.st.wf.set_ramp(r);
+                }
+            });
             let contrast = "How far below the trace ceiling the hottest colour sits.";
             row_help(ui, "contrast", contrast, |ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
@@ -109,7 +125,72 @@ impl ScopeSettings<'_> {
             });
         });
         ui.add_space(8.0);
+        self.heatmap(ui);
+        ui.add_space(8.0);
         self.scale(ui);
+    }
+
+    /// The readings kept behind the waterfall, and the files they make.
+    fn heatmap(&mut self, ui: &mut egui::Ui) {
+        let (mut on, mut rows, mut cap) =
+            self.settings.read(|s| (s.heat_on, s.heat_rows_per_sec, s.heat_cap_mb));
+        let was = (on, rows, cap);
+        let status = self.heat.clone().unwrap_or_default();
+        section(ui, "heatmap", "the span kept as readings, and written out as a file", |ui| {
+            let keep = "Decibels per bin, kept apart from the display so an export can be \
+                        coloured and scaled afterwards. A retune starts it again: two \
+                        tunings are two frequency axes.";
+            switch(ui, "record", &mut on, "keep the readings", keep);
+            row_help(ui, "rate", "Rows a second kept. Slower holds more of the night.", |ui| {
+                let opts = HEAT_ROWS.iter().map(|(n, f)| (*f, (*n).to_string()));
+                let mut v = rows;
+                if choice(ui, "heat_rows", &mut v, opts) {
+                    rows = v;
+                }
+            });
+            row_help(ui, "memory", "What the readings may take before the oldest go.", |ui| {
+                let opts = HEAT_CAPS.iter().map(|v| (*v, format!("{v} MB")));
+                let mut v = cap;
+                if choice(ui, "heat_cap", &mut v, opts) {
+                    cap = v;
+                }
+            });
+            reading(
+                ui,
+                "holding",
+                match status.rows {
+                    0 => "nothing yet".to_string(),
+                    n => format!(
+                        "{n} rows, {:.0} s, {:.1} MB",
+                        status.seconds,
+                        status.bytes as f64 / (1 << 20) as f64
+                    ),
+                },
+            );
+            let write = "PNG is flat pixels with the axes burned in. HTML is the same \
+                         picture with the readings beside it, so a pointer over a point \
+                         gives the time, the frequency and the decibels.";
+            row_help(ui, "write", write, |ui| {
+                if ui.button("PNG").clicked() {
+                    self.acts.push(Action::ExportHeatmap(crate::heatmap::Export::Png));
+                }
+                if ui.button("HTML").clicked() {
+                    self.acts.push(Action::ExportHeatmap(crate::heatmap::Export::Html));
+                }
+            });
+            match (&status.error, &status.saved) {
+                (Some(e), _) => lamp(ui, false, e),
+                (None, Some(p)) => lamp(ui, true, &p.display().to_string()),
+                (None, None) => {}
+            }
+        });
+        if (on, rows, cap) != was {
+            self.settings.edit(|s| {
+                s.heat_on = on;
+                s.heat_rows_per_sec = rows;
+                s.heat_cap_mb = cap;
+            });
+        }
     }
 
     /// The decibel scale both of them are drawn against.

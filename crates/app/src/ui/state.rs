@@ -85,6 +85,9 @@ pub(super) struct ScopeState {
     pub floor: f32,
     pub ceil: f32,
     pub auto_scale: bool,
+    /// The colours a row is drawn in, which an export is offered as its
+    /// default: what is on screen is what somebody means by "this one".
+    pub ramp: crate::heatmap::Ramp,
     /// Bins asked for, and bins the running spectrum actually has.
     pub fft: usize,
     pub fft_size: usize,
@@ -124,6 +127,7 @@ impl Default for ScopeState {
             floor: -90.0,
             ceil: -20.0,
             auto_scale: true,
+            ramp: crate::heatmap::Ramp::Chassis,
             fft: 2048,
             fft_size: 2048,
             plot_frac: super::DEFAULT_PLOT_FRAC,
@@ -145,6 +149,8 @@ impl ScopeState {
         self.wf = Waterfall::new(v.wf_rows);
         self.wf_top_offset = v.wf_top_offset;
         self.auto_scale = v.auto_scale;
+        self.ramp = v.ramp;
+        self.wf.set_ramp(v.ramp);
         self.floor = v.floor;
         self.ceil = v.ceil;
         self.refresh = v.refresh;
@@ -160,6 +166,7 @@ impl ScopeState {
             wf_rows: self.wf_rows,
             wf_top_offset: self.wf_top_offset,
             auto_scale: self.auto_scale,
+            ramp: self.ramp,
             floor: self.floor,
             ceil: self.ceil,
             refresh: self.refresh,
