@@ -257,10 +257,31 @@ fn fetch(
     if resp.status().as_u16() != 200 {
         return Err(Error::Status(repo.tarball.into(), resp.status().as_u16()));
     }
-    let mut gz = flate2::read::GzDecoder::new(
-        resp.body_mut().with_config().limit(repo.max_bytes.max(MAX_BYTES)).reader(),
-    );
-    let files = unpack_kept(&mut gz, &tmp, repo.keep)?;
+    // Counted on the compressed side, where the length the forge declared
+    // applies: what comes out of the decoder is several times what came
+    // down the wire, and a bar past its end reads as a fault.
+    let progress = crate::progress::of(repo.dir);
+    progress.start();
+    if let Some(n) = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+    {
+        progress.expect(n);
+    }
+    let body = resp.body_mut().with_config().limit(repo.max_bytes.max(MAX_BYTES)).reader();
+    let mut gz = flate2::read::GzDecoder::new(crate::progress::Tapped { inner: body, progress });
+    let files = match unpack_kept(&mut gz, &tmp, repo.keep) {
+        Ok(files) => {
+            progress.stop();
+            files
+        }
+        Err(e) => {
+            progress.stop();
+            return Err(e);
+        }
+    };
     if files == 0 {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(Error::Parse(repo.dir.into(), "the tarball holds no files".into()));

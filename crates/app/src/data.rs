@@ -695,6 +695,10 @@ pub struct Row {
     /// Seconds since the last successful check, or `None` if never checked.
     pub checked_ago: Option<u64>,
     pub busy: bool,
+    /// How far the download has got, where one is running. Summed across
+    /// the dataset's files, since a dataset of four host files is one row
+    /// with one bar.
+    pub progress: datasets::progress::Reading,
     pub error: Option<String>,
     /// Set when the dataset cannot be fetched as things stand, such as a
     /// token that has not been given. The pane says this instead of offering
@@ -726,6 +730,7 @@ pub fn status() -> Vec<Row> {
             }
             let w = work_slot(which);
             Row {
+                progress: fetching(which),
                 which,
                 rows: which.rows(),
                 bytes,
@@ -736,6 +741,29 @@ pub fn status() -> Vec<Row> {
             }
         })
         .collect()
+}
+
+/// What the files of one dataset have downloaded between them.
+///
+/// A dataset is one row however many files it is made of, so the bar is the
+/// sum: four host files landing one after another read as one download
+/// getting on with it rather than four bars starting over.
+fn fetching(which: Which) -> datasets::progress::Reading {
+    let names: Vec<String> = match which {
+        Which::Repo(r) => vec![r.dir.to_string()],
+        _ => which.sources().iter().map(|s| s.name.to_string()).collect(),
+    };
+    let mut out = datasets::progress::Reading::default();
+    for name in names {
+        let r = datasets::progress::of(&name).read();
+        out.done += r.done;
+        out.total = match (out.total, r.total) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
+        out.running |= r.running;
+    }
+    out
 }
 
 pub fn cache_dir() -> Option<PathBuf> {
@@ -1072,6 +1100,43 @@ mod tests {
         assert_eq!(fmt_bytes(0), "—");
         assert_eq!(fmt_bytes(930_667), "908 kB");
         assert_eq!(fmt_bytes(84_506_836), "80.6 MB");
+    }
+
+    /// A dataset is one row however many files it is made of, and what the
+    /// row draws is what its files have between them. A repository counts
+    /// under its cache directory, since it is a tree rather than a file.
+    #[test]
+    fn a_row_reports_what_its_own_files_have_downloaded() {
+        let with_files = Which::all()
+            .iter()
+            .copied()
+            .find(|w| w.sources().len() > 1)
+            .expect("a dataset made of several files");
+        let names: Vec<String> = with_files.sources().iter().map(|s| s.name.to_string()).collect();
+        for (i, name) in names.iter().enumerate() {
+            let p = datasets::progress::of(name);
+            p.start();
+            p.expect(100);
+            p.wrote(10 * (i as u64 + 1));
+        }
+        let r = fetching(with_files);
+        let want: u64 = (1..=names.len() as u64).map(|i| 10 * i).sum();
+        assert_eq!(r.done, want, "the files' bytes, added up");
+        assert_eq!(r.total, Some(100 * names.len() as u64));
+        assert!(r.running, "one file still going is a row still going");
+        for name in &names {
+            datasets::progress::of(name).stop();
+        }
+        assert!(!fetching(with_files).running);
+
+        // And a repository, which has no `sources` at all.
+        let repo = Which::Repo(datasets::git::REPOS[0]);
+        let p = datasets::progress::of(datasets::git::REPOS[0].dir);
+        p.start();
+        p.expect(2_000);
+        p.wrote(500);
+        assert_eq!(fetching(repo).fraction(), Some(0.25));
+        p.stop();
     }
 
     #[test]

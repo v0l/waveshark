@@ -1833,6 +1833,13 @@ impl App {
                         // credit and a link, and a receiver that draws its
                         // masts while saying nothing is not complying.
                         hint(ui, r.which.terms());
+                        // While it runs, how far: the cell export is 85 MB
+                        // and a script repository two gigabytes, and a
+                        // button reading CHECKING for four minutes is
+                        // indistinguishable from one that has hung.
+                        if r.busy && (r.progress.running || r.progress.done > 0) {
+                            widgets::progress(ui, r.progress.done, r.progress.total);
+                        }
                         if let Some(e) = &r.error {
                             lamp(ui, false, e);
                         }
@@ -1866,7 +1873,10 @@ impl App {
         // the pane has to come back and look, or a finished download stays
         // reading CHECKING until the pointer moves.
         if busy {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
+            // Often enough that a bar moves rather than steps: a download
+            // is the one thing in this pane that changes while nobody
+            // touches anything.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 

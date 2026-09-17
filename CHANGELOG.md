@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- A dataset that is downloading says how far it has got, in bytes and as a bar.
 - The raw capture can be armed on energy: a file per burst, holding the signal
   from before it triggered.
 - Several matching tuners offered as one wider receiver, drift between them

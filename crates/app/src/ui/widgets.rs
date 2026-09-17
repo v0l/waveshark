@@ -589,6 +589,49 @@ pub fn lamp(ui: &mut Ui, ok: bool, text: &str) {
     });
 }
 
+/// How far a download has got: a bar in a recess, with the figures on it.
+///
+/// A length the far end declared draws a bar; one it did not draws a stripe
+/// that sweeps, because a bar at a guessed position is a worse answer than
+/// no bar. The numbers are on the row either way, since a bar says roughly
+/// and a person waiting on 400 MB wants exactly.
+pub fn progress(ui: &mut Ui, done: u64, total: Option<u64>) {
+    let ctx = ui.ctx().clone();
+    let h = 10.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 1.0, theme::WELL);
+    match total.filter(|t| *t > 0) {
+        Some(total) => {
+            let f = (done as f32 / total as f32).clamp(0.0, 1.0);
+            let mut bar = rect;
+            bar.set_width(rect.width() * f);
+            p.rect_filled(bar, 1.0, theme::TRACE);
+        }
+        None => {
+            // Nothing to be a fraction of, so it moves rather than fills:
+            // a fifth of the width, sweeping once every two seconds.
+            let t = ctx.input(|i| i.time) as f32 % 2.0 / 2.0;
+            let w = rect.width() * 0.2;
+            let x = rect.left() + (rect.width() + w) * t - w;
+            let mut bar = egui::Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(w, h));
+            bar = bar.intersect(rect);
+            p.rect_filled(bar, 1.0, theme::TRACE);
+            ctx.request_repaint();
+        }
+    }
+    let said = match total.filter(|t| *t > 0) {
+        Some(t) => format!(
+            "{} of {} ({:.0}%)",
+            crate::data::fmt_bytes(done),
+            crate::data::fmt_bytes(t),
+            done as f64 / t as f64 * 100.0
+        ),
+        None => format!("{} so far", crate::data::fmt_bytes(done)),
+    };
+    theme::Line::new().legend("downloading").value(said).size(11.0).show(ui);
+}
+
 /// A card whose header is a legend and, on the right, one line saying what
 /// the card is for: the sentence that would otherwise sit under the title
 /// as a paragraph nobody reads twice.

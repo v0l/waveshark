@@ -54,7 +54,15 @@ pub trait Fetch: Send + Sync {
 
     /// Write the current bytes to `to`, or return `None` without writing
     /// anything if what `have` describes is still current.
-    fn fetch(&self, have: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error>;
+    /// Write the file to `to`, reporting what the far end declared on
+    /// `progress`. What lands is counted for you; the length, where there
+    /// is one, is the fetcher's to declare.
+    fn fetch(
+        &self,
+        have: &Seen,
+        to: &mut dyn Write,
+        progress: &crate::progress::Progress,
+    ) -> Result<Option<Seen>, Error>;
 }
 
 /// A cached dataset file: what to call it on disk, where it comes from, and
@@ -110,7 +118,12 @@ impl Fetch for Http {
         self.url.to_string()
     }
 
-    fn fetch(&self, have: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error> {
+    fn fetch(
+        &self,
+        have: &Seen,
+        to: &mut dyn Write,
+        progress: &crate::progress::Progress,
+    ) -> Result<Option<Seen>, Error> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .user_agent(AGENT)
             // 304 is the answer we are hoping for, not a failure.
@@ -146,6 +159,11 @@ impl Fetch for Http {
             tracing::warn!(asked = %self.url, answered = %ureq::ResponseExt::get_uri(&resp), "dataset URL redirects");
         }
         let seen = Seen { etag: header("etag"), last_modified: header("last-modified") };
+        // What it says it is sending, so the row can draw how far through
+        // it is. A chunked answer declares nothing and gets no bar.
+        if let Some(n) = header("content-length").and_then(|v| v.parse::<u64>().ok()) {
+            progress.expect(n);
+        }
         let mut body = resp.body_mut().with_config().limit(MAX_BYTES).reader();
         std::io::copy(&mut body, to).map_err(|e| fail(e.to_string()))?;
         Ok(Some(seen))
@@ -164,9 +182,15 @@ impl Fetch for File {
         self.path.display().to_string()
     }
 
-    fn fetch(&self, have: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error> {
+    fn fetch(
+        &self,
+        have: &Seen,
+        to: &mut dyn Write,
+        progress: &crate::progress::Progress,
+    ) -> Result<Option<Seen>, Error> {
         let io = |e: std::io::Error| Error::Io(self.origin(), e);
         let meta = std::fs::metadata(&self.path).map_err(io)?;
+        progress.expect(meta.len());
         let stamp = meta
             .modified()
             .ok()
@@ -381,14 +405,22 @@ impl Cache {
         };
         let f = std::fs::File::create(&tmp).map_err(io(&tmp))?;
         let mut out = std::io::BufWriter::new(f);
-        let seen = match src.from.fetch(have, &mut out) {
+        // Counted where the bytes are written rather than in each fetcher:
+        // every one of them writes here, and a fetcher that forgot to
+        // report would be a row that sat at nothing for a minute.
+        let progress = crate::progress::of(src.name);
+        progress.start();
+        let mut counted = crate::progress::Counted { inner: &mut out, progress };
+        let seen = match src.from.fetch(have, &mut counted, progress) {
             Ok(Some(seen)) => seen,
             other => {
+                progress.stop();
                 drop(out);
                 let _ = std::fs::remove_file(&tmp);
                 return other.map(|_| None);
             }
         };
+        progress.stop();
         out.flush().map_err(io(&tmp))?;
         let len = out.get_ref().metadata().map_err(io(&tmp))?.len();
         drop(out);
@@ -463,7 +495,12 @@ mod tests {
         fn origin(&self) -> String {
             "counted".into()
         }
-        fn fetch(&self, have: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error> {
+        fn fetch(
+            &self,
+            have: &Seen,
+            to: &mut dyn Write,
+            _progress: &crate::progress::Progress,
+        ) -> Result<Option<Seen>, Error> {
             self.fetches.fetch_add(1, Ordering::Relaxed);
             let tag = self.tag.lock().clone();
             if have.etag.as_deref() == Some(tag.as_str()) {
@@ -546,7 +583,12 @@ mod tests {
             fn origin(&self) -> String {
                 "broken".into()
             }
-            fn fetch(&self, _: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error> {
+            fn fetch(
+                &self,
+                _: &Seen,
+                to: &mut dyn Write,
+                _: &crate::progress::Progress,
+            ) -> Result<Option<Seen>, Error> {
                 to.write_all(b"half a fi").unwrap();
                 Err(Error::Status("broken".into(), 500))
             }
@@ -572,7 +614,12 @@ mod tests {
             fn origin(&self) -> String {
                 "refused".into()
             }
-            fn fetch(&self, _: &Seen, _: &mut dyn Write) -> Result<Option<Seen>, Error> {
+            fn fetch(
+                &self,
+                _: &Seen,
+                _: &mut dyn Write,
+                _: &crate::progress::Progress,
+            ) -> Result<Option<Seen>, Error> {
                 Err(Error::Status("refused".into(), 403))
             }
         }

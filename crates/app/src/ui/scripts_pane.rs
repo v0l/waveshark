@@ -191,7 +191,9 @@ impl<'a> Scripts<'a> {
     }
 
     fn tree(&mut self, ui: &mut egui::Ui) {
-        let width = ui.available_width();
+        // Short of the scroll area's own width: the bar is drawn over the
+        // rows, and a count painted at the right edge sat under it.
+        let width = (ui.available_width() - ui.spacing().scroll.bar_width - 2.0).max(60.0);
         let filter = self.st.filter.to_lowercase();
         // Collected first: the rows are drawn from the state and the clicks
         // change it, and a row cannot borrow the set it toggles.
@@ -460,7 +462,9 @@ fn row_with(
         p.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x24, 0x27, 0x2D));
     }
     let x = rect.left() + 4.0 + depth as f32 * 12.0;
-    let right_w = if right.is_empty() { 0.0 } else { 34.0 };
+    // Wide enough for the figure it is: these run to five digits, and a
+    // fixed column cut the count of the largest collection in half.
+    let right_w = if right.is_empty() { 0.0 } else { 8.0 * right.chars().count() as f32 + 6.0 };
     widgets::cell(
         &p,
         rect,

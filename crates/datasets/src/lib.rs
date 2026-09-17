@@ -16,6 +16,7 @@ pub mod gateways;
 pub mod git;
 pub mod m17;
 pub mod pistar;
+pub mod progress;
 pub mod radioid;
 pub mod satnogs;
 pub mod sigid;
