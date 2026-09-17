@@ -339,6 +339,31 @@ impl FirDecim {
         Self::new(lowpass(taps, cutoff, atten_db), factor)
     }
 
+    /// Design from both edges: `pass_hz` survives and `stop_hz` is gone.
+    ///
+    /// [`Self::design_hz`] stops only what would alias, which for a signal
+    /// far narrower than the output rate is barely a filter: decimating
+    /// 48 kHz to 8 kHz for a 1.7 kHz passband it puts the cutoff at 4 kHz,
+    /// and a station 300 Hz outside the passband arrives untouched. Measured
+    /// on a synthetic CW channel, that let a carrier a kilohertz off the
+    /// dial key the envelope through the tone tracker's filter skirt and
+    /// publish 32 letters of nothing.
+    ///
+    /// It costs what the transition band costs: the taps rise as the two
+    /// edges close, and they run at the output rate rather than the input.
+    pub fn design_band(
+        rate: f64,
+        factor: usize,
+        pass_hz: f64,
+        stop_hz: f64,
+        atten_db: f64,
+    ) -> Self {
+        let pass = pass_hz.min(rate * 0.45);
+        let stop = stop_hz.clamp(pass * 1.05, rate * 0.5);
+        let taps = estimate_taps(((stop - pass) / rate).max(1e-4), atten_db);
+        Self::new(lowpass(taps, 0.5 * (pass + stop) / rate, atten_db), factor)
+    }
+
     pub fn factor(&self) -> usize {
         self.factor
     }
