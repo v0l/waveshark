@@ -67,6 +67,40 @@ pub fn crc16_ti(data: &[u8]) -> u16 {
     crc16(data, 0x8005, 0xffff)
 }
 
+/// How long the CCSDS randomiser's sequence is before it repeats.
+pub const CCSDS_PERIOD: usize = 255;
+
+/// The pseudo-random sequence every CCSDS telemetry downlink is XORed with,
+/// CCSDS 131.0-B blue book: `x^8 + x^7 + x^5 + x^3 + 1`, seeded all ones,
+/// the register's top bit out first.
+///
+/// It is there so that a transmitter sending a run of identical bytes still
+/// gives the receiver's clock something to lock to, and it repeats every 255
+/// bytes, which is why a frame is derandomised by position rather than by a
+/// running register.
+pub fn ccsds_sequence() -> [u8; CCSDS_PERIOD] {
+    let mut state = 0xffu8;
+    let mut out = [0u8; CCSDS_PERIOD];
+    for byte in out.iter_mut() {
+        for _ in 0..8 {
+            *byte = (*byte << 1) | (state >> 7);
+            let feedback = (state ^ (state >> 2) ^ (state >> 4) ^ (state >> 7)) & 1;
+            state = (state << 1) | feedback;
+        }
+    }
+    out
+}
+
+/// XOR `bytes` with the CCSDS sequence in place, `from` being the position of
+/// `bytes[0]` in the randomised block. Its own inverse, like every whitener
+/// here.
+pub fn ccsds(bytes: &mut [u8], from: usize) {
+    let seq = ccsds_sequence();
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b ^= seq[(from + i) % CCSDS_PERIOD];
+    }
+}
+
 /// The sixty-four byte mask a Vaisala radiosonde XORs its frame with, from
 /// the header onward, repeating every 64 bytes.
 ///
