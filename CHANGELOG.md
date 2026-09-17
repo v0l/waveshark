@@ -21,6 +21,7 @@ the code is in the commit log.
 - EAS and SAME alert headers, on the seven NOAA Weather Radio channels.
 - Inmarsat STD-C: EGC and SafetyNET broadcasts off an L-band patch antenna.
 - Inmarsat Aero: satellite ACARS and the P channel's signal units.
+- UAT at 978 MHz: light aircraft, and the ground stations' weather and traffic.
 - A dataset that is downloading says how far it has got, in bytes and as a bar.
 - Transmit six protocols this receiver reads, on a channel already decoding
   one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements, SSTV

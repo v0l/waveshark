@@ -77,6 +77,7 @@ pub use demod::{AmDemod, Deemphasis, FmDemod};
 pub use detect::{Burst, Detector, DetectorConfig, NoiseFloor};
 pub use fir::{Fir, FirDecim, FirDecimReal};
 pub use fsk::{FskConfig, FskDetector};
+pub use fsk::{SyncBurst, SyncDetector, SyncPattern};
 pub use gsm::{GsmConfig, Sch, SchDetector, SchHit};
 pub use m17::{M17Config, M17Demod, M17Stats};
 pub use mixer::Mixer;
