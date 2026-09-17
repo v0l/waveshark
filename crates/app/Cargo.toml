@@ -3,6 +3,9 @@ name = "app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "A software defined radio receiver that decodes what it hears"
+homepage = "https://github.com/v0l/waveshark"
+repository = "https://github.com/v0l/waveshark"
 
 [[bin]]
 name = "waveshark"
@@ -122,6 +125,62 @@ tts = ["dep:tts"]
 # `-cuda` asset, since a binary linked against cudart does not start on a
 # machine without it.
 cuda = ["stt?/cuda", "tts?/cuda"]
+
+# The installers the release publishes, built by `cargo packager` after the
+# binary. Paths are relative to this file, as build.rs's icon already is.
+#
+# `dist-extra` is the one staging directory the workflow fills with whatever a
+# platform cannot link from the machine it runs on: the vcpkg DLLs on Windows,
+# and on macOS the Homebrew dylibs that dylibbundler has already rewritten the
+# binary to look for. It is empty on Linux, where librtlsdr and ALSA come from
+# the packages `deb.depends` names.
+[package.metadata.packager]
+product-name = "WaveShark"
+identifier = "io.github.v0l.waveshark"
+publisher = "WaveShark"
+authors = ["v0l <kieran@harkin.me>"]
+category = "Utility"
+license-file = "../../LICENSE"
+icons = [
+    "../../assets/logo/waveshark-icon.png",
+    "../../assets/logo/waveshark-icon.ico",
+]
+resources = [{ src = "../../dist-extra/*", target = "" }]
+
+[package.metadata.packager.deb]
+# Not the product name kebab-cased, which would be `wave-shark`.
+package-name = "waveshark"
+section = "hamradio"
+# What the binary links and does not carry. A release build has no ffmpeg and
+# no LimeSuite, so neither is named here; adding them would refuse to install
+# on a machine that cannot get them.
+depends = ["librtlsdr0 | librtlsdr2", "libasound2 | libasound2t64", "libusb-1.0-0"]
+
+[package.metadata.packager.dmg]
+# The window the operator sees when the image opens: the bundle on the left,
+# Applications on the right, which is the whole instruction.
+window-size = { width = 660, height = 400 }
+app-position = { x = 180, y = 170 }
+application-folder-position = { x = 480, y = 170 }
+
+# The RPM, which cargo-packager does not build. Run from the workspace root as
+# `cargo generate-rpm -p crates/app --target <triple>`, which rewrites the
+# `target/release` prefix below to the target's directory.
+[package.metadata.generate-rpm]
+name = "waveshark"
+assets = [
+    { source = "target/release/waveshark", dest = "/usr/bin/waveshark", mode = "755" },
+    { source = "crates/app/waveshark.desktop", dest = "/usr/share/applications/waveshark.desktop", mode = "644" },
+    { source = "assets/logo/waveshark-icon.png", dest = "/usr/share/icons/hicolor/512x512/apps/waveshark.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/waveshark/LICENSE", mode = "644" },
+]
+# ldd on the build machine would name Debian's sonames, so the dependencies
+# are the Fedora package names instead.
+auto-req = "no"
+
+[package.metadata.generate-rpm.requires]
+rtl-sdr = "*"
+alsa-lib = "*"
 
 [[example]]
 name = "lime"

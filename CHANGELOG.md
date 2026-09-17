@@ -38,9 +38,14 @@ the code is in the commit log.
   rate.
 - Radiosonde launch sites from SondeHub, on the map with the time until the
   next release from each.
+- Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
+  macOS, beside the archives. Setup fetches the one this machine installs
+  from and opens it.
 
 ### Fixed
 
+- A CUDA build was offered the plain download, and a plain build the CUDA
+  one.
 - The hiss on the end of every over: the squelch no longer hangs on to a
   channel whose carrier has gone.
 - CTCSS tones and DCS codes are filtered out of the audio, so they no longer

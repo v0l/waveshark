@@ -18,6 +18,12 @@ testdata/rtl433/
 testdata/offair/
 out/
 
+# Where `cargo packager` writes the installers, and the staging directory the
+# build workflow fills with the libraries a platform cannot link from the
+# machine running the binary.
+dist/
+dist-extra/
+
 # Python bytecode from the tools directory.
 __pycache__/
 *.pyc
