@@ -255,7 +255,7 @@ mod tests {
     /// Every icon in the top bar and the view strip, in the order they are
     /// drawn. Listed rather than derived so a new variant has to be added
     /// here, which is where the tests below then check it.
-    const ALL: [Icon; 25] = [
+    const ALL: [Icon; 26] = [
         Icon::Play,
         Icon::Stop,
         Icon::Sliders,
