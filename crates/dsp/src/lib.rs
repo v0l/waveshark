@@ -17,6 +17,7 @@ pub mod channelizer;
 pub mod classify;
 pub mod conv;
 pub mod ctcss;
+pub mod cw;
 pub mod d8psk;
 pub mod dc;
 pub mod dcs;
