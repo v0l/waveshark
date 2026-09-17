@@ -1588,10 +1588,13 @@ impl App {
                 let id = self.audio.next_id as u64;
                 self.audio.next_id += 1;
                 let mut c = fresh(id, hz, ChanMode::Audio(Demod::Nfm), Some(SUB_CHANNEL.into()));
-                // Heard as well as sent: a half duplex radio is deaf for the
-                // over anyway, and a channel put on the speaker for it would
-                // squeal through the room.
-                c.on = false;
+                // On, because the radio is only sent the channels that are:
+                // an off channel is not in the list and the key came back
+                // "there is no such channel to key". Muted instead, since
+                // nobody wants a remote's pulses through the speaker.
+                c.on = true;
+                c.muted = true;
+                c.voice = false;
                 self.audio.channels.push(c);
                 id
             }
@@ -3459,7 +3462,8 @@ mod tests {
         let ch: Vec<&Channel> = a.audio.channels.iter().collect();
         assert_eq!(ch.len(), 1, "one channel, not one per press");
         assert_eq!(ch[0].freq, 433_920_000.0);
-        assert!(!ch[0].on, "the channel keys rather than listens");
+        assert!(ch[0].on, "the radio is only sent the channels that are on");
+        assert!(ch[0].muted, "keyed, not listened to");
         assert_eq!(ch[0].tx.as_ref().map(|t| t.source), Some(crate::radio::TxSource::Sub));
         let id = ch[0].id;
         let keyed = a.cmds.iter().filter(|c| matches!(c, Cmd::Key(Some(k)) if *k == id)).count();
