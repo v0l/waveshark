@@ -95,6 +95,11 @@ pub struct App {
     map: map_pane::MapState,
     /// The .sub files this machine holds, as the panel lists them.
     scripts: scripts_pane::ScriptsState,
+    /// When the `.sub` file being keyed from the scripts panel has played,
+    /// so the key comes back up without the operator holding anything.
+    sub_until: Option<std::time::Instant>,
+    /// Where the radio transmits, or `None` for one that does not.
+    tx_reach: Option<(f64, f64)>,
     sats: state::SatsState,
     calls: state::CallsState,
     transcript: state::TranscriptState,
@@ -289,6 +294,15 @@ const HEAT_ROWS: [(&str, f32); 5] =
     [("4/s", 4.0), ("2/s", 2.0), ("1/s", 1.0), ("every 2 s", 0.5), ("every 10 s", 0.1)];
 /// What the readings may take, in megabytes.
 const HEAT_CAPS: [u64; 5] = [8, 32, 128, 512, 2048];
+
+/// What the channel the scripts panel keys is called. Found by its name, so
+/// keying a second file reuses the one channel rather than leaving a strip of
+/// identical ones behind.
+const SUB_CHANNEL: &str = "SUB";
+
+/// Carrier held past the end of the file, so the last gap is played out
+/// rather than cut off by the key coming up on the final mark.
+const SUB_TAIL: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// What the main pane shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -570,6 +584,8 @@ impl Default for App {
             sats: state::SatsState::default(),
             map: map_pane::MapState::default(),
             scripts: scripts_pane::ScriptsState::default(),
+            sub_until: None,
+            tx_reach: None,
             rt: background_runtime(),
             calls: state::CallsState::default(),
             transcript: state::TranscriptState::default(),
@@ -1280,6 +1296,7 @@ impl App {
         {
             let c = radio.status.radio();
             self.reach = c.reach;
+            self.tx_reach = c.tx_reach;
             self.tunable = c.tunable;
         }
         // Every frame is peak-held into the pending row, not just the one that
@@ -1530,8 +1547,8 @@ impl App {
         }
         let acts = scripts_pane::Scripts {
             st: &mut self.scripts,
-            cmds: &mut self.cmds,
-            center: self.center,
+            tx_range: self.tx_reach,
+            keyed: self.audio.keying.at.is_some() || self.sub_until.is_some(),
             acts: Vec::new(),
         }
         .show(ui);
@@ -1539,8 +1556,76 @@ impl App {
             match a {
                 scripts_pane::Action::Hide => self.settings.edit(|s| s.scripts = false),
                 scripts_pane::Action::Open(w) => self.open = Some(w),
+                scripts_pane::Action::Transmit(f) => self.transmit_sub(f),
             }
         }
+    }
+
+    /// Key a `.sub` file, at the frequency the file names.
+    ///
+    /// Everything the operator would otherwise do by hand: the dial to the
+    /// file's frequency, a channel there set to transmit the file, the file
+    /// itself to the radio thread, and the key down. The key comes back up
+    /// on its own in [`Self::sub_key`], because the length of the over is
+    /// the length of the file and nothing else decides it.
+    fn transmit_sub(&mut self, f: crate::radio::SubFile) {
+        let hz = f.file.frequency as f64;
+        // Within the span, or the dial moves: a channel outside what the
+        // radio is sampling has nothing to key through.
+        if (hz - self.center).abs() > self.rate / 2.0 {
+            self.retune(hz);
+        }
+        // One channel for this, reused: keying a file twice must not leave a
+        // strip of identical channels behind. Its mode is NFM because the
+        // chain reads the pulses through the OOK keyer whatever the channel
+        // says, and a mode that cannot transmit would refuse the key.
+        let id = match self.audio.channels.iter_mut().find(|c| c.label == SUB_CHANNEL) {
+            Some(c) => {
+                c.freq = hz;
+                c.id
+            }
+            None => {
+                let id = self.audio.next_id as u64;
+                self.audio.next_id += 1;
+                let mut c = fresh(id, hz, ChanMode::Audio(Demod::Nfm), Some(SUB_CHANNEL.into()));
+                // Heard as well as sent: a half duplex radio is deaf for the
+                // over anyway, and a channel put on the speaker for it would
+                // squeal through the room.
+                c.on = false;
+                self.audio.channels.push(c);
+                id
+            }
+        };
+        if let Some(c) = self.audio.channels.iter_mut().find(|c| c.id == id) {
+            c.tx = Some(crate::radio::TxSpec {
+                source: crate::radio::TxSource::Sub,
+                shift_hz: 0.0,
+                ..Default::default()
+            });
+        }
+        self.send_channels();
+        // The parsed file, then the key. The strip shows what is loaded, so
+        // it is the interface's copy as well as the radio's.
+        self.audio.sub_pick.file = Some(f.clone());
+        let over = f.file.duration();
+        self.cmds.push(Cmd::SubFile(Some(f)));
+        self.cmds.push(Cmd::Key(Some(id)));
+        // A tail beyond the file: the last gap is silence the transmitter
+        // still has to play out before the carrier drops.
+        self.sub_until = Some(std::time::Instant::now() + over + SUB_TAIL);
+    }
+
+    /// Let the key go once the file has played.
+    fn sub_key(&mut self, ctx: &egui::Context) {
+        let Some(until) = self.sub_until else { return };
+        if std::time::Instant::now() < until {
+            // Nothing else may be drawing, and a carrier that stays up
+            // because the window went idle is the worst fault this has.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            return;
+        }
+        self.sub_until = None;
+        self.cmds.push(Cmd::Key(None));
     }
 
     /// Draw the chain view over the graph it edits.
@@ -2681,6 +2766,7 @@ impl eframe::App for App {
             let _s = tracing::info_span!("scripts").entered();
             self.scripts_view(ui);
         }
+        self.sub_key(ui.ctx());
         {
             let _s = tracing::info_span!("log").entered();
             self.log_view(ui);
@@ -3350,6 +3436,53 @@ mod tests {
         // And applying it again sends nothing: it is already what it is.
         let now = a.settings.get();
         assert!(settings_cmds(&now, Some(&now)).is_empty());
+    }
+
+    /// The scripts panel's TX button, which is the whole of what an
+    /// operator does to send a file: the dial, one channel keying the file,
+    /// and a key that comes back up when the file has played.
+    #[test]
+    fn keying_a_sub_file_tunes_a_channel_and_lets_the_key_go_by_itself() {
+        let mut a = app();
+        let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
+            Preset: FuriHalSubGhzPresetOok650Async\nProtocol: Princeton\nBit: 24\n\
+            Key: 00 00 00 00 00 95 D5 D4\nTE: 400\n";
+        let path = std::env::temp_dir().join(format!("waveshark-tx-{}.sub", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        let f = crate::radio::SubFile::open(&path).unwrap();
+        let over = f.file.duration();
+
+        a.transmit_sub(f);
+        // The dial moved to the file, because 433.92 MHz is nowhere near the
+        // 100 MHz span this receiver was on.
+        assert_eq!(a.center, 433_920_000.0);
+        let ch: Vec<&Channel> = a.audio.channels.iter().collect();
+        assert_eq!(ch.len(), 1, "one channel, not one per press");
+        assert_eq!(ch[0].freq, 433_920_000.0);
+        assert!(!ch[0].on, "the channel keys rather than listens");
+        assert_eq!(ch[0].tx.as_ref().map(|t| t.source), Some(crate::radio::TxSource::Sub));
+        let id = ch[0].id;
+        let keyed = a.cmds.iter().filter(|c| matches!(c, Cmd::Key(Some(k)) if *k == id)).count();
+        assert_eq!(keyed, 1, "keyed once");
+        assert_eq!(a.cmds.iter().filter(|c| matches!(c, Cmd::SubFile(Some(_)))).count(), 1);
+        assert_eq!(a.audio.sub_pick.file.as_ref().map(|f| f.label()), Some("Princeton".into()));
+
+        // A second file reuses the channel rather than adding another.
+        let f2 = crate::radio::SubFile::open(&path).unwrap();
+        a.transmit_sub(f2);
+        assert_eq!(a.audio.channels.len(), 1);
+
+        // The key is still down while the file plays, and comes up after it
+        // with the tail the transmitter needs to play the last gap out.
+        let until = a.sub_until.expect("the over has an end");
+        assert!(until > std::time::Instant::now() + over, "the tail is past the file");
+        assert!(until <= std::time::Instant::now() + over + SUB_TAIL);
+        a.sub_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        a.cmds.clear();
+        a.sub_key(&egui::Context::default());
+        assert!(a.sub_until.is_none());
+        assert_eq!(a.cmds.iter().filter(|c| matches!(c, Cmd::Key(None))).count(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     fn app() -> App {

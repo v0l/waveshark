@@ -187,14 +187,18 @@ pub fn status(repo: &'static Repo, cache: &crate::cache::Cache) -> Status {
     }
 }
 
-/// Files under the tree whose name ends with `ext`, relative to the
-/// extraction root, in path order. The question a scripts browser asks;
-/// generic here because it is a question about a tree, not about any one
-/// kind of script.
+/// Files under the tree with this extension, relative to the extraction
+/// root, in path order. The question a scripts browser asks; generic here
+/// because it is a question about a tree, not about any one kind of script.
+///
+/// `ext` is taken with or without its dot and matched regardless of case: a
+/// repository of captures traded between people has `.sub` and `.SUB` in it,
+/// and a caller asking for ".sub" and getting nothing is the kind of empty
+/// list nobody reads as a bug.
 pub fn files_with(repo: &'static Repo, cache: &crate::cache::Cache, ext: &str) -> Vec<String> {
     let Some(t) = held(repo, cache) else { return Vec::new() };
     let mut out = Vec::new();
-    walk(&t.dir, &t.dir, ext, &mut out);
+    walk(&t.dir, &t.dir, ext.trim_start_matches('.'), &mut out);
     out.sort();
     out
 }
@@ -205,7 +209,7 @@ fn walk(root: &Path, dir: &Path, ext: &str, out: &mut Vec<String>) {
         let p = e.path();
         if p.is_dir() {
             walk(root, &p, ext, out);
-        } else if p.extension().is_some_and(|x| x == ext)
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext))
             && let Ok(rel) = p.strip_prefix(root)
         {
             out.push(rel.display().to_string());
@@ -572,13 +576,20 @@ mod tests {
         std::fs::write(tree.join("sub/a.sub"), b"a").unwrap();
         std::fs::write(tree.join("b.sub"), b"b").unwrap();
         std::fs::write(tree.join("skip.txt"), b"x").unwrap();
+        std::fs::write(tree.join("SHOUTED.SUB"), b"c").unwrap();
         write_meta(
             repo_at(&d),
             &cache,
             &Meta { commit: Some("abc".into()), files: 3, checked: 1, refused: None },
         );
+        // With the dot or without it, and whatever case the file is in: a
+        // traded capture is as likely to be .SUB as .sub.
         let got = files_with(repo_at(&d), &cache, "sub");
-        assert_eq!(got, vec!["b.sub".to_string(), "sub/a.sub".to_string()]);
+        assert_eq!(
+            got,
+            vec!["SHOUTED.SUB".to_string(), "b.sub".to_string(), "sub/a.sub".to_string()]
+        );
+        assert_eq!(files_with(repo_at(&d), &cache, ".sub"), got);
     }
 
     /// A file short of a full header ends the archive rather than being

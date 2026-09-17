@@ -1029,6 +1029,10 @@ impl SubPick {
         match crate::radio::SubFile::open(&path) {
             Ok(f) => {
                 self.fault = None;
+                // Both copies: the radio keys it, and the strip says what it
+                // is keying. Without the second the strip went on offering
+                // to choose a file after one had been chosen.
+                self.file = Some(f.clone());
                 cmds.push(crate::radio::Cmd::SubFile(Some(f)));
             }
             Err(e) => self.fault = Some(format!("{}: {e}", path.display())),

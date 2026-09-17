@@ -1475,6 +1475,11 @@ pub struct RadioControls {
     /// ranges. What the dial is clamped to, which used to be the RTL-SDR's
     /// 24 to 1766 MHz whatever radio was connected.
     pub reach: (f64, f64),
+    /// Where it transmits, or `None` for a radio that does not. Published
+    /// beside the receive reach because a control that offers to key a
+    /// frequency the radio cannot reach is a control that fails when it is
+    /// pressed.
+    pub tx_reach: Option<(f64, f64)>,
     /// Whether the tuner can be moved at all. A network stream is pinned by
     /// whoever feeds it, and its dial is a readout.
     pub tunable: bool,
@@ -1490,6 +1495,7 @@ impl Default for RadioControls {
             ppm: 0.0,
             offset: 0.0,
             reach: (24e6, 1766e6),
+            tx_reach: None,
             tunable: true,
         }
     }
@@ -1527,6 +1533,14 @@ impl RadioControls {
             // Already on the aerial's side of the converter: the front end
             // moves the ranges it reports with the offset.
             reach: dev.reach(),
+            tx_reach: dev.info().tx.as_ref().and_then(|t| {
+                let offset = dev.tuning().offset;
+                let lo =
+                    t.ranges.iter().map(|r| r.range.start().as_f64()).fold(f64::INFINITY, f64::min);
+                let hi = t.ranges.iter().map(|r| r.range.end().as_f64()).fold(0.0f64, f64::max);
+                (lo.is_finite() && hi > lo)
+                    .then(|| ((lo + offset).max(0.0), (hi + offset).max(0.0)))
+            }),
             // A stream is pinned by whoever feeds it and a capture by
             // whoever recorded it; both dials are readouts.
             tunable: !matches!(
