@@ -281,7 +281,7 @@ fn restart(
     entry: &crate::devices::Entry,
     rate: Sps,
     center: Hz,
-    gain: GainMode,
+    front: &FrontEnd,
     ppm: f64,
     offset: f64,
 ) -> common::Result<(Box<dyn common::Device>, Box<dyn common::RxStream>)> {
@@ -296,9 +296,45 @@ fn restart(
     dev.correct(ppm);
     dev.set_offset(offset);
     dev.set_dial(center)?;
-    let _ = dev.set_gain("tuner", gain);
+    front.apply(dev.as_mut());
     let stream = dev.start_rx()?;
     Ok((dev, stream))
+}
+
+/// What the front end is set to, per stage and per switch.
+///
+/// A reopened device starts at its defaults, so every stage and switch has to
+/// be put back and not just the total: a HackRF reopened for a span change
+/// came back with the baseband VGA at zero, which looks like the antenna
+/// fell out. Read off the device rather than from the commands, so a driver
+/// that distributes a total across its stages or quantises one reports what
+/// it actually did.
+#[derive(Clone, Debug, Default)]
+struct FrontEnd {
+    gains: Vec<(String, GainMode)>,
+    toggles: Vec<(String, bool)>,
+}
+
+impl FrontEnd {
+    fn read(dev: &dyn common::Device) -> Self {
+        Self {
+            gains: dev.gains(),
+            toggles: dev.toggles().into_iter().map(|t| (t.name, t.on)).collect(),
+        }
+    }
+
+    fn apply(&self, dev: &mut dyn common::Device) {
+        for (stage, mode) in &self.gains {
+            if let Err(e) = dev.set_gain(stage, *mode) {
+                tracing::warn!("could not restore {stage} gain: {e}");
+            }
+        }
+        for (name, on) in &self.toggles {
+            if let Err(e) = dev.set_toggle(name, *on) {
+                tracing::warn!("could not restore {name}: {e}");
+            }
+        }
+    }
 }
 
 /// Open the radio for transmit, and say what the graph should key.
@@ -2109,10 +2145,10 @@ struct RadioThread<'a, R: Fn()> {
     /// go and opening the next, which is a state the thread does not run in:
     /// a reopen that fails ends it.
     stream: Option<Box<dyn common::RxStream>>,
-    /// Tracked so a restart can put it back: reopening a device resets it, and
-    /// a span change that silently returned the gain to its default would look
-    /// like the antenna had fallen out.
-    gain: GainMode,
+    /// Tracked so a restart can put it back: reopening a device resets every
+    /// stage and switch, and a span change that silently returned them to
+    /// their defaults would look like the antenna had fallen out.
+    front: FrontEnd,
     /// What the receiver should be doing. Everything that acts on a sample is
     /// in the graph this describes, so a command changes the plan and the
     /// graph is rebuilt from it, rather than each command reaching into a
@@ -2281,7 +2317,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             entry,
             dev,
             stream: Some(stream),
-            gain: GainMode::Auto,
+            front: FrontEnd::default(),
             plan,
             rx,
             scanners,
@@ -2310,7 +2346,17 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             hits: 0,
         };
         this.open_mic();
+        this.remember_front();
         Ok(this)
+    }
+
+    /// Note what the front end is set to, for whatever reopens the radio.
+    ///
+    /// Read after each change rather than while reopening: the device that
+    /// has to be put back is often one that has stopped answering, and its
+    /// own account of its gain is then whatever the last read failed to get.
+    fn remember_front(&mut self) {
+        self.front = FrontEnd::read(self.dev.as_ref());
     }
 
     fn run(mut self) -> anyhow::Result<()> {
@@ -2471,14 +2517,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 if let Err(e) = self.dev.set_gain(&stage, mode) {
                     *self.status.error.lock() = Some(format!("{stage} gain: {e}"));
                 }
-                // Reopening for a rate change resets the device, so the tuner
-                // setting has to survive outside it.
-                if stage == "tuner" {
-                    self.gain = mode;
-                }
                 // The driver snaps to what the hardware supports, so the
                 // control has to be told what it actually got rather than what
                 // it asked for.
+                self.remember_front();
                 self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 self.rx.remeasure_dc();
             }
@@ -2486,6 +2528,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 if let Err(e) = self.dev.set_toggle(&name, on) {
                     *self.status.error.lock() = Some(format!("{name}: {e}"));
                 }
+                self.remember_front();
                 self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 // Any of these changes the offset, and a stale estimate shows
                 // up as a spur that was not there a moment ago.
@@ -2855,7 +2898,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 &entry,
                 r,
                 self.plan.center,
-                self.gain,
+                &self.front,
                 self.dev.asked_ppm(),
                 self.dev.offset(),
             ) {
@@ -2873,6 +2916,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             return Flow::Go;
         }
         self.plan.rate = self.dev.rate().as_f64();
+        self.remember_front();
+        self.status.set_radio(RadioControls::read(self.dev.as_ref()));
         self.needs_rebuild = true;
         Flow::Go
     }
@@ -3118,7 +3163,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 entry.as_ref().expect("the loop runs only where there is one"),
                 Sps(self.plan.rate as u64),
                 self.plan.center,
-                self.gain,
+                &self.front,
                 self.dev.asked_ppm(),
                 self.dev.offset(),
             ) {
@@ -6337,5 +6382,158 @@ mod zoom_tests {
             "captures that keep up now and should come off KNOWN_SLOW:\n{}",
             recovered.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod front_end_tests {
+    use super::*;
+    use common::{Device, DeviceInfo, DriverKind, GainStage, Toggle, TunerRange};
+
+    /// A radio with three stages that quantise, a switch, and a "tuner"
+    /// handle that distributes a total across the stages. All three
+    /// behaviours a reopen has to survive, and all three a HackRF has.
+    struct ThreeStages {
+        info: DeviceInfo,
+        tuning: common::Tuning,
+        amp: bool,
+        lna: u32,
+        vga: u32,
+        bias_tee: bool,
+    }
+
+    impl ThreeStages {
+        fn new() -> Self {
+            let stage = |name: &str, hi: f32, step: f32| GainStage {
+                name: name.into(),
+                label: name.into(),
+                range: 0.0..=hi,
+                values: Vec::new(),
+                step,
+                auto: false,
+            };
+            Self {
+                info: DeviceInfo {
+                    kind: DriverKind::HackRf,
+                    id: "stub".into(),
+                    label: "Stub".into(),
+                    tuner: "none".into(),
+                    ranges: vec![TunerRange { label: "rx", range: Hz(1_000_000)..=Hz(6_000_000_000) }],
+                    rates: Vec::new(),
+                    rate_range: Sps(2_000_000)..=Sps(20_000_000),
+                    gain_stages: vec![
+                        stage("amp", 14.0, 14.0),
+                        stage("lna", 40.0, 8.0),
+                        stage("vga", 62.0, 2.0),
+                    ],
+                    native_format: common::SampleFormat::Cs8,
+                    usable_bandwidth_ratio: 0.75,
+                    tx: None,
+                },
+                tuning: common::Tuning::default(),
+                amp: false,
+                lna: 0,
+                vga: 0,
+                bias_tee: false,
+            }
+        }
+    }
+
+    impl common::Device for ThreeStages {
+        fn info(&self) -> &DeviceInfo {
+            &self.info
+        }
+        fn set_center(&mut self, _f: Hz) -> common::Result<()> {
+            Ok(())
+        }
+        fn center(&self) -> Hz {
+            Hz(100_000_000)
+        }
+        fn tuning(&self) -> &common::Tuning {
+            &self.tuning
+        }
+        fn tuning_mut(&mut self) -> &mut common::Tuning {
+            &mut self.tuning
+        }
+        fn set_rate(&mut self, _r: Sps) -> common::Result<()> {
+            Ok(())
+        }
+        fn rate(&self) -> Sps {
+            Sps(2_000_000)
+        }
+        fn set_gain(&mut self, stage: &str, mode: GainMode) -> common::Result<()> {
+            let db = match mode {
+                GainMode::Auto => 32.0,
+                GainMode::Manual(db) => db,
+            };
+            match stage {
+                "tuner" => {
+                    self.amp = db > 102.0;
+                    let rest = (db - if self.amp { 14.0 } else { 0.0 }).max(0.0);
+                    self.lna = ((rest / 2.0) as u32 / 8 * 8).min(40);
+                    self.vga = ((rest - self.lna as f32) as u32 / 2 * 2).min(62);
+                }
+                "amp" => self.amp = db >= 7.0,
+                "lna" => self.lna = (db as u32 / 8 * 8).min(40),
+                "vga" => self.vga = (db as u32 / 2 * 2).min(62),
+                _ => return Err(common::Error::other("no such stage")),
+            }
+            Ok(())
+        }
+        fn gains(&self) -> Vec<(String, GainMode)> {
+            vec![
+                ("amp".into(), GainMode::Manual(if self.amp { 14.0 } else { 0.0 })),
+                ("lna".into(), GainMode::Manual(self.lna as f32)),
+                ("vga".into(), GainMode::Manual(self.vga as f32)),
+            ]
+        }
+        fn toggles(&self) -> Vec<Toggle> {
+            vec![Toggle {
+                name: "bias_tee".into(),
+                label: "Bias tee".into(),
+                help: String::new(),
+                on: self.bias_tee,
+            }]
+        }
+        fn set_toggle(&mut self, name: &str, on: bool) -> common::Result<()> {
+            match name {
+                "bias_tee" => self.bias_tee = on,
+                _ => return Err(common::Error::other("no such switch")),
+            }
+            Ok(())
+        }
+        fn start_rx(&mut self) -> common::Result<Box<dyn common::RxStream>> {
+            Err(common::Error::other("not a real radio"))
+        }
+    }
+
+    /// Reopening for a span change puts every stage back, not the total: the
+    /// HackRF came back with the VGA at zero because only "tuner" was
+    /// remembered, and a driver that distributes a total does not land on
+    /// what the operator set stage by stage.
+    #[test]
+    fn a_reopen_restores_every_stage_and_switch() {
+        let mut was = ThreeStages::new();
+        was.set_gain("lna", GainMode::Manual(24.0)).unwrap();
+        was.set_gain("vga", GainMode::Manual(45.0)).unwrap();
+        was.set_gain("amp", GainMode::Manual(14.0)).unwrap();
+        was.set_toggle("bias_tee", true).unwrap();
+        // What the hardware landed on, which is not quite what was asked for.
+        assert_eq!(
+            was.gains(),
+            vec![
+                ("amp".to_string(), GainMode::Manual(14.0)),
+                ("lna".to_string(), GainMode::Manual(24.0)),
+                ("vga".to_string(), GainMode::Manual(44.0)),
+            ]
+        );
+
+        let front = FrontEnd::read(&was);
+        let mut back = ThreeStages::new();
+        assert_eq!(back.gains()[2].1, GainMode::Manual(0.0), "a fresh device is at its defaults");
+        front.apply(&mut back);
+
+        assert_eq!(back.gains(), was.gains());
+        assert!(back.bias_tee, "the bias tee is a front end setting and goes back too");
     }
 }
