@@ -12,6 +12,7 @@ pub mod biphase;
 pub mod ble;
 pub mod ble_coded;
 pub mod blend;
+pub mod bpsk;
 pub mod c4fm;
 pub mod channelizer;
 pub mod classify;

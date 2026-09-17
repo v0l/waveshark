@@ -7,6 +7,7 @@
 //! reconfiguration rather than a recompile.
 
 pub mod acars_nodes;
+pub mod aero_nodes;
 pub mod ais_nodes;
 pub mod aprs_nodes;
 pub mod apt_nodes;
@@ -60,6 +61,7 @@ pub mod scope_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod sstv_nodes;
+pub mod stdc_nodes;
 pub mod sub_tx;
 pub mod survey_nodes;
 pub mod tetra_nodes;
@@ -251,6 +253,8 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (wmbus_nodes::DESC, wmbus_nodes::build),
     (dfm_nodes::DESC, dfm_nodes::build),
     (epirb_nodes::DESC, epirb_nodes::build),
+    (stdc_nodes::DESC, stdc_nodes::build),
+    (aero_nodes::DESC, aero_nodes::build),
     (imet_nodes::DESC, imet_nodes::build),
     (lms6_nodes::DESC, lms6_nodes::build),
     (m10_nodes::DESC, m10_nodes::build),
