@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- DAB ensembles on band III: the ensemble name, its stations, their programme
+  types and bit rates. No sound yet.
 - The trace and the waterfall each choose what a point shows out of the frame
   behind it: the newest transform, the mean, or the loudest.
 - The memory bank reads Chirp, CSV, Freqman and SDR# lists, and exports as

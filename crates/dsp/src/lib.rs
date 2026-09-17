@@ -20,6 +20,7 @@ pub mod conv;
 pub mod ctcss;
 pub mod cw;
 pub mod d8psk;
+pub mod dab;
 pub mod dc;
 pub mod dcs;
 pub mod demod;

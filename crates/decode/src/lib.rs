@@ -26,6 +26,7 @@ pub mod ble;
 pub mod ccsds;
 pub mod channel_keys;
 pub(crate) mod crypto;
+pub mod dab;
 pub mod dfm;
 pub mod dmr;
 pub mod dmr_bp;
