@@ -901,6 +901,8 @@ pub(super) struct AudioState {
     /// because the key moves when the panel relaids itself and a transmission
     /// must not.
     pub keying: Keying,
+    /// The `.sub` file the SUB transmit source plays, as parsed.
+    pub sub_pick: SubPick,
 }
 
 /// What the transmit key is doing: which channel it is keying, and whether it
@@ -910,6 +912,62 @@ pub struct Keying {
     pub at: Option<u64>,
     /// Latched, so letting the pointer go leaves the carrier up.
     pub latched: bool,
+}
+
+/// The `.sub` file loaded for the SUB transmit source, as the interface
+/// parsed it. One at a time: the radio has one transmitter and the file is
+/// what a channel keys, not a library.
+#[derive(Default)]
+pub(super) struct SubPick {
+    /// The loaded file, held so the strip can show what it keys.
+    pub file: Option<crate::radio::SubFile>,
+    /// Why the last file would not play, said once.
+    pub fault: Option<String>,
+    picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
+}
+
+impl SubPick {
+    /// Ask for a `.sub` file.
+    pub fn ask(&mut self, ctx: &egui::Context) {
+        if self.picking.is_some() {
+            return;
+        }
+        let start = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("Downloads"))
+            .filter(|d| d.is_dir())
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .unwrap_or_default();
+        let ctx = ctx.clone();
+        self.picking = Some(poll_promise::Promise::spawn_thread("open sub", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Choose a Flipper .sub file")
+                .set_directory(&start)
+                .add_filter("Flipper SubGhz", &["sub"])
+                .pick_file();
+            // Nothing is drawing while the dialog is up, so the frame that
+            // reads this has to be asked for.
+            ctx.request_repaint();
+            picked
+        }));
+    }
+
+    /// Take the file the dialog came back with, once it has.
+    pub fn poll(&mut self, cmds: &mut Vec<crate::radio::Cmd>) {
+        if self.picking.as_ref().is_none_or(|p| p.ready().is_none()) {
+            return;
+        }
+        let Some(path) = self.picking.take().and_then(|p| p.block_and_take()) else {
+            return;
+        };
+        match crate::radio::SubFile::open(&path) {
+            Ok(f) => {
+                self.fault = None;
+                cmds.push(crate::radio::Cmd::SubFile(Some(f)));
+            }
+            Err(e) => self.fault = Some(format!("{}: {e}", path.display())),
+        }
+    }
 }
 
 impl Default for AudioState {
@@ -926,6 +984,7 @@ impl Default for AudioState {
             call_agc: true,
             levels_rev: 0,
             keying: Keying::default(),
+            sub_pick: SubPick::default(),
         }
     }
 }

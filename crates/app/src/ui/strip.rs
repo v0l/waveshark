@@ -4,7 +4,7 @@
 use super::state::AudioState;
 use super::*;
 use crate::chain::derived;
-use crate::radio::TxSource;
+use crate::radio::{SubFile, TxSource};
 use pipeline::param::ParamValue;
 
 /// What the strip wants done that it cannot do itself.
@@ -417,6 +417,8 @@ impl Strip<'_> {
         keying: &mut crate::ui::state::Keying,
         cmds: &mut Vec<Cmd>,
         source: Option<(usize, String)>,
+        sub_file: Option<&SubFile>,
+        sub_pick: &mut super::state::SubPick,
         files: &mut super::state::FilePick,
         air: &crate::agent::channel::AgentChannel,
         air_fault: Option<&'static str>,
@@ -452,7 +454,7 @@ impl Strip<'_> {
         if !digital {
             ui.horizontal(|ui| {
                 theme::Line::new().legend("src").show(ui);
-                for src in [TxSource::Mic, TxSource::Tone, TxSource::Agent] {
+                for src in [TxSource::Mic, TxSource::Tone, TxSource::Agent, TxSource::Sub] {
                     if ui.selectable_label(tx.source == src, src.label()).clicked() {
                         tx.source = src;
                         changed = true;
@@ -484,6 +486,57 @@ impl Strip<'_> {
             // Nothing: the panel where the key would be says what the agent
             // is doing, which is the same thing said better.
             TxSource::Agent => {}
+            TxSource::Sub => {
+                // The file is parsed on the interface and handed to the
+                // radio thread whole (`Cmd::SubFile`), so the chain reads
+                // what was checked rather than re-reading a path mid-over.
+                let name = sub_file.map_or_else(
+                    || "nothing: choose a .sub".to_string(),
+                    |f| {
+                        std::path::Path::new(&f.path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| f.path.clone())
+                    },
+                );
+                ui.horizontal(|ui| {
+                    theme::Line::new().legend("file").show(ui);
+                    if ui
+                        .button("OPEN")
+                        .on_hover_text("Choose a Flipper .sub file to replay")
+                        .clicked()
+                    {
+                        sub_pick.ask(ui.ctx());
+                    }
+                    if let Some(f) = sub_file {
+                        if ui.button("CLEAR").on_hover_text("Transmit nothing").clicked() {
+                            cmds.push(Cmd::SubFile(None));
+                            changed = true;
+                        }
+                        theme::Line::new()
+                            .value(format!(
+                                "{} {:.4} MHz {}",
+                                f.label(),
+                                f.file.frequency as f64 / 1e6,
+                                f.file.preset.label()
+                            ))
+                            .size(11.0)
+                            .show(ui);
+                    }
+                    theme::Line::new().value(name).size(11.0).elided(ui);
+                });
+                if let Some(f) = sub_file {
+                    if f.file.frequency != (ch.freq + tx.shift_hz) as u64
+                        && ui
+                            .button("TUNE")
+                            .on_hover_text("Move the dial to the file's own frequency")
+                            .clicked()
+                    {
+                        cmds.push(Cmd::Center(common::Hz(f.file.frequency)));
+                        changed = true;
+                    }
+                }
+            }
             _ if digital => {
                 let (node, path) = source.unzip();
                 let path = path.unwrap_or_default();
@@ -1049,6 +1102,7 @@ impl Strip<'_> {
                                     }
                                 }
                             }
+                            let sub_file = self.st.sub_pick.file.clone();
                             if can_tx
                                 && Self::channel_tx(
                                     ui,
@@ -1059,6 +1113,8 @@ impl Strip<'_> {
                                     &mut self.st.keying,
                                     self.cmds,
                                     tx_source_file(self.chain),
+                                    sub_file.as_ref(),
+                                    &mut self.st.sub_pick,
                                     self.files,
                                     self.air,
                                     self.air_fault,

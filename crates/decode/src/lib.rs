@@ -69,6 +69,7 @@ pub mod rs41;
 pub mod rtty;
 pub mod slicer;
 pub mod sstv;
+pub mod subghz;
 #[cfg(feature = "tea")]
 pub mod ta61;
 #[cfg(feature = "tea")]

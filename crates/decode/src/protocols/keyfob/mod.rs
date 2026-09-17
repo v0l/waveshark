@@ -16,6 +16,7 @@
 //! opposite bit polarity from waveshark's slicer, `find_and_parse` is told
 //! to invert.
 
+pub mod encode;
 pub mod shared;
 
 mod ansonic;
@@ -32,6 +33,7 @@ mod princeton;
 pub use ansonic::Ansonic;
 pub use bett::Bett;
 pub use came::{came12_bit, came24_bit};
+pub use encode::{INTER_FRAME_GAP_US, frame as encode_frame, repeated, silence};
 pub use holtek::Holtek;
 pub use holtek_ht12x::HoltekHt12x;
 pub use keeloq::KeeLoq;

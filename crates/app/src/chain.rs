@@ -477,6 +477,10 @@ impl TxPlan {
             && a.source == b.source
             && a.mic_gain == b.mic_gain
             && a.tone_hz == b.tone_hz
+            // A different file is a different chain, even though nothing
+            // in the stages' settings says so: the file rides on the sinks.
+            && a.source != crate::radio::TxSource::Sub
+            && b.source != crate::radio::TxSource::Sub
     }
 }
 
@@ -594,6 +598,8 @@ pub struct TxSinks {
     pub stream: Option<Box<dyn common::TxStream>>,
     /// The microphone, when the channel transmits from one.
     pub mic: Option<std::sync::Arc<dyn audio::AudioSource>>,
+    /// The parsed `.sub` file, when the channel transmits one.
+    pub sub: Option<crate::radio::SubFile>,
 }
 
 impl Plan {
@@ -671,6 +677,9 @@ impl Receiver {
     fn tx_source_of(&self, plan: &Plan) -> Option<std::sync::Arc<dyn audio::AudioSource>> {
         match plan.tx.map(|t| t.spec.source) {
             Some(crate::radio::TxSource::Agent) => self.voice.clone(),
+            // A `.sub` file is on the source node already, handed in whole;
+            // there is no audio source to offer it.
+            Some(crate::radio::TxSource::Sub) => None,
             _ => self.mic.clone(),
         }
     }
@@ -942,7 +951,7 @@ impl Receiver {
             match tx.as_mut() {
                 Some(t) if t.mic.is_none() => t.mic = Some(src),
                 Some(_) => {}
-                None => tx = Some(TxSinks { stream: None, mic: Some(src) }),
+                None => tx = Some(TxSinks { stream: None, mic: Some(src), sub: None }),
             }
         }
         self.assemble_without_refusals(plan, pool, ring, tx, retuned)?;
@@ -1048,8 +1057,11 @@ impl Receiver {
                     // feeds the source stage is handed in again, and it is
                     // whichever the plan says: an agent channel rebuilt round
                     // a refusal must not come back reading the room.
-                    sinks_tx =
-                        self.tx_source_of(plan).map(|src| TxSinks { stream: None, mic: Some(src) });
+                    sinks_tx = self.tx_source_of(plan).map(|src| TxSinks {
+                        stream: None,
+                        mic: Some(src),
+                        sub: None,
+                    });
                 }
             }
         }
@@ -2923,23 +2935,51 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     s.insert("level".into(), pipeline::ParamValue::Float(level));
                     ("tone", s)
                 }
+                // A saved signal is a pulse source and nothing else: the
+                // file's timings are what a remote sent, so there is no
+                // band to limit and no emphasis to predistort. The
+                // modulator below is the same OOK keyer Morse reuses,
+                // because every async OOK `.sub` is keyed carrier whatever
+                // protocol its capture was of.
+                TxSource::Sub => ("sub_tx", Settings::new()),
             };
-            settings.insert("low_hz".into(), pipeline::ParamValue::Float(band.0));
-            settings.insert("high_hz".into(), pipeline::ParamValue::Float(band.1));
+            // A pulse source has no audio band to limit; the settings are
+            // only ever a microphone's and a tone's.
+            if tx.spec.source != TxSource::Sub {
+                settings.insert("low_hz".into(), pipeline::ParamValue::Float(band.0));
+                settings.insert("high_hz".into(), pipeline::ParamValue::Float(band.1));
+            }
             p.add_derived(derived::TX_SOURCE, kind, settings);
             p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::TX_SOURCE, 0));
 
-            let (mod_kind, deviation) = match tx.mode {
-                TxMode::Nfm | TxMode::Carrier => ("fm_mod", nodes::NBFM_DEVIATION_HZ),
-                TxMode::Fm => ("fm_mod", nodes::FM_DEVIATION_HZ),
-                TxMode::Wfm => ("fm_mod", nodes::WBFM_DEVIATION_HZ),
-                TxMode::Am => ("am_mod", 0.0),
-                TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+            // A `.sub` file is keyed carrier: its own pulses through the
+            // OOK keyer rather than one of the voice modulators.
+            let (mod_kind, m) = if tx.spec.source == TxSource::Sub {
+                let mut m = Settings::new();
+                m.insert("offset_hz".into(), pipeline::ParamValue::Float(0.0));
+                m.insert("ramp_us".into(), pipeline::ParamValue::Float(500.0));
+                ("ook_mod", m)
+            } else {
+                let deviation = match tx.mode {
+                    TxMode::Nfm | TxMode::Carrier => nodes::NBFM_DEVIATION_HZ,
+                    TxMode::Fm => nodes::FM_DEVIATION_HZ,
+                    TxMode::Wfm => nodes::WBFM_DEVIATION_HZ,
+                    TxMode::Am => 0.0,
+                    TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+                };
+                let mut m = Settings::new();
+                if deviation > 0.0 {
+                    m.insert("deviation_hz".into(), pipeline::ParamValue::Float(deviation));
+                }
+                (
+                    match tx.mode {
+                        TxMode::Nfm | TxMode::Fm | TxMode::Carrier | TxMode::Wfm => "fm_mod",
+                        TxMode::Am => "am_mod",
+                        TxMode::Digital(_) => unreachable!("a data mode took the branch above"),
+                    },
+                    m,
+                )
             };
-            let mut m = Settings::new();
-            if deviation > 0.0 {
-                m.insert("deviation_hz".into(), pipeline::ParamValue::Float(deviation));
-            }
             p.add_derived(derived::TX_MOD, mod_kind, m);
             p.connect(Source::Stage(derived::TX_SOURCE, 0), (derived::TX_MOD, 0));
         }
@@ -4333,6 +4373,18 @@ fn add_patch(
                 Some(s) => Box::new(nodes::TxSinkNode::new(s)) as Box<dyn pipeline::node::Node>,
                 None => Box::new(nodes::TxSinkNode::idle()) as Box<dyn pipeline::node::Node>,
             },
+            // The `.sub` file is handed in whole, the way the microphone
+            // and the radio are: what the stage holds is the parsed file,
+            // and a stage built without one stays silent until a rebuild
+            // after a file is chosen. The setting marks that a file came
+            // with this rebuild, so a pooled node holding the previous
+            // file is not reused.
+            None if st.kind == "sub_tx" => {
+                let file = tx.as_ref().and_then(|t| t.sub.as_ref().map(|f| f.file.clone()));
+                let mut settings = st.settings.clone();
+                settings.insert("file_loaded".into(), pipeline::ParamValue::Bool(file.is_some()));
+                Box::new(nodes::SubTxNode::new(file)) as Box<dyn pipeline::node::Node>
+            }
             // The receive side of the same microphone: a decoder that reads
             // audio, fed from the device rather than from the air.
             None if st.kind == "mic_in" => {
@@ -6621,17 +6673,28 @@ pub fn transmit_graph(
             return Err(common::Error::other("the agent has nothing open to transmit from"));
         }
         (TxSource::Tone, _) => Box::new(nodes::ToneNode::new(tx.tone_hz.max(1.0), level)),
+        // A `.sub` source needs no audio at all; its file is handed in on
+        // the node rather than in `mic`.
+        (TxSource::Sub, _) => Box::new(nodes::SubTxNode::default()),
     };
-    let modulator: Box<dyn pipeline::Node> = match mode {
-        TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
-        TxMode::Fm => Box::new(nodes::FmModNode::new(0.0, nodes::FM_DEVIATION_HZ, 0.25)),
-        TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
-        TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
-        // This builds the audio transmitter on its own, for a test of the
-        // modulators. A data mode's chain is a source and a modulator off
-        // the registry, which `derived_patch` draws and the receiver runs.
-        TxMode::Digital(id) => {
-            return Err(common::Error::other(format!("{id} transmits from the receiver's patch")));
+    let modulator: Box<dyn pipeline::Node> = if tx.source == TxSource::Sub {
+        // A `.sub` file is keyed carrier whatever the channel's mode is:
+        // its pulses are what a remote sent, not audio to deviation.
+        Box::new(nodes::OokModNode::new(0.0, 1.0, 500.0))
+    } else {
+        match mode {
+            TxMode::Nfm | TxMode::Carrier => Box::new(nodes::FmModNode::narrowband(0.0)),
+            TxMode::Fm => Box::new(nodes::FmModNode::new(0.0, nodes::FM_DEVIATION_HZ, 0.25)),
+            TxMode::Wfm => Box::new(nodes::FmModNode::wideband(0.0)),
+            TxMode::Am => Box::new(nodes::AmModNode::new(0.0, 0.8, 0.25)),
+            // This builds the audio transmitter on its own, for a test of the
+            // modulators. A data mode's chain is a source and a modulator off
+            // the registry, which `derived_patch` draws and the receiver runs.
+            TxMode::Digital(id) => {
+                return Err(common::Error::other(format!(
+                    "{id} transmits from the receiver's patch"
+                )));
+            }
         }
     };
     pipeline::chain(input, vec![head, modulator, Box::new(nodes::TxSinkNode::new(stream))])
@@ -7503,7 +7566,11 @@ mod tx_in_graph_tests {
         plan.channels[0].offset_hz += 25_000.0;
         plan.tx.as_mut().unwrap().on_air = Hz(446_074_000);
         let radio = Counted::default();
-        rx.set_transmitter(Some(TxSinks { stream: Some(Box::new(radio.clone())), mic: None }));
+        rx.set_transmitter(Some(TxSinks {
+            stream: Some(Box::new(radio.clone())),
+            mic: None,
+            sub: None,
+        }));
         rx.rebuild(&plan).unwrap();
 
         assert!(rx.tx_on_air(), "the radio never reached the chain");
@@ -7861,7 +7928,7 @@ mod tx_in_graph_tests {
 
         let src: std::sync::Arc<dyn audio::AudioSource> =
             std::sync::Arc::new(audio::Canned::new(vec![0.0; 4_800], 48_000.0, true));
-        rx.set_transmitter(Some(TxSinks { stream: None, mic: Some(src) }));
+        rx.set_transmitter(Some(TxSinks { stream: None, mic: Some(src), sub: None }));
         rx.rebuild(&plan).unwrap();
         assert!(mic(&rx), "the microphone stage did not appear");
         assert!(

@@ -21,6 +21,10 @@ the code is in the commit log.
 - Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
 - Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.
+- Flipper `.sub` files on the transmit strip: a saved capture or key file keyed
+  as it stands, at the frequency the file names. RAW plays its recorded
+  timings; Princeton, CAME, Nice FLO, Holtek, Ansonic, BETT, Linear and
+  LinearDelta3 key files are re-encoded from their key.
 - The agent and the MCP server reach the settings: the scanner table, the
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.

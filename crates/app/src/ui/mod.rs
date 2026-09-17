@@ -2617,6 +2617,8 @@ impl eframe::App for App {
         // and the transcript filled in a soak run and stayed empty in use.
         self.poll_capture(ui.ctx());
         self.pick_file.poll(&mut self.cmds);
+        // The `.sub` dialog lands its file as a command like any other.
+        self.audio.sub_pick.poll(&mut self.cmds);
         self.read_heard();
         self.read_said();
         self.soak_check(ui.ctx());
