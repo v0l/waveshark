@@ -660,3 +660,35 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "6e5ff6c98c1f6e4239855030a154e68933457db178c20418e45f740d338b4e30"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/Renault_TPMS/gfile091.json"
 description = "A second Renault wheel, 227.25 kPa at 27 C, the id little-endian in the middle of the frame"
+
+[[sample]]
+name = "ert_scm_a_912.6M_2400k.cu8"
+sha256 = "f028c5690a6dd0e4aca3c9cbb32003ec304ff3c00c5f5ce858791d7ece25883c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ert/scm/01/g001_912.6M_2400k.cu8"
+reference_sha256 = "7608ca6fa239c62e6a7bf0cfcffc64b8828ea874ddd8219715243dcf9c83ba93"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ert/scm/01/g001_912.6M_2400k.json"
+description = "An Itron gas meter reading 562456, Manchester on-off keying at 32768 chips a second, the first ERT capture here"
+
+[[sample]]
+name = "ert_scm_b_912.6M_2400k.cu8"
+sha256 = "876d2a93304a8d532c1d742b5f5af1ca84fc5d81fd3d8ddec5bfaa49ca84a542"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ert/scm/01/g002_912.6M_2400k.cu8"
+reference_sha256 = "4df26a809066f8857f97e1281179ed4187d0cd0898b2f145a02db81c06a8812b"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ert/scm/01/g002_912.6M_2400k.json"
+description = "A second meter three minutes later, reading 727018 with a different tamper flag"
+
+[[sample]]
+name = "ert_scmplus_912.6M_2359.3k.cu8"
+sha256 = "57b280f63ae8d1e2e9cc10405a7460f4013be9869eb8e002f63fff75ad37644b"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/scmplus/01/g002_912.6M_2359.3k.cu8"
+reference_sha256 = "a8162843f713a618ab762d197d760d7993557843fce7cfa3389c765be8334244"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/scmplus/01/g002_912.6M_2359.3k.json"
+description = "A water meter sending SCM+, the longer message behind a 24 bit sync and a CRC-16 instead of the BCH check"
+
+[[sample]]
+name = "ert_idm_912.6M_2359.3k.cu8"
+sha256 = "20504e4969c908622b7ca34bef759dd16de88df5c2e1392f472f4a36caac4b6c"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/idm/IDM/g002_912.6M_2359.3k.cu8"
+reference_sha256 = "1a8c80a3d6a77dc3d80bd66dcf8c8025ab70e76c691a9d4de13e69d8b41a5170"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/idm/IDM/g002_912.6M_2359.3k.json"
+description = "An electricity meter sending IDM, 90 bytes carrying the reading and the 47 five-minute differences before it"

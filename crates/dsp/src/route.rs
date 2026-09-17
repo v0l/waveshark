@@ -313,7 +313,7 @@ impl BurstRouter {
             }
             Modulation::Ook => {
                 self.stats.to_ook += 1;
-                self.run_ook(&burst, &mut packages);
+                self.run_ook(&burst, class.features.baud, &mut packages);
                 common::FrontEnd::Ook
             }
             Modulation::Ask => {
@@ -342,7 +342,7 @@ impl BurstRouter {
             }
             Modulation::Unknown => {
                 self.stats.refused += 1;
-                self.run_ook(&burst, &mut packages);
+                self.run_ook(&burst, class.features.baud, &mut packages);
                 self.run_fsk(&burst, &mut packages);
                 common::FrontEnd::OokFsk
             }
@@ -363,10 +363,10 @@ impl BurstRouter {
         });
     }
 
-    fn run_ook(&mut self, burst: &[C32], out: &mut Vec<Package>) {
+    fn run_ook(&mut self, burst: &[C32], baud: f32, out: &mut Vec<Package>) {
         self.env.clear();
         self.env.extend(burst.iter().map(|c| c.norm()));
-        let mut det = OokDetector::new(self.rate, self.cfg.ook);
+        let mut det = OokDetector::new(self.rate, self.ook_config(baud));
         let from = out.len();
         det.process(&self.env, out);
         det.flush(out);
@@ -389,6 +389,28 @@ impl BurstRouter {
         det.process(burst, out);
         det.flush(out);
         Self::stamp(&mut out[from..], self.burst_start, common::Modulation::Fsk2);
+    }
+
+    /// The shortest credible mark, given what the burst was measured to be.
+    ///
+    /// The stock floor of 100 us suits a sensor sending 500 us symbols and
+    /// throws away every pulse of an Itron ERT meter, which is Manchester at
+    /// 32768 chips a second and so keys marks of 30 us. The classifier has
+    /// already measured the symbol rate, and a mark cannot be shorter than
+    /// half a symbol, so a burst keyed faster than the floor lowers it for
+    /// itself.
+    ///
+    /// Only downwards: a slow burst keeps the stock floor. Lowering it for
+    /// everything was tried and costs the Fine Offset capture, where a 32 us
+    /// glitch inside the burst then survives as a ninetieth pulse and the PWM
+    /// frame no longer slices.
+    fn ook_config(&self, baud: f32) -> PulseConfig {
+        let mut cfg = self.cfg.ook;
+        if baud > 0.0 {
+            let half_symbol_us = (5e5 / baud) as u32;
+            cfg.min_mark_us = cfg.min_mark_us.min(half_symbol_us).max(5);
+        }
+        cfg
     }
 
     /// Put the package back on the stream's own timeline, and record which
@@ -498,6 +520,39 @@ mod tests {
         );
         assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
         assert_eq!(r.take_stats().to_ook, 1);
+    }
+
+    /// A burst keyed faster than the stock 100 us floor still produces
+    /// pulses, because the classifier measured the rate and the front end
+    /// took its floor from that. At 30 us a symbol, which is what an ERT
+    /// meter keys, every mark is under the stock floor and the burst would
+    /// otherwise arrive empty.
+    #[test]
+    fn a_burst_keyed_faster_than_the_stock_floor_still_produces_pulses() {
+        let (bursts, _) = route(&ook_burst(&pattern(400), 30));
+        assert_eq!(bursts.len(), 1);
+        let marks: Vec<u32> =
+            bursts[0].packages.iter().flat_map(|p| p.pulses.iter()).map(|p| p.mark).collect();
+        assert!(marks.len() >= 80, "only {} pulses, marks {marks:?}", marks.len());
+        assert!(
+            marks.iter().all(|m| *m <= 200),
+            "a mark of {:?} us is not 30 us keying",
+            marks.iter().max()
+        );
+    }
+
+    /// And a slow burst keeps the stock floor, so a glitch inside it is still
+    /// thrown away rather than sliced as a symbol.
+    #[test]
+    fn a_slowly_keyed_burst_keeps_the_stock_floor() {
+        let cfg = RouterConfig {
+            classify: ClassifyConfig { channel_hz: RATE as f32, ..Default::default() },
+            ..Default::default()
+        };
+        let r = BurstRouter::new(RATE, cfg);
+        assert_eq!(r.ook_config(2_000.0).min_mark_us, 100, "500 us symbols keep the stock floor");
+        assert_eq!(r.ook_config(32_768.0).min_mark_us, 15, "a 30 us chip halves to 15");
+        assert_eq!(r.ook_config(0.0).min_mark_us, 100, "nothing measured, nothing changed");
     }
 
     #[test]
