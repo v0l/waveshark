@@ -22,6 +22,9 @@ pub struct Entry {
     /// The one frequency this device delivers, when the tuner is somebody
     /// else's and cannot be moved from here.
     pub pinned: Option<common::Hz>,
+    /// The radios this entry is made of, for a receiver that is several
+    /// tuners stitched into one span. Empty for a single radio.
+    pub parts: Vec<Entry>,
 }
 
 impl Entry {
@@ -31,8 +34,42 @@ impl Entry {
         label: String,
         rates: std::ops::RangeInclusive<Sps>,
     ) -> Self {
-        Self { kind, index, label, rates, addr: None, path: None, pinned: None }
+        Self { kind, index, label, rates, addr: None, path: None, pinned: None, parts: Vec::new() }
     }
+}
+
+/// Offer every set of matching radios as one wider receiver.
+///
+/// Same driver and same rates, because the slices have to be the same width
+/// and the same shape: a 2.4 MS/s dongle next to a HackRF is two different
+/// front ends with two different rolloffs, and the seam between them would
+/// move with the rate. Two dongles are one entry, three are one entry of
+/// three rather than three pairs, because somebody who has plugged in three
+/// wants the span they paid for.
+fn combinations(hw: &[Entry]) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for kind in [DriverKind::RtlSdr, DriverKind::HackRf, DriverKind::LimeSdr] {
+        let parts: Vec<Entry> = hw.iter().filter(|e| e.kind == kind).cloned().collect();
+        let n = parts.len();
+        if n < 2 || parts.iter().any(|e| e.rates != parts[0].rates) {
+            continue;
+        }
+        let each = parts[0].rates.end().0;
+        let span = Sps(each * n as u64);
+        out.push(Entry {
+            kind: DriverKind::Combined,
+            index: out.len(),
+            label: format!("{n} x {} ({})", kind.as_str(), label(span.as_f64())),
+            // The widest span and nothing else: a combiner exists to buy
+            // span, and a narrower one is one of the radios on its own.
+            rates: span..=span,
+            addr: None,
+            path: None,
+            pinned: None,
+            parts,
+        });
+    }
+    out
 }
 
 /// Rates an RTL-SDR will accept. See `rtlsdr::RtlSdr::open` for why the
@@ -70,6 +107,9 @@ pub fn list() -> Vec<Entry> {
             Sps(1_000_000)..=e.rate_max(),
         ));
     }
+    // After the radios themselves: a stitched receiver is a thing somebody
+    // chooses, not what a fresh session should open on.
+    v.extend(combinations(&v));
     for (i, r) in streams().into_iter().enumerate() {
         v.push(stream_entry(i, &r));
     }
@@ -113,6 +153,7 @@ impl Capture {
             // it. Retuning would leave the dial saying one thing while the
             // samples said another.
             pinned: self.center,
+            parts: Vec::new(),
         }
     }
 }
@@ -221,6 +262,7 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
             addr: Some(p.addr),
             path: None,
             pinned: Some(p.center),
+            parts: Vec::new(),
         },
         Err(e) => {
             tracing::debug!("iqstream {}: {e}", r.addr);
@@ -232,6 +274,7 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
                 addr: Some(r.addr.clone()),
                 path: None,
                 pinned: None,
+                parts: Vec::new(),
             }
         }
     }
@@ -252,6 +295,14 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
         DriverKind::IqStream => {
             let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
             Ok(Box::new(iqnet::IqNet::open(addr)?))
+        }
+        DriverKind::Combined => {
+            let mut kids = Vec::with_capacity(e.parts.len());
+            for p in &e.parts {
+                kids.push(open(p)?);
+            }
+            let each = Sps(e.rates.end().0 / e.parts.len().max(1) as u64);
+            Ok(Box::new(sources::Combined::at_rate(kids, Some(each))?))
         }
         DriverKind::File => {
             let path = e.path.as_deref().ok_or(Error::NoDevice)?;
@@ -482,6 +533,47 @@ mod tests {
         remove_capture(&path);
         assert!(!captures().iter().any(|x| x.path == path));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Two dongles are offered as one wider receiver, and the widest span is
+    /// the only one it is offered at.
+    #[test]
+    fn matching_dongles_are_offered_as_one_wider_receiver() {
+        let hw = vec![
+            Entry::local(DriverKind::RtlSdr, 0, "RTL a".into(), RTL_RATES),
+            Entry::local(DriverKind::RtlSdr, 1, "RTL b".into(), RTL_RATES),
+            Entry::local(DriverKind::HackRf, 0, "HackRF".into(), HACKRF_RATES),
+        ];
+        let combos = combinations(&hw);
+        assert_eq!(combos.len(), 1, "one HackRF cannot be combined with itself");
+        let c = &combos[0];
+        assert_eq!(c.kind, DriverKind::Combined);
+        assert_eq!(c.parts.len(), 2);
+        assert_eq!(c.rates, Sps(4_800_000)..=Sps(4_800_000));
+        assert_eq!(c.label, "2 x rtlsdr (4.800M)");
+        // And that one rate is offered as a span, which is the whole point:
+        // 4.8 MS/s is not one of the candidates.
+        assert!(spans_with_zoom(&c.rates).iter().any(|s| (s.rate - 4_800_000.0).abs() < 1.0));
+
+        // Three of them are one receiver of three, not three pairs.
+        let three: Vec<Entry> = (0..3)
+            .map(|i| Entry::local(DriverKind::RtlSdr, i, format!("RTL {i}"), RTL_RATES))
+            .collect();
+        let combos = combinations(&three);
+        assert_eq!(combos.len(), 1);
+        assert_eq!(combos[0].parts.len(), 3);
+        assert_eq!(combos[0].rates, Sps(7_200_000)..=Sps(7_200_000));
+
+        // Radios that cannot run at the same rate cannot be slices of one
+        // span: the seam would sit somewhere different for each.
+        let odd = vec![
+            Entry::local(DriverKind::RtlSdr, 0, "RTL a".into(), RTL_RATES),
+            Entry::local(DriverKind::RtlSdr, 1, "RTL b".into(), Sps(225_000)..=Sps(2_048_000)),
+        ];
+        assert!(combinations(&odd).is_empty());
+
+        // One radio on its own is a radio.
+        assert!(combinations(&hw[2..]).is_empty());
     }
 
     #[test]

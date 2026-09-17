@@ -65,13 +65,23 @@ impl Rational {
 
     /// Interpolate by `l` and decimate by `m`, whatever those mean in rates.
     pub fn with_ratio(l: usize, m: usize) -> Self {
-        assert!(l >= 1 && m >= 1);
-        let per_phase = 24;
         // Designed at the interpolated rate, stopping below whichever Nyquist
         // is lower: the input's when interpolating, the output's when
         // decimating. A tenth of margin keeps the transition out of the band
         // a decoder cares about.
-        let cutoff = 0.45 / l.max(m) as f64;
+        Self::with_cutoff(l, m, 0.45 / l.max(m) as f64)
+    }
+
+    /// The same with the passband edge stated, in cycles per sample of the
+    /// interpolated rate.
+    ///
+    /// For a caller that is cutting a stream into a share of a wider one
+    /// rather than changing its rate: several tuners stitched into one span
+    /// need each slice trimmed to exactly the width it owns, so the slices
+    /// tile instead of overlapping.
+    pub fn with_cutoff(l: usize, m: usize, cutoff: f64) -> Self {
+        assert!(l >= 1 && m >= 1);
+        let per_phase = 24;
         let taps = crate::fir::lowpass((per_phase * l) | 1, cutoff, 60.0);
         let mut phases = vec![Vec::with_capacity(per_phase); l];
         for (p, phase) in phases.iter_mut().enumerate() {

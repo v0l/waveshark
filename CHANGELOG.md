@@ -13,6 +13,8 @@ the code is in the commit log.
 
 - The raw capture can be armed on energy: a file per burst, holding the signal
   from before it triggered.
+- Several matching tuners offered as one wider receiver, drift between them
+  measured on the band they share and taken out.
 - Heatmap export: the span kept as readings and written as a PNG, or as a page
   that gives the time, frequency and decibels under the pointer. Four colour
   ramps, the panel's own by default.

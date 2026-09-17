@@ -134,6 +134,7 @@ impl Scope<'_> {
         // plot and anything drawn under it there is washed out to the fill's
         // own colour. Kept to four pixels and a low alpha so it reads as a
         // margin note rather than as a signal.
+        self.seam_marks(&p, &plot);
         self.scan_marks(&p, &plot);
         self.source_marks(&p, &plot);
         self.faults(&p, &plot);
@@ -688,6 +689,39 @@ impl Scope<'_> {
                     Color32::from_rgb(0xE8, 0xEC, 0xF0),
                 );
             }
+        }
+    }
+
+    /// Where two tuners of a stitched span meet.
+    ///
+    /// Drawn because a signal on one of these is read by neither tuner whole:
+    /// the two sides carry their own rolloff and slip against each other in
+    /// time, so the operator has to be able to see that a carrier is sitting
+    /// on the join rather than wonder why it will not decode.
+    fn seam_marks(&self, p: &egui::Painter, plot: &Rect) {
+        let Some(r) = self.radio else { return };
+        let seams = r.status.radio().seams;
+        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        for hz in seams {
+            let x = self.x_of(plot, hz);
+            if !plot.x_range().contains(x) {
+                continue;
+            }
+            // Dashed, in the chassis's own edge colour: it is a property of
+            // the receiver rather than anything heard.
+            let mut y = plot.top();
+            while y < plot.bottom() {
+                let to = (y + 4.0).min(plot.bottom());
+                p.line_segment([Pos2::new(x, y), Pos2::new(x, to)], Stroke::new(1.0, theme::ETCH));
+                y += 8.0;
+            }
+            p.text(
+                Pos2::new(x + 3.0, plot.bottom() - 2.0),
+                Align2::LEFT_BOTTOM,
+                "seam",
+                font.clone(),
+                theme::LEGEND,
+            );
         }
     }
 
