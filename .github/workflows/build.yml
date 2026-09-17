@@ -220,9 +220,19 @@ jobs:
           dylibbundler -of -b -x target/${{ matrix.target }}/release/waveshark \
             -d dist-extra -p @executable_path/../Resources/
           cargo packager -p app -r --target ${{ matrix.target }} -f app -o "$PWD/dist"
+          # cargo-packager signs the Mach-O files it copies and never seals
+          # the bundle, and a quarantined bundle with no seal is "damaged" on
+          # Apple silicon rather than merely unnotarised. So the bundle is
+          # signed here, and the image is made with hdiutil rather than a
+          # second packager run, which would rebuild the .app and throw the
+          # seal away.
           codesign --force --deep --sign - dist/WaveShark.app
-          cargo packager -p app -r --target ${{ matrix.target }} -f dmg -o "$PWD/dist"
-          mv dist/*.dmg waveshark-${{ matrix.name }}.dmg
+          codesign --verify --deep --strict dist/WaveShark.app
+          mkdir -p dmgroot
+          cp -R dist/WaveShark.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname WaveShark -srcfolder dmgroot -ov -format UDZO \
+            waveshark-${{ matrix.name }}.dmg
 
       - name: Installers (windows)
         if: runner.os == 'Windows' && matrix.installers
