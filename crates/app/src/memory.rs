@@ -9,6 +9,8 @@
 //! wide, and what it is called. Levels and squelch are the strip's and are
 //! set against the signal on the day.
 
+pub mod formats;
+
 use crate::radio::{ChanMode, TxSource, TxSpec};
 use crate::scanners::{hz, num};
 use std::path::PathBuf;
@@ -100,6 +102,18 @@ impl Memory {
                 .unwrap_or(self.list.len());
             self.list.insert(at, s);
         }
+    }
+
+    /// Add a list read from somewhere else, correcting whatever is already
+    /// saved at the same frequency in the same group. Returns how many
+    /// entries the bank grew by, which is fewer than were read when a list
+    /// is imported twice.
+    pub fn merge(&mut self, list: Vec<Saved>) -> usize {
+        let before = self.list.len();
+        for s in list {
+            self.add(s);
+        }
+        self.list.len() - before
     }
 
     pub fn remove(&mut self, i: usize) {

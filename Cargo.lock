@@ -301,6 +301,7 @@ dependencies = [
  "clap",
  "common",
  "crossbeam-channel",
+ "csv",
  "datasets",
  "decode",
  "dsp",

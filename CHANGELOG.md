@@ -13,6 +13,8 @@ the code is in the commit log.
 
 - The trace and the waterfall each choose what a point shows out of the frame
   behind it: the newest transform, the mean, or the loudest.
+- The memory bank reads Chirp, CSV, Freqman and SDR# lists, and exports as
+  Chirp CSV.
 - A dataset that is downloading says how far it has got, in bytes and as a bar.
 - Transmit six protocols this receiver reads, on a channel already decoding
   one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements, SSTV

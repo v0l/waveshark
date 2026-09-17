@@ -219,8 +219,106 @@ impl App {
             self.recall(&s);
             self.open = None;
         }
+        section(ui, "lists", "read a list somebody else wrote, or take this one away", |ui| {
+            ui.horizontal(|ui| {
+                let busy = self.memory_io.is_some();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("IMPORT"))
+                    .on_hover_text(
+                        "a Chirp or plain CSV, a PortaPack Freqman .TXT, an SDR# \
+                             frequencies.xml, or a waveshark channels file",
+                    )
+                    .clicked()
+                {
+                    self.import_channels(ui.ctx());
+                }
+                if ui
+                    .add_enabled(!busy && !self.memory.list.is_empty(), egui::Button::new("EXPORT"))
+                    .on_hover_text("the whole bank as a Chirp CSV")
+                    .clicked()
+                {
+                    self.export_channels(ui.ctx());
+                }
+            });
+            if !self.memory_note.is_empty() {
+                let ok = !self.memory_note.starts_with("nothing");
+                lamp(ui, ok, &self.memory_note.clone());
+            }
+        });
         if let Some(p) = crate::memory::Memory::path() {
             theme::Line::new().note(p.display().to_string()).size(10.0).elided(ui);
+        }
+    }
+
+    /// Read a frequency list, whoever wrote it. The group a channel goes into
+    /// is the one its own list named, or the file's name where it named none.
+    fn import_channels(&mut self, ctx: &egui::Context) {
+        if self.memory_io.is_some() {
+            return;
+        }
+        let ctx = ctx.clone();
+        self.memory_io = Some(poll_promise::Promise::spawn_thread("import channels", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Import a frequency list")
+                .add_filter("Frequency lists", &["csv", "txt", "TXT", "xml", "channels"])
+                .add_filter("Anything", &["*"])
+                .pick_file();
+            ctx.request_repaint();
+            let Some(path) = picked else { return state::ListIo::Said(String::new()) };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => return state::ListIo::Said(format!("{}: {e}", path.display())),
+            };
+            let stem =
+                path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let (format, read) = crate::memory::formats::read(&text, &stem);
+            state::ListIo::Read(Box::new(read), format)
+        }));
+    }
+
+    /// The bank as a Chirp CSV, which is the export a handheld's programming
+    /// software will take.
+    fn export_channels(&mut self, ctx: &egui::Context) {
+        if self.memory_io.is_some() {
+            return;
+        }
+        let text = crate::memory::formats::write_csv(&self.memory);
+        let count = self.memory.list.len();
+        let ctx = ctx.clone();
+        self.memory_io = Some(poll_promise::Promise::spawn_thread("export channels", move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("Export the memory bank")
+                .set_file_name(crate::memory::formats::export_name())
+                .add_filter("CSV", &["csv"])
+                .save_file();
+            ctx.request_repaint();
+            let Some(path) = picked else { return state::ListIo::Said(String::new()) };
+            state::ListIo::Said(match std::fs::write(&path, text) {
+                Ok(()) => format!("{count} channels written to {}", path.display()),
+                Err(e) => format!("nothing written: {}: {e}", path.display()),
+            })
+        }));
+    }
+
+    /// Take the list the dialog came back with, once it has.
+    pub(super) fn poll_memory_io(&mut self) {
+        if self.memory_io.as_ref().is_none_or(|p| p.ready().is_none()) {
+            return;
+        }
+        let Some(io) = self.memory_io.take().map(|p| p.block_and_take()) else {
+            return;
+        };
+        match io {
+            state::ListIo::Said(s) => self.memory_note = s,
+            state::ListIo::Read(read, format) => {
+                let note = read.note(format);
+                let added = self.memory.merge(read.list);
+                self.memory_note = match added {
+                    0 => format!("nothing new: {note}"),
+                    n => format!("{note}, {n} new"),
+                };
+                let _ = self.memory.save();
+            }
         }
     }
 
