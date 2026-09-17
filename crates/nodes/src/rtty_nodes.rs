@@ -412,6 +412,142 @@ impl Protocol for Rtty {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// The line, then the shift a station keys: the narrow 170 Hz, since
+    /// that is what the default speed goes with and what the other end
+    /// expects on the amateur bands.
+    fn transmit(&self) -> Option<crate::protocol::TxChain> {
+        Some(crate::protocol::TxChain {
+            source: NodeSpec::new(RTTY_TX.name),
+            modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
+                .f("shift_hz", Shift::default().hz())
+                .f("offset_hz", 0.0),
+        })
+    }
+}
+
+/// Text as a keyed teleprinter line.
+///
+/// The transmit mirror of [`RttyNode`]: the Baudot codes come from
+/// [`decode::rtty::encode`], which is the table the receiver reads back, and
+/// each is framed as a start element of space, five data bits with the least
+/// significant first, and a stop element of mark.
+///
+/// The stop is two bit times rather than the teleprinter's one and a half,
+/// because the keyer works in whole bits and the receiver reads the stop as
+/// one element however long it is held. The line rests at mark before and
+/// after the over, which is what closes the run at the far end.
+pub struct RttyTxNode {
+    text: String,
+    speed: Speed,
+    shift: Shift,
+    keyer: crate::tx_nodes::Keyer,
+    rate: f64,
+}
+
+/// Bit times of resting mark in front of an over and behind it. The far end
+/// closes a run after 24 symbols with no character framed, so the tail has
+/// to be longer than that or two overs arrive as one.
+const IDLE_BITS: usize = 32;
+
+impl Default for RttyTxNode {
+    fn default() -> Self {
+        Self::new("", Speed::default(), Shift::default())
+    }
+}
+
+impl RttyTxNode {
+    pub fn new(text: &str, speed: Speed, shift: Shift) -> Self {
+        let mut n = Self {
+            text: text.into(),
+            speed,
+            shift,
+            keyer: crate::tx_nodes::Keyer::new(speed.baud(), 0.0),
+            rate: 0.0,
+        };
+        n.reload();
+        n
+    }
+
+    fn reload(&mut self) {
+        self.keyer.set_baud(self.speed.baud());
+        if self.text.is_empty() {
+            self.keyer.load(Vec::new());
+            return;
+        }
+        let mut bits = vec![true; IDLE_BITS];
+        for code in rtty::encode(&self.text) {
+            bits.push(false);
+            bits.extend((0..5).map(|k| code >> k & 1 != 0));
+            bits.extend([true, true]);
+        }
+        bits.extend(std::iter::repeat_n(true, IDLE_BITS));
+        self.keyer.load(bits);
+    }
+}
+
+impl Simple for RttyTxNode {
+    fn name(&self) -> &str {
+        RTTY_TX.name
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        vec![
+            ("keying".into(), format!("{} baud, {} Hz", self.speed, self.shift)),
+            ("overs".into(), self.keyer.passes().to_string()),
+        ]
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.rate <= 0.0 {
+            return Err(common::Error::other("rtty_tx needs a clock to key against"));
+        }
+        self.rate = i.spec.rate;
+        Ok(StreamSpec {
+            kind: PortKind::Pulses,
+            rate: i.spec.rate,
+            center: i.spec.center,
+            bandwidth: CHANNEL_WIDTH_HZ,
+            channels: 1,
+            flow: pipeline::port::Flow::Tx,
+            domain: pipeline::port::Domain::Baseband,
+        })
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        if i.is_empty() {
+            return Ok(());
+        }
+        let pkg = self.keyer.take(i.len(), self.rate);
+        if !pkg.pulses.is_empty() {
+            o.pulses_mut().push(pkg);
+        }
+        Ok(())
+    }
+
+    fn params(&self) -> Vec<Param> {
+        let speed = Speed::ALL.iter().position(|&s| s == self.speed).unwrap_or(0);
+        let shift = Shift::ALL.iter().position(|&s| s == self.shift).unwrap_or(0);
+        vec![
+            Param::text(TEXT, self.text.clone()).label("Over"),
+            Param::choice(SPEED, speed, Speed::ALL.iter().map(|s| s.to_string()).collect())
+                .label("Speed")
+                .unit("baud"),
+            Param::choice(SHIFT, shift, Shift::ALL.iter().map(|s| s.to_string()).collect())
+                .label("Shift")
+                .unit("Hz"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            TEXT => self.text = value.as_str().unwrap_or_default().to_string(),
+            SPEED => self.speed = speed_of(&value).unwrap_or_default(),
+            SHIFT => self.shift = shift_of(&value).unwrap_or_default(),
+            _ => return Err(common::Error::other(format!("rtty_tx: unknown parameter {name:?}"))),
+        }
+        self.reload();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +640,37 @@ mod tests {
         assert_eq!(d.crc_ok, None, "nothing in RTTY checks");
     }
 
+    /// The transmitter into the receiver: an over keyed by the chain the
+    /// protocol declares, read back by the node that reads real stations.
+    ///
+    /// What it pins beyond the synthetic keying above is that the shift the
+    /// protocol asks the modulator for, the framing the source builds and
+    /// the pacing against the radio's clock all agree with the receiver.
+    #[test]
+    fn an_over_keyed_by_the_transmit_chain_is_read_back() {
+        let (rate, center) = (48_000.0, 14_083_000.0);
+        // 24 characters and five shifts at 45.45 baud, eight bits each,
+        // with 32 bit times of resting mark either side: 296 bits, which is
+        // 6.5 seconds.
+        let air = crate::tx_nodes::transmit_for(
+            &Rtty,
+            rate,
+            Hz(center as u64),
+            6.6,
+            &[(TEXT, ParamValue::Text(OVER.into()))],
+        );
+        // 78 blocks of 4096 samples, which is a whole number of bits here.
+        assert_eq!(air.len(), 318_912, "6.6 s of samples at {rate}");
+
+        let mut node = RttyNode::default();
+        node.negotiate(&spec(rate, center)).unwrap();
+        let frames = run(&mut node, &air, rate, center);
+        assert_eq!(frames.len(), 1, "{} runs off the air", frames.len());
+        let d = rtty_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+        assert_eq!(d.text.as_deref(), Some(OVER));
+        assert_eq!(d.field("characters").and_then(|v| v.as_i64()), Some(29));
+    }
+
     /// The same over with mark and space the other way about, which is what
     /// a sideband inversion anywhere along the path produces. The operator
     /// is not asked which way up the station is.
@@ -588,6 +755,20 @@ mod tests {
 const CHANNEL_HZ: &str = "channel_hz";
 const SPEED: &str = "speed";
 const SHIFT: &str = "shift";
+const TEXT: &str = "text";
+
+pub const RTTY_TX: StageDesc = StageDesc {
+    name: "rtty_tx",
+    summary: "Key an over as Baudot: a start element, five bits and a stop",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
+    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
+    Ok(Box::new(RttyTxNode::new(s.str_or(TEXT, ""), speed, shift)))
+}
 
 pub const DESC: StageDesc = StageDesc {
     name: "rtty",

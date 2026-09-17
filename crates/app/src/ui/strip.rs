@@ -416,7 +416,7 @@ impl Strip<'_> {
         mic_clipped: bool,
         keying: &mut crate::ui::state::Keying,
         cmds: &mut Vec<Cmd>,
-        source: Option<(usize, String)>,
+        source: Option<(usize, Vec<pipeline::param::Param>)>,
         sub_file: Option<&SubFile>,
         sub_pick: &mut super::state::SubPick,
         files: &mut super::state::FilePick,
@@ -539,9 +539,16 @@ impl Strip<'_> {
                     }
                 }
             }
-            _ if digital => {
-                let (node, path) = source.unzip();
-                let path = path.unwrap_or_default();
+            // A data mode with nothing but a file to choose is the
+            // television multiplex; everything else keys what its own stage
+            // holds, drawn from the stage's parameters below.
+            _ if digital && source.as_ref().is_some_and(|(_, p)| has_path(p)) => {
+                let node = source.as_ref().map(|(id, _)| *id);
+                let path = source
+                    .as_ref()
+                    .and_then(|(_, p)| p.iter().find(|p| p.name == "path"))
+                    .and_then(|p| p.value.as_str().map(str::to_string))
+                    .unwrap_or_default();
                 ui.horizontal(|ui| {
                     theme::Line::new().legend("file").show(ui);
                     let chosen = std::path::Path::new(&path);
@@ -581,6 +588,19 @@ impl Strip<'_> {
                     // strip nobody can use.
                     theme::Line::new().value(name).size(11.0).elided(ui);
                 });
+            }
+            // What a page, a beacon or an over says. The stage describes its
+            // own fields, so a protocol added later is drawn here without
+            // this knowing anything about it, exactly as the chain view
+            // renders a stage it has never heard of.
+            _ if digital => {
+                if let Some((node, params)) = &source {
+                    for prm in params {
+                        if let Some(cmd) = tx_field(ui, *node, prm, keying) {
+                            cmds.push(cmd);
+                        }
+                    }
+                }
             }
             TxSource::Mic => {
                 // The microphone's own fader and meter, read the way the
@@ -721,7 +741,8 @@ impl Strip<'_> {
             if keying.at.is_some() {
                 cmds.push(Cmd::Key(None));
             }
-            *keying = crate::ui::state::Keying { at: Some(ch.id), latched: latch };
+            *keying =
+                crate::ui::state::Keying { at: Some(ch.id), latched: latch, ..Default::default() };
             cmds.push(Cmd::Key(Some(ch.id)));
         }
         changed
@@ -1114,7 +1135,7 @@ impl Strip<'_> {
                                     mic_clipped,
                                     &mut self.st.keying,
                                     self.cmds,
-                                    tx_source_file(self.chain),
+                                    tx_source(self.chain),
                                     sub_file.as_ref(),
                                     &mut self.st.sub_pick,
                                     self.files,
@@ -1202,9 +1223,84 @@ impl Strip<'_> {
     }
 }
 
-/// The stage a television channel transmits from, and what it is set to
-/// read: its node id and the file it has, or `None` where nothing in the
-/// running chain transmits a stream.
+/// Whether a transmit source is one that sends a file rather than fields.
+fn has_path(params: &[pipeline::param::Param]) -> bool {
+    params.iter().any(|p| p.name == "path")
+}
+
+/// One of a data mode's fields on the strip, sent to the stage when it is
+/// entered. `None` until something is entered.
+///
+/// A text field is typed into and sent on Enter or on leaving it, because a
+/// page half typed is not a page to transmit. A closed list and a number go
+/// as soon as they are set: there is no half-chosen speed.
+fn tx_field(
+    ui: &mut egui::Ui,
+    node: usize,
+    prm: &pipeline::param::Param,
+    keying: &mut crate::ui::state::Keying,
+) -> Option<Cmd> {
+    use pipeline::param::{ParamRange, ParamValue};
+    let legend = match prm.label.is_empty() {
+        true => prm.name.clone(),
+        false => prm.label.to_lowercase(),
+    };
+    let mut out = None;
+    ui.horizontal(|ui| {
+        theme::Line::new().legend(&legend).show(ui);
+        match (&prm.value, &prm.range) {
+            (ParamValue::Choice(i), ParamRange::Choices(choices)) => {
+                let mut pick = *i;
+                if widgets::choice(
+                    ui,
+                    (node, &prm.name),
+                    &mut pick,
+                    choices.iter().cloned().enumerate(),
+                ) {
+                    out = Some(Cmd::NodeParam(node, prm.name.clone(), ParamValue::Choice(pick)));
+                }
+            }
+            (ParamValue::Int(v), ParamRange::Int { range }) => {
+                let mut x = *v;
+                if ui.add(egui::DragValue::new(&mut x).range(range.clone())).changed() {
+                    out = Some(Cmd::NodeParam(node, prm.name.clone(), ParamValue::Int(x)));
+                }
+            }
+            (ParamValue::Text(sent), _) => {
+                let key = format!("{node}.{}", prm.name);
+                let text = keying.fields.entry(key).or_insert_with(|| sent.clone());
+                let r = widgets::field(ui, text, &legend);
+                if r.lost_focus() && text.as_str() != sent.as_str() {
+                    out = Some(Cmd::NodeParam(
+                        node,
+                        prm.name.clone(),
+                        ParamValue::Text(text.clone()),
+                    ));
+                }
+            }
+            (v, _) => {
+                theme::Line::new().value(format!("{v:?}")).size(11.0).elided(ui);
+            }
+        }
+    });
+    out
+}
+
+/// The stage a data mode transmits from: its node id and what it is set to
+/// send, or `None` where nothing in the running chain is one.
+///
+/// Every data mode has one, and what it holds differs: a television
+/// multiplex is a file, a page is an address and a message, a beacon is a
+/// callsign and a report. So the stage's own parameters are what is drawn,
+/// which is the same description the chain view renders.
+pub(super) fn tx_source(
+    topo: Option<&pipeline::graph::Topology>,
+) -> Option<(usize, Vec<pipeline::param::Param>)> {
+    let node = topo?.nodes.iter().find(|n| n.id.0 == derived::TX_SOURCE as usize)?;
+    Some((node.id.0, node.params.clone()))
+}
+
+/// The stage a television channel transmits from, and the file it has.
 pub(super) fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, String)> {
     let node = topo?.nodes.iter().find(|n| n.kind == "ts_source")?;
     let path = node

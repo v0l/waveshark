@@ -41,6 +41,28 @@ impl std::fmt::Display for Address {
     }
 }
 
+impl std::str::FromStr for Address {
+    type Err = ();
+
+    /// `EI2ABC-9`, or `EI2ABC` for the station itself. Anything that is not
+    /// a callsign and an optional substation number is refused here rather
+    /// than shifted onto the air as whatever bytes it happened to be.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        let s = s.trim().to_ascii_uppercase();
+        let (call, ssid) = match s.split_once('-') {
+            Some((c, n)) => (c, n.parse::<u8>().map_err(|_| ())?),
+            None => (s.as_str(), 0),
+        };
+        if call.is_empty() || call.len() > 6 || ssid > 15 {
+            return Err(());
+        }
+        if !call.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+            return Err(());
+        }
+        Ok(Address { call: call.to_string(), ssid, repeated: false })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub destination: Address,
@@ -145,6 +167,39 @@ pub fn parse(bytes: &[u8]) -> Result<Frame, ParseError> {
     })
 }
 
+/// A frame as it goes on the air, ready for `dsp::hdlc` to stuff and check.
+///
+/// The inverse of [`parse`], and the transmit side of the same shift: every
+/// address character is moved up a bit so the low one can mark the last
+/// address. No check sequence, because HDLC owns that and adds it with the
+/// flags.
+pub fn encode(frame: &Frame) -> Vec<u8> {
+    let mut out = Vec::with_capacity(MIN_LEN + frame.info.len());
+    let mut addrs: Vec<&Address> = vec![&frame.destination, &frame.source];
+    addrs.extend(frame.path.iter());
+    let n = addrs.len();
+    for (i, a) in addrs.into_iter().enumerate() {
+        for c in format!("{:<6}", a.call).bytes().take(6) {
+            out.push(c << 1);
+        }
+        // Bits 5 and 6 are reserved and sent set; bit 7 is the repeated flag
+        // on a digipeater's address; bit 0 ends the address list.
+        let repeated = u8::from(a.repeated && i >= 2) << 7;
+        out.push(0x60 | repeated | (a.ssid & 0x0F) << 1 | u8::from(i + 1 == n));
+    }
+    out.push(frame.control);
+    if let Some(pid) = frame.pid {
+        out.push(pid);
+    }
+    out.extend_from_slice(&frame.info);
+    out
+}
+
+/// An unnumbered information frame, which is the only kind APRS sends.
+pub fn ui(destination: Address, source: Address, path: Vec<Address>, info: &[u8]) -> Frame {
+    Frame { destination, source, path, control: 0x03, pid: Some(0xF0), info: info.to_vec() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +269,41 @@ mod tests {
             *b = 0x60;
         }
         assert!(parse(&raw).is_err());
+    }
+
+    /// What was built is what is read back, including the path and the
+    /// substation numbers, and the bytes are the ones the hand-built frame
+    /// above produces rather than merely something this parser likes.
+    #[test]
+    fn an_encoded_frame_is_the_wire_format_and_parses_back() {
+        let f = ui(
+            "APRS".parse().unwrap(),
+            "MI0ABC-9".parse().unwrap(),
+            vec!["WIDE1-1".parse().unwrap(), "WIDE2-2".parse().unwrap()],
+            b"!5338.00N/00615.00W-waveshark",
+        );
+        let raw = encode(&f);
+        assert_eq!(
+            raw,
+            build(("APRS", 0), ("MI0ABC", 9), &[("WIDE1", 1), ("WIDE2", 2)], f.info.as_slice())
+        );
+        assert_eq!(raw.len(), 4 * ADDR_LEN + 2 + 29);
+        let back = parse(&raw).unwrap();
+        assert_eq!(back, f);
+        assert!(back.is_ui());
+        let path: Vec<String> = back.path.iter().map(|a| a.to_string()).collect();
+        assert_eq!(path, vec!["WIDE1-1", "WIDE2-2"]);
+    }
+
+    #[test]
+    fn a_callsign_parses_with_its_substation_and_nothing_else_does() {
+        let a: Address = "mi0abc-9".parse().unwrap();
+        assert_eq!(a.call, "MI0ABC");
+        assert_eq!(a.ssid, 9);
+        assert_eq!("APRS".parse::<Address>().unwrap().ssid, 0);
+        for bad in ["", "TOOLONGCALL", "MI0ABC-16", "MI0ABC-X", "MI0-ABC"] {
+            assert!(bad.parse::<Address>().is_err(), "{bad} is not a callsign");
+        }
     }
 
     #[test]

@@ -309,7 +309,12 @@ impl FskModNode {
         let per_us = self.rate / 1e6;
         let (hi, lo) = (self.offset_hz + self.shift_hz / 2.0, self.offset_hz - self.shift_hz / 2.0);
         for p in &pkg.pulses {
-            let mark = ((p.mark as f64 * per_us).round() as usize).max(1);
+            // A mark of nothing is nothing, not one sample. A detector
+            // never reports a zero mark, but a keyer handing out one block
+            // at a time does whenever a block begins on a space, and a
+            // single sample of the upper tone inside a start element costs
+            // the character at the far end.
+            let mark = (p.mark as f64 * per_us).round() as usize;
             let gap = (p.gap as f64 * per_us).round() as usize;
             for _ in 0..mark {
                 let c = self.carrier.step(hi, self.rate);

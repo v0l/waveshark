@@ -680,9 +680,77 @@ impl OokDetector {
     }
 }
 
+/// Bits at a baud as mark and gap timings: the inverse of what a detector
+/// reads off an envelope.
+///
+/// A run of true is a mark and the run of false after it is the gap, so a
+/// two-level keyed transmission of any kind, on-off or FSK, is expressible
+/// here and every protocol that keys NRZ bits at a fixed rate shares this.
+///
+/// Edges are placed from an exact running time rather than from a rounded
+/// bit length, because a rounded one drifts: 1200 baud is 833.33 us, and a
+/// POCSAG transmission is 1120 bits, so rounding each bit to 833 us loses
+/// most of a bit period by the end of one batch.
+pub fn keyed(bits: &[bool], baud: f64) -> Package {
+    let mut pkg = Package::default();
+    if bits.is_empty() || baud <= 0.0 {
+        return pkg;
+    }
+    let at = |i: usize| (i as f64 * 1e6 / baud).round() as u64;
+    let mut i = 0;
+    while i < bits.len() {
+        let mark_start = i;
+        while i < bits.len() && bits[i] {
+            i += 1;
+        }
+        let gap_start = i;
+        while i < bits.len() && !bits[i] {
+            i += 1;
+        }
+        let mark = (at(gap_start) - at(mark_start)) as u32;
+        let gap = (at(i) - at(gap_start)) as u32;
+        // A transmission starting on a space has no mark to lead with, and
+        // a pulse with neither is nothing at all.
+        if mark == 0 && gap == 0 {
+            break;
+        }
+        pkg.pulses.push(Pulse { mark, gap });
+    }
+    pkg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The timings are the bits, and the last edge lands where the whole
+    /// transmission's length says rather than where a rounded bit period
+    /// would put it.
+    #[test]
+    fn keying_bits_places_every_edge_on_the_exact_clock() {
+        // 1101 0011 at 1200 baud: two marks, two gaps.
+        let bits = [true, true, false, true, false, false, true, true];
+        let pkg = keyed(&bits, 1200.0);
+        assert_eq!(pkg.pulses.len(), 3);
+        assert_eq!(pkg.pulses[0], Pulse { mark: 1667, gap: 833 });
+        assert_eq!(pkg.pulses[1], Pulse { mark: 833, gap: 1667 });
+        assert_eq!(pkg.pulses[2], Pulse { mark: 1667, gap: 0 });
+        let total: u64 = pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
+        // Eight bits at 833.33 us is 6667 us, which a rounded 833 us bit
+        // would have made 6664.
+        assert_eq!(total, 6667);
+    }
+
+    /// A long run of alternating bits, which is what a preamble is, stays on
+    /// the clock to the last edge: 576 bits at 512 baud is 1125000 us.
+    #[test]
+    fn a_preamble_does_not_drift() {
+        let bits: Vec<bool> = (0..576).map(|i| i % 2 == 0).collect();
+        let pkg = keyed(&bits, 512.0);
+        assert_eq!(pkg.pulses.len(), 288);
+        let total: u64 = pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
+        assert_eq!(total, 1_125_000);
+    }
 
     #[test]
     fn a_stream_that_begins_inside_a_transmission_is_passed_whole() {
