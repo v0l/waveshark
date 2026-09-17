@@ -62,7 +62,6 @@ pub mod survey_nodes;
 pub mod tetra_nodes;
 pub mod twotone_nodes;
 pub mod tx_nodes;
-pub mod tx_source;
 pub mod vdl2_nodes;
 pub mod video_nodes;
 pub mod wefax_nodes;
@@ -182,6 +181,9 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (tx_nodes::MORSE_TX, tx_nodes::build_morse_tx),
     (tx_nodes::MORSE_KEY, tx_nodes::build_morse_key),
     (sub_tx::SUB_TX, sub_tx::build_sub_tx),
+    (pocsag_nodes::POCSAG_TX, pocsag_nodes::build_tx),
+    (rtty_nodes::RTTY_TX, rtty_nodes::build_tx),
+    (aprs_nodes::APRS_TX, aprs_nodes::build_tx),
     (mod_nodes::OOK_MOD, mod_nodes::build_ook_mod),
     (mod_nodes::FSK_MOD, mod_nodes::build_fsk_mod),
     (mod_nodes::ASK_MOD, mod_nodes::build_ask_mod),
@@ -225,16 +227,13 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (droneid_nodes::DESC, droneid_nodes::build),
     (acars_nodes::DESC, acars_nodes::build),
     (aprs_nodes::DESC, aprs_nodes::build),
-    (aprs_nodes::APRS_TX, aprs_nodes::build_tx),
     (m17_nodes::DESC, m17_nodes::build),
     (tetra_nodes::DESC, tetra_nodes::build),
     (dmr_nodes::DESC, dmr_nodes::build),
     (p25_nodes::DESC, p25_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
-    (pocsag_nodes::POCSAG_TX, pocsag_nodes::build_tx),
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
-    (rtty_nodes::RTTY_TX, rtty_nodes::build_tx),
     (morse_nodes::DESC, morse_nodes::build),
     (mdc_nodes::DESC, mdc_nodes::build),
     (twotone_nodes::DESC, twotone_nodes::build),

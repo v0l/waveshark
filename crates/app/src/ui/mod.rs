@@ -1951,7 +1951,8 @@ impl App {
             .any(|s| s.id == id && s.squelch_open);
         match self.air.poll(&config, std::time::Instant::now(), busy) {
             Some(Move::Key(id)) => {
-                self.audio.keying = state::Keying { at: Some(id), latched: true };
+                self.audio.keying =
+                    state::Keying { at: Some(id), latched: true, ..Default::default() };
                 self.send(Cmd::Key(Some(id)));
             }
             Some(Move::Unkey) => {

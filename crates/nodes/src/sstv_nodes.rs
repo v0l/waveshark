@@ -231,7 +231,12 @@ pub struct SstvTxNode {
     /// it.
     at: f64,
     rate: f64,
-    pace: crate::tx_source::Pace,
+    /// Samples of silence left before the picture is sent again, and how
+    /// many there are between pictures.
+    rest: f64,
+    pause_s: f64,
+    /// Pictures sent whole.
+    pictures: u64,
 }
 
 impl Default for SstvTxNode {
@@ -244,7 +249,11 @@ impl Default for SstvTxNode {
             audio: Vec::new(),
             at: 0.0,
             rate: 0.0,
-            pace: crate::tx_source::Pace::default(),
+            rest: 0.0,
+            // A picture is a minute or two of air, so five seconds between
+            // them is a transmitter sending back to back.
+            pause_s: 5.0,
+            pictures: 0,
         };
         n.load();
         n
@@ -284,7 +293,7 @@ impl SstvTxNode {
     }
 
     pub fn sent(&self) -> u64 {
-        self.pace.sent()
+        self.pictures
     }
 }
 
@@ -347,7 +356,7 @@ impl Simple for SstvTxNode {
         };
         vec![
             ("sending".into(), format!("{what} in {}", self.mode.name)),
-            ("pictures".into(), self.pace.sent().to_string()),
+            ("pictures".into(), self.pictures.to_string()),
         ]
     }
 
@@ -372,19 +381,17 @@ impl Simple for SstvTxNode {
         for _ in 0..i.len() {
             if self.at >= self.audio.len() as f64 {
                 // Between pictures the carrier carries silence rather than
-                // stopping: a transmission that keys down per picture would
-                // rebuild the graph's burst detector's idea of the channel
-                // every two minutes.
-                self.pace.clock(1, self.rate);
-                if self.pace.due() {
-                    self.pace.spent(0.0);
+                // stopping: a transmission that keyed down per picture would
+                // rebuild the receiving end's idea of the channel every two
+                // minutes.
+                self.rest -= 1.0;
+                if self.rest <= 0.0 {
                     self.at = 0.0;
+                    self.pictures += 1;
+                    self.rest = self.pause_s * self.rate;
                 }
                 out.push(0.0);
                 continue;
-            }
-            if self.at == 0.0 {
-                self.pace.spent(self.seconds() * 1e6);
             }
             // Linear between the samples of a 44.1 kHz picture. The tones
             // are under 2.5 kHz and the rate above is at least forty times
@@ -402,7 +409,8 @@ impl Simple for SstvTxNode {
 
     fn reset(&mut self) {
         self.at = 0.0;
-        self.pace.reset();
+        self.rest = 0.0;
+        self.pictures = 0;
     }
 
     fn params(&self) -> Vec<pipeline::param::Param> {
@@ -415,9 +423,7 @@ impl Simple for SstvTxNode {
                 sstv::MODES.iter().map(|m| m.name.to_string()).collect(),
             )
             .label("Mode"),
-            Param::float(PAUSE_MS, self.pace.pause_ms(), 0.0..=600_000.0)
-                .label("Between pictures")
-                .unit("ms"),
+            Param::float(PAUSE_S, self.pause_s, 0.0..=600.0).label("Between pictures").unit("s"),
         ]
     }
 
@@ -451,7 +457,7 @@ impl Simple for SstvTxNode {
                     self.load();
                 }
             }
-            PAUSE_MS => self.pace.set_pause_ms(value.as_f64().unwrap_or(5_000.0)),
+            PAUSE_S => self.pause_s = value.as_f64().unwrap_or(5.0).clamp(0.0, 600.0),
             _ => return Err(common::Error::other(format!("sstv_tx: unknown parameter {name:?}"))),
         }
         Ok(())
@@ -508,9 +514,11 @@ impl Protocol for Sstv {
 const CHANNEL_HZ: &str = "channel_hz";
 
 /// What the transmit side is set with.
-const PICTURE: &str = "picture";
+/// The file the picture comes from, named `path` because that is what the
+/// strip draws a file row for.
+const PICTURE: &str = "path";
 const MODE: &str = "mode";
-const PAUSE_MS: &str = "pause_ms";
+const PAUSE_S: &str = "pause_s";
 
 pub const DESC: StageDesc = StageDesc {
     name: "sstv",
@@ -533,9 +541,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let k = s.i64_or(MODE, 0).clamp(0, sstv::MODES.len() as i64 - 1) as usize;
     let mut n = SstvTxNode::new(s.str_or(PICTURE, ""), &sstv::MODES[k]);
-    // A picture is a minute or two of air, so a repeat every five seconds
-    // is a transmitter sending back to back and not a pause worth naming.
-    n.pace.set_pause_ms(s.f64_or(PAUSE_MS, 5_000.0));
+    n.pause_s = s.f64_or(PAUSE_S, 5.0).clamp(0.0, 600.0);
     Ok(Box::new(n))
 }
 

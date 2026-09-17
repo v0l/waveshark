@@ -259,40 +259,47 @@ pub struct BleTxNode {
     address: pdu::Address,
     name: String,
     channel: u8,
+    keyer: crate::tx_nodes::Keyer,
     rate: f64,
-    pace: crate::tx_source::Pace,
 }
 
 impl Default for BleTxNode {
     fn default() -> Self {
-        Self {
-            // A locally administered random address, which is what a device
-            // advertising a name without a registered assignment uses.
-            address: pdu::Address { bytes: [0x01, 0x02, 0x03, 0x04, 0x05, 0xC0], random: true },
-            name: "waveshark".into(),
-            channel: 38,
-            rate: 0.0,
-            pace: crate::tx_source::Pace::default(),
-        }
+        // A locally administered random address, which is what a device
+        // advertising a name without a registered assignment uses.
+        let address = pdu::Address { bytes: [0x01, 0x02, 0x03, 0x04, 0x05, 0xC0], random: true };
+        Self::new(address, "waveshark", 38)
     }
 }
 
 impl BleTxNode {
-    pub fn new(name: &str, channel: u8) -> Self {
-        Self { name: name.into(), channel, ..Default::default() }
+    pub fn new(address: pdu::Address, name: &str, channel: u8) -> Self {
+        // An advertiser rests between bursts, and at a megabit a second the
+        // rest is most of the air: 20 ms, the shortest interval the
+        // specification allows, is 20 000 bit times.
+        let mut n = Self {
+            address,
+            name: name.into(),
+            channel,
+            keyer: crate::tx_nodes::Keyer::new(dsp::ble::BAUD, 20_000.0).resting_silent(),
+            rate: 0.0,
+        };
+        n.reload();
+        n
+    }
+
+    /// Encode what the settings now say, from the top.
+    fn reload(&mut self) {
+        self.keyer.load(dsp::ble::encode_packet(self.channel, &self.pdu()));
     }
 
     pub fn pdu(&self) -> Vec<u8> {
         pdu::encode_adv_ind(self.address, &self.name)
     }
 
-    pub fn advertisement(&self) -> Vec<common::pulse::Pulse> {
-        let bits = dsp::ble::encode_packet(self.channel, &self.pdu());
-        dsp::pulse::nrz(&bits, dsp::ble::BAUD)
-    }
-
+    /// Advertisements keyed whole since the stage was built.
     pub fn sent(&self) -> u64 {
-        self.pace.sent()
+        self.keyer.passes()
     }
 }
 
@@ -303,8 +310,8 @@ impl Simple for BleTxNode {
 
     fn readings(&self) -> Vec<(String, String)> {
         vec![
-            ("as".into(), format!("{} on {}", self.name, self.channel)),
-            ("sent".into(), self.pace.sent().to_string()),
+            ("advertising".into(), format!("{} on {}", self.name, self.channel)),
+            ("sent".into(), self.sent().to_string()),
         ]
     }
 
@@ -320,18 +327,14 @@ impl Simple for BleTxNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        self.pace.clock(i.len(), self.rate);
-        if !self.pace.due() {
+        if i.is_empty() {
             return Ok(());
         }
-        let pulses = self.advertisement();
-        self.pace.spent(crate::tx_source::air_time_us(&pulses));
-        o.pulses_mut().push(common::pulse::Package { pulses, ..Default::default() });
+        let pkg = self.keyer.take(i.len(), self.rate);
+        if !pkg.pulses.is_empty() {
+            o.pulses_mut().push(pkg);
+        }
         Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.pace.reset();
     }
 
     fn params(&self) -> Vec<pipeline::param::Param> {
@@ -345,9 +348,6 @@ impl Simple for BleTxNode {
                 ADV_CHANNELS.iter().map(|(ch, _)| ch.to_string()).collect(),
             )
             .label("Channel"),
-            Param::float(PAUSE_MS, self.pace.pause_ms(), 0.0..=60_000.0)
-                .label("Interval")
-                .unit("ms"),
         ]
     }
 
@@ -368,18 +368,18 @@ impl Simple for BleTxNode {
                 self.address = parse_address(&text)
                     .ok_or_else(|| common::Error::other("ble_tx: six hex bytes, most first"))?;
             }
+            // A picker sends the index into the three, not the index of the
+            // channel, and 0, 1 and 2 are not advertising channels.
             CHANNEL => {
                 let v = value.as_i64().unwrap_or(1);
                 self.channel = match ADV_CHANNELS.iter().find(|(ch, _)| i64::from(*ch) == v) {
                     Some((ch, _)) => *ch,
-                    // A picker sends the index into the three, not the index
-                    // of the channel, and 0, 1 and 2 are not channels.
-                    None => ADV_CHANNELS[(v.clamp(0, 2)) as usize].0,
+                    None => ADV_CHANNELS[v.clamp(0, 2) as usize].0,
                 };
             }
-            PAUSE_MS => self.pace.set_pause_ms(value.as_f64().unwrap_or(1_000.0)),
             _ => return Err(common::Error::other(format!("ble_tx: unknown parameter {name:?}"))),
         }
+        self.reload();
         Ok(())
     }
 }
@@ -501,36 +501,22 @@ mod tests {
     /// agree or the name does not come back.
     #[test]
     fn an_advertisement_this_receiver_sent_is_one_this_receiver_reads() {
-        let (rate, center) = (8_000_000.0, 2_427_000_000.0);
-        let channel_hz = 2_426_000_000.0;
-        let mut tx = BleTxNode::new("waveshark", 38);
-        let keyed = tx.negotiate(&spec(rate, center)).unwrap();
-
-        let ins = [spec(rate, center)];
-        let (mut ev, mut tg) = (Vec::new(), Vec::new());
-        let mut pulses = Payload::empty_of(PortKind::Pulses);
-        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        Simple::process(&mut tx, &Payload::Real(vec![0.0; 4096]), &mut pulses, &mut ctx).unwrap();
-        assert_eq!(tx.sent(), 1);
-        // Preamble and access address are 40 bits, the PDU is 22 bytes and
-        // the CRC three, and a bit is a microsecond.
-        let air = crate::tx_source::air_time_us(&pulses.as_pulses().unwrap()[0].pulses);
-        assert_eq!(tx.pdu().len(), 22);
-        assert_eq!(air, 40.0 + 25.0 * 8.0);
-
-        let mut modulator = crate::mod_nodes::FskModNode::new(channel_hz - center, 500_000.0, 0.5);
-        modulator.negotiate(&PortSpec { spec: keyed, latency: 0 }).unwrap();
-        let mut iq = Payload::Iq(Vec::new());
-        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        Simple::process(&mut modulator, &pulses, &mut iq, &mut ctx).unwrap();
-        let iq = match iq {
-            Payload::Iq(v) => v,
-            _ => unreachable!("a modulator produces baseband"),
-        };
-        assert_eq!(iq.len(), (air * rate / 1e6) as usize);
+        let (rate, center) = (8_000_000.0, 2_426_000_000.0);
+        // Two advertising intervals of clock, which at the 20 ms this stage
+        // rests for is two packets on the air.
+        let air = crate::tx_nodes::transmit_for(
+            &Ble,
+            rate,
+            Hz(center as u64),
+            0.05,
+            &[(NAME, pipeline::param::ParamValue::Text("waveshark".into()))],
+        );
+        // The stage rests on no carrier, so most of this is silence: three
+        // packets of 240 us and the empty blocks of clock between them.
+        assert_eq!(air.len(), 394_880, "50 ms of samples at {rate}");
 
         // The detector needs a floor to measure a burst against, so the
-        // advertisement arrives between two stretches of quiet band.
+        // advertisements arrive between two stretches of quiet band.
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut noise = |n: usize| -> Vec<common::C32> {
             (0..n)
@@ -547,18 +533,25 @@ mod tests {
         };
         let mut rx = BleNode::default();
         rx.negotiate(&spec(rate, center)).unwrap();
+        let ins = [spec(rate, center)];
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
         let mut frames: Vec<Vec<u8>> = Vec::new();
-        for block in [noise(20_000), iq, noise(20_000)] {
-            let mut out = Payload::Frames(Vec::new());
-            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-            Simple::process(&mut rx, &Payload::Iq(block), &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+        for block in [noise(20_000), air, noise(20_000)] {
+            for chunk in block.chunks(8_192) {
+                let mut out = Payload::Frames(Vec::new());
+                let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+                Simple::process(&mut rx, &Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).unwrap();
+                if let Payload::Frames(f) = out {
+                    frames.extend(f.into_iter().map(|x| x.bytes));
+                }
             }
         }
-        assert_eq!(frames.len(), 1, "{} advertisements off the air", frames.len());
-        assert_eq!(rx.accepted(), 1);
-        let d = ble_decoded(&frames[0], Hz(channel_hz as u64)).expect("a decode");
+        // 240 us of packet and then 20 ms of rest, so 50 ms of clock carries
+        // three: one at the start and one after each rest.
+        assert_eq!(frames.len(), 3, "{} advertisements off the air", frames.len());
+        assert_eq!(rx.accepted(), 3);
+        assert_eq!(BleTxNode::default().pdu().len(), 22, "the PDU the stage builds");
+        let d = ble_decoded(&frames[0], Hz(center as u64)).expect("a decode");
         assert_eq!(d.protocol, "BLE-Adv");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("waveshark"), "{detail}");
@@ -638,7 +631,6 @@ mod tests {
 const NAME: &str = "name";
 const ADDRESS: &str = "address";
 const CHANNEL: &str = "channel";
-const PAUSE_MS: &str = "pause_ms";
 
 pub const DESC: StageDesc = StageDesc {
     name: "ble",
@@ -660,10 +652,11 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 
 pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     use pipeline::registry::SettingsExt;
-    let mut n = BleTxNode::new(s.str_or(NAME, "waveshark"), 38);
+    let mut n = BleTxNode::default();
     if let Some(a) = parse_address(s.str_or(ADDRESS, "")) {
         n.address = a;
     }
-    n.pace.set_pause_ms(s.f64_or(PAUSE_MS, crate::tx_source::DEFAULT_PAUSE_MS));
+    n.name = s.str_or(NAME, "waveshark").to_string();
+    n.reload();
     Ok(Box::new(n))
 }

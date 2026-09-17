@@ -623,41 +623,43 @@ mod tests {
         }
     }
 
-    /// Every transmit chain a protocol declares builds and negotiates, and
-    /// ends in baseband the radio can be handed.
+    /// Every protocol that says it transmits names stages that exist and
+    /// negotiate from the transmit clock to samples for the radio.
     ///
-    /// The transmit mirror of the chain test above, and worth as much: the
-    /// chain is drawn from the registry by name, so a source and a modulator
-    /// that disagree about their port kinds are a transmitter that refuses
-    /// to key with the operator's finger already on the button.
+    /// The chain view, the mode menu and the radio all take a protocol at
+    /// its word here, and a transmit chain is only built when a key goes
+    /// down, so a name that is not in the registry would be a panic at the
+    /// worst moment rather than a refusal.
     #[test]
-    fn every_transmit_chain_builds_and_ends_in_baseband() {
+    fn every_transmit_chain_builds_and_ends_in_samples() {
         let reg = crate::registry();
-        let mut chains = 0;
+        let mut keyed = Vec::new();
         for p in all() {
             let Some(tx) = p.transmit() else { continue };
-            chains += 1;
-            // What the clock hands a transmit chain: the span's own rate,
-            // wide enough for the widest of these to fit its modulation in.
-            let rate = 8_000_000.0f64.max(p.shape().min_rate_hz);
+            keyed.push(p.id());
+            let rate = p.shape().min_rate_hz.max(48_000.0);
             let clock = pipeline::port::StreamSpec {
                 kind: PortKind::Real,
                 rate,
                 center: common::Hz(p.default_hz() as u64),
                 channels: 1,
                 flow: pipeline::port::Flow::Tx,
+                domain: pipeline::port::Domain::Baseband,
                 ..Default::default()
             };
             let g = crate::build_chain(clock, &[tx.source, tx.modulator], &reg)
                 .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
             let (tail, _) = g.order().last().expect("a tail");
             let out = g.spec_of(tail.out(0)).expect("an output");
-            assert_eq!(out.kind, PortKind::Iq, "{} transmits something else", p.id());
-            assert_eq!(out.rate, rate, "{} keys at a rate the radio is not", p.id());
-            assert!(out.bandwidth <= rate, "{} is wider than its stream", p.id());
+            assert_eq!(out.kind, PortKind::Iq, "{} does not end in samples", p.id());
+            assert_eq!(out.rate, rate, "{} transmits at the wrong rate", p.id());
+            assert_eq!(out.flow, pipeline::port::Flow::Tx, "{} is not a transmission", p.id());
         }
-        // POCSAG, APRS, RTTY, BLE, SSTV and DVB-T.
-        assert_eq!(chains, 6, "protocols that transmit");
+        assert_eq!(
+            keyed,
+            ["ble", "sstv", "dvbt", "aprs", "pocsag", "rtty"],
+            "what this build can key up"
+        );
     }
 
     /// Nothing is left out of the frame walk, and everything whose spectrum

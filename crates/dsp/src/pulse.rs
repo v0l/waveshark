@@ -21,44 +21,6 @@
 
 pub use common::pulse::{Package, Pulse};
 
-/// NRZ bits at `baud` as mark and gap timings, the transmit mirror of the
-/// slicing above: a run of ones is a mark and the run of zeros after it is
-/// the gap.
-///
-/// The timings are whole microseconds, which no useful baud divides: a bit at
-/// 2400 baud is 416.67 us, and rounding each run on its own drifts by a
-/// microsecond every third bit until a receiver's clock recovery is chasing a
-/// rate that was never sent. So each edge is placed against the ideal
-/// timeline and the duration is the difference between two placed edges,
-/// which keeps the accumulated error under a microsecond however long the
-/// transmission is.
-///
-/// Leading zeros cannot be expressed, since a package starts with a mark;
-/// every protocol here opens with a preamble that starts at one, and one that
-/// did not would have to key its own idle first.
-pub fn nrz(bits: &[bool], baud: f64) -> Vec<Pulse> {
-    let mut out = Vec::new();
-    if bits.is_empty() || baud <= 0.0 {
-        return out;
-    }
-    let us_per_bit = 1e6 / baud;
-    // Where a bit index falls on the ideal timeline, rounded once.
-    let at = |i: usize| (i as f64 * us_per_bit).round() as u32;
-    let mut i = 0;
-    while i < bits.len() {
-        let ones = i;
-        while i < bits.len() && bits[i] {
-            i += 1;
-        }
-        let zeros = i;
-        while i < bits.len() && !bits[i] {
-            i += 1;
-        }
-        out.push(Pulse { mark: at(zeros) - at(ones), gap: at(i) - at(zeros) });
-    }
-    out
-}
-
 /// Amplitude to dB relative to a full scale sample.
 ///
 /// Amplitude, not power, so the reference is 1.0 rather than 0.5, and a signal
@@ -718,30 +680,76 @@ impl OokDetector {
     }
 }
 
+/// Bits at a baud as mark and gap timings: the inverse of what a detector
+/// reads off an envelope.
+///
+/// A run of true is a mark and the run of false after it is the gap, so a
+/// two-level keyed transmission of any kind, on-off or FSK, is expressible
+/// here and every protocol that keys NRZ bits at a fixed rate shares this.
+///
+/// Edges are placed from an exact running time rather than from a rounded
+/// bit length, because a rounded one drifts: 1200 baud is 833.33 us, and a
+/// POCSAG transmission is 1120 bits, so rounding each bit to 833 us loses
+/// most of a bit period by the end of one batch.
+pub fn keyed(bits: &[bool], baud: f64) -> Package {
+    let mut pkg = Package::default();
+    if bits.is_empty() || baud <= 0.0 {
+        return pkg;
+    }
+    let at = |i: usize| (i as f64 * 1e6 / baud).round() as u64;
+    let mut i = 0;
+    while i < bits.len() {
+        let mark_start = i;
+        while i < bits.len() && bits[i] {
+            i += 1;
+        }
+        let gap_start = i;
+        while i < bits.len() && !bits[i] {
+            i += 1;
+        }
+        let mark = (at(gap_start) - at(mark_start)) as u32;
+        let gap = (at(i) - at(gap_start)) as u32;
+        // A transmission starting on a space has no mark to lead with, and
+        // a pulse with neither is nothing at all.
+        if mark == 0 && gap == 0 {
+            break;
+        }
+        pkg.pulses.push(Pulse { mark, gap });
+    }
+    pkg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The timings are the bits, and the last edge lands where the whole
+    /// transmission's length says rather than where a rounded bit period
+    /// would put it.
     #[test]
-    fn bits_become_runs_of_mark_and_gap() {
-        // 1 1 0 1 0 0 0 at 1000 baud: two ones, a zero, a one, three zeros.
-        let p = nrz(&[true, true, false, true, false, false, false], 1000.0);
-        assert_eq!(p.len(), 2);
-        assert_eq!(p[0], Pulse { mark: 2000, gap: 1000 });
-        assert_eq!(p[1], Pulse { mark: 1000, gap: 3000 });
+    fn keying_bits_places_every_edge_on_the_exact_clock() {
+        // 1101 0011 at 1200 baud: two marks, two gaps.
+        let bits = [true, true, false, true, false, false, true, true];
+        let pkg = keyed(&bits, 1200.0);
+        assert_eq!(pkg.pulses.len(), 3);
+        assert_eq!(pkg.pulses[0], Pulse { mark: 1667, gap: 833 });
+        assert_eq!(pkg.pulses[1], Pulse { mark: 833, gap: 1667 });
+        assert_eq!(pkg.pulses[2], Pulse { mark: 1667, gap: 0 });
+        let total: u64 = pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
+        // Eight bits at 833.33 us is 6667 us, which a rounded 833 us bit
+        // would have made 6664.
+        assert_eq!(total, 6667);
     }
 
-    /// 2400 baud is 416.666 us a bit, so a run rounded on its own loses a
-    /// third of a microsecond every time. Placing the edges instead holds the
-    /// last one of 4800 bits to within a microsecond of where it belongs,
-    /// where per-run rounding would be 800 us out, two symbols late.
+    /// A long run of alternating bits, which is what a preamble is, stays on
+    /// the clock to the last edge: 576 bits at 512 baud is 1125000 us.
     #[test]
-    fn a_long_transmission_does_not_drift_off_its_clock() {
-        let bits: Vec<bool> = (0..4800).map(|i| i % 2 == 0).collect();
-        let p = nrz(&bits, 2400.0);
-        let total: u64 = p.iter().map(|x| u64::from(x.mark) + u64::from(x.gap)).sum();
-        let ideal = (4800.0 * 1e6 / 2400.0) as u64;
-        assert_eq!(total, ideal, "4800 bits at 2400 baud is two seconds of air");
+    fn a_preamble_does_not_drift() {
+        let bits: Vec<bool> = (0..576).map(|i| i % 2 == 0).collect();
+        let pkg = keyed(&bits, 512.0);
+        assert_eq!(pkg.pulses.len(), 288);
+        let total: u64 = pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
+        assert_eq!(total, 1_125_000);
     }
 
     #[test]
