@@ -1434,6 +1434,8 @@ pub struct Status {
     /// The walk over a band: where it is, what it has heard and whether it
     /// has stopped on something.
     pub band_scan: parking_lot::Mutex<Option<nodes::ScanStatus>>,
+    /// What is on each channel: one row per transmitter and one per channel.
+    pub channel_map: parking_lot::Mutex<Option<nodes::ChannelStatus>>,
     /// What the heatmap holds and where the last export went.
     pub heatmap: parking_lot::Mutex<Option<crate::heatmap::HeatmapStatus>>,
     /// And for the feed into the house: the broker, whether it is up, and
@@ -1611,6 +1613,7 @@ impl Default for Status {
             wigle: parking_lot::Mutex::new(None),
             beacondb: parking_lot::Mutex::new(None),
             band_scan: parking_lot::Mutex::new(None),
+            channel_map: parking_lot::Mutex::new(None),
             heatmap: parking_lot::Mutex::new(None),
             homeassistant: parking_lot::Mutex::new(None),
             strips: parking_lot::Mutex::new(Strips::default()),
@@ -3396,6 +3399,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
         }
         {
+            let now = self.rx.channel_status();
+            let mut held = self.status.channel_map.lock();
+            if *held != now {
+                *held = now;
+            }
+        }
+        {
             let now = self.rx.heatmap_status();
             let mut held = self.status.heatmap.lock();
             if *held != now {
@@ -4843,6 +4853,55 @@ pub(crate) mod tests {
             assert!(r.detail.contains("aggregated=1"), "{}", r.detail);
         }
         every_row_carries_its_measurements(&wifi);
+    }
+
+    /// The channel view over the same capture: who is on which channel, read
+    /// off the channel every decode carries rather than off its fields.
+    ///
+    /// The capture is one 20 MHz span parked on channel 11, and the two
+    /// devices talking on it are 70:03:9F:0D:A9:8D and A8:29:48:F4:91:C0,
+    /// the same pair `wifi_frames_are_found_and_read` names. Neither beacons
+    /// here, so neither claims a channel and both are filed where they were
+    /// heard, which is all a receiver can honestly say about a capture with
+    /// no beacon in it.
+    #[test]
+    fn the_channel_view_lists_who_is_on_the_channel() {
+        let Some(buf) = wifi_fixture() else {
+            eprintln!("skipping: ofdm_wifi_frames_2462M_20000k.cs8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts =
+            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let read = out.iter().filter(|r| r.model == Some("802.11")).count();
+        let st = rx.channel_status().expect("the channel map reports itself");
+        assert_eq!(st.loads.len(), 1, "one span, one channel: {:?}", st.loads);
+        let ch = &st.loads[0];
+        assert_eq!((ch.plan, ch.number), (common::ChannelPlan::Wifi, 11));
+        assert_eq!(ch.overlapping, 0, "nothing else was heard to reach channel 11");
+        assert_eq!(ch.stations, st.stations.len() as u32);
+        assert_eq!(st.stations.len(), 2, "expected the two devices: {:?}", st.stations);
+        let mut ids: Vec<&str> = st.stations.iter().map(|s| s.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["70:03:9F:0D:A9:8D", "A8:29:48:F4:91:C0"]);
+        for s in &st.stations {
+            assert_eq!(s.channel, 11);
+            assert_eq!(s.heard_on, 11);
+            assert_eq!(s.width_hz, 20_000_000);
+            // No beacon, so nothing says what protects the network.
+            assert_eq!(s.secrecy, common::Secrecy::Unsaid);
+            assert!(s.rssi_dbfs.is_finite() && s.best_rssi_dbfs >= s.rssi_dbfs);
+        }
+        // Every frame the receiver read is filed under one of the two: the
+        // channel view and the packet list cannot disagree about how much
+        // was heard. Ninety-two of the capture's ninety-four frames reach
+        // the bus here, the same floor `wifi_frames_are_found_and_read`
+        // pins.
+        let filed: usize = st.stations.iter().map(|s| s.packets as usize).sum();
+        assert!(read >= 88, "the receiver read {read} frames, expected 92");
+        assert_eq!(filed, read, "{filed} frames filed against {read} read");
     }
 
     /// DJI DroneID through the whole receiver: the 2.4 GHz block puts `auto`

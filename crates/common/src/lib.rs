@@ -15,8 +15,8 @@ pub mod units;
 pub mod value;
 
 pub use decode::{
-    Airtime, CONTROL_CHANNELS, Cpr, Decoded, Identity, Link, Party, PartyKind, Position,
-    ReportDetail, Secrecy, SondeSensors, media,
+    Airtime, CONTROL_CHANNELS, ChannelPlan, ChannelUse, Cpr, Decoded, Identity, Link, Party,
+    PartyKind, Position, ReportDetail, Secrecy, SondeSensors, media,
 };
 pub use device::{
     Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,

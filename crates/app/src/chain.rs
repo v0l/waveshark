@@ -2472,6 +2472,11 @@ impl Receiver {
         Some(self.stage::<nodes::BandScanNode>(derived::SCAN)?.status())
     }
 
+    /// What is on each channel, for the channel view.
+    pub fn channel_status(&self) -> Option<nodes::ChannelStatus> {
+        Some(self.stage::<nodes::ChannelMapNode>(derived::CHANNELS)?.status())
+    }
+
     /// What the heatmap holds, and where the last export went.
     pub fn heatmap_status(&self) -> Option<crate::heatmap::HeatmapStatus> {
         Some(self.stage::<crate::heatmap::HeatmapNode>(derived::HEATMAP)?.status())
@@ -2829,6 +2834,8 @@ pub mod derived {
     pub const MESSAGES: u64 = Patch::DERIVED_BASE + 28;
     /// The walk over a band, reading what each step turned up.
     pub const SCAN: u64 = Patch::DERIVED_BASE + 30;
+    /// What is on each channel, from every decoder that names one.
+    pub const CHANNELS: u64 = Patch::DERIVED_BASE + 32;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -3333,6 +3340,13 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         w.insert("on_hit".into(), pipeline::ParamValue::Text(plan.scan.on_hit.label().into()));
         let walk = p.add_derived(derived::SCAN, "band_scan", w);
         p.connect(Source::Stage(rows, 0), (walk, 0));
+
+        // And what is on each channel is a sixth. Always drawn, because a
+        // channel view is a reading of what was heard rather than a mode the
+        // receiver is put into, and a transmitter heard before the pane was
+        // opened is the one worth listing.
+        let chans = p.add_derived(derived::CHANNELS, "channel_map", Settings::new());
+        p.connect(Source::Stage(rows, 0), (chans, 0));
 
         // And what somebody wrote is a fifth. On, like the packet log: the
         // bursts these were decoded from are already being written down, and
@@ -4894,6 +4908,26 @@ pub(crate) mod tests {
         let rx = Receiver::build(&plan, Default::default()).expect("a receiver that does not walk");
         assert!(rx.topology().nodes.iter().any(|n| n.kind == "band_scan"));
         assert_eq!(rx.scan_status().map(|s| s.running), Some(false));
+    }
+
+    /// The channel map is a consumer of the packet bus like the survey, and
+    /// is always drawn: a channel view is a reading of what was heard rather
+    /// than a mode the receiver is put into.
+    #[test]
+    fn the_channel_map_is_drawn_on_the_bus_and_starts_empty() {
+        let plan = plan(20_000_000.0, Hz::mhz(2_462));
+        let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
+        let topo = rx.topology();
+        let map = topo
+            .nodes
+            .iter()
+            .find(|n| n.kind == "channel_map")
+            .expect("the channel map is in the graph");
+        let rows = topo.nodes.iter().find(|n| n.kind == "dedupe").expect("the dedupe");
+        assert!(feeds(rows, map), "the map reads the bus after the duplicates are dropped");
+        let st = rx.channel_status().expect("the map reports itself");
+        assert_eq!(st.stations.len(), 0);
+        assert_eq!(st.loads.len(), 0);
     }
 
     /// The heatmap recorder hangs off the head, so it keeps the span rather

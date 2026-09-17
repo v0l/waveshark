@@ -260,7 +260,7 @@ pub(super) fn now_us() -> u64 {
 }
 
 /// How long ago, in the space a column has.
-fn ago(us: u64) -> String {
+pub(super) fn ago(us: u64) -> String {
     let s = us / 1_000_000;
     match s {
         0..=59 => format!("{s}s"),
