@@ -22,6 +22,7 @@ pub mod droneid_nodes;
 pub mod dsp_nodes;
 pub mod dvbt_nodes;
 pub mod elrs_nodes;
+pub mod epirb_nodes;
 pub mod feed_nodes;
 pub mod filter_nodes;
 pub mod frame_meter;
@@ -211,6 +212,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (elrs_nodes::DESC, elrs_nodes::build),
     (wmbus_nodes::DESC, wmbus_nodes::build),
     (dfm_nodes::DESC, dfm_nodes::build),
+    (epirb_nodes::DESC, epirb_nodes::build),
     (imet_nodes::DESC, imet_nodes::build),
     (lms6_nodes::DESC, lms6_nodes::build),
     (m10_nodes::DESC, m10_nodes::build),

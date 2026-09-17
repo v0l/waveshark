@@ -376,6 +376,156 @@ pub fn bch63_51(code: &mut [bool]) -> Option<u32> {
     Some(2)
 }
 
+/// Generator of the BCH(63,51) code [`bch63_51`] reads, as the coefficients
+/// of x^12+x^10+x^8+x^5+x^4+x^3+1, highest power in the top bit.
+pub const BCH_63_51_GEN: u64 = 0b1_0101_0011_1001;
+
+/// Generator of the BCH(127,106) code [`bch127_106`] reads: the product of
+/// the minimal polynomials of a, a^3 and a^5 over GF(128), which is
+/// x^21+x^18+x^17+x^15+x^14+x^12+x^11+x^8+x^7+x^6+x^5+x+1.
+pub const BCH_127_106_GEN: u64 = 0b10_0110_1101_1001_1110_0011;
+
+/// The parity a systematic BCH or CRC encoder appends: the message shifted
+/// up by the generator's degree, divided by the generator, remainder kept.
+///
+/// `message` is in transmission order, so the first bit is the highest
+/// power. `parity_bits` is that degree, and the generator carries its
+/// x^degree term in the bit above the parity.
+pub fn bch_parity(message: &[bool], generator: u64, parity_bits: usize) -> u64 {
+    let mut acc = 0u64;
+    let feed = |acc: &mut u64, bit: bool| {
+        *acc = *acc << 1 | u64::from(bit);
+        if *acc >> parity_bits & 1 != 0 {
+            *acc ^= generator;
+        }
+    };
+    for bit in message {
+        feed(&mut acc, *bit);
+    }
+    for _ in 0..parity_bits {
+        feed(&mut acc, false);
+    }
+    acc & ((1u64 << parity_bits) - 1)
+}
+
+/// GF(128), built on x^7 + x^3 + 1, as the tables a BCH(127,106) decoder
+/// needs. The same pair as [`gf64`]: `exp[i]` is a^i, `log[e]` the power that
+/// produced it.
+fn gf128() -> &'static ([u8; 128], [u8; 128]) {
+    static TABLES: std::sync::OnceLock<([u8; 128], [u8; 128])> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let (mut exp, mut log) = ([0u8; 128], [0u8; 128]);
+        let mut x = 1u8;
+        for (i, e) in exp.iter_mut().enumerate().take(127) {
+            *e = x;
+            log[x as usize] = i as u8;
+            x <<= 1;
+            if x & 0x80 != 0 {
+                x ^= 0x89;
+            }
+        }
+        exp[127] = exp[0];
+        (exp, log)
+    })
+}
+
+/// BCH(127,106) over GF(128), correcting up to three wrong bits.
+///
+/// `code` is the codeword as bits, `code[i]` the coefficient of x^i, so the
+/// parity is at the low end. A shortened code is the same word with zeros in
+/// the positions never sent: a 406 MHz beacon's first protected field is
+/// (82,61), which is this with forty-five zeros above it, and a correction
+/// landing in that padding is evidence the word was worse than three bits
+/// wrong rather than a correction to keep.
+///
+/// Returns how many bits were corrected, or `None` where the syndromes name
+/// no pattern of three or fewer. Berlekamp-Massey for the locator rather
+/// than Peterson's closed form, which divides by S1^3 + S3 and so cannot
+/// place the triples where that is zero: three errors at positions 3, 4 and
+/// 34 of a test word are one such.
+pub fn bch127_106(code: &mut [bool]) -> Option<u32> {
+    if code.len() != 127 {
+        return None;
+    }
+    let (exp, log) = gf128();
+    let mul = |a: u8, b: u8| match a == 0 || b == 0 {
+        true => 0,
+        false => exp[(usize::from(log[a as usize]) + usize::from(log[b as usize])) % 127],
+    };
+    let div = |a: u8, b: u8| match a == 0 {
+        true => 0,
+        false => exp[(usize::from(log[a as usize]) + 127 - usize::from(log[b as usize])) % 127],
+    };
+    // Syndromes S1 to S6. The even ones follow from the odd for a binary
+    // code, but computing all six costs nothing and keeps the recursion
+    // below the textbook one.
+    let syn: Vec<u8> = (1..=6)
+        .map(|power: usize| {
+            code.iter()
+                .enumerate()
+                .filter(|(_, b)| **b)
+                .fold(0u8, |s, (i, _)| s ^ exp[i * power % 127])
+        })
+        .collect();
+    if syn.iter().all(|s| *s == 0) {
+        return Some(0);
+    }
+
+    // Berlekamp-Massey: the shortest register that generates the syndromes
+    // is the error locator.
+    let (mut sigma, mut prev) = (vec![1u8], vec![1u8]);
+    let (mut len, mut shift, mut last_d) = (0usize, 1usize, 1u8);
+    for n in 0..6usize {
+        let mut d = syn[n];
+        for i in 1..=len {
+            if i < sigma.len() && i <= n {
+                d ^= mul(sigma[i], syn[n - i]);
+            }
+        }
+        if d == 0 {
+            shift += 1;
+            continue;
+        }
+        let scale = div(d, last_d);
+        let was = sigma.clone();
+        sigma.resize(sigma.len().max(prev.len() + shift), 0);
+        for (i, p) in prev.iter().enumerate() {
+            sigma[i + shift] ^= mul(scale, *p);
+        }
+        if 2 * len <= n {
+            (len, prev, last_d, shift) = (n + 1 - len, was, d, 1);
+        } else {
+            shift += 1;
+        }
+    }
+    if len > 3 {
+        return None;
+    }
+
+    // Chien search: the roots are the inverses of the error positions, and
+    // there have to be as many as the locator's degree or the word was worse
+    // than this code can place.
+    let mut found = Vec::with_capacity(len);
+    for at in 0..127usize {
+        let x = exp[(127 - at) % 127];
+        let (mut v, mut power) = (0u8, 1u8);
+        for c in &sigma {
+            v ^= mul(*c, power);
+            power = mul(power, x);
+        }
+        if v == 0 {
+            found.push(at);
+        }
+    }
+    if found.len() != len {
+        return None;
+    }
+    for at in found {
+        code[at] = !code[at];
+    }
+    Some(len as u32)
+}
+
 /// One nibble read back out of a Hamming(8,4) codeword, and whether a bit
 /// had to be corrected to get it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -505,6 +655,100 @@ mod tests {
             refused += u32::from(bch63_51(&mut bad).is_none() || bad != code);
         }
         assert_eq!(refused, 20, "a triple was silently turned into a codeword");
+    }
+
+    /// Bits written as a string of ones and zeros, spaces ignored, in the
+    /// order the beacon transmits them.
+    fn bits_of(s: &str) -> Vec<bool> {
+        s.chars().filter(|c| *c == '0' || *c == '1').map(|c| c == '1').collect()
+    }
+
+    /// The two worked examples in Annex B of C/S T.001, the 406 MHz beacon
+    /// specification: a short message from a float-free EPIRB in the United
+    /// States, and the position field of a user-location beacon at
+    /// 43 32' N 001 28' E. Both give the parity their own long division
+    /// produced, so this pins the generators as well as the division.
+    #[test]
+    fn the_beacon_specification_parity_examples_come_back() {
+        let pdf1 = bits_of("0101011011100110100000000100000000000010001000000010000000001");
+        assert_eq!(pdf1.len(), 61);
+        let bch1 = bch_parity(&pdf1, BCH_127_106_GEN, 21);
+        assert_eq!(bch1, 0b001011001010101001001, "{bch1:021b}");
+
+        let pdf2 = bits_of("10 0101 0111 0000 0000 0001 0111");
+        assert_eq!(pdf2.len(), 26);
+        let bch2 = bch_parity(&pdf2, BCH_63_51_GEN, 12);
+        assert_eq!(bch2, 0b0001_0101_0001, "{bch2:012b}");
+    }
+
+    /// Encode 61 data bits as the shortened (82,61) BCH(127,106) codeword a
+    /// beacon's first protected field is: parity at the low end, the
+    /// forty-five never-sent positions zero at the top.
+    fn bch127_shortened(message: &[bool]) -> Vec<bool> {
+        let parity = bch_parity(message, BCH_127_106_GEN, 21);
+        let mut code: Vec<bool> = (0..21).map(|i| parity >> i & 1 != 0).collect();
+        code.extend(message.iter().rev().copied());
+        code.resize(127, false);
+        code
+    }
+
+    /// Every word comes back, and so does every word with one, two or three
+    /// wrong bits anywhere in the 82 that were sent.
+    #[test]
+    fn bch127_106_corrects_three_wrong_bits() {
+        let mut seed = 0x0bad_c0de_1234_5678u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..64 {
+            let message: Vec<bool> = (0..61).map(|_| next() & 1 != 0).collect();
+            let code = bch127_shortened(&message);
+            let mut clean = code.clone();
+            assert_eq!(bch127_106(&mut clean), Some(0), "a clean codeword was corrected");
+            assert_eq!(clean, code);
+
+            let mut at: Vec<usize> = Vec::new();
+            while at.len() < 3 {
+                let k = (next() % 82) as usize;
+                if !at.contains(&k) {
+                    at.push(k);
+                }
+            }
+            for n in 1..=3usize {
+                let mut bad = code.clone();
+                for k in &at[..n] {
+                    bad[*k] = !bad[*k];
+                }
+                assert_eq!(bch127_106(&mut bad), Some(n as u32), "{n} wrong bits at {at:?}");
+                assert_eq!(bad, code, "{n} wrong bits at {at:?}");
+            }
+        }
+    }
+
+    /// Four wrong bits are past the code, and what matters is that it says
+    /// so rather than handing back a different message. Measured over 200
+    /// quadruples in the 82 sent positions: 200 refused or corrected into
+    /// the padding, none silently turned into another codeword.
+    #[test]
+    fn bch127_106_refuses_four_wrong_bits() {
+        let code = bch127_shortened(&[true; 61]);
+        let mut honest = 0;
+        for at in 0..200usize {
+            let mut bad = code.clone();
+            for k in [at, at + 11, at + 29, at + 53] {
+                let k = k % 82;
+                bad[k] = !bad[k];
+            }
+            let placed = bch127_106(&mut bad);
+            // Either refused, or the correction landed somewhere the
+            // shortened code never sends, which the caller checks.
+            let padding_dirty = bad[82..].iter().any(|b| *b);
+            honest += u32::from(placed.is_none() || padding_dirty || bad != code);
+        }
+        assert_eq!(honest, 200, "a quadruple was silently turned into a codeword");
     }
 
     /// Every nibble survives a round trip through the code, and every single

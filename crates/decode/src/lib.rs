@@ -31,6 +31,7 @@ pub mod droneid;
 pub mod dtmf;
 pub mod dvbt;
 pub mod elrs;
+pub mod epirb;
 pub mod flysky;
 pub mod framing;
 pub mod frsky;
