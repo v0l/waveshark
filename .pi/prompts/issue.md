@@ -118,6 +118,19 @@ Do not file a wish. Something you merely did not get to, or that would be
 nice, belongs nowhere: an issue is a thing somebody could pick up and finish
 with what is written in it.
 
+Say where it came from and what it sits next to. An issue that arrives with no
+history reads like a wish however concrete it is, so end it with a line naming
+the issue the work came out of and any issue it overlaps, asking the same
+question of another part of the receiver, or waiting on it. Reference the
+numbers (`#12`), and where GitHub has the relationship as data, set it: a
+sub-issue with `gh issue edit --add-parent`, a dependency with
+`gh issue develop` or the `blocked-by` field. One line, not a paragraph, and
+never a reference to an issue the commit just made untrue.
+
+Check the open list before filing rather than after: `gh issue list --search
+"<the thing>"`. Something already filed is a comment on that issue saying what
+this work found, not a second issue with a different title.
+
 ## Report
 
 Say what layer each piece landed at, the numbers the tests pin, and the issue
