@@ -90,6 +90,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- A LimeSDR transmitted into an unselected port, so nothing left the socket.
 - A HackRF came back at its default gain and with the bias tee off after a
   span change.
 - The Windows installer offered a repair rather than an upgrade over a

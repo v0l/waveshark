@@ -225,6 +225,18 @@ struct Antenna {
     name: String,
 }
 
+/// A TX antenna port and the band LimeSuite recommends it for.
+///
+/// The band is asked for rather than assumed, because the two names mean
+/// opposite switch positions on the two boards: BAND1 is 30 MHz - 1.9 GHz on
+/// a LimeSDR-USB and 2 - 2.6 GHz on a Mini.
+#[derive(Clone, Debug)]
+struct TxPort {
+    index: usize,
+    name: String,
+    band: std::ops::RangeInclusive<f64>,
+}
+
 pub struct LimeSdr {
     handle: Arc<Handle>,
     info: DeviceInfo,
@@ -259,6 +271,10 @@ pub struct LimeSdr {
     /// the port before the operator has looked at it.
     tx_gain_db: f32,
     tx_chan: usize,
+    /// The transmit ports the board has, with their bands.
+    tx_ports: Vec<TxPort>,
+    /// Port name to force, or `AUTO_ANTENNA` to follow the frequency.
+    tx_antenna: String,
     transmitting: Arc<AtomicBool>,
 }
 
@@ -330,6 +346,7 @@ impl LimeSdr {
         };
 
         let antennas = rx_antennas(&handle);
+        let tx_ports = tx_ports(&handle);
         let channels =
             unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_RX) }.max(1) as usize;
         // A LimeSDR-USB is 2x2 and a Mini is 1x1, so this is asked rather
@@ -411,6 +428,8 @@ impl LimeSdr {
             tx_center: Hz::mhz(100),
             tx_gain_db: 0.0,
             tx_chan: DEFAULT_CHAN,
+            tx_ports,
+            tx_antenna: AUTO_ANTENNA.to_string(),
             transmitting: Arc::new(AtomicBool::new(false)),
         };
         let rate = me.rate;
@@ -480,6 +499,29 @@ impl LimeSdr {
         let Some(a) = self.antenna_for(f) else { return Ok(()) };
         check(
             unsafe { ffi::LMS_SetAntenna(self.handle.ptr(), ffi::LMS_CH_RX, self.chan, a.index) },
+            "LMS_SetAntenna",
+        )
+    }
+
+    /// The TX port to use at a given frequency.
+    fn tx_port_for(&self, f: Hz) -> Option<&TxPort> {
+        pick_tx_port(&self.tx_ports, &self.tx_antenna, f)
+    }
+
+    /// Point the transmit chain at a port.
+    ///
+    /// Nothing else does. `LMS_Init` leaves the chip on BAND1 and never
+    /// touches the board's RF switch, which on a LimeSDR-USB is FPGA register
+    /// 0x17 and comes up selecting the other output: the PA drives a pin the
+    /// switch has disconnected, so the transmitter runs and the connector is
+    /// dead. The Mini picks a port itself on every retune, so this only
+    /// repeats what it already did.
+    fn apply_tx_antenna(&self, f: Hz) -> Result<()> {
+        let Some(p) = self.tx_port_for(f) else { return Ok(()) };
+        check(
+            unsafe {
+                ffi::LMS_SetAntenna(self.handle.ptr(), ffi::LMS_CH_TX, self.tx_chan, p.index)
+            },
             "LMS_SetAntenna",
         )
     }
@@ -566,6 +608,68 @@ fn rx_antennas(handle: &Handle) -> Vec<Antenna> {
         // connectors. Offering either is offering a way to hear nothing.
         .filter(|a| a.name.starts_with("LNA"))
         .collect()
+}
+
+fn tx_ports(handle: &Handle) -> Vec<TxPort> {
+    let n = unsafe {
+        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, std::ptr::null_mut())
+    };
+    if n <= 0 {
+        return Vec::new();
+    }
+    let mut list = vec![[0 as std::os::raw::c_char; 16]; n as usize];
+    let n = unsafe {
+        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, list.as_mut_ptr())
+    };
+    list.iter()
+        .take(n.max(0) as usize)
+        .enumerate()
+        // "NONE" disconnects the transmitter, and the Mini lists an "Auto"
+        // that is the library doing what `tx_port_for` does.
+        .filter(|(_, s)| cstr(*s).starts_with("BAND"))
+        .map(|(i, s)| {
+            let mut range = ffi::lms_range_t { min: 0.0, max: 0.0, step: 0.0 };
+            let rc = unsafe {
+                ffi::LMS_GetAntennaBW(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, i, &mut range)
+            };
+            let band = if rc == ffi::LMS_SUCCESS && range.max > range.min {
+                range.min..=range.max
+            } else {
+                0.0..=0.0
+            };
+            TxPort { index: i, name: cstr(s), band }
+        })
+        .collect()
+}
+
+fn pick_tx_port<'a>(ports: &'a [TxPort], forced: &str, f: Hz) -> Option<&'a TxPort> {
+    if forced != AUTO_ANTENNA {
+        if let Some(p) = ports.iter().find(|p| p.name == forced) {
+            return Some(p);
+        }
+    }
+    let hz = f.0 as f64;
+    ports
+        .iter()
+        .find(|p| p.band.contains(&hz))
+        // Off the end of both bands (below 30 MHz, or in the gap between them)
+        // the nearest one still radiates, where no band at all does not.
+        .or_else(|| {
+            ports
+                .iter()
+                .min_by(|a, b| band_distance(&a.band, hz).total_cmp(&band_distance(&b.band, hz)))
+        })
+}
+
+/// How far a frequency is from a band, and zero inside it.
+fn band_distance(band: &std::ops::RangeInclusive<f64>, hz: f64) -> f64 {
+    if hz < *band.start() {
+        *band.start() - hz
+    } else if hz > *band.end() {
+        hz - *band.end()
+    } else {
+        0.0
+    }
 }
 
 fn reported_rate_max(handle: &Handle) -> Option<u64> {
@@ -740,6 +844,18 @@ impl Device for LimeSdr {
                 selected: self.antenna.clone(),
             });
         }
+        if !self.tx_ports.is_empty() {
+            let mut options = vec![AUTO_ANTENNA.to_string()];
+            options.extend(self.tx_ports.iter().map(|p| p.name.clone()));
+            v.push(common::Choice {
+                name: "tx_antenna".into(),
+                label: "Transmit port".into(),
+                help: "Which TX connector the transmitter drives. Auto takes the port LimeSuite says is matched at the transmit frequency, which is BAND1 below 1.9 GHz on a LimeSDR-USB and BAND2 there on a Mini: the same two names are opposite switch positions on the two boards. A port that does not match the frequency radiates a fraction of the power."
+                    .into(),
+                options,
+                selected: self.tx_antenna.clone(),
+            });
+        }
         if self.channels > 1 {
             v.push(common::Choice {
                 name: "channel".into(),
@@ -762,6 +878,14 @@ impl Device for LimeSdr {
                 self.antenna = value.to_string();
                 let _g = self.handle.ctl.lock().unwrap();
                 self.apply_antenna(self.center)
+            }
+            "tx_antenna" => {
+                if value != AUTO_ANTENNA && !self.tx_ports.iter().any(|p| p.name == value) {
+                    return Err(Error::other(format!("no transmit port named {value:?}")));
+                }
+                self.tx_antenna = value.to_string();
+                let _g = self.handle.ctl.lock().unwrap();
+                self.apply_tx_antenna(self.tx_center)
             }
             "channel" => {
                 let chan = value
@@ -851,6 +975,7 @@ impl Device for LimeSdr {
             "LMS_SetLOFrequency",
         )?;
         self.tx_center = f;
+        self.apply_tx_antenna(f)?;
         Ok(())
     }
 
@@ -884,6 +1009,7 @@ impl Device for LimeSdr {
                 },
                 "LMS_SetLOFrequency",
             )?;
+            self.apply_tx_antenna(self.tx_center)?;
             check(
                 unsafe {
                     ffi::LMS_SetGaindB(
@@ -1263,6 +1389,36 @@ mod tests {
         // after the first is garbage.
         assert_eq!(std::mem::size_of::<C32>(), 2 * std::mem::size_of::<f32>());
         assert_eq!(std::mem::align_of::<C32>(), std::mem::align_of::<f32>());
+    }
+
+    /// The two boards give the same two names to opposite switch positions,
+    /// so the choice is made from the bands LimeSuite reports rather than
+    /// from the names: `LMS7_Device::GetTxPathBand` for the USB board against
+    /// `LMS7_LimeSDR_mini`'s override of it.
+    #[test]
+    fn a_transmit_port_is_chosen_by_its_band_and_not_its_name() {
+        let port =
+            |i, n: &str, lo: f64, hi: f64| TxPort { index: i, name: n.into(), band: lo..=hi };
+        let usb = [port(1, "BAND1", 30e6, 1.9e9), port(2, "BAND2", 2e9, 2.6e9)];
+        let mini = [port(1, "BAND1", 2e9, 2.6e9), port(2, "BAND2", 30e6, 1.9e9)];
+
+        let at = |ports: &[TxPort], hz: u64| {
+            pick_tx_port(ports, AUTO_ANTENNA, Hz(hz)).unwrap().name.clone()
+        };
+        assert_eq!(at(&usb, 145_500_000), "BAND1");
+        assert_eq!(at(&mini, 145_500_000), "BAND2");
+        assert_eq!(at(&usb, 2_400_000_000), "BAND2");
+        assert_eq!(at(&mini, 2_400_000_000), "BAND1");
+
+        // In the gap between the bands, and below the bottom of both, the
+        // nearest port is still a port.
+        assert_eq!(at(&usb, 1_950_000_000), "BAND1");
+        assert_eq!(at(&usb, 10_000_000), "BAND1");
+
+        // A pinned port wins at any frequency; an unknown name falls back.
+        assert_eq!(pick_tx_port(&usb, "BAND2", Hz::mhz(145)).unwrap().index, 2);
+        assert_eq!(pick_tx_port(&usb, "BAND9", Hz::mhz(145)).unwrap().index, 1);
+        assert!(pick_tx_port(&[], AUTO_ANTENNA, Hz::mhz(145)).is_none());
     }
 
     #[test]
