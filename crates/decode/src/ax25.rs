@@ -172,30 +172,37 @@ pub fn parse(bytes: &[u8]) -> Result<Frame, ParseError> {
     })
 }
 
-/// An unnumbered information frame carrying `info`, ready for the check
-/// sequence and the flags `dsp::hdlc::encode_frame` puts around it.
+/// A frame as it goes on the air, ready for `dsp::hdlc` to stuff and check.
 ///
-/// The inverse of [`parse`] for the one frame type APRS sends. The address
-/// bytes are shifted left the way the parser unshifts them, the low bit of
-/// the last one terminates the list, and the two bits above the SSID are the
-/// reserved ones every station sets.
-pub fn encode(destination: &Address, source: &Address, path: &[Address], info: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ADDR_LEN * (2 + path.len()) + 2 + info.len());
-    let all: Vec<&Address> = [destination, source].into_iter().chain(path).collect();
-    let n = all.len();
-    for (i, a) in all.into_iter().enumerate() {
+/// The inverse of [`parse`], and the transmit side of the same shift: every
+/// address character is moved up a bit so the low one can mark the last
+/// address. No check sequence, because HDLC owns that and adds it with the
+/// flags.
+pub fn encode(frame: &Frame) -> Vec<u8> {
+    let mut out = Vec::with_capacity(MIN_LEN + frame.info.len());
+    let mut addrs: Vec<&Address> = vec![&frame.destination, &frame.source];
+    addrs.extend(frame.path.iter());
+    let n = addrs.len();
+    for (i, a) in addrs.into_iter().enumerate() {
         for c in format!("{:<6}", a.call).bytes().take(6) {
             out.push(c << 1);
         }
-        out.push(
-            0x60 | (a.ssid & 0x0F) << 1 | u8::from(i + 1 == n) | if a.repeated { 0x80 } else { 0 },
-        );
+        // Bits 5 and 6 are reserved and sent set; bit 7 is the repeated flag
+        // on a digipeater's address; bit 0 ends the address list.
+        let repeated = u8::from(a.repeated && i >= 2) << 7;
+        out.push(0x60 | repeated | (a.ssid & 0x0F) << 1 | u8::from(i + 1 == n));
     }
-    // UI, and no layer 3 above, which is what APRS declares.
-    out.push(0x03);
-    out.push(0xF0);
-    out.extend_from_slice(info);
+    out.push(frame.control);
+    if let Some(pid) = frame.pid {
+        out.push(pid);
+    }
+    out.extend_from_slice(&frame.info);
     out
+}
+
+/// An unnumbered information frame, which is the only kind APRS sends.
+pub fn ui(destination: Address, source: Address, path: Vec<Address>, info: &[u8]) -> Frame {
+    Frame { destination, source, path, control: 0x03, pid: Some(0xF0), info: info.to_vec() }
 }
 
 #[cfg(test)]
@@ -208,33 +215,7 @@ mod tests {
 
     fn build(dest: (&str, u8), src: (&str, u8), path: &[(&str, u8)], info: &[u8]) -> Vec<u8> {
         let path: Vec<Address> = path.iter().map(|(c, s)| addr(c, *s)).collect();
-        encode(&addr(dest.0, dest.1), &addr(src.0, src.1), &path, info)
-    }
-
-    /// The wire format, spelled out, so the encoder these tests build their
-    /// frames with is checked against the bytes rather than against the
-    /// parser that shares its assumptions.
-    #[test]
-    fn an_encoded_frame_is_the_bytes_that_go_on_the_air() {
-        let raw = build(("APRS", 0), ("EI2ABC", 9), &[], b"hi");
-        assert_eq!(&raw[..6], &[b'A' << 1, b'P' << 1, b'R' << 1, b'S' << 1, b' ' << 1, b' ' << 1]);
-        assert_eq!(raw[6], 0x60, "the destination is not the last address");
-        assert_eq!(raw[13], 0x60 | 9 << 1 | 1, "the source ends the list");
-        assert_eq!(&raw[14..], &[0x03, 0xF0, b'h', b'i']);
-    }
-
-    #[test]
-    fn a_callsign_parses_once_with_its_ssid_and_its_repeated_mark() {
-        use std::str::FromStr;
-        assert_eq!(Address::from_str("EI2ABC-9").unwrap(), addr("EI2ABC", 9));
-        assert_eq!(Address::from_str("aprs").unwrap(), addr("APRS", 0));
-        assert_eq!(
-            Address::from_str("WIDE1-1*").unwrap(),
-            Address { call: "WIDE1".into(), ssid: 1, repeated: true }
-        );
-        assert!(Address::from_str("TOOLONGCALL").is_err());
-        assert!(Address::from_str("EI2ABC-16").is_err());
-        assert!(Address::from_str("").is_err());
+        encode(&ui(addr(dest.0, dest.1), addr(src.0, src.1), path, info))
     }
 
     #[test]
@@ -282,6 +263,47 @@ mod tests {
             *b = 0x60;
         }
         assert!(parse(&raw).is_err());
+    }
+
+    /// What was built is what is read back, including the path and the
+    /// substation numbers, and the bytes are the ones the hand-built frame
+    /// above produces rather than merely something this parser likes.
+    #[test]
+    fn an_encoded_frame_is_the_wire_format_and_parses_back() {
+        let f = ui(
+            "APRS".parse().unwrap(),
+            "MI0ABC-9".parse().unwrap(),
+            vec!["WIDE1-1".parse().unwrap(), "WIDE2-2".parse().unwrap()],
+            b"!5338.00N/00615.00W-waveshark",
+        );
+        let raw = encode(&f);
+        assert_eq!(
+            raw,
+            build(("APRS", 0), ("MI0ABC", 9), &[("WIDE1", 1), ("WIDE2", 2)], f.info.as_slice())
+        );
+        assert_eq!(raw.len(), 4 * ADDR_LEN + 2 + 29);
+        let back = parse(&raw).unwrap();
+        assert_eq!(back, f);
+        assert!(back.is_ui());
+        let path: Vec<String> = back.path.iter().map(|a| a.to_string()).collect();
+        assert_eq!(path, vec!["WIDE1-1", "WIDE2-2"]);
+    }
+
+    #[test]
+    fn a_callsign_parses_with_its_substation_and_nothing_else_does() {
+        let a: Address = "mi0abc-9".parse().unwrap();
+        assert_eq!(a.call, "MI0ABC");
+        assert_eq!(a.ssid, 9);
+        assert_eq!("APRS".parse::<Address>().unwrap().ssid, 0);
+        for bad in ["", "TOOLONGCALL", "MI0ABC-16", "MI0ABC-X", "MI0-ABC"] {
+            assert!(bad.parse::<Address>().is_err(), "{bad} is not a callsign");
+        }
+        // A digipeater that has already repeated the frame is printed with a
+        // star after it, which is how every APRS log shows one.
+        assert_eq!(
+            "WIDE1-1*".parse::<Address>().unwrap(),
+            Address { call: "WIDE1".into(), ssid: 1, repeated: true }
+        );
     }
 
     #[test]

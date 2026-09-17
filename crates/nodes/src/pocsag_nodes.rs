@@ -13,7 +13,6 @@
 
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
-use crate::tx_source::{Pace, air_time_us};
 use common::Result;
 use decode::pocsag::{self, Body};
 use dsp::pocsag::{DEVIATION_HZ, PocsagConfig, PocsagDemod, Transmission};
@@ -21,7 +20,7 @@ use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
-use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
+use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// A common UK and European paging channel, and only the default the node is
@@ -194,85 +193,59 @@ pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
         .collect()
 }
 
-/// How a page's message is coded on the air. The three bodies ITU-R M.584-2
-/// allows, named so a picker can offer them.
-const FORMATS: [(&str, u8); 3] = [("Alphanumeric", 3), ("Numeric", 0), ("Tone only", 0)];
-
-/// A page, keyed as pulse timings.
+/// A page, keyed as the bits of a whole transmission.
 ///
-/// The transmit mirror of [`PocsagNode`] down to the same three layers read
-/// backwards: `decode::pocsag::encode` builds the codeword contents,
-/// `dsp::pocsag::encode_bits` adds the BCH parity and the batching, and
-/// `dsp::pulse::nrz` turns the bits into the mark and gap timings
-/// [`crate::mod_nodes::FskModNode`] keys. Nothing new is encoded here.
+/// The transmit mirror of [`PocsagNode`]: preamble, sync words, the address
+/// codeword in the frame its address demands and the message codewords after
+/// it, all from [`decode::pocsag::encode`] and [`dsp::pocsag::encode_bits`],
+/// which are the same two layers the receiver reads back. What leaves is
+/// timings, and [`crate::mod_nodes::FskModNode`] puts them on a carrier.
 ///
-/// A mark is the upper tone, so a one is transmitted high. Which way up a
-/// pager reads it does not matter: the sync search accepts the complement
-/// and inverts everything after it, which is why off-air recordings decode
-/// both ways.
+/// A mark is the upper tone, and POCSAG sends a binary zero as the positive
+/// deviation, so the bits are inverted on their way to the keyer. A receiver
+/// reads the transmission either way up, but a pager does not.
 pub struct PocsagTxNode {
     address: u32,
     function: u8,
     message: String,
-    /// One of [`dsp::pocsag::BAUDS`].
-    baud: f64,
-    /// Which of [`FORMATS`] the message is coded as.
-    format: usize,
+    keyer: crate::tx_nodes::Keyer,
     rate: f64,
-    pace: Pace,
 }
 
 impl Default for PocsagTxNode {
     fn default() -> Self {
-        Self {
-            address: 1_234_567,
-            function: 3,
-            message: String::new(),
-            baud: 1200.0,
-            format: 0,
-            rate: 0.0,
-            pace: Pace::default(),
-        }
+        Self::new(1_234_567, 3, "", 1200.0)
     }
 }
 
 impl PocsagTxNode {
     pub fn new(address: u32, function: u8, message: &str, baud: f64) -> Self {
-        let mut n = Self { message: message.into(), ..Default::default() };
-        n.address = address & 0x1F_FFFF;
-        n.function = function & 3;
-        n.baud = nearest_baud(baud);
+        // Idle between passes: a second of silence at every speed, so a
+        // receiver hears one transmission end before the next preamble
+        // starts rather than reading two as one.
+        let mut n = Self {
+            address,
+            function: function & 3,
+            message: message.into(),
+            keyer: crate::tx_nodes::Keyer::new(baud, baud),
+            rate: 0.0,
+        };
+        n.reload();
         n
     }
 
-    fn body(&self) -> Body {
-        match FORMATS[self.format.min(FORMATS.len() - 1)].0 {
-            "Numeric" => Body::Numeric(self.message.clone()),
-            "Tone only" => Body::Tone,
-            _ => Body::Alpha(self.message.clone()),
-        }
+    /// Encode what the settings now say, from the top.
+    fn reload(&mut self) {
+        let body = match self.message.is_empty() {
+            true => Body::Tone,
+            // A numeric pager shows only digits, and nothing on the air says
+            // which kind the address belongs to, so text is sent as text.
+            false => Body::Alpha(self.message.clone()),
+        };
+        let contents = pocsag::encode(self.address, self.function, &body);
+        let bits: Vec<bool> = dsp::pocsag::encode_bits(&contents).iter().map(|&b| !b).collect();
+        self.keyer.load(bits);
     }
-
-    /// The whole transmission as timings: preamble, batches and all.
-    pub fn page(&self) -> Vec<common::pulse::Pulse> {
-        let contents = pocsag::encode(self.address, self.function, &self.body());
-        dsp::pulse::nrz(&dsp::pocsag::encode_bits(&contents), self.baud)
-    }
-
-    /// Pages handed to the modulator since the stage was built.
-    pub fn sent(&self) -> u64 {
-        self.pace.sent()
-    }
-}
-
-/// The rate nearest `hz` that POCSAG is actually sent at. A transmitter
-/// between two of them is a transmitter no pager can read.
-fn nearest_baud(hz: f64) -> f64 {
-    dsp::pocsag::BAUDS
-        .iter()
-        .copied()
-        .min_by(|a, b| (a - hz).abs().total_cmp(&(b - hz).abs()))
-        .unwrap_or(1200.0)
 }
 
 impl Simple for PocsagTxNode {
@@ -281,95 +254,79 @@ impl Simple for PocsagTxNode {
     }
 
     fn readings(&self) -> Vec<(String, String)> {
-        vec![
-            ("to".into(), self.address.to_string()),
-            ("baud".into(), format!("{:.0}", self.baud)),
-            ("pages".into(), self.pace.sent().to_string()),
-        ]
+        let mut out = vec![
+            ("paging".into(), self.address.to_string()),
+            ("baud".into(), format!("{:.0}", self.keyer.baud())),
+        ];
+        if self.keyer.passes() > 0 {
+            out.push(("sent".into(), self.keyer.passes().to_string()));
+        }
+        out
     }
 
-    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
-        if input.spec.rate <= 0.0 {
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.rate <= 0.0 {
             return Err(common::Error::other("pocsag_tx needs a clock to key against"));
         }
-        self.rate = input.spec.rate;
+        self.rate = i.spec.rate;
         Ok(StreamSpec {
-            // Microsecond timings, so the port has no rate of its own; the
-            // modulator's is passed through the way `sub_tx` passes it.
             kind: PortKind::Pulses,
-            rate: input.spec.rate,
-            center: input.spec.center,
+            // The timings are microseconds and the port has no rate of its
+            // own; the clock is passed on for the modulator behind. See
+            // `MorseKeyNode`.
+            rate: i.spec.rate,
+            center: i.spec.center,
             bandwidth: CHANNEL_WIDTH_HZ,
             channels: 1,
-            flow: Flow::Tx,
-            domain: Domain::Baseband,
+            flow: pipeline::port::Flow::Tx,
+            domain: pipeline::port::Domain::Baseband,
         })
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        self.pace.clock(i.len(), self.rate);
-        if !self.pace.due() {
+        if i.is_empty() {
             return Ok(());
         }
-        let pulses = self.page();
-        if pulses.is_empty() {
-            return Ok(());
+        let pkg = self.keyer.take(i.len(), self.rate);
+        if !pkg.pulses.is_empty() {
+            o.pulses_mut().push(pkg);
         }
-        self.pace.spent(air_time_us(&pulses));
-        o.pulses_mut().push(common::pulse::Package { pulses, ..Default::default() });
         Ok(())
     }
 
-    fn reset(&mut self) {
-        self.pace.reset();
-    }
-
     fn params(&self) -> Vec<Param> {
-        let bauds = dsp::pocsag::BAUDS.iter().map(|b| format!("{b:.0}")).collect();
         vec![
-            Param::int(ADDRESS, i64::from(self.address), 0..=0x1F_FFFF).label("Address"),
+            // 21 bits of address, of which the low three are the frame the
+            // address codeword must sit in.
+            Param::int(ADDRESS, i64::from(self.address), 0..=2_097_151).label("Address"),
             Param::int(FUNCTION, i64::from(self.function), 0..=3).label("Function"),
-            Param::choice(FORMAT, self.format, FORMATS.iter().map(|(n, _)| (*n).into()).collect())
-                .label("Format"),
             Param::text(MESSAGE, self.message.clone()).label("Message"),
-            Param::choice(BAUD, nearest_index(self.baud), bauds).label("Rate").unit("baud"),
-            Param::float(PAUSE_MS, self.pace.pause_ms(), 0.0..=60_000.0)
-                .label("Between pages")
-                .unit("ms"),
+            Param::choice(
+                BAUD_PARAM,
+                dsp::pocsag::BAUDS.iter().position(|&b| b == self.keyer.baud()).unwrap_or(1),
+                dsp::pocsag::BAUDS.iter().map(|b| format!("{b:.0}")).collect(),
+            )
+            .label("Speed")
+            .unit("baud"),
         ]
     }
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
-            ADDRESS => self.address = value.as_i64().unwrap_or(0).clamp(0, 0x1F_FFFF) as u32,
+            ADDRESS => self.address = value.as_i64().unwrap_or(0).clamp(0, 2_097_151) as u32,
             FUNCTION => self.function = value.as_i64().unwrap_or(3).clamp(0, 3) as u8,
-            FORMAT => self.format = value.as_i64().unwrap_or(0).clamp(0, 2) as usize,
-            MESSAGE => {
-                self.message = match value {
-                    ParamValue::Text(t) => t,
-                    _ => return Err(common::Error::other("pocsag_tx: a message is text")),
-                }
+            MESSAGE => self.message = value.as_str().unwrap_or_default().to_string(),
+            BAUD_PARAM => {
+                let i = value.as_i64().unwrap_or(1).clamp(0, 2) as usize;
+                self.keyer.set_baud(dsp::pocsag::BAUDS[i]);
             }
-            // A choice by index, and a rate by value, both land here: the
-            // picker sends 0, 1 or 2 and a patch may carry 512.
-            BAUD => {
-                let v = value.as_f64().unwrap_or(1200.0);
-                self.baud = match v < dsp::pocsag::BAUDS.len() as f64 {
-                    true => dsp::pocsag::BAUDS[v as usize],
-                    false => nearest_baud(v),
-                };
-            }
-            PAUSE_MS => self.pace.set_pause_ms(value.as_f64().unwrap_or(1_000.0)),
             _ => {
                 return Err(common::Error::other(format!("pocsag_tx: unknown parameter {name:?}")));
             }
         }
+        self.reload();
         Ok(())
     }
-}
-
-fn nearest_index(baud: f64) -> usize {
-    dsp::pocsag::BAUDS.iter().position(|b| *b == baud).unwrap_or(1)
 }
 
 pub struct Pocsag;
@@ -420,15 +377,14 @@ impl Protocol for Pocsag {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
-    /// The page keyer into the two-tone modulator. The shift is twice the
-    /// deviation the receiver's discriminator is scaled for, because the
-    /// modulator is told the distance between the tones and a pager channel
-    /// is specified as the swing either side of the carrier.
+    /// The page, then the deviation a pager expects: 4.5 kHz either side of
+    /// the carrier is a 9 kHz separation between the tones.
     fn transmit(&self) -> Option<crate::protocol::TxChain> {
         Some(crate::protocol::TxChain {
-            source: NodeSpec::new(POCSAG_TX.name).f(BAUD, 1200.0),
+            source: NodeSpec::new(POCSAG_TX.name),
             modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
-                .f("shift_hz", DEVIATION_HZ * 2.0),
+                .f("shift_hz", DEVIATION_HZ * 2.0)
+                .f("offset_hz", 0.0),
         })
     }
 }
@@ -440,13 +396,6 @@ mod tests {
 
     fn spec(rate: f64, center: f64) -> PortSpec {
         PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
-    }
-
-    fn run(n: &mut impl Simple, i: &Payload, o: &mut Payload, rate: f64, center: f64) {
-        let ins = [spec(rate, center)];
-        let (mut ev, mut tg) = (Vec::new(), Vec::new());
-        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        n.process(i, o, &mut ctx).unwrap();
     }
 
     #[test]
@@ -518,90 +467,95 @@ mod tests {
         assert_eq!(get("address"), Some(common::Value::Int(1_234_568)));
     }
 
-    /// Keyed by the transmit stage, modulated, and read back by the receive
-    /// stage: the round trip that says the encoder and the decoder agree
-    /// about every layer between them.
+    /// The transmitter into the receiver: a page keyed by the chain the
+    /// protocol declares, read back off the air by the node that reads real
+    /// pagers.
+    ///
+    /// The round trip is the test that matters. The encoder and the decoder
+    /// share the codeword tables, so either could be self-consistently
+    /// wrong; what this pins is that the deviation, the bit polarity and the
+    /// pacing agree with a receiver that has read pagers off the air.
     #[test]
-    fn a_page_this_receiver_transmitted_is_a_page_this_receiver_reads() {
-        let (rate, center) = (192_000.0, DEFAULT_HZ);
-        let mut tx = PocsagTxNode::new(1_234_568, 3, "MOVE TO CHANNEL 2", 1200.0);
-        let keyed = tx.negotiate(&spec(rate, center)).unwrap();
+    fn a_page_keyed_by_the_transmit_chain_is_read_back() {
+        let (rate, center) = (240_000.0, Hz(DEFAULT_HZ as u64));
+        // One pass at 1200 baud is 1120 bits, which is 0.93 s, so a second
+        // and a half holds one whole transmission and part of the next.
+        let air = crate::tx_nodes::transmit_for(
+            &Pocsag,
+            rate,
+            center,
+            1.5,
+            &[(MESSAGE, ParamValue::Text("WAVESHARK".into()))],
+        );
+        // 88 blocks of 4096 samples, less the 48 owed to the keyer when the
+        // clock ran out part way through a bit and the rounding of each
+        // pulse's edges onto a sample.
+        assert_eq!(air.len(), 360_400, "1.5 s of samples at {rate}");
 
-        let mut pulses = Payload::empty_of(PortKind::Pulses);
-        run(&mut tx, &Payload::Real(vec![0.0; 4096]), &mut pulses, rate, center);
-        assert_eq!(tx.sent(), 1, "one page per due slot");
-        let air: f64 = air_time_us(&pulses.as_pulses().unwrap()[0].pulses) / 1e6;
-        // 576 preamble bits and one batch of 544 at 1200 baud.
-        assert!((air - 1120.0 / 1200.0).abs() < 1e-3, "{air} s of air");
-
-        let mut modulator = crate::mod_nodes::FskModNode::new(0.0, DEVIATION_HZ * 2.0, 0.5);
-        modulator.negotiate(&PortSpec { spec: keyed, latency: 0 }).unwrap();
-        let mut iq = Payload::Iq(Vec::new());
-        run(&mut modulator, &pulses, &mut iq, rate, center);
-        let iq = match iq {
-            Payload::Iq(v) => v,
-            _ => unreachable!("a modulator produces baseband"),
-        };
-        // The timings at the clock's rate, to the sample: the modulator
-        // rounds each mark and gap on its own, so a whole transmission may
-        // land a sample either side of its microseconds.
-        assert!((iq.len() as f64 - air * rate).abs() <= 1.0, "{} samples", iq.len());
-
-        let mut rx = PocsagNode::default();
-        rx.negotiate(&spec(rate, center)).unwrap();
-        let quiet = vec![common::C32::new(0.0, 0.0); 32_000];
+        let mut node = PocsagNode::new(DEFAULT_HZ);
+        node.negotiate(&spec(rate, DEFAULT_HZ)).unwrap();
+        let ins = [spec(rate, DEFAULT_HZ)];
+        let tags = Vec::new();
         let mut frames: Vec<Vec<u8>> = Vec::new();
-        for block in [&quiet[..], &iq[..], &quiet[..]] {
-            let mut out = Payload::Frames(Vec::new());
-            run(&mut rx, &Payload::Iq(block.to_vec()), &mut out, rate, center);
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+        let quiet = vec![common::C32::new(0.0, 0.0); 40_000];
+        for block in [&air[..], &quiet[..]] {
+            for chunk in block.chunks(8_192) {
+                let input = Payload::Iq(chunk.to_vec());
+                let mut out = Payload::Frames(Vec::new());
+                let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+                let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+                node.process(&input, &mut out, &mut ctx).unwrap();
+                if let Payload::Frames(f) = out {
+                    frames.extend(f.into_iter().map(|x| x.bytes));
+                }
             }
         }
 
-        assert_eq!(frames.len(), 1, "one transmission back off the air");
-        let decodes = pocsag_decoded(&frames[0], Hz(center as u64));
+        assert_eq!(frames.len(), 1, "one whole transmission in a second and a half");
+        let decodes = pocsag_decoded(&frames[0], Hz(DEFAULT_HZ as u64));
         assert_eq!(decodes.len(), 1);
         assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
-        assert_eq!(decodes[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
+        assert_eq!(decodes[0].text.as_deref(), Some("WAVESHARK"));
         let get = |k: &str| decodes[0].fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("address"), Some(common::Value::Int(1_234_568)));
+        assert_eq!(get("address"), Some(common::Value::Int(1_234_567)));
         assert_eq!(get("function"), Some(common::Value::Int(3)));
     }
 
-    /// A numeric page is the same round trip through the other body, which is
-    /// the one whose four-bit codes are reversed in the codeword.
+    /// Every speed the receiver searches is a speed it can be keyed at, and
+    /// the bits leave at the rate the clock says rather than as fast as the
+    /// blocks arrive.
     #[test]
-    fn a_numeric_page_keeps_its_digits() {
-        let mut tx = PocsagTxNode::new(2_000_002, 0, "112233", 512.0);
-        tx.format = 1;
-        let contents = pocsag::encode(2_000_002, 0, &Body::Numeric("112233".into()));
-        let words: Vec<u32> = contents.into_iter().map(dsp::pocsag::encode_codeword).collect();
-        let t = Transmission { codewords: words, baud: 512, corrected: 0, lost: 0 };
-        let decodes = pocsag_decoded(&t.to_bytes(), Hz(DEFAULT_HZ as u64));
-        assert_eq!(decodes.len(), 1);
-        assert_eq!(decodes[0].text.as_deref(), Some("112233"));
-        // 512 baud is five times the air of 2400 for the same page.
-        assert_eq!(tx.baud, 512.0);
-        let long = air_time_us(&tx.page());
-        tx.set_param(BAUD, ParamValue::Float(2400.0)).unwrap();
-        assert_eq!(tx.baud, 2400.0);
-        assert!((long / air_time_us(&tx.page()) - 4.6875).abs() < 0.01, "512 against 2400 baud");
-    }
-
-    /// A rate between two of the three is a transmission no pager can read,
-    /// so the stage moves to the nearest one rather than keying it.
-    #[test]
-    fn a_rate_pocsag_does_not_use_is_pulled_to_the_nearest_one() {
-        assert_eq!(nearest_baud(1000.0), 1200.0);
-        assert_eq!(nearest_baud(600.0), 512.0);
-        assert_eq!(nearest_baud(9600.0), 2400.0);
-        let mut n = PocsagTxNode::default();
-        // The picker sends an index; a patch carries a rate. Both land here.
-        n.set_param(BAUD, ParamValue::Int(2)).unwrap();
-        assert_eq!(n.baud, 2400.0);
-        n.set_param(BAUD, ParamValue::Float(512.0)).unwrap();
-        assert_eq!(n.baud, 512.0);
+    fn each_speed_keys_its_own_number_of_bits_a_second() {
+        for baud in dsp::pocsag::BAUDS {
+            let mut n = PocsagTxNode::new(1_000_001, 0, "X", baud);
+            let rate = 240_000.0;
+            n.negotiate(&PortSpec {
+                spec: StreamSpec { kind: PortKind::Real, rate, ..Default::default() },
+                latency: 0,
+            })
+            .unwrap();
+            let ins = [spec(rate, DEFAULT_HZ)];
+            let tags = Vec::new();
+            let mut us = 0u64;
+            for _ in 0..(rate as usize / 4_096) {
+                let mut out = Payload::empty_of(PortKind::Pulses);
+                let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+                let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+                Simple::process(&mut n, &Payload::Real(vec![0.0; 4_096]), &mut out, &mut ctx)
+                    .unwrap();
+                for p in out.as_pulses().unwrap_or(&[]) {
+                    us +=
+                        p.pulses.iter().map(|x| u64::from(x.mark) + u64::from(x.gap)).sum::<u64>();
+                }
+            }
+            // 58 blocks of 4096 is 0.9899 s, and the last partial bit is
+            // owed rather than sent, so the timings are a bit short of it.
+            let seconds = us as f64 / 1e6;
+            assert!(
+                (0.985..=0.990).contains(&seconds),
+                "{baud} baud keyed {seconds:.4} s of timings in 0.9899 s"
+            );
+        }
     }
 
     /// A transmitter empties its queue in one go, so one transmission is
@@ -624,14 +578,6 @@ mod tests {
 /// The carrier this stage is pointed at.
 const CHANNEL_HZ: &str = "channel_hz";
 
-/// What the transmit side is set with.
-const ADDRESS: &str = "address";
-const FUNCTION: &str = "function";
-const FORMAT: &str = "format";
-const MESSAGE: &str = "message";
-const BAUD: &str = "baud";
-const PAUSE_MS: &str = "pause_ms";
-
 pub const DESC: StageDesc = StageDesc {
     name: "pocsag",
     summary: "One pager channel: narrowband FM and POCSAG at 512 to 2400 baud",
@@ -639,25 +585,28 @@ pub const DESC: StageDesc = StageDesc {
     feeds_bus: true,
 };
 
-pub const POCSAG_TX: StageDesc = StageDesc {
-    name: "pocsag_tx",
-    summary: "Page a pager: an address, a message and the batches around them",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     Ok(Box::new(PocsagNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }
 
+/// What the page says, and who it is for.
+const ADDRESS: &str = "address";
+const FUNCTION: &str = "function";
+const MESSAGE: &str = "message";
+const BAUD_PARAM: &str = "baud";
+
+pub const POCSAG_TX: StageDesc = StageDesc {
+    name: "pocsag_tx",
+    summary: "Key a page as POCSAG: preamble, batches and the address codeword",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
 pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let mut n = PocsagTxNode::new(
-        s.i64_or(ADDRESS, 1_234_567) as u32,
-        s.i64_or(FUNCTION, 3) as u8,
+    Ok(Box::new(PocsagTxNode::new(
+        s.f64_or(ADDRESS, 1_234_567.0) as u32,
+        s.f64_or(FUNCTION, 3.0) as u8,
         s.str_or(MESSAGE, ""),
-        s.f64_or(BAUD, 1200.0),
-    );
-    n.format = s.i64_or(FORMAT, 0).clamp(0, 2) as usize;
-    n.pace.set_pause_ms(s.f64_or(PAUSE_MS, crate::tx_source::DEFAULT_PAUSE_MS));
-    Ok(Box::new(n))
+        s.f64_or(BAUD_PARAM, 1200.0),
+    )))
 }

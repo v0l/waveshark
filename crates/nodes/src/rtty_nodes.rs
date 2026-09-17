@@ -364,141 +364,6 @@ fn is_baudot(bytes: &[u8]) -> bool {
 
 pub struct Rtty;
 
-/// An over, keyed as pulse timings.
-///
-/// The mirror of [`RttyNode`]: `decode::rtty::encode` picks the codes and the
-/// shift characters between them, `decode::rtty::line` adds the start and
-/// stop elements, and `dsp::pulse::nrz` turns those into the timings
-/// [`crate::mod_nodes::FskModNode`] keys. A mark is the upper tone, which is
-/// upright for a station on the upper sideband; the receiver reads both ways
-/// up regardless.
-///
-/// The line is keyed at twice the baud because a stop element is one and a
-/// half bit times and whole bits cannot express that.
-pub struct RttyTxNode {
-    text: String,
-    speed: Speed,
-    shift: Shift,
-    stop: rtty::Stop,
-    rate: f64,
-    pace: crate::tx_source::Pace,
-}
-
-impl Default for RttyTxNode {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            speed: Speed::default(),
-            shift: Shift::default(),
-            stop: rtty::Stop::default(),
-            rate: 0.0,
-            pace: crate::tx_source::Pace::default(),
-        }
-    }
-}
-
-/// Elements keyed per bit time. Two, so a stop of one and a half bits is
-/// three of them.
-const ELEMENTS_PER_BIT: usize = 2;
-
-impl RttyTxNode {
-    pub fn new(text: &str, speed: Speed, shift: Shift) -> Self {
-        Self { text: text.into(), speed, shift, ..Default::default() }
-    }
-
-    /// The whole over as timings, idle marks and all.
-    pub fn over(&self) -> Vec<common::pulse::Pulse> {
-        let codes = rtty::encode(&self.text);
-        let bits = rtty::line(&codes, self.stop, ELEMENTS_PER_BIT);
-        dsp::pulse::nrz(&bits, self.speed.baud() * ELEMENTS_PER_BIT as f64)
-    }
-
-    pub fn sent(&self) -> u64 {
-        self.pace.sent()
-    }
-}
-
-impl Simple for RttyTxNode {
-    fn name(&self) -> &str {
-        RTTY_TX.name
-    }
-
-    fn readings(&self) -> Vec<(String, String)> {
-        vec![
-            ("keying".into(), format!("{} baud, {} Hz", self.speed, self.shift)),
-            ("overs".into(), self.pace.sent().to_string()),
-        ]
-    }
-
-    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
-        if input.spec.rate <= 0.0 {
-            return Err(common::Error::other("rtty_tx needs a clock to key against"));
-        }
-        self.rate = input.spec.rate;
-        let mut out = input.spec.with_kind(PortKind::Pulses);
-        out.flow = pipeline::port::Flow::Tx;
-        out.bandwidth = CHANNEL_WIDTH_HZ;
-        Ok(out)
-    }
-
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        self.pace.clock(i.len(), self.rate);
-        if !self.pace.due() || self.text.is_empty() {
-            return Ok(());
-        }
-        let pulses = self.over();
-        if pulses.is_empty() {
-            return Ok(());
-        }
-        self.pace.spent(crate::tx_source::air_time_us(&pulses));
-        o.pulses_mut().push(common::pulse::Package { pulses, ..Default::default() });
-        Ok(())
-    }
-
-    fn reset(&mut self) {
-        self.pace.reset();
-    }
-
-    fn params(&self) -> Vec<Param> {
-        vec![
-            Param::text(TEXT, self.text.clone()).label("Over"),
-            Param::choice(
-                SPEED,
-                Speed::ALL.iter().position(|s| *s == self.speed).unwrap_or(0),
-                Speed::ALL.iter().map(|s| s.to_string()).collect(),
-            )
-            .label("Speed")
-            .unit("baud"),
-            Param::choice(
-                SHIFT,
-                Shift::ALL.iter().position(|s| *s == self.shift).unwrap_or(0),
-                Shift::ALL.iter().map(|s| s.to_string()).collect(),
-            )
-            .label("Shift")
-            .unit("Hz"),
-            Param::float(PAUSE_MS, self.pace.pause_ms(), 0.0..=60_000.0)
-                .label("Between overs")
-                .unit("ms"),
-        ]
-    }
-
-    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
-        match name {
-            TEXT => {
-                self.text = match value {
-                    ParamValue::Text(t) => t,
-                    _ => return Err(common::Error::other("rtty_tx: an over is text")),
-                }
-            }
-            SPEED => self.speed = speed_of(&value).unwrap_or_default(),
-            SHIFT => self.shift = shift_of(&value).unwrap_or_default(),
-            PAUSE_MS => self.pace.set_pause_ms(value.as_f64().unwrap_or(1_000.0)),
-            _ => return Err(common::Error::other(format!("rtty_tx: unknown parameter {name:?}"))),
-        }
-        Ok(())
-    }
-}
-
 impl Protocol for Rtty {
     fn id(&self) -> &'static str {
         "rtty"
@@ -547,14 +412,141 @@ impl Protocol for Rtty {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
-    /// The teleprinter into the two-tone modulator, at the shift the
-    /// receiver defaults to reading.
+    /// The line, then the shift a station keys: the narrow 170 Hz, since
+    /// that is what the default speed goes with and what the other end
+    /// expects on the amateur bands.
     fn transmit(&self) -> Option<crate::protocol::TxChain> {
         Some(crate::protocol::TxChain {
             source: NodeSpec::new(RTTY_TX.name),
             modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
-                .f("shift_hz", Shift::default().hz()),
+                .f("shift_hz", Shift::default().hz())
+                .f("offset_hz", 0.0),
         })
+    }
+}
+
+/// Text as a keyed teleprinter line.
+///
+/// The transmit mirror of [`RttyNode`]: the Baudot codes come from
+/// [`decode::rtty::encode`], which is the table the receiver reads back, and
+/// each is framed as a start element of space, five data bits with the least
+/// significant first, and a stop element of mark.
+///
+/// The stop is two bit times rather than the teleprinter's one and a half,
+/// because the keyer works in whole bits and the receiver reads the stop as
+/// one element however long it is held. The line rests at mark before and
+/// after the over, which is what closes the run at the far end.
+pub struct RttyTxNode {
+    text: String,
+    speed: Speed,
+    shift: Shift,
+    keyer: crate::tx_nodes::Keyer,
+    rate: f64,
+}
+
+/// Bit times of resting mark in front of an over and behind it. The far end
+/// closes a run after 24 symbols with no character framed, so the tail has
+/// to be longer than that or two overs arrive as one.
+const IDLE_BITS: usize = 32;
+
+impl Default for RttyTxNode {
+    fn default() -> Self {
+        Self::new("", Speed::default(), Shift::default())
+    }
+}
+
+impl RttyTxNode {
+    pub fn new(text: &str, speed: Speed, shift: Shift) -> Self {
+        let mut n = Self {
+            text: text.into(),
+            speed,
+            shift,
+            keyer: crate::tx_nodes::Keyer::new(speed.baud(), 0.0),
+            rate: 0.0,
+        };
+        n.reload();
+        n
+    }
+
+    fn reload(&mut self) {
+        self.keyer.set_baud(self.speed.baud());
+        if self.text.is_empty() {
+            self.keyer.load(Vec::new());
+            return;
+        }
+        let mut bits = vec![true; IDLE_BITS];
+        for code in rtty::encode(&self.text) {
+            bits.push(false);
+            bits.extend((0..5).map(|k| code >> k & 1 != 0));
+            bits.extend([true, true]);
+        }
+        bits.extend(std::iter::repeat_n(true, IDLE_BITS));
+        self.keyer.load(bits);
+    }
+}
+
+impl Simple for RttyTxNode {
+    fn name(&self) -> &str {
+        RTTY_TX.name
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        vec![
+            ("keying".into(), format!("{} baud, {} Hz", self.speed, self.shift)),
+            ("overs".into(), self.keyer.passes().to_string()),
+        ]
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.rate <= 0.0 {
+            return Err(common::Error::other("rtty_tx needs a clock to key against"));
+        }
+        self.rate = i.spec.rate;
+        Ok(StreamSpec {
+            kind: PortKind::Pulses,
+            rate: i.spec.rate,
+            center: i.spec.center,
+            bandwidth: CHANNEL_WIDTH_HZ,
+            channels: 1,
+            flow: pipeline::port::Flow::Tx,
+            domain: pipeline::port::Domain::Baseband,
+        })
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        if i.is_empty() {
+            return Ok(());
+        }
+        let pkg = self.keyer.take(i.len(), self.rate);
+        if !pkg.pulses.is_empty() {
+            o.pulses_mut().push(pkg);
+        }
+        Ok(())
+    }
+
+    fn params(&self) -> Vec<Param> {
+        let speed = Speed::ALL.iter().position(|&s| s == self.speed).unwrap_or(0);
+        let shift = Shift::ALL.iter().position(|&s| s == self.shift).unwrap_or(0);
+        vec![
+            Param::text(TEXT, self.text.clone()).label("Over"),
+            Param::choice(SPEED, speed, Speed::ALL.iter().map(|s| s.to_string()).collect())
+                .label("Speed")
+                .unit("baud"),
+            Param::choice(SHIFT, shift, Shift::ALL.iter().map(|s| s.to_string()).collect())
+                .label("Shift")
+                .unit("Hz"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            TEXT => self.text = value.as_str().unwrap_or_default().to_string(),
+            SPEED => self.speed = speed_of(&value).unwrap_or_default(),
+            SHIFT => self.shift = shift_of(&value).unwrap_or_default(),
+            _ => return Err(common::Error::other(format!("rtty_tx: unknown parameter {name:?}"))),
+        }
+        self.reload();
+        Ok(())
     }
 }
 
@@ -648,43 +640,31 @@ mod tests {
         assert_eq!(d.crc_ok, None, "nothing in RTTY checks");
     }
 
-    /// Keyed by the transmit stage, modulated, and read back: the encoder,
-    /// the line discipline and the framer all agree or the text does not
-    /// come back.
+    /// The transmitter into the receiver: an over keyed by the chain the
+    /// protocol declares, read back by the node that reads real stations.
+    ///
+    /// What it pins beyond the synthetic keying above is that the shift the
+    /// protocol asks the modulator for, the framing the source builds and
+    /// the pacing against the radio's clock all agree with the receiver.
     #[test]
-    fn an_over_this_receiver_keyed_is_an_over_this_receiver_reads() {
-        let (rate, center) = (8_000.0, DEFAULT_HZ);
-        let mut tx = RttyTxNode::new(OVER, Speed::default(), Shift::default());
-        let keyed = tx.negotiate(&spec(rate, center)).unwrap();
-
-        let mut pulses = Payload::empty_of(PortKind::Pulses);
-        let ins = [spec(rate, center)];
-        let (mut ev, mut tg) = (Vec::new(), Vec::new());
-        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        Simple::process(&mut tx, &Payload::Real(vec![0.0; 4096]), &mut pulses, &mut ctx).unwrap();
-        assert_eq!(tx.sent(), 1);
-        // 29 codes of seven and a half bit times, and eight idle bits
-        // either side, at 45.45 baud.
-        let air = crate::tx_source::air_time_us(&pulses.as_pulses().unwrap()[0].pulses) / 1e6;
-        assert!((air - (29.0 * 7.5 + 16.0) / 45.45).abs() < 1e-3, "{air} s of air");
-
-        let mut modulator = crate::mod_nodes::FskModNode::new(0.0, Shift::default().hz(), 0.5);
-        modulator.negotiate(&PortSpec { spec: keyed, latency: 0 }).unwrap();
-        let mut iq = Payload::Iq(Vec::new());
-        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        Simple::process(&mut modulator, &pulses, &mut iq, &mut ctx).unwrap();
-        let mut iq = match iq {
-            Payload::Iq(v) => v,
-            _ => unreachable!("a modulator produces baseband"),
-        };
-        // The carrier drops between overs, and that silence is what closes
-        // the run: an over has no end of message and the framer publishes
-        // when the tones fall undecided.
-        iq.extend(std::iter::repeat_n(C32::new(0.0, 0.0), rate as usize / 2));
+    fn an_over_keyed_by_the_transmit_chain_is_read_back() {
+        let (rate, center) = (48_000.0, 14_083_000.0);
+        // 24 characters and five shifts at 45.45 baud, eight bits each,
+        // with 32 bit times of resting mark either side: 296 bits, which is
+        // 6.5 seconds.
+        let air = crate::tx_nodes::transmit_for(
+            &Rtty,
+            rate,
+            Hz(center as u64),
+            6.6,
+            &[(TEXT, ParamValue::Text(OVER.into()))],
+        );
+        // 78 blocks of 4096 samples, which is a whole number of bits here.
+        assert_eq!(air.len(), 318_912, "6.6 s of samples at {rate}");
 
         let mut node = RttyNode::default();
         node.negotiate(&spec(rate, center)).unwrap();
-        let frames = run(&mut node, &iq, rate, center);
+        let frames = run(&mut node, &air, rate, center);
         assert_eq!(frames.len(), 1, "{} runs off the air", frames.len());
         let d = rtty_decoded(&frames[0], Hz(center as u64)).expect("a decode");
         assert_eq!(d.text.as_deref(), Some(OVER));
@@ -776,7 +756,19 @@ const CHANNEL_HZ: &str = "channel_hz";
 const SPEED: &str = "speed";
 const SHIFT: &str = "shift";
 const TEXT: &str = "text";
-const PAUSE_MS: &str = "pause_ms";
+
+pub const RTTY_TX: StageDesc = StageDesc {
+    name: "rtty_tx",
+    summary: "Key an over as Baudot: a start element, five bits and a stop",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
+    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
+    Ok(Box::new(RttyTxNode::new(s.str_or(TEXT, ""), speed, shift)))
+}
 
 pub const DESC: StageDesc = StageDesc {
     name: "rtty",
@@ -785,25 +777,10 @@ pub const DESC: StageDesc = StageDesc {
     feeds_bus: true,
 };
 
-pub const RTTY_TX: StageDesc = StageDesc {
-    name: "rtty_tx",
-    summary: "Key an over in Baudot, start and stop elements and all",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
     let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
     Ok(Box::new(RttyNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), speed, shift)))
-}
-
-pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
-    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
-    let mut n = RttyTxNode::new(s.str_or(TEXT, ""), speed, shift);
-    n.pace.set_pause_ms(s.f64_or(PAUSE_MS, crate::tx_source::DEFAULT_PAUSE_MS));
-    Ok(Box::new(n))
 }
 
 /// A saved patch holds the choice as an index and a person writing one holds

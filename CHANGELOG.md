@@ -14,8 +14,9 @@ the code is in the commit log.
 - The trace and the waterfall each choose what a point shows out of the frame
   behind it: the newest transform, the mean, or the loudest.
 - A dataset that is downloading says how far it has got, in bytes and as a bar.
-- Transmit six protocols this receiver reads: POCSAG pages, APRS beacons, RTTY
-  overs, BLE advertisements, SSTV pictures and RDS station names.
+- Transmit six protocols this receiver reads, on a channel already decoding
+  one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements, SSTV
+  pictures and RDS station names.
 - The raw capture can be armed on energy: a file per burst, holding the signal
   from before it triggered.
 - Several matching tuners offered as one wider receiver, drift between them

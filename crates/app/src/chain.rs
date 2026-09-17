@@ -7581,6 +7581,50 @@ mod tx_in_graph_tests {
         );
     }
 
+    /// A channel decoding a data mode keys up in that mode, with the stages
+    /// its protocol declares and none of the voice chain's.
+    ///
+    /// One test for the three, because what is being checked is the join:
+    /// the mode menu asks the registry, the plan carries the protocol's id,
+    /// and `derived_patch` builds what `Protocol::transmit` named.
+    #[test]
+    fn a_data_channel_keys_up_with_its_own_source_and_modulator() {
+        for (id, hz, want) in [
+            ("pocsag", 439_987_500, ["tx_clock", "pocsag_tx", "fsk_mod", "radio_tx"]),
+            ("aprs", 144_800_000, ["tx_clock", "aprs_tx", "fm_mod", "radio_tx"]),
+            ("rtty", 14_083_000, ["tx_clock", "rtty_tx", "fsk_mod", "radio_tx"]),
+        ] {
+            let mut plan = tests::plan(2_400_000.0, Hz(hz));
+            plan.channels = vec![ChannelSpec {
+                id: 1,
+                label: id.into(),
+                offset_hz: 0.0,
+                mode: ChanMode::Decode(id.into()),
+                bandwidth_hz: None,
+                squelch_db: None,
+                agc: true,
+                voice: false,
+                tx: Some(TxSpec::default()),
+            }];
+            let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+                .unwrap_or_else(|| panic!("{id} can be keyed"));
+            assert_eq!(mode, TxMode::Digital(id));
+            plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(hz) });
+
+            let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+            let tx = rx.tx_topology().expect("a transmit chain");
+            let kinds: Vec<&str> = tx.nodes.iter().map(|n| n.kind.as_str()).collect();
+            assert_eq!(kinds, want, "{id}");
+            // The source's fields are the stage's own, which is what the
+            // strip and the chain view both draw.
+            let source = tx.nodes.iter().find(|n| n.kind == want[1]).expect("a source");
+            assert!(
+                source.params.iter().any(|p| matches!(p.value, pipeline::ParamValue::Text(_))),
+                "{id} has nothing to say"
+            );
+        }
+    }
+
     /// A transport packet that says which packet it is in every payload
     /// byte, so a stream read back off the air can be checked against the
     /// file it came from.
