@@ -89,6 +89,12 @@ fn voices(dir: &str) -> Vec<(String, String)> {
     out
 }
 
+/// A scroll area's height as a share of the screen, so a modal with two
+/// growing lists in it still fits a laptop panel.
+fn share_of_screen(ui: &egui::Ui, share: f32, least: f32, most: f32) -> f32 {
+    (ui.ctx().input(|i| i.content_rect().height()) * share).clamp(least, most)
+}
+
 impl App {
     pub(super) fn settings_modal(&mut self, ctx: &egui::Context) {
         let Some(which) = self.open else { return };
@@ -98,6 +104,7 @@ impl App {
             Settings::Radio => "Radio",
             Settings::PacketLog => "Packet log",
             Settings::Scanners => "Scanners",
+            Settings::BandWalk => "Band walk",
             Settings::Memory => "Memory bank",
             Settings::Data => crate::i18n::t("settings.data"),
             Settings::Agent => "Agent",
@@ -107,7 +114,9 @@ impl App {
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(match which {
-                    Settings::Scanners | Settings::Memory | Settings::Data => 560.0,
+                    Settings::Scanners | Settings::BandWalk | Settings::Memory | Settings::Data => {
+                        560.0
+                    }
                     _ => 520.0,
                 });
                 modal_title(ui, title);
@@ -117,6 +126,7 @@ impl App {
                     Settings::Radio => self.radio_settings(ui),
                     Settings::PacketLog => self.packet_log_settings(ui),
                     Settings::Scanners => self.scanner_settings(ui),
+                    Settings::BandWalk => self.band_walk(ui),
                     Settings::Memory => self.memory_pane(ui),
                     Settings::Data => self.data_settings(ui),
                     Settings::Agent => self.agent_settings(ui),
@@ -246,7 +256,7 @@ impl App {
         let mut acts: Vec<Cmd> = Vec::new();
         let mut tune_to = None;
 
-        section(ui, "band walk", "step the dial past the span until something answers", |ui| {
+        section(ui, "the dial", "step it past the span until something answers", |ui| {
             row_help(
                 ui,
                 "band",
@@ -344,53 +354,61 @@ impl App {
 
         if let Some(st) = status.as_ref().filter(|st| !st.found.is_empty()) {
             ui.add_space(6.0);
-            for f in &st.found {
-                let mhz = f.center_hz as f64 / 1e6;
-                card(
-                    ui,
-                    Some(theme::TRACE),
-                    |ui| {
-                        theme::Line::new()
-                            .value(format!("{mhz:.4} MHz"))
-                            .size(12.0)
-                            .gap(12.0)
-                            .heard(f.protocol.clone().unwrap_or_else(|| "unclaimed".into()))
-                            .size(11.0)
-                            .show(ui);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("IGNORE").clicked() {
-                                let mut list: Vec<String> =
-                                    st.ignore.iter().map(nodes::Key::label).collect();
-                                list.push(f.key.label());
-                                acts.push(Cmd::StageParam(
-                                    crate::chain::derived::SCAN,
-                                    "ignore".into(),
-                                    pipeline::ParamValue::Text(list.join(",")),
-                                ));
-                            }
-                            if ui.button("TUNE").clicked() {
-                                tune_to = Some(mhz);
-                            }
-                        });
-                    },
-                    |ui| {
-                        theme::Line::new()
-                            .legend("heard")
-                            .value(f.heard.to_string())
-                            .size(11.0)
-                            .gap(16.0)
-                            .legend("snr")
-                            .value(format!("{:.0} dB", f.snr_db))
-                            .size(11.0)
-                            .gap(16.0)
-                            .legend("as")
-                            .value(f.key.label())
-                            .size(11.0)
-                            .show(ui);
-                    },
-                );
-                ui.add_space(4.0);
-            }
+            let w = ui.available_width();
+            let tall = share_of_screen(ui, 0.45, 160.0, 560.0);
+            egui::ScrollArea::vertical().max_height(tall).id_salt("walkhits").show(ui, |ui| {
+                ui.set_max_width(w);
+                for f in &st.found {
+                    let mhz = f.center_hz as f64 / 1e6;
+                    card(
+                        ui,
+                        Some(theme::TRACE),
+                        |ui| {
+                            theme::Line::new()
+                                .value(format!("{mhz:.4} MHz"))
+                                .size(12.0)
+                                .gap(12.0)
+                                .heard(f.protocol.clone().unwrap_or_else(|| "unclaimed".into()))
+                                .size(11.0)
+                                .show(ui);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("IGNORE").clicked() {
+                                        let mut list: Vec<String> =
+                                            st.ignore.iter().map(nodes::Key::label).collect();
+                                        list.push(f.key.label());
+                                        acts.push(Cmd::StageParam(
+                                            crate::chain::derived::SCAN,
+                                            "ignore".into(),
+                                            pipeline::ParamValue::Text(list.join(",")),
+                                        ));
+                                    }
+                                    if ui.button("TUNE").clicked() {
+                                        tune_to = Some(mhz);
+                                    }
+                                },
+                            );
+                        },
+                        |ui| {
+                            theme::Line::new()
+                                .legend("heard")
+                                .value(f.heard.to_string())
+                                .size(11.0)
+                                .gap(16.0)
+                                .legend("snr")
+                                .value(format!("{:.0} dB", f.snr_db))
+                                .size(11.0)
+                                .gap(16.0)
+                                .legend("as")
+                                .value(f.key.label())
+                                .size(11.0)
+                                .show(ui);
+                        },
+                    );
+                    ui.add_space(4.0);
+                }
+            });
         }
 
         if (on, lo, hi, step, dwell, hold) != was {
@@ -448,13 +466,43 @@ impl App {
             }
         });
         ui.add_space(8.0);
-        self.band_walk(ui);
+        // The walk is its own dialog: it has a form and a list of finds, and
+        // both of them beside the table left nothing room enough to read.
+        let walk = self.radio.as_ref().and_then(|r| r.status.band_scan.lock().clone());
+        let mut open_walk = false;
+        section(ui, "band walk", "step the dial past the span until something answers", |ui| {
+            ui.horizontal(|ui| {
+                match walk.as_ref().filter(|st| st.running) {
+                    Some(st) => {
+                        let at = st
+                            .center_hz
+                            .map(|c| format!("{:.4} MHz", c / 1e6))
+                            .unwrap_or_else(|| "starting".into());
+                        let what = match st.holding {
+                            true => format!("held at {at}"),
+                            false => format!("at {at}, {} found", st.found.len()),
+                        };
+                        lamp(ui, true, &what);
+                    }
+                    None => lamp(ui, false, "the dial stays where you put it"),
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    open_walk = ui.button("WALK").clicked();
+                });
+            });
+        });
+        if open_walk {
+            self.scanner_edit = Some(rows);
+            self.open = Some(Settings::BandWalk);
+            return;
+        }
         ui.add_space(8.0);
 
         let mut remove = None;
         let mut tune_to = None;
         let w = ui.available_width();
-        egui::ScrollArea::vertical().max_height(360.0).id_salt("scanrows").show(ui, |ui| {
+        let tall = share_of_screen(ui, 0.34, 200.0, 420.0);
+        egui::ScrollArea::vertical().max_height(tall).id_salt("scanrows").show(ui, |ui| {
             ui.set_max_width(w);
             for (i, r) in rows.iter_mut().enumerate() {
                 let on = active.iter().any(|n| n == &r.name);
