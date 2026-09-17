@@ -354,6 +354,9 @@ pub struct Plan {
     /// something an operator switched on and expects to still be there after
     /// a retune rebuilds the graph.
     pub iqstream: Option<IqStreamPlan>,
+    /// Where a KISS TNC is served, for packet software to use the radio
+    /// through, or `None` for not served at all.
+    pub kiss: Option<std::net::SocketAddr>,
     /// The channel being transmitted on, if any, and what it transmits.
     ///
     /// In the plan because the transmitter is part of what the receiver is
@@ -2946,6 +2949,8 @@ pub mod derived {
     pub const CHANNELS: u64 = Patch::DERIVED_BASE + 32;
     /// The span on its way out to network subscribers.
     pub const IQSTREAM: u64 = Patch::DERIVED_BASE + 34;
+    /// AX.25 off the bus, out to whatever packet software is connected.
+    pub const KISS: u64 = Patch::DERIVED_BASE + 35;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -3489,6 +3494,19 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         // way the survey's file is.
         let wigle = p.add_derived(derived::WIGLE, "wigle", Settings::new());
         p.connect(Source::Stage(rows, 0), (wigle, 0));
+
+        // The TNC is a consumer of the same decodes, drawn only when one is
+        // being served: unlike the feeds above it opens a listening socket,
+        // which is not something to do because a receiver started.
+        if let Some(addr) = plan.kiss {
+            let mut k = Settings::new();
+            k.insert(
+                nodes::kiss_nodes::ADDRESS.into(),
+                pipeline::ParamValue::Text(addr.to_string()),
+            );
+            let tnc = p.add_derived(derived::KISS, "kiss_tnc", k);
+            p.connect(Source::Stage(rows, 0), (tnc, 0));
+        }
 
         // beaconDB is a third consumer of the same decodes, drawn whether or
         // not it is on for the same reason.
@@ -5044,6 +5062,7 @@ pub(crate) mod tests {
             transcribe_model: String::new(),
             transcribe_device: String::new(),
             feeds: Vec::new(),
+            kiss: None,
             tx: None,
             scan: Default::default(),
             settings: Default::default(),
@@ -7914,6 +7933,67 @@ mod tx_in_graph_tests {
                 "{id} has nothing to say"
             );
         }
+    }
+
+    /// A packet channel keys up with what a KISS client sent, and the TNC is
+    /// drawn on the bus only where one was asked for.
+    #[test]
+    fn a_packet_channel_transmits_what_a_kiss_client_sent() {
+        let mut plan = tests::plan(2_400_000.0, Hz(144_800_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "APRS".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("aprs".into()),
+            bandwidth_hz: None,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: Some(TxSpec::default()),
+        }];
+        let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+            .expect("a packet channel can be keyed");
+        assert_eq!(mode, TxMode::Digital("aprs"));
+        plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(144_800_000) });
+
+        // With no TNC served there is no stage on the bus, and the transmit
+        // chain is drawn anyway: it is silence until a client connects.
+        let drawn = derived_patch(&plan);
+        assert_eq!(drawn.stages().iter().filter(|s| s.kind == "kiss_tnc").count(), 0);
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let tx = rx.tx_topology().expect("a transmit chain");
+        let kinds: Vec<&str> = tx.nodes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds, ["tx_clock", "aprs_tx", "fm_mod", "radio_tx"]);
+
+        // Asked for, it is one stage, downstream of the decodes rather than
+        // of a channel: what it serves is every AX.25 frame on the bus.
+        plan.kiss = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        let drawn = derived_patch(&plan);
+        let tnc = drawn
+            .stages()
+            .iter()
+            .find(|s| s.kind == "kiss_tnc")
+            .expect("the TNC is drawn where one is served");
+        let from = match drawn.feeding((tnc.id, 0)) {
+            Some(crate::patch::Source::Stage(id, _)) => id,
+            other => panic!("the TNC is fed by {other:?}"),
+        };
+        assert_eq!(
+            drawn.stage(from).map(|s| s.kind.as_str()),
+            Some("dedupe"),
+            "the TNC reads the decodes, not a channel"
+        );
+
+        // And it negotiates in the graph the receiver runs, rather than only
+        // in the one it draws.
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let running = rx.topology();
+        assert_eq!(
+            running.nodes.iter().filter(|n| n.kind == "kiss_tnc").count(),
+            1,
+            "the TNC did not build: {:?}",
+            running.nodes.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
+        );
     }
 
     /// A transport packet that says which packet it is in every payload

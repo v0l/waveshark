@@ -41,6 +41,7 @@ pub mod iqstream_nodes;
 pub mod imet_nodes;
 pub mod iq_tx;
 pub mod keyed;
+pub mod kiss_nodes;
 pub mod lms6_nodes;
 pub mod lora_nodes;
 pub mod lrpt_nodes;
@@ -112,6 +113,7 @@ pub use homeassistant_nodes::{
 };
 pub use imet_nodes::ImetNode;
 pub use keyed::{Keyed, keyed, keyed_mut};
+pub use kiss_nodes::KissTncNode;
 pub use lms6_nodes::Lms6Node;
 pub use lora_nodes::LoraNode;
 pub use lrpt_nodes::LrptNode;
@@ -301,6 +303,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (wigle_nodes::DESC, wigle_nodes::build),
     (beacondb_nodes::DESC, beacondb_nodes::build),
     (homeassistant_nodes::DESC, homeassistant_nodes::build),
+    (kiss_nodes::TNC, kiss_nodes::build),
 ];
 
 /// Every node type compiled into this build, ready to make one by name.

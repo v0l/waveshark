@@ -301,7 +301,8 @@ impl Protocol for Aprs {
     }
     /// The frame as Bell 202 audio, then the deviation a 2 m packet channel
     /// is keyed at. The tones are audio, so what puts them on the air is the
-    /// same FM modulator a voice channel uses.
+    /// same FM modulator a voice channel uses. One source, whether the frame
+    /// came from the operator's beacon fields or from a KISS client.
     fn transmit(&self) -> Option<crate::protocol::TxChain> {
         Some(crate::protocol::TxChain {
             source: NodeSpec::new(APRS_TX.name),
@@ -312,13 +313,18 @@ impl Protocol for Aprs {
     }
 }
 
-/// A beacon as Bell 202 audio.
+/// A frame as Bell 202 audio: what a KISS client sent, or the operator's own
+/// beacon.
 ///
 /// The transmit mirror of [`AprsNode`] and built from the same layers read
 /// back: [`decode::ax25::encode`] lays out the frame, `dsp::hdlc` stuffs it
 /// and adds the check sequence, and `dsp::afsk` turns the bits into the two
 /// tones. What leaves is audio, because on a packet channel the data is in
 /// the audio and the carrier is ordinary narrowband FM.
+///
+/// A channel has one transmit source, so this is where both kinds of frame
+/// meet. A client's frame goes first: somebody at a keyboard is waiting on
+/// it, where a beacon repeats anyway.
 ///
 /// The audio is built once for a whole frame and handed out a block at a
 /// time, because a frame is a quarter of a second and a block is a
@@ -329,11 +335,22 @@ pub struct AprsTxNode {
     path: String,
     info: String,
     rate: f64,
+    /// The beacon the fields describe, as audio, or empty for nothing to say.
+    beacon: Vec<f32>,
+    /// The frame going out now.
     audio: Vec<f32>,
     at: usize,
+    /// Whether [`Self::audio`] came from a client rather than the beacon.
+    from_client: bool,
     /// Samples of silence left before the beacon goes again.
     rest: usize,
     sent: u64,
+    /// Where the KISS TNC listens, and the server once one is running there.
+    /// Resolved when a frame is wanted rather than when the node is built,
+    /// because the transmit chain is built on its own thread and in no fixed
+    /// order against the graph that serves.
+    tnc_addr: std::net::SocketAddr,
+    tnc: Option<std::sync::Arc<crate::kiss_nodes::Tnc>>,
 }
 
 /// Flags in front of a frame, which is what the far end's clock settles on.
@@ -359,10 +376,67 @@ impl AprsTxNode {
             path: path.into(),
             info: info.into(),
             rate: 0.0,
+            beacon: Vec::new(),
             audio: Vec::new(),
             at: 0,
+            from_client: false,
             rest: 0,
             sent: 0,
+            tnc_addr: crate::kiss_nodes::default_address(),
+            tnc: None,
+        }
+    }
+
+    /// Keying for the TNC at one address, whether or not it is serving yet.
+    pub fn keying(addr: std::net::SocketAddr) -> Self {
+        let mut node = Self::new("N0CALL", "APRS", "WIDE1-1", "");
+        node.tnc_addr = addr;
+        node
+    }
+
+    /// Keying for one TNC in particular, which is how a test hands it the
+    /// server it just started.
+    pub fn attach(tnc: std::sync::Arc<crate::kiss_nodes::Tnc>) -> Self {
+        let mut node = Self::new("N0CALL", "APRS", "WIDE1-1", "");
+        node.tnc_addr = tnc.address();
+        node.tnc = Some(tnc);
+        node
+    }
+
+    /// Frames put on the air since the chain was built.
+    pub fn sent(&self) -> u64 {
+        self.sent
+    }
+
+    /// The TNC, looked up once it is serving.
+    pub(crate) fn attached(&mut self) -> Option<&std::sync::Arc<crate::kiss_nodes::Tnc>> {
+        if self.tnc.is_none() {
+            self.tnc = crate::kiss_nodes::running(self.tnc_addr);
+        }
+        self.tnc.as_ref()
+    }
+
+    /// Lay out the next frame: a client's if one is queued, else the beacon.
+    fn load(&mut self) {
+        self.at = 0;
+        self.audio.clear();
+        let queued = self.attached().cloned().and_then(|tnc| {
+            let frame = tnc.next_frame()?;
+            let flags = tnc
+                .params()
+                .lead_flags(dsp::afsk::BELL202.baud)
+                .max(crate::kiss_nodes::MIN_LEAD_FLAGS);
+            Some(dsp::afsk::encode(&frame, self.rate, flags))
+        });
+        match queued {
+            Some(audio) => {
+                self.audio = audio;
+                self.from_client = true;
+            }
+            None => {
+                self.audio = self.beacon.clone();
+                self.from_client = false;
+            }
         }
     }
 
@@ -387,7 +461,8 @@ impl AprsTxNode {
     fn reload(&mut self) {
         self.at = 0;
         self.rest = 0;
-        self.audio = match (self.rate > 0.0, self.frame()) {
+        self.audio.clear();
+        self.beacon = match (self.rate > 0.0, self.frame()) {
             (true, Some(f)) => dsp::afsk::encode(&f, self.rate, LEAD_FLAGS),
             _ => Vec::new(),
         };
@@ -404,7 +479,16 @@ impl Simple for AprsTxNode {
             Some(_) => format!("{} to {}", self.source, self.destination),
             None => "nothing to beacon".into(),
         };
-        vec![("beaconing".into(), what), ("sent".into(), self.sent.to_string())]
+        let (queued, clients) = match &self.tnc {
+            Some(t) => (t.queued().to_string(), t.connected().to_string()),
+            None => ("no TNC is being served".into(), "0".into()),
+        };
+        vec![
+            ("beaconing".into(), what),
+            ("sent".into(), self.sent.to_string()),
+            ("queued".into(), queued),
+            ("clients".into(), clients),
+        ]
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
@@ -424,12 +508,6 @@ impl Simple for AprsTxNode {
             return Ok(());
         }
         let out = o.real_mut();
-        if self.audio.is_empty() {
-            // Nothing to say is silence, not a refusal: the chain is drawn
-            // whether or not there is a beacon in it.
-            out.resize(out.len() + want, 0.0);
-            return Ok(());
-        }
         let mut left = want;
         while left > 0 {
             if self.rest > 0 {
@@ -439,14 +517,28 @@ impl Simple for AprsTxNode {
                 left -= n;
                 continue;
             }
+            if self.at >= self.audio.len() {
+                self.load();
+            }
+            if self.audio.is_empty() {
+                // Nothing to say is silence, not a refusal: the chain is
+                // drawn and keyed whether or not there is a beacon in it or
+                // a client connected.
+                out.resize(out.len() + left, 0.0);
+                return Ok(());
+            }
             let n = (self.audio.len() - self.at).min(left);
             out.extend_from_slice(&self.audio[self.at..self.at + n]);
             self.at += n;
             left -= n;
             if self.at >= self.audio.len() {
-                self.at = 0;
                 self.sent += 1;
-                self.rest = (BEACON_GAP_S * self.rate) as usize;
+                // A queue drains back to back; a beacon waits, so two of them
+                // do not arrive as one frame.
+                self.rest = match self.from_client {
+                    true => 0,
+                    false => (BEACON_GAP_S * self.rate) as usize,
+                };
             }
         }
         Ok(())

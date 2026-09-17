@@ -1051,6 +1051,17 @@ impl App {
 
     /// Start on the radio whose label contains `want`, for when several are
     /// plugged in and the saved one is not the one wanted.
+    /// Serve a KISS TNC here, from the command line, so packet software can
+    /// use the radio.
+    ///
+    /// The address is told to the node registry as well as to the receiver,
+    /// because the transmit half is built on the transmitter's own thread
+    /// from the protocol registry and has no plan to read it from.
+    pub fn serve_kiss(&mut self, addr: std::net::SocketAddr) {
+        nodes::kiss_nodes::set_default_address(addr);
+        self.send(Cmd::Kiss(Some(addr)));
+    }
+
     /// Publish every device heard to this broker, from the command line.
     pub fn publish_to(&mut self, publish: nodes::Publish) {
         self.settings.edit(|s| {
@@ -3404,6 +3415,7 @@ mod tests {
             Cmd::Survey(_) => "survey",
             Cmd::Gps(_) => "gps",
             Cmd::Feeds(_) => "feeds",
+            Cmd::Kiss(_) => "kiss",
             Cmd::Location(..) => "location",
             Cmd::Audio { .. } => "audio",
             Cmd::Wigle(_) => "wigle",

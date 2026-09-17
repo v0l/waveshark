@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- KISS TNC on `--kiss-listen`: packet software reads what the radio heard and
+  keys AX.25 through it.
 - NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
   whether the speech is enciphered. No sound yet.
 - DAB ensembles on band III: the ensemble name, its stations, their programme
