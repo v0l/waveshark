@@ -22,7 +22,7 @@ mod hanshow;
 mod hideki;
 mod interlogix;
 mod ism868_link;
-mod keyfob;
+pub mod keyfob;
 mod lacrosse;
 mod nexus;
 mod oregon;

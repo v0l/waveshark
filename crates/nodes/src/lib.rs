@@ -53,6 +53,7 @@ pub mod scope_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod sstv_nodes;
+pub mod sub_tx;
 pub mod survey_nodes;
 pub mod tetra_nodes;
 pub mod tx_nodes;
@@ -118,6 +119,7 @@ pub use sink_nodes::{
 };
 pub use source_nodes::{SourceDecodeNode, SourceDetectNode};
 pub use sstv_nodes::SstvNode;
+pub use sub_tx::SubTxNode;
 pub use survey_nodes::SurveyNode;
 pub use tetra_nodes::TetraNode;
 pub use tx_nodes::{
@@ -170,6 +172,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (tx_nodes::TONE, tx_nodes::build_tone),
     (tx_nodes::MORSE_TX, tx_nodes::build_morse_tx),
     (tx_nodes::MORSE_KEY, tx_nodes::build_morse_key),
+    (sub_tx::SUB_TX, sub_tx::build_sub_tx),
     (mod_nodes::OOK_MOD, mod_nodes::build_ook_mod),
     (mod_nodes::FSK_MOD, mod_nodes::build_fsk_mod),
     (mod_nodes::ASK_MOD, mod_nodes::build_ask_mod),

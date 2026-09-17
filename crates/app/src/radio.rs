@@ -385,6 +385,7 @@ fn key_up(
     gain_db: f32,
     mic: &Option<audio::AudioCapture>,
     voice: &Option<std::sync::Arc<dyn audio::AudioSource>>,
+    sub: &Option<SubFile>,
 ) -> common::Result<(crate::chain::TxPlan, crate::chain::TxSinks)> {
     // Where the channel transmits: its own frequency plus the repeater
     // shift, which is zero for simplex.
@@ -442,12 +443,14 @@ fn key_up(
         TxSource::Agent => {
             Some(voice.clone().ok_or_else(|| common::Error::other("the agent has no voice"))?)
         }
-        TxSource::Tone => None,
+        // The file is already on the node; there is nothing to hand in at
+        // key-up.
+        TxSource::Sub | TxSource::Tone => None,
     };
 
     Ok((
         crate::chain::TxPlan { spec: *tx, mode, on_air },
-        crate::chain::TxSinks { stream: Some(dev.start_tx()?), mic: src },
+        crate::chain::TxSinks { stream: Some(dev.start_tx()?), mic: src, sub: sub.clone() },
     ))
 }
 
@@ -482,6 +485,31 @@ fn tune_gap() -> std::time::Duration {
     }
 }
 
+/// A Flipper `.sub` file, parsed and ready to key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubFile {
+    /// Where it came from, which is all a person knows it by.
+    pub path: String,
+    /// The parsed file: frequency, preset and the pulses themselves.
+    pub file: decode::subghz::SubGhz,
+}
+
+impl SubFile {
+    /// What the strip says the file is.
+    pub fn label(&self) -> String {
+        self.file.protocol.clone()
+    }
+
+    /// Parse a `.sub` file from disk.
+    pub fn open(path: &std::path::Path) -> Result<Self, decode::subghz::SubError> {
+        let text =
+            std::fs::read_to_string(path).map_err(|_| decode::subghz::SubError::NotASubFile)?;
+        Ok(Self { path: path.display().to_string(), file: decode::subghz::parse(&text)? })
+    }
+}
+
+/// Instructions from the interface to the radio.
+#[derive(Clone)]
 pub enum Cmd {
     Center(Hz),
     Rate(Sps),
@@ -624,6 +652,10 @@ pub enum Cmd {
     /// What the agent says, as a source the transmit chain reads when a
     /// channel is set to [`TxSource::Agent`].
     Voice(std::sync::Arc<dyn audio::AudioSource>),
+    /// A Flipper `.sub` file, parsed, for a channel set to
+    /// [`TxSource::Sub`]. `None` clears it. Handed in whole rather than as
+    /// a path so the radio thread never parses mid-over.
+    SubFile(Option<SubFile>),
     /// Key a channel by id, or unkey with `None`.
     ///
     /// One command for the whole receiver rather than one per channel: every
@@ -791,6 +823,10 @@ pub enum TxSource {
     /// What the agent has to say, from the queue it writes into. The key
     /// follows the queue: see `agent::channel`.
     Agent,
+    /// A Flipper `.sub` file's pulses, keyed as they stand. The file is
+    /// handed in whole by the interface, so the chain reads what was parsed
+    /// rather than re-reading a path; see `Cmd::SubFile`.
+    Sub,
 }
 
 impl TxSource {
@@ -799,6 +835,7 @@ impl TxSource {
             Self::Tone => "TONE",
             Self::Mic => "MIC",
             Self::Agent => "AGENT",
+            Self::Sub => "SUB",
         }
     }
 }
@@ -2094,6 +2131,10 @@ enum Block {
 struct Tx {
     /// The radio's own transmit gain.
     gain_db: f32,
+    /// A parsed `.sub` file, for a channel set to [`TxSource::Sub`]. Held
+    /// beside the gain rather than in the plan because it is handed in
+    /// whole, the way the agent's voice is, and a plan is copied around.
+    sub_file: Option<SubFile>,
     /// Blocks since the key went down, for the note said once a second.
     blocks_since_key: u64,
     /// The channel whose key is down but whose transmitter is still being
@@ -2324,6 +2365,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             audio: AudioIo { out: String::new(), input: String::new(), _player: player, mic: None },
             tx: Tx {
                 gain_db: 0.0,
+                sub_file: None,
                 blocks_since_key: 0,
                 keying_for: None,
                 last_keyed: None,
@@ -2473,6 +2515,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::Voice(src) => {
                 self.voice = Some(src.clone());
                 self.rx.set_agent_voice(Some(src));
+                self.needs_rebuild = true;
+            }
+            Cmd::SubFile(f) => {
+                self.tx.sub_file = f;
                 self.needs_rebuild = true;
             }
             Cmd::TxGain(db) => {
@@ -2828,6 +2874,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             self.tx.gain_db,
             &self.audio.mic,
             &self.voice,
+            &self.tx.sub_file,
         );
         let (tx_plan, mut sinks) = match up {
             Ok(got) => got,
