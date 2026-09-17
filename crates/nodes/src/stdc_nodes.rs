@@ -1,0 +1,362 @@
+//! Inmarsat STD-C as a graph node: one TDM channel in, packets out.
+//!
+//! The waveform is [`dsp::bpsk`] and the frames are [`decode::inmarsat::stdc`];
+//! what is here is the wiring. A channel is mixed down, filtered to the few
+//! kilohertz the 1200 symbol carrier occupies, demodulated, and handed to the
+//! framer, which finds the unique word, undoes the interleaver, decodes the
+//! code and unscrambles what is left.
+//!
+//! What reaches the bus is one packet at a time rather than the 640 byte
+//! frame, because a frame is a queue of unrelated things: a bulletin board,
+//! a channel assignment for one ship, a SafetyNET warning for everybody.
+//! Only a packet whose own check bytes agree is sent on, so a row here is
+//! something that was received rather than something that was guessed at.
+
+use crate::NodeSpec;
+use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
+use common::Result;
+use decode::inmarsat::{BAND_HZ, stdc};
+use dsp::bpsk::{BpskConfig, BpskDemod};
+use dsp::{FirDecim, Mixer};
+use pipeline::event::{Decoded, media};
+use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::port::{Payload, PortKind, StreamSpec};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
+
+/// A network control station's common channel, which is what an idle
+/// terminal listens to. Which one is in view depends on the ocean region, so
+/// this is only what the node is built with before it is told otherwise.
+pub const DEFAULT_HZ: f64 = 1_541_450_000.0;
+
+/// What one channel occupies. The carrier is 1200 symbols a second and a
+/// receiver is told to give it 5 to 10 kHz.
+pub const CHANNEL_WIDTH_HZ: f64 = 6_000.0;
+
+/// The rate the symbols are recovered at: eight samples a symbol.
+const WORK_HZ: f64 = 9_600.0;
+
+/// The rate to ask the receiver for, which decimates to [`WORK_HZ`] by four.
+const FEED_HZ: f64 = 38_400.0;
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub struct StdcNode {
+    channel_hz: f64,
+    mixer: Mixer,
+    decim: FirDecim,
+    demod: BpskDemod,
+    framer: stdc::Framer,
+    mixed: Vec<common::C32>,
+    narrow: Vec<common::C32>,
+    soft: Vec<f32>,
+    frames: Vec<stdc::Frame>,
+    meter: crate::FrameMeter,
+    packets: u64,
+}
+
+impl Default for StdcNode {
+    fn default() -> Self {
+        Self::new(DEFAULT_HZ)
+    }
+}
+
+impl StdcNode {
+    pub fn new(channel_hz: f64) -> Self {
+        Self {
+            channel_hz,
+            // All replaced at negotiation, when the real rate is known.
+            mixer: Mixer::new(0.0, 1.0),
+            decim: FirDecim::design_hz(WORK_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
+            demod: BpskDemod::new(WORK_HZ, BpskConfig::INMARSAT_C),
+            framer: stdc::Framer::new(),
+            mixed: Vec::new(),
+            narrow: Vec::new(),
+            soft: Vec::new(),
+            frames: Vec::new(),
+            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 10.0),
+            packets: 0,
+        }
+    }
+
+    /// Packets whose check bytes agreed since the node was built.
+    pub fn packets(&self) -> u64 {
+        self.packets
+    }
+}
+
+impl Simple for StdcNode {
+    fn name(&self) -> &str {
+        "stdc"
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Iq {
+            return Err(common::Error::other("stdc reads complex baseband"));
+        }
+        let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
+        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
+            return Err(common::Error::other("stdc needs its channel inside the span"));
+        }
+        let factor = (rate / WORK_HZ).round().max(1.0) as usize;
+        let work = rate / factor as f64;
+        self.mixer = Mixer::new(center - self.channel_hz, rate);
+        self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
+        self.demod = BpskDemod::new(work, BpskConfig::INMARSAT_C);
+        self.framer.reset();
+        // On the channel, not on the span: a 6 kHz channel in a megahertz of
+        // band is a thousandth of the power.
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0);
+
+        let mut out = i.spec.with_kind(PortKind::Frames);
+        out.center = common::Hz(self.channel_hz as u64);
+        out.bandwidth = CHANNEL_WIDTH_HZ;
+        Ok(out)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        let Some(iq) = i.as_iq() else { return Ok(()) };
+        self.mixed.clear();
+        self.mixer.process(iq, &mut self.mixed);
+        self.narrow.clear();
+        self.decim.process(&self.mixed, &mut self.narrow);
+        self.meter.feed(&self.narrow);
+
+        self.soft.clear();
+        let mut soft = std::mem::take(&mut self.soft);
+        self.demod.process(&self.narrow, &mut soft);
+        self.frames.clear();
+        let mut frames = std::mem::take(&mut self.frames);
+        self.framer.process(&soft, &mut frames);
+        self.soft = soft;
+
+        let out = o.frames_mut();
+        for f in &frames {
+            for p in stdc::packets(&f.bytes) {
+                if !p.check_ok {
+                    continue;
+                }
+                self.packets += 1;
+                out.push(self.meter.frame(p.bytes));
+            }
+        }
+        self.frames = frames;
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.mixer.reset();
+        self.decim.reset();
+        self.demod.reset();
+        self.framer.reset();
+        self.meter.reset();
+    }
+}
+
+/// The row a packet becomes.
+///
+/// An EGC broadcast carries text, and no person wrote it: a coast station's
+/// computer addressed an area, so it goes out with a media type and its
+/// fields and `written` left false.
+pub fn stdc_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let packets = stdc::packets(bytes);
+    let p = packets.first()?;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("packet".into(), common::Value::Text(p.descriptor.label().into())),
+        ("descriptor".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
+    ];
+    let mut d = Decoded::bytes("Inmarsat-C", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Psk2)
+        .with_crc(Some(p.check_ok))
+        .by(common::Identity::new("inmarsat-c", "egc").named("Inmarsat-C"));
+
+    let egc = matches!(p.descriptor, stdc::Descriptor::EgcHeader1 | stdc::Descriptor::EgcHeader2)
+        .then(|| stdc::Egc::parse(&p.bytes))
+        .flatten();
+    if let Some(e) = egc {
+        fields.push(("service".into(), common::Value::Text(e.service.label().into())));
+        fields.push(("priority".into(), common::Value::Text(e.priority.label().into())));
+        fields.push(("message_id".into(), common::Value::Int(i64::from(e.message_id))));
+        fields.push(("part".into(), common::Value::Int(i64::from(e.packet_no))));
+        let text = e.text();
+        let summary = format!("{}: {}", e.service.label(), text.trim());
+        d = d.with_text(text).with_detail(summary).with_media(media::TEXT);
+    } else {
+        d = d.with_detail(p.descriptor.label().to_string());
+    }
+    Some(d.with_fields(fields))
+}
+
+pub struct Stdc;
+
+impl Protocol for Stdc {
+    fn id(&self) -> &'static str {
+        "stdc"
+    }
+    fn label(&self) -> &'static str {
+        "std-c"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["inmarsat-c", "inmarsatc", "egc", "safetynet"]
+    }
+    /// The L-band downlinks to mobiles. Which channel a network control
+    /// station is on depends on the satellite in view, so the band is the
+    /// claim and the scanner table names the carriers inside it.
+    fn placement(&self) -> Placement {
+        Placement::Bands(vec![BAND_HZ])
+    }
+    fn default_hz(&self) -> f64 {
+        DEFAULT_HZ
+    }
+    fn shape(&self) -> Shape {
+        Shape {
+            widths: &[CHANNEL_WIDTH_HZ],
+            min_rate_hz: WORK_HZ,
+            feed_rate_hz: FEED_HZ,
+            span_wide: false,
+            families: &[],
+        }
+    }
+    fn stage_label(&self, hz: f64) -> String {
+        format!("{:.4} STD-C", hz / 1e6)
+    }
+    fn frame_claim(&self) -> FrameClaim {
+        FrameClaim::Band { width_hz: (BAND_HZ.1 - BAND_HZ.0) as u64 }
+    }
+    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+        let hz = p.center_hz() as f64;
+        if !(BAND_HZ.0..BAND_HZ.1).contains(&hz) || bytes.len() < 3 {
+            return None;
+        }
+        // A signal unit is an Aero frame and is exactly twelve bytes; an
+        // STD-C packet says its own length in its first byte or two.
+        if bytes.len() == decode::inmarsat::aero::SU_BYTES {
+            return None;
+        }
+        Some(stdc_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+    }
+    fn chain(&self, at: Placed) -> Vec<NodeSpec> {
+        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
+    }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "stdc",
+    summary: "One Inmarsat STD-C TDM: 1200 baud BPSK, EGC and SafetyNET",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(StdcNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::{C32, Hz};
+
+    /// Run a channel through the node and collect what reached the bus.
+    fn read(n: &mut StdcNode, rate: f64, iq: &[C32]) -> Vec<Vec<u8>> {
+        let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(DEFAULT_HZ as u64)), latency: 0 };
+        n.negotiate(&spec).expect("a channel");
+        let ins = [spec];
+        let tags = Vec::new();
+        let mut got = Vec::new();
+        for chunk in iq.chunks(16_384) {
+            let mut out = Payload::Frames(Vec::new());
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            n.process(&Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).expect("read");
+            if let Payload::Frames(f) = out {
+                got.extend(f.into_iter().map(|x| x.bytes));
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn the_channel_has_to_be_inside_the_span() {
+        let mut n = StdcNode::new(DEFAULT_HZ);
+        let far = PortSpec { spec: StreamSpec::iq(200_000.0, Hz(1_530_000_000)), latency: 0 };
+        assert!(n.negotiate(&far).is_err());
+        let near = PortSpec { spec: StreamSpec::iq(200_000.0, Hz(1_541_400_000)), latency: 0 };
+        let out = n.negotiate(&near).expect("a channel in the span");
+        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.center, Hz(DEFAULT_HZ as u64));
+    }
+
+    /// One frame of packets, keyed as BPSK at the offset a tuner leaves and
+    /// read back off the air by the node: the whole path, symbols included.
+    #[test]
+    fn a_keyed_frame_is_read_off_the_air() {
+        let mut frame = vec![0u8; stdc::FRAME_BYTES];
+        let mut board: Vec<u8> = vec![0x7D, 0x01, 0x12, 0x34, 0x01, 0x02, 0x03, 0x04];
+        board.resize(14, 0);
+        let check = stdc::check(&board);
+        board[12..].copy_from_slice(&check);
+        frame[..board.len()].copy_from_slice(&board);
+
+        let symbols = stdc::encode_frame(&frame);
+        // Two frames, because the framer is looking for a word it has not
+        // seen before and the first symbols of a stream are its worst.
+        let mut keyed: Vec<u8> = Vec::new();
+        for _ in 0..2 {
+            keyed.extend(symbols.iter().map(|s| u8::from(*s < 0.0)));
+        }
+        let rate = 38_400.0;
+        let iq: Vec<C32> = dsp::bpsk::modulate(&keyed, rate, BpskConfig::INMARSAT_C, 300.0, 0.5);
+
+        let mut n = StdcNode::new(DEFAULT_HZ);
+        let frames = read(&mut n, rate, &iq);
+        assert_eq!(frames.len(), 1, "one packet out of two frames");
+        assert_eq!(n.packets(), 1);
+        let d = stdc_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a row");
+        assert_eq!(d.protocol, "Inmarsat-C");
+        assert_eq!(d.crc_ok, Some(true));
+        assert_eq!(d.detail.as_deref(), Some("bulletin board"));
+    }
+
+    /// An EGC broadcast is a machine addressing an area, so it carries text
+    /// and fields and nobody wrote it.
+    #[test]
+    fn a_safetynet_warning_is_text_that_nobody_wrote() {
+        let text = b"NAVAREA I 123/25 NORTH SEA UNLIT BUOY ADRIFT";
+        let mut egc: Vec<u8> = vec![0xB1, 0, 0x31, 0x40, 0x00, 0x07, 0x01, 0x00];
+        egc.extend([0x01, 0x02, 0x03, 0x04]);
+        egc.extend(text.iter().copied());
+        egc.extend([0, 0]);
+        egc[1] = (egc.len() - 2) as u8;
+        let check = stdc::check(&egc);
+        let n = egc.len();
+        egc[n - 2..].copy_from_slice(&check);
+
+        let d = stdc_decoded(&egc, Hz(DEFAULT_HZ as u64)).expect("a row");
+        assert!(!d.written, "a coast station's computer did not write it");
+        assert_eq!(d.media_type, media::TEXT);
+        assert_eq!(d.text.as_deref(), Some("NAVAREA I 123/25 NORTH SEA UNLIT BUOY ADRIFT"));
+        let field = |k: &str| d.field(k).map(|v| v.to_string());
+        assert_eq!(field("service").as_deref(), Some("SafetyNET NAVAREA or METAREA warning"));
+        assert_eq!(field("priority").as_deref(), Some("urgency"));
+        assert_eq!(field("message_id").as_deref(), Some("7"));
+    }
+
+    /// Ten minutes of noise on the channel, and nothing reaches the bus.
+    #[test]
+    fn noise_produces_no_packets() {
+        let rate = 38_400.0;
+        let mut s = 5u64;
+        let iq: Vec<C32> = (0..(rate as usize * 600))
+            .map(|_| {
+                let mut next = || {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (s >> 33) as f32 / (1u64 << 30) as f32 - 1.0
+                };
+                C32::new(next(), next())
+            })
+            .collect();
+        let mut n = StdcNode::new(DEFAULT_HZ);
+        assert_eq!(read(&mut n, rate, &iq).len(), 0);
+        assert_eq!(n.packets(), 0);
+    }
+}

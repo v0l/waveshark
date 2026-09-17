@@ -44,6 +44,7 @@ pub mod geo;
 pub mod gpu;
 pub mod gsm;
 pub mod imet;
+pub mod inmarsat;
 pub mod jpeg;
 #[cfg(feature = "tea")]
 pub mod keystream;
