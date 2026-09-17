@@ -2483,6 +2483,7 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
         Cmd::CaptureCap(now.capture_cap_mb.map(|mb| mb << 20).unwrap_or(0)),
     );
     when(now.capture_on != was.capture_on, Cmd::CaptureIq(now.capture_on));
+    when(now.capture_arm != was.capture_arm, Cmd::CaptureTrigger(now.capture_arm));
     when(
         (now.packet_log_on, &now.log_dir) != (was.packet_log_on, &was.log_dir),
         Cmd::PacketLog(now.log_path()),
@@ -3309,6 +3310,7 @@ mod tests {
             Cmd::PacketLogCap(_) => "log_cap",
             Cmd::CaptureCap(_) => "capture_cap",
             Cmd::CaptureIq(_) => "capture",
+            Cmd::CaptureTrigger(_) => "capture_trigger",
             Cmd::PacketLog(_) => "packet_log",
             Cmd::Survey(_) => "survey",
             Cmd::Gps(_) => "gps",
@@ -3356,6 +3358,7 @@ mod tests {
                 "beacondb",
                 "capture",
                 "capture_cap",
+                "capture_trigger",
                 "dc_block",
                 "decode",
                 "feeds",

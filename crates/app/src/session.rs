@@ -267,6 +267,10 @@ pub struct Session {
     /// the packet log: it is switched on to catch something that happens
     /// rarely, and a restart in between should not quietly stop it.
     pub capture_on: bool,
+    /// What starts a capture, and on what terms when that is energy.
+    /// Remembered with the switch: a capture armed to catch something that
+    /// happens twice a night is armed for nights on end.
+    pub capture_arm: crate::chain::CapturePlan,
     /// Whether the span is kept as readings for a heatmap, how often a row
     /// is taken and how much of it is held. Remembered for the reason the
     /// capture switch is: what an export wants is the hours already gone.
@@ -435,6 +439,7 @@ impl Default for Session {
             survey_path: String::new(),
             list_unknown: true,
             capture_on: false,
+            capture_arm: crate::chain::CapturePlan::default(),
             heat_on: true,
             heat_rows_per_sec: 2.0,
             heat_cap_mb: (crate::heatmap::DEFAULT_BUDGET >> 20) as u64,
@@ -745,6 +750,21 @@ impl Session {
             survey_path: kv.get("survey_path").map(|v| v.to_string()).unwrap_or_default(),
             list_unknown: kv.get("list_unknown").map(|v| *v == "true").unwrap_or(d.list_unknown),
             capture_on: kv.get("capture_on").map(|v| *v == "true").unwrap_or(d.capture_on),
+            capture_arm: crate::chain::CapturePlan {
+                trigger: kv
+                    .get("capture_trigger")
+                    .and_then(|v| nodes::capture_nodes::Trigger::parse(v))
+                    .unwrap_or(d.capture_arm.trigger),
+                reference: kv
+                    .get("capture_reference")
+                    .and_then(|v| nodes::capture_nodes::Reference::parse(v))
+                    .unwrap_or(d.capture_arm.reference),
+                threshold_db: f("capture_threshold_db", d.capture_arm.threshold_db as f64)
+                    .clamp(-120.0, 60.0) as f32,
+                pre_ms: f("capture_pre_ms", d.capture_arm.pre_ms as f64).clamp(0.0, 5_000.0) as f32,
+                hang_ms: f("capture_hang_ms", d.capture_arm.hang_ms as f64).clamp(0.0, 30_000.0)
+                    as f32,
+            },
             heat_on: kv.get("heat_on").map(|v| *v == "true").unwrap_or(d.heat_on),
             heat_rows_per_sec: f("heat_rows_per_sec", d.heat_rows_per_sec as f64).clamp(0.02, 20.0)
                 as f32,
@@ -865,6 +885,12 @@ impl Session {
         s.push_str(&format!("transcribe_device = {}\n", self.transcribe_device));
         s.push_str(&format!("list_unknown = {}\n", self.list_unknown));
         s.push_str(&format!("capture_on = {}\n", self.capture_on));
+        let arm = &self.capture_arm;
+        s.push_str(&format!("capture_trigger = {}\n", arm.trigger.as_str()));
+        s.push_str(&format!("capture_reference = {}\n", arm.reference.as_str()));
+        s.push_str(&format!("capture_threshold_db = {}\n", arm.threshold_db));
+        s.push_str(&format!("capture_pre_ms = {}\n", arm.pre_ms));
+        s.push_str(&format!("capture_hang_ms = {}\n", arm.hang_ms));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
         s.push_str(&format!("capture_cap_mb = {}\n", render_cap(self.capture_cap_mb)));
         let v = &self.view;
@@ -1015,6 +1041,13 @@ mod tests {
             survey_path: "/var/log/waveshark/survey.sqlite".into(),
             list_unknown: false,
             capture_on: true,
+            capture_arm: crate::chain::CapturePlan {
+                trigger: nodes::capture_nodes::Trigger::Energy,
+                reference: nodes::capture_nodes::Reference::Absolute,
+                threshold_db: -62.5,
+                pre_ms: 250.0,
+                hang_ms: 2_500.0,
+            },
             gps: "/dev/ttyACM0@9600".into(),
             wigle_name: "AID0000".into(),
             wigle_token: "hunter2".into(),
