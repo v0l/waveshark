@@ -61,7 +61,12 @@ impl Fetch for Artemis {
         "github.com/AresValley/Artemis-DB".into()
     }
 
-    fn fetch(&self, have: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error> {
+    fn fetch(
+        &self,
+        have: &Seen,
+        to: &mut dyn Write,
+        _progress: &crate::progress::Progress,
+    ) -> Result<Option<Seen>, Error> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .user_agent(AGENT)
             .timeout_global(Some(Duration::from_secs(600)))

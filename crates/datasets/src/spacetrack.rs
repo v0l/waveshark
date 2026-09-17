@@ -90,7 +90,12 @@ impl Fetch for Query {
         self.url.clone()
     }
 
-    fn fetch(&self, _have: &Seen, to: &mut dyn Write) -> Result<Option<Seen>, Error> {
+    fn fetch(
+        &self,
+        _have: &Seen,
+        to: &mut dyn Write,
+        _progress: &crate::progress::Progress,
+    ) -> Result<Option<Seen>, Error> {
         let fail = |e: String| Error::Fetch(self.url.clone(), e);
         let Some(account) = account().filter(Account::is_complete) else {
             return Err(fail("no Space-Track login has been given".into()));
