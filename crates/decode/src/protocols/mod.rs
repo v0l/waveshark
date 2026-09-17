@@ -13,6 +13,7 @@ mod acurite;
 mod alecto;
 mod ambient;
 mod bresser;
+mod ert;
 mod esl;
 mod ev1527;
 mod fineoffset;
@@ -36,6 +37,7 @@ pub use acurite::{Acurite606Tx, Acurite609Txc, Acurite986, AcuriteTower, Acurite
 pub use alecto::AlectoV1;
 pub use ambient::AmbientF007th;
 pub use bresser::Bresser3Ch;
+pub use ert::{ErtIdm, ErtScm, ErtScmPlus};
 pub use esl::Esl;
 pub use ev1527::Ev1527;
 pub use fineoffset::{FineOffsetWh51, FineOffsetWh1080};
