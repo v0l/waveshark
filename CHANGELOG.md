@@ -44,7 +44,9 @@ the code is in the commit log.
   BETT, Linear and LinearDelta3 key files are re-encoded from their key.
 - A scripts panel down the left: every `.sub` file this machine holds, as a
   tree by where it came from, and a TX button that keys one at the frequency
-  it names, on a channel that decodes what it hears there. The NullSec Flipper Suite downloads in the data settings.
+  it names, on a channel that decodes what it hears there. Eight collections
+  of captures download in the data settings, UberGuidoZ and the Zero-Sploit DB
+  among them.
 - The agent and the MCP server reach the settings: the scanner table, the
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.

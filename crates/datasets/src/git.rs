@@ -63,6 +63,17 @@ pub struct Repo {
     /// The terms the publisher states for the content.
     pub terms: &'static str,
     pub max_age: Duration,
+    /// Extensions worth keeping, without the dot, or empty for the whole
+    /// tree. A repository of captures is mostly not captures: the largest
+    /// of these is two gigabytes of firmware, photographs and documents
+    /// around eleven thousand `.sub` files that come to a few megabytes.
+    /// The tarball is served whole either way; this is what lands on disk.
+    pub keep: &'static [&'static str],
+    /// What the compressed tarball may run to. Sized per repository rather
+    /// than once for all of them, because refusing the one collection
+    /// everybody has is not a safe default, and a gigabyte is plenty for
+    /// the rest.
+    pub max_bytes: u64,
 }
 
 impl Repo {
@@ -246,9 +257,10 @@ fn fetch(
     if resp.status().as_u16() != 200 {
         return Err(Error::Status(repo.tarball.into(), resp.status().as_u16()));
     }
-    let mut gz =
-        flate2::read::GzDecoder::new(resp.body_mut().with_config().limit(MAX_BYTES).reader());
-    let files = unpack(&mut gz, &tmp)?;
+    let mut gz = flate2::read::GzDecoder::new(
+        resp.body_mut().with_config().limit(repo.max_bytes.max(MAX_BYTES)).reader(),
+    );
+    let files = unpack_kept(&mut gz, &tmp, repo.keep)?;
     if files == 0 {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(Error::Parse(repo.dir.into(), "the tarball holds no files".into()));
@@ -288,7 +300,9 @@ fn head_commit(repo: &'static Repo, agent: &ureq::Agent) -> Result<String, Error
 /// of zero records at the end. Anything else in the stream is skipped
 /// rather than interpreted, because a link is a route out of the
 /// extraction root and no dataset here needs one.
-fn unpack(gz: &mut dyn Read, to: &Path) -> Result<u64, Error> {
+/// Unpack, writing only the files whose extension is in `keep`. An empty
+/// `keep` writes everything.
+fn unpack_kept(gz: &mut dyn Read, to: &Path, keep: &[&str]) -> Result<u64, Error> {
     std::fs::create_dir_all(to).map_err(|e| Error::Io(to.display().to_string(), e))?;
     let mut header = [0u8; 512];
     let mut buf = Vec::new();
@@ -337,6 +351,14 @@ fn unpack(gz: &mut dyn Read, to: &Path) -> Result<u64, Error> {
             continue;
         }
         take(gz, payload, &mut buf)?;
+        // Read whatever it is, so the stream stays in step, and write only
+        // what was asked for.
+        let wanted = keep.is_empty()
+            || path.extension().is_some_and(|e| keep.iter().any(|k| e.eq_ignore_ascii_case(k)));
+        if !wanted {
+            prefix.clear();
+            continue;
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error::Io(parent.display().to_string(), e))?;
@@ -473,9 +495,137 @@ pub static NULLSEC: Repo = Repo {
     page: "https://github.com/bad-antics/nullsec-flipper-suite",
     terms: "MIT (the repository); each capture is its transmitter's",
     max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: MAX_BYTES,
 };
 
-pub static REPOS: &[&Repo] = &[&NULLSEC];
+/// What a sub-GHz collection is kept for. The rest of these repositories is
+/// infrared, NFC, badge scripts, firmware and photographs, none of which
+/// this receiver can key.
+const SUB: &[&str] = &["sub"];
+
+pub static UBERGUIDOZ: Repo = Repo {
+    name: "UberGuidoZ Flipper",
+    dir: "uberguidoz-flipper",
+    head: "https://api.github.com/repos/UberGuidoZ/Flipper/branches/main",
+    tarball: "https://codeload.github.com/UberGuidoZ/Flipper/tar.gz/refs/heads/main",
+    publisher: "github.com/UberGuidoZ",
+    about: "The largest collected Flipper playground: some eleven thousand \
+     .sub captures for gates, garages, barriers, shutters and remotes, by \
+     make and model. A two gigabyte download, of which the captures are a \
+     few megabytes; the rest is not kept.",
+    page: "https://github.com/UberGuidoZ/Flipper/tree/main/Sub-GHz",
+    terms: "GPL-3.0 (the repository); each capture is its transmitter's",
+    max_age: MAX_AGE,
+    keep: SUB,
+    // Two and a bit gigabytes compressed, and growing.
+    max_bytes: 4 << 30,
+};
+
+pub static ZERO_SPLOIT: Repo = Repo {
+    name: "Zero-Sploit SubGHz DB",
+    dir: "zero-sploit-subghz-db",
+    head: "https://api.github.com/repos/Zero-Sploit/FlipperZero-Subghz-DB/branches/main",
+    tarball: "https://codeload.github.com/Zero-Sploit/FlipperZero-Subghz-DB/tar.gz/refs/heads/main",
+    publisher: "github.com/Zero-Sploit",
+    about: "Thirteen thousand .sub captures filed by manufacturer and \
+     model: the widest catalogue of gate and barrier remotes in one tree.",
+    page: "https://github.com/Zero-Sploit/FlipperZero-Subghz-DB",
+    terms: "no licence stated; each capture is its transmitter's",
+    max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: MAX_BYTES,
+};
+
+pub static ROCKETGOD: Repo = Repo {
+    name: "RocketGod Flipper Zero",
+    dir: "rocketgod-flipper-zero",
+    head: "https://api.github.com/repos/RocketGod-git/Flipper_Zero/branches/main",
+    tarball: "https://codeload.github.com/RocketGod-git/Flipper_Zero/tar.gz/refs/heads/main",
+    publisher: "github.com/RocketGod-git",
+    about: "A mixed Flipper collection whose sub-GHz half holds several \
+     thousand captures, including X10 mains switches and a set of test \
+     tones. A one and a half gigabyte download; only the captures are \
+     kept.",
+    page: "https://github.com/RocketGod-git/Flipper_Zero/tree/main/subghz",
+    terms: "no licence stated; each capture is its transmitter's",
+    max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: 3 << 30,
+};
+
+pub static MUDDLEDBOX: Repo = Repo {
+    name: "MuddledBox Sub-GHz",
+    dir: "muddledbox-subghz",
+    head: "https://api.github.com/repos/MuddledBox/FlipperZeroSub-GHz/branches/main",
+    tarball: "https://codeload.github.com/MuddledBox/FlipperZeroSub-GHz/tar.gz/refs/heads/main",
+    publisher: "github.com/MuddledBox",
+    about: "A short, checked set: the Tesla charge port opener at both \
+     bandwidths, and a handful of vehicle and gate remotes.",
+    page: "https://github.com/MuddledBox/FlipperZeroSub-GHz",
+    terms: "no licence stated; each capture is its transmitter's",
+    max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: MAX_BYTES,
+};
+
+pub static TOUCHTUNES: Repo = Repo {
+    name: "TouchTunes remotes",
+    dir: "flipperzero-touchtunes",
+    head: "https://api.github.com/repos/jimilinuxguy/flipperzero-touchtunes/branches/master",
+    tarball: "https://codeload.github.com/jimilinuxguy/flipperzero-touchtunes/tar.gz/refs/heads/master",
+    publisher: "github.com/jimilinuxguy",
+    about: "The TouchTunes jukebox remote at 433.92 MHz, and a generated \
+     sweep of every address it accepts. Eight thousand files, nearly all \
+     of them one key each of that sweep.",
+    page: "https://github.com/jimilinuxguy/flipperzero-touchtunes",
+    terms: "GPL-3.0 (the repository); each capture is its transmitter's",
+    max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: MAX_BYTES,
+};
+
+pub static EVILPETE: Repo = Repo {
+    name: "evilpete Flipper toolbox",
+    dir: "evilpete-flipper-toolbox",
+    head: "https://api.github.com/repos/evilpete/flipper_toolbox/branches/main",
+    tarball: "https://codeload.github.com/evilpete/flipper_toolbox/tar.gz/refs/heads/main",
+    publisher: "github.com/evilpete",
+    about: "Tools for converting captures into Flipper files, with a short \
+     set of X10 mains-switch commands beside them.",
+    page: "https://github.com/evilpete/flipper_toolbox",
+    terms: "BSD-3-Clause (the repository); each capture is its transmitter's",
+    max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: MAX_BYTES,
+};
+
+pub static FLIPPER_PLAYLIST: Repo = Repo {
+    name: "flipper-playlist test set",
+    dir: "flipper-playlist",
+    head: "https://api.github.com/repos/darmiel/flipper-playlist/branches/feat%2Fplaylist",
+    tarball: "https://codeload.github.com/darmiel/flipper-playlist/tar.gz/refs/heads/feat/playlist",
+    publisher: "github.com/darmiel",
+    about: "The Flipper firmware's own sub-GHz unit tests: one file per \
+     protocol, each a known key. Useful for checking a decoder rather than \
+     for opening anything.",
+    page: "https://github.com/darmiel/flipper-playlist",
+    terms: "GPL-3.0 (the repository)",
+    max_age: MAX_AGE,
+    keep: SUB,
+    max_bytes: MAX_BYTES,
+};
+
+pub static REPOS: &[&Repo] = &[
+    &NULLSEC,
+    &UBERGUIDOZ,
+    &ZERO_SPLOIT,
+    &ROCKETGOD,
+    &MUDDLEDBOX,
+    &TOUCHTUNES,
+    &EVILPETE,
+    &FLIPPER_PLAYLIST,
+];
 
 #[cfg(test)]
 mod tests {
@@ -549,13 +699,60 @@ mod tests {
             .read_to_end(&mut tar)
             .unwrap();
         let mut r = tar.as_slice();
-        let n = unpack(&mut r, &to).unwrap();
+        let n = unpack_kept(&mut r, &to, &[]).unwrap();
         assert_eq!(n, 3, "two .sub files and the .txt");
         assert_eq!(std::fs::read(to.join("sub/a.sub")).unwrap(), b"a");
         assert_eq!(std::fs::read(to.join("b.sub")).unwrap(), b"b");
         // The symlink was skipped, and nothing was written through it.
         assert!(!to.join("escape").exists());
         assert!(!to.join("repo-main").exists(), "the archive root is not a directory of the tree");
+    }
+
+    /// The whole tarball is served whatever is wanted from it, so what a
+    /// repository costs on disk is what the filter lets through: the
+    /// largest of these is two gigabytes around a few megabytes of
+    /// captures.
+    #[test]
+    fn only_the_extensions_asked_for_are_written() {
+        let d = tmpdir("keep");
+        let to = d.join("tree");
+        let mut tar = Vec::new();
+        flate2::read::GzDecoder::new(gzipped("repo-main").as_slice())
+            .read_to_end(&mut tar)
+            .unwrap();
+        let mut r = tar.as_slice();
+        let n = unpack_kept(&mut r, &to, &["sub"]).unwrap();
+        assert_eq!(n, 2, "the two .sub files, and not the .txt beside them");
+        assert_eq!(std::fs::read(to.join("sub/a.sub")).unwrap(), b"a");
+        assert_eq!(std::fs::read(to.join("b.sub")).unwrap(), b"b");
+        assert!(!to.join("c.txt").exists());
+    }
+
+    /// Every row has to name a branch that exists and a directory of its
+    /// own: a repeated `dir` is two repositories unpacking over each other,
+    /// and the tarball and head URLs disagreeing about the branch is a
+    /// download validated against the wrong commit.
+    #[test]
+    fn every_repository_row_is_consistent() {
+        let mut dirs: Vec<&str> = REPOS.iter().map(|r| r.dir).collect();
+        dirs.sort_unstable();
+        let before = dirs.len();
+        dirs.dedup();
+        assert_eq!(dirs.len(), before, "one cache directory each");
+        for r in REPOS {
+            let branch = r
+                .head
+                .rsplit_once("/branches/")
+                .map(|(_, b)| b.replace("%2F", "/"))
+                .unwrap_or_else(|| panic!("{} has no branch in its head URL", r.dir));
+            assert!(
+                r.tarball.ends_with(&format!("/refs/heads/{branch}")),
+                "{}: the tarball and the head URL name different branches",
+                r.dir
+            );
+            assert!(r.max_bytes >= MAX_BYTES, "{}: a cap under the default", r.dir);
+            assert!(!r.terms.is_empty() && !r.about.is_empty(), "{}: unattributed", r.dir);
+        }
     }
 
     #[test]
@@ -604,7 +801,7 @@ mod tests {
             .unwrap();
         let cut = tar.len() - 40;
         let mut r = &tar[..cut];
-        let n = unpack(&mut r, &to).unwrap();
+        let n = unpack_kept(&mut r, &to, &[]).unwrap();
         assert_eq!(n, 3, "every whole entry before the cut");
     }
 }
@@ -622,11 +819,17 @@ mod network {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let cache = Cache::new(&d);
-        let t = get(&NULLSEC, &cache).expect("download");
+        // The short one, so the test costs a couple of hundred kilobytes:
+        // what is under test is the URLs, the filter and the walk, and a
+        // repository of thirteen thousand captures tests none of it harder.
+        let t = get(&MUDDLEDBOX, &cache).expect("download");
         assert!(!t.commit.is_empty());
-        let subs = files_with(&NULLSEC, &cache, "sub");
-        assert!(!subs.is_empty(), "the suite holds .sub files");
-        assert!(subs.iter().all(|p| p.ends_with(".sub")));
+        let subs = files_with(&MUDDLEDBOX, &cache, "sub");
+        assert!(subs.len() >= 12, "the set holds its captures: {}", subs.len());
+        assert!(
+            subs.iter().all(|p| p.to_lowercase().ends_with(".sub")),
+            "and nothing else was written"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }
