@@ -51,16 +51,20 @@ LimeSDR both of those plus full duplex.
 Grab a build from [releases](https://github.com/v0l/waveshark/releases): a
 `.deb` or `.rpm` for Linux x86_64, an `.msi` for Windows x86_64, a `.dmg` for
 macOS on Apple silicon. Setup checks for a newer release and can fetch and
-open the one for the machine it is running on.
+open the one for the machine it is running on. The bare binary is published
+beside each installer for anyone who would rather not install anything; on
+Windows it needs `rtlsdr.dll` and `libusb-1.0.dll`, which are assets of the
+same release.
 
-The archives are still there for anyone who would rather unpack a folder, and
-Linux and Windows also have a CUDA build, as an archive only: it is the same
-receiver with the speech models and the key search on the GPU, and installing
-it over the plain one would be two packages fighting for the same path.
+One build per platform, card or no card. The speech models run on an NVIDIA
+GPU when the CUDA 12 runtime is on the machine and on the CPU when it is not,
+because the CUDA libraries are loaded when they are first wanted rather than
+named in the binary. macOS uses Metal. The TETRA key search runs on any GPU
+through wgpu, AMD and Intel included.
 
 The Linux packages pull in librtlsdr, which brings the udev rules that let you
-open a dongle without root; from the archive, install `librtlsdr0` or `rtl-sdr`
-yourself. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
+open a dongle without root; with the bare binary, install `librtlsdr0` or
+`rtl-sdr` yourself. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
 [Zadig](https://zadig.akeo.ie/) first or nothing can open the device. The
 Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
 is built without the driver. Only the macOS build shows pictures off a
@@ -79,7 +83,7 @@ That build has everything, including two decoders the published binaries do
 not carry:
 
 ```sh
-cargo run --release -p app --no-default-features --features limesdr,stt,mcp
+cargo run --release -p app --no-default-features --features limesdr,stt,cuda,mcp
 ```
 
 is what the release workflow runs, and it leaves out `tea` and `ambe`. `tea`

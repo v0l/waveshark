@@ -39,8 +39,7 @@ the code is in the commit log.
 - Radiosonde launch sites from SondeHub, on the map with the time until the
   next release from each.
 - Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
-  macOS, beside the archives. Setup fetches the one this machine installs
-  from and opens it.
+  macOS. Setup fetches the one this machine installs from and opens it.
 
 ### Fixed
 
@@ -62,6 +61,10 @@ the code is in the commit log.
 
 ### Changed
 
+- One build per platform: the speech models use an NVIDIA card when the
+  machine has one and the CPU when it does not. The separate CUDA downloads
+  are gone.
+- A release carries the installer and the binary itself, no archives.
 - The packet log folder, the unrecognised-burst filter and the raw capture
   switch are remembered between runs.
 - The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather

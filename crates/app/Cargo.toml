@@ -118,12 +118,13 @@ stt = ["nodes/stt", "dep:stt"]
 # asked to talk on the air it fetches about 330 MB of model, voice and
 # pronunciation dictionary. A build without it can still use a speech server.
 tts = ["dep:tts"]
-# Run the speech model on a CUDA card. On by default in a build from source,
-# since the model on a CPU keeps up with one handheld and not a repeater;
-# nothing on a Mac, which gets Metal whenever `stt` is on. Building it needs
-# the CUDA toolkit on the path. The release workflow ships it as a separate
-# `-cuda` asset, since a binary linked against cudart does not start on a
-# machine without it.
+# Run the speech model on a CUDA card. On by default and in every published
+# binary: the patched candle in the workspace manifest loads the CUDA
+# libraries when a device is first asked for, so a build with this on starts
+# on a machine with no card and reads speech on the CPU. Building it needs the
+# CUDA toolkit on the path; running it does not. It matters because the model
+# on a CPU keeps up with one handheld and not a repeater. Nothing on a Mac,
+# which gets Metal whenever `stt` is on.
 cuda = ["stt?/cuda", "tts?/cuda"]
 
 # The installers the release publishes, built by `cargo packager` after the
