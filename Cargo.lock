@@ -307,6 +307,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-phosphor",
+ "flate2",
  "gps",
  "hackrf",
  "hound",

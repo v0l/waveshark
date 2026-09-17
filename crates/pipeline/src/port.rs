@@ -67,6 +67,15 @@ pub enum PortKind {
     /// several sources at once, since a receiver can watch more than one
     /// channel.
     Video,
+    /// Frames of a power spectrum, each a run of bins with the span they
+    /// cover.
+    ///
+    /// The junction between transforming samples and reading bins, so a
+    /// display and a recorder share one FFT rather than each running its
+    /// own over the same samples and disagreeing about what was there. Not
+    /// [`PortKind::Real`]: a frame arrives a few times a second in one lump
+    /// at the transform's rate, not sample by sample at the graph's.
+    Spectrum,
 }
 
 /// A reusable buffer. Stages write into the caller's buffer rather than
@@ -83,6 +92,7 @@ pub enum Payload {
     Sources(Vec<SourceBlock>),
     Voice(Vec<common::Voice>),
     Video(Vec<common::VideoFrame>),
+    Spectrum(Vec<common::SpectrumFrame>),
 }
 
 impl Payload {
@@ -98,6 +108,7 @@ impl Payload {
             PortKind::Sources => Payload::Sources(Vec::new()),
             PortKind::Voice => Payload::Voice(Vec::new()),
             PortKind::Video => Payload::Video(Vec::new()),
+            PortKind::Spectrum => Payload::Spectrum(Vec::new()),
         }
     }
 
@@ -113,6 +124,7 @@ impl Payload {
             Payload::Sources(_) => PortKind::Sources,
             Payload::Voice(_) => PortKind::Voice,
             Payload::Video(_) => PortKind::Video,
+            Payload::Spectrum(_) => PortKind::Spectrum,
         }
     }
 
@@ -127,6 +139,7 @@ impl Payload {
             Payload::Sources(v) => v.len(),
             Payload::Voice(v) => v.len(),
             Payload::Video(v) => v.len(),
+            Payload::Spectrum(v) => v.len(),
         }
     }
 
@@ -146,6 +159,7 @@ impl Payload {
             Payload::Sources(v) => v.clear(),
             Payload::Voice(v) => v.clear(),
             Payload::Video(v) => v.clear(),
+            Payload::Spectrum(v) => v.clear(),
         }
     }
 
@@ -208,6 +222,20 @@ impl Payload {
     pub fn as_video(&self) -> Option<&[common::VideoFrame]> {
         match self {
             Payload::Video(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_spectrum(&self) -> Option<&[common::SpectrumFrame]> {
+        match self {
+            Payload::Spectrum(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn spectrum_mut(&mut self) -> Option<&mut Vec<common::SpectrumFrame>> {
+        match self {
+            Payload::Spectrum(v) => Some(v),
             _ => None,
         }
     }

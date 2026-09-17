@@ -244,8 +244,7 @@ impl App {
                 scope_settings::Action::ResetWaterfall => self.reset_waterfall(),
                 // Coloured and scaled as the waterfall is showing it, because
                 // what somebody means by "export this" is what they can see.
-                scope_settings::Action::ExportHeatmap(what) => self.send(Cmd::ExportHeatmap {
-                    what,
+                scope_settings::Action::ExportHeatmap => self.send(Cmd::ExportHeatmap {
                     ramp: self.scope.ramp,
                     floor: self.scope.floor,
                     ceil: self.scope.ceil - self.scope.wf_top_offset,

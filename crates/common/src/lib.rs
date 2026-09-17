@@ -27,7 +27,7 @@ pub use iq::{C32, IqBuf, SampleFormat};
 pub use modulation::Modulation;
 pub use pulse::{
     ANALOGUE, CHANNEL_MATCH_HZ, Cadence, ConversationKey, Frame, FrontEnd, IqBurst, Measure,
-    Package, Packet, PacketBody, Pixels, Pulse, Speech, Update, VideoFrame, Voice,
+    Package, Packet, PacketBody, Pixels, Pulse, SpectrumFrame, Speech, Update, VideoFrame, Voice,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use units::{Hz, Sps};
