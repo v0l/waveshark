@@ -15,105 +15,99 @@ the code is in the commit log.
   types and bit rates. No sound yet.
 - IEEE 802.15.4 at 2.4 GHz: the addresses and networks under Zigbee, Thread
   and Matter.
-- The trace and the waterfall each choose what a point shows out of the frame
-  behind it: the newest transform, the mean, or the loudest.
-- The memory bank reads Chirp, CSV, Freqman and SDR# lists, and exports as
-  Chirp CSV.
-- Transmit a recorded capture: pick a file on a channel and send it back out.
-- VOX: speech keys the transmit channel, with a tail, a roger beep and the
-  receiver's own audio kept out of it.
+- P25 phase 1: the talkgroup, the radio id and the key a call is under,
+  without speech.
+- FLEX paging at 1600 and 3200 baud, two and four level, in the message view.
+- Two-tone paging: the pair that opens a fire or ambulance pager, named from
+  an operator's list.
+- MDC-1200: the unit id a Motorola radio sends when its key goes down.
+- RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
+- Morse off the air: a CW channel read as text, at the speed it was sent.
 - EAS and SAME alert headers, on the seven NOAA Weather Radio channels.
 - Inmarsat STD-C: EGC and SafetyNET broadcasts off an L-band patch antenna.
 - Inmarsat Aero: satellite ACARS and the P channel's signal units.
 - UAT at 978 MHz: light aircraft, and the ground stations' weather and traffic.
-- rtl_tcp servers as radios, tuned from here, added beside packet feeds in one
-  dialog.
-- A dataset that is downloading says how far it has got, in bytes and as a bar.
-- Transmit six protocols this receiver reads, on a channel already decoding
-  one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements, SSTV
-  pictures and RDS station names.
-- The raw capture can be armed on energy: a file per burst, holding the signal
-  from before it triggered.
-- Several matching tuners offered as one wider receiver, drift between them
-  measured on the band they share and taken out.
-- Heatmap export: the span kept as readings and written as a page that zooms,
-  pans and gives the time of day, frequency and decibels under a crosshair.
-  Moving the dial widens the picture rather than clearing it, so a band walk
-  draws the whole band, and a row is the loudest each bin reached over the
-  whole of it rather than a snapshot, so a burst of a few milliseconds is
-  there. Four colour ramps, the panel's own by
-  default.
-- A channel view: what is on each Wi-Fi, Bluetooth and 802.15.4 channel, how
-  loud, and how crowded it is.
-- A band walk in the scanner settings: the dial steps past the span, holds on
-  what it hears or logs it and moves on, and each find can be ignored. A step
-  counts as busy after the packets asked for, and a logging walk can sit out a
-  conversation.
-- Analogue FPV video named from its line rate, with its channel: R1, F4, A5.
-- P25 phase 1: the talkgroup, the radio id and the key a call is under,
-  without speech.
+- COSPAS-SARSAT 406 MHz distress beacons: EPIRB, PLB and ELT identities, with
+  their position on the map.
+- Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
+- XN297 toy remotes at 2.4 GHz, with their address and payload.
+- Ford and Renault tyre pressure sensors, with pressure, temperature and
+  whether the wheel is moving.
 - Meteor-M LRPT passes: the three MSU-MR channels on the video pane, a strip
   of eight rows at a time.
 - NOAA APT passes and HF weather fax charts, drawn on the video pane as they
   are received.
-- FLEX paging at 1600 and 3200 baud, two and four level, in the message view.
-- Morse off the air: a CW channel read as text, at the speed it was sent.
-- MDC-1200: the unit id a Motorola radio sends when its key goes down.
-- Two-tone paging: the pair that opens a fire or ambulance pager, named from
-  an operator's list.
-- Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
-- RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
-- Toy remotes at 2.4 GHz: XN297 bursts with their address and payload.
-- Flipper `.sub` files on the transmit strip: a saved capture or key file keyed
-  as it stands, at the frequency the file names. A heard burst is written back
-  out as one from the packet list, as a key file where a remote was decoded.
-  RAW plays its recorded timings; Princeton, CAME, Nice FLO, Holtek, Ansonic,
-  BETT, Linear and LinearDelta3 key files are re-encoded from their key.
-- A scripts panel down the left: every `.sub` file this machine holds, as a
-  tree by where it came from, and a TX button that keys one at the frequency
-  it names, on a channel that decodes what it hears there. Eight collections
-  of captures download in the data settings, UberGuidoZ and the Zero-Sploit DB
-  among them.
-- The agent and the MCP server reach the settings: the scanner table, the
-  memory bank, its own voice, what reads speech, the station, the sound
-  devices, the survey and its feeds, the datasets and the display.
-- A timeline under the call list: the recordings drawn as clips against the
-  clock, with quiet longer than three seconds shown as a marker rather than
-  empty lane. Click to play from a moment, drag to pick a stretch, and write
-  that stretch out as one Opus file.
-- The recordings table filters by talkgroup, caller, system or frequency, and
-  a row opens its own conversation. Overs are saved as the Opus they were
-  recorded as, through a file dialog.
-- A sub-ghz-modem can be the station's GPS: DETECT in the position settings
-  finds one on a USB serial port and offers its fix feed.
-- COSPAS-SARSAT 406 MHz distress beacons: EPIRB, PLB and ELT identities, with
-  their position on the map.
-- Ford and Renault tyre pressure sensors, with pressure, temperature and
-  whether the wheel is moving.
+- Analogue FPV video named from its line rate, with its channel: R1, F4, A5.
 - Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
   climb rate: serial, and the air temperature and humidity it was sent up to
   measure. The channel follows the transmitter as it drifts on the way up.
-- Graw DFM-09 and DFM-17 radiosondes, with their serial, position and climb
-  rate.
-- Meteomodem M10 and M20 radiosondes, with their serial, position and climb
-  rate.
-- InterMet iMet radiosondes, with position, pressure, temperature and
-  humidity.
-- Meisei iMS-100 radiosondes, with their serial, position and climb rate.
-- Meteo-Radiy MRZ radiosondes, with their serial, position and climb rate.
-- Lockheed Martin LMS6 radiosondes, with their serial, position and climb
-  rate.
+- Graw DFM, Meteomodem M10 and M20, InterMet iMet, Meisei iMS-100,
+  Meteo-Radiy MRZ and Lockheed Martin LMS6 radiosondes, with their serial,
+  position and climb rate.
 - Radiosonde launch sites from SondeHub, on the map with the time until the
   next release from each.
+- rtl_tcp as a remote tuner, added beside packet feeds in one dialog.
+- Several matching tuners offered as one wider receiver, with the drift
+  between them measured on the band they share and taken out.
+- Heatmap export: the span kept as readings and written as a page that zooms
+  and pans, with the time of day, frequency and decibels under a crosshair.
+  Moving the dial widens the picture rather than clearing it, and a row is the
+  loudest each bin reached rather than a snapshot. Four colour ramps.
+- Channel view: what is on each Wi-Fi, Bluetooth and 802.15.4 channel, how
+  loud, and how crowded it is.
+- Band walk in the scanner settings: the dial steps past the span, holds on
+  what it hears or logs it and moves on, and each find can be ignored. A step
+  counts as busy after the packets asked for.
+- Transmit for six protocols this receiver already reads, on a channel
+  decoding one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements,
+  SSTV pictures and RDS station names.
+- Recorded captures sent back out: pick a file on a channel and transmit it.
+- VOX: speech keys the transmit channel, with a tail, a roger beep and the
+  receiver's own audio kept out of it.
+- Flipper `.sub` files: a scripts panel down the left holding every one this
+  machine has, as a tree by where it came from, and a TX button that keys one
+  at the frequency it names. RAW plays its recorded timings; Princeton, CAME,
+  Nice FLO, Holtek, Ansonic, BETT, Linear and LinearDelta3 are re-encoded from
+  their key, and a heard burst is written back out as a key file.
+- Eight collections of `.sub` captures download in the data settings,
+  UberGuidoZ and the Zero-Sploit DB among them.
+- Raw capture armed on energy: a file per burst, holding the signal from
+  before it triggered.
+- Memory bank imports of Chirp, CSV, Freqman and SDR# lists, and export as
+  Chirp CSV.
+- A timeline under the call list: the recordings drawn as clips against the
+  clock, quiet longer than three seconds marked rather than left empty. Click
+  to play from a moment, drag to pick a stretch and write it out as one Opus
+  file.
+- The recordings table filters by talkgroup, caller, system or frequency, and
+  a row opens its own conversation.
+- A sub-ghz-modem as the station's GPS: DETECT in the position settings finds
+  one on a USB serial port and offers its fix feed.
+- The agent and the MCP server reach the settings: the scanner table, the
+  memory bank, its own voice, what reads speech, the station, the sound
+  devices, the survey and its feeds, the datasets and the display.
+- Trace and waterfall detectors chosen apart: the newest transform, the mean,
+  or the loudest.
+- The channel strip can be put away, from the button on it, and brought back
+  from the panels at the right of the top bar.
+- Dataset downloads say how far they have got, in bytes and as a bar.
 - Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
   macOS. Setup fetches the one this machine installs from and opens it.
 
 ### Changed
 
-- The map draws anything that says where it was, so the iMet, Graw, Meteomodem,
-  Meisei, MRZ and LMS6 sondes appear beside the Vaisala ones.
-- Every download carries its version in the name, and the Windows binary is a
-  zip holding the two DLLs it will not start without.
+- The map draws anything that says where it was, so every sonde appears
+  beside the Vaisala ones.
+- One build per platform: the speech models use an NVIDIA card when the
+  machine has one and the CPU when it does not. The separate CUDA downloads
+  are gone.
+- A release carries the installer and the binary itself, no archives, each
+  named with its version.
+- The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather than
+  3.5 GB, and ahead of real time without a card. Describing a voice in a
+  sentence is gone, and so is the precision setting.
+- The packet log folder, the unrecognised-burst filter and the raw capture
+  switch are remembered between runs.
 
 ### Fixed
 
@@ -124,8 +118,7 @@ the code is in the commit log.
   span change.
 - The Windows installer offered a repair rather than an upgrade over a
   release candidate.
-- A CUDA build was offered the plain download, and a plain build the CUDA
-  one.
+- A CUDA build was offered the plain download, and a plain build the CUDA one.
 - The hiss on the end of every over: the squelch no longer hangs on to a
   channel whose carrier has gone.
 - CTCSS tones and DCS codes are filtered out of the audio, so they no longer
@@ -134,23 +127,6 @@ the code is in the commit log.
   one record, and a fresh radio is told all of it. Call recording and the
   transcriber, with the weights and the device it runs on, are in that record
   too, so they stay as they were left.
-
-### Added
-
-- The channel strip can be put away, from the button on it, and brought back
-  from the panels at the right of the top bar.
-
-### Changed
-
-- One build per platform: the speech models use an NVIDIA card when the
-  machine has one and the CPU when it does not. The separate CUDA downloads
-  are gone.
-- A release carries the installer and the binary itself, no archives.
-- The packet log folder, the unrecognised-burst filter and the raw capture
-  switch are remembered between runs.
-- The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather
-  than 3.5 GB, and ahead of real time without a card. Describing a voice in
-  a sentence is gone, and so is the precision setting.
 
 ## [0.3.0] - 2026-09-16
 

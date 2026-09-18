@@ -310,9 +310,32 @@ of a release may take two or three lines to say what the thing does; nothing
 else may. The reasoning belongs in a code comment where it is findable, and
 the measurements in the test that pins them.
 
+**Start with the word somebody would search for.** A line is read by eye down
+the left edge and by `grep` for a name, so the protocol, the pane, the flag or
+the format goes first and the rest of the line qualifies it. A line that opens
+with a verb, an article or a piece of scene setting buries the one word that
+would have found it.
+
+Good: `IQStream and rtl_tcp as remote tuners, added beside packet feeds.`
+Good: `Meshtastic channel keys, entered per channel.`
+Bad: `Serve the span over iqstream on --iqstream-listen.`
+Bad: `You can now add rtl_tcp servers as radios.`
+
+**Write a noun phrase, not a sentence and not a heading.** The entry names the
+thing that is now there. It does not announce it, does not address the reader,
+and is not a title followed by its own explanation. A colon is for naming the
+variants or the parts of the thing just named, never for gluing a description
+onto a label: if what follows the colon is a sentence explaining the words
+before it, the colon is wrong and so is the line.
+
 Good: `SSTV pictures: Martin, Scottie and Robot modes, on the video pane.`
 Good: `A green stripe down the right of a Robot picture.`
+Bad: `Remote tuners: another machine can read the same span from here.`
 Bad: anything with a colon followed by three clauses, or the word "which".
+
+Spell a name the way its own documentation spells it, and the same way every
+time: `IQStream`, `rtl_tcp`, `Meshtastic`, `POCSAG`. The name is the search
+key, so a line that invents a capitalisation is a line nobody finds.
 
 A release is `tools/changelog.sh release X.Y.Z`, the version in `Cargo.toml`
 and `Cargo.lock` (the release jobs build `--locked` and stop on a stale one),
