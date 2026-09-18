@@ -28,6 +28,25 @@ const MODE_S_HZ: u64 = 1_090_000_000;
 /// reads the timestamp that way.
 const BEAST_CLOCK_HZ: f64 = 12_000_000.0;
 
+/// How finely the parity search slices, as a word rather than a number
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+enum Search {
+    Off,
+    Coarse,
+    Fine,
+}
+
+impl Search {
+    fn config(self) -> ModeSConfig {
+        let base = ModeSConfig::default();
+        match self {
+            Search::Off => ModeSConfig { crc_framing: false, ..base },
+            Search::Coarse => ModeSConfig { phase_step: 0.5, ..base },
+            Search::Fine => base,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "wave1090", version, about = "Mode S and ADS-B, speaking dump1090's protocols")]
 struct Args {
@@ -102,6 +121,14 @@ struct Args {
     /// or a bare port. One aerial then feeds this and whatever else wants it
     #[arg(long, value_name = "ADDR")]
     iqstream_listen: Option<String>,
+
+    /// How hard the parity search looks, which is what this costs.
+    ///
+    /// `fine` reads more than dump1090 and wants a third of a fast core;
+    /// `coarse` draws level with it for half that; `off` leaves the parity
+    /// search out and reads what a preamble search alone finds
+    #[arg(long, value_name = "HOW", default_value = "fine")]
+    parity_search: Search,
 
     /// Say nothing on standard output but what was asked for
     #[arg(long)]
@@ -226,9 +253,9 @@ struct Reader {
 }
 
 impl Reader {
-    fn new(rate: f64, raw: bool) -> Self {
+    fn new(rate: f64, raw: bool, search: Search) -> Self {
         Self {
-            det: ModeSDetector::new(rate, ModeSConfig::default()),
+            det: ModeSDetector::new(rate, search.config()),
             book: AddressBook::new(),
             sbs: sbs::Sbs::default(),
             frames: Vec::new(),
@@ -346,7 +373,7 @@ fn from_radio(
     }
 
     let mut stream = dev.start_rx().context("the radio would not start")?;
-    let mut reader = Reader::new(rate, args.raw);
+    let mut reader = Reader::new(rate, args.raw, args.parity_search);
     reader.server = listen(args, center, rate)?;
     reader.sbs.here = station(args);
     let began = std::time::Instant::now();
@@ -391,7 +418,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
             buf.samples.len() as f64 / rate
         );
     }
-    let mut reader = Reader::new(rate, args.raw);
+    let mut reader = Reader::new(rate, args.raw, args.parity_search);
     reader.server = listen(args, buf.center.0, rate)?;
     reader.sbs.here = station(args);
     for block in buf.samples.chunks(65_536) {

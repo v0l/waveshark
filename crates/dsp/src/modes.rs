@@ -74,6 +74,20 @@ pub struct ModeSConfig {
     pub min_level: f32,
     /// Whether to frame by the CRC as well as by the preamble
     pub crc_framing: bool,
+    /// Spacing of the offsets the parity search slices at, in samples
+    ///
+    /// A sample at 2.4 MS/s is nearly half a chip, so slicing only at whole
+    /// samples leaves a frame up to half a sample out of step with the
+    /// half-chip windows its bits are read from, and it comes out as noise.
+    /// Against dump1090 on the same samples over 120 s: whole samples read
+    /// 13180 DF17 to its 14017, half a sample 14964 to 14825, a quarter
+    /// 19022 to 16613.
+    ///
+    /// It is the cost as well as the yield, and the two decide together what
+    /// a machine can run: the pass adds 0.20 s a whole sample and 0.83 s a
+    /// quarter over four seconds of 2.4 MS/s capture, so a quarter is a third
+    /// of one core here and more than a Raspberry Pi 4 has to spare.
+    pub phase_step: f64,
 }
 
 impl Default for ModeSConfig {
@@ -82,20 +96,9 @@ impl Default for ModeSConfig {
         // 3:1 finds 14 of its 40 frames, 2.5:1 finds 25, 2:1 finds 27, and
         // below 2:1 nothing more appears. Looser costs only CPU, because the
         // validator rejects what the CRC does not like, so 2:1 it is.
-        Self { preamble_ratio: 2.0, min_level: 0.004, crc_framing: true }
+        Self { preamble_ratio: 2.0, min_level: 0.004, crc_framing: true, phase_step: 0.25 }
     }
 }
-
-/// Spacing of the offsets the parity search slices at, in samples
-///
-/// A sample at 2.4 MS/s is nearly half a chip, so slicing only at whole
-/// samples leaves a frame up to half a sample out of step with the half-chip
-/// windows the bits are read from, and it comes out as noise. Against
-/// dump1090 on the same samples over 120 s: whole samples read 13180 DF17 to
-/// its 14017, half a sample 14964 to 14825, a quarter 19022 to 16613. The
-/// quarter costs 0.83 s over four seconds of capture against 0.20 s, which is
-/// the price of reading more than the reference does.
-const PHASE_STEP: f64 = 0.25;
 
 /// Mode S parity generator, 0xFFF409
 ///
@@ -302,10 +305,11 @@ impl ModeSDetector {
         // samples on, so offsets across one bit exhaust where a frame can
         // begin. A whole sample apart is not fine enough, because a sample is
         // nearly half a chip.
-        let offsets = (spus / PHASE_STEP).ceil() as usize;
+        let step = self.cfg.phase_step.clamp(0.05, spus);
+        let offsets = (spus / step).ceil() as usize;
         let mut bits = std::mem::take(&mut self.bits);
         for o in 0..offsets {
-            let offset = o as f64 * PHASE_STEP;
+            let offset = o as f64 * step;
             let count = ((mag.len() as f64 - offset) / spus).floor() as usize;
             let count = count.saturating_sub(1);
             bits.clear();

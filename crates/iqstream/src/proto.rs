@@ -252,26 +252,19 @@ impl<'a> TlvMap<'a> {
         self.get(tag).and_then(|v| v.first().copied())
     }
     pub fn u16(&self, tag: u16) -> Option<u16> {
-        self.get(tag)
-            .and_then(|v| v.get(..2))
-            .map(|v| u16::from_le_bytes([v[0], v[1]]))
+        self.get(tag).and_then(|v| v.get(..2)).map(|v| u16::from_le_bytes([v[0], v[1]]))
     }
     pub fn i16(&self, tag: u16) -> Option<i16> {
         self.u16(tag).map(|v| v as i16)
     }
     pub fn u32(&self, tag: u16) -> Option<u32> {
-        self.get(tag)
-            .and_then(|v| v.get(..4))
-            .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
+        self.get(tag).and_then(|v| v.get(..4)).map(|v| u32::from_le_bytes(v.try_into().unwrap()))
     }
     pub fn u64(&self, tag: u16) -> Option<u64> {
-        self.get(tag)
-            .and_then(|v| v.get(..8))
-            .map(|v| u64::from_le_bytes(v.try_into().unwrap()))
+        self.get(tag).and_then(|v| v.get(..8)).map(|v| u64::from_le_bytes(v.try_into().unwrap()))
     }
     pub fn str(&self, tag: u16) -> Option<String> {
-        self.get(tag)
-            .map(|v| String::from_utf8_lossy(v).into_owned())
+        self.get(tag).map(|v| String::from_utf8_lossy(v).into_owned())
     }
 }
 
@@ -288,11 +281,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(msg_type: u8, tlvs: &Tlvs) -> Self {
-        Frame {
-            version: VERSION_MAJOR as u8,
-            msg_type,
-            payload: tlvs.bytes().to_vec(),
-        }
+        Frame { version: VERSION_MAJOR as u8, msg_type, payload: tlvs.bytes().to_vec() }
     }
 
     pub fn empty(msg_type: u8) -> Self {
@@ -326,10 +315,7 @@ pub fn decode_preamble(buf: &[u8; PREAMBLE_LEN]) -> Result<(u16, u16)> {
     if buf[0..4] != CONTROL_MAGIC {
         bail!("not an iqstream control connection");
     }
-    Ok((
-        u16::from_le_bytes([buf[4], buf[5]]),
-        u16::from_le_bytes([buf[6], buf[7]]),
-    ))
+    Ok((u16::from_le_bytes([buf[4], buf[5]]), u16::from_le_bytes([buf[6], buf[7]])))
 }
 
 // ---------------------------------------------------------------------------

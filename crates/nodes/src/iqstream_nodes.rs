@@ -28,11 +28,11 @@
 //! stage borrows one, exactly as `remote` keeps its connections.
 
 use common::{Hz, Result, SampleFormat};
+use pipeline::SettingsExt;
 use pipeline::event::{Event, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-use pipeline::SettingsExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -262,14 +262,18 @@ mod tests {
     #[test]
     fn the_dial_is_not_offered_unless_it_was_asked_for() {
         let held = build(&Settings::new()).unwrap();
-        assert_eq!(held.readings().iter().find(|(k, _)| k == "dial").map(|(_, v)| v.as_str()),
-                   Some("held here"));
+        assert_eq!(
+            held.readings().iter().find(|(k, _)| k == "dial").map(|(_, v)| v.as_str()),
+            Some("held here")
+        );
         let mut s = Settings::new();
         s.insert(TUNABLE.into(), pipeline::ParamValue::Bool(true));
         s.insert(ADDRESS.into(), pipeline::ParamValue::Text("127.0.0.1:0".into()));
         let offered = build(&s).unwrap();
-        assert_eq!(offered.readings().iter().find(|(k, _)| k == "dial").map(|(_, v)| v.as_str()),
-                   Some("offered"));
+        assert_eq!(
+            offered.readings().iter().find(|(k, _)| k == "dial").map(|(_, v)| v.as_str()),
+            Some("offered")
+        );
     }
 
     /// One block through the stage, and whatever retunes it asked for.
