@@ -42,22 +42,34 @@ When picking with no number, run the grep for each candidate as you walk up the
 list, and report the ones you passed over as already built so they can be
 closed on the next push.
 
+## A worktree for an issue means somebody else has it
+
+Run `git worktree list` before taking a number. A worktree or a branch whose
+name starts with the issue number is another agent working that issue right
+now, however empty the tree looks and whether or not it has any commits yet.
+It is not yours to continue, inspect or tidy up: skip the issue, say in one
+line which worktree you saw, and move to the next oldest. This holds even when
+the number was given rather than picked, and the reply then says nothing was
+done.
+
 ## Worktree
 
-One issue, one worktree, one branch, off `master`. The issue number goes at
-the front of both names, so a directory listing says which issue each tree is
-for and an abandoned one can be traced back:
+One issue, one worktree, one branch, off `master`, created by you. The issue
+number goes at the front of both names, so a directory listing says which issue
+each tree is for and an abandoned one can be traced back:
 
 ```sh
 git worktree add -b <N>-<short-name> ../super-radio-<N>-<short-name> master
 ```
 
 For issue 18 "Read Morse off the air" that is `18-cw` and
-`../super-radio-18-cw`. A worktree without its number is a worktree to move
-before doing any work in it.
+`../super-radio-18-cw`. If that command fails because the branch or the
+directory is already there, that is the signal above: skip the issue rather
+than picking another name for it. A worktree without its number is a worktree
+to move before doing any work in it.
 
-Work there and nowhere else. Never commit to `master` and never touch another
-worktree's files.
+Work in the tree you created and nowhere else. Never commit to `master`, never
+read or write another worktree's files, and never run a build in one.
 
 ## Build it
 
