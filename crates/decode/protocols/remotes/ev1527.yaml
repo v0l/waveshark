@@ -1,0 +1,24 @@
+# EV1527, PT2260/PT2262 and SC2260/SC2262 fixed-code remotes: doorbells,
+# gate remotes, PIR sensors and door contacts, the commonest and least
+# verifiable thing on 433.92 and 315 MHz.
+#
+# A frame is 24 data bits and a sync mark, with no checksum of any kind, so
+# the burst has to be exactly one frame long to be believed, and even then
+# the occasional burst of something else will read as one. The data bits
+# are documented in the opposite polarity to the slicer's, so the two
+# fields are complemented and the sync bit, always a short mark, is not.
+#
+# `tristate` is the PT226x view of the address and command, each pair of
+# bits one of the states a pin can be strapped to, which is what a remote's
+# DIP switches read as and the form worth writing down when cloning one.
+name: Generic-Remote
+timing: { pwm: [464, 1404], reset_us: 1800, tolerance_us: 200 }
+frame: { bits: 25, find: exact }
+fields:
+  - { name: id, bits: 16, not: true, min: 1 }
+  - { name: cmd, bits: 8, not: true, min: 1 }
+  - { bits: 1, const: 1 }
+  - { name: tristate, at: 0, bits: 24, type: tristate, not: true }
+vectors:
+  - { hex: "5e c0 f7 80", fields: { id: 0xa13f, cmd: 0x08, tristate: "XX0Z011100X0" } }
+  - { hex: "00 ff 0f 80", fields: { id: 0xff00, cmd: 0xf0, tristate: "111100001100" } }

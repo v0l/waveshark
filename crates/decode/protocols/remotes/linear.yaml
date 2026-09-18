@@ -1,0 +1,14 @@
+# Linear 3089 and the DIP-switch remotes on its chip: a 10-bit fixed code.
+#
+# A short mark is a 0 and a long mark a 1, so the frame is inverted. The
+# Flipper notes the bits collect inverted relative to the label and flips
+# them back for display: `code` is what matches a receiver's DIP switches,
+# `raw` what was on the air.
+name: Linear
+timing: { pwm: [500, 1500], reset_us: 2500 }
+frame: { bits: 10, invert: true, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: raw, bits: 10 }
+  - { name: code, at: 0, bits: 10, not: true }
+vectors:
+  - { hex: "55 40", fields: { raw: 0x155, code: 0x2aa } }
