@@ -6,6 +6,11 @@
 //! read the same samples without a second dongle and without taking this one
 //! away.
 //!
+//! A server is a port and a set of tuners on it, one per stream, so a second
+//! stage naming the same address adds a stream rather than wanting a second
+//! port. A stream is claimed by name and kept across a rebuild for that
+//! reason: the name is what a subscriber picked, and a new id would drop it.
+//!
 //! # A remote tune is a request like any other
 //!
 //! Nothing here moves the radio. A subscriber's `TUNE` arrives on the server's
@@ -57,13 +62,14 @@ fn servers() -> &'static Mutex<HashMap<SocketAddr, Arc<iqstream::Server>>> {
 ///
 /// A port of zero is never shared: it asks the kernel for a free port, so two
 /// of them are two servers however the request was written.
-fn server(addr: SocketAddr, cfg: iqstream::ServerConfig) -> Result<Arc<iqstream::Server>> {
+pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
     if addr.port() != 0
         && let Ok(map) = servers().lock()
         && let Some(s) = map.get(&addr)
     {
         return Ok(s.clone());
     }
+    let cfg = iqstream::ServerConfig { name: "waveshark".into(), streams: Vec::new() };
     let s = iqstream::Server::start(addr, cfg)?;
     if addr.port() != 0
         && let Ok(mut map) = servers().lock()
@@ -75,8 +81,12 @@ fn server(addr: SocketAddr, cfg: iqstream::ServerConfig) -> Result<Arc<iqstream:
 
 pub struct IqStreamServerNode {
     address: String,
+    /// What this tuner is called on the wire, which is how a subscriber picks
+    /// it out of the several a server may carry.
+    stream: String,
     tunable: bool,
     server: Option<Arc<iqstream::Server>>,
+    tuner: Option<Arc<iqstream::Stream>>,
     center: Hz,
     rate: f64,
     /// Where the tuner reaches, so a subscriber can be offered a dial with
@@ -89,6 +99,12 @@ pub struct IqStreamServerNode {
     /// What was last asked for, so the same request is not emitted every block
     /// while the device takes its time.
     asked: Option<u64>,
+    /// What the radio is set to, as whoever holds it last said: its gain
+    /// stages, its switches, its antenna port. A stage cannot see a device,
+    /// so this arrives from outside through [`IqStreamServerNode::set_radio`]
+    /// and is passed to the subscribers, who are otherwise reading samples
+    /// whose level they cannot account for.
+    radio: (Option<f32>, Vec<iqstream::Setting>),
 }
 
 impl Default for IqStreamServerNode {
@@ -99,35 +115,50 @@ impl Default for IqStreamServerNode {
 
 impl IqStreamServerNode {
     pub fn new(address: &str, tunable: bool) -> Self {
+        Self::named(address, DEFAULT_STREAM, tunable)
+    }
+
+    pub fn named(address: &str, stream: &str, tunable: bool) -> Self {
         Self {
             address: address.into(),
+            stream: stream.into(),
             tunable,
             server: None,
+            tuner: None,
             center: Hz(0),
             rate: 0.0,
             span: (0, 0),
             uc8: Vec::new(),
             asked: None,
+            radio: (None, Vec::new()),
         }
     }
 
-    /// Start the server, or take the one already listening on that address.
+    /// Say what the radio feeding this stage is set to.
+    ///
+    /// Told rather than asked, because the device is on the radio thread and
+    /// a node may not reach it. A set that has not moved sends nothing.
+    pub fn set_radio(&mut self, gain_db: Option<f32>, settings: Vec<iqstream::Setting>) {
+        if self.radio == (gain_db, settings.clone()) {
+            return;
+        }
+        self.radio = (gain_db, settings);
+        if let Some(t) = &self.tuner {
+            t.set_gain_db(self.radio.0);
+            t.set_settings(self.radio.1.clone());
+        }
+    }
+
+    /// Start the server, or take the one already listening on that address,
+    /// and claim this stage's tuner on it.
     ///
     /// A port that will not bind is logged and left: a receiver that stopped
     /// because somebody else had 1234 would be a worse fault than one that
     /// serves nothing.
-    fn attach(&mut self) -> Option<&Arc<iqstream::Server>> {
+    fn attach(&mut self) -> Option<&Arc<iqstream::Stream>> {
         if self.server.is_none() {
             let addr: SocketAddr = self.address.parse().ok()?;
-            let cfg = iqstream::ServerConfig {
-                name: "waveshark".into(),
-                center_hz: self.center.0,
-                sample_rate: self.rate as u32,
-                gain_db: None,
-                tunable: self.tunable,
-                tune_range_hz: Some(self.span),
-            };
-            match server(addr, cfg) {
+            match server(addr) {
                 Ok(s) => self.server = Some(s),
                 Err(e) => {
                     tracing::warn!("iqstream_server: {}: {e}", self.address);
@@ -135,7 +166,19 @@ impl IqStreamServerNode {
                 }
             }
         }
-        self.server.as_ref()
+        if self.tuner.is_none() {
+            let cfg = iqstream::StreamConfig {
+                name: self.stream.clone(),
+                center_hz: self.center.0,
+                sample_rate: self.rate as u32,
+                gain_db: self.radio.0,
+                tunable: self.tunable,
+                tune_range_hz: Some(self.span),
+                settings: self.radio.1.clone(),
+            };
+            self.tuner = self.server.as_ref().map(|s| s.stream_named(cfg));
+        }
+        self.tuner.as_ref()
     }
 }
 
@@ -149,12 +192,17 @@ impl Simple for IqStreamServerNode {
     }
 
     fn readings(&self) -> Vec<(String, String)> {
-        let (serving, readers, blocks) = match &self.server {
-            Some(s) => (s.addr().to_string(), s.subscribers().to_string(), s.blocks_sent()),
-            None => ("not listening".into(), "0".into(), 0),
+        let serving = match &self.server {
+            Some(s) => s.addr().to_string(),
+            None => "not listening".into(),
+        };
+        let (readers, blocks) = match &self.tuner {
+            Some(t) => (t.subscribers().to_string(), t.blocks_sent()),
+            None => ("0".into(), 0),
         };
         vec![
             ("serving".into(), serving),
+            ("stream".into(), self.stream.clone()),
             ("readers".into(), readers),
             ("blocks".into(), blocks.to_string()),
             ("dial".into(), if self.tunable { "offered" } else { "held here" }.into()),
@@ -175,12 +223,16 @@ impl Simple for IqStreamServerNode {
         self.span = (self.center.0.saturating_sub(half.max(1)), self.center.0 + half.max(1));
         // A rate or a centre change is a different stream. The subscribers
         // are told the new centre; a rate change they cannot be told about,
-        // so the server is let go and the next block starts a fresh one.
-        if let Some(s) = &self.server {
-            if s.sample_rate() != self.rate as u32 {
-                self.server = None;
+        // so the stream is taken off the server and the next block starts a
+        // fresh one in its place.
+        if let Some(t) = self.tuner.take() {
+            if t.sample_rate() != self.rate as u32 {
+                if let Some(s) = &self.server {
+                    s.remove_stream(t.id());
+                }
             } else {
-                s.retuned(self.center.0);
+                t.retuned(self.center.0);
+                self.tuner = Some(t);
             }
         }
         Ok(i.spec)
@@ -188,14 +240,14 @@ impl Simple for IqStreamServerNode {
 
     fn process(&mut self, i: &Payload, _o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let iq = i.as_iq().unwrap_or(&[]);
-        let Some(server) = self.attach() else {
+        let Some(tuner) = self.attach() else {
             return Ok(());
         };
-        let server = server.clone();
+        let tuner = tuner.clone();
 
         // What a subscriber asked for, forwarded once. The device answers by
         // retuning, which arrives back here as a negotiate with a new centre.
-        if let Some(t) = server.wanted()
+        if let Some(t) = tuner.wanted()
             && self.asked != Some(t.center_hz)
         {
             self.asked = Some(t.center_hz);
@@ -211,7 +263,7 @@ impl Simple for IqStreamServerNode {
             // anyway. A subscriber wanting fewer asks for fewer and the
             // server packs them down.
             SampleFormat::Cu8.encode(iq, &mut self.uc8);
-            server.push(&self.uc8);
+            tuner.push(&self.uc8);
             self.uc8.clear();
         }
         Ok(())
@@ -220,8 +272,13 @@ impl Simple for IqStreamServerNode {
 
 /// Where the server listens, as `host:port`.
 pub const ADDRESS: &str = "address";
+/// What this tuner is called on that server.
+pub const STREAM: &str = "stream";
 /// Whether a subscriber may move this receiver's dial.
 pub const TUNABLE: &str = "tunable";
+
+/// What the receiver's own span is called, where nothing named it.
+pub const DEFAULT_STREAM: &str = "span";
 
 pub const DESC: StageDesc = StageDesc {
     name: "iqstream_server",
@@ -234,7 +291,8 @@ pub const DESC: StageDesc = StageDesc {
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let default = format!("0.0.0.0:{DEFAULT_PORT}");
     let addr = s.str_or(ADDRESS, &default);
-    Ok(Box::new(IqStreamServerNode::new(&addr, s.bool_or(TUNABLE, false))))
+    let stream = s.str_or(STREAM, DEFAULT_STREAM);
+    Ok(Box::new(IqStreamServerNode::named(&addr, &stream, s.bool_or(TUNABLE, false))))
 }
 
 #[cfg(test)]
@@ -276,6 +334,38 @@ mod tests {
         );
     }
 
+    fn gain(db: f32) -> iqstream::Setting {
+        iqstream::Setting {
+            name: "tuner".into(),
+            label: "RF gain".into(),
+            kind: iqstream::SettingKind::Gain,
+            value: iqstream::SettingValue::Gain(db),
+            options: Vec::new(),
+            range_db: Some((0.0, 49.6)),
+        }
+    }
+
+    /// What the radio is set to reaches the tuner whether it was said before
+    /// the server existed or after, and a set that has not moved is not said
+    /// again: the radio thread reports this four times a second.
+    #[test]
+    fn what_the_radio_is_set_to_reaches_the_subscribers() {
+        let mut n = IqStreamServerNode::new("127.0.0.1:0", false);
+        // Before there is a server, which is where the radio thread's first
+        // report lands: it is kept and goes into the stream when one opens.
+        n.set_radio(Some(32.8), vec![gain(32.8)]);
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(1090))]).unwrap();
+        block(&mut n, 64);
+        let tuner = n.tuner.clone().expect("a tuner on a free port");
+        assert_eq!(tuner.settings(), vec![gain(32.8)]);
+        assert_eq!(tuner.gain_db(), Some(32.8));
+
+        // And afterwards, which is every report after the first.
+        n.set_radio(Some(14.4), vec![gain(14.4)]);
+        assert_eq!(tuner.settings(), vec![gain(14.4)]);
+        assert_eq!(tuner.gain_db(), Some(14.4));
+    }
+
     /// One block through the stage, and whatever retunes it asked for.
     fn block(n: &mut IqStreamServerNode, samples: usize) -> Vec<f64> {
         let ins = [spec(2_400_000.0, n.center)];
@@ -301,7 +391,7 @@ mod tests {
         let mut n = IqStreamServerNode::new("127.0.0.1:0", true);
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(1090))]).unwrap();
         assert_eq!(block(&mut n, 64), Vec::<f64>::new(), "nobody asked");
-        let server = n.server.clone().expect("a server on a free port");
+        let server = n.tuner.clone().expect("a tuner on a free port");
         assert!(server.tunable());
 
         // Park a request the way a subscriber's TUNE does, then run blocks.
@@ -332,7 +422,7 @@ mod tests {
         let mut n = IqStreamServerNode::new("127.0.0.1:0", false);
         Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(1090))]).unwrap();
         assert_eq!(block(&mut n, 64), Vec::<f64>::new());
-        let server = n.server.clone().expect("a server on a free port");
+        let server = n.tuner.clone().expect("a tuner on a free port");
         assert!(!server.tunable());
         server.ask(433_920_000);
         assert_eq!(block(&mut n, 64), Vec::<f64>::new(), "a held dial does not move");

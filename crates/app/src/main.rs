@@ -68,6 +68,7 @@ mod tracks;
 #[cfg_attr(not(feature = "stt"), allow(dead_code))]
 mod transcripts;
 mod transmit;
+mod tuners;
 mod ui;
 mod update;
 mod videobus;
@@ -999,6 +1000,61 @@ impl std::str::FromStr for Serve {
     }
 }
 
+/// A radio this receiver is not listening to, handed out beside the span.
+///
+/// `1`, `RTL2838`, `1,2.4M`, `1,2.4M,433.92`: which radio, then optionally the
+/// rate and where to park it. The radio is its position in the receiver list
+/// or a piece of its label. Its dial is always offered, since nothing here is
+/// watching it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServeTuner(pub crate::chain::TunerServePlan);
+
+impl std::str::FromStr for ServeTuner {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.split(',').map(str::trim);
+        let radio = parts.next().unwrap_or_default().to_string();
+        if radio.is_empty() {
+            return Err("name a radio, by its number in the list or by its label".into());
+        }
+        let rate = match parts.next().filter(|p| !p.is_empty()) {
+            Some(r) => Some(common::Sps(parse_rate(r)? as u64)),
+            None => None,
+        };
+        let center = match parts.next().filter(|p| !p.is_empty()) {
+            Some(c) => {
+                let mhz: f64 = c.parse().map_err(|_| format!("{c:?} is not a frequency in MHz"))?;
+                Some(common::Hz((mhz * 1e6) as u64))
+            }
+            None => None,
+        };
+        Ok(Self(crate::chain::TunerServePlan {
+            radio,
+            // Filled in from --iqstream-listen once the arguments are read,
+            // because a tuner is served on the same port as the span.
+            addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+            stream: String::new(),
+            rate,
+            center,
+        }))
+    }
+}
+
+/// `2.4M`, `2400k` or `2400000`, all of which mean the same rate.
+fn parse_rate(s: &str) -> Result<f64, String> {
+    let (digits, scale) = match s.chars().last() {
+        Some('M') | Some('m') => (&s[..s.len() - 1], 1e6),
+        Some('k') | Some('K') => (&s[..s.len() - 1], 1e3),
+        _ => (s, 1.0),
+    };
+    let n: f64 = digits.parse().map_err(|_| format!("{s:?} is not a sample rate"))?;
+    match n > 0.0 {
+        true => Ok(n * scale),
+        false => Err(format!("{s:?} is not a sample rate")),
+    }
+}
+
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
     let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
     let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
@@ -1124,6 +1180,14 @@ struct Args {
     /// it on this screen too
     #[arg(long, value_name = "ADDR", default_value = "off")]
     iqstream_listen: Serve,
+
+    /// Serve a radio this receiver is not listening to, as its own stream on
+    /// the same port: its number in the receiver list or a piece of its
+    /// label, then optionally a rate and a frequency in MHz, as
+    /// `1,2.4M,433.92`. Repeat it for each radio. Their dials are offered,
+    /// since nothing here is watching them
+    #[arg(long = "iqstream-tuner", value_name = "RADIO")]
+    iqstream_tuners: Vec<ServeTuner>,
 
     /// Open on the picture, for analogue video
     #[arg(long)]
@@ -1574,6 +1638,20 @@ fn main() -> eframe::Result<()> {
             if let Some(serving) = args.iqstream_listen.0.clone() {
                 app.serve_iqstream(serving);
             }
+            // A spare radio is served on the same port as the span, which has
+            // to be open for there to be one: on its own, --iqstream-tuner
+            // opens the default port rather than serving nothing.
+            if !args.iqstream_tuners.is_empty() {
+                let addr = args.iqstream_listen.0.map(|s| s.addr).unwrap_or_else(|| {
+                    std::net::SocketAddr::from(([0, 0, 0, 0], nodes::iqstream_nodes::DEFAULT_PORT))
+                });
+                let tuners = args
+                    .iqstream_tuners
+                    .iter()
+                    .map(|t| crate::chain::TunerServePlan { addr, ..t.0.clone() })
+                    .collect();
+                app.serve_tuners(tuners);
+            }
             // On unless asked otherwise, on the loopback: an agent that has
             // to be enabled by a flag nobody remembers is an agent nobody
             // uses, and a port on 127.0.0.1 reaches no further than this
@@ -1649,4 +1727,47 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// What an operator types for a spare radio: which one, and optionally
+    /// what to run it at and where to park it.
+    #[test]
+    fn a_served_tuner_reads_its_radio_rate_and_frequency() {
+        let bare = ServeTuner::from_str("1").unwrap().0;
+        assert_eq!(bare.radio, "1");
+        assert_eq!(bare.rate, None, "the stage picks what the radio can do");
+        assert_eq!(bare.center, None);
+
+        let full = ServeTuner::from_str("RTL2838, 2.4M, 433.92").unwrap().0;
+        assert_eq!(full.radio, "RTL2838");
+        assert_eq!(full.rate, Some(common::Sps(2_400_000)));
+        assert_eq!(full.center, Some(common::Hz(433_920_000)));
+
+        assert_eq!(ServeTuner::from_str("0,1024k").unwrap().0.rate, Some(common::Sps(1_024_000)));
+        assert_eq!(ServeTuner::from_str("0,250000").unwrap().0.rate, Some(common::Sps(250_000)));
+        assert!(ServeTuner::from_str("").is_err());
+        assert!(ServeTuner::from_str("0,fast").is_err());
+        assert!(ServeTuner::from_str("0,2.4M,here").is_err());
+    }
+
+    /// A port is every interface and a tuner goes with it, which is what
+    /// makes a receiver on a mast worth serving at all.
+    #[test]
+    fn a_bare_port_serves_the_network_and_takes_the_dial_only_when_asked() {
+        assert_eq!(
+            Serve::from_str("1234").unwrap().0,
+            Some(crate::chain::IqStreamPlan {
+                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
+                tunable: false,
+            })
+        );
+        assert!(Serve::from_str("1234,tune").unwrap().0.is_some_and(|s| s.tunable));
+        assert_eq!(Serve::from_str("off").unwrap().0, None);
+        assert!(Serve::from_str("1234,nope").is_err());
+    }
 }

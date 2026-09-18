@@ -7,8 +7,8 @@
 //! new server can talk to an old client as long as the major version matches.
 //!
 //! Vendored from <https://github.com/v0l/iqstream> so both ends of the
-//! protocol can be spoken from here. 1.1 adds [`msg::TUNE`]; everything else
-//! is 1.0 unchanged, and the two interoperate.
+//! protocol can be spoken from here. 1.1 adds [`msg::TUNE`], 1.2 adds streams;
+//! everything else is 1.0 unchanged, and the versions interoperate.
 
 use common::{Error, Result};
 
@@ -30,12 +30,24 @@ pub const VERSION_MAJOR: u16 = 1;
 /// message type with [`msg::ERROR`] and keeps the subscription, and ignores
 /// tags it does not know, so the two versions interoperate in both
 /// directions.
-pub const VERSION_MINOR: u16 = 1;
+///
+/// 2: several tuners on one port. The welcome carries a [`tag::STREAM`] per
+/// tuner, [`tag::STREAM_ID`] says which one a subscribe, a tune or a tuned is
+/// about, and the data header carries it too. A 1.1 peer names no stream and
+/// gets the first one, which is the only stream a 1.1 server has.
+pub const VERSION_MINOR: u16 = 2;
 
 pub const PREAMBLE_LEN: usize = 8;
 pub const FRAME_HEADER_LEN: usize = 4;
 pub const MAX_FRAME_PAYLOAD: usize = 8192;
-pub const DATA_HEADER_LEN: usize = 32;
+pub const DATA_HEADER_LEN: usize = 36;
+
+/// The 1.1 data header, which carried no stream id.
+///
+/// Still read, because the header says its own length and a 1.1 server sends
+/// this: the fields up to here have not moved, and everything in such a
+/// stream is stream zero.
+pub const DATA_HEADER_LEN_1_1: usize = 32;
 
 /// Fits inside a 1500 byte MTU alongside IPv6 and UDP headers.
 pub const MAX_DATAGRAM_PAYLOAD: usize = 1400;
@@ -62,6 +74,30 @@ pub mod msg {
     /// reader who did not ask would otherwise be labelled at the old
     /// frequency. Since 1.1.
     pub const TUNED: u8 = 0x0d;
+    /// Ask what tuners the server has now. The welcome already said, so this
+    /// is for a client that has been connected a while. Since 1.2.
+    pub const LIST_STREAMS: u8 = 0x0e;
+    /// The tuners, as [`super::tag::STREAM`] entries. Sent in answer to
+    /// [`LIST_STREAMS`], and unasked to every connection when a tuner is
+    /// added or taken away. Since 1.2.
+    pub const STREAMS: u8 = 0x0f;
+    /// One tuner, as a [`super::tag::STREAM`] entry, because something about
+    /// it moved: a gain, a switch, an antenna port, the rate it runs at.
+    ///
+    /// Sent to every connection, whether or not it subscribed to that tuner,
+    /// for the reason [`TUNED`] is: a reader labelling what it hears with a
+    /// gain that was turned down ten minutes ago is reporting a level that
+    /// was never true. Since 1.2.
+    pub const STREAM_CHANGED: u8 = 0x10;
+    /// Ask a tuner to be set differently: a gain, a switch, an antenna port,
+    /// named by [`super::tag::SETTING_NAME`] and carrying
+    /// [`super::tag::SETTING_VALUE`].
+    ///
+    /// A request like [`TUNE`] and refused on the same terms, since a radio
+    /// somebody here is listening to is not one a subscriber may reach into.
+    /// What it was actually set to comes back as [`STREAM_CHANGED`], because
+    /// a driver snaps a gain to its own step. Since 1.2.
+    pub const SET_SETTING: u8 = 0x11;
 }
 
 pub mod tag {
@@ -82,6 +118,34 @@ pub mod tag {
     /// can be asked, but not driven. Since 1.1.
     pub const TUNE_MIN_HZ: u16 = 0x0016;
     pub const TUNE_MAX_HZ: u16 = 0x0017;
+    /// One tuner, as a nested TLV block: see [`super::StreamDesc`]. Repeated
+    /// once per tuner in a welcome or a [`super::msg::STREAMS`]. Since 1.2.
+    pub const STREAM: u16 = 0x0018;
+    /// Which tuner a subscribe, an unsubscribe, a tune or a tuned is about.
+    /// Absent means the first one. Since 1.2.
+    pub const STREAM_ID: u16 = 0x0019;
+    /// What a tuner is called, for an operator picking one. Since 1.2.
+    pub const STREAM_NAME: u16 = 0x001a;
+    // Settings of a tuner, numbered clear of the subscription parameters and
+    // the counters below: a nested block has its own context, but a tag that
+    // means two things in one protocol is a trap for whoever reads a capture.
+    /// One setting of a tuner, as a nested TLV block: see [`super::Setting`].
+    /// Repeated once per setting inside a [`STREAM`]. Since 1.2.
+    pub const SETTING: u16 = 0x0060;
+    pub const SETTING_NAME: u16 = 0x0061;
+    /// What an operator reading it calls it, which is not what the driver
+    /// calls it.
+    pub const SETTING_LABEL: u16 = 0x0062;
+    /// Which of [`super::SettingKind`] this is.
+    pub const SETTING_KIND: u16 = 0x0063;
+    /// `auto` or tenths of a dB for a gain, `on` or `off` for a switch, the
+    /// option's own name for a choice.
+    pub const SETTING_VALUE: u16 = 0x0064;
+    /// One option a choice offers, repeated.
+    pub const SETTING_OPTION: u16 = 0x0065;
+    /// How far a gain goes, in tenths of a dB.
+    pub const SETTING_MIN_DDB: u16 = 0x0066;
+    pub const SETTING_MAX_DDB: u16 = 0x0067;
     // Subscription parameters
     pub const UDP_PORT: u16 = 0x0020;
     pub const BIT_DEPTH: u16 = 0x0021;
@@ -121,6 +185,10 @@ pub mod error_code {
     pub const NOT_TUNABLE: u16 = 6;
     /// Asked for a frequency the tuner cannot reach.
     pub const OUT_OF_RANGE: u16 = 7;
+    /// Named a stream this server does not have, or no longer has.
+    pub const NO_SUCH_STREAM: u16 = 8;
+    /// Named a setting this tuner does not offer.
+    pub const NO_SUCH_SETTING: u16 = 9;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +316,12 @@ impl<'a> TlvMap<'a> {
         self.entries.iter().find(|(t, _)| *t == tag).map(|(_, v)| *v)
     }
 
+    /// Every value under one tag, in the order they were written, for a tag
+    /// that repeats: one [`tag::STREAM`] per tuner.
+    pub fn all(&self, tag: u16) -> Vec<&'a [u8]> {
+        self.entries.iter().filter(|(t, _)| *t == tag).map(|(_, v)| *v).collect()
+    }
+
     pub fn u8(&self, tag: u16) -> Option<u8> {
         self.get(tag).and_then(|v| v.first().copied())
     }
@@ -322,6 +396,204 @@ pub fn decode_preamble(buf: &[u8; PREAMBLE_LEN]) -> Result<(u16, u16)> {
 // Data datagrams
 // ---------------------------------------------------------------------------
 
+/// What kind of thing a [`Setting`] is, which is what a reader draws it as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKind {
+    /// A gain in dB, or the driver picking it.
+    Gain,
+    /// A switch: a bias tee, an offset tuning, a direct sampling input.
+    Switch,
+    /// One of a named set: an antenna port, a receive channel.
+    Choice,
+    /// Something a later version of this protocol knows about and this build
+    /// does not, kept so it can be shown rather than dropped.
+    Unknown(u8),
+}
+
+impl SettingKind {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Gain => 0,
+            Self::Switch => 1,
+            Self::Choice => 2,
+            Self::Unknown(c) => c,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            0 => Self::Gain,
+            1 => Self::Switch,
+            2 => Self::Choice,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// What one setting of a tuner is set to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingValue {
+    /// The driver or the hardware picking the gain for itself.
+    Auto,
+    Gain(f32),
+    Switch(bool),
+    /// The option's own name, as it appears in [`Setting::options`].
+    Choice(String),
+}
+
+impl SettingValue {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Auto => "auto".into(),
+            Self::Gain(db) => format!("{:.1}", db),
+            Self::Switch(on) => match on {
+                true => "on".into(),
+                false => "off".into(),
+            },
+            Self::Choice(v) => v.clone(),
+        }
+    }
+
+    pub fn parse(kind: SettingKind, text: &str) -> Self {
+        match kind {
+            SettingKind::Switch => Self::Switch(matches!(text, "on" | "1" | "true")),
+            SettingKind::Gain => match text {
+                "auto" => Self::Auto,
+                db => Self::Gain(db.parse().unwrap_or(0.0)),
+            },
+            SettingKind::Choice | SettingKind::Unknown(_) => Self::Choice(text.to_string()),
+        }
+    }
+}
+
+/// One thing about a tuner that is set rather than heard: a gain stage, a
+/// switch, an antenna port.
+///
+/// Carried in the tuner's description and sent again whenever it moves, so a
+/// reader knows what the samples it is being given were taken at. What the
+/// far end does not offer it does not list, which is how a dongle and a
+/// LimeSDR describe themselves through the same field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Setting {
+    /// The driver's own name for it, which is what a request would name.
+    pub name: String,
+    /// What an operator reading it calls it.
+    pub label: String,
+    pub kind: SettingKind,
+    pub value: SettingValue,
+    /// What a choice offers, and empty for anything else.
+    pub options: Vec<String>,
+    /// How far a gain goes, in dB, where the far end said.
+    pub range_db: Option<(f32, f32)>,
+}
+
+impl Setting {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut t = Tlvs::new();
+        t.str(tag::SETTING_NAME, &self.name)
+            .str(tag::SETTING_LABEL, &self.label)
+            .u8(tag::SETTING_KIND, self.kind.code())
+            .str(tag::SETTING_VALUE, &self.value.text());
+        for o in &self.options {
+            t.str(tag::SETTING_OPTION, o);
+        }
+        if let Some((lo, hi)) = self.range_db {
+            t.i16(tag::SETTING_MIN_DDB, (lo * 10.0) as i16)
+                .i16(tag::SETTING_MAX_DDB, (hi * 10.0) as i16);
+        }
+        t.bytes().to_vec()
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self> {
+        let m = TlvMap::parse(buf)?;
+        let kind = SettingKind::from_code(m.u8(tag::SETTING_KIND).unwrap_or(0));
+        Ok(Setting {
+            name: m.str(tag::SETTING_NAME).unwrap_or_default(),
+            label: m.str(tag::SETTING_LABEL).unwrap_or_default(),
+            kind,
+            value: SettingValue::parse(kind, &m.str(tag::SETTING_VALUE).unwrap_or_default()),
+            options: m
+                .all(tag::SETTING_OPTION)
+                .iter()
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .collect(),
+            range_db: m
+                .i16(tag::SETTING_MIN_DDB)
+                .zip(m.i16(tag::SETTING_MAX_DDB))
+                .map(|(lo, hi)| (lo as f32 / 10.0, hi as f32 / 10.0)),
+        })
+    }
+}
+
+/// One tuner a server is offering, as the welcome describes it.
+///
+/// Carried as a nested TLV block so the set can repeat and so a field added
+/// later is additive here exactly as it is at the top level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamDesc {
+    pub id: u16,
+    /// What an operator picking a tuner sees. Never empty on the wire from
+    /// this implementation, but a server may leave it out.
+    pub name: String,
+    pub center_hz: u64,
+    pub sample_rate: u32,
+    pub gain_db: Option<f32>,
+    pub tunable: bool,
+    pub tune_range_hz: Option<(u64, u64)>,
+    /// Everything else the far end is set to: its gain stages, its switches,
+    /// its antenna port. Empty from a server that says nothing about them.
+    pub settings: Vec<Setting>,
+}
+
+impl StreamDesc {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut t = Tlvs::new();
+        t.u16(tag::STREAM_ID, self.id)
+            .str(tag::STREAM_NAME, &self.name)
+            .u64(tag::CENTER_HZ, self.center_hz)
+            .u32(tag::SAMPLE_RATE, self.sample_rate)
+            .u8(tag::TUNABLE, self.tunable as u8);
+        if let Some(g) = self.gain_db {
+            t.i16(tag::GAIN_DDB, (g * 10.0) as i16);
+        }
+        if let Some((lo, hi)) = self.tune_range_hz {
+            t.u64(tag::TUNE_MIN_HZ, lo).u64(tag::TUNE_MAX_HZ, hi);
+        }
+        for s in &self.settings {
+            t.put(tag::SETTING, &s.encode());
+        }
+        t.bytes().to_vec()
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self> {
+        let m = TlvMap::parse(buf)?;
+        Ok(StreamDesc {
+            id: m.u16(tag::STREAM_ID).unwrap_or(0),
+            name: m.str(tag::STREAM_NAME).unwrap_or_default(),
+            center_hz: m.u64(tag::CENTER_HZ).unwrap_or(0),
+            sample_rate: m.u32(tag::SAMPLE_RATE).unwrap_or(0),
+            gain_db: m.i16(tag::GAIN_DDB).map(|g| g as f32 / 10.0),
+            tunable: m.u8(tag::TUNABLE).unwrap_or(0) != 0,
+            tune_range_hz: m.u64(tag::TUNE_MIN_HZ).zip(m.u64(tag::TUNE_MAX_HZ)),
+            settings: m.all(tag::SETTING).iter().filter_map(|b| Setting::decode(b).ok()).collect(),
+        })
+    }
+}
+
+/// The tuners in a welcome or a [`msg::STREAMS`].
+///
+/// Empty from a 1.1 peer, which describes its one stream with the flat tags
+/// instead; a caller reading a welcome makes a [`StreamDesc`] out of those.
+pub fn read_streams(m: &TlvMap<'_>) -> Vec<StreamDesc> {
+    m.all(tag::STREAM).iter().filter_map(|b| StreamDesc::decode(b).ok()).collect()
+}
+
+pub fn put_streams(t: &mut Tlvs, streams: &[StreamDesc]) {
+    for s in streams {
+        t.put(tag::STREAM, &s.encode());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataHeader {
     pub version: u8,
@@ -336,6 +608,9 @@ pub struct DataHeader {
     /// Complex samples in the block once decoded, so a receiver can size its
     /// buffer and pad correctly when a block is lost.
     pub block_samples: u32,
+    /// Which tuner these samples are of. Zero from a 1.1 server, which has
+    /// one. Since 1.2.
+    pub stream_id: u16,
 }
 
 impl DataHeader {
@@ -352,17 +627,19 @@ impl DataHeader {
         out[25] = self.codec.code();
         out[26..28].copy_from_slice(&self.decimation.to_le_bytes());
         out[28..32].copy_from_slice(&self.block_samples.to_le_bytes());
+        out[32..34].copy_from_slice(&self.stream_id.to_le_bytes());
+        out[34..36].copy_from_slice(&0u16.to_le_bytes());
     }
 
     pub fn decode(buf: &[u8]) -> Result<(Self, &[u8])> {
-        if buf.len() < DATA_HEADER_LEN {
+        if buf.len() < DATA_HEADER_LEN_1_1 {
             bail!("short datagram: {} bytes", buf.len());
         }
         if buf[0..4] != DATA_MAGIC {
             bail!("bad magic");
         }
         let header_len = u16::from_le_bytes([buf[4], buf[5]]) as usize;
-        if header_len < DATA_HEADER_LEN || header_len > buf.len() {
+        if header_len < DATA_HEADER_LEN_1_1 || header_len > buf.len() {
             bail!("bad header length {header_len}");
         }
         let header = DataHeader {
@@ -375,6 +652,10 @@ impl DataHeader {
             codec: Codec::from_code(buf[25])?,
             decimation: u16::from_le_bytes([buf[26], buf[27]]),
             block_samples: u32::from_le_bytes(buf[28..32].try_into().unwrap()),
+            stream_id: match header_len >= DATA_HEADER_LEN {
+                true => u16::from_le_bytes([buf[32], buf[33]]),
+                false => 0,
+            },
         };
         Ok((header, &buf[header_len..]))
     }
@@ -474,6 +755,115 @@ mod tests {
         assert_eq!(m.i16(tag::GAIN_DDB), Some(496));
         assert_eq!(m.str(tag::CLIENT_NAME).as_deref(), Some("probe"));
         assert_eq!(m.u8(0xffff), None);
+    }
+
+    /// A tuner survives the nested encoding whole, and several of them keep
+    /// their order and stay apart.
+    #[test]
+    fn streams_roundtrip_in_a_welcome() {
+        let streams = vec![
+            StreamDesc {
+                id: 0,
+                name: "span".into(),
+                center_hz: 1_090_000_000,
+                sample_rate: 2_400_000,
+                gain_db: Some(49.6),
+                tunable: false,
+                tune_range_hz: None,
+                settings: Vec::new(),
+            },
+            StreamDesc {
+                id: 3,
+                name: "loft dongle".into(),
+                center_hz: 433_920_000,
+                sample_rate: 1_024_000,
+                gain_db: None,
+                tunable: true,
+                tune_range_hz: Some((24_000_000, 1_766_000_000)),
+                settings: vec![
+                    Setting {
+                        name: "tuner".into(),
+                        label: "RF gain".into(),
+                        kind: SettingKind::Gain,
+                        value: SettingValue::Gain(32.8),
+                        options: Vec::new(),
+                        range_db: Some((0.0, 49.6)),
+                    },
+                    Setting {
+                        name: "bias_t".into(),
+                        label: "Bias tee".into(),
+                        kind: SettingKind::Switch,
+                        value: SettingValue::Switch(true),
+                        options: Vec::new(),
+                        range_db: None,
+                    },
+                    Setting {
+                        name: "antenna".into(),
+                        label: "Antenna".into(),
+                        kind: SettingKind::Choice,
+                        value: SettingValue::Choice("LNAW".into()),
+                        options: vec!["LNAH".into(), "LNAL".into(), "LNAW".into()],
+                        range_db: None,
+                    },
+                ],
+            },
+        ];
+        let mut t = Tlvs::new();
+        t.str(tag::SERVER_NAME, "waveshark");
+        put_streams(&mut t, &streams);
+        let m = TlvMap::parse(t.bytes()).unwrap();
+        assert_eq!(read_streams(&m), streams);
+        assert_eq!(m.str(tag::SERVER_NAME).as_deref(), Some("waveshark"));
+    }
+
+    /// A 1.1 welcome carries no stream entries, and reading it says so rather
+    /// than inventing one: the caller makes the single stream out of the flat
+    /// tags it does carry.
+    #[test]
+    fn a_welcome_without_streams_lists_none() {
+        let mut t = Tlvs::new();
+        t.u64(tag::CENTER_HZ, 1_090_000_000).u32(tag::SAMPLE_RATE, 2_400_000);
+        let m = TlvMap::parse(t.bytes()).unwrap();
+        assert!(read_streams(&m).is_empty());
+    }
+
+    /// The header grew by four bytes at the end, so a 1.1 datagram still
+    /// decodes: its own length says where its payload starts, and everything
+    /// in a 1.1 stream is stream zero.
+    #[test]
+    fn a_data_header_says_which_stream_and_an_old_one_still_reads() {
+        let header = DataHeader {
+            version: 1,
+            sample_index: 4096,
+            block_seq: 7,
+            frag_index: 1,
+            frag_count: 2,
+            bit_depth: 8,
+            codec: Codec::None,
+            decimation: 1,
+            block_samples: 2048,
+            stream_id: 5,
+        };
+        let mut buf = [0u8; DATA_HEADER_LEN + 4];
+        let mut head = [0u8; DATA_HEADER_LEN];
+        header.encode(&mut head);
+        buf[..DATA_HEADER_LEN].copy_from_slice(&head);
+        buf[DATA_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4]);
+        let (back, body) = DataHeader::decode(&buf).unwrap();
+        assert_eq!(back, header);
+        assert_eq!(body, &[1, 2, 3, 4]);
+
+        // The same bytes as a 1.1 server writes them: a 32 byte header, four
+        // bytes of payload, and no stream id anywhere.
+        let mut old = [0u8; DATA_HEADER_LEN_1_1 + 4];
+        old[..DATA_HEADER_LEN_1_1].copy_from_slice(&head[..DATA_HEADER_LEN_1_1]);
+        old[4..6].copy_from_slice(&(DATA_HEADER_LEN_1_1 as u16).to_le_bytes());
+        old[DATA_HEADER_LEN_1_1..].copy_from_slice(&[1, 2, 3, 4]);
+        let (back, body) = DataHeader::decode(&old).unwrap();
+        assert_eq!(back.stream_id, 0, "a 1.1 stream is stream zero");
+        assert_eq!(back.sample_index, 4096);
+        assert_eq!(back.block_samples, 2048);
+        assert_eq!(body, &[1, 2, 3, 4]);
     }
 
     #[test]

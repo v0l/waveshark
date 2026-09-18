@@ -11,8 +11,9 @@
 //! reported in [`Block::padded_before`] so the timebase stays true.
 
 use crate::proto::{
-    BitDepth, Codec, DataHeader, Frame, MAX_FRAME_PAYLOAD, PREAMBLE_LEN, Tlvs, VERSION_MAJOR,
-    VERSION_MINOR, decode_preamble, encode_preamble, msg, now_ns, tag, unpack,
+    BitDepth, Codec, DataHeader, Frame, MAX_FRAME_PAYLOAD, PREAMBLE_LEN, Setting, SettingValue,
+    StreamDesc, Tlvs, VERSION_MAJOR, VERSION_MINOR, decode_preamble, encode_preamble, msg, now_ns,
+    read_streams, tag, unpack,
 };
 use common::{Error, Result};
 use std::collections::BTreeMap;
@@ -35,6 +36,9 @@ pub struct ClientConfig {
     pub codec: Codec,
     /// zstd level. Above 1 costs server CPU for almost no ratio.
     pub level: i8,
+    /// Which tuner to read, of the ones the server offers. None takes the
+    /// first, which is the only one a 1.1 server has.
+    pub stream: Option<u16>,
     /// Local UDP port. 0 picks a free one.
     pub local_port: u16,
     /// Report lost samples in [`Block::padded_before`] and fill them with mid
@@ -50,6 +54,7 @@ impl Default for ClientConfig {
             bits: 8,
             codec: Codec::None,
             level: 1,
+            stream: None,
             local_port: 0,
             pad_gaps: true,
             ping_interval: Duration::from_secs(10),
@@ -57,8 +62,13 @@ impl Default for ClientConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StreamInfo {
+    /// Which tuner of the server's this is reading.
+    pub id: u16,
+    /// What the far end calls that tuner. Empty from a 1.1 server, which has
+    /// one stream and never names it.
+    pub name: String,
     pub center_hz: u64,
     pub sample_rate: u32,
     pub gain_db: Option<f32>,
@@ -69,6 +79,10 @@ pub struct StreamInfo {
     /// tune but did not say where it may go, which is every 1.0 server: ask
     /// and find out is all that is left.
     pub tune_range_hz: Option<(u64, u64)>,
+    /// What else the far end is set to: gain stages, switches, antenna port.
+    /// Kept up to date from [`msg::STREAM_CHANGED`], so this is what the
+    /// block last taken was heard at.
+    pub settings: Vec<Setting>,
     pub bit_depth: u8,
     pub codec: Codec,
     pub block_samples: u32,
@@ -87,6 +101,9 @@ pub struct Block {
     /// last [`msg::TUNED`] seen. Every block carries it so a caller labelling
     /// a spectrum does not have to track the retunes itself.
     pub center_hz: u64,
+    /// Which tuner these samples are of, which is the one subscribed to: a
+    /// datagram of anything else is dropped before it reaches here.
+    pub stream_id: u16,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -103,12 +120,85 @@ pub struct IqStream {
     control: OwnedWriteHalf,
     frames: mpsc::Receiver<Frame>,
     info: StreamInfo,
+    /// Every tuner the server offered, kept so a caller can show the others
+    /// without connecting again.
+    available: Vec<StreamDesc>,
     config: ClientConfig,
     assembler: Assembler,
+    /// Set when the server says this subscription is over, which is how a
+    /// tuner taken off the server ends its readers: the control connection
+    /// stays up, so nothing else here would notice.
+    ended: bool,
     stats: Stats,
     ping: tokio::time::Interval,
     buf: Vec<u8>,
     decoded: Vec<u8>,
+}
+
+/// What a server said when it was greeted, before anything subscribed.
+struct Greeting {
+    read_half: OwnedReadHalf,
+    write_half: OwnedWriteHalf,
+    welcome: Frame,
+    streams: Vec<StreamDesc>,
+}
+
+/// Connect, say hello, and take the welcome.
+///
+/// A 1.1 server lists no tuners and describes its one stream in the flat
+/// tags, so one is made out of those: everything above here then reads a set
+/// of tuners whatever the far end's version.
+async fn greet<A: ToSocketAddrs + std::fmt::Debug>(server: A, name: &str) -> Result<Greeting> {
+    let control = TcpStream::connect(&server).await.map_err(other)?;
+    control.set_nodelay(true).map_err(other)?;
+    let (mut read_half, mut write_half) = control.into_split();
+
+    write_half.write_all(&encode_preamble()).await.map_err(other)?;
+    let mut preamble = [0u8; PREAMBLE_LEN];
+    read_half.read_exact(&mut preamble).await.map_err(other)?;
+    let (major, minor) = decode_preamble(&preamble)?;
+    if major != VERSION_MAJOR {
+        return Err(Error::other(format!(
+            "server speaks version {major}.{minor}, this speaks {VERSION_MAJOR}.{VERSION_MINOR}"
+        )));
+    }
+
+    let mut hello = Tlvs::new();
+    hello.str(tag::CLIENT_NAME, name);
+    write_half.write_all(&Frame::new(msg::HELLO, &hello).encode()).await.map_err(other)?;
+    let welcome = read_frame(&mut read_half)
+        .await?
+        .ok_or_else(|| Error::other("server closed before welcome"))?;
+    if welcome.msg_type != msg::WELCOME {
+        return Err(Error::other(describe_error(&welcome)));
+    }
+    let w = welcome.tlvs()?;
+    let mut streams = read_streams(&w);
+    if streams.is_empty() {
+        streams.push(StreamDesc {
+            id: 0,
+            name: w.str(tag::SERVER_NAME).unwrap_or_default(),
+            center_hz: w.u64(tag::CENTER_HZ).unwrap_or(0),
+            sample_rate: w.u32(tag::SAMPLE_RATE).unwrap_or(0),
+            gain_db: w.i16(tag::GAIN_DDB).map(|g| g as f32 / 10.0),
+            tunable: w.u8(tag::TUNABLE).unwrap_or(0) != 0,
+            tune_range_hz: w.u64(tag::TUNE_MIN_HZ).zip(w.u64(tag::TUNE_MAX_HZ)),
+            settings: Vec::new(),
+        });
+    }
+    drop(w);
+    Ok(Greeting { read_half, write_half, welcome, streams })
+}
+
+/// What tuners a server has, without subscribing to any of them.
+///
+/// What builds a radio list: a server with three dongles on it is three
+/// entries, and each says where it is and how far its dial goes.
+pub async fn list<A: ToSocketAddrs + std::fmt::Debug>(
+    server: A,
+    name: &str,
+) -> Result<Vec<StreamDesc>> {
+    Ok(greet(server, name).await?.streams)
 }
 
 impl IqStream {
@@ -121,29 +211,8 @@ impl IqStream {
         let udp = UdpSocket::bind(("0.0.0.0", config.local_port)).await.map_err(other)?;
         let local_port = udp.local_addr().map_err(other)?.port();
 
-        let control = TcpStream::connect(&server).await.map_err(other)?;
-        control.set_nodelay(true).map_err(other)?;
-        let (mut read_half, mut write_half) = control.into_split();
-
-        write_half.write_all(&encode_preamble()).await.map_err(other)?;
-        let mut preamble = [0u8; PREAMBLE_LEN];
-        read_half.read_exact(&mut preamble).await.map_err(other)?;
-        let (major, minor) = decode_preamble(&preamble)?;
-        if major != VERSION_MAJOR {
-            return Err(Error::other(format!(
-                "server speaks version {major}.{minor}, this speaks {VERSION_MAJOR}.{VERSION_MINOR}"
-            )));
-        }
-
-        let mut hello = Tlvs::new();
-        hello.str(tag::CLIENT_NAME, &config.name);
-        write_half.write_all(&Frame::new(msg::HELLO, &hello).encode()).await.map_err(other)?;
-        let welcome = read_frame(&mut read_half)
-            .await?
-            .ok_or_else(|| Error::other("server closed before welcome"))?;
-        if welcome.msg_type != msg::WELCOME {
-            return Err(Error::other(describe_error(&welcome)));
-        }
+        let Greeting { mut read_half, mut write_half, welcome, streams } =
+            greet(server, &config.name).await?;
         let w = welcome.tlvs()?;
         if let Some(depths) = w.get(tag::SUPPORTED_BIT_DEPTHS)
             && !depths.contains(&bit_depth.0)
@@ -155,9 +224,18 @@ impl IqStream {
         {
             return Err(Error::other(format!("server does not offer codec {:?}", config.codec)));
         }
+        let wanted = match config.stream {
+            Some(id) => streams
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| Error::other(format!("server has no tuner {id}")))?,
+            None => streams.first().ok_or_else(|| Error::other("server offers no tuner"))?,
+        }
+        .clone();
 
         let mut sub = Tlvs::new();
-        sub.u16(tag::UDP_PORT, local_port)
+        sub.u16(tag::STREAM_ID, wanted.id)
+            .u16(tag::UDP_PORT, local_port)
             .u8(tag::BIT_DEPTH, bit_depth.0)
             .u8(tag::CODEC, config.codec.code())
             .u8(tag::CODEC_LEVEL, config.level as u8)
@@ -172,11 +250,14 @@ impl IqStream {
         let r = reply.tlvs()?;
 
         let info = StreamInfo {
-            center_hz: w.u64(tag::CENTER_HZ).unwrap_or(0),
-            sample_rate: w.u32(tag::SAMPLE_RATE).unwrap_or(0),
-            gain_db: w.i16(tag::GAIN_DDB).map(|g| g as f32 / 10.0),
-            tunable: w.u8(tag::TUNABLE).unwrap_or(0) != 0,
-            tune_range_hz: w.u64(tag::TUNE_MIN_HZ).zip(w.u64(tag::TUNE_MAX_HZ)),
+            id: wanted.id,
+            name: wanted.name.clone(),
+            center_hz: wanted.center_hz,
+            sample_rate: wanted.sample_rate,
+            gain_db: wanted.gain_db,
+            tunable: wanted.tunable,
+            tune_range_hz: wanted.tune_range_hz,
+            settings: wanted.settings.clone(),
             bit_depth: r.u8(tag::BIT_DEPTH).unwrap_or(bit_depth.0),
             codec: Codec::from_code(r.u8(tag::CODEC).unwrap_or(config.codec.code()))?,
             block_samples: r.u32(tag::BLOCK_SAMPLES).unwrap_or(0),
@@ -201,8 +282,10 @@ impl IqStream {
             control: write_half,
             frames,
             info,
+            available: streams,
             config,
             assembler: Assembler::default(),
+            ended: false,
             stats: Stats::default(),
             ping,
             buf: vec![0u8; 65536],
@@ -212,6 +295,11 @@ impl IqStream {
 
     pub fn info(&self) -> &StreamInfo {
         &self.info
+    }
+
+    /// Every tuner this server offers, as its welcome listed them.
+    pub fn available(&self) -> &[StreamDesc] {
+        &self.available
     }
 
     pub fn stats(&self) -> Stats {
@@ -243,14 +331,37 @@ impl IqStream {
             )));
         }
         let mut t = Tlvs::new();
-        t.u64(tag::CENTER_HZ, center_hz);
+        t.u16(tag::STREAM_ID, self.info.id).u64(tag::CENTER_HZ, center_hz);
         self.control.write_all(&Frame::new(msg::TUNE, &t).encode()).await.map_err(other)
+    }
+
+    /// Ask the far end to set one of this tuner's settings.
+    ///
+    /// Returns as soon as the request is on the wire, like [`IqStream::tune`]
+    /// and for the same reason: what the radio really became arrives later as
+    /// a [`msg::STREAM_CHANGED`] and shows up in [`StreamInfo::settings`],
+    /// because a driver snaps a gain to its own step.
+    pub async fn set_setting(&mut self, name: &str, value: SettingValue) -> Result<()> {
+        if !self.info.tunable {
+            return Err(Error::other("this server will not be set from here"));
+        }
+        if !self.info.settings.iter().any(|s| s.name == name) {
+            return Err(Error::other(format!("that tuner has no setting called {name:?}")));
+        }
+        let mut t = Tlvs::new();
+        t.u16(tag::STREAM_ID, self.info.id)
+            .str(tag::SETTING_NAME, name)
+            .str(tag::SETTING_VALUE, &value.text());
+        self.control.write_all(&Frame::new(msg::SET_SETTING, &t).encode()).await.map_err(other)
     }
 
     /// Next complete block, or `None` when the server closes the control
     /// connection. Cancellation safe: dropping the future loses nothing.
     pub async fn next_block(&mut self) -> Result<Option<Block>> {
         loop {
+            if self.ended {
+                return Ok(None);
+            }
             tokio::select! {
                 _ = self.ping.tick() => {
                     let mut t = Tlvs::new();
@@ -266,6 +377,12 @@ impl IqStream {
                     let Ok((header, payload)) = DataHeader::decode(&self.buf[..n]) else {
                         continue;
                     };
+                    // Another tuner on the same server, reaching this port
+                    // because a subscription was replaced and the old pump
+                    // had a datagram already in flight.
+                    if header.stream_id != self.info.id {
+                        continue;
+                    }
                     self.stats.datagrams += 1;
                     let Some(body) = self.assembler.push(&header, payload, &mut self.stats) else {
                         continue;
@@ -290,6 +407,7 @@ impl IqStream {
                         samples,
                         padded_before: padded,
                         center_hz: self.info.center_hz,
+                        stream_id: header.stream_id,
                     }));
                 }
             }
@@ -315,8 +433,49 @@ impl IqStream {
             // samples are of somewhere else, so the reading changes before the
             // next block leaves rather than after.
             msg::TUNED => {
-                if let Some(hz) = frame.tlvs()?.u64(tag::CENTER_HZ) {
+                let t = frame.tlvs()?;
+                let mine = t.u16(tag::STREAM_ID).is_none_or(|id| id == self.info.id);
+                if let (true, Some(hz)) = (mine, t.u64(tag::CENTER_HZ)) {
                     self.info.center_hz = hz;
+                }
+                for s in &mut self.available {
+                    if t.u16(tag::STREAM_ID).is_none_or(|id| id == s.id)
+                        && let Some(hz) = t.u64(tag::CENTER_HZ)
+                    {
+                        s.center_hz = hz;
+                    }
+                }
+            }
+            // The set of tuners changed: one was plugged in, or the receiver
+            // at the far end stopped serving one.
+            msg::STREAMS => self.available = read_streams(&frame.tlvs()?),
+            // One tuner is set differently than it was: a gain moved, a bias
+            // tee went off, the antenna port changed. What it says about the
+            // one being read replaces what the welcome said, because from
+            // here on the samples were taken at the new setting.
+            msg::STREAM_CHANGED => {
+                for desc in read_streams(&frame.tlvs()?) {
+                    if desc.id == self.info.id {
+                        self.info.center_hz = desc.center_hz;
+                        self.info.sample_rate = desc.sample_rate;
+                        self.info.gain_db = desc.gain_db;
+                        self.info.tunable = desc.tunable;
+                        self.info.tune_range_hz = desc.tune_range_hz;
+                        self.info.settings = desc.settings.clone();
+                    }
+                    match self.available.iter_mut().find(|s| s.id == desc.id) {
+                        Some(known) => *known = desc,
+                        None => self.available.push(desc),
+                    }
+                }
+            }
+            // The subscription is over: asked for, or the tuner taken off
+            // the server by whoever owns it. Either way no more samples of
+            // it will arrive, and a reader waiting for them would wait for
+            // ever, because the connection itself is still up.
+            msg::UNSUBSCRIBED => {
+                if frame.tlvs()?.u16(tag::STREAM_ID).is_none_or(|id| id == self.info.id) {
+                    self.ended = true;
                 }
             }
             // A refused tune is not a dead subscription: the samples keep
@@ -330,7 +489,9 @@ impl IqStream {
     /// Stop the stream cleanly. Dropping the client also works, but this tells
     /// the server immediately instead of leaving it to the keepalive.
     pub async fn unsubscribe(&mut self) -> Result<()> {
-        self.control.write_all(&Frame::empty(msg::UNSUBSCRIBE).encode()).await.map_err(other)
+        let mut t = Tlvs::new();
+        t.u16(tag::STREAM_ID, self.info.id);
+        self.control.write_all(&Frame::new(msg::UNSUBSCRIBE, &t).encode()).await.map_err(other)
     }
 }
 

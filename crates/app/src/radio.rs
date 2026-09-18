@@ -516,6 +516,9 @@ pub enum Cmd {
     /// serving it. The listening socket outlives the graph, so turning it off
     /// only takes the stage out; the port is given up when the process ends.
     IqStream(Option<crate::chain::IqStreamPlan>),
+    /// The radios served beside the span, as the complete set for the same
+    /// reason the feeds are one.
+    IqStreamTuners(Vec<crate::chain::TunerServePlan>),
     /// Where to serve a KISS TNC, or `None` to serve none.
     Kiss(Option<std::net::SocketAddr>),
     /// The scanner table, as the complete set for the same reason feeds are:
@@ -1123,6 +1126,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         fronts,
         feeds: Vec::new(),
         iqstream: None,
+        iqstream_tuners: Vec::new(),
         kiss: None,
         seams: Vec::new(),
         tx: None,
@@ -2130,6 +2134,7 @@ impl Audio {
             transcribe_device: String::new(),
             feeds: Vec::new(),
             iqstream: None,
+            iqstream_tuners: Vec::new(),
             kiss: None,
             seams: Vec::new(),
             tx: None,
@@ -2423,6 +2428,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // command.
             feeds: Vec::new(),
             iqstream: None,
+            iqstream_tuners: Vec::new(),
             kiss: None,
             seams: Vec::new(),
             tx: None,
@@ -2780,6 +2786,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::IqStream(serving) => {
                 if serving != self.plan.iqstream {
                     self.plan.iqstream = serving;
+                    self.needs_rebuild = true;
+                }
+            }
+            Cmd::IqStreamTuners(tuners) => {
+                if tuners != self.plan.iqstream_tuners {
+                    self.plan.iqstream_tuners = tuners;
                     self.needs_rebuild = true;
                 }
             }
@@ -3583,6 +3595,15 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         if self.last_chain.elapsed() >= CHAIN_PUBLISH {
             publish_chain(self.status, &self.rx);
             self.last_chain = std::time::Instant::now();
+            // And what the radio is set to, to whoever is reading the span
+            // over the network. Read off the device rather than remembered
+            // from a command, because a driver snaps a gain to its own step
+            // and an AGC moves one nobody asked to move; told on the same
+            // beat as the chain, because reading it back crosses USB.
+            if self.plan.iqstream.is_some() {
+                let settings = crate::tuners::settings_of(self.dev.as_ref());
+                self.rx.tell_subscribers(None, settings);
+            }
         }
         // Scopes are a display and refresh with the spectrum, not with the
         // chain: a scope republished once a second is a scope showing a
@@ -3858,6 +3879,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         center,
         rate,
         iqstream: None,
+        iqstream_tuners: Vec::new(),
         zoom: 1,
         usable_ratio: 1.0,
         dc_block: false,

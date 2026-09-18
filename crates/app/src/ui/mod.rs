@@ -1088,6 +1088,11 @@ impl App {
         self.send(crate::radio::Cmd::IqStream(Some(serving)));
     }
 
+    /// Serve radios this receiver is not listening to, beside the span.
+    pub fn serve_tuners(&mut self, tuners: Vec<crate::chain::TunerServePlan>) {
+        self.send(crate::radio::Cmd::IqStreamTuners(tuners));
+    }
+
     /// Start the radio without waiting for the play button, which is what a
     /// capture being replayed usually wants and what a screenshot needs.
     /// Open with a settings dialog up, for a screenshot of it.

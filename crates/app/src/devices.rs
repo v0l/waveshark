@@ -119,7 +119,7 @@ pub fn list() -> Vec<Entry> {
     // chooses, not what a fresh session should open on.
     v.extend(combinations(&v));
     for (i, r) in streams().into_iter().enumerate() {
-        v.push(stream_entry(i, &r));
+        v.extend(stream_entries(i, &r));
     }
     // Last, so plugging a radio in does not change which receiver a fresh
     // session opens on. A capture is what somebody reaches for when there is
@@ -263,32 +263,46 @@ pub fn remove_stream(proto: remote::Proto, addr: &str) {
 /// A server that does not answer is still listed. Dropping it would look like
 /// the setting had been lost, when what happened is that a receiver somewhere
 /// else is switched off.
-fn stream_entry(index: usize, r: &Remote) -> Entry {
+/// One entry per tuner the server carries, which is one entry for nearly
+/// every server and several for a machine handing out its spare dongles.
+fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
     let name = if r.label.is_empty() { r.addr.clone() } else { r.label.clone() };
-    match r.proto.probe(&r.addr) {
+    match r.proto.probe_all(&r.addr) {
         // A server that owns its own tuning says where it is and what rate it
         // is running; one this end tunes says neither, and the entry offers
         // the whole of what the tuner will do.
-        Ok(p) => Entry {
-            kind: DriverKind::Network,
-            index,
-            label: match p.center {
-                Some(c) => format!("{name} {:.3} MHz", c.as_f64() / 1e6),
-                None => format!("{name} ({})", p.tuner),
-            },
-            rates: match p.rate {
-                Some(rate) => rate..=rate,
-                None => RTL_RATES,
-            },
-            addr: Some(p.addr),
-            proto: Some(r.proto),
-            path: None,
-            pinned: p.center.filter(|_| !p.tunable),
-            parts: Vec::new(),
-        },
+        Ok(found) => found
+            .into_iter()
+            .map(|p| {
+                // The tuner's own name where it gave one, because a server
+                // with three dongles on it reads as three of the same line
+                // otherwise.
+                let called = match p.name.is_empty() {
+                    true => name.clone(),
+                    false => format!("{name} {}", p.name),
+                };
+                Entry {
+                    kind: DriverKind::Network,
+                    index,
+                    label: match p.center {
+                        Some(c) => format!("{called} {:.3} MHz", c.as_f64() / 1e6),
+                        None => format!("{called} ({})", p.tuner),
+                    },
+                    rates: match p.rate {
+                        Some(rate) => rate..=rate,
+                        None => RTL_RATES,
+                    },
+                    addr: Some(p.addr),
+                    proto: Some(r.proto),
+                    path: None,
+                    pinned: p.center.filter(|_| !p.tunable),
+                    parts: Vec::new(),
+                }
+            })
+            .collect(),
         Err(e) => {
             tracing::debug!("{} {}: {e}", r.proto, r.addr);
-            Entry {
+            vec![Entry {
                 kind: DriverKind::Network,
                 index,
                 label: format!("{name} (offline)"),
@@ -298,7 +312,7 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
                 path: None,
                 pinned: None,
                 parts: Vec::new(),
-            }
+            }]
         }
     }
 }

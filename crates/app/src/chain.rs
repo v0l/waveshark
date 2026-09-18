@@ -360,6 +360,13 @@ pub struct Plan {
     /// something an operator switched on and expects to still be there after
     /// a retune rebuilds the graph.
     pub iqstream: Option<IqStreamPlan>,
+    /// Radios this receiver is not listening to, served as streams of their
+    /// own beside the span.
+    ///
+    /// A plan value for the same reason the span's own server is: a port an
+    /// operator opened is expected to still be open after a retune has built
+    /// the graph again.
+    pub iqstream_tuners: Vec<TunerServePlan>,
     /// Where a KISS TNC is served, for packet software to use the radio
     /// through, or `None` for not served at all.
     pub kiss: Option<std::net::SocketAddr>,
@@ -2354,6 +2361,19 @@ impl Receiver {
         self.pending_record = rec.map(RecordRing::new);
     }
 
+    /// Tell whoever is reading the span over the network what the radio is
+    /// set to, so a level they report is a level something was heard at.
+    ///
+    /// Nothing if the span is not being served, and nothing on the wire
+    /// unless a setting moved.
+    pub fn tell_subscribers(&mut self, gain_db: Option<f32>, settings: Vec<iqstream::Setting>) {
+        if let Some(stage) =
+            self.stage_mut::<nodes::iqstream_nodes::IqStreamServerNode>(derived::IQSTREAM)
+        {
+            stage.set_radio(gain_db, settings);
+        }
+    }
+
     /// Everything that decoded this block, as packet list rows.
     ///
     /// One place, because there is one decoder: whatever the front end, a
@@ -2907,6 +2927,22 @@ pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
 /// Fixed for the stages there is only ever one of, and computed from what it
 /// is for otherwise: a bank keeps its channels and a detector its noise floor
 /// across a rebuild only if the same stage comes back under the same name.
+/// One spare radio, served beside the span.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TunerServePlan {
+    /// Which radio: its position in the receiver list, or a piece of its
+    /// label.
+    pub radio: String,
+    pub addr: std::net::SocketAddr,
+    /// What it is called on the wire. Empty takes the radio's own label.
+    pub stream: String,
+    /// What to run it at, or None for the fastest it does up to 2.4 MS/s.
+    pub rate: Option<common::Sps>,
+    /// Where to park it. A subscriber may move it from there, since nothing
+    /// here is listening.
+    pub center: Option<common::Hz>,
+}
+
 /// Serving the span to the network.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IqStreamPlan {
@@ -3286,6 +3322,26 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         s.insert(nodes::iqstream_nodes::TUNABLE.into(), pipeline::ParamValue::Bool(net.tunable));
         p.add_derived(derived::IQSTREAM, nodes::iqstream_nodes::DESC.name, s);
         p.connect(head, (derived::IQSTREAM, 0));
+    }
+
+    // And the radios nobody here is listening to, each its own stream on the
+    // same port. They read their own radio rather than this stream, and sit
+    // on the head to be clocked, drawn and switched off with everything else.
+    for spec in &plan.iqstream_tuners {
+        use crate::tuners as served;
+        let mut s = Settings::new();
+        s.insert(served::RADIO.into(), pipeline::ParamValue::Text(spec.radio.clone()));
+        s.insert(served::ADDRESS.into(), pipeline::ParamValue::Text(spec.addr.to_string()));
+        s.insert(served::STREAM.into(), pipeline::ParamValue::Text(spec.stream.clone()));
+        if let Some(r) = spec.rate {
+            s.insert(served::RATE.into(), pipeline::ParamValue::Float(r.as_f64()));
+        }
+        if let Some(c) = spec.center {
+            s.insert(served::CENTER_HZ.into(), pipeline::ParamValue::Float(c.as_f64()));
+        }
+        let id = derived::at(served::DESC.name, fnv(&spec.radio), 0);
+        p.add_derived(id, served::DESC.name, s);
+        p.connect(head, (id, 0));
     }
 
     // The heatmap recorder, on the same terms and for the same reason: what
@@ -4571,6 +4627,7 @@ fn stages() -> &'static pipeline::registry::Registry {
 pub fn registry() -> pipeline::registry::Registry {
     use pipeline::registry::{Category, StageDesc};
     let mut r = nodes::registry();
+    r.register(crate::tuners::DESC, crate::tuners::build);
     r.register(
         StageDesc {
             name: "tracks",
@@ -5105,6 +5162,7 @@ pub(crate) mod tests {
             zoom: 1,
             usable_ratio: 1.0,
             iqstream: None,
+            iqstream_tuners: Vec::new(),
             tx_capture: None,
             dc_block: true,
             refresh_hz: 30.0,
@@ -5585,6 +5643,64 @@ pub(crate) mod tests {
         let again: Vec<_> = after.stages().iter().filter(|s| s.kind == kind).collect();
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].id, served[0].id, "a new id would be a new socket");
+    }
+
+    /// A spare radio is a stage of its own beside the span's, one per radio,
+    /// each keeping its id across a retune for the same reason: the stream a
+    /// subscriber picked is the one it must still be reading afterwards.
+    #[test]
+    fn each_served_radio_is_a_stage_of_its_own() {
+        let kind = crate::tuners::DESC.name;
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let mut plan = tests::plan(2_400_000.0, Hz::mhz(1090));
+        assert_eq!(derived_patch(&plan).stages().iter().filter(|s| s.kind == kind).count(), 0);
+
+        plan.iqstream_tuners = vec![
+            TunerServePlan {
+                radio: "0".into(),
+                addr,
+                stream: String::new(),
+                rate: Some(common::Sps(2_400_000)),
+                center: Some(Hz::mhz(1090)),
+            },
+            TunerServePlan {
+                radio: "loft".into(),
+                addr,
+                stream: "loft".into(),
+                rate: None,
+                center: None,
+            },
+        ];
+        let drawn = derived_patch(&plan);
+        let served: Vec<_> = drawn.stages().iter().filter(|s| s.kind == kind).collect();
+        assert_eq!(served.len(), 2, "one stage per radio");
+        assert_eq!(
+            served[1].settings.get(crate::tuners::STREAM),
+            Some(&pipeline::ParamValue::Text("loft".into()))
+        );
+        // A rate that was not named is not written down as zero: the stage
+        // picks what the radio can do.
+        assert_eq!(served[1].settings.get(crate::tuners::RATE), None);
+        for s in &served {
+            match drawn.feeding((s.id, 0)) {
+                Some(crate::patch::Source::Stage(id, _)) => {
+                    assert_eq!(drawn.stage(id).map(|s| s.kind.as_str()), Some("dc_block"))
+                }
+                other => panic!("a served radio is fed by {other:?}"),
+            }
+        }
+        let ids: Vec<u64> = served.iter().map(|s| s.id).collect();
+
+        plan.center = Hz::mhz(433);
+        let after = derived_patch(&plan);
+        let again: Vec<u64> =
+            after.stages().iter().filter(|s| s.kind == kind).map(|s| s.id).collect();
+        assert_eq!(again, ids, "a new id would drop the readers of that tuner");
+
+        // And they build: the stage is in the receiver's registry, not only
+        // in the drawing.
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert_eq!(rx.topology().nodes.iter().filter(|n| n.kind == kind).count(), 2);
     }
 
     /// The dial is held here unless the plan says otherwise, and that is what

@@ -121,6 +121,18 @@ impl Proto {
         }
     }
 
+    /// Every tuner at an address, which is more than one only for a server
+    /// carrying several.
+    ///
+    /// What builds the radio list: a machine with three dongles on one port
+    /// is three receivers to pick from, each with its own address.
+    pub fn probe_all(self, addr: &str) -> Result<Vec<Probe>> {
+        match self {
+            Self::IqStream => iqstream::probe_all(addr),
+            Self::RtlTcp => rtl_tcp::probe(addr).map(|p| vec![p]),
+        }
+    }
+
     pub fn open(self, addr: &str) -> Result<Box<dyn common::Device>> {
         match self {
             Self::IqStream => Ok(Box::new(iqstream::Device::open(addr)?)),
@@ -135,11 +147,31 @@ impl std::fmt::Display for Proto {
     }
 }
 
+/// Split a `host:port#2` into the address and the tuner it names.
+///
+/// A server with several tuners on one port needs a way of saying which, and
+/// a suffix is what fits everywhere an address already goes: the session file,
+/// the command line and the device id.
+pub fn split_stream(s: &str) -> (&str, Option<u16>) {
+    match s.rsplit_once('#') {
+        Some((addr, id)) => match id.trim().parse::<u16>() {
+            Ok(id) => (addr, Some(id)),
+            Err(_) => (s, None),
+        },
+        None => (s, None),
+    }
+}
+
 /// Add a default port to a bare host, and reject what is not an address.
 pub fn parse_addr(s: &str, port: u16) -> Option<String> {
     let s = s.trim();
     if s.is_empty() || s.contains(char::is_whitespace) {
         return None;
+    }
+    // The tuner a multi-tuner server is being asked for travels with the
+    // address and is not part of it.
+    if let (head, Some(id)) = split_stream(s) {
+        return parse_addr(head, port).map(|a| format!("{a}#{id}"));
     }
     // A bracketed IPv6 literal already carries its own colons.
     if s.starts_with('[') {
@@ -179,6 +211,12 @@ pub struct Probe {
     pub rate: Option<Sps>,
     /// Gain the source was started with, when it was told.
     pub gain_db: Option<f32>,
+    /// What the far end calls this tuner, where it has a name: a server with
+    /// several says which dongle each is. Empty otherwise.
+    pub name: String,
+    /// What the far end is set to beyond its frequency: gain stages,
+    /// switches, antenna port. Empty from a protocol that does not say.
+    pub settings: Vec<::iqstream::Setting>,
     /// Whether this server will accept a retune.
     pub tunable: bool,
     /// How far a retune may go, where the far end said. None from one that

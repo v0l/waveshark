@@ -95,6 +95,12 @@ pub fn probe(addr: &str) -> Result<Probe> {
         center: None,
         rate: None,
         gain_db: None,
+        // A dongle on rtl_tcp is the whole server, so there is nothing to
+        // tell it apart from.
+        name: String::new(),
+        // rtl_tcp says nothing about the dongle's gain, and the one control
+        // it takes is spoken as its own command rather than as a setting.
+        settings: Vec::new(),
         tunable: true,
         // The dongle's own range, which the greeting names by naming its
         // tuner chip.

@@ -314,6 +314,7 @@ dependencies = [
  "hound",
  "httpc",
  "image",
+ "iqstream",
  "libc",
  "limesdr",
  "nodes",

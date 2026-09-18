@@ -69,8 +69,11 @@ the code is in the commit log.
   next release from each.
 - IQStream and rtl_tcp as remote tuners, added beside packet feeds in one
   dialog.
-- IQStream remote tuners can be tuned from here.
-- An IQStream server, so another machine can read the same span.
+- IQStream remote tuners can be tuned from here, gain and switches included,
+  and a server carrying several is one receiver per tuner in the list.
+- An IQStream server, so another machine can read the same span, with
+  `--iqstream-tuner` handing out radios this receiver is not using as streams
+  of their own on the same port.
 - Several matching tuners offered as one wider receiver, with the drift
   between them measured on the band they share and taken out.
 - Heatmap export: the span kept as readings and written as a page that zooms

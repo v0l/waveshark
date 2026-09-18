@@ -1,37 +1,50 @@
-//! Handing this receiver's span out to network subscribers.
+//! Handing tuners out to network subscribers.
 //!
-//! The graph is synchronous and the socket work is not, so a server owns a
-//! thread with a single-threaded runtime on it and the caller only ever
-//! touches [`Server`]: [`Server::push`] to give it samples, [`Server::retuned`]
-//! to tell it the dial moved, [`Server::wanted`] to find out that a subscriber
-//! asked it to move.
+//! A server is a port with a set of [`Stream`]s on it, one per tuner, and a
+//! subscriber names the one it wants. The graph is synchronous and the socket
+//! work is not, so a server owns a thread with a single-threaded runtime on it
+//! and the caller only ever touches a stream: [`Stream::push`] to give it
+//! samples, [`Stream::retuned`] to tell it the dial moved, [`Stream::wanted`]
+//! to find out that a subscriber asked it to move.
 //!
-//! Every subscriber gets its own task, because each chose its own bit depth
-//! and codec and so each has to pack the same block differently. They share
-//! one [`tokio::sync::broadcast`] of raw blocks, which drops the oldest for a
-//! subscriber falling behind rather than stalling the others.
+//! Streams come and go while the server runs, because a receiver that opens a
+//! second dongle should not need a second port. Every control connection is
+//! told when the set changes, so nobody is left subscribed to a name that no
+//! longer means anything, and told again when one of them is set differently:
+//! a gain turned down, a bias tee switched off, an antenna port moved. A
+//! reader has to know what its samples were taken at, or the level it reports
+//! is a level nothing was ever heard at.
+//!
+//! Every subscription gets its own task, because each chose its own bit depth
+//! and codec and so each has to pack the same block differently. A stream's
+//! subscriptions share one [`tokio::sync::broadcast`] of raw blocks, which
+//! drops the oldest for a subscriber falling behind rather than stalling the
+//! others. One control connection may hold a subscription to each stream at
+//! once, so its writes go through a channel to a single writer task rather
+//! than several tasks contending for the socket.
 //!
 //! # A tune is a request, not a setting
 //!
-//! Nothing here moves a tuner. A [`msg::TUNE`] is parked in [`Server::wanted`]
-//! for whoever owns the radio to pick up and act on, and the answer comes back
-//! through [`Server::retuned`] once the tuner has actually landed. The two are
-//! deliberately separate: a subscriber asking for 433.92 MHz on a dongle that
-//! steps in units of its own must be told where it really went, and only the
-//! owner knows that.
+//! Nothing here moves a tuner. A [`msg::TUNE`] is parked in [`Stream::wanted`]
+//! for whoever owns that radio to pick up and act on, and the answer comes
+//! back through [`Stream::retuned`] once the tuner has actually landed. The
+//! two are deliberately separate: a subscriber asking for 433.92 MHz on a
+//! dongle that steps in units of its own must be told where it really went,
+//! and only the owner knows that.
 
 use crate::proto::{
     BitDepth, Codec, DATA_HEADER_LEN, DataHeader, Frame, MAX_DATAGRAM_PAYLOAD, MAX_FRAME_PAYLOAD,
-    PREAMBLE_LEN, Tlvs, VERSION_MAJOR, decode_preamble, encode_preamble, error_code, msg, now_ns,
-    pack, tag,
+    PREAMBLE_LEN, Setting, SettingValue, StreamDesc, Tlvs, VERSION_MAJOR, decode_preamble,
+    encode_preamble, error_code, msg, now_ns, pack, put_streams, tag,
 };
 use common::{Error, Result};
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 fn other(e: impl std::fmt::Display) -> Error {
     Error::other(e.to_string())
@@ -50,33 +63,46 @@ const IDLE_TIMEOUT_S: u64 = 45;
 /// How often the server pings a quiet subscriber.
 const PING_INTERVAL_S: u64 = 15;
 
-/// What the receiver is streaming, as the welcome describes it.
-#[derive(Clone, Debug)]
-pub struct ServerConfig {
-    /// Reported to subscribers for logging.
+/// One tuner, as the welcome describes it.
+#[derive(Clone, Debug, Default)]
+pub struct StreamConfig {
+    /// What an operator picking a tuner sees: the radio's own label.
     pub name: String,
     pub center_hz: u64,
     pub sample_rate: u32,
     pub gain_db: Option<f32>,
-    /// Whether a subscriber may move the dial. Off unless an operator asked
-    /// for it: the local screen follows a remote tune.
+    /// Whether a subscriber may move this dial. Off unless an operator asked
+    /// for it: granting it on the receiver's own radio moves the local screen.
     pub tunable: bool,
     /// How far the tuner reaches, sent only when `tunable`. A subscriber that
     /// is not told this can ask for a frequency but cannot offer a dial,
     /// because it has no idea where the dial may go.
     pub tune_range_hz: Option<(u64, u64)>,
+    /// What else the radio is set to: its gain stages, its switches, its
+    /// antenna port. Kept up to date with [`Stream::set_settings`].
+    pub settings: Vec<Setting>,
+}
+
+/// What the server is, and the tuners it starts with.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Reported to subscribers for logging.
+    pub name: String,
+    /// Tuners offered from the moment the port opens. More may be added with
+    /// [`Server::add_stream`] while it runs.
+    pub streams: Vec<StreamConfig>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        ServerConfig {
-            name: "waveshark".into(),
-            center_hz: 0,
-            sample_rate: 0,
-            gain_db: None,
-            tunable: false,
-            tune_range_hz: None,
-        }
+        ServerConfig { name: "waveshark".into(), streams: Vec::new() }
+    }
+}
+
+impl ServerConfig {
+    /// One tuner and nothing else, which is what a 1.1 server was.
+    pub fn single(name: &str, stream: StreamConfig) -> Self {
+        ServerConfig { name: name.into(), streams: vec![stream] }
     }
 }
 
@@ -86,113 +112,142 @@ pub struct Tune {
     pub center_hz: u64,
 }
 
-pub struct Server {
-    addr: SocketAddr,
-    blocks: broadcast::Sender<Arc<Vec<u8>>>,
-    /// Read by every subscriber task when it builds a welcome, and by the
-    /// fan-out when it labels a block.
-    center_hz: Arc<AtomicU64>,
-    sample_rate: u32,
-    tunable: bool,
+/// A setting a subscriber asked for, waiting to be acted on.
+///
+/// Named rather than described: what a gain of 24 dB means is the driver's
+/// business, and this crate does not know what a gain stage is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub name: String,
+    pub value: SettingValue,
+}
+
+/// One tuner on a server: what is pushed into it, and who is reading it.
+pub struct Stream {
+    id: u16,
     name: String,
-    gain_ddb: Option<i16>,
-    /// The last frequency a subscriber asked for, coalesced: a client dragging
-    /// a dial sends one of these a frame and only the last is worth anything.
-    wanted: Arc<Mutex<Option<Tune>>>,
-    subscribers: Arc<AtomicUsize>,
-    blocks_sent: Arc<AtomicU64>,
+    /// Changes when whoever owns the tuner reshapes it, so a rate is read
+    /// rather than copied into every welcome as it is built.
+    sample_rate: AtomicU32,
+    /// The gain and everything else that is set rather than heard, which move
+    /// under the readers and so are held together and announced together.
+    state: Mutex<State>,
+    tunable: bool,
+    tune_range_hz: Option<(u64, u64)>,
+    center_hz: AtomicU64,
+    blocks: broadcast::Sender<Arc<Vec<u8>>>,
     /// Sent to every subscriber, so a retune reaches a reader that did not ask
     /// for one.
     retunes: broadcast::Sender<u64>,
-    stop: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
+    /// The last frequency a subscriber asked for, coalesced: a client dragging
+    /// a dial sends one of these a frame and only the last is worth anything.
+    wanted: Mutex<Option<Tune>>,
+    /// Settings a subscriber asked for, one per name for the same reason:
+    /// a gain slider dragged across its range is one request by the time
+    /// anybody looks.
+    asks: Mutex<Vec<Ask>>,
+    subscribers: AtomicUsize,
+    blocks_sent: AtomicU64,
+    /// The server's own, so a setting moving reaches every connection and not
+    /// only this tuner's readers.
+    changed: broadcast::Sender<Change>,
 }
 
-impl Server {
-    /// Listen on `addr`, or fail if the port is taken.
-    ///
-    /// A port of zero asks the kernel for a free one, which is what a test
-    /// wants; [`Server::addr`] then says which it got.
-    pub fn start(addr: SocketAddr, cfg: ServerConfig) -> Result<Arc<Self>> {
-        let (blocks, _) = broadcast::channel(FANOUT_DEPTH);
-        let (retunes, _) = broadcast::channel(8);
-        let center_hz = Arc::new(AtomicU64::new(cfg.center_hz));
-        let wanted = Arc::new(Mutex::new(None));
-        let subscribers = Arc::new(AtomicUsize::new(0));
-        let blocks_sent = Arc::new(AtomicU64::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
+/// What a tuner is set to, beyond where it is pointed.
+#[derive(Default)]
+struct State {
+    gain_db: Option<f32>,
+    settings: Vec<Setting>,
+}
 
-        // Bound with std so a port already in use is an error the caller sees,
-        // rather than a log line from a thread it has already left. Doing it
-        // through the runtime would need a block_on, which panics when start
-        // is called from inside another runtime, as a test does.
-        let listener = std::net::TcpListener::bind(addr).map_err(|e| match e.kind() {
-            std::io::ErrorKind::AddrInUse => Error::Busy,
-            _ => other(e),
-        })?;
-        listener.set_nonblocking(true).map_err(other)?;
-        let bound = listener.local_addr().map_err(other)?;
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::other(format!("tokio runtime: {e}")))?;
-
-        let shared = Shared {
-            cfg: cfg.clone(),
-            center_hz: center_hz.clone(),
-            blocks: blocks.clone(),
-            retunes: retunes.clone(),
-            wanted: wanted.clone(),
-            subscribers: subscribers.clone(),
-            blocks_sent: blocks_sent.clone(),
-        };
-        let stopping = stop.clone();
-        let join = std::thread::Builder::new()
-            .name("iqstream-srv".into())
-            .spawn(move || {
-                // from_std registers with the reactor, so it has to happen
-                // inside the runtime rather than on the way in.
-                rt.block_on(async move {
-                    match TcpListener::from_std(listener) {
-                        Ok(l) => accept_loop(l, shared, stopping).await,
-                        Err(e) => tracing::error!("iqstream: {e}"),
-                    }
-                });
-            })
-            .map_err(|e| Error::other(format!("spawn server thread: {e}")))?;
-
-        Ok(Arc::new(Server {
-            addr: bound,
-            blocks,
-            center_hz,
-            sample_rate: cfg.sample_rate,
-            tunable: cfg.tunable,
+impl Stream {
+    fn new(id: u16, cfg: StreamConfig, changed: broadcast::Sender<Change>) -> Arc<Self> {
+        Arc::new(Stream {
+            id,
             name: cfg.name,
-            gain_ddb: cfg.gain_db.map(|g| (g * 10.0) as i16),
-            wanted,
-            subscribers,
-            blocks_sent,
-            retunes,
-            stop,
-            join: Some(join),
-        }))
+            sample_rate: AtomicU32::new(cfg.sample_rate),
+            state: Mutex::new(State { gain_db: cfg.gain_db, settings: cfg.settings }),
+            tunable: cfg.tunable,
+            tune_range_hz: cfg.tune_range_hz,
+            center_hz: AtomicU64::new(cfg.center_hz),
+            blocks: broadcast::channel(FANOUT_DEPTH).0,
+            retunes: broadcast::channel(8).0,
+            wanted: Mutex::new(None),
+            asks: Mutex::new(Vec::new()),
+            subscribers: AtomicUsize::new(0),
+            blocks_sent: AtomicU64::new(0),
+            changed,
+        })
     }
 
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
+    pub fn id(&self) -> u16 {
+        self.id
     }
 
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub fn gain_ddb(&self) -> Option<i16> {
-        self.gain_ddb
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate.load(Ordering::Relaxed)
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    /// Say the tuner is running at another rate.
+    ///
+    /// Announced like any other change, though a subscriber already reading
+    /// cannot act on it: the samples it is being handed are at the new rate
+    /// whatever it does, and whoever changes a rate under its readers is
+    /// expected to end them by dropping the stream.
+    pub fn set_sample_rate(&self, rate: u32) {
+        if self.sample_rate.swap(rate, Ordering::Relaxed) != rate {
+            self.announce();
+        }
+    }
+
+    pub fn gain_db(&self) -> Option<f32> {
+        self.state.lock().ok().and_then(|s| s.gain_db)
+    }
+
+    /// Say what the whole front end is reading at, where a radio has one
+    /// number for it. Announced when it moves.
+    pub fn set_gain_db(&self, gain_db: Option<f32>) {
+        let moved = match self.state.lock() {
+            Ok(mut s) if s.gain_db != gain_db => {
+                s.gain_db = gain_db;
+                true
+            }
+            _ => false,
+        };
+        if moved {
+            self.announce();
+        }
+    }
+
+    pub fn settings(&self) -> Vec<Setting> {
+        self.state.lock().map(|s| s.settings.clone()).unwrap_or_default()
+    }
+
+    /// Say what the radio's gain stages, switches and choices are set to.
+    ///
+    /// The whole set each time rather than one at a time, because that is
+    /// what a caller reading them back off a driver has, and a set that is
+    /// the same as the one before it is not announced.
+    pub fn set_settings(&self, settings: Vec<Setting>) {
+        let moved = match self.state.lock() {
+            Ok(mut s) if s.settings != settings => {
+                s.settings = settings;
+                true
+            }
+            _ => false,
+        };
+        if moved {
+            self.announce();
+        }
+    }
+
+    /// Tell every connection what this tuner is now, subscribed to it or not.
+    fn announce(&self) {
+        let _ = self.changed.send(Change::Stream(self.id));
     }
 
     pub fn tunable(&self) -> bool {
@@ -211,7 +266,24 @@ impl Server {
         self.center_hz.load(Ordering::Relaxed)
     }
 
-    /// Hand one block of interleaved UC8 to every subscriber.
+    pub fn desc(&self) -> StreamDesc {
+        let (gain_db, settings) = match self.state.lock() {
+            Ok(s) => (s.gain_db, s.settings.clone()),
+            Err(_) => (None, Vec::new()),
+        };
+        StreamDesc {
+            id: self.id,
+            name: self.name.clone(),
+            center_hz: self.center_hz(),
+            sample_rate: self.sample_rate(),
+            gain_db,
+            tunable: self.tunable,
+            tune_range_hz: self.tune_range_hz.filter(|_| self.tunable),
+            settings,
+        }
+    }
+
+    /// Hand one block of interleaved UC8 to every subscriber of this tuner.
     ///
     /// Costs nothing with nobody listening, which is what lets the node stay
     /// in the graph whether or not anybody has connected.
@@ -249,7 +321,35 @@ impl Server {
         self.wanted.lock().ok().and_then(|mut w| w.take())
     }
 
-    /// Say where the tuner actually landed, and tell every subscriber.
+    /// Park a setting as a subscriber's [`msg::SET_SETTING`] does, refused on
+    /// the same terms as a tune.
+    pub fn ask_setting(&self, name: &str, value: SettingValue) -> bool {
+        if !self.tunable {
+            return false;
+        }
+        match self.asks.lock() {
+            Ok(mut asks) => {
+                let ask = Ask { name: name.to_string(), value };
+                match asks.iter_mut().find(|a| a.name == ask.name) {
+                    Some(held) => *held = ask,
+                    None => asks.push(ask),
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The settings subscribers asked for, taken.
+    ///
+    /// Whoever owns the radio applies them and then says what they really
+    /// became with [`Stream::set_settings`], because a driver snaps a gain to
+    /// its own step and refuses what the hardware will not do.
+    pub fn asked(&self) -> Vec<Ask> {
+        self.asks.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default()
+    }
+
+    /// Say where this tuner actually landed, and tell every subscriber.
     ///
     /// Called for any move, not only one a subscriber asked for: a reader
     /// whose stream slid out from under it because the local operator dragged
@@ -260,6 +360,165 @@ impl Server {
             let _ = self.retunes.send(center_hz);
         }
     }
+}
+
+/// What a connection has to pass on: the set of tuners, or one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Change {
+    /// A tuner was added or taken away.
+    Set,
+    /// One tuner is set differently than it was.
+    Stream(u16),
+}
+
+/// The tuners, shared between the caller and every connection task.
+struct Streams {
+    name: String,
+    streams: Mutex<Vec<Arc<Stream>>>,
+    next_id: AtomicU32,
+    /// Poked when a stream is added, removed or changed, so every connection
+    /// can pass it on.
+    changed: broadcast::Sender<Change>,
+}
+
+impl Streams {
+    fn all(&self) -> Vec<Arc<Stream>> {
+        self.streams.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    fn descs(&self) -> Vec<StreamDesc> {
+        self.all().iter().map(|s| s.desc()).collect()
+    }
+
+    /// The stream a message named, or the first one where it named none,
+    /// which is what a 1.1 client does.
+    fn pick(&self, id: Option<u16>) -> Option<Arc<Stream>> {
+        let all = self.all();
+        match id {
+            Some(id) => all.into_iter().find(|s| s.id == id),
+            None => all.into_iter().next(),
+        }
+    }
+}
+
+pub struct Server {
+    addr: SocketAddr,
+    inner: Arc<Streams>,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Server {
+    /// Listen on `addr`, or fail if the port is taken.
+    ///
+    /// A port of zero asks the kernel for a free one, which is what a test
+    /// wants; [`Server::addr`] then says which it got.
+    pub fn start(addr: SocketAddr, cfg: ServerConfig) -> Result<Arc<Self>> {
+        let inner = Arc::new(Streams {
+            name: cfg.name,
+            streams: Mutex::new(Vec::new()),
+            next_id: AtomicU32::new(0),
+            changed: broadcast::channel(8).0,
+        });
+        for s in cfg.streams {
+            add(&inner, s);
+        }
+
+        // Bound with std so a port already in use is an error the caller sees,
+        // rather than a log line from a thread it has already left. Doing it
+        // through the runtime would need a block_on, which panics when start
+        // is called from inside another runtime, as a test does.
+        let listener = std::net::TcpListener::bind(addr).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AddrInUse => Error::Busy,
+            _ => other(e),
+        })?;
+        listener.set_nonblocking(true).map_err(other)?;
+        let bound = listener.local_addr().map_err(other)?;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::other(format!("tokio runtime: {e}")))?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let shared = inner.clone();
+        let join = std::thread::Builder::new()
+            .name("iqstream-srv".into())
+            .spawn(move || {
+                // from_std registers with the reactor, so it has to happen
+                // inside the runtime rather than on the way in.
+                rt.block_on(async move {
+                    match TcpListener::from_std(listener) {
+                        Ok(l) => accept_loop(l, shared, stopping).await,
+                        Err(e) => tracing::error!("iqstream: {e}"),
+                    }
+                });
+            })
+            .map_err(|e| Error::other(format!("spawn server thread: {e}")))?;
+
+        Ok(Arc::new(Server { addr: bound, inner, stop, join: Some(join) }))
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    /// Offer another tuner on this port, from now on.
+    ///
+    /// Every connected client is told, because a client that asked for the
+    /// list once would otherwise never learn of a dongle plugged in since.
+    pub fn add_stream(&self, cfg: StreamConfig) -> Arc<Stream> {
+        let s = add(&self.inner, cfg);
+        let _ = self.inner.changed.send(Change::Set);
+        s
+    }
+
+    /// The tuner of this name, added if it is not there yet.
+    ///
+    /// What a stage does on every rebuild: the name is the identity, so the
+    /// readers of a tuner survive the graph around it being built again.
+    pub fn stream_named(&self, cfg: StreamConfig) -> Arc<Stream> {
+        if let Some(s) = self.inner.all().into_iter().find(|s| s.name == cfg.name) {
+            return s;
+        }
+        self.add_stream(cfg)
+    }
+
+    pub fn stream(&self, id: u16) -> Option<Arc<Stream>> {
+        self.inner.pick(Some(id))
+    }
+
+    /// The first tuner, which is the one a client that named none is given.
+    pub fn default_stream(&self) -> Option<Arc<Stream>> {
+        self.inner.pick(None)
+    }
+
+    pub fn streams(&self) -> Vec<Arc<Stream>> {
+        self.inner.all()
+    }
+
+    /// Stop offering a tuner. Its subscribers are dropped, since there is
+    /// nothing left for them to read.
+    pub fn remove_stream(&self, id: u16) {
+        if let Ok(mut v) = self.inner.streams.lock() {
+            v.retain(|s| s.id != id);
+        }
+        let _ = self.inner.changed.send(Change::Set);
+    }
+}
+
+fn add(inner: &Arc<Streams>, cfg: StreamConfig) -> Arc<Stream> {
+    let id = inner.next_id.fetch_add(1, Ordering::Relaxed) as u16;
+    let s = Stream::new(id, cfg, inner.changed.clone());
+    if let Ok(mut v) = inner.streams.lock() {
+        v.push(s.clone());
+    }
+    s
 }
 
 impl Drop for Server {
@@ -274,18 +533,7 @@ impl Drop for Server {
     }
 }
 
-#[derive(Clone)]
-struct Shared {
-    cfg: ServerConfig,
-    center_hz: Arc<AtomicU64>,
-    blocks: broadcast::Sender<Arc<Vec<u8>>>,
-    retunes: broadcast::Sender<u64>,
-    wanted: Arc<Mutex<Option<Tune>>>,
-    subscribers: Arc<AtomicUsize>,
-    blocks_sent: Arc<AtomicU64>,
-}
-
-async fn accept_loop(listener: TcpListener, shared: Shared, stop: Arc<AtomicBool>) {
+async fn accept_loop(listener: TcpListener, shared: Arc<Streams>, stop: Arc<AtomicBool>) {
     loop {
         let Ok((sock, peer)) = listener.accept().await else {
             continue;
@@ -302,8 +550,28 @@ async fn accept_loop(listener: TcpListener, shared: Shared, stop: Arc<AtomicBool
     }
 }
 
-/// One subscriber, from preamble to disconnection.
-async fn serve(sock: TcpStream, peer: SocketAddr, shared: Shared) -> Result<()> {
+/// One subscription on one connection: the task pumping it, and the switch
+/// that ends it.
+struct Subscription {
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Subscription {
+    async fn end(self) {
+        let _ = self.stop.send(true);
+        let _ = self.task.await;
+    }
+}
+
+/// One client, from preamble to disconnection.
+///
+/// The connection reads frames and owns the subscriptions it opened; the
+/// samples of each go out from a task of their own. Everything written to the
+/// socket goes through `out`, because several tasks have something to say on
+/// it and a half-written frame from two of them at once is an unreadable
+/// stream.
+async fn serve(sock: TcpStream, peer: SocketAddr, shared: Arc<Streams>) -> Result<()> {
     sock.set_nodelay(true).map_err(other)?;
     let (mut rd, mut wr) = sock.into_split();
 
@@ -312,155 +580,343 @@ async fn serve(sock: TcpStream, peer: SocketAddr, shared: Shared) -> Result<()> 
     let (major, _) = decode_preamble(&preamble)?;
     wr.write_all(&encode_preamble()).await.map_err(other)?;
     if major != VERSION_MAJOR {
-        let _ = send_error(
-            &mut wr,
-            error_code::UNSUPPORTED_VERSION,
-            &format!("this server speaks {VERSION_MAJOR}.x"),
-        )
-        .await;
+        let mut t = Tlvs::new();
+        t.u16(tag::ERROR_CODE, error_code::UNSUPPORTED_VERSION)
+            .str(tag::ERROR_MESSAGE, &format!("this server speaks {VERSION_MAJOR}.x"));
+        let _ = wr.write_all(&Frame::new(msg::ERROR, &t).encode()).await;
         return Err(Error::other(format!("{peer} speaks version {major}")));
     }
 
     let hello = read_frame(&mut rd).await?.ok_or(Error::Disconnected)?;
     if hello.msg_type != msg::HELLO {
-        let _ = send_error(&mut wr, error_code::BAD_REQUEST, "expected hello").await;
+        let mut t = Tlvs::new();
+        t.u16(tag::ERROR_CODE, error_code::BAD_REQUEST).str(tag::ERROR_MESSAGE, "expected hello");
+        let _ = wr.write_all(&Frame::new(msg::ERROR, &t).encode()).await;
         return Err(Error::other("no hello"));
     }
     let who = hello.tlvs()?.str(tag::CLIENT_NAME).unwrap_or_else(|| peer.to_string());
 
-    let mut w = Tlvs::new();
-    w.str(tag::SERVER_NAME, &shared.cfg.name)
-        .u64(tag::CENTER_HZ, shared.center_hz.load(Ordering::Relaxed))
-        .u32(tag::SAMPLE_RATE, shared.cfg.sample_rate)
-        .u8(tag::TUNABLE, shared.cfg.tunable as u8)
-        .put(tag::SUPPORTED_BIT_DEPTHS, &BitDepth::SUPPORTED)
-        .put(tag::SUPPORTED_CODECS, &[Codec::None.code(), Codec::Zstd.code()]);
-    if let Some(g) = shared.cfg.gain_db {
-        w.i16(tag::GAIN_DDB, (g * 10.0) as i16);
-    }
-    if let (true, Some((lo, hi))) = (shared.cfg.tunable, shared.cfg.tune_range_hz) {
-        w.u64(tag::TUNE_MIN_HZ, lo).u64(tag::TUNE_MAX_HZ, hi);
-    }
-    wr.write_all(&Frame::new(msg::WELCOME, &w).encode()).await.map_err(other)?;
+    let (out, mut outbox) = mpsc::channel::<Vec<u8>>(64);
+    let writer = tokio::spawn(async move {
+        while let Some(bytes) = outbox.recv().await {
+            if wr.write_all(&bytes).await.is_err() {
+                return;
+            }
+        }
+    });
 
-    let sub = read_frame(&mut rd).await?.ok_or(Error::Disconnected)?;
-    if sub.msg_type != msg::SUBSCRIBE {
-        let _ = send_error(&mut wr, error_code::BAD_REQUEST, "expected subscribe").await;
-        return Err(Error::other("no subscribe"));
+    let result = converse(&mut rd, &out, &shared, peer, &who).await;
+    drop(out);
+    let _ = writer.await;
+    tracing::info!("iqstream: {who} left");
+    result
+}
+
+async fn converse(
+    rd: &mut tokio::net::tcp::OwnedReadHalf,
+    out: &mpsc::Sender<Vec<u8>>,
+    shared: &Arc<Streams>,
+    peer: SocketAddr,
+    who: &str,
+) -> Result<()> {
+    send(out, welcome(shared)).await?;
+
+    let mut subs: HashMap<u16, Subscription> = HashMap::new();
+    let mut changed = shared.changed.subscribe();
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(PING_INTERVAL_S));
+    ping.tick().await;
+    let mut last_seen = tokio::time::Instant::now();
+
+    let ending = loop {
+        tokio::select! {
+            _ = ping.tick() => {
+                if last_seen.elapsed().as_secs() > IDLE_TIMEOUT_S {
+                    break Err(Error::other("keepalive timed out"));
+                }
+                let mut t = Tlvs::new();
+                t.u64(tag::TIMESTAMP_NS, now_ns());
+                send(out, Frame::new(msg::PING, &t)).await?;
+            }
+            // One tuner is set differently: a gain, a switch, an antenna
+            // port, the rate. Passed on to this connection whether or not it
+            // subscribed to that tuner, because a reader is entitled to know
+            // what the others are doing before it picks one.
+            change = changed.recv() => {
+                if let Ok(Change::Stream(id)) = change {
+                    if let Some(s) = shared.pick(Some(id)) {
+                        let mut t = Tlvs::new();
+                        put_streams(&mut t, &[s.desc()]);
+                        send(out, Frame::new(msg::STREAM_CHANGED, &t)).await?;
+                    }
+                    continue;
+                }
+                // A tuner came or went. Everything connected is told, and a
+                // subscription whose stream is gone is ended here rather than
+                // left reading a channel nothing will ever push to.
+                let live = shared.all();
+                let lost: Vec<u16> = subs
+                    .keys()
+                    .copied()
+                    .filter(|id| !live.iter().any(|s| s.id == *id))
+                    .collect();
+                for id in lost {
+                    if let Some(sub) = subs.remove(&id) {
+                        sub.end().await;
+                    }
+                    let mut t = Tlvs::new();
+                    t.u16(tag::STREAM_ID, id);
+                    send(out, Frame::new(msg::UNSUBSCRIBED, &t)).await?;
+                }
+                send(out, streams_frame(shared)).await?;
+            }
+            frame = read_frame(rd) => {
+                let Some(frame) = frame? else { break Ok(()) };
+                last_seen = tokio::time::Instant::now();
+                let named = frame.tlvs()?.u16(tag::STREAM_ID);
+                match frame.msg_type {
+                    msg::SUBSCRIBE => {
+                        let Some(stream) = shared.pick(named) else {
+                            fault(out, error_code::NO_SUCH_STREAM, "no such tuner here").await?;
+                            continue;
+                        };
+                        // A second subscribe to the same tuner replaces the
+                        // first: the client has changed its mind about the
+                        // bit depth, and two pumps would send it both.
+                        if let Some(old) = subs.remove(&stream.id()) {
+                            old.end().await;
+                        }
+                        match subscribe(&frame, &stream, out, peer, who).await? {
+                            Some(sub) => {
+                                subs.insert(stream.id(), sub);
+                            }
+                            None => continue,
+                        }
+                    }
+                    // Without a stream id, every subscription this connection
+                    // holds, which is what a 1.1 client means by it.
+                    msg::UNSUBSCRIBE => {
+                        let ids: Vec<u16> = match named {
+                            Some(id) => vec![id],
+                            None => subs.keys().copied().collect(),
+                        };
+                        for id in ids {
+                            if let Some(sub) = subs.remove(&id) {
+                                sub.end().await;
+                            }
+                            let mut t = Tlvs::new();
+                            t.u16(tag::STREAM_ID, id);
+                            send(out, Frame::new(msg::UNSUBSCRIBED, &t)).await?;
+                        }
+                        if subs.is_empty() {
+                            break Ok(());
+                        }
+                    }
+                    msg::LIST_STREAMS => send(out, streams_frame(shared)).await?,
+                    msg::PING => {
+                        let mut t = Tlvs::new();
+                        if let Some(ts) = frame.tlvs()?.u64(tag::TIMESTAMP_NS) {
+                            t.u64(tag::TIMESTAMP_NS, ts);
+                        }
+                        send(out, Frame::new(msg::PONG, &t)).await?;
+                    }
+                    msg::PONG => {}
+                    msg::TUNE => tune(&frame, shared, named, out).await?,
+                    msg::SET_SETTING => set_setting(&frame, shared, named, out).await?,
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    for (_, sub) in subs.drain() {
+        sub.end().await;
     }
-    let s = sub.tlvs()?;
-    let bits = BitDepth::new(s.u8(tag::BIT_DEPTH).unwrap_or(8)).map_err(|e| {
-        tracing::debug!("{peer}: {e}");
-        e
-    })?;
-    let codec = Codec::from_code(s.u8(tag::CODEC).unwrap_or(0))?;
+    ending
+}
+
+/// What a `TUNE` does, which is to be written down for whoever owns that
+/// tuner, once it is clear there is one and it may be moved.
+async fn tune(
+    frame: &Frame,
+    shared: &Arc<Streams>,
+    named: Option<u16>,
+    out: &mpsc::Sender<Vec<u8>>,
+) -> Result<()> {
+    let Some(stream) = shared.pick(named) else {
+        return fault(out, error_code::NO_SUCH_STREAM, "no such tuner here").await;
+    };
+    let hz = frame.tlvs()?.u64(tag::CENTER_HZ);
+    match (stream.tunable(), hz) {
+        (false, _) => {
+            fault(out, error_code::NOT_TUNABLE, "this receiver is not offering its dial").await
+        }
+        (true, None) => fault(out, error_code::BAD_REQUEST, "tune named no frequency").await,
+        (true, Some(hz)) if stream.tune_range_hz.is_some_and(|(lo, hi)| hz < lo || hz > hi) => {
+            fault(out, error_code::OUT_OF_RANGE, "outside this tuner's range").await
+        }
+        // Parked, not acted on: where it lands comes back as TUNED once the
+        // radio has actually moved.
+        (true, Some(hz)) => {
+            if let Ok(mut wanted) = stream.wanted.lock() {
+                *wanted = Some(Tune { center_hz: hz });
+            }
+            Ok(())
+        }
+    }
+}
+
+/// What a `SET_SETTING` does, which is to be written down for whoever owns
+/// that radio once it is clear the tuner is offered and knows the setting.
+async fn set_setting(
+    frame: &Frame,
+    shared: &Arc<Streams>,
+    named: Option<u16>,
+    out: &mpsc::Sender<Vec<u8>>,
+) -> Result<()> {
+    let Some(stream) = shared.pick(named) else {
+        return fault(out, error_code::NO_SUCH_STREAM, "no such tuner here").await;
+    };
+    if !stream.tunable() {
+        return fault(out, error_code::NOT_TUNABLE, "this radio is not offered for setting").await;
+    }
+    let t = frame.tlvs()?;
+    let (Some(name), Some(text)) = (t.str(tag::SETTING_NAME), t.str(tag::SETTING_VALUE)) else {
+        return fault(out, error_code::BAD_REQUEST, "name a setting and a value").await;
+    };
+    // Only what the tuner said it had, so a name the radio never offered is
+    // refused here rather than swallowed by whoever polls the requests.
+    let Some(known) = stream.settings().into_iter().find(|s| s.name == name) else {
+        return fault(out, error_code::NO_SUCH_SETTING, "this tuner has no such setting").await;
+    };
+    stream.ask_setting(&name, SettingValue::parse(known.kind, &text));
+    Ok(())
+}
+
+/// Take one subscribe and start the task that feeds it, or answer why not.
+async fn subscribe(
+    frame: &Frame,
+    stream: &Arc<Stream>,
+    out: &mpsc::Sender<Vec<u8>>,
+    peer: SocketAddr,
+    who: &str,
+) -> Result<Option<Subscription>> {
+    let s = frame.tlvs()?;
+    let bits = match BitDepth::new(s.u8(tag::BIT_DEPTH).unwrap_or(8)) {
+        Ok(b) => b,
+        Err(e) => {
+            fault(out, error_code::UNSUPPORTED_BIT_DEPTH, &e.to_string()).await?;
+            return Ok(None);
+        }
+    };
+    let codec = match Codec::from_code(s.u8(tag::CODEC).unwrap_or(0)) {
+        Ok(c) => c,
+        Err(e) => {
+            fault(out, error_code::UNSUPPORTED_CODEC, &e.to_string()).await?;
+            return Ok(None);
+        }
+    };
     let level = s.u8(tag::CODEC_LEVEL).unwrap_or(1) as i32;
-    let udp_port = s.u16(tag::UDP_PORT).ok_or_else(|| Error::other("subscribe named no port"))?;
+    let Some(udp_port) = s.u16(tag::UDP_PORT) else {
+        fault(out, error_code::BAD_REQUEST, "subscribe named no port").await?;
+        return Ok(None);
+    };
 
     // The samples go to the address the control connection came from, on the
     // port the subscriber named. Taking the port alone is what lets a client
     // behind a NAT be reached at all: it has no way to know its own address.
     let mut dest = peer;
     dest.set_port(udp_port);
-    let udp = UdpSocket::bind(if dest.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
-        .await
-        .map_err(other)?;
 
     let mut r = Tlvs::new();
-    r.u8(tag::BIT_DEPTH, bits.0).u8(tag::CODEC, codec.code());
-    wr.write_all(&Frame::new(msg::SUBSCRIBED, &r).encode()).await.map_err(other)?;
-    shared.subscribers.fetch_add(1, Ordering::Relaxed);
-    tracing::info!("iqstream: {who} subscribed from {peer}, {} bit {codec:?}", bits.0);
+    r.u16(tag::STREAM_ID, stream.id()).u8(tag::BIT_DEPTH, bits.0).u8(tag::CODEC, codec.code());
+    send(out, Frame::new(msg::SUBSCRIBED, &r)).await?;
+    tracing::info!("iqstream: {who} subscribed to {} at {} bit {codec:?}", stream.name(), bits.0);
 
-    let result = pump(&mut rd, &mut wr, &udp, dest, bits, codec, level, &shared).await;
-    shared.subscribers.fetch_sub(1, Ordering::Relaxed);
-    tracing::info!("iqstream: {who} left");
-    result
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn({
+        let stream = stream.clone();
+        let out = out.clone();
+        async move {
+            if let Err(e) = pump(&stream, &out, dest, bits, codec, level, stop_rx).await {
+                tracing::debug!("iqstream: {} stopped: {e}", stream.name());
+            }
+        }
+    });
+    Ok(Some(Subscription { stop: stop_tx, task }))
 }
 
+fn welcome(shared: &Arc<Streams>) -> Frame {
+    let mut w = Tlvs::new();
+    w.str(tag::SERVER_NAME, &shared.name);
+    let descs = shared.descs();
+    // The first tuner in the flat tags as well, because a 1.0 or 1.1 client
+    // reads nothing else and there is no version in which it can be told
+    // there are others.
+    if let Some(d) = descs.first() {
+        w.u64(tag::CENTER_HZ, d.center_hz)
+            .u32(tag::SAMPLE_RATE, d.sample_rate)
+            .u8(tag::TUNABLE, d.tunable as u8);
+        if let Some(g) = d.gain_db {
+            w.i16(tag::GAIN_DDB, (g * 10.0) as i16);
+        }
+        if let Some((lo, hi)) = d.tune_range_hz {
+            w.u64(tag::TUNE_MIN_HZ, lo).u64(tag::TUNE_MAX_HZ, hi);
+        }
+    }
+    w.put(tag::SUPPORTED_BIT_DEPTHS, &BitDepth::SUPPORTED)
+        .put(tag::SUPPORTED_CODECS, &[Codec::None.code(), Codec::Zstd.code()]);
+    put_streams(&mut w, &descs);
+    Frame::new(msg::WELCOME, &w)
+}
+
+fn streams_frame(shared: &Arc<Streams>) -> Frame {
+    let mut t = Tlvs::new();
+    put_streams(&mut t, &shared.descs());
+    Frame::new(msg::STREAMS, &t)
+}
+
+async fn send(out: &mpsc::Sender<Vec<u8>>, frame: Frame) -> Result<()> {
+    out.send(frame.encode()).await.map_err(|_| Error::Disconnected)
+}
+
+async fn fault(out: &mpsc::Sender<Vec<u8>>, code: u16, message: &str) -> Result<()> {
+    let mut t = Tlvs::new();
+    t.u16(tag::ERROR_CODE, code).str(tag::ERROR_MESSAGE, message);
+    send(out, Frame::new(msg::ERROR, &t)).await
+}
+
+/// One subscription's samples, until it is ended or the tuner goes away.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
-    rd: &mut tokio::net::tcp::OwnedReadHalf,
-    wr: &mut tokio::net::tcp::OwnedWriteHalf,
-    udp: &UdpSocket,
+    stream: &Arc<Stream>,
+    out: &mpsc::Sender<Vec<u8>>,
     dest: SocketAddr,
     bits: BitDepth,
     codec: Codec,
     level: i32,
-    shared: &Shared,
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut blocks = shared.blocks.subscribe();
-    let mut retunes = shared.retunes.subscribe();
-    let mut ping = tokio::time::interval(std::time::Duration::from_secs(PING_INTERVAL_S));
-    ping.tick().await;
+    let udp = UdpSocket::bind(if dest.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
+        .await
+        .map_err(other)?;
+    let mut blocks = stream.blocks.subscribe();
+    let mut retunes = stream.retunes.subscribe();
+    stream.subscribers.fetch_add(1, Ordering::Relaxed);
+    let _count = Counted(stream.clone());
 
     let mut seq: u32 = 0;
     let mut sample_index: u64 = 0;
     let mut packed = Vec::new();
-    let mut last_seen = tokio::time::Instant::now();
     let mut datagram = [0u8; DATA_HEADER_LEN + MAX_DATAGRAM_PAYLOAD];
 
     loop {
         tokio::select! {
-            _ = ping.tick() => {
-                if last_seen.elapsed().as_secs() > IDLE_TIMEOUT_S {
-                    return Err(Error::other("keepalive timed out"));
-                }
-                let mut t = Tlvs::new();
-                t.u64(tag::TIMESTAMP_NS, now_ns());
-                wr.write_all(&Frame::new(msg::PING, &t).encode()).await.map_err(other)?;
-            }
+            _ = stop.changed() => return Ok(()),
             hz = retunes.recv() => {
                 if let Ok(hz) = hz {
                     let mut t = Tlvs::new();
-                    t.u64(tag::CENTER_HZ, hz);
-                    wr.write_all(&Frame::new(msg::TUNED, &t).encode()).await.map_err(other)?;
-                }
-            }
-            frame = read_frame(rd) => {
-                let Some(frame) = frame? else { return Ok(()) };
-                last_seen = tokio::time::Instant::now();
-                match frame.msg_type {
-                    msg::UNSUBSCRIBE => {
-                        let _ = wr.write_all(&Frame::empty(msg::UNSUBSCRIBED).encode()).await;
-                        return Ok(());
-                    }
-                    msg::PING => {
-                        let mut t = Tlvs::new();
-                        if let Some(ts) = frame.tlvs()?.u64(tag::TIMESTAMP_NS) {
-                            t.u64(tag::TIMESTAMP_NS, ts);
-                        }
-                        wr.write_all(&Frame::new(msg::PONG, &t).encode()).await.map_err(other)?;
-                    }
-                    msg::PONG => {}
-                    msg::TUNE => {
-                        let hz = frame.tlvs()?.u64(tag::CENTER_HZ);
-                        match (shared.cfg.tunable, hz) {
-                            (false, _) => {
-                                send_error(wr, error_code::NOT_TUNABLE,
-                                    "this receiver is not offering its dial").await?;
-                            }
-                            (true, None) => {
-                                send_error(wr, error_code::BAD_REQUEST,
-                                    "tune named no frequency").await?;
-                            }
-                            (true, Some(hz))
-                                if shared.cfg.tune_range_hz
-                                    .is_some_and(|(lo, hi)| hz < lo || hz > hi) =>
-                            {
-                                send_error(wr, error_code::OUT_OF_RANGE,
-                                    "outside this tuner's range").await?;
-                            }
-                            // Parked, not acted on: where it lands comes back
-                            // as TUNED once the radio has actually moved.
-                            (true, Some(hz)) => {
-                                if let Ok(mut wanted) = shared.wanted.lock() {
-                                    *wanted = Some(Tune { center_hz: hz });
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
+                    t.u16(tag::STREAM_ID, stream.id()).u64(tag::CENTER_HZ, hz);
+                    send(out, Frame::new(msg::TUNED, &t)).await?;
                 }
             }
             block = blocks.recv() => {
@@ -481,13 +937,22 @@ async fn pump(
                     Codec::None => std::mem::take(&mut packed),
                     Codec::Zstd => zstd::bulk::compress(&packed, level).map_err(other)?,
                 };
-                send_block(udp, dest, &mut datagram, &body, seq, sample_index,
-                           samples as u32, bits, codec).await?;
+                send_block(&udp, dest, &mut datagram, &body, seq, sample_index,
+                           samples as u32, bits, codec, stream.id()).await?;
                 seq = seq.wrapping_add(1);
                 sample_index += samples as u64;
-                shared.blocks_sent.fetch_add(1, Ordering::Relaxed);
+                stream.blocks_sent.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+}
+
+/// Keeps a stream's reader count true however its pump ends.
+struct Counted(Arc<Stream>);
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.subscribers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -507,6 +972,7 @@ async fn send_block(
     block_samples: u32,
     bits: BitDepth,
     codec: Codec,
+    stream_id: u16,
 ) -> Result<()> {
     let frag_count = body.len().div_ceil(MAX_DATAGRAM_PAYLOAD).max(1) as u16;
     for (i, chunk) in body.chunks(MAX_DATAGRAM_PAYLOAD).enumerate() {
@@ -520,6 +986,7 @@ async fn send_block(
             codec,
             decimation: 1,
             block_samples,
+            stream_id,
         };
         let mut head = [0u8; DATA_HEADER_LEN];
         header.encode(&mut head);
@@ -530,16 +997,6 @@ async fn send_block(
         let _ = udp.send_to(&datagram[..DATA_HEADER_LEN + chunk.len()], dest).await;
     }
     Ok(())
-}
-
-async fn send_error(
-    wr: &mut tokio::net::tcp::OwnedWriteHalf,
-    code: u16,
-    message: &str,
-) -> Result<()> {
-    let mut t = Tlvs::new();
-    t.u16(tag::ERROR_CODE, code).str(tag::ERROR_MESSAGE, message);
-    wr.write_all(&Frame::new(msg::ERROR, &t).encode()).await.map_err(other)
 }
 
 async fn read_frame(sock: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Option<Frame>> {

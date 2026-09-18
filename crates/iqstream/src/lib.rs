@@ -1,4 +1,4 @@
-//! One tuner, many network readers.
+//! Tuners, and many network readers of each.
 //!
 //! [`proto`] is the wire format, vendored from the reference implementation so
 //! the receiver can speak both ends of it. [`client`] subscribes to somebody
@@ -8,6 +8,18 @@
 //! chooses its own bit depth and compression. The control connection is the
 //! subscription's lifetime: a reader that stops answering keepalives is
 //! dropped.
+//!
+//! # Several tuners on one port
+//!
+//! A server offers a [`server::Stream`] per tuner and says so in its welcome;
+//! a subscriber names the one it wants, and a tune names the dial it means. A
+//! 1.1 peer names none, and a server hands it the first, which is the only
+//! stream such a server ever had.
+//!
+//! What a tuner is set to travels with it: its gain stages, its switches and
+//! its antenna port are in its description, and moving any of them sends
+//! every connection a fresh one. A reader that is not told cannot say what
+//! level its samples were heard at.
 //!
 //! # Moving the dial from the other end
 //!
@@ -21,6 +33,6 @@ pub mod client;
 pub mod proto;
 pub mod server;
 
-pub use client::{Block, ClientConfig, IqStream, StreamInfo};
-pub use proto::Codec;
-pub use server::{Server, ServerConfig, Tune};
+pub use client::{Block, ClientConfig, IqStream, StreamInfo, list};
+pub use proto::{Codec, Setting, SettingKind, SettingValue, StreamDesc};
+pub use server::{Ask, Server, ServerConfig, Stream, StreamConfig, Tune};
