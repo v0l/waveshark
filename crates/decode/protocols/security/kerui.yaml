@@ -4,7 +4,7 @@
 # 20-bit id and a 4-bit command naming the event. No checksum.
 name: Kerui-Security
 timing: { pwm: [420, 960], reset_us: 9900, tolerance_us: 160 }
-frame: { bits: 25, not_constant: 24, repeats: 25 }
+frame: { bits: 25, find: rows, copies: 3, not_constant: 24, repeats: 25 }
 fields:
   - { name: id, bits: 20, data: int, not: true, min: 1 }
   - { name: cmd, bits: 4, data: int, not: true, in: [0xa, 0xe, 0x7, 0xb, 0x5, 0xf] }
