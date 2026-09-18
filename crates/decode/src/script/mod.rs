@@ -68,6 +68,8 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/tpms/renault.yaml"),
     include_str!("../../protocols/home/x10_rf.yaml"),
     include_str!("../../protocols/weather/acurite_5n1.yaml"),
+    include_str!("../../protocols/weather/alecto_v1.yaml"),
+    include_str!("../../protocols/security/honeywell.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -216,16 +218,16 @@ impl Scripted {
         {
             return Err(DecodeError::NotThisProtocol);
         }
+        let mut walk =
+            Walk { bits: frame, cursor: 0, read: BTreeMap::new(), id: None, model: None };
+        walk.items(&self.desc.fields)?;
         let mut verified = None;
-        for c in self.desc.check.iter() {
+        for c in self.desc.check.iter().filter(|c| c.applies(|cond| walk.holds(cond))) {
             if !check_holds(c, frame) {
                 return Err(DecodeError::CrcFailed);
             }
             verified = Some(true);
         }
-        let mut walk =
-            Walk { bits: frame, cursor: 0, read: BTreeMap::new(), id: None, model: None };
-        walk.items(&self.desc.fields)?;
         let mut r = Report::new(walk.model.map(|m| intern(&m)).unwrap_or(self.name));
         r.crc_valid = verified;
         r.raw = frame.slice(0, want).as_padded_bytes().to_vec();
@@ -270,11 +272,18 @@ impl Scripted {
             derived: BTreeMap::new(),
         };
         w.items(&self.desc.fields)?;
+        let derived = w.derived;
+        let decided = |cond: &desc::Cond| {
+            cond.iter().all(|(k, want)| {
+                fields.get(k).or_else(|| derived.get(k)).is_some_and(|v| want.holds(v))
+            })
+        };
+        let applies: Vec<&Check> = self.desc.check.iter().filter(|c| c.applies(&decided)).collect();
         // a check may cover another's stored value, so every check is
         // written as many times as there are checks: the last pass sees
         // every value in place
-        for _ in 0..self.desc.check.iter().count() {
-            for c in self.desc.check.iter() {
+        for _ in 0..applies.len() {
+            for c in &applies {
                 if c.kind == CheckKind::EvenParity {
                     for byte in (c.over[0]..c.over[1]).step_by(8) {
                         let v = extract(&out, byte, 8);
@@ -282,7 +291,7 @@ impl Scripted {
                     }
                 }
                 if let (Some(at), Some(v)) = (c.at, check_value(c, &out)) {
-                    let width = c.kind.width(c.over).unwrap_or(0);
+                    let width = c.stored().unwrap_or(0);
                     overwrite(&mut out, at, width, v);
                 }
             }
@@ -962,17 +971,26 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
             bits::lfsr_digest8_reflect(&d, c.generator as u8, c.key as u8) as u64
         }
         CheckKind::Complement => !extract(frame, c.over[0], c.over[1] - c.over[0]),
+        CheckKind::NibbleSum => {
+            let nibble = |b| {
+                let n = extract(frame, b, 4);
+                if c.reflect { n.reverse_bits() >> 60 } else { n }
+            };
+            let sum: i64 = (c.over[0]..c.over[1]).step_by(4).map(|b| nibble(b) as i64).sum();
+            (if c.negate { c.init as i64 - sum } else { sum + c.add }) as u64
+        }
         CheckKind::EvenParity => return None,
     };
-    let width = c.kind.width(c.over)?;
-    Some((v ^ c.xor as u64) & mask(width))
+    let width = c.stored()?;
+    let v = (v ^ c.xor as u64) & mask(width);
+    Some(if c.reflect { v.reverse_bits() >> (64 - width) } else { v })
 }
 
 fn check_holds(c: &Check, frame: &BitBuffer) -> bool {
     match (c.kind, c.at) {
         (CheckKind::EvenParity, _) => bits::even_parity(&covered(c, frame)),
-        (kind, Some(at)) => {
-            let width = kind.width(c.over).unwrap_or(0);
+        (_, Some(at)) => {
+            let width = c.stored().unwrap_or(0);
             check_value(c, frame) == Some(extract(frame, at, width))
         }
         _ => false,

@@ -1,0 +1,28 @@
+# Honeywell 5800 series and 2GIG alarm sensors, 345 MHz: door contacts,
+# motion detectors and glass break sensors reporting to a panel with no
+# encryption and no rolling code. FSK NRZ at 136 us a chip, Manchester
+# behind a 555556 preamble, six bytes with a CRC-16 whose polynomial the
+# channel decides.
+name: Honeywell-Security
+timing: { nrz: 136, reset_us: 408 }
+frame: { bits: 48, find: sync, sync: "555556", sync_bits: 24, decode: manchester }
+check:
+  - { kind: crc16, poly: 0x8050, init: 0, over: [0, 32], at: 32, when: { channel: [2, 4, 9, 10, 12] } }
+  - { kind: crc16, poly: 0x8005, init: 0, over: [0, 32], at: 32, when: { channel: 8 } }
+fields:
+  - { name: channel, bits: 4, data: int, in: [2, 4, 8, 9, 10, 12] }
+  - { name: id, bits: 20, data: int, min: 1 }
+  - { name: event, bits: 8, data: int }
+  - { name: state, at: 24, bits: 1, data: text, map: { 1: open, 0: closed } }
+  - { name: contact_open, at: 24, bits: 1, data: bool, type: bool }
+  - { name: tamper, at: 25, bits: 1, data: bool, type: bool }
+  - { name: reed_open, at: 26, bits: 1, data: bool, type: bool }
+  - { name: alarm, at: 27, bits: 1, data: bool, type: bool }
+  - { name: battery_ok, at: 28, bits: 1, data: bool, type: bool, not: true }
+  - { name: heartbeat, at: 29, bits: 1, data: bool, type: bool }
+  - { bits: 16, hidden: true }
+vectors:
+  - hex: "83 87 87 a0 a7 99"
+    fields: { channel: 8, id: 0x38787, event: 0xa0, state: open, contact_open: true, tamper: false, reed_open: true, alarm: false, battery_ok: true, heartbeat: false }
+  - hex: "a1 20 56 a0 cf c0"
+    fields: { channel: 10, id: 0x12056, event: 0xa0, state: open, contact_open: true, tamper: false, reed_open: true, alarm: false, battery_ok: true, heartbeat: false }

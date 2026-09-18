@@ -190,6 +190,33 @@ pub struct Check {
     pub generator: u32,
     #[serde(default)]
     pub key: u32,
+    /// Added to a sum before comparing
+    #[serde(default)]
+    pub add: i64,
+    /// The sum is taken from `init` rather than compared as it is
+    #[serde(default)]
+    pub negate: bool,
+    /// Width of the stored value where the kind does not fix it
+    pub width: Option<usize>,
+    /// The value is stored low bit first, and a nibble sum adds the
+    /// nibbles as they read reversed
+    #[serde(default)]
+    pub reflect: bool,
+    /// The check applies only when these fields read so
+    pub when: Option<Cond>,
+    pub unless: Option<Cond>,
+}
+
+impl Check {
+    /// Width of the stored value, as the kind or the description says
+    pub fn stored(&self) -> Option<usize> {
+        self.kind.width(self.over).map(|w| self.width.unwrap_or(w))
+    }
+
+    /// Whether the check applies, given what the fields read
+    pub fn applies(&self, holds: impl Fn(&Cond) -> bool) -> bool {
+        self.when.as_ref().is_none_or(&holds) && self.unless.as_ref().is_none_or(|c| !holds(c))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -207,6 +234,8 @@ pub enum CheckKind {
     EvenParity,
     /// The stored bits are the covered bits complemented
     Complement,
+    /// Every nibble covered added up, `add` on top or taken from `init`
+    NibbleSum,
 }
 
 impl CheckKind {
@@ -221,6 +250,7 @@ impl CheckKind {
             | Self::Lfsr8Reflect => 8,
             Self::Crc16 | Self::Crc16Le => 16,
             Self::Complement => over[1] - over[0],
+            Self::NibbleSum => 8,
             Self::EvenParity => return None,
         })
     }
@@ -634,7 +664,17 @@ impl Desc {
                     c.over, f.bits
                 ));
             }
-            match (c.kind.width(c.over), c.at) {
+            if c.width.is_some_and(|w| w == 0 || w > 64) {
+                return Err(format!("{name}: a check's width is out of range"));
+            }
+            for cond in c.when.iter().chain(c.unless.iter()) {
+                for k in cond.keys() {
+                    if !all_fields(&self.fields).iter().any(|f| &f.name == k) {
+                        return Err(format!("{name}: a check names no field called {k}"));
+                    }
+                }
+            }
+            match (c.stored(), c.at) {
                 (Some(w), Some(at)) if at + w > f.bits => {
                     return Err(format!("{name}: a check's value runs past the frame"));
                 }
@@ -648,6 +688,9 @@ impl Desc {
                 && (c.over[1] - c.over[0]) % 8 != 0
             {
                 return Err(format!("{name}: a {:?} check covers whole bytes", c.kind));
+            }
+            if c.kind == CheckKind::NibbleSum && (c.over[1] - c.over[0]) % 4 != 0 {
+                return Err(format!("{name}: a nibble sum covers whole nibbles"));
             }
         }
         for path in owner_paths(&self.fields) {
