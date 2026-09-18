@@ -14,6 +14,7 @@
 
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
+use common::bands::Usage;
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::wefax;
 use dsp::resample::Rational;
@@ -204,7 +205,7 @@ impl Protocol for Wefax {
     /// broadcasts are scattered from 2 to 20 MHz and each service has its
     /// own list, so this is a frequency an operator sets.
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Utility])
     }
     fn shape(&self) -> Shape {
         Shape {

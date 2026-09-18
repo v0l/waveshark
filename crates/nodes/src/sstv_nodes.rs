@@ -15,6 +15,7 @@
 use crate::NodeSpec;
 use crate::RealFir;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
+use common::bands::Usage;
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::sstv;
 use dsp::resample::Rational;
@@ -477,7 +478,7 @@ impl Protocol for Sstv {
     /// Wherever a picture is sent: the two metre calling frequency is the one
     /// with a channel, and the shortwave ones are worked by hand.
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Amateur])
     }
     fn shape(&self) -> Shape {
         Shape {

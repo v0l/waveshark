@@ -126,6 +126,10 @@ the code is in the commit log.
   sentence is gone, and so is the precision setting.
 - The packet log folder, the unrecognised-burst filter and the raw capture
   switch are remembered between runs.
+- Auto mode places a decoder only where that service is, so 2.4 GHz no longer
+  runs the pager and voice decoders.
+- The band ribbon names the European land mobile allocations at 162, 410 and
+  440 MHz, which read as unallocated.
 
 ### Fixed
 

@@ -31,6 +31,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::dmr::{self, LinkControl};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
@@ -927,7 +928,7 @@ impl Protocol for Dmr {
         "dmr"
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Amateur, Usage::Utility, Usage::Ism])
     }
     /// Like M17 it runs wherever it is put, so it is recognised by its own
     /// tagged body rather than by band.

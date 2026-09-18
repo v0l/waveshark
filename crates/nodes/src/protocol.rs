@@ -21,11 +21,23 @@ use pipeline::port::PortKind;
 /// Where in the spectrum a protocol's transmitters can be.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Placement {
-    /// Wherever something the right shape is found: a pager channel is a
-    /// pager channel at 153 MHz and at 440 MHz.
-    Anywhere,
+    /// Wherever the band plan says that service is: a pager is on the utility
+    /// allocations, M17 on the amateur ones, LoRa on the licence-free ones.
+    ///
+    /// Naming the service rather than the megahertz is what keeps a decoder
+    /// off a band it was never on. Before this, every narrow source a busy
+    /// 2.4 GHz band opened got M17, DMR, P25, POCSAG, FLEX, MDC-1200,
+    /// two-tone, APRS and SSTV built on it, which measured about 4 ms of a
+    /// 2.13 ms block. It also follows the regional plan, which 902 to
+    /// 928 MHz is the reason for: licence-free in the Americas and the GSM
+    /// uplink in Europe.
+    ///
+    /// Auto mode is what reads this. An operator who wants a decoder
+    /// somewhere else adds the channel by hand and names the protocol, and
+    /// no table is consulted.
+    Usage(&'static [common::bands::Usage]),
     /// Inside licensed allocations, in absolute hertz: the TETRA downlinks,
-    /// the GSM downlinks. Knowledge about the world rather than this radio.
+    /// the GSM downlinks. Knowledge about the world the plan does not carry.
     Bands(Vec<(f64, f64)>),
     /// On fixed frequencies the standard put it on: 1090 MHz, the two AIS
     /// channels, the three BLE advertising channels.
@@ -37,7 +49,7 @@ impl Placement {
     /// placement counts within half its width.
     pub fn covers(&self, hz: f64, width_hz: f64) -> bool {
         match self {
-            Placement::Anywhere => true,
+            Placement::Usage(u) => common::bands::at(hz).is_some_and(|b| u.contains(&b.usage)),
             Placement::Bands(bands) => bands.iter().any(|(lo, hi)| (*lo..*hi).contains(&hz)),
             Placement::Channels(chs) => chs.iter().any(|c| (c - hz).abs() <= width_hz / 2.0),
         }
@@ -47,7 +59,7 @@ impl Placement {
     /// owns: one per channel, or the band itself.
     pub fn bands(&self, width_hz: f64) -> Vec<(f64, f64)> {
         match self {
-            Placement::Anywhere => Vec::new(),
+            Placement::Usage(u) => common::bands::ranges_for(u),
             Placement::Bands(bands) => bands.clone(),
             Placement::Channels(chs) => {
                 chs.iter().map(|c| (c - width_hz / 2.0, c + width_hz / 2.0)).collect()
@@ -59,7 +71,9 @@ impl Placement {
     /// strip channel picked from a menu wants one.
     pub fn default_hz(&self) -> Option<f64> {
         match self {
-            Placement::Anywhere => None,
+            // A service is not a frequency, so a protocol placed by one says
+            // where to put a hand-placed channel itself.
+            Placement::Usage(_) => None,
             Placement::Bands(b) => b.first().map(|(lo, hi)| (lo + hi) / 2.0),
             Placement::Channels(c) => c.first().copied(),
         }
@@ -605,6 +619,100 @@ pub fn channel_protocols() -> impl Iterator<Item = &'static dyn Protocol> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No narrowband land mobile or amateur decoder is placed in the 2.4 GHz
+    /// band.
+    ///
+    /// Every narrow source a busy 2.4 GHz band opens used to get M17, DMR,
+    /// P25, POCSAG, FLEX, MDC-1200, two-tone, APRS and SSTV built on it,
+    /// about 4 ms of processor time in a 2.13 ms block, and every row they
+    /// produced was thrown away again by the band test in `read_frame`.
+    #[test]
+    fn the_24_ghz_band_gets_none_of_the_land_mobile_decoders() {
+        for id in [
+            "m17", "dmr", "p25", "pocsag", "flex", "mdc1200", "twotone", "aprs", "sstv", "rtty",
+            "morse", "wefax",
+        ] {
+            let p = by_id(id).unwrap_or_else(|| panic!("{id} is registered"));
+            for hz in [2_402e6, 2_431e6, 2_450e6, 2_480e6, 5_800e6] {
+                assert!(
+                    !p.placement().covers(hz, p.shape().widths[0]),
+                    "{id} is placed at {:.0} MHz",
+                    hz / 1e6
+                );
+            }
+        }
+    }
+
+    /// And the frequencies the corpus was recorded on still get theirs: a
+    /// handheld in the 433 MHz licence-free band is where most of this
+    /// traffic actually is, so licence-free is not the same answer as
+    /// 2.4 GHz.
+    #[test]
+    fn the_captures_still_reach_the_decoder_that_reads_them() {
+        for (id, hz) in [
+            ("dmr", 433.45e6),
+            ("m17", 434.02e6),
+            ("pocsag", 433.92e6),
+            ("lora", 869.525e6),
+            ("aprs", 144.8e6),
+        ] {
+            let p = by_id(id).unwrap_or_else(|| panic!("{id} is registered"));
+            assert!(
+                p.placement().covers(hz, p.shape().widths[0]),
+                "{id} is not placed at {:.3} MHz",
+                hz / 1e6
+            );
+        }
+    }
+
+    /// Where a protocol says it can be, the ribbon names it.
+    ///
+    /// Europe had nothing at all between PMR446 and LTE 800, so a receiver
+    /// tuned to a television multiplex said UNALLOCATED and offered narrow
+    /// FM. The decoder knew the band the whole time.
+    #[test]
+    fn a_television_multiplex_is_named_where_the_decoder_says_it_is() {
+        for (lo, hi) in by_id("dvbt").expect("dvbt").placement().bands(8.0e6) {
+            for hz in [lo + 1e6, (lo + hi) / 2.0, hi - 1e6] {
+                let name = common::bands::name_at_in(common::bands::Plan::Europe, hz);
+                assert!(
+                    matches!(name, "UHF TV" | "DAB / Band III"),
+                    "{:.1} MHz is {name}",
+                    hz / 1e6
+                );
+            }
+        }
+        // Channel 21 is the bottom of the UHF plan and every channel above
+        // it is 8 MHz on: 429 is the capture's own frequency, not a
+        // broadcast one, so it stays unallocated.
+        assert_eq!(common::bands::snap_in(common::bands::Plan::Europe, 475.3e6), 474.0e6);
+        assert_eq!(common::bands::snap_in(common::bands::Plan::Europe, 601.0e6), 602.0e6);
+        // A dish, once the LNB's oscillator is set as the offset: the dial
+        // reads what came out of the sky rather than what is on the cable.
+        assert_eq!(
+            common::bands::name_at_in(common::bands::Plan::Europe, 11.778e9),
+            "Satellite TV (Ku)"
+        );
+        assert_eq!(
+            common::bands::name_at_in(common::bands::Plan::Americas, 12.2e9),
+            "Satellite TV (Ku)"
+        );
+    }
+
+    #[test]
+    fn the_narrowest_band_wins_when_they_overlap() {
+        // 433.92 is inside both the 70 cm amateur band and ISM 433; the ISM
+        // allocation is the more useful label and the narrower entry.
+        assert_eq!(common::bands::name_at_in(common::bands::Plan::Europe, 433.92e6), "ISM 433");
+        // Same for the transponder frequencies inside the DME allocation.
+        assert_eq!(common::bands::name_at_in(common::bands::Plan::Europe, 1090.0e6), "ADS-B");
+        assert_eq!(
+            common::bands::name_at_in(common::bands::Plan::Europe, 1030.05e6),
+            "SSR interrogation"
+        );
+        assert_eq!(common::bands::name_at_in(common::bands::Plan::Europe, 1000.0e6), "DME / TACAN");
+    }
 
     #[test]
     fn every_protocol_names_a_registered_stage() {

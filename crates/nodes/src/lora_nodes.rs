@@ -27,6 +27,7 @@
 
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
+use common::bands::Usage;
 use common::{C32, Result};
 use decode::lora::{self, Received};
 use decode::lorawan;
@@ -1005,7 +1006,7 @@ impl Protocol for Lora {
         "lora"
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Ism, Usage::Wlan])
     }
     /// The same chirp is legal at 433, 868 and 915 MHz and none of those
     /// bands is only LoRa, so the claim is the front end's tag plus a

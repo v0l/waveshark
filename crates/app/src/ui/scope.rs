@@ -682,7 +682,7 @@ impl Scope<'_> {
             }
             let cell =
                 Rect::from_min_max(Pos2::new(x0, r.top() + 2.0), Pos2::new(x1, r.bottom() - 2.0));
-            p.rect_filled(cell, 1.0, b.color);
+            p.rect_filled(cell, 1.0, bands::color(b.usage));
             if x1 - x0 > 60.0 {
                 p.text(
                     cell.center(),

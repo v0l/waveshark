@@ -19,6 +19,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::p25::{self, Duid, Encryption, LinkControl};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
@@ -505,7 +506,7 @@ impl Protocol for P25 {
     /// A 12.5 kHz channel anywhere: P25 is on VHF, UHF, 700 and 800 MHz, and
     /// what makes one a P25 channel is what is keyed on it.
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Utility])
     }
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged

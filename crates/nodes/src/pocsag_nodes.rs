@@ -14,6 +14,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::pocsag::{self, Body};
 use dsp::pocsag::{DEVIATION_HZ, PocsagConfig, PocsagDemod, Transmission};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -339,7 +340,7 @@ impl Protocol for Pocsag {
         "pager"
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Utility, Usage::Ism])
     }
     /// The widest of the paging allocations, so every narrower claim inside
     /// them is offered a frame first.

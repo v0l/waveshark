@@ -17,6 +17,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::mdc1200;
 use dsp::afsk::{AfskBits, AfskConfig, FFSK1200};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -235,7 +236,7 @@ impl Protocol for Mdc {
         &["mdc", "ani"]
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Utility, Usage::Amateur])
     }
     fn default_hz(&self) -> f64 {
         DEFAULT_HZ
