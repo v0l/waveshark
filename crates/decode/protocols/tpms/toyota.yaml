@@ -1,0 +1,22 @@
+# Toyota tyre pressure sensors (the Pacific Industries PMV-107J family),
+# 315 and 433 MHz: FSK at 52 us a chip, differential Manchester behind a
+# sync whose last bit is the level the first symbol boundary is read
+# against. Nine bytes with a CRC-8, the pressure sent twice, once inverted.
+name: Toyota
+timing: { nrz: 52, reset_us: 150 }
+frame: { bits: 72, find: sync, sync: "a9e0", sync_bits: 12, sync_skip: 11, decode: diff_manchester, either_polarity: true }
+check:
+  - { kind: crc8, poly: 0x07, init: 0x80, over: [0, 64], at: 64 }
+  - { kind: complement, over: [33, 41], at: 56 }
+fields:
+  - { name: id, bits: 32, data: text, type: hex }
+  - { bits: 1, hidden: true }
+  - { name: pressure_psi, bits: 8, data: float, unit: psi, scale: 0.25, offset: -7 }
+  - { name: temperature_c, bits: 8, data: float, unit: c, offset: -40, round: 0 }
+  - { bits: 7, hidden: true }
+  - { name: status, gather: [32, [49, 56]], data: int }
+  - { bits: 8, hidden: true }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "12 34 56 78 b2 20 aa 9b 95"
+    fields: { id: "12345678", pressure_psi: 18.0, temperature_c: 25.0, status: 170 }

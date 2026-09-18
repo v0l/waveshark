@@ -172,19 +172,14 @@ impl Protocols {
     pub fn all() -> Self {
         use crate::protocols::*;
         let mut p = Self::new();
-        p.add(Box::new(AcuriteWind));
         p.add(Box::new(Hideki));
         p.add(Box::new(AlectoV1));
         p.add(Box::new(GtWt02));
         p.add(Box::new(GtWt03));
         p.add(Box::new(OregonV3));
         p.add(Box::new(OregonV2));
-        p.add(Box::new(X10Rf));
         p.add(Box::new(KeeLoq));
         p.add(Box::new(SomfyRts));
-        p.add(Box::new(ToyotaTpms));
-        p.add(Box::new(FordTpms));
-        p.add(Box::new(RenaultTpms));
         p.add(Box::new(HoneywellSecurity));
         p.add(Box::new(InterlogixSecurity));
         p.add(Box::new(Ism868Link));

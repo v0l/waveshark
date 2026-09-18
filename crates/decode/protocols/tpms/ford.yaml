@@ -1,0 +1,30 @@
+# Ford tyre pressure sensors, 315 and 433 MHz: FSK at 52 us a chip,
+# Manchester behind an aaa9 preamble, eight bytes closed by a sum. The
+# flags say whether the wheel is turning or the sensor is being learned;
+# the temperature byte carries a reading only when its top bit is clear.
+name: Ford
+timing: { nrz: 52, reset_us: 150 }
+frame: { bits: 64, find: sync, sync: "aaa9", sync_bits: 16, decode: manchester, either_polarity: true }
+check: { kind: sum8, over: [0, 56], at: 56 }
+fields:
+  - { name: id, bits: 32, data: text, type: hex }
+  - { bits: 8, hidden: true }
+  - { bits: 8, hidden: true }
+  - { bits: 1, const: 0 }
+  - { bits: 1, hidden: true }
+  - { bits: 1, hidden: true }
+  - { bits: 1, const: 0 }
+  - { bits: 4, hidden: true }
+  - { bits: 8, hidden: true }
+  - { name: code, at: 32, bits: 24, data: text, type: hex }
+  - { name: mode, gather: [49, 52, 53], hidden: true, in: [2, 1, 5] }
+  - { name: moving, at: 49, bits: 1, data: bool, type: bool }
+  - { name: learn, at: 52, bits: 1, data: bool, type: bool }
+  - { name: pressure_psi, gather: [50, [32, 40]], data: float, unit: psi, scale: 0.25 }
+  - { name: no_temp, at: 40, bits: 1, hidden: true }
+  - { name: temperature_c, at: 41, bits: 7, data: float, unit: c, offset: -56, round: 0, when: { no_temp: 0 } }
+vectors:
+  - hex: "45 bb 32 0f 6a d4 46 c5"
+    fields: { id: "45bb320f", code: "6ad446", moving: true, learn: false, pressure_psi: 26.5 }
+  - hex: "45 bb 32 0f 6a 4d 46 3e"
+    fields: { id: "45bb320f", code: "6a4d46", moving: true, learn: false, pressure_psi: 26.5, temperature_c: 21.0 }
