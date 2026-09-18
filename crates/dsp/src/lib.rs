@@ -26,6 +26,7 @@ pub mod dc;
 pub mod dcs;
 pub mod demod;
 pub mod detect;
+pub mod dqpsk;
 pub mod drift;
 pub mod drm;
 pub mod droneid;

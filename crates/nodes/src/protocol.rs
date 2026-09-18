@@ -559,6 +559,7 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::epirb_nodes::Epirb,
         &crate::stdc_nodes::Stdc,
         &crate::aero_nodes::Aero,
+        &crate::iridium_nodes::Iridium,
     ];
     ALL
 }

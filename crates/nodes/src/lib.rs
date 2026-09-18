@@ -37,9 +37,10 @@ pub mod gsm_nodes;
 pub mod homeassistant_nodes;
 pub mod ident_nodes;
 pub mod ieee802154_nodes;
-pub mod iqstream_nodes;
 pub mod imet_nodes;
 pub mod iq_tx;
+pub mod iqstream_nodes;
+pub mod iridium_nodes;
 pub mod keyed;
 pub mod kiss_nodes;
 pub mod lms6_nodes;
@@ -272,6 +273,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (epirb_nodes::DESC, epirb_nodes::build),
     (stdc_nodes::DESC, stdc_nodes::build),
     (aero_nodes::DESC, aero_nodes::build),
+    (iridium_nodes::DESC, iridium_nodes::build),
     (imet_nodes::DESC, imet_nodes::build),
     (lms6_nodes::DESC, lms6_nodes::build),
     (m10_nodes::DESC, m10_nodes::build),

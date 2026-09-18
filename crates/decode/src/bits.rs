@@ -503,6 +503,70 @@ pub const BCH_31_21_GEN: u64 = 0x769;
 /// x^21+x^18+x^17+x^15+x^14+x^12+x^11+x^8+x^7+x^6+x^5+x+1.
 pub const BCH_127_106_GEN: u64 = 0b10_0110_1101_1001_1110_0011;
 
+/// Generator of the BCH(31,21) Iridium keys its ring alert and broadcast
+/// blocks with, x^10+x^7+x^5+x^4+x^2+x+1. A different pair of minimal
+/// polynomials from the paging one [`BCH_31_21_GEN`], so the two codes share
+/// their shape and not their arithmetic.
+pub const BCH_31_21_IRIDIUM_GEN: u64 = 1207;
+
+/// Correct up to two wrong bits in any binary cyclic code, by the remainder
+/// its generator leaves.
+///
+/// `code` is in transmission order, so the first bit is the highest power,
+/// and `generator` carries its own leading term. Returns how many bits were
+/// flipped, or `None` where no single bit and no pair leaves the syndrome
+/// that arrived, which is three wrong bits or more.
+///
+/// By search rather than by a field: [`bch31_21`] solves for the error
+/// positions in GF(32) built on one primitive polynomial, and a code with a
+/// different generator needs a different field. Trying every position and
+/// every pair is 31 and 465 exclusive-ors for a 31-bit word, which is
+/// nothing beside the demodulation that produced it.
+pub fn bch_repair2(code: &mut [bool], generator: u64) -> Option<u32> {
+    let parity_bits = 63 - generator.leading_zeros() as usize;
+    let syndrome = |bits: &[bool]| {
+        let mut acc = 0u64;
+        for b in bits {
+            acc = acc << 1 | u64::from(*b);
+            if acc >> parity_bits & 1 != 0 {
+                acc ^= generator;
+            }
+        }
+        acc & ((1u64 << parity_bits) - 1)
+    };
+    let s = syndrome(code);
+    if s == 0 {
+        return Some(0);
+    }
+    // The syndrome a single wrong bit at each position leaves, which is that
+    // position's power of x reduced by the generator.
+    let mut one = vec![false; code.len()];
+    let each: Vec<u64> = (0..code.len())
+        .map(|i| {
+            one[i] = true;
+            let r = syndrome(&one);
+            one[i] = false;
+            r
+        })
+        .collect();
+    if let Some(at) = each.iter().position(|r| *r == s) {
+        code[at] = !code[at];
+        return Some(1);
+    }
+    for i in 0..code.len() {
+        let want = s ^ each[i];
+        if let Some(j) = each.iter().position(|r| *r == want) {
+            if j == i {
+                continue;
+            }
+            code[i] = !code[i];
+            code[j] = !code[j];
+            return Some(2);
+        }
+    }
+    None
+}
+
 /// The parity a systematic BCH or CRC encoder appends: the message shifted
 /// up by the generator's degree, divided by the generator, remainder kept.
 ///
@@ -925,6 +989,46 @@ mod tests {
     /// puts its message bits at 0 to 20 and its parity at 21 to 30, least
     /// significant bit first on the air, so a FLEX word is this codeword
     /// read from the top down.
+    /// The search decoder against the field decoder: the same BCH(31,21)
+    /// code, the same corrections, on the paging generator they both know.
+    /// Then the Iridium generator, which [`bch31_21`] cannot read because
+    /// its field is built on another primitive polynomial.
+    #[test]
+    fn bch_repair2_agrees_with_the_field_decoder_and_reads_another_generator() {
+        let message: Vec<bool> = (0..21).map(|i| i % 3 == 0).collect();
+        let code = |generator: u64| {
+            let parity = bch_parity(&message, generator, 10);
+            let mut out = message.clone();
+            out.extend((0..10).rev().map(|i| parity >> i & 1 != 0));
+            out
+        };
+        for generator in [BCH_31_21_GEN, BCH_31_21_IRIDIUM_GEN] {
+            let word = code(generator);
+            let mut clean = word.clone();
+            assert_eq!(bch_repair2(&mut clean, generator), Some(0));
+            assert_eq!(clean, word);
+            for (a, b) in [(0usize, None), (4, None), (0, Some(30)), (7, Some(19))] {
+                let mut hurt = word.clone();
+                hurt[a] = !hurt[a];
+                if let Some(b) = b {
+                    hurt[b] = !hurt[b];
+                }
+                let wrong = 1 + u32::from(b.is_some());
+                assert_eq!(bch_repair2(&mut hurt, generator), Some(wrong), "{a},{b:?}");
+                assert_eq!(hurt, word, "{generator} left {a},{b:?} wrong");
+            }
+            // Three is past what ten parity bits can place, and what comes
+            // back is either a refusal or a different codeword; either way
+            // it is never the message that was sent.
+            let mut hurt = word.clone();
+            for at in [2, 11, 23] {
+                hurt[at] = !hurt[at];
+            }
+            bch_repair2(&mut hurt, generator);
+            assert_ne!(hurt, word);
+        }
+    }
+
     #[test]
     fn bch31_21_corrects_two_wrong_bits_and_matches_multimon() {
         let encode = |message: &[bool]| {
