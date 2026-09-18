@@ -84,6 +84,20 @@ struct Args {
     #[arg(long, value_name = "PORT", default_value_t = 30005)]
     net_bo_port: u16,
 
+    /// Take frames from somebody else on these ports, comma separated, and
+    /// republish them. An mlat client hands its results back this way
+    #[arg(long, value_name = "PORTS", value_delimiter = ',')]
+    net_bi_port: Vec<u16>,
+
+    /// Where this receiver is, in degrees. A position frame then resolves
+    /// against it rather than waiting for the other half of its pair
+    #[arg(long, value_name = "DEG", allow_negative_numbers = true)]
+    lat: Option<f64>,
+
+    /// Where this receiver is, in degrees
+    #[arg(long, value_name = "DEG", allow_negative_numbers = true)]
+    lon: Option<f64>,
+
     /// Serve the samples on to other receivers over iqstream, as addr:port
     /// or a bare port. One aerial then feeds this and whatever else wants it
     #[arg(long, value_name = "ADDR")]
@@ -112,19 +126,38 @@ fn main() -> Result<()> {
         }
     }
 
+    let incoming: Vec<std::sync::mpsc::Receiver<Vec<u8>>> = args
+        .net_bi_port
+        .iter()
+        .filter(|p| **p > 0)
+        .map(|port| {
+            let rx = net::accept_frames(&args.net_bind_address, *port)
+                .with_context(|| format!("cannot serve port {port}"))?;
+            if !args.quiet {
+                println!("input  on {}:{port}", args.net_bind_address);
+            }
+            Ok(rx)
+        })
+        .collect::<Result<_>>()?;
+
     match (&args.file, &args.iqstream) {
         (Some(path), _) => from_file(&args, path, ports),
         (None, Some(addr)) => {
-            let dev = remote::iqstream::Device::open(addr)
-                .with_context(|| format!("iqstream {addr}"))?;
-            from_radio(&args, Box::new(dev), true, ports)
+            let dev =
+                remote::iqstream::Device::open(addr).with_context(|| format!("iqstream {addr}"))?;
+            from_radio(&args, Box::new(dev), true, ports, incoming)
         }
         (None, None) => {
             let dev = rtlsdr::RtlSdr::open_by_id(&args.device_index)
                 .with_context(|| format!("no RTL-SDR {}", args.device_index))?;
-            from_radio(&args, Box::new(dev), false, ports)
+            from_radio(&args, Box::new(dev), false, ports, incoming)
         }
     }
+}
+
+/// Where the aerial is, for the cheap half of CPR.
+fn station(args: &Args) -> Option<(f64, f64)> {
+    args.lat.zip(args.lon)
 }
 
 /// Where a decoded frame goes
@@ -149,7 +182,11 @@ fn serve(args: &Args, port: u16) -> Result<Option<net::Fanout>> {
 /// A subscriber here is reading the same tuner, which is how one aerial feeds
 /// this and a second receiver at once. Not tunable: the dial belongs to
 /// whoever this is decoding for.
-fn listen(args: &Args, center_hz: u64, rate: f64) -> Result<Option<std::sync::Arc<iqstream::Server>>> {
+fn listen(
+    args: &Args,
+    center_hz: u64,
+    rate: f64,
+) -> Result<Option<std::sync::Arc<iqstream::Server>>> {
     let Some(spec) = &args.iqstream_listen else { return Ok(None) };
     let addr: std::net::SocketAddr = match spec.parse() {
         Ok(a) => a,
@@ -225,7 +262,11 @@ impl Reader {
         self.book = book.into_inner();
 
         let now = chrono::Utc::now();
-        for f in &self.frames {
+        // Taken out of the way, because publishing borrows the rest of the
+        // reader: the buffer goes back afterwards so a block costs no
+        // allocation.
+        let frames = std::mem::take(&mut self.frames);
+        for f in &frames {
             // Correcting a flipped bit is arithmetic on the frame rather than
             // signal processing, so it happens here, as it does in the
             // receiver's own Mode S node.
@@ -233,34 +274,53 @@ impl Reader {
                 17 | 18 => adsb::fix_single_bit(&f.bytes).unwrap_or_else(|| f.bytes.clone()),
                 _ => f.bytes.clone(),
             };
-            let Ok(frame) = adsb::parse(&bytes) else { continue };
-            self.kept += 1;
+            let clock =
+                (f.at_sample as f64 * BEAST_CLOCK_HZ / self.rate) as u64 & 0x0000_ffff_ffff_ffff;
+            self.publish(&bytes, clock, f.rssi_dbfs, ports, now);
+        }
+        self.frames = frames;
+        self.sbs.expire();
+    }
 
-            if self.raw || ports.avr.is_some() {
-                let line = net::avr(&bytes);
-                if self.raw {
-                    print!("{line}");
-                }
-                if let Some(p) = &ports.avr {
-                    p.send(line.as_bytes());
-                }
+    /// One frame out on every port, whether it was heard here or handed back
+    /// by somebody else.
+    fn publish(
+        &mut self,
+        bytes: &[u8],
+        clock: u64,
+        rssi_dbfs: f32,
+        ports: &Ports,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Ok(frame) = adsb::parse(bytes) else { return };
+        self.kept += 1;
+        if self.raw || ports.avr.is_some() {
+            let line = net::avr(bytes);
+            if self.raw {
+                print!("{line}");
             }
-            if let Some(p) = &ports.beast {
-                let clock =
-                    (f.at_sample as f64 * BEAST_CLOCK_HZ / self.rate) as u64 & 0x0000_ffff_ffff_ffff;
-                p.send(&net::beast(&bytes, clock, f.rssi_dbfs));
-            }
-            if let Some(p) = &ports.sbs {
-                for line in self.sbs.lines(&frame, now) {
-                    p.send(format!("{line}\r\n").as_bytes());
-                }
+            if let Some(p) = &ports.avr {
+                p.send(line.as_bytes());
             }
         }
-        self.sbs.expire();
+        if let Some(p) = &ports.beast {
+            p.send(&net::beast(bytes, clock, rssi_dbfs));
+        }
+        if let Some(p) = &ports.sbs {
+            for line in self.sbs.lines(&frame, now) {
+                p.send(format!("{line}\r\n").as_bytes());
+            }
+        }
     }
 }
 
-fn from_radio(args: &Args, mut dev: Box<dyn Device>, remote: bool, ports: Ports) -> Result<()> {
+fn from_radio(
+    args: &Args,
+    mut dev: Box<dyn Device>,
+    remote: bool,
+    ports: Ports,
+    incoming: Vec<std::sync::mpsc::Receiver<Vec<u8>>>,
+) -> Result<()> {
     // A remote server owns its own tuner: the rate and the dial are whatever
     // it is already streaming, and asking is how a shared dongle gets shared.
     if !remote {
@@ -288,6 +348,7 @@ fn from_radio(args: &Args, mut dev: Box<dyn Device>, remote: bool, ports: Ports)
     let mut stream = dev.start_rx().context("the radio would not start")?;
     let mut reader = Reader::new(rate, args.raw);
     reader.server = listen(args, center, rate)?;
+    reader.sbs.here = station(args);
     let began = std::time::Instant::now();
     let mut said = began;
     loop {
@@ -296,6 +357,14 @@ fn from_radio(args: &Args, mut dev: Box<dyn Device>, remote: bool, ports: Ports)
             Err(e) => bail!("the radio stopped: {e}"),
         };
         reader.block(&buf.samples, &ports);
+        // Whatever came back from an mlat client since the last block, put
+        // out as though it had been heard here, which is what
+        // `--forward-mlat` means to everything downstream.
+        for rx in &incoming {
+            while let Ok(bytes) = rx.try_recv() {
+                reader.publish(&bytes, 0, f32::NEG_INFINITY, &ports, chrono::Utc::now());
+            }
+        }
         if !args.quiet && said.elapsed().as_secs() >= 10 {
             said = std::time::Instant::now();
             eprintln!(
@@ -324,6 +393,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
     }
     let mut reader = Reader::new(rate, args.raw);
     reader.server = listen(args, buf.center.0, rate)?;
+    reader.sbs.here = station(args);
     for block in buf.samples.chunks(65_536) {
         reader.block(block, &ports);
     }

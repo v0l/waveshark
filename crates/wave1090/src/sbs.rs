@@ -21,6 +21,13 @@ const PAIR_LIFE: Duration = Duration::from_secs(10);
 #[derive(Default)]
 pub struct Sbs {
     seen: HashMap<u32, Aircraft>,
+    /// Where the receiver is, when an operator said
+    ///
+    /// A position frame resolves against it on its own, so the first one
+    /// after an aircraft appears is a position rather than a blank waiting
+    /// for the other half of its pair. Within 180 nautical miles, which is
+    /// further than a transponder is heard from.
+    pub here: Option<(f64, f64)>,
 }
 
 #[derive(Default)]
@@ -41,6 +48,7 @@ impl Sbs {
         // decodes as it demodulates, so a message is generated and logged at
         // the same moment.
         let head = |kind: u8| format!("MSG,{kind},1,1,{hex},1,{stamp},{stamp}");
+        let here = self.here;
         let plane = self.seen.entry(icao).or_default();
 
         match &f.kind {
@@ -49,7 +57,7 @@ impl Sbs {
                 vec![format!("{},{callsign},,,,,,,,,,0", head(1))]
             }
             Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
-                let at = plane.fix((*lat_cpr, *lon_cpr), *odd);
+                let at = plane.fix((*lat_cpr, *lon_cpr), *odd, here);
                 let alt = altitude_ft.map(|a| a.to_string()).unwrap_or_default();
                 let (lat, lon) = match at {
                     Some((lat, lon)) => (format!("{lat:.5}"), format!("{lon:.5}")),
@@ -59,7 +67,7 @@ impl Sbs {
                 vec![format!("{},{call},{alt},,,{lat},{lon},,,,,0", head(3))]
             }
             Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
-                let at = plane.fix((*lat_cpr, *lon_cpr), *odd);
+                let at = plane.fix((*lat_cpr, *lon_cpr), *odd, here);
                 let (lat, lon) = match at {
                     Some((lat, lon)) => (format!("{lat:.5}"), format!("{lon:.5}")),
                     None => (String::new(), String::new()),
@@ -109,7 +117,7 @@ impl Aircraft {
     ///
     /// Globally from a fresh pair, and from the last known position where
     /// only one half is fresh, which is the same order dump1090 resolves in.
-    fn fix(&mut self, cpr: (u32, u32), odd: bool) -> Option<(f64, f64)> {
+    fn fix(&mut self, cpr: (u32, u32), odd: bool, here: Option<(f64, f64)>) -> Option<(f64, f64)> {
         let now = Instant::now();
         match odd {
             true => self.odd = Some((cpr, now)),
@@ -125,7 +133,7 @@ impl Aircraft {
                 return self.at;
             }
         }
-        self.at = self.at.map(|reference| adsb::cpr_local(reference, cpr, odd));
+        self.at = self.at.or(here).map(|reference| adsb::cpr_local(reference, cpr, odd));
         self.at
     }
 }

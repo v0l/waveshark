@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 /// A port and everybody listening on it
@@ -38,6 +39,107 @@ impl Fanout {
         let mut clients = self.clients.lock().unwrap();
         clients.retain_mut(|c| c.write_all(bytes).is_ok());
     }
+}
+
+/// Frames arriving from somebody else, on a port dump1090 calls `net-bi`.
+///
+/// This is how an mlat client hands its results back: it computes a position
+/// from several receivers and returns synthetic frames, which the receiver
+/// republishes so everything downstream sees the aircraft. Beast and AVR are
+/// both accepted, since a client picks either.
+pub fn accept_frames(addr: &str, port: u16) -> std::io::Result<Receiver<Vec<u8>>> {
+    let listener = TcpListener::bind((addr, port))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for sock in listener.incoming().flatten() {
+            let tx = tx.clone();
+            std::thread::spawn(move || read_frames(sock, tx));
+        }
+    });
+    Ok(rx)
+}
+
+fn read_frames(sock: TcpStream, tx: Sender<Vec<u8>>) {
+    use std::io::Read;
+    let mut sock = sock;
+    let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+    loop {
+        let n = match sock.read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        while let Some((frame, used)) = next_frame(&buf) {
+            buf.drain(..used);
+            if let Some(f) = frame
+                && tx.send(f).is_err()
+            {
+                return;
+            }
+        }
+        // A client sending nothing a frame recognises is a client to stop
+        // buffering for.
+        if buf.len() > 64 * 1024 {
+            buf.clear();
+        }
+    }
+}
+
+/// The next frame in `buf`, and how many bytes it consumed.
+///
+/// `None` for the whole answer means there is not enough yet; a `Some` with a
+/// `None` frame is a byte skipped as noise between frames.
+fn next_frame(buf: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+    match buf.first()? {
+        0x1a => {
+            let kind = *buf.get(1)?;
+            let len = match kind {
+                b'1' => 2,
+                b'2' => 7,
+                b'3' => 14,
+                // Not a frame type, so the marker was data: step over it.
+                _ => return Some((None, 1)),
+            };
+            // Six of timestamp and one of level ahead of the frame, with
+            // every 0x1a in any of it doubled.
+            let mut out = Vec::with_capacity(len + 7);
+            let mut i = 2;
+            while out.len() < len + 7 {
+                let b = *buf.get(i)?;
+                if b == 0x1a {
+                    if *buf.get(i + 1)? != 0x1a {
+                        return Some((None, 1));
+                    }
+                    i += 1;
+                }
+                out.push(b);
+                i += 1;
+            }
+            Some((Some(out.split_off(7)), i))
+        }
+        b'*' | b'@' => {
+            let end = buf.iter().position(|b| *b == b';')?;
+            // A `@` line carries a timestamp ahead of the frame, in hex; the
+            // frame is the tail, and its length says where it starts.
+            let body = &buf[1..end];
+            let bytes = unhex(body).filter(|b| matches!(b.len(), 7 | 14)).or_else(|| {
+                unhex(body).and_then(|b| (b.len() > 14).then(|| b[b.len() - 14..].to_vec()))
+            });
+            Some((bytes, end + 1))
+        }
+        _ => Some((None, 1)),
+    }
+}
+
+fn unhex(s: &[u8]) -> Option<Vec<u8>> {
+    let s: Vec<u8> = s.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
+    (s.len() % 2 == 0 && s.iter().all(|c| c.is_ascii_hexdigit()))
+        .then(|| {
+            s.chunks(2)
+                .map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok())
+                .collect::<Option<Vec<u8>>>()
+        })
+        .flatten()
 }
 
 /// A frame as AVR hex, the format dump1090 serves on 30002: `*8d4840d6...;`
@@ -102,6 +204,32 @@ mod tests {
         assert_eq!(&out[2..8], &[0, 0, 0, 0, 0, 1]);
         assert_eq!(out[8], 127, "half amplitude is half of full scale");
         assert_eq!(&out[9..], &[0x1a, 0x1a, 0x00, 0x1a, 0x1a, 0, 0, 0, 0]);
+    }
+
+    /// What goes out has to come back in: an mlat client returns Beast, and a
+    /// frame that does not survive the round trip is one nothing downstream
+    /// ever sees.
+    #[test]
+    fn a_beast_frame_reads_back_as_the_frame_that_was_written() {
+        let frame = [0x8d, 0x1a, 0x40, 0xd6, 0x1a, 0x1a, 0, 0, 0, 0, 0, 0, 0, 9];
+        let wire = beast(&frame, 0x1234_5678, -12.0);
+        let (got, used) = next_frame(&wire).expect("a whole frame");
+        assert_eq!(got.as_deref(), Some(&frame[..]));
+        assert_eq!(used, wire.len(), "and nothing left over");
+        // Half a frame is not yet an answer, rather than a wrong one.
+        assert!(next_frame(&wire[..8]).is_none());
+    }
+
+    #[test]
+    fn an_avr_line_reads_back_as_its_frame() {
+        let line = b"*8d4840d6202cc371c32ce0576098;\r\n";
+        let (got, used) = next_frame(line).expect("a whole line");
+        assert_eq!(got.expect("a frame").len(), 14);
+        assert_eq!(used, 30);
+        // With a timestamp ahead of it, which is what `@` means.
+        let stamped = b"@0000000000008d4840d6202cc371c32ce0576098;";
+        let (got, _) = next_frame(stamped).expect("a whole line");
+        assert_eq!(got.expect("a frame").len(), 14);
     }
 
     #[test]
