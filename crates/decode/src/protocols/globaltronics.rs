@@ -1,20 +1,14 @@
-//! Globaltronics GT-WT-02 and GT-WT-03, the thermo-hygrometers sold with Aldi
-//! and Lidl weather stations across Europe.
+//! Globaltronics GT-WT-02, a thermo-hygrometer sold with Aldi and Lidl
+//! weather stations across Europe.
 //!
-//! Same manufacturer, unrelated frames. The 02 is PPM with millisecond symbols
-//! and a nibble-sum checksum; the 03 is PWM with a sync mark, inverted, and a
-//! rolling-key checksum that is neither a CRC nor a sum.
+//! PPM with millisecond symbols and a nibble-sum checksum. The GT-WT-03 from
+//! the same manufacturer is an unrelated frame, and is a description in the
+//! published tree rather than code here.
 //!
-//! GT-WT-02, 37 bits:
+//! 37 bits:
 //!
 //! ```text
 //! IIIIIIII BMCCTTTT TTTTTTTT HHHHHHHX XXXXX
-//! ```
-//!
-//! GT-WT-03, 41 bits, the last a stop bit:
-//!
-//! ```text
-//! IIIIIIII HHHHHHHH BMCCTTTT TTTTTTTT XXXXXXXX 1
 //! ```
 //!
 //! - `I` id, redrawn when the batteries are changed
@@ -95,75 +89,6 @@ fn nibble_sum(b: &[u8]) -> u8 {
             .sum::<u16>()
             + (b[3] & 0x0e) as u16;
     (s & 0x3f) as u8
-}
-
-pub struct GtWt03;
-
-/// Forty data bits plus the stop bit, which has to be counted: the frame
-/// length is also the spacing between repeats.
-const WT03_BITS: usize = 41;
-
-impl Protocol for GtWt03 {
-    fn name(&self) -> &'static str {
-        "GT-WT03"
-    }
-
-    fn timing(&self) -> Timing {
-        Timing::pwm_sync(256, 625, 855, 3000)
-    }
-
-    fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
-        let bits = bits.inverted();
-        let b = find_frame_bits(&bits, WT03_BITS, |b| {
-            b[..5].iter().any(|v| *v != 0) && roll_byte(&b[..4], 0x3100) ^ b[4] ^ 0x2d == 0
-        })
-        .ok_or(match bits.len() {
-            n if n < WT03_BITS => DecodeError::WrongLength { got: n, want: WT03_BITS },
-            _ => DecodeError::CrcFailed,
-        })?;
-
-        let channel = (b[2] >> 4) & 0x03;
-        let temperature = signed12(b[2], b[3]);
-        // -50.1 and 70.1 are the sensor's own out-of-range markers, so the
-        // window has to be a shade wider than its specified range.
-        if !(-50.1..=70.1).contains(&temperature) {
-            return Err(DecodeError::Implausible("temperature out of range"));
-        }
-        let humidity = humidity_pct(b[1], 20..=95)?;
-
-        let mut r = Report::new(self.name());
-        r.crc_valid = Some(true);
-        r.raw = b.clone();
-        r = r
-            .int("id", b[0] as i64)
-            .int("channel", channel as i64 + 1)
-            .float("temperature_c", temperature)
-            .int("humidity_pct", humidity as i64)
-            .bool("battery_ok", b[2] & 0x80 == 0);
-        if b[2] & 0x40 != 0 {
-            r = r.bool("button", true);
-        }
-        Ok(r)
-    }
-}
-
-/// Per byte, XOR a key into the sum for every set bit, the key rolling right
-/// from `gen` as the bits are walked MSB first and resetting at each byte.
-///
-/// The low byte of a Galois LFSR-16 seeded per byte, in other words, which is
-/// why neither a CRC nor a sum reproduces it.
-fn roll_byte(data: &[u8], r#gen: u16) -> u8 {
-    let mut sum = 0u8;
-    for &byte in data {
-        let mut key = r#gen;
-        for i in (0..8).rev() {
-            if byte >> i & 1 != 0 {
-                sum ^= key as u8;
-            }
-            key >>= 1;
-        }
-    }
-    sum
 }
 
 /// A 12 bit two's complement temperature split across two bytes, in tenths.
@@ -251,58 +176,5 @@ mod tests {
             broken.push(if i == 18 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
         }
         assert_eq!(GtWt02.decode(&broken), Err(DecodeError::CrcFailed));
-    }
-
-    fn wt03(id: u8, channel: u8, temp_c: f64, humidity: u8, battery_low: bool) -> BitBuffer {
-        let raw = ((temp_c * 10.0).round() as i16 & 0x0fff) as u16;
-        let mut b = [0u8; 6];
-        b[0] = id;
-        b[1] = humidity;
-        b[2] = (if battery_low { 0x80 } else { 0 }) | (channel << 4) | (raw >> 8) as u8;
-        b[3] = raw as u8;
-        b[4] = roll_byte(&b[..4], 0x3100) ^ 0x2d;
-        b[5] = 0x80; // the stop bit
-        bits_of(&b, WT03_BITS).inverted()
-    }
-
-    #[test]
-    fn decodes_a_gt_wt_03_frame() {
-        let r = GtWt03.decode(&wt03(0x17, 0, 26.1, 48, false)).unwrap();
-        assert_eq!(r.get("id"), Some(&Value::Int(0x17)));
-        assert_eq!(r.get("channel"), Some(&Value::Int(1)));
-        assert_eq!(r.get("temperature_c"), Some(&Value::Float(26.1)));
-        assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));
-        assert_eq!(r.crc_valid, Some(true));
-    }
-
-    #[test]
-    fn a_gt_wt_03_frame_below_zero_decodes() {
-        let r = GtWt03.decode(&wt03(0x01, 2, -4.4, 55, true)).unwrap();
-        assert_eq!(r.get("temperature_c"), Some(&Value::Float(-4.4)));
-        assert_eq!(r.get("channel"), Some(&Value::Int(3)));
-        assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
-    }
-
-    #[test]
-    fn a_corrupt_gt_wt_03_frame_fails_its_checksum() {
-        let f = wt03(0x17, 0, 26.1, 48, false);
-        let mut broken = BitBuffer::new();
-        for i in 0..f.len() {
-            broken.push(if i == 12 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
-        }
-        assert_eq!(GtWt03.decode(&broken), Err(DecodeError::CrcFailed));
-    }
-
-    #[test]
-    fn the_rolling_checksum_is_not_a_sum_or_a_crc() {
-        // Worth pinning: it looks like both and is neither, so a future
-        // refactor reaching for crc8 here would break it silently.
-        assert_eq!(roll_byte(&[0x00, 0x00, 0x00, 0x00], 0x3100), 0x00);
-        assert_eq!(roll_byte(&[0x80, 0x00, 0x00, 0x00], 0x3100), 0x00);
-        assert_eq!(roll_byte(&[0x01, 0x00, 0x00, 0x00], 0x3100), 0x62);
-        assert_eq!(
-            roll_byte(&[0xff, 0x00, 0x00, 0x00], 0x3100),
-            0x62 ^ 0xc4 ^ 0x88 ^ 0x10 ^ 0x20 ^ 0x40 ^ 0x80
-        );
     }
 }
