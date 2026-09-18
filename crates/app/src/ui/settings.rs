@@ -2545,7 +2545,7 @@ impl App {
         let found = self
             .devices
             .iter()
-            .find(|d| d.addr.as_deref() == Some(addr.as_str()))
+            .find(|d| d.addr.as_deref().is_some_and(|a| crate::devices::same_server(a, &addr)))
             .cloned()
             .ok_or_else(|| format!("{addr} did not answer"))?;
         self.select_device(ctx, found);

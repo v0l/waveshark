@@ -254,7 +254,17 @@ pub fn add_stream(proto: remote::Proto, addr: &str, label: &str) -> Option<Strin
 }
 
 pub fn remove_stream(proto: remote::Proto, addr: &str) {
-    STREAMS.lock().retain(|r| !(r.addr == addr && r.proto == proto));
+    STREAMS.lock().retain(|r| !(same_server(&r.addr, addr) && r.proto == proto));
+}
+
+/// Whether two addresses name the same server, tuner id or not.
+///
+/// A record is one server and an entry is one of its tuners, so the entry
+/// carries a `#id` the record never had. Comparing the two as strings loses a
+/// radio the operator is looking straight at: the × forgets nothing and the
+/// radio just added cannot be found again.
+pub fn same_server(a: &str, b: &str) -> bool {
+    remote::split_stream(a).0 == remote::split_stream(b).0
 }
 
 /// Ask a server what it is streaming so the entry can carry its rate and its
@@ -693,6 +703,26 @@ mod tests {
         assert_eq!(streams().iter().filter(|r| r.addr == "radarpi.test:1234").count(), 1);
         remove_stream(iqs, "radarpi.test:1234");
         assert!(!streams().iter().any(|r| r.addr == "radarpi.test:1234"));
+    }
+
+    /// A server that answered is forgotten by the tuner the operator sees.
+    ///
+    /// The record is the server and the entry is one of its tuners, so what
+    /// the × hands back carries a `#id` the record never had. Matched as
+    /// strings, the × did nothing and a radio just added could not be found
+    /// in the list it had been added to, which read as the server not
+    /// answering when it had.
+    #[test]
+    fn a_tuner_id_on_the_address_still_names_its_server() {
+        use remote::Proto;
+        let iqs = Proto::IqStream;
+        add_stream(iqs, "radarpi2.test:1234", "Mast");
+        assert!(same_server("radarpi2.test:1234#0", "radarpi2.test:1234"));
+        assert!(!same_server("radarpi2.test:1234", "other.test:1234"));
+        // A second dongle on the same server is the same record, not another.
+        assert!(same_server("radarpi2.test:1234#1", "radarpi2.test:1234#0"));
+        remove_stream(iqs, "radarpi2.test:1234#0");
+        assert_eq!(streams().iter().filter(|r| r.addr == "radarpi2.test:1234").count(), 0);
     }
 
     #[test]
