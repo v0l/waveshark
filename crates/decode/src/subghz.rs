@@ -557,20 +557,19 @@ TE: 400
     #[test]
     fn every_key_protocol_written_is_read_back_as_the_same_code() {
         use crate::protocol::Value;
-        use crate::protocols::keyfob;
         let holtek = 0x50_d2_aa_aa_a1_u64;
-        let princeton = crate::script::named("Princeton").unwrap();
-        let cases: [(&str, &str, u64, &dyn Protocol); 8] = [
-            ("Princeton", "code", 0xa1_3f_08, &princeton),
-            ("Nice-Flo", "code", 0xabc, &keyfob::NiceFlo),
-            ("Holtek", "code", holtek, &keyfob::Holtek),
-            ("Holtek-HT12x", "code", 0xabc, &keyfob::HoltekHt12x),
-            ("Bett", "code", 0x3_ab_cd, &keyfob::Bett),
-            ("Ansonic", "code", 0xabc, &keyfob::Ansonic),
-            ("Linear", "code", 0x2aa, &keyfob::Linear),
-            ("Linear-Delta3", "cnt", 0x5a, &keyfob::LinearDelta3),
+        let cases: [(&str, &str, u64); 8] = [
+            ("Princeton", "code", 0xa1_3f_08),
+            ("Nice-Flo", "code", 0xabc),
+            ("Holtek", "code", holtek),
+            ("Holtek-HT12x", "code", 0xabc),
+            ("Bett", "code", 0x3_ab_cd),
+            ("Ansonic", "code", 0xabc),
+            ("Linear", "code", 0x2aa),
+            ("Linear-Delta3", "cnt", 0x5a),
         ];
-        for (name, field, code, decoder) in cases {
+        for (name, field, code) in cases {
+            let decoder = crate::script::named(name).unwrap();
             let fields = vec![(field.to_string(), Value::Int(code as i64))];
             let body = key_of_decode(name, &fields).unwrap_or_else(|| panic!("{name} has a key"));
             let save = Save { frequency: 433_920_000, preset: Preset::Ook, body };

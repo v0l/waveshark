@@ -12,7 +12,7 @@
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
 use decode::protocols::{
-    Acurite609Txc, AcuriteTower, Bresser3Ch, Ev1527, FineOffsetWh51, GtWt02, GtWt03, LacrosseIt,
+    Acurite609Txc, AcuriteTower, Bresser3Ch, FineOffsetWh51, GtWt02, GtWt03, LacrosseIt,
     LacrosseTx141thBv2, OregonV3, Rubicson, SomfyRts, X10Rf,
 };
 use decode::{Protocol, Protocols};
@@ -168,7 +168,7 @@ fn an_ev1527_remote_press_decodes_from_its_timings() {
     pulses.push((464, 10_000));
     let pkg = package(pulses);
 
-    let r = Ev1527.decode_package(&pkg).expect("decode");
+    let r = decode::script::named("Generic-Remote").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0xa13f)));
     assert_eq!(r.get("cmd"), Some(&Value::Int(8)));
     assert_eq!(r.crc_valid, None);

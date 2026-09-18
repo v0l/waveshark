@@ -1,0 +1,11 @@
+# Linear Delta3: an 8-bit rolling-code remote whose short mark is a 1, the
+# slicer's own polarity, so the frame is not inverted. The code is a
+# per-press counter the receiver compares against a window, which is all a
+# listener without the learned key can see.
+name: Linear-Delta3
+timing: { pwm: [500, 2000], reset_us: 4000 }
+frame: { bits: 8, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: cnt, bits: 8 }
+vectors:
+  - { hex: "5a", fields: { cnt: 0x5a } }

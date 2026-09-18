@@ -1,33 +1,53 @@
 //! Protocols described rather than written: a timing table, a way of finding
-//! the frame, and a field layout, read out of a YAML file into one
+//! the frame, its checks and a field layout, read out of a YAML file into one
 //! [`Protocol`] that decodes and encodes from the same description.
 //!
 //! The layout reads both ways because every bit of the frame belongs to
-//! exactly one field in turn, or to a `const`. A field with an `at` is a
-//! view over bits some other field owns, reported on decode and ignored on
-//! encode, which is how a keyfob shows a `serial` and a `btn` inside the one
-//! `code` it is keyed by. Every description carries `vectors`, a frame and
-//! the report it reads as, and [`check`] runs each one through both
-//! directions and through the slicer.
+//! exactly one field in turn, a `const`, or a nameless slot a check fills. A
+//! field with an `at` is a view over bits some other field owns, reported on
+//! decode and ignored on encode, which is how a keyfob shows a `serial` and a
+//! `btn` inside the one `code` it is keyed by. Every description carries
+//! `vectors`, a frame and the report it reads as, and [`check`] runs each
+//! one through both directions and through the slicer.
+//!
+//! The built-in descriptions are the ones in `crates/decode/protocols` at
+//! the time of the build. The same files are published as a dataset, so a
+//! description fixed after a release reaches a receiver that fetches it:
+//! [`install`] replaces the built-in set by name, and a user's own files
+//! under `~/.config/waveshark/protocols` replace both. A description that
+//! fails its vectors is refused at install rather than run, which is what
+//! keeps a bad push from reading worse than the build it replaces.
 
 pub mod desc;
 
-use crate::bits::BitBuffer;
+use crate::bits::{self, BitBuffer};
 use crate::protocol::{DecodeError, Protocol, Report, Value};
+use crate::protocols::find_frame_bits;
 use crate::protocols::keyfob::shared::{find_and_parse, plausible};
-use crate::protocols::{find_frame_bits, keyfob::encode};
-use crate::slicer::{Coding, Timing, slice};
+use crate::slicer::{Coding, Timing, differential_manchester_decode, manchester_decode, slice};
 use common::pulse::{Package, Pulse};
 pub use desc::Desc;
-use desc::{Field, Item, Kind};
+use desc::{Check, CheckKind, Convert, Decode, Field, Find, Item, Kind, Transform};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// The descriptions built in, the files under `crates/decode/protocols` in
 /// the layout waveshark-protocols keeps: one directory per kind of device
-pub const BUILTIN: &[&str] =
-    &[include_str!("../../protocols/weather/nexus.yaml"), include_str!("../../protocols/remotes/princeton.yaml")];
+pub const BUILTIN: &[&str] = &[
+    include_str!("../../protocols/weather/nexus.yaml"),
+    include_str!("../../protocols/remotes/princeton.yaml"),
+    include_str!("../../protocols/remotes/came.yaml"),
+    include_str!("../../protocols/remotes/came24.yaml"),
+    include_str!("../../protocols/remotes/holtek.yaml"),
+    include_str!("../../protocols/remotes/holtek_ht12x.yaml"),
+    include_str!("../../protocols/remotes/linear.yaml"),
+    include_str!("../../protocols/remotes/linear_delta3.yaml"),
+    include_str!("../../protocols/remotes/nice_flo.yaml"),
+    include_str!("../../protocols/remotes/ansonic.yaml"),
+    include_str!("../../protocols/remotes/bett.yaml"),
+    include_str!("../../protocols/remotes/ev1527.yaml"),
+];
 
 /// Every built-in description as a protocol
 pub fn builtin() -> Vec<Scripted> {
@@ -111,6 +131,7 @@ pub struct Scripted {
     desc: Desc,
     timing: Timing,
     name: &'static str,
+    sync: Option<BitBuffer>,
 }
 
 /// Why a frame could not be built from the fields given
@@ -137,32 +158,48 @@ impl Scripted {
     pub fn new(desc: Desc) -> Self {
         let timing = desc.timing.timing().expect("validated");
         let name = intern(&desc.name);
-        Self { desc, timing, name }
+        let sync = desc
+            .frame
+            .sync
+            .as_deref()
+            .map(|h| hex_bits(h, desc.frame.sync_bits).expect("validated"));
+        Self { desc, timing, name, sync }
     }
 
     pub fn desc(&self) -> &Desc {
         &self.desc
     }
 
-    /// Read one frame starting at `start`, or say why it is not one
-    pub fn read(&self, bits: &BitBuffer, start: usize) -> Result<Report, DecodeError> {
-        if start + self.desc.frame.bits > bits.len() {
-            return Err(DecodeError::WrongLength {
-                got: bits.len() - start,
-                want: self.desc.frame.bits,
-            });
+    /// Read a located frame of exactly the frame's bits, as sliced
+    fn read_air(&self, frame: &BitBuffer) -> Result<Report, DecodeError> {
+        self.read(&transform(frame, &self.desc.transform))
+    }
+
+    /// Read one frame as the fields see it, or say why it is not one
+    pub fn read(&self, frame: &BitBuffer) -> Result<Report, DecodeError> {
+        let want = self.desc.frame.bits;
+        if frame.len() < want {
+            return Err(DecodeError::WrongLength { got: frame.len(), want });
         }
         if self.desc.frame.min_transitions > 0 {
-            let n = self.desc.frame.bits.min(64);
-            let code = extract(bits, start, n);
-            if !plausible(code, n as u32) {
+            let n = want.min(64);
+            if !plausible(extract(frame, 0, n), n as u32) {
                 return Err(DecodeError::NotThisProtocol);
             }
         }
-        let mut walk = Walk { bits, start, cursor: start, read: BTreeMap::new(), id: None };
+        let mut verified = None;
+        for c in self.desc.check.iter() {
+            if !check_holds(c, frame) {
+                return Err(DecodeError::CrcFailed);
+            }
+            verified = Some(true);
+        }
+        let mut walk =
+            Walk { bits: frame, cursor: 0, read: BTreeMap::new(), id: None, model: None };
         walk.items(&self.desc.fields)?;
-        let mut r = Report::new(self.name);
-        r.raw = bits.slice(start, self.desc.frame.bits).as_padded_bytes().to_vec();
+        let mut r = Report::new(walk.model.map(|m| intern(&m)).unwrap_or(self.name));
+        r.crc_valid = verified;
+        r.raw = frame.slice(0, want).as_padded_bytes().to_vec();
         for (k, (v, reported)) in walk.read {
             if reported {
                 r.fields.insert(k, v);
@@ -183,16 +220,97 @@ impl Scripted {
             }
         }
         let mut out = BitBuffer::with_capacity(self.desc.frame.bits);
-        write_items(&self.desc.fields, fields, &mut out)?;
+        let mut w = Writer { fields, out: &mut out, checks: self.desc.check.iter().collect() };
+        w.items(&self.desc.fields)?;
+        for c in self.desc.check.iter() {
+            if let (Some(at), Some(v)) = (c.at, check_value(c, &out)) {
+                let width = c.kind.width(c.over).unwrap_or(0);
+                overwrite(&mut out, at, width, v);
+            }
+        }
         Ok(out)
     }
 
     /// The pulses one transmission of these fields is, through this
     /// protocol's timing
     pub fn package(&self, fields: &BTreeMap<String, Value>) -> Result<Package, EncodeError> {
-        let bits = self.encode(fields)?;
-        let air = if self.desc.frame.invert { bits.inverted() } else { bits };
+        let frame = self.encode(fields)?;
+        let mut air = transform(&frame, &self.desc.transform);
+        if let Some(sync) = &self.sync {
+            let skip = self.desc.frame.sync_skip.unwrap_or(self.desc.frame.sync_bits);
+            let chips = match self.desc.frame.decode {
+                Decode::None => air,
+                Decode::Manchester => manchester_chips(&air),
+                Decode::DiffManchester => diff_manchester_chips(&air),
+            };
+            let mut with = sync.slice(0, skip);
+            for i in 0..chips.len() {
+                with.push(chips.get(i).unwrap_or(false));
+            }
+            air = with;
+        }
+        if self.desc.frame.invert {
+            air = air.inverted();
+        }
         Ok(pulses(&self.timing, &air, self.desc.frame.repeats))
+    }
+
+    /// Every place a frame could start behind the sync, and the frame there
+    fn behind_sync(&self, bits: &BitBuffer) -> Vec<BitBuffer> {
+        let f = &self.desc.frame;
+        let Some(sync) = &self.sync else { return Vec::new() };
+        let want = f.bits;
+        let skip = f.sync_skip.unwrap_or(f.sync_bits);
+        let n = f.sync_bits;
+        let mut out = Vec::new();
+        if bits.len() < n {
+            return out;
+        }
+        let word = extract(sync, 0, n);
+        for at in 0..=bits.len() - n {
+            if extract(bits, at, n) != word {
+                continue;
+            }
+            let start = at + skip;
+            let frame = match f.decode {
+                Decode::None => {
+                    if start + want > bits.len() {
+                        continue;
+                    }
+                    bits.slice(start, want)
+                }
+                Decode::Manchester => manchester_decode(bits, start),
+                Decode::DiffManchester => differential_manchester_decode(bits, start, want),
+            };
+            if frame.len() >= want {
+                out.push(frame.slice(0, want));
+            }
+        }
+        out
+    }
+
+    fn rows(&self, bits: &BitBuffer) -> Option<BitBuffer> {
+        let want = self.desc.frame.bits;
+        // the slicer marks a row where it cut, which leaves the first
+        // copy's start unmarked: it is where the buffer begins
+        let mut starts = vec![0];
+        starts.extend(bits.rows().iter().copied().filter(|s| *s != 0));
+        let ends = starts.iter().skip(1).copied().chain(std::iter::once(bits.len()));
+        let rows: Vec<BitBuffer> = starts
+            .iter()
+            .copied()
+            .zip(ends)
+            .filter(|(start, end)| (want..=want + 1).contains(&(end - start)))
+            .map(|(start, _)| bits.slice(start, want))
+            .collect();
+        let alone = rows.len() == 1 && bits.len() <= want + 1;
+        let copies = self.desc.frame.copies;
+        rows.iter()
+            .find(|r| {
+                (alone || rows.iter().filter(|o| o == r).count() >= copies)
+                    && self.read_air(r).is_ok()
+            })
+            .cloned()
     }
 }
 
@@ -210,21 +328,57 @@ impl Protocol for Scripted {
     }
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
-        let want = self.desc.frame.bits;
-        match self.desc.frame.find {
-            desc::Find::Tile => find_and_parse(bits, want, self.desc.frame.invert, |b| {
-                self.read(&BitBuffer::from_bytes(b), 0).ok()
-            }),
-            desc::Find::Repeat => {
-                let bits = if self.desc.frame.invert { bits.inverted() } else { bits.clone() };
-                if bits.len() < want {
-                    return Err(DecodeError::WrongLength { got: bits.len(), want });
-                }
+        let f = &self.desc.frame;
+        let want = f.bits;
+        if let Some([lo, hi]) = f.row_bits
+            && !crate::protocols::rows_within(bits, lo..=hi)
+        {
+            return Err(DecodeError::NotThisProtocol);
+        }
+        if f.find == Find::Tile {
+            return find_and_parse(bits, want, f.invert, |b| {
+                self.read_air(&BitBuffer::from_bytes(b).slice(0, want)).ok()
+            });
+        }
+        let bits = if f.invert { bits.inverted() } else { bits.clone() };
+        if bits.len() < want {
+            return Err(DecodeError::WrongLength { got: bits.len(), want });
+        }
+        match f.find {
+            Find::Tile => unreachable!(),
+            Find::Repeat => {
                 let frame = find_frame_bits(&bits, want, |b| {
-                    self.read(&BitBuffer::from_bytes(b), 0).is_ok()
+                    self.read_air(&BitBuffer::from_bytes(b).slice(0, want)).is_ok()
                 })
                 .ok_or(DecodeError::NotThisProtocol)?;
-                self.read(&BitBuffer::from_bytes(&frame), 0)
+                self.read_air(&BitBuffer::from_bytes(&frame).slice(0, want))
+            }
+            Find::Exact => {
+                if bits.len() > want + 1 {
+                    return Err(DecodeError::WrongLength { got: bits.len(), want });
+                }
+                self.read_air(&bits.slice(0, want))
+            }
+            Find::Rows => {
+                let row = self.rows(&bits).ok_or(DecodeError::NotThisProtocol)?;
+                self.read_air(&row)
+            }
+            Find::Sync => {
+                let mut last = DecodeError::NotThisProtocol;
+                let streams: Vec<BitBuffer> = if f.either_polarity {
+                    vec![bits.clone(), bits.inverted()]
+                } else {
+                    vec![bits]
+                };
+                for s in &streams {
+                    for frame in self.behind_sync(s) {
+                        match self.read_air(&frame) {
+                            Ok(r) => return Ok(r),
+                            Err(e) => last = e,
+                        }
+                    }
+                }
+                Err(last)
             }
         }
     }
@@ -233,11 +387,11 @@ impl Protocol for Scripted {
 /// One pass over the layout, reading
 struct Walk<'a> {
     bits: &'a BitBuffer,
-    start: usize,
     cursor: usize,
     /// Every value read, hidden ones too, and whether it is reported
     read: BTreeMap<String, (Value, bool)>,
     id: Option<String>,
+    model: Option<String>,
 }
 
 impl Walk<'_> {
@@ -249,8 +403,11 @@ impl Walk<'_> {
         for it in items {
             match it {
                 Item::Group(g) => {
-                    let branch = if self.holds(&g.when) { &g.fields } else { &g.otherwise };
-                    self.items(branch)?;
+                    let taken = self.holds(&g.when);
+                    if taken && let Some(m) = &g.model {
+                        self.model = Some(m.clone());
+                    }
+                    self.items(if taken { &g.fields } else { &g.otherwise })?;
                 }
                 Item::Field(f) => self.field(f)?,
             }
@@ -264,28 +421,39 @@ impl Walk<'_> {
         {
             return Ok(());
         }
+        if f.kind == Kind::Format {
+            let text = format_text(&f.format, &self.read)?;
+            self.read.insert(f.name.clone(), (Value::Text(text), !f.hidden));
+            return Ok(());
+        }
         let pos = match f.at {
-            Some(at) => self.start + at,
+            Some(at) => at,
             None => {
                 let p = self.cursor;
                 self.cursor += f.bits;
                 p
             }
         };
-        let raw = extract(self.bits, pos, f.bits);
+        let raw = raw_bits(f, extract(self.bits, pos, f.bits));
         if let Some(c) = f.r#const {
             if raw != c {
                 return Err(DecodeError::NotThisProtocol);
             }
             return Ok(());
         }
-        let v = value_of(f, raw);
-        if let Some(n) = v.as_f64() {
-            if f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m) {
-                return Err(DecodeError::Implausible("out of range"));
-            }
+        if f.name.is_empty() {
+            return Ok(());
         }
-        let reported = !f.hidden && f.omit_if != Some(raw);
+        if !f.allowed.is_empty() && !f.allowed.contains(&raw) {
+            return Err(DecodeError::NotThisProtocol);
+        }
+        let v = value_of(f, raw)?;
+        if let Some(n) = v.as_f64()
+            && (f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m))
+        {
+            return Err(DecodeError::Implausible("out of range"));
+        }
+        let reported = !f.hidden && !f.omit_if.iter().any(|o| *o == raw);
         if f.id {
             self.id = Some(f.name.clone());
         }
@@ -309,32 +477,113 @@ fn push(out: &mut BitBuffer, v: u64, n: usize) {
     }
 }
 
-/// The reported value of a raw field
-fn value_of(f: &Field, raw: u64) -> Value {
-    if let Some(l) = f.map.get(&raw) {
-        return l.value();
+fn overwrite(buf: &mut BitBuffer, at: usize, n: usize, v: u64) {
+    let mut out = BitBuffer::with_capacity(buf.len());
+    for i in 0..buf.len() {
+        let bit = if (at..at + n).contains(&i) {
+            v >> (n - 1 - (i - at)) & 1 != 0
+        } else {
+            buf.get(i).unwrap()
+        };
+        out.push(bit);
     }
-    let n: i64 = match f.kind {
-        Kind::Bool => return Value::Bool(raw != 0),
-        Kind::Int if f.bits < 64 => ((raw << (64 - f.bits)) as i64) >> (64 - f.bits),
-        Kind::Int | Kind::Uint => raw as i64,
-    };
-    match (f.scale, f.offset) {
-        (None, None) => Value::Int(n),
-        (None, Some(o)) => Value::Int(n + o as i64),
-        (Some(s), o) => {
-            let d = decimals(s);
-            let v = n as f64 * s + o.unwrap_or(0.0);
-            Value::Float((v * d).round() / d)
-        }
-    }
+    *buf = out;
 }
 
-/// Ten to the number of decimals a step has: 0.1 rounds to tenths
-fn decimals(scale: f64) -> f64 {
+fn mask(n: usize) -> u64 {
+    if n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
+}
+
+/// The field's bits as sent, undone: complement and bit order
+fn raw_bits(f: &Field, mut raw: u64) -> u64 {
+    if f.not {
+        raw = !raw & mask(f.bits);
+    }
+    if f.reflect {
+        raw = raw.reverse_bits() >> (64 - f.bits);
+    }
+    raw
+}
+
+/// The reported value of a raw field
+fn value_of(f: &Field, raw: u64) -> Result<Value, DecodeError> {
+    if let Some(l) = f.map.get(&raw) {
+        return Ok(l.value());
+    }
+    let n: i64 = match f.kind {
+        Kind::Bool => return Ok(Value::Bool(raw != 0)),
+        Kind::Hex => {
+            return Ok(Value::Text(format!("{:0width$x}", raw, width = f.bits.div_ceil(4))));
+        }
+        Kind::Tristate => return Ok(Value::Text(tristate(raw, f.bits))),
+        Kind::Pick => {
+            let slots = f.bits / f.unit;
+            let pressed = (0..slots).find(|i| (raw >> (i * f.unit)) & mask(f.unit) != f.idle);
+            return pressed.map(|i| Value::Int(i as i64 + 1)).ok_or(DecodeError::NotThisProtocol);
+        }
+        Kind::Bcd => {
+            let mut n = 0i64;
+            for i in (0..f.bits / 4).rev() {
+                let d = (raw >> (i * 4)) & 0xf;
+                if d > 9 {
+                    return Err(DecodeError::Implausible("not a decimal digit"));
+                }
+                n = n * 10 + d as i64;
+            }
+            n
+        }
+        Kind::Int if f.bits < 64 => ((raw << (64 - f.bits)) as i64) >> (64 - f.bits),
+        Kind::Int | Kind::Uint => raw as i64,
+        Kind::Format => unreachable!(),
+    };
+    let float = f.scale.is_some() || f.convert.is_some() || f.round.is_some();
+    if !float {
+        return Ok(Value::Int(n + f.offset.unwrap_or(0.0) as i64));
+    }
+    let mut v = n as f64 * f.scale.unwrap_or(1.0) + f.offset.unwrap_or(0.0);
+    if let Some(Convert::FToC) = f.convert {
+        v = (v - 32.0) / 1.8;
+    }
+    let d = 10f64.powi(f.round.map_or_else(|| decimals(f.scale.unwrap_or(1.0)), |r| r as i32));
+    Ok(Value::Float((v * d).round() / d))
+}
+
+/// The number of decimals a step has: 0.1 rounds to tenths
+fn decimals(scale: f64) -> i32 {
     let s = format!("{scale}");
-    let places = s.split('.').nth(1).map_or(0, str::len);
-    10f64.powi(places as i32)
+    s.split('.').nth(1).map_or(0, str::len) as i32
+}
+
+fn tristate(raw: u64, bits: usize) -> String {
+    (0..bits / 2)
+        .rev()
+        .map(|i| match (raw >> (i * 2)) & 0b11 {
+            0b00 => '0',
+            0b01 => 'Z',
+            0b10 => 'X',
+            _ => '1',
+        })
+        .collect()
+}
+
+/// `{name}` and `{name:02}` filled from what has been read
+fn format_text(fmt: &str, read: &BTreeMap<String, (Value, bool)>) -> Result<String, DecodeError> {
+    let mut out = String::new();
+    let mut rest = fmt;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let close = rest[open..].find('}').ok_or(DecodeError::Implausible("bad format"))?;
+        let spec = &rest[open + 1..open + close];
+        let (name, width) = spec.split_once(':').unwrap_or((spec, ""));
+        let (v, _) = read.get(name).ok_or(DecodeError::Implausible("format names no field"))?;
+        match (v, width.strip_prefix('0').and_then(|w| w.parse::<usize>().ok())) {
+            (Value::Int(n), Some(w)) => out.push_str(&format!("{n:0w$}")),
+            (v, _) => out.push_str(&v.to_string()),
+        }
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// The raw bits of a reported value
@@ -344,27 +593,66 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
     {
         return Ok(*raw);
     }
-    let mask = if f.bits >= 64 { u64::MAX } else { (1u64 << f.bits) - 1 };
-    let n: i64 = match (f.kind, v) {
-        (Kind::Bool, Value::Bool(b)) => *b as i64,
-        (Kind::Bool, _) => return Err(EncodeError::OutOfRange(f.name.clone())),
-        (_, v) => {
-            let x = v.as_f64().ok_or_else(|| EncodeError::OutOfRange(f.name.clone()))?;
-            let x = (x - f.offset.unwrap_or(0.0)) / f.scale.unwrap_or(1.0);
-            x.round() as i64
+    let err = || EncodeError::OutOfRange(f.name.clone());
+    let raw: u64 = match (f.kind, v) {
+        (Kind::Bool, Value::Bool(b)) => *b as u64,
+        (Kind::Bool, _) => return Err(err()),
+        (Kind::Hex, Value::Text(t)) => u64::from_str_radix(t, 16).map_err(|_| err())?,
+        (Kind::Tristate, Value::Text(t)) => {
+            let mut raw = 0u64;
+            for c in t.chars() {
+                let pair = match c {
+                    '0' => 0b00,
+                    'Z' => 0b01,
+                    'X' => 0b10,
+                    '1' => 0b11,
+                    _ => return Err(err()),
+                };
+                raw = (raw << 2) | pair;
+            }
+            raw
+        }
+        (Kind::Hex | Kind::Tristate | Kind::Pick | Kind::Format, _) => return Err(err()),
+        (kind, v) => {
+            let mut x = v.as_f64().ok_or_else(err)?;
+            if let Some(Convert::FToC) = f.convert {
+                x = x * 1.8 + 32.0;
+            }
+            x = (x - f.offset.unwrap_or(0.0)) / f.scale.unwrap_or(1.0);
+            let n = x.round() as i64;
+            match kind {
+                Kind::Int => {
+                    let lo = -(1i64 << (f.bits - 1));
+                    if !(lo..-lo).contains(&n) {
+                        return Err(err());
+                    }
+                    n as u64 & mask(f.bits)
+                }
+                Kind::Bcd => {
+                    if n < 0 {
+                        return Err(err());
+                    }
+                    let mut raw = 0u64;
+                    let mut n = n as u64;
+                    for i in 0..f.bits / 4 {
+                        raw |= (n % 10) << (i * 4);
+                        n /= 10;
+                    }
+                    if n != 0 {
+                        return Err(err());
+                    }
+                    raw
+                }
+                _ => {
+                    if n < 0 || n as u64 > mask(f.bits) {
+                        return Err(err());
+                    }
+                    n as u64
+                }
+            }
         }
     };
-    let fits = match f.kind {
-        Kind::Int => {
-            let lo = -(1i64 << (f.bits - 1));
-            (lo..-lo).contains(&n)
-        }
-        _ => n >= 0 && (n as u64) <= mask,
-    };
-    if !fits {
-        return Err(EncodeError::OutOfRange(f.name.clone()));
-    }
-    Ok(n as u64 & mask)
+    Ok(raw_bits(f, raw))
 }
 
 fn holds(cond: &desc::Cond, fields: &BTreeMap<String, Value>) -> bool {
@@ -375,47 +663,144 @@ fn owns_any(items: &[Item]) -> bool {
     desc::all_fields(items).iter().any(|f| !f.is_view())
 }
 
-fn write_items(
-    items: &[Item],
-    fields: &BTreeMap<String, Value>,
-    out: &mut BitBuffer,
-) -> Result<(), EncodeError> {
-    for it in items {
-        match it {
-            Item::Group(g) => {
-                if !owns_any(&g.fields) && !owns_any(&g.otherwise) {
-                    continue;
+/// One pass over the layout, writing
+struct Writer<'a> {
+    fields: &'a BTreeMap<String, Value>,
+    out: &'a mut BitBuffer,
+    checks: Vec<&'a Check>,
+}
+
+impl Writer<'_> {
+    fn items(&mut self, items: &[Item]) -> Result<(), EncodeError> {
+        for it in items {
+            match it {
+                Item::Group(g) => {
+                    if !owns_any(&g.fields) && !owns_any(&g.otherwise) {
+                        continue;
+                    }
+                    let branch = if holds(&g.when, self.fields) { &g.fields } else { &g.otherwise };
+                    self.items(branch)?;
                 }
-                let branch = if holds(&g.when, fields) { &g.fields } else { &g.otherwise };
-                write_items(branch, fields, out)?;
-            }
-            Item::Field(f) if f.is_view() => {}
-            Item::Field(f) => {
-                if let Some(c) = &f.when
-                    && !holds(c, fields)
-                {
-                    continue;
+                Item::Field(f) if f.is_view() => {}
+                Item::Field(f) => {
+                    if let Some(c) = &f.when
+                        && !holds(c, self.fields)
+                    {
+                        continue;
+                    }
+                    let at = self.out.len();
+                    let filled_by_check = self.checks.iter().any(|c| c.at == Some(at));
+                    let raw = match (f.r#const, self.fields.get(&f.name)) {
+                        (Some(c), _) => c,
+                        (None, Some(v)) => raw_of(f, v)?,
+                        (None, None) if f.name.is_empty() || filled_by_check => 0,
+                        (None, None) => match f.omit_if.iter().next() {
+                            Some(d) => *d,
+                            None => return Err(EncodeError::Missing(f.name.clone())),
+                        },
+                    };
+                    push(self.out, raw, f.bits);
                 }
-                let raw = match (f.r#const, fields.get(&f.name), f.omit_if) {
-                    (Some(c), _, _) => c,
-                    (None, Some(v), _) => raw_of(f, v)?,
-                    (None, None, Some(d)) => d,
-                    (None, None, None) => return Err(EncodeError::Missing(f.name.clone())),
-                };
-                push(out, raw, f.bits);
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+/// The bits `over` covers, packed into bytes most significant first
+fn covered(c: &Check, frame: &BitBuffer) -> Vec<u8> {
+    frame.slice(c.over[0], c.over[1] - c.over[0]).as_padded_bytes().to_vec()
+}
+
+/// What a check computes over the frame, for the kinds that store a value
+fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
+    let d = covered(c, frame);
+    let v: u64 = match c.kind {
+        CheckKind::Crc8 => bits::crc8(&d, c.poly as u8, c.init as u8) as u64,
+        CheckKind::Crc8Le => bits::crc8le(&d, c.poly as u8, c.init as u8) as u64,
+        CheckKind::Crc16 => bits::crc16(&d, c.poly as u16, c.init as u16) as u64,
+        CheckKind::Crc16Le => bits::crc16le(&d, c.poly as u16, c.init as u16) as u64,
+        CheckKind::Sum8 => bits::checksum8(&d) as u64,
+        CheckKind::Xor8 => bits::xor8(&d) as u64,
+        CheckKind::Lfsr8 => bits::lfsr_digest8(&d, c.generator as u8, c.key as u8) as u64,
+        CheckKind::Lfsr8Reflect => {
+            bits::lfsr_digest8_reflect(&d, c.generator as u8, c.key as u8) as u64
+        }
+        CheckKind::Complement => !extract(frame, c.over[0], c.over[1] - c.over[0]),
+        CheckKind::EvenParity => return None,
+    };
+    let width = c.kind.width(c.over)?;
+    Some((v ^ c.xor as u64) & mask(width))
+}
+
+fn check_holds(c: &Check, frame: &BitBuffer) -> bool {
+    match (c.kind, c.at) {
+        (CheckKind::EvenParity, _) => bits::even_parity(&covered(c, frame)),
+        (kind, Some(at)) => {
+            let width = kind.width(c.over).unwrap_or(0);
+            check_value(c, frame) == Some(extract(frame, at, width))
+        }
+        _ => false,
+    }
+}
+
+/// The frame's bytes rearranged, each step its own inverse
+fn transform(frame: &BitBuffer, steps: &[Transform]) -> BitBuffer {
+    if steps.is_empty() {
+        return frame.clone();
+    }
+    let mut bytes = frame.as_padded_bytes().to_vec();
+    for s in steps {
+        for b in &mut bytes {
+            *b = match s {
+                Transform::ReflectBytes => bits::reflect8(*b),
+                Transform::ReflectNibbles => (bits::reflect8(*b) << 4) | (bits::reflect8(*b) >> 4),
+                Transform::SwapNibbles => b.rotate_left(4),
+            };
+        }
+    }
+    BitBuffer::from_bytes(&bytes).slice(0, frame.len())
+}
+
+/// A bit as the pair of chips the Manchester decoder reads it from
+fn manchester_chips(bits: &BitBuffer) -> BitBuffer {
+    let mut out = BitBuffer::with_capacity(bits.len() * 2);
+    for i in 0..bits.len() {
+        let b = bits.get(i).unwrap_or(false);
+        out.push(!b);
+        out.push(b);
+    }
+    out
+}
+
+/// A bit as the pair of chips the differential Manchester decoder reads it
+/// from: a clock transition opens every symbol, and a zero has a second
+/// transition in the middle
+fn diff_manchester_chips(bits: &BitBuffer) -> BitBuffer {
+    let mut out = BitBuffer::with_capacity(bits.len() * 2 + 2);
+    let mut level = false;
+    for i in 0..bits.len() {
+        level = !level;
+        out.push(level);
+        if !bits.get(i).unwrap_or(false) {
+            level = !level;
+        }
+        out.push(level);
+    }
+    // a closing clock edge, so the last symbol is read
+    out.push(!level);
+    out.push(!level);
+    out
 }
 
 /// The pulses of `repeats` copies of a frame, the last gap being the reset
 ///
 /// PWM is the keyfob encoder's shape. PPM marks are half the short gap,
-/// which is where rtl_433's recordings of these sensors put them.
+/// which is where rtl_433's recordings of these sensors put them. NRZ and
+/// Manchester are levels run together, a package opening on its first mark.
 pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
     match t.coding {
-        Coding::Pwm => encode::frame(*t, bits, repeats),
+        Coding::Pwm => crate::protocols::keyfob::encode::frame(*t, bits, repeats),
         Coding::Ppm => {
             // a gap carries the bit, so a closing mark is what makes the
             // last gap one rather than the silence after the frame
@@ -430,7 +815,46 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
             }
             pkg
         }
-        Coding::Manchester | Coding::Nrz => unimplemented!("a description is pwm or ppm"),
+        Coding::Nrz | Coding::Manchester => {
+            let unit = t.short_us;
+            let mut levels: Vec<bool> = Vec::new();
+            for _ in 0..repeats {
+                if t.coding == Coding::Nrz {
+                    // a package opens on a mark, so leading gap chips would
+                    // be lost; one mark in front keeps them
+                    if bits.get(0) == Some(false) {
+                        levels.push(true);
+                    }
+                    levels.extend((0..bits.len()).map(|i| bits.get(i).unwrap_or(false)));
+                } else {
+                    for i in 0..bits.len() {
+                        let b = bits.get(i).unwrap_or(false);
+                        levels.push(b);
+                        levels.push(!b);
+                    }
+                }
+                let quiet = (t.reset_us / unit.max(1) + 2) as usize;
+                levels.extend(std::iter::repeat_n(false, quiet));
+            }
+            let mut pkg = Package::default();
+            let mut i = 0;
+            while i < levels.len() {
+                let ones = levels[i..].iter().take_while(|v| **v).count();
+                if ones == 0 {
+                    i += 1;
+                    continue;
+                }
+                i += ones;
+                let zeros = levels[i..].iter().take_while(|v| !**v).count();
+                i += zeros;
+                pkg.pulses
+                    .push(Pulse { mark: ones as u32 * unit, gap: zeros.max(1) as u32 * unit });
+            }
+            if let Some(last) = pkg.pulses.last_mut() {
+                last.gap = last.gap.max(t.reset_us);
+            }
+            pkg
+        }
     }
 }
 
@@ -443,7 +867,7 @@ fn hex_bits(hex: &str, n: usize) -> Result<BitBuffer, String> {
         (0..digits.len()).step_by(2).map(|i| u8::from_str_radix(&digits[i..i + 2], 16)).collect();
     let bytes = bytes.map_err(|e| format!("hex {hex:?}: {e}"))?;
     if bytes.len() * 8 < n {
-        return Err(format!("hex {hex:?} is shorter than the {n} bit frame"));
+        return Err(format!("hex {hex:?} is shorter than {n} bits"));
     }
     Ok(BitBuffer::from_bytes(&bytes).slice(0, n))
 }
@@ -459,13 +883,17 @@ pub fn check(p: &Scripted) -> Result<(), String> {
         let want: BTreeMap<String, Value> =
             v.fields.iter().map(|(k, l)| (k.clone(), l.value())).collect();
         let frame = hex_bits(&v.hex, p.desc.frame.bits).map_err(|e| format!("{name}: {e}"))?;
-        let r = p.read(&frame, 0).map_err(|e| format!("{name} vector {i}: {e:?}"))?;
+        let r = p.read(&frame).map_err(|e| format!("{name} vector {i}: {e:?}"))?;
         if r.fields != want {
             return Err(format!(
                 "{name} vector {i}: read {}, expected {}",
                 r.fields_line(),
                 Report { fields: want, ..Report::new("") }.fields_line()
             ));
+        }
+        let model = v.model.as_deref().unwrap_or(name);
+        if r.model != model {
+            return Err(format!("{name} vector {i}: read as {}, expected {model}", r.model));
         }
         let back = p.encode(&want).map_err(|e| format!("{name} vector {i}: {e}"))?;
         if back != frame {
@@ -515,67 +943,133 @@ mod tests {
         assert_eq!(p.desc().frame.repeats, 3);
     }
 
+    fn parse_err(body: &str) -> String {
+        Desc::parse(&format!("name: X\ntiming: {{pwm: [400, 1200], reset_us: 3000}}\n{body}"))
+            .unwrap_err()
+    }
+
     #[test]
     fn a_layout_that_does_not_fill_the_frame_is_refused() {
-        let e = Desc::parse(
-            "name: X\ntiming: {pwm: [400, 1200], reset_us: 3000}\nframe: {bits: 24}\n\
-             fields:\n  - {name: a, bits: 8}\n",
-        )
-        .unwrap_err();
+        let e = parse_err("frame: {bits: 24}\nfields:\n  - {name: a, bits: 8}\n");
         assert!(e.contains("own 8 bits"), "{e}");
     }
 
     #[test]
     fn a_branch_that_does_not_fill_the_frame_is_refused() {
-        let e = Desc::parse(
-            "name: X\ntiming: {pwm: [400, 1200], reset_us: 3000}\nframe: {bits: 16}\n\
-             fields:\n  - {name: k, bits: 8}\n  - when: {k: 1}\n    fields: [{name: a, bits: 8}]\n    else: [{name: b, bits: 4}]\n",
-        )
-        .unwrap_err();
+        let e = parse_err(
+            "frame: {bits: 16}\nfields:\n  - {name: k, bits: 8}\n  - when: {k: 1}\n    \
+             fields: [{name: a, bits: 8}]\n    else: [{name: b, bits: 4}]\n",
+        );
         assert!(e.contains("own 12 bits"), "{e}");
     }
 
     #[test]
     fn a_condition_must_name_a_field() {
-        let e = Desc::parse(
-            "name: X\ntiming: {pwm: [400, 1200], reset_us: 3000}\nframe: {bits: 8}\n\
-             fields:\n  - {name: a, bits: 8}\n  - {name: b, at: 0, bits: 4, when: {zz: 1}}\n",
-        )
-        .unwrap_err();
+        let e = parse_err(
+            "frame: {bits: 8}\nfields:\n  - {name: a, bits: 8}\n  - {name: b, at: 0, bits: 4, when: {zz: 1}}\n",
+        );
         assert!(e.contains("zz"), "{e}");
     }
 
     #[test]
     fn an_unknown_key_is_refused() {
-        let e = Desc::parse(
-            "name: X\ntiming: {pwm: [400, 1200], reset_us: 3000}\nframe: {bits: 8}\n\
-             fields:\n  - {name: a, bits: 8, scael: 2}\n",
-        )
-        .unwrap_err();
+        let e = parse_err("frame: {bits: 8}\nfields:\n  - {name: a, bits: 8, scael: 2}\n");
         assert!(e.contains("scael"), "{e}");
     }
 
     #[test]
-    fn a_scaled_value_rounds_to_its_step() {
-        let f = Field {
+    fn a_check_must_fit_the_frame() {
+        let e = parse_err(
+            "frame: {bits: 16}\ncheck: {kind: crc8, over: [0, 8], at: 12}\nfields:\n  - {name: a, bits: 16}\n",
+        );
+        assert!(e.contains("runs past"), "{e}");
+    }
+
+    fn field(kind: Kind, bits: usize) -> Field {
+        Field {
             name: "t".into(),
-            bits: 12,
+            bits,
             at: None,
-            kind: Kind::Int,
+            kind,
             r#const: None,
+            allowed: Vec::new(),
             hidden: false,
             id: false,
-            scale: Some(0.1),
+            not: false,
+            reflect: false,
+            scale: None,
             offset: None,
+            convert: None,
+            round: None,
             min: None,
             max: None,
-            omit_if: None,
+            omit_if: Default::default(),
             map: BTreeMap::new(),
+            unit: 0,
+            idle: 0,
+            format: String::new(),
             when: None,
-        };
-        assert_eq!(value_of(&f, 194), Value::Float(19.4));
-        assert_eq!(value_of(&f, 0xfa9), Value::Float(-8.7));
+        }
+    }
+
+    #[test]
+    fn a_scaled_value_rounds_to_its_step() {
+        let f = Field { scale: Some(0.1), ..field(Kind::Int, 12) };
+        assert_eq!(value_of(&f, 194), Ok(Value::Float(19.4)));
+        assert_eq!(value_of(&f, 0xfa9), Ok(Value::Float(-8.7)));
         assert_eq!(raw_of(&f, &Value::Float(-8.7)), Ok(0xfa9));
         assert_eq!(raw_of(&f, &Value::Float(300.0)), Err(EncodeError::OutOfRange("t".into())));
+    }
+
+    #[test]
+    fn bcd_reads_digits_and_writes_them_back() {
+        let f = field(Kind::Bcd, 12);
+        assert_eq!(value_of(&f, 0x217), Ok(Value::Int(217)));
+        assert!(value_of(&f, 0x2a7).is_err());
+        assert_eq!(raw_of(&f, &Value::Int(217)), Ok(0x217));
+    }
+
+    #[test]
+    fn fahrenheit_converts_and_back() {
+        let f = Field {
+            scale: Some(0.1),
+            offset: Some(-40.0),
+            convert: Some(Convert::FToC),
+            ..field(Kind::Uint, 12)
+        };
+        // 65.7 F is 18.7 C
+        assert_eq!(value_of(&f, 1057), Ok(Value::Float(18.7)));
+        assert_eq!(raw_of(&f, &Value::Float(18.7)), Ok(1057));
+    }
+
+    #[test]
+    fn reflect_and_not_undo_themselves() {
+        let f = Field { not: true, reflect: true, ..field(Kind::Uint, 8) };
+        let raw = raw_bits(&f, 0b1011_0001);
+        assert_eq!(raw, 0b0111_0010);
+        assert_eq!(raw_of(&f, &Value::Int(raw as i64)), Ok(0b1011_0001));
+    }
+
+    #[test]
+    fn differential_manchester_chips_read_back() {
+        let mut b = BitBuffer::new();
+        for bit in [true, false, false, true, true, false] {
+            b.push(bit);
+        }
+        let chips = diff_manchester_chips(&b);
+        let back = differential_manchester_decode(&chips, 0, 6);
+        assert_eq!(back, b, "{} vs {}", back.to_hex(), b.to_hex());
+    }
+
+    #[test]
+    fn a_complement_check_is_written_and_read() {
+        let d = Desc::parse(
+            "name: X\ntiming: {ppm: [500, 1500], reset_us: 6000}\nframe: {bits: 16}\n\
+             check: {kind: complement, over: [0, 8], at: 8}\n\
+             fields:\n  - {name: a, bits: 8}\n  - {bits: 8, hidden: true}\n\
+             vectors: [{hex: \"5a a5\", fields: {a: 0x5a}}]\n",
+        )
+        .unwrap();
+        check(&Scripted::new(d)).unwrap();
     }
 }

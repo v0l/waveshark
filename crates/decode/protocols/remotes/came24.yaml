@@ -1,0 +1,8 @@
+# CAME 24-bit fixed code, on the same timing as the 12-bit fob in came.yaml.
+name: CAME-24bit
+timing: { pwm: [320, 640], reset_us: 2500 }
+frame: { bits: 24, invert: true, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: code, bits: 24 }
+vectors:
+  - { hex: "ab cd ef", fields: { code: 0xabcdef } }

@@ -1,0 +1,12 @@
+# Ansonic: a 12-bit fixed-code remote whose short mark is a 1, the slicer's
+# own polarity, so the frame is not inverted. The low eleven bits are the
+# DIP-switch address with the button in bits 1 and 2.
+name: Ansonic
+timing: { pwm: [555, 1111], reset_us: 2500 }
+frame: { bits: 12, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: code, bits: 12 }
+  - { name: cnt, at: 0, bits: 12 }
+  - { name: btn, at: 9, bits: 2 }
+vectors:
+  - { hex: "12 30", fields: { code: 0x123, cnt: 0x123, btn: 1 } }

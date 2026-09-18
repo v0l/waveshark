@@ -1,0 +1,17 @@
+# Holtek HT6P20/HT6P30B: 40-bit fixed-code remotes, one of the commonest
+# doorbell and gate fobs in Asia and Europe.
+#
+# A short mark is a 0 and a long mark a 1, so the frame is inverted. The
+# header nibble is always 5 and pins the alignment; the serial goes out least
+# significant bit first; the sixteen button bits are four nibbles, every one
+# 0xa except the pressed button's. No checksum.
+name: Holtek
+timing: { pwm: [430, 870], reset_us: 4000 }
+frame: { bits: 40, invert: true, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: code, bits: 40 }
+  - { at: 0, bits: 4, const: 0x5 }
+  - { name: serial, at: 4, bits: 20, reflect: true }
+  - { name: btn, at: 24, bits: 16, type: pick, unit: 4, idle: 0xa }
+vectors:
+  - { hex: "5a 2c 48 aa a5", fields: { code: 0x5a2c48aaa5, serial: 0x12345, btn: 1 } }
