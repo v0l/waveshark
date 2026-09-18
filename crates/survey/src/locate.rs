@@ -48,7 +48,10 @@ pub const MIN_SIGHTINGS: usize = 4;
 pub const MIN_SPREAD_M: f64 = 4.0 * MOVED_M;
 
 /// Path-loss exponent: 2 is free space, 3 to 4 is a built-up street. Between
-/// the two, which is where a drive through a town sits on average.
+/// the two, which is where a drive through a town sits on average. Sweeping
+/// it from 2 to 4 over the outdoor survey in `tests/locate_drive.rs` moves
+/// the error by a few hundred metres either way and no value wins on all
+/// three drives, so this is not the constant that decides a result.
 const EXPONENT: f64 = 2.5;
 
 /// How far outside the drive the transmitter is looked for, as a multiple

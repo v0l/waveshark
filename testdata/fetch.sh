@@ -131,4 +131,23 @@ while IFS= read -r line; do
 done < offair.toml
 [[ -n "$name" ]] && fetch "offair/$name" "$sha" "$url" "$comp"
 
+# Published survey measurements, into their own directory: these are levels and
+# positions somebody else recorded and surveyed, not recordings made here.
+mkdir -p survey
+
+name=""; sha=""; url=""; comp=""
+while IFS= read -r line; do
+    case "$line" in
+        '[[dataset]]')
+            [[ -n "$name" ]] && fetch "survey/$name" "$sha" "$url" "$comp"
+            name=""; sha=""; url=""; comp="none"
+            ;;
+        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+    esac
+done < survey.toml
+[[ -n "$name" ]] && fetch "survey/$name" "$sha" "$url" "$comp"
+
 echo "done"

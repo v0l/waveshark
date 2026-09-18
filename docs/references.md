@@ -130,6 +130,16 @@ header is one a packager will miss.
 | `crates/decode/src/protocols/keyfob/` | Flipper Zero Momentum firmware subghz protocols | GPL |
 | `crates/orbit` | the `sgp4` crate, which implements the model in Vallado's *Revisiting Spacetrack Report #3* | MIT/Apache |
 
+One dataset is downloaded by the tests rather than by the program. The
+locator is checked against the *LoRa signal quality and GPS positioning time
+series dataset* by López Escobar, Fondo-Ferreiro, González-Castaño and
+Gil-Castiñeira of the Universidade de Vigo
+([doi 10.5281/zenodo.13835721](https://doi.org/10.5281/zenodo.13835721), CC BY
+4.0), which is levels recorded around the Sálvora Archipelago against three
+LoRa gateways whose positions were surveyed and published with them. It is
+fetched by `testdata/fetch.sh`, never committed, and credited here because
+CC BY asks for it.
+
 TinyGS publishes one more thing this receiver wants and cannot fetch: the
 modem settings per satellite, spreading factor, bandwidth and coding rate,
 on `api.tinygs.com/v3/satellites`. That path is behind Cloudflare bot
@@ -238,8 +248,8 @@ footprint circle, and free-space loss with one-way delay.
 
 ## Test fixtures
 
-Recorded IQ is not committed. `testdata/fixtures.toml` and
-`testdata/offair.toml` carry the manifest: a name, a sha256 of the compressed
+Recorded IQ is not committed. `testdata/fixtures.toml`,
+`testdata/offair.toml` and `testdata/survey.toml` carry the manifest: a name, a sha256 of the compressed
 upload, the URL on nostr.download, the centre and rate, and a description
 saying what the capture is evidence of and how that was established. The
 procedure for adding one, including why a capture earns its place only by
