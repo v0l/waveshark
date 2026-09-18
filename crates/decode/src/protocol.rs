@@ -187,7 +187,7 @@ impl Protocols {
         p.add(Box::new(ErtIdm));
         p.add(Box::new(Hanshow::uplink_500k()));
         p.add(Box::new(Hanshow::uplink_100k()));
-        for s in crate::script::current() {
+        for s in crate::script::current().into_iter().filter(|s| s.has_timing()) {
             p.add(Box::new(s));
         }
         p

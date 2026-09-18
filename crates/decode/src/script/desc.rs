@@ -15,7 +15,10 @@ use std::collections::BTreeMap;
 pub struct Desc {
     /// The model name a report carries
     pub name: String,
-    pub timing: TimingDesc,
+    /// The pulse timing, for a protocol read off the burst detector
+    pub timing: Option<TimingDesc>,
+    /// The channel and demodulator, for a protocol placed in the graph
+    pub radio: Option<Radio>,
     pub frame: Frame,
     /// Protocols whose decode of the same package outranks this one
     #[serde(default)]
@@ -28,6 +31,54 @@ pub struct Desc {
     pub fields: Vec<Item>,
     #[serde(default)]
     pub vectors: Vec<Vector>,
+}
+
+/// Where a protocol's channel is and how its bits are read off it
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Radio {
+    /// Two-level FSK or GFSK at a baud and a deviation
+    pub fsk: Option<Fsk>,
+    /// Bands the channel can be in, in hertz
+    #[serde(default)]
+    pub bands: Vec<[f64; 2]>,
+    /// Fixed channels, in hertz
+    #[serde(default)]
+    pub channels: Vec<f64>,
+    /// The channel's width
+    pub width_hz: f64,
+    /// The rate the channel is cut down to before the bit clock reads it;
+    /// eight samples a symbol if unsaid, four being where the clock stops
+    pub rate_hz: Option<f64>,
+    /// The frequency offered when placed by hand; the first channel or
+    /// the middle of the first band if unsaid
+    pub default_hz: Option<f64>,
+    /// The word a scanner names it by; the name lowercased if unsaid
+    pub id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fsk {
+    pub baud: f64,
+    /// Peak deviation from the carrier
+    pub deviation_hz: f64,
+    /// Bandwidth of the filter in front of the discriminator; Carson's
+    /// rule, twice the deviation plus the baud, if unsaid
+    pub bandwidth_hz: Option<f64>,
+}
+
+impl Radio {
+    pub fn rate_hz(&self) -> f64 {
+        self.rate_hz.unwrap_or_else(|| self.fsk.map_or(0.0, |f| f.baud * 8.0))
+    }
+
+    pub fn default_hz(&self) -> f64 {
+        self.default_hz
+            .or_else(|| self.channels.first().copied())
+            .or_else(|| self.bands.first().map(|[lo, hi]| (lo + hi) / 2.0))
+            .unwrap_or(0.0)
+    }
 }
 
 /// A pulse timing table, keyed by coding
@@ -641,7 +692,30 @@ impl Desc {
         if name.is_empty() {
             return Err("a description needs a name".into());
         }
-        let timing = self.timing.timing().map_err(|e| format!("{name}: {e}"))?;
+        let timing = match &self.timing {
+            Some(t) => Some(t.timing().map_err(|e| format!("{name}: {e}"))?),
+            None => None,
+        };
+        if timing.is_none() && self.radio.is_none() {
+            return Err(format!("{name}: a description needs a timing or a radio"));
+        }
+        if let Some(r) = &self.radio {
+            if r.fsk.is_none() {
+                return Err(format!("{name}: a radio needs a demodulator, fsk"));
+            }
+            if r.bands.is_empty() && r.channels.is_empty() {
+                return Err(format!("{name}: a radio needs bands or channels"));
+            }
+            if r.width_hz <= 0.0 || r.rate_hz() <= 0.0 {
+                return Err(format!("{name}: a radio needs a width and a rate"));
+            }
+            if r.fsk.is_some_and(|f| f.baud <= 0.0 || f.deviation_hz <= 0.0) {
+                return Err(format!("{name}: fsk needs a baud and a deviation"));
+            }
+            if self.frame.find != Find::Sync {
+                return Err(format!("{name}: a radio's bits are a stream, so find must be sync"));
+            }
+        }
         let f = &self.frame;
         if f.bits == 0 || f.bits > 1024 {
             return Err(format!("{name}: frame bits {} out of range", f.bits));
@@ -659,7 +733,7 @@ impl Desc {
         } else if f.sync.is_some() || f.decode != Decode::None {
             return Err(format!("{name}: sync and decode need find: sync"));
         }
-        if f.decode != Decode::None && timing.coding != Coding::Nrz {
+        if f.decode != Decode::None && timing.is_some_and(|t| t.coding != Coding::Nrz) {
             return Err(format!("{name}: decode needs nrz timing, whose bits are the chips"));
         }
         for c in self.check.iter() {
