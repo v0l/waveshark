@@ -677,8 +677,8 @@ pub static FLIPPER_PLAYLIST: Repo = Repo {
 
 /// The protocol descriptions the receiver reads sensors and remotes with,
 /// published apart from the build so a fixed or added layout reaches a
-/// receiver without a release. The same files are built in, so a receiver
-/// that never fetches reads what it shipped with.
+/// receiver without a release. Nothing is built in, so a receiver that
+/// never fetches reads no ISM sensor at all.
 pub static PROTOCOLS: Repo = Repo {
     name: "Protocol descriptions",
     dir: "waveshark-protocols",

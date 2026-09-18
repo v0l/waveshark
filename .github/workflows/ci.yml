@@ -55,6 +55,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # The decoders are described rather than written, and the descriptions
+      # are published apart from the build, so the tests need the tree the
+      # receiver fetches.
+      - name: Protocol descriptions
+        run: git clone --quiet --depth 1 https://github.com/v0l/waveshark-protocols testdata/protocols
+
       - name: Test
         env:
           CUDA_COMPUTE_CAP: '80'

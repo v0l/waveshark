@@ -1,5 +1,5 @@
 //! Oregon Scientific v2.1 sensors. The v3 family, which sends each bit
-//! once, is three descriptions under `crates/decode/protocols/weather`.
+//! once, is three descriptions in the published waveshark-protocols tree.
 //!
 //! 433.92 MHz, Manchester at 1024 baud, and the first user of the Manchester
 //! slicer, which until now had no protocol behind it. v3 is the THGR810, the

@@ -1,9 +1,0 @@
-# GateTX: a 24-bit fixed-code gate remote the Flipper reads at 350 us a
-# short mark, the short mark being a 1 as the slicer has it. No checksum.
-name: GateTX
-timing: { pwm: [350, 700], reset_us: 2500 }
-frame: { bits: 24, find: tile, min_transitions: 3, repeats: 3 }
-fields:
-  - { name: code, bits: 24, data: int }
-vectors:
-  - { hex: "a1 3f 08", fields: { code: 0xa13f08 } }

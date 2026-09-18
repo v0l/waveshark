@@ -1,5 +1,5 @@
-//! The protocol descriptions the receiver runs: the fetched set over the
-//! built-in one, and the operator's own files over both.
+//! The protocol descriptions the receiver runs: the fetched set, and the
+//! operator's own files over it. Nothing is built in.
 //!
 //! `decode::script` holds the set; this is where it is filled from disk.
 //! The fetched tree is `datasets::git::PROTOCOLS` in the cache, and a

@@ -64,7 +64,14 @@ fn wideband(base: &[C32], bank: &ChannelBank) -> Vec<C32> {
     out
 }
 
+/// The published descriptions, installed for this test binary: nothing
+/// is built in, so an ISM chain reads nothing until they are
+fn descriptions() {
+    assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
+}
+
 fn ook_chain() -> Vec<NodeSpec> {
+    descriptions();
     vec![
         NodeSpec::new("envelope"),
         NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
@@ -228,6 +235,7 @@ fn channels_without_a_chain_are_skipped() {
 #[test]
 fn the_automatic_chain_decodes_without_being_told_the_modulation() {
     use common::Packet;
+    descriptions();
     let base = need_fixture!(fixture());
     let mut bank = make_bank();
     // Exactly what the app runs: gated on detection, both modulations, every

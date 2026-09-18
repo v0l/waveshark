@@ -150,4 +150,18 @@ while IFS= read -r line; do
 done < survey.toml
 [[ -n "$name" ]] && fetch "survey/$name" "$sha" "$url" "$comp"
 
+# The protocol descriptions are published apart from the build, so the tests
+# read the same files a receiver fetches rather than a copy kept in step by
+# hand. A clone rather than a hashed tarball: the point of the repo is that
+# it moves, and a test reading last month's copy would prove nothing.
+PROTOCOLS_REPO=${PROTOCOLS_REPO:-https://github.com/v0l/waveshark-protocols.git}
+if [[ -d protocols/.git ]]; then
+    echo "fetch   protocols"
+    git -C protocols pull --quiet --ff-only || echo "warn    protocols: could not update, keeping what is there" >&2
+else
+    echo "fetch   protocols"
+    git clone --quiet --depth 1 "$PROTOCOLS_REPO" protocols
+fi
+echo "ok      protocols ($(find protocols -name '*.yaml' | wc -l) descriptions)"
+
 echo "done"

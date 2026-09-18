@@ -12,9 +12,15 @@
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
 use decode::protocols::{GtWt02, SomfyRts};
-use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
+
+/// The published description of `name`, from the fetched tree: nothing is
+/// built in, so a test installs before it asks
+fn named(name: &str) -> Option<decode::script::Scripted> {
+    assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
+    decode::script::named(name)
+}
 
 fn package(pulses: Vec<(u32, u32)>) -> Package {
     Package {
@@ -55,7 +61,11 @@ fn an_acurite_609txc_burst_decodes_from_its_timings() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x8f)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(30.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(56)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1, "claimed by more than one protocol");
+    assert_eq!(
+        Protocols::published().decode_all(&pkg).len(),
+        1,
+        "claimed by more than one protocol"
+    );
 }
 
 #[test]
@@ -74,7 +84,7 @@ fn an_acurite_tower_burst_decodes_from_its_timings() {
     assert_eq!(r.get("channel"), Some(&Value::Text("A".into())));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(18.4)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(55)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 #[test]
@@ -95,7 +105,7 @@ fn a_lacrosse_tx141th_burst_decodes_through_its_sync_marks() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x9c)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.6)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(44)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 #[test]
@@ -147,7 +157,7 @@ fn a_nexus_burst_decodes_from_its_timings() {
     let f = [0x5c, 0x90, 0xc2, 0xf3, 0xe0];
     let pkg = ppm(&bits_of(&f, 36), 500, 1000, 2000, 5000);
 
-    let nexus = decode::script::named("Nexus-TH").expect("a built-in description");
+    let nexus = named("Nexus-TH").expect("a published description");
     let r = nexus.decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x5c)));
     assert_eq!(r.get("channel"), Some(&Value::Int(2)));
@@ -166,7 +176,7 @@ fn an_ev1527_remote_press_decodes_from_its_timings() {
     pulses.push((464, 10_000));
     let pkg = package(pulses);
 
-    let r = decode::script::named("Generic-Remote").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Generic-Remote").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0xa13f)));
     assert_eq!(r.get("cmd"), Some(&Value::Int(8)));
     assert_eq!(r.crc_valid, None);
@@ -184,7 +194,7 @@ fn a_rubicson_burst_decodes_from_its_timings() {
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(14.9)));
     // Nexus shares this layout and must hand the frame over rather than
     // report it as its own with a humidity read off the CRC.
-    let claimed = Protocols::all().decode_all(&pkg);
+    let claimed = Protocols::published().decode_all(&pkg);
     assert_eq!(claimed.len(), 1, "claimed by {claimed:?}");
     assert_eq!(claimed[0].model, "Rubicson-Temperature");
 }
@@ -203,7 +213,7 @@ fn a_bresser_3ch_burst_decodes_from_its_timings() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x3d)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(20.0)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(51)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 #[test]
@@ -216,7 +226,7 @@ fn a_gt_wt_02_burst_decodes_from_its_millisecond_symbols() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x34)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.7)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(35)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 #[test]
@@ -232,7 +242,7 @@ fn a_gt_wt_03_burst_decodes_from_its_timings() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x17)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(26.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 /// NRZ: runs of like bits become one mark and one gap at `bit_us` a bit.
@@ -344,7 +354,7 @@ fn an_x10_press_decodes_from_its_timings() {
     assert_eq!(r.get("channel"), Some(&Value::Text("A".into())));
     assert_eq!(r.get("unit"), Some(&Value::Int(1)));
     assert_eq!(r.get("state"), Some(&Value::Text("ON".into())));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 #[test]
@@ -401,7 +411,7 @@ fn a_somfy_rts_burst_decodes_from_its_manchester_timings() {
     assert_eq!(r.get("control"), Some(&Value::Text("Up".into())));
     assert_eq!(r.get("counter"), Some(&Value::Int(0x01fe)));
     assert_eq!(r.crc_valid, Some(true));
-    assert_eq!(Protocols::all().decode_all(&pkg).len(), 1);
+    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 
 #[test]
@@ -411,7 +421,7 @@ fn noise_is_claimed_by_nothing() {
     let pulses: Vec<(u32, u32)> =
         (0..48).map(|i| (700 + (i % 5) * 37, 900 + (i % 7) * 53)).collect();
     let pkg = package(pulses);
-    let claimed = Protocols::all().decode_all(&pkg);
+    let claimed = Protocols::published().decode_all(&pkg);
     assert!(claimed.is_empty(), "noise decoded as {:?}", claimed);
 }
 
@@ -438,7 +448,7 @@ fn a_long_noisy_burst_does_not_manufacture_a_sensor() {
                 if short { (208, 417) } else { (417, 208) }
             })
             .collect();
-        let claimed = Protocols::all().decode_all(&package(pulses));
+        let claimed = Protocols::published().decode_all(&package(pulses));
         assert!(claimed.is_empty(), "noise decoded as {claimed:?}");
     }
 }

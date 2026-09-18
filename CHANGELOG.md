@@ -19,7 +19,9 @@ the code is in the commit log.
   fetched from github.com/v0l/waveshark-protocols, so a fixed or added
   layout arrives without a new build, each stating its fields' types and
   units. A description with a radio block is a mode in the menu and the
-  scanner table, and keys up from the fields on its card. Files in `~/.config/waveshark/protocols` override it.
+  scanner table, and keys up from the fields on its card. Files in
+  `~/.config/waveshark/protocols` override it, and a receiver that has never
+  fetched reads no ISM sensor until it does.
 - NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
   whether the speech is enciphered. No sound yet.
 - Iridium ring alerts at 1626 MHz: the satellite, its beam and its position,

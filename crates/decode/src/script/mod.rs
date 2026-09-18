@@ -10,13 +10,15 @@
 //! `vectors`, a frame and the report it reads as, and [`check`] runs each
 //! one through both directions and through the slicer.
 //!
-//! The built-in descriptions are the ones in `crates/decode/protocols` at
-//! the time of the build. The same files are published as a dataset, so a
-//! description fixed after a release reaches a receiver that fetches it:
-//! [`install`] replaces the built-in set by name, and a user's own files
-//! under `~/.config/waveshark/protocols` replace both. A description that
-//! fails its vectors is refused at install rather than run, which is what
-//! keeps a bad push from reading worse than the build it replaces.
+//! No description is built in. They are published as their own repository,
+//! v0l/waveshark-protocols, fetched as a dataset and installed from disc by
+//! [`install`], so a layout fixed after a release reaches a receiver
+//! without one, and a user's own files under `~/.config/waveshark/protocols`
+//! replace what was fetched. A description that fails its vectors is
+//! refused at install rather than run, which is what keeps a bad push from
+//! reading worse than the last one. A receiver that has never fetched reads
+//! no ISM sensor at all, and the tests read the published tree that
+//! `testdata/fetch.sh` clones rather than a copy kept in step by hand.
 
 pub mod desc;
 
@@ -32,64 +34,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-/// The descriptions built in, the files under `crates/decode/protocols` in
-/// the layout waveshark-protocols keeps: one directory per kind of device
-pub const BUILTIN: &[&str] = &[
-    include_str!("../../protocols/weather/nexus.yaml"),
-    include_str!("../../protocols/remotes/princeton.yaml"),
-    include_str!("../../protocols/remotes/came.yaml"),
-    include_str!("../../protocols/remotes/came24.yaml"),
-    include_str!("../../protocols/remotes/holtek.yaml"),
-    include_str!("../../protocols/remotes/holtek_ht12x.yaml"),
-    include_str!("../../protocols/remotes/linear.yaml"),
-    include_str!("../../protocols/remotes/linear_delta3.yaml"),
-    include_str!("../../protocols/remotes/nice_flo.yaml"),
-    include_str!("../../protocols/remotes/ansonic.yaml"),
-    include_str!("../../protocols/remotes/bett.yaml"),
-    include_str!("../../protocols/remotes/ev1527.yaml"),
-    include_str!("../../protocols/remotes/gate_tx.yaml"),
-    include_str!("../../protocols/remotes/smc5326.yaml"),
-    include_str!("../../protocols/weather/prologue.yaml"),
-    include_str!("../../protocols/weather/rubicson.yaml"),
-    include_str!("../../protocols/weather/bresser_3ch.yaml"),
-    include_str!("../../protocols/weather/lacrosse_tx141th.yaml"),
-    include_str!("../../protocols/weather/lacrosse_tx29.yaml"),
-    include_str!("../../protocols/weather/lacrosse_tx35.yaml"),
-    include_str!("../../protocols/weather/acurite_609txc.yaml"),
-    include_str!("../../protocols/weather/acurite_tower.yaml"),
-    include_str!("../../protocols/weather/acurite_606tx.yaml"),
-    include_str!("../../protocols/weather/acurite_986.yaml"),
-    include_str!("../../protocols/weather/fineoffset_whx080.yaml"),
-    include_str!("../../protocols/weather/fineoffset_wh51.yaml"),
-    include_str!("../../protocols/weather/ambient_f007th.yaml"),
-    include_str!("../../protocols/tpms/schrader.yaml"),
-    include_str!("../../protocols/tpms/toyota.yaml"),
-    include_str!("../../protocols/tpms/ford.yaml"),
-    include_str!("../../protocols/tpms/renault.yaml"),
-    include_str!("../../protocols/home/x10_rf.yaml"),
-    include_str!("../../protocols/weather/acurite_5n1.yaml"),
-    include_str!("../../protocols/weather/alecto_v1.yaml"),
-    include_str!("../../protocols/security/honeywell.yaml"),
-    include_str!("../../protocols/weather/oregon_thgr810.yaml"),
-    include_str!("../../protocols/weather/oregon_thn802.yaml"),
-    include_str!("../../protocols/weather/oregon_wgr800.yaml"),
-    include_str!("../../protocols/weather/gt_wt03.yaml"),
-    include_str!("../../protocols/security/kerui.yaml"),
-    include_str!("../../protocols/weather/thermopro_tp12.yaml"),
-    include_str!("../../protocols/weather/springfield_soil.yaml"),
-    include_str!("../../protocols/home/quhwa_doorbell.yaml"),
-    include_str!("../../protocols/weather/emos_ttx201.yaml"),
-];
-
-/// Every built-in description as a protocol
-pub fn builtin() -> Vec<Scripted> {
-    BUILTIN
-        .iter()
-        .map(|y| Scripted::new(Desc::parse(y).expect("a built-in description parses")))
-        .collect()
-}
-
-/// Descriptions installed over the built-in set, by name
+/// The descriptions the receiver runs, installed from disk: the fetched
+/// waveshark-protocols tree and the operator's own files. Nothing is built
+/// in, so a receiver that has never fetched reads no ISM sensor at all.
 static INSTALLED: RwLock<Vec<Arc<Desc>>> = RwLock::new(Vec::new());
 
 /// Counts installs, so a graph built against an older set can tell
@@ -130,15 +77,52 @@ pub fn install(files: &[(String, String)]) -> Installed {
     out
 }
 
-/// The built-in descriptions with the installed ones over them, as protocols
+/// Every installed description, as protocols
 pub fn current() -> Vec<Scripted> {
     let installed = INSTALLED.read().unwrap_or_else(|e| e.into_inner());
-    let mut out: Vec<Scripted> = builtin()
-        .into_iter()
-        .filter(|b| !installed.iter().any(|i| i.name == b.desc.name))
-        .collect();
-    out.extend(installed.iter().map(|d| Scripted::new((**d).clone())));
-    out
+    installed.iter().map(|d| Scripted::new((**d).clone())).collect()
+}
+
+/// Taken by a test that writes the installed set, which is process wide
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Hold the installed set against the other tests in this binary
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Install the published descriptions so a test has something to decode
+/// with: the clone of waveshark-protocols `testdata/fetch.sh` leaves under
+/// `testdata/protocols`, or wherever `WAVESHARK_PROTOCOLS` points. False
+/// when it has not been fetched, which a test reports and skips on.
+pub fn install_fetched() -> bool {
+    let dir = std::env::var_os("WAVESHARK_PROTOCOLS").map(std::path::PathBuf::from).unwrap_or_else(
+        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/protocols"),
+    );
+    let mut files: Vec<(String, String)> = Vec::new();
+    collect_yaml(&dir, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    if files.is_empty() {
+        eprintln!("no protocol descriptions under {}, run testdata/fetch.sh", dir.display());
+        return false;
+    }
+    let got = install(&files);
+    assert!(got.refused.is_empty(), "published descriptions refused: {:?}", got.refused);
+    true
+}
+
+fn collect_yaml(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_yaml(&p, out);
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("yaml"))
+            && let Ok(text) = std::fs::read_to_string(&p)
+        {
+            out.push((p.display().to_string(), text));
+        }
+    }
 }
 
 /// The current description of `name`, for a test or a tool that wants one
@@ -1294,29 +1278,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_builtin_description_reads_its_vectors_both_ways() {
-        for p in builtin() {
+    fn every_published_description_reads_its_vectors_both_ways() {
+        let _installing = test_lock();
+        if !install_fetched() {
+            eprintln!("skipping: no protocol descriptions, run testdata/fetch.sh");
+            return;
+        }
+        let published = current();
+        assert!(published.len() >= 44, "{} descriptions fetched", published.len());
+        for p in published {
             check(&p).unwrap();
         }
     }
 
     #[test]
-    fn an_installed_description_replaces_the_built_in_one_by_name() {
-        let mut y = BUILTIN[1].to_string();
-        y = y.replace("repeats: 3", "repeats: 5");
-        let bad = "name: Broken\ntiming: {pwm: [1, 2], reset_us: 3}\nframe: {bits: 8}\n\
-                   fields: [{name: a, bits: 8}]\nvectors: [{hex: \"00\", fields: {a: 1}}]\n";
-        let got = install(&[("p.yaml".into(), y), ("b.yaml".into(), bad.into())]);
-        assert_eq!(got.names, ["Princeton"]);
+    fn a_later_file_wins_by_name_and_a_broken_one_is_refused() {
+        let _installing = test_lock();
+        let one = r#"
+name: Twice
+timing: {pwm: [400, 1200], reset_us: 3000}
+frame: {bits: 8, repeats: 3}
+fields: [{name: a, bits: 8, data: int}]
+vectors: [{hex: "2a", fields: {a: 42}}]
+"#;
+        let two = one.replace("repeats: 3", "repeats: 5");
+        let bad = r#"
+name: Broken
+timing: {pwm: [1, 2], reset_us: 3}
+frame: {bits: 8}
+fields: [{name: a, bits: 8, data: int}]
+vectors: [{hex: "00", fields: {a: 1}}]
+"#;
+        let got = install(&[
+            ("one.yaml".into(), one.into()),
+            ("two.yaml".into(), two),
+            ("b.yaml".into(), bad.into()),
+        ]);
+        assert_eq!(got.names, ["Twice", "Twice"], "refused {:?}", got.refused);
         assert_eq!(got.refused.len(), 1, "{:?}", got.refused);
         assert!(got.refused[0].1.contains("Broken"), "{:?}", got.refused);
         let cur = current();
-        assert_eq!(cur.len(), BUILTIN.len());
-        let p = cur.iter().find(|p| p.name() == "Princeton").unwrap();
-        assert_eq!(p.desc().frame.repeats, 5);
+        assert_eq!(cur.len(), 1);
+        assert_eq!(cur[0].desc().frame.repeats, 5, "the later file won");
         install(&[]);
-        let p = current().into_iter().find(|p| p.name() == "Princeton").unwrap();
-        assert_eq!(p.desc().frame.repeats, 3);
+        assert!(current().is_empty(), "nothing is built in");
     }
 
     fn parse_err(body: &str) -> String {
