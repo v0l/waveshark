@@ -202,6 +202,20 @@ impl ModeSDetector {
         }
     }
 
+    /// Forget everything carried between calls, keeping the sample index.
+    ///
+    /// For a caller that knows its sample stream broke: the carried tail is
+    /// then not contiguous with the next block, and a splice between two
+    /// bursts frames as a preamble that was never transmitted. The index
+    /// restarts at zero, so a caller timing frames rebases on the new stream.
+    pub fn reset(&mut self) {
+        self.tail.clear();
+        self.tail_at = 0;
+        self.seen = 0;
+        self.next_start = 0;
+        self.recent.clear();
+    }
+
     /// Sample rate this detector was built for.
     pub fn rate(&self) -> f64 {
         self.spus as f64 * 1e6
@@ -392,7 +406,16 @@ impl ModeSDetector {
                 let Some(f) = self.crc_frame(&bits[at..at + n], data, &mean, floor) else {
                     continue;
                 };
-                let start = base + (data - DATA_US as f64 * spus).max(0.0) as u64;
+                // Half a step forward and rounded, not truncated. The offset grid
+                // is `step` coarse and a stream decodes while it sits up to a
+                // step early, so the offset that passed is half a step early on
+                // average, and truncating the sample index loses another half.
+                // Against the preamble search's index for the same frame at
+                // 2.4 MS/s: 0.69 samples early before, 0.12 after, which is
+                // 0.29 us of jitter removed from a Beast timestamp that mixes
+                // frames from both searches.
+                let start =
+                    base + (data - DATA_US as f64 * spus + step * 0.5).round().max(0.0) as u64;
                 let f = ModeSFrame { at_sample: start, ..f };
                 if self.already(&f) || found.iter().any(|g| same_frame(g, &f, spus)) {
                     continue;
@@ -831,5 +854,69 @@ mod tests {
         let want = (lead * 2.4) as u64;
         let got = f[0].at_sample;
         assert!(got.abs_diff(want) <= 2, "preamble reported at {got}, expected about {want}");
+    }
+
+    /// Both searches have to put the same frame at the same sample.
+    ///
+    /// A Beast timestamp is read as a clock, and a receiver whose frames come
+    /// from two searches with different references has that difference as
+    /// per-frame jitter, which is what an mlat client cannot fit (#154). The
+    /// number is the mean over 60 sub-sample positions of a frame at
+    /// 2.4 MS/s: the parity search read 0.69 samples earlier than the
+    /// preamble search before the rounding was fixed, 0.12 after.
+    #[test]
+    fn the_parity_search_times_a_frame_where_the_preamble_search_does() {
+        let rate = 2.4e6;
+        let spus = 2.4f32;
+        let mut gap = 0.0f64;
+        let mut n = 0.0f64;
+        for k in 0..60 {
+            let lead = 20.0 + k as f32 * 0.037;
+            let clean = modulate(&LONG, rate, 0.5, lead);
+            // The same signal with its preamble erased, so only the parity
+            // search can find it.
+            let mut blind = clean.clone();
+            let from = (lead * spus) as usize;
+            let to = ((lead + DATA_US) * spus) as usize;
+            blind[from..to].iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
+            let at = |iq: &[C32]| -> Option<u64> {
+                let mut d = ModeSDetector::new(rate, ModeSConfig::default());
+                let mut out = Vec::new();
+                d.process_valid(iq, &mut out, &|f: &ModeSFrame| f.bytes == LONG);
+                out.iter().find(|f| f.bytes == LONG).map(|f| f.at_sample)
+            };
+            if let (Some(a), Some(b)) = (at(&clean), at(&blind)) {
+                gap += a as f64 - b as f64;
+                n += 1.0;
+            }
+        }
+        assert_eq!(n, 56.0, "expected 56 of the 60 positions to decode both ways");
+        let mean = gap / n;
+        assert!(
+            mean.abs() < 0.2,
+            "the parity search reads {mean:.3} samples from the preamble search"
+        );
+    }
+
+    /// A reset is what a caller does when its samples stopped arriving, so
+    /// what was carried over the break must not frame with what follows it.
+    #[test]
+    fn a_reset_drops_the_carried_tail() {
+        let iq = modulate(&LONG, 2.4e6, 0.5, 20.0);
+        let cut = (30.0 * 2.4) as usize;
+        let mut d = ModeSDetector::new(2.4e6, ModeSConfig::default());
+        let mut out = Vec::new();
+        let is_long = |f: &ModeSFrame| f.bytes == LONG;
+        d.process_valid(&iq[..cut], &mut out, &is_long);
+        assert_eq!(out.len(), 0, "half a frame is not a frame yet");
+        d.reset();
+        d.process_valid(&iq[cut..], &mut out, &is_long);
+        assert_eq!(out.len(), 0, "the frame was spliced back across the break");
+        // And the index starts again, which is what lets a caller rebase.
+        let whole = modulate(&LONG, 2.4e6, 0.5, 20.0);
+        d.reset();
+        d.process_valid(&whole, &mut out, &is_long);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].at_sample < (21.0 * 2.4) as u64, "index did not restart");
     }
 }

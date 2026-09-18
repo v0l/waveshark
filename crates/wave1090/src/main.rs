@@ -10,6 +10,7 @@
 //! from an iqstream server somewhere else, which is how one aerial feeds
 //! several receivers.
 
+mod clock;
 mod net;
 mod sbs;
 
@@ -23,10 +24,6 @@ use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
 /// The frequency this is about. Present as a flag because dump1090 has one,
 /// and because a downconverter puts the band somewhere else.
 const MODE_S_HZ: u64 = 1_090_000_000;
-
-/// Mode S counts time in twelfths of a microsecond, and every Beast client
-/// reads the timestamp that way.
-const BEAST_CLOCK_HZ: f64 = 12_000_000.0;
 
 /// How finely the parity search slices, as a word rather than a number
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -144,11 +141,9 @@ fn main() -> Result<()> {
         beast: serve(&args, args.net_bo_port)?,
     };
     if !args.quiet {
-        for (name, port) in
-            [("AVR", args.net_ro_port), ("SBS", args.net_sbs_port), ("Beast", args.net_bo_port)]
-        {
-            if port > 0 {
-                println!("{name:<6} on {}:{port}", args.net_bind_address);
+        for (name, port) in [("AVR", &ports.avr), ("SBS", &ports.sbs), ("Beast", &ports.beast)] {
+            if let Some(p) = port {
+                println!("{name:<6} on {}", p.addr());
             }
         }
     }
@@ -209,11 +204,7 @@ fn serve(args: &Args, port: u16) -> Result<Option<net::Fanout>> {
 /// A subscriber here is reading the same tuner, which is how one aerial feeds
 /// this and a second receiver at once. Not tunable: the dial belongs to
 /// whoever this is decoding for.
-fn listen(
-    args: &Args,
-    center_hz: u64,
-    rate: f64,
-) -> Result<Option<Fanned>> {
+fn listen(args: &Args, center_hz: u64, rate: f64) -> Result<Option<Fanned>> {
     let Some(spec) = &args.iqstream_listen else { return Ok(None) };
     let addr: std::net::SocketAddr = match spec.parse() {
         Ok(a) => a,
@@ -256,10 +247,12 @@ struct Reader {
     book: AddressBook,
     sbs: sbs::Sbs,
     frames: Vec<ModeSFrame>,
-    rate: f64,
+    clock: clock::Clock,
     raw: bool,
     read: u64,
     kept: u64,
+    /// Samples the source produced that never reached the demodulator
+    dropped: u64,
     /// Where the samples are fanned out, and the buffer they are packed into
     server: Option<Fanned>,
     uc8: Vec<u8>,
@@ -272,18 +265,29 @@ impl Reader {
             book: AddressBook::new(),
             sbs: sbs::Sbs::default(),
             frames: Vec::new(),
-            rate,
+            clock: clock::Clock::new(rate),
             raw,
             read: 0,
             kept: 0,
+            dropped: 0,
             server: None,
             uc8: Vec::new(),
         }
     }
 
     /// One block of samples in, whatever it held out on every port.
-    fn block(&mut self, iq: &[common::C32], ports: &Ports) {
+    ///
+    /// `seq` is where the block sits in the stream the source produced,
+    /// dropped samples included, which is what makes the Beast clock keep
+    /// time rather than count what happened to arrive.
+    fn block(&mut self, seq: u64, iq: &[common::C32], ports: &Ports) {
         self.read += iq.len() as u64;
+        if let clock::Step::Broke(n) = self.clock.block(seq, iq.len()) {
+            // What the demodulator is carrying ended before the break, and a
+            // splice between two bursts frames as a preamble nobody sent.
+            self.det.reset();
+            self.dropped += n;
+        }
         // Before the decoding, so a subscriber's copy is not delayed by it,
         // and only where somebody is connected: packing costs a pass over
         // every sample.
@@ -314,9 +318,8 @@ impl Reader {
                 17 | 18 => adsb::fix_single_bit(&f.bytes).unwrap_or_else(|| f.bytes.clone()),
                 _ => f.bytes.clone(),
             };
-            let clock =
-                (f.at_sample as f64 * BEAST_CLOCK_HZ / self.rate) as u64 & 0x0000_ffff_ffff_ffff;
-            self.publish(&bytes, clock, f.rssi_dbfs, ports, now);
+            let at = self.clock.at(f.at_sample);
+            self.publish(&bytes, at, f.rssi_dbfs, ports, now);
         }
         self.frames = frames;
         self.sbs.expire();
@@ -396,23 +399,33 @@ fn from_radio(
             Ok(b) => b,
             Err(e) => bail!("the radio stopped: {e}"),
         };
-        reader.block(&buf.samples, &ports);
+        reader.block(buf.seq, &buf.samples, &ports);
         // Whatever came back from an mlat client since the last block, put
         // out as though it had been heard here, which is what
-        // `--forward-mlat` means to everything downstream.
+        // `--forward-mlat` means to everything downstream. Not with a
+        // timestamp of this receiver's, though: the frame was computed
+        // somewhere else and was never at a sample index here, so it goes out
+        // untimed and a client leaves it out of its clock fit.
         for rx in &incoming {
             while let Ok(bytes) = rx.try_recv() {
-                reader.publish(&bytes, 0, f32::NEG_INFINITY, &ports, chrono::Utc::now());
+                reader.publish(
+                    &bytes,
+                    clock::UNTIMED,
+                    f32::NEG_INFINITY,
+                    &ports,
+                    chrono::Utc::now(),
+                );
             }
         }
         if !args.quiet && said.elapsed().as_secs() >= 10 {
             said = std::time::Instant::now();
             eprintln!(
-                "{} frames in {:.0} s, {:.1} a second, {} dropped",
+                "{} frames in {:.0} s, {:.1} a second, {} dropped, {} gaps",
                 reader.kept,
                 began.elapsed().as_secs_f64(),
                 reader.kept as f64 / began.elapsed().as_secs_f64(),
-                stream.dropped()
+                stream.dropped(),
+                reader.dropped
             );
         }
     }
@@ -434,11 +447,142 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
     let mut reader = Reader::new(rate, args.raw, args.parity_search);
     reader.server = listen(args, buf.center.0, rate)?;
     reader.sbs.here = station(args);
-    for block in buf.samples.chunks(65_536) {
-        reader.block(block, &ports);
+    for (n, block) in buf.samples.chunks(65_536).enumerate() {
+        reader.block((n * 65_536) as u64, block, &ports);
     }
     if !args.quiet {
         println!("{} frames", reader.kept);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    const CAPTURE: &str = "../../testdata/adsb_1090M_2400k.cu8";
+    /// A block of the capture with no frame in it, so dropping it can be
+    /// compared frame for frame against not dropping it.
+    const HOLE: usize = 73;
+
+    fn capture() -> Option<common::IqBuf> {
+        let path = std::path::Path::new(CAPTURE);
+        if !path.exists() {
+            eprintln!("skipping: no {CAPTURE}, run testdata/fetch.sh");
+            return None;
+        }
+        Some(sources::FileSource::open(path).unwrap().read_all().unwrap())
+    }
+
+    /// The capture in the 65536 sample blocks a dongle hands over, each with
+    /// where it sits in the stream.
+    fn blocks(buf: &common::IqBuf) -> Vec<(u64, Vec<common::C32>)> {
+        buf.samples
+            .chunks(65_536)
+            .enumerate()
+            .map(|(n, b)| ((n * 65_536) as u64, b.to_vec()))
+            .collect()
+    }
+
+    /// Every Beast frame the receiver put on the wire, as timestamp and body.
+    ///
+    /// Through the socket rather than around it, because a timestamp is only
+    /// right if it survives the escaping as well as the arithmetic.
+    fn beast_over_the_wire(blocks: &[(u64, Vec<common::C32>)], rate: f64) -> Vec<(u64, Vec<u8>)> {
+        let fanout = net::Fanout::serve("127.0.0.1", 0).expect("a port");
+        let mut client = std::net::TcpStream::connect(fanout.addr()).expect("connect");
+        client.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        // The listener accepts on its own thread, so wait for it to hold the
+        // socket before anything is sent to nobody.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let reader = std::thread::spawn(move || {
+            let (mut buf, mut chunk) = (Vec::new(), [0u8; 65_536]);
+            while let Ok(n) = client.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            buf
+        });
+
+        let ports = Ports { avr: None, sbs: None, beast: Some(fanout) };
+        let mut rx = Reader::new(rate, false, Search::Fine);
+        for (seq, iq) in blocks {
+            rx.block(*seq, iq, &ports);
+        }
+        drop(ports);
+        let bytes = reader.join().expect("the client thread");
+
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while let Some((frame, used)) = net::next_frame(&bytes[at..]) {
+            if let Some(f) = frame {
+                out.push((timestamp(&bytes[at + 2..]), f));
+            }
+            at += used;
+        }
+        out
+    }
+
+    /// The six bytes of clock at the head of a Beast body, unescaped.
+    fn timestamp(body: &[u8]) -> u64 {
+        let (mut ts, mut i) = (0u64, 0usize);
+        for _ in 0..6 {
+            i += (body[i] == 0x1a) as usize;
+            ts = (ts << 8) | body[i] as u64;
+            i += 1;
+        }
+        ts
+    }
+
+    /// The whole point of the Beast timestamp: it is a clock.
+    ///
+    /// Four seconds of the 1090 MHz capture, and every frame's timestamp is
+    /// the sample it was heard at times five, in order and never repeated.
+    #[test]
+    fn a_beast_timestamp_is_the_sample_index_at_twelve_megahertz() {
+        let Some(buf) = capture() else { return };
+        let frames = beast_over_the_wire(&blocks(&buf), buf.rate.as_f64());
+        assert_eq!(frames.len(), 70, "frames on 30005");
+        assert!(frames.iter().all(|(ts, _)| *ts != clock::UNTIMED), "a frame lost its time");
+        assert!(
+            frames.windows(2).all(|w| w[0].0 < w[1].0),
+            "timestamps out of order: {:?}",
+            frames.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+        );
+        // 2.4 MS/s is five ticks a sample, and four seconds is 9.6 M samples,
+        // so no frame can be past 48 M ticks or on a fraction of a sample.
+        let (first, last) = (frames[0].0, frames[frames.len() - 1].0);
+        assert!(last < 48_000_000, "the last frame is at {last}");
+        assert_eq!((first % 5, last % 5), (0, 0), "not a whole sample");
+    }
+
+    /// Samples the radio dropped are time that passed.
+    ///
+    /// The same capture with one block never delivered: every frame after it
+    /// keeps the timestamp it had, because the clock is made from the
+    /// sequence number the source counts and not from what arrived.
+    #[test]
+    fn a_dropped_block_does_not_move_the_frames_after_it() {
+        let Some(buf) = capture() else { return };
+        let rate = buf.rate.as_f64();
+        let all = blocks(&buf);
+        let whole = beast_over_the_wire(&all, rate);
+        let holed: Vec<(u64, Vec<common::C32>)> =
+            all.iter().enumerate().filter(|(n, _)| *n != HOLE).map(|(_, b)| b.clone()).collect();
+        let gapped = beast_over_the_wire(&holed, rate);
+
+        assert_eq!(whole.len(), 70);
+        assert_eq!(gapped.len(), 70, "a frame went with the dropped block");
+        let past = (HOLE as u64 + 1) * 65_536 * 5;
+        let mut checked = 0;
+        for ((a, one), (b, other)) in whole.iter().zip(&gapped) {
+            assert_eq!(one, other, "a different frame came out");
+            assert_eq!(a, b, "a frame moved by {} ticks", *b as i64 - *a as i64);
+            checked += (*a > past) as usize;
+        }
+        assert_eq!(checked, 42, "frames past the gap");
+    }
 }

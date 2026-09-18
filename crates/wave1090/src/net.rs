@@ -11,16 +11,17 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 /// A port and everybody listening on it
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Fanout {
     clients: Arc<Mutex<Vec<TcpStream>>>,
+    addr: std::net::SocketAddr,
 }
 
 impl Fanout {
     /// Start listening, or return the error a caller should print and exit on.
     pub fn serve(addr: &str, port: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind((addr, port))?;
-        let out = Self::default();
+        let out = Self { clients: Arc::default(), addr: listener.local_addr()? };
         let clients = out.clients.clone();
         std::thread::spawn(move || {
             for sock in listener.incoming().flatten() {
@@ -32,6 +33,11 @@ impl Fanout {
             }
         });
         Ok(out)
+    }
+
+    /// Where it is listening, which a port of zero only settles here.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
     }
 
     /// Write to every client, dropping the ones that fail.
@@ -89,7 +95,7 @@ fn read_frames(sock: TcpStream, tx: Sender<Vec<u8>>) {
 ///
 /// `None` for the whole answer means there is not enough yet; a `Some` with a
 /// `None` frame is a byte skipped as noise between frames.
-fn next_frame(buf: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
+pub fn next_frame(buf: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
     match buf.first()? {
         0x1a => {
             let kind = *buf.get(1)?;
