@@ -620,10 +620,17 @@ impl ModeSDetector {
     }
 }
 
-/// Whether two frames are one frame found twice, by both searches or by two
-/// sampling offsets of the same search.
+/// Whether two frames are one transmission found twice, by both searches or
+/// by two sampling offsets of the same search.
 fn same_frame(a: &ModeSFrame, b: &ModeSFrame, spus: f64) -> bool {
-    a.bytes == b.bytes && a.at_sample.abs_diff(b.at_sample) <= (2.0 * spus) as u64 + 2
+    // Not by the bits: a transmission read twice can come out differing by a
+    // bit, the preamble search keeping it on a known address and the parity
+    // search on its checksum, and a caller that corrects that bit then has
+    // one frame twice at one sample. Two aircraft cannot start a frame within
+    // two microseconds of each other and both decode, so the sample is the
+    // identity and the bits are not (#154).
+    a.bytes.len() == b.bytes.len()
+        && a.at_sample.abs_diff(b.at_sample) <= (2.0 * spus) as u64 + 2
 }
 
 /// Middle magnitude of a block, as the level a CRC-framed window is measured
@@ -896,6 +903,41 @@ mod tests {
             mean.abs() < 0.2,
             "the parity search reads {mean:.3} samples from the preamble search"
         );
+    }
+
+    /// One transmission is one frame, however differently it was read.
+    ///
+    /// The two searches can read the same burst a bit apart, one keeping it on
+    /// a known address and the other on its checksum. A caller that corrects
+    /// the bit then publishes the same frame twice at the same sample, which
+    /// an mlat client reads as a clock that stopped (#154). The pair here is
+    /// off radarpi: 8d4cae5a at sample 240122, one copy reading `ee` where the
+    /// other read `fe`.
+    #[test]
+    fn a_burst_read_two_ways_is_one_frame_and_not_two() {
+        let one = ModeSFrame {
+            bytes: vec![
+                0x8d, 0x4c, 0xae, 0x5a, 0xf8, 0x23, 0x00, 0x06, 0x00, 0x4a, 0xb8, 0xee, 0x81, 0x90,
+            ],
+            at_sample: 240_122,
+            rssi_dbfs: -20.0,
+            weak_bits: 0,
+        };
+        let other = ModeSFrame {
+            bytes: {
+                let mut b = one.bytes.clone();
+                b[11] = 0xfe;
+                b
+            },
+            ..one.clone()
+        };
+        assert!(same_frame(&one, &other, 2.4), "one burst counted as two frames");
+        // A short frame beside a long one at the same sample is not it, and
+        // nor is the same frame a whole frame later.
+        let short = ModeSFrame { bytes: vec![0u8; 7], ..one.clone() };
+        assert!(!same_frame(&one, &short, 2.4));
+        let later = ModeSFrame { at_sample: one.at_sample + 300, ..one.clone() };
+        assert!(!same_frame(&one, &later, 2.4));
     }
 
     /// A reset is what a caller does when its samples stopped arriving, so
