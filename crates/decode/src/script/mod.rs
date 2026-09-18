@@ -24,9 +24,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-/// The descriptions built in, one file each under `crates/decode/protocols`
+/// The descriptions built in, the files under `crates/decode/protocols` in
+/// the layout waveshark-protocols keeps: one directory per kind of device
 pub const BUILTIN: &[&str] =
-    &[include_str!("../../protocols/nexus.yaml"), include_str!("../../protocols/princeton.yaml")];
+    &[include_str!("../../protocols/weather/nexus.yaml"), include_str!("../../protocols/remotes/princeton.yaml")];
 
 /// Every built-in description as a protocol
 pub fn builtin() -> Vec<Scripted> {
