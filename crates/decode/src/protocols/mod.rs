@@ -9,7 +9,6 @@
 //! rule, that rule is here too: the rules are not cosmetic, they are what
 //! stops a checksum-free protocol claiming every burst on the band.
 
-mod alecto;
 mod ert;
 mod esl;
 mod globaltronics;
@@ -19,10 +18,8 @@ mod interlogix;
 mod ism868_link;
 pub mod keyfob;
 mod oregon;
-mod security;
 mod somfy_rts;
 
-pub use alecto::AlectoV1;
 pub use ert::{ErtIdm, ErtScm, ErtScmPlus};
 pub use esl::Esl;
 pub use globaltronics::{GtWt02, GtWt03};
@@ -32,7 +29,6 @@ pub use interlogix::InterlogixSecurity;
 pub use ism868_link::Ism868Link;
 pub use keyfob::KeeLoq;
 pub use oregon::{OregonV2, OregonV3};
-pub use security::HoneywellSecurity;
 pub use somfy_rts::SomfyRts;
 
 use crate::bits::BitBuffer;
