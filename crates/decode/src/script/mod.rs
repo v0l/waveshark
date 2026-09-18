@@ -1197,7 +1197,8 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
     }
 }
 
-fn hex_bits(hex: &str, n: usize) -> Result<BitBuffer, String> {
+/// The first `n` bits of a hex frame as a vector writes it
+pub fn hex_bits(hex: &str, n: usize) -> Result<BitBuffer, String> {
     let digits: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
     if !digits.len().is_multiple_of(2) {
         return Err(format!("hex {hex:?} has an odd number of digits"));
