@@ -181,6 +181,10 @@ pub struct Probe {
     pub gain_db: Option<f32>,
     /// Whether this server will accept a retune.
     pub tunable: bool,
+    /// How far a retune may go, where the far end said. None from one that
+    /// takes a tune without naming a range, which leaves a dial with no ends
+    /// to draw and so no dial.
+    pub tune_range: Option<std::ops::RangeInclusive<Hz>>,
     /// What the far end says is in front of the converter, where it says
     /// anything: the tuner chip for rtl_tcp, "remote" otherwise.
     pub tuner: String,

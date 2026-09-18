@@ -12,6 +12,7 @@ members = [
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
+    "crates/iqstream",
     "crates/remote",
     "crates/sources",
     "crates/decode",
@@ -45,6 +46,7 @@ default-members = [
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
+    "crates/iqstream",
     "crates/remote",
     "crates/sources",
     "crates/decode",
@@ -96,6 +98,7 @@ gps = { path = "crates/gps" }
 survey = { path = "crates/survey" }
 httpc = { path = "crates/httpc" }
 orbit = { path = "crates/orbit" }
+iqstream = { path = "crates/iqstream" }
 
 anyhow = "1.0"
 # Raw ffmpeg, for the container and the codecs a broadcast multiplex uses.

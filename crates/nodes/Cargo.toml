@@ -38,6 +38,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # for it would cost every build that never speaks to one.
 rumqttc = { version = "0.25", default-features = false }
 serde_json.workspace = true
+iqstream.workspace = true
 
 [features]
 # Nothing by default: the app names what it wants, and a default here was on

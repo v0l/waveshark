@@ -347,6 +347,13 @@ pub struct Plan {
     pub transcribe_device: String,
     /// Other receivers feeding the same packet bus.
     pub feeds: Vec<nodes::FeedSpec>,
+    /// Where the span is served to network subscribers, and whether one of
+    /// them may move the dial.
+    ///
+    /// A plan value rather than an edit, because a listening socket is
+    /// something an operator switched on and expects to still be there after
+    /// a retune rebuilds the graph.
+    pub iqstream: Option<IqStreamPlan>,
     /// The channel being transmitted on, if any, and what it transmits.
     ///
     /// In the plan because the transmitter is part of what the receiver is
@@ -2863,6 +2870,16 @@ pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
 /// Fixed for the stages there is only ever one of, and computed from what it
 /// is for otherwise: a bank keeps its channels and a detector its noise floor
 /// across a rebuild only if the same stage comes back under the same name.
+/// Serving the span to the network.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IqStreamPlan {
+    pub addr: std::net::SocketAddr,
+    /// Whether a subscriber may retune this receiver. Off unless an operator
+    /// asked: granting it moves the frequency on the local screen, because
+    /// there is one tuner.
+    pub tunable: bool,
+}
+
 pub mod derived {
     use crate::patch::Patch;
 
@@ -2927,6 +2944,8 @@ pub mod derived {
     pub const SCAN: u64 = Patch::DERIVED_BASE + 30;
     /// What is on each channel, from every decoder that names one.
     pub const CHANNELS: u64 = Patch::DERIVED_BASE + 32;
+    /// The span on its way out to network subscribers.
+    pub const IQSTREAM: u64 = Patch::DERIVED_BASE + 34;
 
     /// A stage that belongs to one band or one channel: the extraction in
     /// front of a front end, the front end itself, one bank of a set.
@@ -3214,6 +3233,20 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         s.insert("hang_ms".into(), pipeline::ParamValue::Float(arm.hang_ms as f64));
         p.add_derived(derived::CAPTURE, "iq_capture", s);
         p.connect(head, (derived::CAPTURE, 0));
+    }
+
+    // Served to the network off the head, beside the capture and the
+    // spectrum: what a subscriber wants is the span this receiver is on, not
+    // one channel out of it.
+    if let Some(net) = &plan.iqstream {
+        let mut s = Settings::new();
+        s.insert(
+            nodes::iqstream_nodes::ADDRESS.into(),
+            pipeline::ParamValue::Text(net.addr.to_string()),
+        );
+        s.insert(nodes::iqstream_nodes::TUNABLE.into(), pipeline::ParamValue::Bool(net.tunable));
+        p.add_derived(derived::IQSTREAM, nodes::iqstream_nodes::DESC.name, s);
+        p.connect(head, (derived::IQSTREAM, 0));
     }
 
     // The heatmap recorder, on the same terms and for the same reason: what
@@ -4986,6 +5019,7 @@ pub(crate) mod tests {
             center,
             rate,
             zoom: 1,
+            iqstream: None,
             tx_capture: None,
             dc_block: true,
             refresh_hz: 30.0,
@@ -5417,6 +5451,73 @@ pub(crate) mod tests {
         let cap = rx.capture().unwrap();
         assert_eq!(cap.trigger(), Trigger::Energy, "a retune disarmed the capture");
         assert_eq!(cap.threshold_dbfs(), Some(-42.0));
+    }
+
+    /// The server is drawn only where one was asked for, reads the head like
+    /// the capture and the spectrum rather than a channel, and survives a
+    /// retune: the graph is rebuilt on every dial move and a stage that came
+    /// and went would take the listening socket with it.
+    #[test]
+    fn the_span_is_served_off_the_head_and_survives_a_retune() {
+        let kind = nodes::iqstream_nodes::DESC.name;
+        let mut plan = tests::plan(2_400_000.0, Hz::mhz(1090));
+
+        let drawn = derived_patch(&plan);
+        assert_eq!(
+            drawn.stages().iter().filter(|s| s.kind == kind).count(),
+            0,
+            "nothing is served until somebody asks"
+        );
+
+        plan.iqstream = Some(IqStreamPlan {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            tunable: false,
+        });
+        let drawn = derived_patch(&plan);
+        let served: Vec<_> = drawn.stages().iter().filter(|s| s.kind == kind).collect();
+        assert_eq!(served.len(), 1, "one server, not one per channel");
+        let from = match drawn.feeding((served[0].id, 0)) {
+            Some(crate::patch::Source::Stage(id, _)) => id,
+            other => panic!("the server is fed by {other:?}"),
+        };
+        assert_eq!(
+            drawn.stage(from).map(|s| s.kind.as_str()),
+            Some("dc_block"),
+            "the server reads the head, not a channel"
+        );
+
+        // And it negotiates in the graph the receiver runs, not only in the
+        // one it draws.
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert_eq!(rx.topology().nodes.iter().filter(|n| n.kind == kind).count(), 1);
+
+        // The dial moved, which is a rebuild: the stage comes back under the
+        // same derived id, so the socket it holds is the same socket.
+        plan.center = Hz::mhz(433);
+        let after = derived_patch(&plan);
+        let again: Vec<_> = after.stages().iter().filter(|s| s.kind == kind).collect();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, served[0].id, "a new id would be a new socket");
+    }
+
+    /// The dial is held here unless the plan says otherwise, and that is what
+    /// reaches the stage: a subscriber cannot be given something an operator
+    /// did not offer.
+    #[test]
+    fn the_dial_is_offered_only_where_the_plan_says_so() {
+        let kind = nodes::iqstream_nodes::DESC.name;
+        let mut plan = tests::plan(2_400_000.0, Hz::mhz(1090));
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        for tunable in [false, true] {
+            plan.iqstream = Some(IqStreamPlan { addr, tunable });
+            let drawn = derived_patch(&plan);
+            let s = drawn.stages().iter().find(|s| s.kind == kind).expect("a server");
+            assert_eq!(
+                s.settings.get(nodes::iqstream_nodes::TUNABLE),
+                Some(&pipeline::ParamValue::Bool(tunable)),
+                "tunable {tunable}"
+            );
+        }
     }
 
     #[test]

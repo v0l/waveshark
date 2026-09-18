@@ -46,7 +46,10 @@ the code is in the commit log.
   position and climb rate.
 - Radiosonde launch sites from SondeHub, on the map with the time until the
   next release from each.
-- rtl_tcp as a remote tuner, added beside packet feeds in one dialog.
+- IQStream and rtl_tcp as remote tuners, added beside packet feeds in one
+  dialog.
+- IQStream remote tuners can be tuned from here.
+- An IQStream server, so another machine can read the same span.
 - Several matching tuners offered as one wider receiver, with the drift
   between them measured on the band they share and taken out.
 - Heatmap export: the span kept as readings and written as a page that zooms

@@ -96,6 +96,9 @@ pub fn probe(addr: &str) -> Result<Probe> {
         rate: None,
         gain_db: None,
         tunable: true,
+        // The dongle's own range, which the greeting names by naming its
+        // tuner chip.
+        tune_range: tuner.ranges().first().map(|r| r.range.clone()),
         tuner: tuner.name().to_string(),
     })
 }
