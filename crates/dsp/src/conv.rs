@@ -66,13 +66,19 @@ pub const TETRA_1_4: Code =
 /// D^4, 1 + D + D^3 + D^4 and 1 + D^2 + D^4.
 pub const TETRA_1_3: Code = Code { constraint: 5, polys: &[0b1_1111, 0b1_1011, 0b1_0101] };
 
+/// DRM's rate 1/6 mother code, ES 201 980 clause 7.2.1.1, from which every
+/// rate the standard uses is punctured: 133, 171 and 145 octal, then the
+/// same three again.
+pub const DRM_1_6: Code =
+    Code { constraint: 7, polys: &[0o133, 0o171, 0o145, 0o133, 0o171, 0o145] };
+
 /// No puncturing: every mother bit is sent.
 pub const P_1_2: &[u8] = &[1, 1];
 
-/// The most coded bits any code here puts out per bit in, which is TETRA's
-/// rate 1/4. A step is that wide at most, so it is an array rather than a
+/// The most coded bits any code here puts out per bit in, which is DRM's
+/// rate 1/6. A step is that wide at most, so it is an array rather than a
 /// buffer.
-const MAX_RATE: usize = 4;
+const MAX_RATE: usize = 6;
 
 /// A puncturing mask, read once: what a step starting at each place in the
 /// period takes from the stream, and where the next step starts.

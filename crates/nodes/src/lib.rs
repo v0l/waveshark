@@ -22,6 +22,7 @@ pub mod dab_nodes;
 pub mod decode_nodes;
 pub mod dfm_nodes;
 pub mod dmr_nodes;
+pub mod drm_nodes;
 pub mod droneid_nodes;
 pub mod dsp_nodes;
 pub mod dvbt_nodes;
@@ -235,6 +236,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),
     (dab_nodes::DESC, dab_nodes::build),
+    (drm_nodes::DESC, drm_nodes::build),
     (ident_nodes::DESC, ident_nodes::build),
     (dvbt_nodes::TS_SOURCE, dvbt_nodes::build_ts_source),
     (dvbt_nodes::DVBT_MOD, dvbt_nodes::build_dvbt_mod),
