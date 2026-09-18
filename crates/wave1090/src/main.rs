@@ -16,7 +16,7 @@ mod sbs;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use common::device::{Device, GainMode};
-use common::{Hz, Sps};
+use common::{Hz, SampleFormat, Sps};
 use decode::adsb::{self, AddressBook};
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
 
@@ -84,6 +84,11 @@ struct Args {
     #[arg(long, value_name = "PORT", default_value_t = 30005)]
     net_bo_port: u16,
 
+    /// Serve the samples on to other receivers over iqstream, as addr:port
+    /// or a bare port. One aerial then feeds this and whatever else wants it
+    #[arg(long, value_name = "ADDR")]
+    iqstream_listen: Option<String>,
+
     /// Say nothing on standard output but what was asked for
     #[arg(long)]
     quiet: bool,
@@ -139,6 +144,35 @@ fn serve(args: &Args, port: u16) -> Result<Option<net::Fanout>> {
     ))
 }
 
+/// The iqstream server this receiver fans its own samples out on, if asked.
+///
+/// A subscriber here is reading the same tuner, which is how one aerial feeds
+/// this and a second receiver at once. Not tunable: the dial belongs to
+/// whoever this is decoding for.
+fn listen(args: &Args, center_hz: u64, rate: f64) -> Result<Option<std::sync::Arc<iqstream::Server>>> {
+    let Some(spec) = &args.iqstream_listen else { return Ok(None) };
+    let addr: std::net::SocketAddr = match spec.parse() {
+        Ok(a) => a,
+        Err(_) => match spec.parse::<u16>() {
+            Ok(port) => ([0, 0, 0, 0], port).into(),
+            Err(_) => bail!("--iqstream-listen wants addr:port or a port, not {spec:?}"),
+        },
+    };
+    let cfg = iqstream::ServerConfig {
+        name: "wave1090".into(),
+        center_hz,
+        sample_rate: rate as u32,
+        gain_db: Some(args.gain),
+        tunable: false,
+        tune_range_hz: None,
+    };
+    let server = iqstream::Server::start(addr, cfg).context("cannot serve iqstream")?;
+    if !args.quiet {
+        println!("iqstream on {}", server.addr());
+    }
+    Ok(Some(server))
+}
+
 /// The state a run carries between blocks.
 struct Reader {
     det: ModeSDetector,
@@ -149,6 +183,9 @@ struct Reader {
     raw: bool,
     read: u64,
     kept: u64,
+    /// Where the samples are fanned out, and the buffer they are packed into
+    server: Option<std::sync::Arc<iqstream::Server>>,
+    uc8: Vec<u8>,
 }
 
 impl Reader {
@@ -162,12 +199,24 @@ impl Reader {
             raw,
             read: 0,
             kept: 0,
+            server: None,
+            uc8: Vec::new(),
         }
     }
 
     /// One block of samples in, whatever it held out on every port.
     fn block(&mut self, iq: &[common::C32], ports: &Ports) {
         self.read += iq.len() as u64;
+        // Before the decoding, so a subscriber's copy is not delayed by it,
+        // and only where somebody is connected: packing costs a pass over
+        // every sample.
+        if let Some(server) = &self.server
+            && server.subscribers() > 0
+        {
+            SampleFormat::Cu8.encode(iq, &mut self.uc8);
+            server.push(&self.uc8);
+            self.uc8.clear();
+        }
         self.frames.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
         self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
@@ -238,6 +287,7 @@ fn from_radio(args: &Args, mut dev: Box<dyn Device>, remote: bool, ports: Ports)
 
     let mut stream = dev.start_rx().context("the radio would not start")?;
     let mut reader = Reader::new(rate, args.raw);
+    reader.server = listen(args, center, rate)?;
     let began = std::time::Instant::now();
     let mut said = began;
     loop {
@@ -273,6 +323,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
         );
     }
     let mut reader = Reader::new(rate, args.raw);
+    reader.server = listen(args, buf.center.0, rate)?;
     for block in buf.samples.chunks(65_536) {
         reader.block(block, &ports);
     }
