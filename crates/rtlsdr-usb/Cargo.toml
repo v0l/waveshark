@@ -1,0 +1,14 @@
+[package]
+name = "rtlsdr-usb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RTL2832U and R82xx driver over USB, with no system library"
+
+[dependencies]
+nusb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 common.workspace = true
-rtlsdr-sys.workspace = true
+rtlsdr-usb.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
 

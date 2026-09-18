@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let d = rtlsdr::enumerate();
     let d = d.first().ok_or("no RTL-SDR")?;
-    let mut sdr = rtlsdr::RtlSdr::open(d.index)?;
+    let mut sdr = rtlsdr::RtlSdr::open(d.index as u32)?;
     sdr.set_rate(Sps(RF_RATE))?;
     sdr.set_gain("tuner", GainMode::Manual(49.6))?;
 
