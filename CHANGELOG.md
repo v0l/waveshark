@@ -15,6 +15,8 @@ the code is in the commit log.
   whether the speech is enciphered. No sound yet.
 - DAB ensembles on band III: the ensemble name, its stations, their programme
   types and bit rates. No sound yet.
+- DRM on shortwave and medium wave: the services in a multiplex, their
+  languages and their labels. No sound yet.
 - IEEE 802.15.4 at 2.4 GHz: the addresses and networks under Zigbee, Thread
   and Matter.
 - P25 phase 1: the talkgroup, the radio id and the key a call is under,

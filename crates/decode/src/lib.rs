@@ -30,6 +30,7 @@ pub mod dab;
 pub mod dfm;
 pub mod dmr;
 pub mod dmr_bp;
+pub mod drm;
 pub mod droneid;
 pub mod dtmf;
 pub mod dvbt;
