@@ -17,6 +17,9 @@ pub enum Modulation {
     Fsk2,
     /// Four levels. The four-level front end reads these.
     Fsk4,
+    /// Eight tones, read as tones rather than as levels: FT8 and the other
+    /// weak-signal modes key one of eight a few hertz apart.
+    Fsk8,
     /// Two tones at a modulation index near 0.5, which is MSK and its
     /// filtered relative GMSK. Worth separating from plain FSK because the
     /// tones overlap and a hard threshold on the discriminator loses to a
@@ -87,6 +90,7 @@ impl Modulation {
             Modulation::Ask => "ASK",
             Modulation::Fsk2 => "2-FSK",
             Modulation::Fsk4 => "4-FSK",
+            Modulation::Fsk8 => "8-FSK",
             Modulation::Msk => "MSK",
             Modulation::Psk2 => "BPSK",
             Modulation::Psk4 => "QPSK",
@@ -158,6 +162,7 @@ impl Modulation {
             "AFSK" => Some(Self::Afsk),
             "GFSK" => Some(Self::Gfsk),
             "4FSK" | "FSK4" | "C4FM" => Some(Self::Fsk4),
+            "8FSK" | "FSK8" => Some(Self::Fsk8),
             "MSK" => Some(Self::Msk),
             "GMSK" => Some(Self::Gmsk),
             "OQPSK" => Some(Self::Oqpsk),
@@ -180,11 +185,12 @@ impl Modulation {
 
     /// Every verdict, so a caller can round-trip or list them without
     /// keeping its own copy of the set.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Ook,
         Self::Ask,
         Self::Fsk2,
         Self::Fsk4,
+        Self::Fsk8,
         Self::Msk,
         Self::Psk2,
         Self::Psk4,

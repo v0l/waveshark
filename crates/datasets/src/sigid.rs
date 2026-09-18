@@ -242,6 +242,7 @@ pub fn wiki_modulations(m: common::Modulation) -> &'static [&'static str] {
         M::Fsk2 | M::Afsk => &["FSK", "GFSK", "2FSK", "AFSK", "CWFSK", "FFSK"],
         M::Gfsk => &["GFSK", "FSK", "2FSK"],
         M::Fsk4 => &["4FSK", "FSK", "GFSK", "C4FM"],
+        M::Fsk8 => &["8FSK", "MFSK", "FSK"],
         M::Msk => &["MSK", "GMSK"],
         M::Gmsk => &["GMSK", "MSK"],
         M::Psk2 => &["BPSK", "PSK", "DPSK", "SDPSK"],

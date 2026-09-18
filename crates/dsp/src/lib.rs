@@ -43,6 +43,7 @@ pub mod hdlc;
 pub mod lora;
 pub mod lte_turbo;
 pub mod m17;
+pub mod mfsk;
 pub mod mixer;
 pub mod modes;
 pub mod msk;

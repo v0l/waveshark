@@ -534,6 +534,8 @@ pub fn all() -> &'static [&'static dyn Protocol] {
         &crate::pocsag_nodes::Pocsag,
         &crate::flex_nodes::Flex,
         &crate::rtty_nodes::Rtty,
+        &crate::ft8_nodes::Ft8,
+        &crate::ft8_nodes::Ft4,
         &crate::morse_nodes::Morse,
         &crate::mdc_nodes::Mdc,
         &crate::eas_nodes::Eas,

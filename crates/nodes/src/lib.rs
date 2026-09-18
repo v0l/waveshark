@@ -33,6 +33,7 @@ pub mod feed_nodes;
 pub mod filter_nodes;
 pub mod flex_nodes;
 pub mod frame_meter;
+pub mod ft8_nodes;
 pub mod gsm_nodes;
 pub mod homeassistant_nodes;
 pub mod ident_nodes;
@@ -260,6 +261,8 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (pocsag_nodes::DESC, pocsag_nodes::build),
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
+    (ft8_nodes::FT8_DESC, ft8_nodes::build_ft8),
+    (ft8_nodes::FT4_DESC, ft8_nodes::build_ft4),
     (morse_nodes::DESC, morse_nodes::build),
     (eas_nodes::DESC, eas_nodes::build),
     (mdc_nodes::DESC, mdc_nodes::build),
