@@ -247,6 +247,10 @@ pub struct Check {
     /// The sum is taken from `init` rather than compared as it is
     #[serde(default)]
     pub negate: bool,
+    /// The carry out of the sum is folded back in, except the carry from
+    /// adding the last covered byte
+    #[serde(default)]
+    pub fold: bool,
     /// Width of the stored value where the kind does not fix it
     pub width: Option<usize>,
     /// The value is stored low bit first, and a nibble sum adds the
@@ -795,10 +799,8 @@ impl Desc {
             {
                 return Err(format!("{name}: a {:?} check covers whole bytes", c.kind));
             }
-            if matches!(c.kind, CheckKind::NibbleSum | CheckKind::NibbleXor)
-                && (c.over[1] - c.over[0]) % 4 != 0
-            {
-                return Err(format!("{name}: a nibble sum covers whole nibbles"));
+            if c.fold && c.kind != CheckKind::Sum8 {
+                return Err(format!("{name}: only a sum folds its carry"));
             }
         }
         for path in owner_paths(&self.fields) {

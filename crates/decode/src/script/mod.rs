@@ -1031,6 +1031,13 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
         CheckKind::Crc8Le => bits::crc8le(&d, c.poly as u8, c.init as u8) as u64,
         CheckKind::Crc16 => bits::crc16(&d, c.poly as u16, c.init as u16) as u64,
         CheckKind::Crc16Le => bits::crc16le(&d, c.poly as u16, c.init as u16) as u64,
+        CheckKind::Sum8 if c.fold => {
+            // the sum's carry is added back in, but not the carry from
+            // adding the last byte: WT0124's and other pool thermometers'
+            let (last, rest) = d.split_last().map_or((0, &[][..]), |(l, r)| (*l, r));
+            let s: u32 = rest.iter().map(|&b| u32::from(b)).sum();
+            (s + (s >> 8) + u32::from(last)) as u64
+        }
         CheckKind::Sum8 => bits::checksum8(&d) as u64,
         CheckKind::Parity => parity_over(c, frame),
         CheckKind::Xor8 => bits::xor8(&d) as u64,
@@ -1040,15 +1047,19 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
         }
         CheckKind::Complement => !extract(frame, c.over[0], c.over[1] - c.over[0]),
         CheckKind::NibbleSum => {
-            let nibble = |b| {
-                let n = extract(frame, b, 4);
+            // a span ending part way through a nibble pads that nibble out
+            // with zeros, the way a frame whose check starts a bit in does
+            let nibble = |b: usize| {
+                let take = (c.over[1] - b).min(4);
+                let n = extract(frame, b, take) << (4 - take);
                 if c.reflect { n.reverse_bits() >> 60 } else { n }
             };
             (c.over[0]..c.over[1]).step_by(4).map(nibble).sum()
         }
-        CheckKind::NibbleXor => {
-            (c.over[0]..c.over[1]).step_by(4).fold(0u64, |x, b| x ^ extract(frame, b, 4))
-        }
+        CheckKind::NibbleXor => (c.over[0]..c.over[1]).step_by(4).fold(0u64, |x, b| {
+            let take = (c.over[1] - b).min(4);
+            x ^ (extract(frame, b, take) << (4 - take))
+        }),
         CheckKind::Roll8 => {
             let mut sum = 0u8;
             for &byte in &d {
@@ -1383,6 +1394,41 @@ vectors: [{hex: "00", fields: {a: 1}}]
     fn an_unknown_key_is_refused() {
         let e = parse_err("frame: {bits: 8}\nfields:\n  - {name: a, bits: 8, scael: 2}\n");
         assert!(e.contains("scael"), "{e}");
+    }
+
+    #[test]
+    fn a_sum_folds_its_carry_back_in() {
+        // WT0124's second check byte: 5e ba 9a 9f sum to 0x251, the carry of
+        // 2 comes back in, then 0xe1 is added and its own carry is not
+        let d = Desc::parse(
+            "name: X\ntiming: {pwm: [400, 1200], reset_us: 3000}\nframe: {bits: 48}\n\
+             check: {kind: sum8, over: [0, 40], at: 40, fold: true}\n\
+             fields:\n  - {name: a, bits: 40, data: int}\n  - {bits: 8, hidden: true}\n",
+        )
+        .unwrap();
+        let frame = BitBuffer::from_bytes(&[0x5e, 0xba, 0x9a, 0x9f, 0xe1, 0x34]);
+        assert_eq!(check_value(d.check.iter().next().unwrap(), &frame), Some(0x34));
+        assert!(check_holds(d.check.iter().next().unwrap(), &frame));
+        let plain = BitBuffer::from_bytes(&[0x5e, 0xba, 0x9a, 0x9f, 0xe1, 0x32]);
+        assert!(
+            !check_holds(d.check.iter().next().unwrap(), &plain),
+            "an unfolded sum is not this check"
+        );
+    }
+
+    #[test]
+    fn a_nibble_sum_pads_a_span_that_ends_inside_a_nibble() {
+        // Bresser ST1005H: eight nibbles from bit 1, the last of them three
+        // bits wide because the sum's own top bit follows it
+        let d = Desc::parse(
+            "name: X\ntiming: {ppm: [2500, 4500], reset_us: 10000}\nframe: {bits: 38}\n\
+             check: {kind: nibble_sum, over: [1, 32], at: 32, width: 6}\n\
+             fields:\n  - {name: a, bits: 32, data: int}\n  - {bits: 6, hidden: true}\n",
+        )
+        .unwrap();
+        let frame = BitBuffer::from_bytes(&[0x3e, 0xa0, 0x59, 0xc6, 0xe8]);
+        assert_eq!(check_value(d.check.iter().next().unwrap(), &frame), Some(0x3a));
+        assert!(check_holds(d.check.iter().next().unwrap(), &frame));
     }
 
     #[test]
