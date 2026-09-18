@@ -270,6 +270,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (twotone_nodes::DESC, twotone_nodes::build),
     (nrf24_nodes::DESC, nrf24_nodes::build),
     (script_nodes::DESC, script_nodes::build),
+    (script_nodes::SCRIPT_TX, script_nodes::build_tx),
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),
     (wmbus_nodes::DESC, wmbus_nodes::build),

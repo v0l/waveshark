@@ -8057,7 +8057,7 @@ mod tx_in_graph_tests {
             ("aprs", 144_800_000, ["tx_clock", "aprs_tx", "fm_mod", "radio_tx"]),
             ("rtty", 14_083_000, ["tx_clock", "rtty_tx", "fsk_mod", "radio_tx"]),
         ] {
-            let mut plan = tests::plan(2_400_000.0, Hz(hz));
+            let mut plan = tests::plan(2_400_000.0, Hz(hz as u64));
             plan.channels = vec![ChannelSpec {
                 id: 1,
                 label: id.into(),
@@ -8072,7 +8072,7 @@ mod tx_in_graph_tests {
             let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
                 .unwrap_or_else(|| panic!("{id} can be keyed"));
             assert_eq!(mode, TxMode::Digital(id));
-            plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(hz) });
+            plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(hz as u64) });
 
             let rx = Receiver::build(&plan, Sinks::default()).unwrap();
             let tx = rx.tx_topology().expect("a transmit chain");
@@ -8147,6 +8147,60 @@ mod tx_in_graph_tests {
             "the TNC did not build: {:?}",
             running.nodes.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    /// A described protocol keys up through its own source and modulator,
+    /// like a compiled data mode: the description is installed, the plan
+    /// names it, and the transmit chain is what the description declared.
+    #[test]
+    fn a_described_protocol_keys_up_with_its_own_source_and_modulator() {
+        let yaml = r#"
+name: Chain-Link
+radio: { fsk: { baud: 38400, deviation_hz: 20000 }, bands: [[433.0e6, 434.8e6]], width_hz: 100000 }
+frame: { bits: 64, find: sync, sync: "aad391", sync_bits: 24 }
+check: { kind: crc8, poly: 0x31, init: 0, over: [0, 56], at: 56 }
+fields:
+  - { name: id, bits: 16, data: int }
+  - { name: temperature_c, bits: 16, type: int, data: float, unit: c, scale: 0.01 }
+  - { name: battery_mv, bits: 16, data: int, unit: mv }
+  - { name: seq, bits: 8, data: int }
+  - { bits: 8, hidden: true }
+vectors:
+  - { hex: "a5 c3 2b 6e 0b 5a 35 48", fields: { id: 0xa5c3, temperature_c: 111.18, battery_mv: 2906, seq: 53 } }
+"#;
+        decode::script::install(&[("chain.yaml".into(), yaml.into())]);
+
+        let hz = 433_920_000.0;
+        let mut plan = tests::plan(2_400_000.0, Hz(hz as u64));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "chain-link".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("chain-link".into()),
+            bandwidth_hz: None,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            tx: Some(TxSpec::default()),
+        }];
+        let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+            .expect("a described protocol can be keyed");
+        assert_eq!(mode, TxMode::Digital("chain-link".into()));
+        plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(hz as u64) });
+
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let tx = rx.tx_topology().expect("a transmit chain");
+        let kinds: Vec<&str> = tx.nodes.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds, ["tx_clock", "script_tx", "fsk_mod", "radio_tx"]);
+        // The fields travel as the source card's settings, which is what
+        // the strip edits and what the keyer is loaded from.
+        let source = tx.nodes.iter().find(|n| n.kind == "script_tx").expect("a source");
+        assert!(
+            source.params.iter().any(|p| p.name == "desc"
+                && matches!(p.value, pipeline::ParamValue::Text(ref t) if t == "Chain-Link")),
+            "the source names its description"
+        );
+        decode::script::install(&[]);
     }
 
     /// A transport packet that says which packet it is in every payload
