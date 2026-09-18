@@ -53,6 +53,10 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/weather/lacrosse_tx141th.yaml"),
     include_str!("../../protocols/weather/lacrosse_tx29.yaml"),
     include_str!("../../protocols/weather/lacrosse_tx35.yaml"),
+    include_str!("../../protocols/weather/acurite_609txc.yaml"),
+    include_str!("../../protocols/weather/acurite_tower.yaml"),
+    include_str!("../../protocols/weather/acurite_606tx.yaml"),
+    include_str!("../../protocols/weather/acurite_986.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -193,6 +197,14 @@ impl Scripted {
                 return Err(DecodeError::NotThisProtocol);
             }
         }
+        let n = self.desc.frame.not_constant;
+        if n > 0
+            && (0..n)
+                .map(|i| frame.get(i).unwrap_or(false))
+                .all(|b| b == frame.get(0).unwrap_or(false))
+        {
+            return Err(DecodeError::NotThisProtocol);
+        }
         let mut verified = None;
         for c in self.desc.check.iter() {
             if !check_holds(c, frame) {
@@ -229,6 +241,12 @@ impl Scripted {
         let mut w = Writer { fields, out: &mut out, checks: self.desc.check.iter().collect() };
         w.items(&self.desc.fields)?;
         for c in self.desc.check.iter() {
+            if c.kind == CheckKind::EvenParity {
+                for byte in (c.over[0]..c.over[1]).step_by(8) {
+                    let v = extract(&out, byte, 8);
+                    overwrite(&mut out, byte, 8, v | ((v & 0x7f).count_ones() as u64 & 1) << 7);
+                }
+            }
             if let (Some(at), Some(v)) = (c.at, check_value(c, &out)) {
                 let width = c.kind.width(c.over).unwrap_or(0);
                 overwrite(&mut out, at, width, v);
@@ -302,14 +320,15 @@ impl Scripted {
         let mut starts = vec![0];
         starts.extend(bits.rows().iter().copied().filter(|s| *s != 0));
         let ends = starts.iter().skip(1).copied().chain(std::iter::once(bits.len()));
+        let [lo, hi] = self.desc.frame.row_bits.unwrap_or([want, want + 1]);
         let rows: Vec<BitBuffer> = starts
             .iter()
             .copied()
             .zip(ends)
-            .filter(|(start, end)| (want..=want + 1).contains(&(end - start)))
+            .filter(|(start, end)| (lo..=hi).contains(&(end - start)) && start + want <= bits.len())
             .map(|(start, _)| bits.slice(start, want))
             .collect();
-        let alone = rows.len() == 1 && bits.len() <= want + 1;
+        let alone = rows.len() == 1 && bits.len() <= hi;
         let copies = self.desc.frame.copies;
         rows.iter()
             .find(|r| {
@@ -337,6 +356,7 @@ impl Protocol for Scripted {
         let f = &self.desc.frame;
         let want = f.bits;
         if let Some([lo, hi]) = f.row_bits
+            && f.find != Find::Rows
             && !crate::protocols::rows_within(bits, lo..=hi)
         {
             return Err(DecodeError::NotThisProtocol);
@@ -502,8 +522,18 @@ fn mask(n: usize) -> u64 {
     if n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
 }
 
-/// The field's bits as sent, undone: complement and bit order
+/// The field's bits as sent, undone: parity bits dropped, complement and
+/// bit order
 fn raw_bits(f: &Field, mut raw: u64) -> u64 {
+    if let Some(p) = f.per_byte {
+        let n = f.bits / 8;
+        let mut packed = 0u64;
+        for i in 0..n {
+            let byte = (raw >> (8 * (n - 1 - i))) & 0xff;
+            packed = (packed << p) | (byte & mask(p));
+        }
+        raw = packed;
+    }
     if f.not {
         raw = !raw & mask(f.bits);
     }
@@ -539,6 +569,10 @@ fn value_of(f: &Field, raw: u64) -> Result<Value, DecodeError> {
                 n = n * 10 + d as i64;
             }
             n
+        }
+        Kind::SignMag => {
+            let m = (raw & mask(f.bits - 1)) as i64;
+            if raw >> (f.bits - 1) & 1 == 1 { -m } else { m }
         }
         Kind::Int if f.bits < 64 => ((raw << (64 - f.bits)) as i64) >> (64 - f.bits),
         Kind::Int | Kind::Uint => raw as i64,
@@ -636,6 +670,13 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
                     }
                     n as u64 & mask(f.bits)
                 }
+                Kind::SignMag => {
+                    let m = n.unsigned_abs();
+                    if m > mask(f.bits - 1) {
+                        return Err(err());
+                    }
+                    m | ((n < 0) as u64) << (f.bits - 1)
+                }
                 Kind::Bcd => {
                     if n < 0 {
                         return Err(err());
@@ -652,7 +693,8 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
                     raw
                 }
                 _ => {
-                    if n < 0 || n as u64 > mask(f.bits) {
+                    let width = f.per_byte.map_or(f.bits, |p| p * (f.bits / 8));
+                    if n < 0 || n as u64 > mask(width) {
                         return Err(err());
                     }
                     n as u64
@@ -660,7 +702,16 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
             }
         }
     };
-    Ok(raw_bits(f, raw))
+    let mut raw = raw_bits(&Field { per_byte: None, ..f.clone() }, raw);
+    if let Some(p) = f.per_byte {
+        let n = f.bits / 8;
+        let mut spread = 0u64;
+        for i in 0..n {
+            spread = (spread << 8) | ((raw >> (p * (n - 1 - i))) & mask(p));
+        }
+        raw = spread;
+    }
+    Ok(raw)
 }
 
 fn holds(cond: &desc::Cond, fields: &BTreeMap<String, Value>) -> bool {
@@ -1014,6 +1065,7 @@ mod tests {
             omit_if: Default::default(),
             map: BTreeMap::new(),
             unit: 0,
+            per_byte: None,
             idle: 0,
             format: String::new(),
             when: None,

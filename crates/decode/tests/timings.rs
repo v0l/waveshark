@@ -11,9 +11,7 @@
 
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
-use decode::protocols::{
-    Acurite609Txc, AcuriteTower, FineOffsetWh51, GtWt02, GtWt03, OregonV3, SomfyRts, X10Rf,
-};
+use decode::protocols::{FineOffsetWh51, GtWt02, GtWt03, OregonV3, SomfyRts, X10Rf};
 use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -53,7 +51,7 @@ fn an_acurite_609txc_burst_decodes_from_its_timings() {
     // rtl_433: OOK_PULSE_PPM, short 1000, long 2000, reset 10000.
     let pkg = ppm(&bits_of(&f, 40), 500, 1000, 2000, 10_000);
 
-    let r = Acurite609Txc.decode_package(&pkg).expect("decode");
+    let r = named("Acurite-609TXC").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x8f)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(30.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(56)));
@@ -71,7 +69,7 @@ fn an_acurite_tower_burst_decodes_from_its_timings() {
     pulses.extend(pwm(&bits_of(&inverted, 56), 220, 408));
     let pkg = package(pulses);
 
-    let r = AcuriteTower.decode_package(&pkg).expect("decode");
+    let r = named("Acurite-Tower").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x1234)));
     assert_eq!(r.get("channel"), Some(&Value::Text("A".into())));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(18.4)));

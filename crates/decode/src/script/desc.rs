@@ -104,7 +104,7 @@ pub struct Frame {
     /// The bits behind the sync are chips of this coding
     #[serde(default)]
     pub decode: Decode,
-    /// Rows the frame must be found on, for `find: rows`
+    /// Rows the frame must be found on, for `find: rows`; one takes any row
     #[serde(default = "two")]
     pub copies: usize,
     /// A row of the package must be this long, inclusive
@@ -112,6 +112,10 @@ pub struct Frame {
     /// Fewest symbol changes a frame may have, against a chopped carrier
     #[serde(default)]
     pub min_transitions: u32,
+    /// A frame whose first this many bits are all zero or all one is not
+    /// one: what silence checks to
+    #[serde(default)]
+    pub not_constant: usize,
     /// Copies of the frame one transmission sends
     #[serde(default = "one")]
     pub repeats: usize,
@@ -137,7 +141,8 @@ pub enum Find {
     Tile,
     /// The package is the frame, to within a bit
     Exact,
-    /// A row of the frame's length, on `copies` rows or alone
+    /// A row of the frame's length, or a `row_bits` long one, on `copies`
+    /// rows or alone
     Rows,
     /// Behind a sync word, at any bit offset
     Sync,
@@ -343,6 +348,8 @@ pub enum Kind {
     Pick,
     /// Text built from other fields, `{name}` or `{name:02}` each
     Format,
+    /// A sign bit then the magnitude
+    SignMag,
 }
 
 /// A conversion applied after scale and offset
@@ -397,6 +404,9 @@ pub struct Field {
     /// Slot width for `pick`
     #[serde(default)]
     pub unit: usize,
+    /// Bits of each byte that carry the value, the rest being parity: the
+    /// field's width still counts every bit on the air
+    pub per_byte: Option<usize>,
     /// Slot value meaning unpressed, for `pick`
     #[serde(default)]
     pub idle: u64,
@@ -522,6 +532,9 @@ impl Desc {
                 && c >> fld.bits != 0
             {
                 return Err(format!("{name}: const in {} bit field does not fit", fld.bits));
+            }
+            if fld.per_byte.is_some_and(|p| p == 0 || p > 8 || fld.bits % 8 != 0) {
+                return Err(format!("{name}: field {n} has per_byte but is not whole bytes"));
             }
             if fld.kind == Kind::Bool && fld.bits != 1 {
                 return Err(format!("{name}: field {n} is a bool wider than a bit"));

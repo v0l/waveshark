@@ -27,7 +27,7 @@ mod somfy_rts;
 mod tpms;
 mod x10;
 
-pub use acurite::{Acurite606Tx, Acurite609Txc, Acurite986, AcuriteTower, AcuriteWind};
+pub use acurite::AcuriteWind;
 pub use alecto::AlectoV1;
 pub use ambient::AmbientF007th;
 pub use ert::{ErtIdm, ErtScm, ErtScmPlus};
@@ -70,16 +70,6 @@ pub(crate) fn find_frame(
     find_frame_bits(bits, bytes * 8, ok)
 }
 
-/// Frames the slicer's own row marks bracket, least significant bit first.
-///
-/// For protocols whose row length is itself part of the specification: a
-/// candidate is only offered where a row starts, and only where that row is as
-/// long as the protocol says its frames are. That is a far stronger filter
-/// than a checksum over every bit offset, and it is what rtl_433 gets for free
-/// by decoding row by row.
-///
-/// Bytes come back reflected, because the protocols that need this are the
-/// ones transmitting least significant bit first.
 /// Could this buffer hold a frame whose row is `row_bits` long?
 ///
 /// A row is where the slicer cut, which is where the transmitter stopped, so a
@@ -96,27 +86,6 @@ pub(crate) fn rows_within(bits: &BitBuffer, row_bits: std::ops::RangeInclusive<u
     let starts = &starts[..];
     let ends = starts.iter().skip(1).copied().chain(std::iter::once(bits.len()));
     starts.iter().copied().zip(ends).any(|(start, end)| row_bits.contains(&(end - start)))
-}
-
-pub(crate) fn rows_of(
-    bits: &BitBuffer,
-    want: usize,
-    row_bits: std::ops::RangeInclusive<usize>,
-) -> impl Iterator<Item = Vec<u8>> + '_ {
-    let starts: Vec<usize> = bits.rows().to_vec();
-    let ends: Vec<usize> =
-        starts.iter().skip(1).copied().chain(std::iter::once(bits.len())).collect();
-    starts
-        .into_iter()
-        .zip(ends)
-        .filter(move |(start, end)| row_bits.contains(&(end - start)) && start + want <= bits.len())
-        .map(move |(start, _)| {
-            bits.slice(start, want)
-                .as_padded_bytes()
-                .iter()
-                .map(|b| crate::bits::reflect8(*b))
-                .collect()
-        })
 }
 
 /// [`find_frame`] for a frame whose length is not a whole number of bytes,
