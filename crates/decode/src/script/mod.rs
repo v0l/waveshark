@@ -155,7 +155,9 @@ fn intern(name: &str) -> &'static str {
 /// A protocol read from a description
 pub struct Scripted {
     desc: Desc,
-    timing: Timing,
+    /// The pulse timing, for a description with one; a radio-only
+    /// description has none and is never offered a package
+    timing: Option<Timing>,
     name: &'static str,
     sync: Option<BitBuffer>,
 }
@@ -182,7 +184,7 @@ impl std::fmt::Display for EncodeError {
 
 impl Scripted {
     pub fn new(desc: Desc) -> Self {
-        let timing = desc.timing.timing().expect("validated");
+        let timing = desc.timing.as_ref().map(|t| t.timing().expect("validated"));
         let name = intern(&desc.name);
         let sync = desc
             .frame
@@ -194,6 +196,56 @@ impl Scripted {
 
     pub fn desc(&self) -> &Desc {
         &self.desc
+    }
+
+    /// Whether the description reads the burst detector's packages
+    pub fn has_timing(&self) -> bool {
+        self.timing.is_some()
+    }
+
+    /// The bits of one frame's air, sync and all, as a radio would key it
+    pub fn air_bits(&self, fields: &BTreeMap<String, Value>) -> Result<BitBuffer, EncodeError> {
+        let frame = self.encode(fields)?;
+        let mut air = transform(&frame, &self.desc.transform);
+        if let Some(sync) = &self.sync {
+            let skip = self.desc.frame.sync_skip.unwrap_or(self.desc.frame.sync_bits);
+            let chips = match self.desc.frame.decode {
+                Decode::None => air,
+                Decode::Manchester => manchester_chips(&air),
+                Decode::DiffManchester => {
+                    diff_manchester_chips(&air, sync.get(skip.wrapping_sub(1)).unwrap_or(false))
+                }
+            };
+            let mut with = sync.slice(0, skip);
+            for i in 0..chips.len() {
+                with.push(chips.get(i).unwrap_or(false));
+            }
+            air = with;
+        }
+        if self.desc.frame.invert {
+            air = air.inverted();
+        }
+        Ok(air)
+    }
+
+    /// Every frame in a stream of bits, for a demodulator feeding one: where
+    /// each sync started, the bit after the frame, and what it read
+    pub fn frames(&self, bits: &BitBuffer) -> Vec<(usize, usize, Report)> {
+        let f = &self.desc.frame;
+        let bits = if f.invert { bits.inverted() } else { bits.clone() };
+        let streams: Vec<BitBuffer> =
+            if f.either_polarity { vec![bits.clone(), bits.inverted()] } else { vec![bits] };
+        let mut out = Vec::new();
+        for s in &streams {
+            for (at, end, frame) in self.behind_sync(s) {
+                if let Ok(r) = self.read_air(&frame) {
+                    out.push((at, end, r));
+                }
+            }
+        }
+        out.sort_by_key(|(at, _, _)| *at);
+        out.dedup_by_key(|(at, _, _)| *at);
+        out
     }
 
     /// Read a located frame of exactly the frame's bits, as sliced
@@ -281,7 +333,7 @@ impl Scripted {
                 fields.get(k).or_else(|| derived.get(k)).is_some_and(|v| want.holds(v))
             })
         };
-        let applies: Vec<&Check> = self.desc.check.iter().filter(|c| c.applies(&decided)).collect();
+        let applies: Vec<&Check> = self.desc.check.iter().filter(|c| c.applies(decided)).collect();
         // a check may cover another's stored value, so every check is
         // written as many times as there are checks: the last pass sees
         // every value in place
@@ -303,33 +355,19 @@ impl Scripted {
     }
 
     /// The pulses one transmission of these fields is, through this
-    /// protocol's timing
-    pub fn package(&self, fields: &BTreeMap<String, Value>) -> Result<Package, EncodeError> {
-        let frame = self.encode(fields)?;
-        let mut air = transform(&frame, &self.desc.transform);
-        if let Some(sync) = &self.sync {
-            let skip = self.desc.frame.sync_skip.unwrap_or(self.desc.frame.sync_bits);
-            let chips = match self.desc.frame.decode {
-                Decode::None => air,
-                Decode::Manchester => manchester_chips(&air),
-                Decode::DiffManchester => {
-                    diff_manchester_chips(&air, sync.get(skip.wrapping_sub(1)).unwrap_or(false))
-                }
-            };
-            let mut with = sync.slice(0, skip);
-            for i in 0..chips.len() {
-                with.push(chips.get(i).unwrap_or(false));
-            }
-            air = with;
-        }
-        if self.desc.frame.invert {
-            air = air.inverted();
-        }
-        Ok(pulses(&self.timing, &air, self.desc.frame.repeats))
+    /// protocol's timing; none for a description with no timing
+    pub fn package(
+        &self,
+        fields: &BTreeMap<String, Value>,
+    ) -> Result<Option<Package>, EncodeError> {
+        let air = self.air_bits(fields)?;
+        Ok(self.timing.map(|t| pulses(&t, &air, self.desc.frame.repeats)))
     }
 
     /// Every place a frame could start behind the sync, and the frame there
-    fn behind_sync(&self, bits: &BitBuffer) -> Vec<BitBuffer> {
+    /// Every place a frame could start behind the sync: where the sync
+    /// is, the bit after the frame, and the frame there
+    fn behind_sync(&self, bits: &BitBuffer) -> Vec<(usize, usize, BitBuffer)> {
         let f = &self.desc.frame;
         let Some(sync) = &self.sync else { return Vec::new() };
         let want = f.bits;
@@ -345,18 +383,20 @@ impl Scripted {
                 continue;
             }
             let start = at + skip;
-            let frame = match f.decode {
+            let (frame, end) = match f.decode {
                 Decode::None => {
                     if start + want > bits.len() {
                         continue;
                     }
-                    bits.slice(start, want)
+                    (bits.slice(start, want), start + want)
                 }
-                Decode::Manchester => manchester_decode(bits, start),
-                Decode::DiffManchester => differential_manchester_decode(bits, start, want),
+                Decode::Manchester => (manchester_decode(bits, start), start + want * 2),
+                Decode::DiffManchester => {
+                    (differential_manchester_decode(bits, start, want), start + want * 2)
+                }
             };
             if frame.len() >= want {
-                out.push(frame.slice(0, want));
+                out.push((at, end, frame.slice(0, want)));
             }
         }
         out
@@ -394,7 +434,7 @@ impl Protocol for Scripted {
     }
 
     fn timing(&self) -> Timing {
-        self.timing
+        self.timing.expect("only a description with a timing is registered as a pulse protocol")
     }
 
     fn yields_to(&self) -> &[String] {
@@ -446,7 +486,7 @@ impl Protocol for Scripted {
                     vec![bits]
                 };
                 for s in &streams {
-                    for frame in self.behind_sync(s) {
+                    for (_, _, frame) in self.behind_sync(s) {
                         match self.read_air(&frame) {
                             Ok(r) => return Ok(r),
                             Err(e) => last = e,
@@ -1194,11 +1234,32 @@ pub fn check(p: &Scripted) -> Result<(), String> {
                 frame.to_hex()
             ));
         }
-        let pkg = p.package(&want).map_err(|e| format!("{name} vector {i}: {e}"))?;
-        let sliced = slice(&pkg, &p.timing).map_err(|e| format!("{name} vector {i}: {e}"))?;
-        let r = p.decode(&sliced).map_err(|e| format!("{name} vector {i}: {e:?} off the air"))?;
-        if r.fields != want {
-            return Err(format!("{name} vector {i}: off the air read {}", r.fields_line()));
+        match p.package(&want).map_err(|e| format!("{name} vector {i}: {e}"))? {
+            Some(pkg) => {
+                let t = p.timing.expect("a package has a timing");
+                let sliced = slice(&pkg, &t).map_err(|e| format!("{name} vector {i}: {e}"))?;
+                let r = p
+                    .decode(&sliced)
+                    .map_err(|e| format!("{name} vector {i}: {e:?} off the air"))?;
+                if r.fields != want {
+                    return Err(format!("{name} vector {i}: off the air read {}", r.fields_line()));
+                }
+            }
+            None => {
+                // no slicer to go through: the bits a radio would key,
+                // read back as the stream a demodulator hands over
+                let air = p.air_bits(&want).map_err(|e| format!("{name} vector {i}: {e}"))?;
+                let mut stream = BitBuffer::new();
+                stream.extend(false, 8);
+                for i in 0..air.len() {
+                    stream.push(air.get(i).unwrap_or(false));
+                }
+                stream.extend(false, 8);
+                let got = p.frames(&stream);
+                if got.len() != 1 || got[0].2.fields != want {
+                    return Err(format!("{name} vector {i}: {} frames off the stream", got.len()));
+                }
+            }
         }
     }
     Ok(())

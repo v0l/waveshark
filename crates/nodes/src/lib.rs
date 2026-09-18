@@ -66,6 +66,7 @@ pub mod rs41_nodes;
 pub mod rtty_nodes;
 pub mod scan_nodes;
 pub mod scope_nodes;
+pub mod script_nodes;
 pub mod sink_nodes;
 pub mod source_nodes;
 pub mod sstv_nodes;
@@ -268,6 +269,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (mdc_nodes::DESC, mdc_nodes::build),
     (twotone_nodes::DESC, twotone_nodes::build),
     (nrf24_nodes::DESC, nrf24_nodes::build),
+    (script_nodes::DESC, script_nodes::build),
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),
     (wmbus_nodes::DESC, wmbus_nodes::build),
@@ -339,6 +341,10 @@ impl NodeSpec {
 
     pub fn f(self, k: &str, v: f64) -> Self {
         self.set(k, pipeline::ParamValue::Float(v))
+    }
+
+    pub fn s(self, k: &str, v: &str) -> Self {
+        self.set(k, pipeline::ParamValue::Text(v.to_string()))
     }
 
     pub fn i(self, k: &str, v: i64) -> Self {

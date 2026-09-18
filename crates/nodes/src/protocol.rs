@@ -524,8 +524,42 @@ pub struct TxChain {
     pub modulator: NodeSpec,
 }
 
-/// Every protocol compiled into this build.
+/// Every protocol compiled into this build, and every description with a
+/// radio installed over it.
+///
+/// The compiled set is static. The described set changes when a dataset
+/// lands or a file under the config directory is edited, so the list is
+/// rebuilt when `decode::script::generation` moves and leaked, which keeps
+/// every reference handed out before still good: a description set changes
+/// a handful of times in a run and each leak is a few hundred bytes.
 pub fn all() -> &'static [&'static dyn Protocol] {
+    static BUILT: std::sync::RwLock<Option<(u64, &'static [&'static dyn Protocol])>> =
+        std::sync::RwLock::new(None);
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let generation = decode::script::generation();
+    if let Some((g, list)) = *BUILT.read().unwrap_or_else(|e| e.into_inner())
+        && g == generation
+    {
+        return list;
+    }
+    let _building = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((g, list)) = *BUILT.read().unwrap_or_else(|e| e.into_inner())
+        && g == generation
+    {
+        return list;
+    }
+    let mut v: Vec<&'static dyn Protocol> = compiled().to_vec();
+    for p in crate::script_nodes::protocols() {
+        let leaked: &'static dyn Protocol = Box::leak(Box::new(p));
+        v.push(leaked);
+    }
+    let list: &'static [&'static dyn Protocol] = Box::leak(v.into_boxed_slice());
+    *BUILT.write().unwrap_or_else(|e| e.into_inner()) = Some((generation, list));
+    list
+}
+
+/// The protocols written in this tree.
+fn compiled() -> &'static [&'static dyn Protocol] {
     static ALL: &[&dyn Protocol] = &[
         &crate::modes_nodes::ModeS,
         &crate::ais_nodes::Ais,
@@ -582,13 +616,10 @@ pub fn all() -> &'static [&'static dyn Protocol] {
 
 /// Every protocol, in the order a frame on the bus is offered to them:
 /// the most specific claim first.
-pub fn frame_readers() -> &'static [&'static dyn Protocol] {
-    static ORDER: std::sync::OnceLock<Vec<&'static dyn Protocol>> = std::sync::OnceLock::new();
-    ORDER.get_or_init(|| {
-        let mut ps: Vec<&'static dyn Protocol> = all().to_vec();
-        ps.sort_by_key(|p| p.frame_claim());
-        ps
-    })
+pub fn frame_readers() -> Vec<&'static dyn Protocol> {
+    let mut ps: Vec<&'static dyn Protocol> = all().to_vec();
+    ps.sort_by_key(|p| p.frame_claim());
+    ps
 }
 
 /// The protocol registered under a name.
