@@ -67,11 +67,16 @@ open a dongle without root; with the bare binary, install `librtlsdr0` or
 `rtl-sdr` yourself. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
 [Zadig](https://zadig.akeo.ie/) first or nothing can open the device. The
 Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
-is built without the driver. Only the macOS build shows pictures off a
+is built without the driver. Elsewhere LimeSuite is opened when a LimeSDR is
+looked for rather than linked, so the binary starts without it and reads a
+LimeSDR once `liblimesuite` or `LimeSuite` is installed, whatever version the
+distribution carries. Only the macOS build shows pictures off a
 multiplex, because it is the only one whose ffmpeg is new enough.
 
-The macOS app is signed but not notarised, so the first open needs a right
-click and Open, or:
+The macOS app is signed ad-hoc and not notarised, so the first open needs
+Privacy & Security in System Settings, where macOS offers Open Anyway after
+the app has been refused once (on Sonoma and older, a right click and Open
+does it), or:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/WaveShark.app

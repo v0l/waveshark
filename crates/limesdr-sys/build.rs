@@ -3,19 +3,17 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rerun-if-env-changed=LIMESUITE_LIB_DIR");
     println!("cargo:rerun-if-env-changed=LIMESUITE_INCLUDE_DIR");
 
     let mut clang_args: Vec<String> = Vec::new();
 
-    if let Ok(dir) = env::var("LIMESUITE_LIB_DIR") {
-        println!("cargo:rustc-link-search=native={dir}");
-        println!("cargo:rustc-link-lib=LimeSuite");
-        if let Ok(inc) = env::var("LIMESUITE_INCLUDE_DIR") {
-            clang_args.push(format!("-I{inc}"));
-        }
+    // The headers are a build-time need only: nothing is linked, the library
+    // is opened by name at run time. So a release binary starts on a machine
+    // with a different LimeSuite soname, or none at all.
+    if let Ok(inc) = env::var("LIMESUITE_INCLUDE_DIR") {
+        clang_args.push(format!("-I{inc}"));
     } else {
-        match pkg_config::Config::new().probe("LimeSuite") {
+        match pkg_config::Config::new().cargo_metadata(false).probe("LimeSuite") {
             Ok(lib) => {
                 for p in &lib.include_paths {
                     clang_args.push(format!("-I{}", p.display()));
@@ -31,7 +29,7 @@ fn main() {
                        Arch:           sudo pacman -S limesuite\n  \
                        macOS:          brew install limesuite\n\
                      \n\
-                     Or point at a custom build with LIMESUITE_LIB_DIR and \
+                     Or point at a custom build's headers with \
                      LIMESUITE_INCLUDE_DIR.\n\
                      \n\
                      To build waveshark without LimeSDR support, disable the \
@@ -44,6 +42,8 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(&clang_args)
+        .dynamic_library_name("LimeSuiteLib")
+        .dynamic_link_require_all(false)
         // LimeSuite.h pulls in LMS7002M_parameters.h, which is several hundred
         // file-scope `static const struct` definitions. Those are not exported
         // symbols, so anything generated from them fails to link. Take the LMS

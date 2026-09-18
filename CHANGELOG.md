@@ -121,6 +121,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- LimeSuite is loaded when a LimeSDR is looked for, so the Linux packages
+  start on a machine with another version of it, or none.
 - A stripe across the waterfall and a jump in the trace when the dial moved.
 - A mixer's frequency shift did nothing until the graph was rebuilt around it.
 - A LimeSDR transmitted into an unselected port, so nothing left the socket.
