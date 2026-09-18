@@ -1207,6 +1207,13 @@ pub(crate) fn replay_blocks(
         let at = block_start(std::time::Instant::now(), block.len(), rate);
         out.extend(harvest(rx, at));
     }
+    // One block of nothing after the capture, because the auto node reads a
+    // block one call behind finding it, and a radio never stops delivering.
+    let quiet = vec![C32::default(); 16_384];
+    if rx.process(&quiet).is_ok() {
+        let at = block_start(std::time::Instant::now(), quiet.len(), rate);
+        out.extend(harvest(rx, at));
+    }
     out
 }
 
@@ -6592,16 +6599,19 @@ mod zoom_tests {
         const KNOWN_SLOW: &[(&str, &str)] = &[
             (
                 "ism24_busy_2431M_61440k.cs16",
-                "a whole 2.4 GHz band at 61.44 MS/s, which is five things at once, measured on \
-                 four threads as processor time in a 2.13 ms block: the Wi-Fi front end on the \
-                 channels it is on, 2.3 ms; the BLE front end on two advertising channels, \
-                 1.0; the detector over 61 MS/s, 1.2, of which half is eight 32768 point \
-                 transforms and a third the floor pass; cutting the fifty-three sources the \
-                 band opens out of the span, 0.9; and the DroneID correlator on the three \
-                 centres the span holds, 0.6. Six milliseconds of processor time for a two \
-                 millisecond block, and the phases are sequential, so four threads return 1.4 \
-                 rather than 4. Nothing here is a spike any more: the front ends were 4.2 ms \
-                 and the worst block 127",
+                "a whole 2.4 GHz band at 61.44 MS/s, which is five things at once, measured as \
+                 processor time in a 2.13 ms block: the Wi-Fi front end on the channels it is \
+                 on, 2.0 ms; the ZigBee front end on twelve, 1.1; the detector over 61 MS/s, \
+                 1.1, of which half is eight 32768 point transforms and a third the floor \
+                 pass; the BLE front end on two advertising channels, 0.7; the DroneID \
+                 correlator on the three centres the span holds, 0.6; and cutting the \
+                 fifty-three sources the band opens out of the span, 0.9. Seven milliseconds \
+                 of processor time for a two millisecond block, of which the front ends now \
+                 read one block behind so they overlap the detector, which took the median \
+                 from 0.5x to 0.8x. What is left is each front end mixing and filtering the \
+                 whole span for itself, two dozen times over, where one channel bank would \
+                 pay the input rate once. No spikes: the worst block is 27 ms where it was \
+                 127",
             ),
             (
                 "droneid_mini4k_2444.5M_15360k.cs8",
