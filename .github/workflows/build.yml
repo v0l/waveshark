@@ -66,32 +66,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
+            liblimesuite-dev pkg-config libclang-dev \
             libasound2-dev \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
-      # Both -sys crates find their headers through pkg-config, and Homebrew
-      # installs the .pc files where its own pkg-config looks, so nothing has
-      # to be pointed at by hand the way it does on Windows.
+      # The -sys crates that remain find their headers through pkg-config, and
+      # Homebrew installs the .pc files where its own pkg-config looks, so
+      # nothing has to be pointed at by hand.
       - name: macOS libraries
         if: runner.os == 'macOS'
-        run: brew install librtlsdr limesuite pkg-config ffmpeg
+        run: brew install limesuite pkg-config ffmpeg
 
-      # rtlsdr-sys takes an explicit path in preference to pkg-config, which is
-      # the way in on Windows: vcpkg ships the library and headers but getting
-      # pkg-config itself working under MSVC is a job of its own.
+      # The RTL-SDR is driven by the tree's own USB driver, so nothing here is
+      # needed for it on any platform. bindgen still needs libclang, which is
+      # present on the runner but not on a path it looks in by itself.
       - name: Windows libraries
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          vcpkg install rtlsdr:x64-windows
-          $root = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
-          "RTLSDR_LIB_DIR=$root\lib"         | Out-File -Append $env:GITHUB_ENV
-          "RTLSDR_INCLUDE_DIR=$root\include" | Out-File -Append $env:GITHUB_ENV
-          "VCPKG_BIN=$root\bin"              | Out-File -Append $env:GITHUB_ENV
-          # bindgen needs libclang, which is present on the runner but not on
-          # a path it looks in by itself.
           "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -Append $env:GITHUB_ENV
 
       # The toolkit, where the job builds for a card. Network on Linux
@@ -183,8 +176,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force ziproot | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" ziproot\
-          Copy-Item "$env:VCPKG_BIN\rtlsdr.dll" ziproot\
-          Copy-Item "$env:VCPKG_BIN\libusb-1.0.dll" ziproot\
           Compress-Archive -Path ziproot\* -DestinationPath "$env:ASSET.zip"
 
       # The installers, built from the metadata in crates/app/Cargo.toml after
@@ -269,7 +260,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist-extra | Out-Null
-          Copy-Item "$env:VCPKG_BIN\*.dll" dist-extra\ -ErrorAction SilentlyContinue
+          # Nothing is staged here any more: the RTL-SDR is driven by the
+          # tree's own USB driver and no DLL is copied.
           # An MSI product version is major.minor.build and nothing else: the
           # installer reads only those three fields and ignores a fourth. The
           # patch number already sits in the build field, so a release

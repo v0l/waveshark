@@ -5154,16 +5154,18 @@ dependencies = [
  "common",
  "crossbeam-channel",
  "dsp",
- "rtlsdr-sys",
+ "rtlsdr-usb",
  "tracing",
 ]
 
 [[package]]
-name = "rtlsdr-sys"
+name = "rtlsdr-usb"
 version = "0.3.0"
 dependencies = [
- "bindgen",
- "pkg-config",
+ "nusb",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -135,10 +135,11 @@ cuda = ["stt?/cuda", "tts?/cuda"]
 # binary. Paths are relative to this file, as build.rs's icon already is.
 #
 # `dist-extra` is the one staging directory the workflow fills with whatever a
-# platform cannot link from the machine it runs on: the vcpkg DLLs on Windows,
-# and on macOS the Homebrew dylibs that dylibbundler has already rewritten the
-# binary to look for. It is empty on Linux, where librtlsdr and ALSA come from
-# the packages `deb.depends` names.
+# platform cannot link from the machine it runs on: on macOS the Homebrew
+# dylibs that dylibbundler has already rewritten the binary to look for, plus
+# LimeSuite, which is opened by name at run time. It is empty on Linux and
+# Windows: the RTL-SDR is driven by the tree's own USB driver, and ALSA comes
+# from the package `deb.depends` names.
 [package.metadata.packager]
 product-name = "WaveShark"
 identifier = "io.github.v0l.waveshark"
@@ -156,11 +157,10 @@ resources = [{ src = "../../dist-extra/*", target = "" }]
 # Not the product name kebab-cased, which would be `wave-shark`.
 package-name = "waveshark"
 section = "hamradio"
-# What the binary links and does not carry. A release build has no ffmpeg, and
-# LimeSuite is opened by name at run time rather than linked, so neither is
-# named here: LimeSuite's soname carries its version and naming one would
-# refuse to install on every machine carrying another.
-depends = ["librtlsdr0 | librtlsdr2", "libasound2 | libasound2t64", "libusb-1.0-0"]
+# What the binary links and does not carry: libasound2 only. A release build
+# has no ffmpeg, LimeSuite is opened by name at run time and the RTL-SDR is
+# driven by the tree's own USB driver, so none of those is named here.
+depends = ["libasound2 | libasound2t64"]
 
 [package.metadata.generate-rpm]
 name = "waveshark"
@@ -175,7 +175,6 @@ assets = [
 auto-req = "no"
 
 [package.metadata.generate-rpm.requires]
-rtl-sdr = "*"
 alsa-lib = "*"
 
 [[example]]

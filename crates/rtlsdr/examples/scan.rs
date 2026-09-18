@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("devices: {devs:#?}");
     let d = devs.first().ok_or("no RTL-SDR found")?;
 
-    let mut sdr = rtlsdr::RtlSdr::open(d.index)?;
+    let mut sdr = rtlsdr::RtlSdr::open(d.index as u32)?;
     println!("opened: {} / tuner {}", sdr.info().label, sdr.info().tuner);
     println!("gain steps: {:?}", sdr.supported_gains());
 

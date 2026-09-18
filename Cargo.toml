@@ -8,7 +8,7 @@ members = [
     "crates/pipeline",
     "crates/hackrf",
     "crates/hackrf-usb",
-    "crates/rtlsdr-sys",
+    "crates/rtlsdr-usb",
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
@@ -42,7 +42,7 @@ default-members = [
     "crates/pipeline",
     "crates/hackrf",
     "crates/hackrf-usb",
-    "crates/rtlsdr-sys",
+    "crates/rtlsdr-usb",
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
@@ -86,7 +86,7 @@ audio = { path = "crates/audio" }
 hackrf = { path = "crates/hackrf" }
 hackrf-usb = { path = "crates/hackrf-usb" }
 rtlsdr = { path = "crates/rtlsdr" }
-rtlsdr-sys = { path = "crates/rtlsdr-sys" }
+rtlsdr-usb = { path = "crates/rtlsdr-usb" }
 limesdr = { path = "crates/limesdr" }
 limesdr-sys = { path = "crates/limesdr-sys" }
 remote = { path = "crates/remote" }

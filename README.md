@@ -62,9 +62,10 @@ because the CUDA libraries are loaded when they are first wanted rather than
 named in the binary. macOS uses Metal. The TETRA key search runs on any GPU
 through wgpu, AMD and Intel included.
 
-The Linux packages pull in librtlsdr, which brings the udev rules that let you
-open a dongle without root; with the bare binary, install `librtlsdr0` or
-`rtl-sdr` yourself. Windows ships the DLLs, but bind WinUSB to the RTL2832U with
+The RTL-SDR is driven by the receiver's own USB driver, so no librtlsdr is
+installed or loaded. The dongle still needs the udev rules to be openable
+without root: install `rtl-sdr` or `librtlsdr0` yourself to get them, or
+write the rule by hand. On Windows bind WinUSB to the RTL2832U with
 [Zadig](https://zadig.akeo.ie/) first or nothing can open the device. The
 Windows build has no LimeSDR: LimeSuite is not packaged for it, so that binary
 is built without the driver. Elsewhere LimeSuite is opened when a LimeSDR is
@@ -82,14 +83,14 @@ does it), or:
 xattr -dr com.apple.quarantine /Applications/WaveShark.app
 ```
 
-The app carries its own copies of ffmpeg, librtlsdr and LimeSuite. The bare
+The app carries its own copies of ffmpeg and LimeSuite. The bare
 macOS binary does not: it reads them from Homebrew, so `brew install ffmpeg
-librtlsdr limesuite` before running that one.
+limesuite` before running that one.
 
 From source:
 
 ```sh
-sudo apt install librtlsdr-dev liblimesuite-dev pkg-config libclang-dev \
+sudo apt install liblimesuite-dev pkg-config libclang-dev \
   libasound2-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
   libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 cargo run --release -p app
