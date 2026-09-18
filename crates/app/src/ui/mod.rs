@@ -766,6 +766,13 @@ impl App {
         self.settings.read(f)
     }
 
+    /// The width of span the receiver searches: the radio's own rate inside
+    /// its analogue filter, never wider than what zoom left.
+    fn usable_rate(&self) -> f64 {
+        let ratio = self.radio.as_ref().map(|r| r.status.radio().usable_ratio).unwrap_or(1.0);
+        (self.rate * self.zoom.max(1) as f64 * ratio.clamp(0.1, 1.0) as f64).min(self.rate)
+    }
+
     /// Where the tuner is pointed and what the radio is set to, which the
     /// dial and the strip change directly rather than through a switch.
     ///
@@ -2428,12 +2435,14 @@ impl App {
     /// which is the only place that knows how to send anything.
     fn scope_view(&mut self, ui: &mut egui::Ui) {
         let decode_on = self.setting(|s| s.decode_on);
+        let usable = self.usable_rate();
         let acts = scope::Scope {
             st: &mut self.scope,
             channels: &mut self.audio.channels,
             listening: self.audio.listening,
             center: self.center,
             rate: self.rate,
+            usable,
             radio: self.radio.as_ref(),
             scanners: &self.scanners,
             patch: &self.chain.patch,
@@ -3805,12 +3814,14 @@ mod tests {
     /// The scope pane over an app's state, for the geometry tests.
     fn scope_of(a: &mut App) -> scope::Scope<'_> {
         let decode_on = a.setting(|s| s.decode_on);
+        let usable = a.usable_rate();
         scope::Scope {
             st: &mut a.scope,
             channels: &mut a.audio.channels,
             listening: a.audio.listening,
             center: a.center,
             rate: a.rate,
+            usable,
             radio: None,
             scanners: &a.scanners,
             patch: &a.chain.patch,

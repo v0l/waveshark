@@ -292,6 +292,12 @@ pub struct Plan {
     /// Software zoom: the radio keeps sampling at its own rate and everything
     /// downstream sees a decimated copy.
     pub zoom: usize,
+    /// Fraction of `rate` inside the radio's analogue filter
+    ///
+    /// The rolloff either side is the converter's own skirt rather than the
+    /// air: a HackRF at 20 MS/s hears nothing in the outer quarter, so a
+    /// front end placed there decodes the filter.
+    pub usable_ratio: f32,
     pub dc_block: bool,
     /// Frames a second the spectrum is worth producing.
     pub refresh_hz: f32,
@@ -694,6 +700,14 @@ impl Plan {
     /// The rate everything downstream of the zoom decimator sees.
     pub fn eff_rate(&self) -> f64 {
         self.rate / self.zoom.max(1) as f64
+    }
+
+    /// The width of span worth searching, centred on the dial.
+    ///
+    /// Zoom keeps the middle, so a zoomed span is already inside the filter
+    /// and the ratio takes nothing further off it.
+    pub fn usable_rate(&self) -> f64 {
+        (self.rate * (self.usable_ratio as f64).clamp(0.1, 1.0)).min(self.eff_rate())
     }
 }
 
@@ -3303,7 +3317,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         let want = front_band(front, at).and_then(|(band, min_rate)| {
             let band = match front {
                 Front::Banks(_) | Front::Auto => {
-                    at.covered(plan.center.as_f64(), plan.eff_rate())?
+                    at.covered(plan.center.as_f64(), plan.usable_rate())?
                 }
                 _ => band,
             };
@@ -3366,7 +3380,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 // One node over the band, whatever the band holds. The band
                 // is passed on so it ignores the margin the power-of-two
                 // extraction leaves either side, as a bank does.
-                let Some(band) = at.covered(plan.center.as_f64(), plan.eff_rate()) else {
+                let Some(band) = at.covered(plan.center.as_f64(), plan.usable_rate()) else {
                     continue;
                 };
                 let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
@@ -3398,7 +3412,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 // detector sees one long burst instead of packets. The
                 // extraction above buys that resolution back, and costs less,
                 // because the channelizer then runs at the band's rate.
-                let Some(band) = at.covered(plan.center.as_f64(), plan.eff_rate()) else {
+                let Some(band) = at.covered(plan.center.as_f64(), plan.usable_rate()) else {
                     continue;
                 };
                 let sub = SubBand::plan(band, plan.eff_rate(), 0.0);
@@ -4857,9 +4871,18 @@ pub enum ScanMark {
 }
 
 /// What the scanner table is listening to on this span.
-pub fn scan_marks(scanners: &crate::scanners::Scanners, center: f64, rate: f64) -> Vec<ScanMark> {
+///
+/// `usable` is the width inside the radio's analogue filter, which is what
+/// the front ends were placed over; `rate` still decides the channel grid,
+/// since that is the rate the channelizer runs at.
+pub fn scan_marks(
+    scanners: &crate::scanners::Scanners,
+    center: f64,
+    rate: f64,
+    usable: f64,
+) -> Vec<ScanMark> {
     let mut out = Vec::new();
-    for at in scanners.fronts(center, rate) {
+    for at in scanners.fronts(center, usable) {
         match &at.front {
             Front::Protocol { hz, .. } => {
                 let Some(proto) = at.front.proto() else {
@@ -4872,7 +4895,7 @@ pub fn scan_marks(scanners: &crate::scanners::Scanners, center: f64, rate: f64) 
             Front::Auto => {
                 // No grid to draw: the band is watched whole and whatever
                 // is in it is found where it is.
-                let Some(band) = at.covered(center, rate) else {
+                let Some(band) = at.covered(center, usable) else {
                     continue;
                 };
                 out.push(ScanMark::Band {
@@ -4884,7 +4907,7 @@ pub fn scan_marks(scanners: &crate::scanners::Scanners, center: f64, rate: f64) 
                 });
             }
             Front::Banks(widths) => {
-                let Some(band) = at.covered(center, rate) else {
+                let Some(band) = at.covered(center, usable) else {
                     continue;
                 };
                 let sub = SubBand::plan(band, rate, 0.0);
@@ -5080,6 +5103,7 @@ pub(crate) mod tests {
             center,
             rate,
             zoom: 1,
+            usable_ratio: 1.0,
             iqstream: None,
             tx_capture: None,
             dc_block: true,
@@ -7003,7 +7027,40 @@ pub(crate) mod tests {
             regions: Vec::new(),
             enabled: true,
         });
-        scan_marks(&s, p.center.as_f64(), p.eff_rate())
+        scan_marks(&s, p.center.as_f64(), p.eff_rate(), p.usable_rate())
+    }
+
+    #[test]
+    fn the_rolloff_of_the_span_is_not_channelized() {
+        // A HackRF at 0.75 hears nothing in the outer eighth either side, so
+        // an eighth of every bank was a decoder on the anti-alias filter.
+        let mut p = ism_at(433.92, 2_000_000.0);
+        let whole = Receiver::build(&p, Sinks::default()).unwrap().bank_channels();
+        p.usable_ratio = 0.75;
+        let inside = Receiver::build(&p, Sinks::default()).unwrap().bank_channels();
+        // 1.74 MHz of band inside a 2 MHz span, against 1.5 MHz of it, at the
+        // 31.25 kHz the block asks for.
+        assert_eq!(whole, vec![56]);
+        assert_eq!(inside, vec![49]);
+
+        // And the marks say where the receiver is listening, not where the
+        // band is: a mark over the rolloff claims a channel nothing reads.
+        let marks = scan_marks_of(&p);
+        let ScanMark::Band { lo, hi, .. } = &marks[0] else { panic!("{marks:?}") };
+        assert!((lo - 433.17e6).abs() < 1.0 && (hi - 434.67e6).abs() < 1.0, "{lo} to {hi}");
+    }
+
+    #[test]
+    fn zoom_takes_nothing_further_off_the_usable_span() {
+        // Zoom keeps the middle of the span, which is the part inside the
+        // filter already. Multiplying the two would clip a decimated span to
+        // three quarters of itself for no reason.
+        let mut p = ism_at(433.92, 8_000_000.0);
+        p.usable_ratio = 0.75;
+        assert_eq!(p.usable_rate(), 6_000_000.0);
+        p.zoom = 4;
+        assert_eq!(p.eff_rate(), 2_000_000.0);
+        assert_eq!(p.usable_rate(), 2_000_000.0);
     }
 
     #[test]
@@ -7079,7 +7136,7 @@ mod scan_mark_tests {
     #[test]
     fn the_ism_band_is_marked_where_the_detector_is_looking() {
         let s = crate::scanners::Scanners::default();
-        let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0);
+        let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0, 2_048_000.0);
         let band = marks
             .iter()
             .find_map(|m| match m {
@@ -7100,7 +7157,7 @@ mod scan_mark_tests {
         let s = crate::scanners::Scanners::parse(
             "[ISM]\nrange = 433.05 - 434.79 MHz\nspan = 250 kHz\nfront = banks\nwidths = 31.25 kHz\n",
         );
-        let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0);
+        let marks = scan_marks(&s, 433_800_000.0, 2_048_000.0, 2_048_000.0);
         let spacing = marks
             .iter()
             .find_map(|m| match m {
@@ -7117,7 +7174,7 @@ mod scan_mark_tests {
             "[POCSAG]\nrange = 439.9 - 440.1 MHz\nspan = 100 kHz\nfront = pocsag\n\
              channels = 439.9875 MHz\nmargin = 12.5 kHz\n",
         );
-        let marks = scan_marks(&s, 439_987_500.0, 500_000.0);
+        let marks = scan_marks(&s, 439_987_500.0, 500_000.0, 500_000.0);
         assert!(
             marks.iter().any(
                 |m| matches!(m, ScanMark::Channel { hz, .. } if (*hz - 439_987_500.0).abs() < 1.0)
