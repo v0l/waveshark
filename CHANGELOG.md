@@ -125,6 +125,8 @@ the code is in the commit log.
 
 - Mode S frames are also framed by their CRC, so a reply whose preamble
   another aircraft sat on is still read.
+- Mode S demodulation twice as fast on a Raspberry Pi 4, over three times on
+  x86.
 - Stitched receivers open nothing across a tuner join, and a channel put on
   one says so.
 - The map draws anything that says where it was, so every sonde appears

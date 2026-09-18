@@ -84,9 +84,9 @@ pub struct ModeSConfig {
     /// 19022 to 16613.
     ///
     /// It is the cost as well as the yield, and the two decide together what
-    /// a machine can run: the pass adds 0.20 s a whole sample and 0.83 s a
-    /// quarter over four seconds of 2.4 MS/s capture, so a quarter is a third
-    /// of one core here and more than a Raspberry Pi 4 has to spare.
+    /// a machine can run: over four seconds of 2.4 MS/s capture the pass adds
+    /// 0.13 s a whole sample, 0.21 s a half and 0.41 s a quarter, on top of
+    /// the 0.23 s the preamble search costs.
     pub phase_step: f64,
 }
 
@@ -130,10 +130,27 @@ const DATA_US: f32 = 8.0;
 const LONG_BITS: usize = 112;
 const SHORT_BITS: usize = 56;
 
+/// Where a half-chip window sits, as sample offsets from the frame start.
+///
+/// Every window in the frame is at a fixed place once the rate is known, so
+/// the microseconds, the phase and the two roundings are done once in
+/// [`ModeSDetector::new`] rather than at every sample index of the band.
+#[derive(Clone, Copy)]
+struct Win {
+    from: u32,
+    to: u32,
+}
+
 pub struct ModeSDetector {
     cfg: ModeSConfig,
     /// Samples per microsecond, which is the only thing the rate is used for.
     spus: f32,
+    /// The four preamble pulses.
+    pulses: [Win; 4],
+    /// The eight slots that must be quiet.
+    quiet: [Win; 8],
+    /// Both halves of every data bit, one row per sampling phase.
+    halves: [Vec<[Win; 2]>; Self::PHASES.len()],
     /// Magnitudes carried over from the last call, because a frame straddling
     /// the boundary between two buffers is still one frame.
     tail: Vec<f32>,
@@ -155,9 +172,26 @@ pub struct ModeSDetector {
 
 impl ModeSDetector {
     pub fn new(rate: f64, cfg: ModeSConfig) -> Self {
+        let spus = (rate / 1e6) as f32;
+        let win = |us: f32, phase: f32| {
+            let at = us * spus + phase;
+            let from = at.ceil().max(0.0) as u32;
+            let to = (at + 0.5 * spus).ceil().max(1.0) as u32;
+            Win { from, to }
+        };
         Self {
             cfg,
-            spus: (rate / 1e6) as f32,
+            spus,
+            pulses: PULSES_US.map(|us| win(us, 0.0)),
+            quiet: QUIET_US.map(|us| win(us, 0.0)),
+            halves: Self::PHASES.map(|phase| {
+                (0..LONG_BITS)
+                    .map(|k| {
+                        let at = DATA_US + k as f32;
+                        [win(at, phase), win(at + 0.5, phase)]
+                    })
+                    .collect()
+            }),
             tail: Vec::new(),
             tail_at: 0,
             seen: 0,
@@ -203,7 +237,13 @@ impl ModeSDetector {
         // exactly once and at the right sample index.
         let mut mag: Vec<f32> = Vec::with_capacity(self.tail.len() + iq.len());
         mag.extend_from_slice(&self.tail);
-        mag.extend(iq.iter().map(|c| c.norm()));
+        // `Complex::norm` is `hypot`, which guards against an overflow a
+        // sample in [-1, 1] cannot have and costs a libm call to do it. Over
+        // the 9.6 M samples of the four second capture: 17.9 ms against
+        // 2.5 ms on x86, 13.9 ms against 2.7 ms on a Cortex-X925. Both
+        // compilers vectorise the square root, and a hand written f32x8 of
+        // the same arithmetic is no faster than either.
+        mag.extend(iq.iter().map(|c| c.norm_sqr().sqrt()));
         let base = self.tail_at;
         self.seen += iq.len() as u64;
 
@@ -314,9 +354,19 @@ impl ModeSDetector {
             let count = count.saturating_sub(1);
             bits.clear();
             bits.reserve(count);
+            // Which half holds the energy, without dividing either by its
+            // width: the widths are positive, so cross-multiplying compares
+            // the same two means.
+            // No clamp: `count` stops a bit short of the buffer, so the last
+            // window's closing index is inside `sums` by a whole bit.
+            let edge = |x: f64| x.ceil() as usize;
             for k in 0..count {
                 let p = offset + k as f64 * spus;
-                bits.push(mean(p, p + half) > mean(p + half, p + spus));
+                let a = edge(p);
+                let m = edge(p + half);
+                let b = edge(p + spus);
+                let (wa, wb) = ((m - a) as f64, (b - m) as f64);
+                bits.push((sums[m] - sums[a]) * wb > (sums[b] - sums[m]) * wa);
             }
             let mut long = crate::crcframe::SlidingCrc::new(CRC24_POLY, LONG_BITS);
             let mut short = crate::crcframe::SlidingCrc::new(CRC24_POLY, SHORT_BITS);
@@ -402,31 +452,16 @@ impl ModeSDetector {
         ((DATA_US + bits as f32) * self.spus).ceil() as usize
     }
 
-    /// Mean energy in the half-microsecond window starting `us` into the
-    /// frame.
+    /// Mean energy in one half-chip window of a frame starting at `start`.
     ///
-    /// The bounds are computed in microseconds and then rounded outward to
-    /// samples, rather than taken as a fixed sample count. A fixed count is
-    /// only right when the rate is an even multiple of 2 MS/s: at 3.2 MS/s
-    /// half a microsecond is 1.6 samples, a two sample window covers 0.625 us,
-    /// and every window overlaps the next half-chip. The bits then come out of
-    /// a smear of both halves.
-    fn window(&self, mag: &[f32], start: usize, us: f32) -> f32 {
-        self.window_at(mag, start, us, 0.0)
-    }
-
-    /// As [`Self::window`], with the whole frame shifted by `phase` samples.
-    ///
-    /// At 2.4 MS/s a bit is 2.4 samples and a chip 1.2, so where the chip
-    /// boundaries fall between samples changes which samples land in which
-    /// half. Nothing about the frame says what that offset is, and the wrong
-    /// one costs several dB of margin, so the decoder tries a few and lets the
-    /// CRC say which was right. This is the single biggest difference between
-    /// hearing the strong aircraft and hearing all of them.
-    fn window_at(&self, mag: &[f32], start: usize, us: f32, phase: f32) -> f32 {
-        let at = us * self.spus + phase;
-        let from = start + at.ceil().max(0.0) as usize;
-        let to = (start + (at + 0.5 * self.spus).ceil().max(1.0) as usize).min(mag.len());
+    /// The bounds were rounded outward from microseconds rather than taken as
+    /// a fixed sample count. A fixed count is only right when the rate is an
+    /// even multiple of 2 MS/s: at 3.2 MS/s half a microsecond is 1.6 samples,
+    /// a two sample window covers 0.625 us, and every window overlaps the next
+    /// half-chip. The bits then come out of a smear of both halves.
+    fn window(&self, mag: &[f32], start: usize, w: Win) -> f32 {
+        let from = start + w.from as usize;
+        let to = (start + w.to as usize).min(mag.len());
         if from >= to {
             return 0.0;
         }
@@ -434,20 +469,36 @@ impl ModeSDetector {
     }
 
     /// Preamble strength at `start`, or `None` when this is not one.
+    ///
+    /// The tests are the same ones in the same order of strictness, but each
+    /// is asked as soon as it can be answered, because this runs at every
+    /// sample index and the band is quiet at almost all of them. On the four
+    /// second capture the weakest pulse settles 43% of the 9.95 M candidates
+    /// for four window sums, the quiet sum another 53% before it is finished,
+    /// and 3.4% reach a decode.
     fn preamble(&self, mag: &[f32], start: usize) -> Option<f32> {
-        let high: f32 = PULSES_US.iter().map(|us| self.window(mag, start, *us)).sum::<f32>() / 4.0;
-        if high < self.cfg.min_level {
-            return None;
+        let (mut sum, mut weakest) = (0.0f32, f32::INFINITY);
+        for w in self.pulses {
+            let w = self.window(mag, start, w);
+            sum += w;
+            weakest = weakest.min(w);
         }
-        let low: f32 = QUIET_US.iter().map(|us| self.window(mag, start, *us)).sum::<f32>()
-            / QUIET_US.len() as f32;
-        if high < low * self.cfg.preamble_ratio {
+        let high = sum / 4.0;
+        if high < self.cfg.min_level {
             return None;
         }
         // Every pulse individually, not just their mean: one strong pulse and
         // three absent ones has the same mean as four real ones.
-        if PULSES_US.iter().any(|us| self.window(mag, start, *us) < high * 0.5) {
+        if weakest < high * 0.5 {
             return None;
+        }
+        let bound = high * QUIET_US.len() as f32 / self.cfg.preamble_ratio;
+        let mut low = 0.0f32;
+        for w in self.quiet {
+            low += self.window(mag, start, w);
+            if low > bound {
+                return None;
+            }
         }
         Some(high)
     }
@@ -479,8 +530,12 @@ impl ModeSDetector {
 
     /// Sub-sample offsets tried before giving up on a frame.
     ///
-    /// Half a sample either way covers every phase, since anything further is
-    /// the next sample's problem.
+    /// At 2.4 MS/s a bit is 2.4 samples and a chip 1.2, so where the chip
+    /// boundaries fall between samples changes which samples land in which
+    /// half. Nothing about the frame says what that offset is, and the wrong
+    /// one costs several dB of margin, so the decoder tries a few and lets the
+    /// CRC say which was right. Half a sample either way covers every phase,
+    /// since anything further is the next sample's problem.
     const PHASES: [f32; 5] = [0.0, -0.25, 0.25, -0.5, 0.5];
 
     /// Decode at `start`, trying each sampling phase until `valid` is happy.
@@ -490,9 +545,12 @@ impl ModeSDetector {
         start: usize,
         valid: &dyn Fn(&ModeSFrame) -> bool,
     ) -> Option<ModeSFrame> {
+        // The preamble is the same one for every phase, so it is measured
+        // once here rather than in each of the five decodes.
+        let high = self.preamble(mag, start)?;
         let mut first: Option<ModeSFrame> = None;
-        for phase in Self::PHASES {
-            let f = self.decode_at(mag, start, phase)?;
+        for phase in 0..Self::PHASES.len() {
+            let f = self.decode_at(mag, start, phase, high)?;
             if valid(&f) {
                 return Some(f);
             }
@@ -503,17 +561,15 @@ impl ModeSDetector {
         first
     }
 
-    fn decode_at(&self, mag: &[f32], start: usize, phase: f32) -> Option<ModeSFrame> {
-        let high = self.preamble(mag, start)?;
+    fn decode_at(&self, mag: &[f32], start: usize, phase: usize, high: f32) -> Option<ModeSFrame> {
         let (mut bytes, mut weak) = (Vec::with_capacity(LONG_BITS / 8), 0u16);
         let mut byte = 0u8;
         // The downlink format is in the first five bits and says how long the
         // frame is, so the length never has to be guessed.
         let mut bits = SHORT_BITS;
-        for k in 0..LONG_BITS {
-            let at = DATA_US + k as f32;
-            let first = self.window_at(mag, start, at, phase);
-            let second = self.window_at(mag, start, at + 0.5, phase);
+        for (k, halves) in self.halves[phase].iter().enumerate() {
+            let first = self.window(mag, start, halves[0]);
+            let second = self.window(mag, start, halves[1]);
             if (first - second).abs() < high * 0.1 {
                 weak += 1;
             }

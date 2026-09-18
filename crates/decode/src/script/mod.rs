@@ -1084,10 +1084,9 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
 /// The parity bit that brings the covered bits, `step` apart, to even
 fn parity_over(c: &Check, frame: &BitBuffer) -> u64 {
     let step = c.step.unwrap_or(1);
-    let ones = (c.over[0]..c.over[1])
-        .step_by(step)
-        .filter(|&b| frame.get(b).unwrap_or(false))
-        .count() as u64;
+    let ones =
+        (c.over[0]..c.over[1]).step_by(step).filter(|&b| frame.get(b).unwrap_or(false)).count()
+            as u64;
     (ones ^ u64::from(c.odd)) & 1
 }
 

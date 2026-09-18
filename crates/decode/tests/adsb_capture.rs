@@ -149,8 +149,8 @@ fn framing_by_the_crc_reads_frames_the_preamble_search_never_sees() {
 #[test]
 fn the_second_pass_costs_a_fraction_of_the_time_the_capture_covers() {
     // It sits in the hot path of a wide span, so what it costs matters as much
-    // as what it finds. Measured on this file: the second pass adds 0.6 s to
-    // the four seconds of 2.4 MS/s the capture holds, about 15% of real time,
+    // as what it finds. Measured on this file: the second pass adds 0.41 s to
+    // the four seconds of 2.4 MS/s the capture holds, about 10% of real time,
     // most of it the quarter-sample offsets the search slices at. The ceiling
     // is half of real time, loose enough for a slow or loaded machine and
     // tight enough to catch the pass being made an order of magnitude
@@ -166,6 +166,22 @@ fn the_second_pass_costs_a_fraction_of_the_time_the_capture_covers() {
     let added = skip_without_fixture!(seconds());
     // Four seconds of signal in the file.
     assert!(added < 2.0, "the CRC pass added {added:.3} s to four seconds of capture");
+}
+
+#[test]
+fn the_whole_read_costs_less_than_the_time_it_covers() {
+    // What decides whether a small machine can run this at all: a Raspberry
+    // Pi 4 reading 2.4 MS/s has one core and no more. Measured on this file,
+    // release, of the four seconds it covers: 3.82 s before the window offsets
+    // were precomputed and 1.69 s after on a Pi 4, 1.29 s and 0.64 s on x86,
+    // 0.48 s and 0.40 s on a Cortex-X925, which pays almost nothing for the
+    // saturating float to integer cast the change hoists out and so gains
+    // least. The ceiling is real time, which the Pi meets with the parity
+    // search on at 3.24 s.
+    let t = std::time::Instant::now();
+    skip_without_fixture!(decode(ModeSConfig::default()));
+    let el = t.elapsed().as_secs_f64();
+    assert!(el < 4.0, "reading four seconds of capture took {el:.3} s");
 }
 
 #[test]
