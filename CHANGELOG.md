@@ -128,6 +128,8 @@ the code is in the commit log.
   of a kind told apart by the port they are in.
 - LimeSuite is loaded when a LimeSDR is looked for, so the Linux packages
   start on a machine with another version of it, or none.
+- Open Drone ID aircraft reporting a fix are drawn on the map, on Bluetooth
+  and Wi-Fi alike.
 - A stripe across the waterfall and a jump in the trace when the dial moved.
 - A mixer's frequency shift did nothing until the graph was rebuilt around it.
 - A LimeSDR transmitted into an unselected port, so nothing left the socket.

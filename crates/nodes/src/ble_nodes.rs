@@ -217,6 +217,9 @@ pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     who.name = adv.name.clone();
     who.vendor = adv.company.and_then(pdu::company_name).map(str::to_string);
     let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec());
+    if let Some(p) = decode::odid::position(&odid) {
+        d = d.at_position(p);
+    }
     if let Some(ch) = channel {
         d = d.on_channel(common::ChannelUse::new(
             common::ChannelPlan::Ble,

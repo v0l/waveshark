@@ -475,6 +475,31 @@ pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
     f
 }
 
+/// Where the aircraft said it was, for the map.
+///
+/// The aircraft's own position and not the operator's: a system message says
+/// where the person holding the controller is, which is a different thing on
+/// the same screen and is not what a track is made of. Absent unless a
+/// location message carried both coordinates, so a transmitter with no fix
+/// puts nothing on the map.
+pub fn position(messages: &[Parsed]) -> Option<common::Position> {
+    messages.iter().find_map(|p| match &p.message {
+        Message::Location(l) => {
+            let (lat, lon) = (l.latitude?, l.longitude?);
+            Some(common::Position {
+                lat,
+                lon,
+                altitude_m: l.geodetic_alt_m,
+                // F3411 sends metres per second and every protocol that puts
+                // a speed on this map sends knots.
+                speed_kt: l.speed_ms.map(|s| s * 1.943_844),
+                course_deg: l.track_deg.map(f64::from),
+            })
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +580,25 @@ mod tests {
         assert_eq!(l.longitude, None);
         assert_eq!(l.geodetic_alt_m, None);
         assert_eq!(l.height_m, None);
+    }
+
+    /// What goes on the map is the aircraft's own position, in knots, and
+    /// only when a location message carried one. An operator's position in a
+    /// system message is a different thing and is not a track.
+    #[test]
+    fn the_map_gets_the_aircraft_and_only_when_it_has_a_fix() {
+        let p = position(&[parse_message(&location()).unwrap()]).expect("a position");
+        assert!((p.lat - 53.35).abs() < 1e-6);
+        assert!((p.lon + 6.26).abs() < 1e-6);
+        assert_eq!(p.altitude_m, Some(100.0));
+        assert_eq!(p.course_deg, Some(90.0));
+        assert!((p.speed_kt.unwrap() - 153.08).abs() < 0.01, "{p:?}");
+
+        let mut b = vec![0x10];
+        b.resize(24, 0);
+        let none =
+            [parse_message(&message(1, &b)).unwrap(), parse_message(&basic_id("X")).unwrap()];
+        assert_eq!(position(&none), None, "a transmitter with no fix is not on the map");
     }
 
     /// The EU classification only means something when the flags say the EU

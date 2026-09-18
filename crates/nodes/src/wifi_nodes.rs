@@ -315,6 +315,9 @@ pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
     let mut who = common::Identity::new("wifi", who_addr.to_string());
     who.name = f.network.as_ref().and_then(|n| n.ssid.clone());
     let mut d = Decoded::bytes(protocol, center, 0.0, r.mpdu.clone());
+    if let Some(p) = decode::odid::position(&odid) {
+        d = d.at_position(p);
+    }
     if let Some(ch) = heard_channel {
         // What a beacon says about its own security is a statement about the
         // network, so it travels with the channel rather than being read
