@@ -163,11 +163,7 @@ impl Protocols {
         use crate::protocols::*;
         let mut p = Self::new();
         p.add(Box::new(FineOffsetWh1080));
-        p.add(Box::new(Acurite609Txc));
-        p.add(Box::new(AcuriteTower));
         p.add(Box::new(AcuriteWind));
-        p.add(Box::new(Acurite606Tx));
-        p.add(Box::new(Acurite986));
         p.add(Box::new(Hideki));
         p.add(Box::new(AlectoV1));
         p.add(Box::new(GtWt02));

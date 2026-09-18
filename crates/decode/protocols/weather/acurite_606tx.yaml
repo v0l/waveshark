@@ -1,0 +1,18 @@
+# Acurite 606TX temperature sensor, 433.92 MHz, PPM, four bytes with an LFSR
+# digest for a check. A row of the burst has to be the frame's length.
+name: Acurite-606TX
+timing: { ppm: [2000, 4000], reset_us: 10000 }
+frame: { bits: 32, row_bits: [32, 33], not_constant: 24, repeats: 3 }
+check: { kind: lfsr8, gen: 0x98, key: 0xf1, over: [0, 24], at: 24 }
+fields:
+  - { name: id, bits: 8, min: 1 }
+  - { name: battery_ok, bits: 1, type: bool }
+  - { name: button, bits: 1, type: bool }
+  - { name: channel, bits: 2, offset: 1 }
+  - { name: temperature_c, bits: 12, type: int, scale: 0.1, min: -40, max: 70 }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "a3 80 65 ea"
+    fields: { id: 163, battery_ok: true, button: false, channel: 1, temperature_c: 10.1 }
+  - hex: "a3 8f fd 21"
+    fields: { id: 163, battery_ok: true, button: false, channel: 1, temperature_c: -0.3 }
