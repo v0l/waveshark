@@ -7696,7 +7696,7 @@ mod tx_tests {
         spec.process(&iq[40_000..]);
         // The mean of every transform rather than the loudest: this is a
         // measurement of where the power sits, not a search for a burst.
-        let db = spec.take().mean;
+        let db = spec.take(&[]).mean;
         let power: Vec<f64> = db.iter().map(|d| 10f64.powf(*d as f64 / 10.0)).collect();
         let total: f64 = power.iter().sum();
         // The 12.5 kHz channel, in bins either side of centre.

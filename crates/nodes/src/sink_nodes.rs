@@ -15,7 +15,7 @@
 
 use common::{C32, Error, Result};
 use dsp::Spectrum;
-use dsp::spectrum::Detector;
+use dsp::spectrum::{self, Detector};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -119,23 +119,35 @@ pub struct SpectrumNode {
     wf_db: Vec<f32>,
 }
 
-/// The detectors, as a picker's options.
-fn detectors() -> Vec<String> {
-    Detector::ALL.iter().map(|d| d.label().to_string()).collect()
+/// The detectors, as a picker's options. The percentile is named for the
+/// number it is set to, so the option reads `p80` rather than `percentile`.
+fn detectors(current: Detector) -> Vec<String> {
+    Detector::options(current).iter().map(|d| d.label()).collect()
 }
 
 fn index_of(d: Detector) -> usize {
-    Detector::ALL.iter().position(|x| *x == d).unwrap_or(0)
+    Detector::ALL.iter().position(|x| x.at_percent(0) == d.at_percent(0)).unwrap_or(0)
 }
 
 /// Whichever detector a setting names, by index or by name: a patch holds
 /// the index, and a saved record or an agent says the word.
-fn detector_at(v: &ParamValue) -> Detector {
+///
+/// An index keeps the percent already set, because the picker and the number
+/// beside it are two settings for one value.
+fn detector_at(v: &ParamValue, current: Detector) -> Detector {
     if let Some(name) = v.as_str() {
         return Detector::parse(name);
     }
     let i = v.as_i64().unwrap_or(0).max(0) as usize;
-    Detector::ALL.get(i).copied().unwrap_or_default()
+    let d = Detector::ALL.get(i).copied().unwrap_or_default();
+    d.at_percent(current.percent().unwrap_or(spectrum::DEFAULT_PERCENT))
+}
+
+/// A detector moved to the percent a setting names, which a detector that
+/// takes no percentile ignores.
+fn at_percent(d: Detector, v: &ParamValue) -> Detector {
+    let p = v.as_f64().unwrap_or(f64::from(spectrum::DEFAULT_PERCENT));
+    d.at_percent(p.clamp(1.0, 99.0) as u8)
 }
 
 /// The transform size a spectrum stage's description asks for, rounded down
@@ -171,6 +183,13 @@ impl SpectrumNode {
 
     pub fn trace(&self) -> Detector {
         self.trace
+    }
+
+    /// The percent a detector is set to, which a plain reading reports as
+    /// the default rather than as nothing: the control is always on the
+    /// card, and reads what it would take if it were chosen.
+    fn percent(&self, d: Detector) -> u8 {
+        d.percent().unwrap_or(spectrum::DEFAULT_PERCENT)
     }
 
     /// What the waterfall takes out of the same frame.
@@ -294,7 +313,7 @@ impl Simple for SpectrumNode {
             return Ok(());
         }
         self.debt = self.rate / self.refresh_hz.max(1.0) as f64;
-        let frame = self.spec.take();
+        let frame = self.spec.take(&[self.trace, self.wf]);
         self.spec.fold(self.trace.of(&frame));
         self.wf_db.clear();
         self.wf_db.extend_from_slice(self.wf.of(&frame));
@@ -324,9 +343,16 @@ impl Simple for SpectrumNode {
             Param::float("refresh", self.refresh_hz as f64, 1.0..=120.0)
                 .unit("Hz")
                 .label("Frames a second"),
-            Param::choice("trace", index_of(self.trace), detectors()).label("What the trace shows"),
-            Param::choice("waterfall", index_of(self.wf), detectors())
+            Param::choice("trace", index_of(self.trace), detectors(self.trace))
+                .label("What the trace shows"),
+            Param::float("trace_percent", f64::from(self.percent(self.trace)), 1.0..=99.0)
+                .unit("%")
+                .label("Which percentile the trace takes"),
+            Param::choice("waterfall", index_of(self.wf), detectors(self.wf))
                 .label("What the waterfall shows"),
+            Param::float("waterfall_percent", f64::from(self.percent(self.wf)), 1.0..=99.0)
+                .unit("%")
+                .label("Which percentile the waterfall takes"),
         ]
     }
 
@@ -341,11 +367,19 @@ impl Simple for SpectrumNode {
                 Ok(())
             }
             "trace" => {
-                self.trace = detector_at(&v);
+                self.trace = detector_at(&v, self.trace);
                 Ok(())
             }
             "waterfall" => {
-                self.wf = detector_at(&v);
+                self.wf = detector_at(&v, self.wf);
+                Ok(())
+            }
+            "trace_percent" => {
+                self.trace = at_percent(self.trace, &v);
+                Ok(())
+            }
+            "waterfall_percent" => {
+                self.wf = at_percent(self.wf, &v);
                 Ok(())
             }
             _ => Err(Error::other(format!("spectrum: unknown parameter {name:?}"))),

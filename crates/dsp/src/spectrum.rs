@@ -5,7 +5,7 @@ use common::C32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
-/// What a run of transforms came to, in dBFS, read three ways.
+/// What a run of transforms came to, in dBFS, read several ways.
 ///
 /// The same split a spectrum analyser makes, where a trace point covers a
 /// bucket of samples and a detector says what the point shows: the loudest
@@ -16,7 +16,16 @@ pub struct Frame {
     pub peak: Vec<f32>,
     pub mean: Vec<f32>,
     pub sample: Vec<f32>,
+    /// A reading per percentile [`Spectrum::take`] was asked for.
+    ///
+    /// Only what was asked for, because taking one costs a selection over
+    /// every bin and a frame nobody is drawing a percentile from should not
+    /// pay for it.
+    pub pct: Vec<(u8, Vec<f32>)>,
 }
+
+/// The percentile a detector takes when nothing else is chosen.
+pub const DEFAULT_PERCENT: u8 = 80;
 
 /// Which of a frame's readings a display takes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,39 +37,104 @@ pub enum Detector {
     /// by however little of the frame it occupied.
     #[default]
     Average,
+    /// The level the given percent of the frame's transforms fell below.
+    ///
+    /// Between the mean and the peak, and what either of them cannot do: a
+    /// high percentile finds a signal present for part of the frame without
+    /// the peak's habit of drawing the whole span up to one stray transform,
+    /// and a low one reads a floor a nearby burst cannot lift.
+    Percentile(u8),
     /// The loudest each bin reached. Finds a transmission shorter than the
     /// frame, at the price of a floor that reads high.
     Peak,
 }
 
 impl Detector {
-    pub const ALL: [Detector; 3] = [Detector::Sample, Detector::Average, Detector::Peak];
+    pub const ALL: [Detector; 4] = [
+        Detector::Sample,
+        Detector::Average,
+        Detector::Percentile(DEFAULT_PERCENT),
+        Detector::Peak,
+    ];
 
-    pub fn label(self) -> &'static str {
+    /// The menu entries, the percentile carrying `current`'s own number.
+    ///
+    /// A picker compares the value it holds against its options, so the
+    /// percentile entry has to be the one that is set or nothing matches and
+    /// the control shows the first option instead.
+    pub fn options(current: Detector) -> [Detector; 4] {
+        let mut all = Detector::ALL;
+        all[2] = Detector::Percentile(current.percent().unwrap_or(DEFAULT_PERCENT));
+        all
+    }
+
+    /// The percent this detector takes, where it takes one.
+    pub fn percent(self) -> Option<u8> {
         match self {
-            Detector::Sample => "sample",
-            Detector::Average => "average",
-            Detector::Peak => "peak",
+            Detector::Percentile(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The same detector at another percent, which a plain reading ignores.
+    pub fn at_percent(self, p: u8) -> Self {
+        match self {
+            Detector::Percentile(_) => Detector::Percentile(p.clamp(1, 99)),
+            other => other,
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Detector::Sample => "sample".into(),
+            Detector::Average => "average".into(),
+            Detector::Percentile(p) => format!("p{p}"),
+            Detector::Peak => "peak".into(),
         }
     }
 
     pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let s = s.trim().to_ascii_lowercase();
+        // Parsed wide and clamped, so a number that is not a percent lands
+        // at the nearest one it could have meant rather than silently
+        // reading as the default detector.
+        if let Some(n) = s.strip_prefix('p')
+            && let Ok(p) = n.parse::<u32>()
+        {
+            return Detector::Percentile(p.clamp(1, 99) as u8);
+        }
+        match s.as_str() {
             "sample" => Detector::Sample,
             "peak" => Detector::Peak,
+            "percentile" => Detector::Percentile(DEFAULT_PERCENT),
             _ => Detector::Average,
         }
     }
 
     /// The reading this detector takes out of a frame.
+    ///
+    /// A percentile the frame was not asked for falls back to the mean,
+    /// which is what a frame taken by something that does not know about
+    /// this detector holds.
     pub fn of(self, f: &Frame) -> &[f32] {
         match self {
             Detector::Sample => &f.sample,
             Detector::Average => &f.mean,
             Detector::Peak => &f.peak,
+            Detector::Percentile(p) => {
+                f.pct.iter().find(|(q, _)| *q == p).map_or(&f.mean[..], |(_, v)| &v[..])
+            }
         }
     }
 }
+
+/// How many of a frame's transforms a percentile is selected over.
+///
+/// Every transform still reaches the peak and the mean; this is only how
+/// finely the distribution behind them is kept. Sixty-four puts the answer
+/// within a bin and a half of the asked-for rank and costs 4 MB at the
+/// largest transform this offers.
+const KEPT: usize = 64;
 
 /// Windowed, overlapped, averaged FFT producing dBFS bins in display order
 /// (negative frequencies first, DC in the middle).
@@ -93,6 +167,12 @@ pub struct Spectrum {
     /// watching for, which is the opposite of what a heatmap wants from the
     /// same seconds.
     last: Vec<f32>,
+    /// A subsample of the frame's transforms, `KEPT` slots of `size` bins,
+    /// which is what a percentile is selected over.
+    keep: Vec<f32>,
+    /// Slots filled, and how many transforms apart the ones kept are.
+    slots: usize,
+    step: u32,
     taken: u32,
     out: Vec<f32>,
     primed: bool,
@@ -118,6 +198,9 @@ impl Spectrum {
             peak: vec![0.0; size],
             sum: vec![0.0; size],
             last: vec![0.0; size],
+            keep: vec![0.0; size * KEPT],
+            slots: 0,
+            step: 1,
             taken: 0,
             out: vec![0.0; size],
             primed: false,
@@ -159,6 +242,7 @@ impl Spectrum {
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
 
         let half = self.size / 2;
+        let slot = (self.taken % self.step == 0).then(|| self.slots * self.size);
         for i in 0..self.size {
             // Rotate so DC lands in the middle, matching how the span is drawn.
             let src_bin = (i + half) % self.size;
@@ -168,8 +252,33 @@ impl Spectrum {
             }
             self.sum[i] += p;
             self.last[i] = p;
+            if let Some(base) = slot {
+                self.keep[base + i] = p;
+            }
+        }
+        if slot.is_some() {
+            self.slots += 1;
+            if self.slots == KEPT {
+                self.thin();
+            }
         }
         self.taken += 1;
+    }
+
+    /// Throw away every other kept slot and take them half as often.
+    ///
+    /// A frame holds however many transforms the sample rate and the refresh
+    /// rate leave it, which is hundreds at a wide span, and a percentile over
+    /// the newest sixty-four of those would be a percentile of the last few
+    /// milliseconds. Halving instead keeps the surviving slots spread over
+    /// the whole frame, so what is selected is a fair sample of it.
+    fn thin(&mut self) {
+        for dst in 1..KEPT / 2 {
+            let src = dst * 2;
+            self.keep.copy_within(src * self.size..(src + 1) * self.size, dst * self.size);
+        }
+        self.slots = KEPT / 2;
+        self.step *= 2;
     }
 
     /// Averaged spectrum in dBFS, lowest frequency first.
@@ -195,7 +304,7 @@ impl Spectrum {
     /// What is drawn from it is the caller's choice of detector, handed
     /// back through [`Self::fold`], which is what the `smoothing` control
     /// acts on.
-    pub fn take(&mut self) -> Frame {
+    pub fn take(&mut self, want: &[Detector]) -> Frame {
         let n = self.taken.max(1) as f32;
         let mut peak = vec![0.0f32; self.size];
         let mut mean = vec![0.0f32; self.size];
@@ -206,10 +315,46 @@ impl Spectrum {
             mean[i] = 10.0 * (m + 1e-20).log10();
             sample[i] = 10.0 * (self.last[i] + 1e-20).log10();
         }
+        let mut pct: Vec<(u8, Vec<f32>)> = Vec::new();
+        for p in want.iter().filter_map(|d| d.percent()) {
+            if !pct.iter().any(|(q, _)| *q == p) {
+                pct.push((p, self.percentile(p)));
+            }
+        }
         self.peak.fill(0.0);
         self.sum.fill(0.0);
+        self.slots = 0;
+        self.step = 1;
         self.taken = 0;
-        Frame { peak, mean, sample }
+        Frame { peak, mean, sample, pct }
+    }
+
+    /// The level `p` percent of the kept transforms fell below, per bin, in
+    /// dBFS.
+    ///
+    /// Nearest rank, selected in power and converted afterwards, for the
+    /// reason the mean is: the ordering is the same either way but the value
+    /// between two ranks is not.
+    fn percentile(&mut self, p: u8) -> Vec<f32> {
+        let n = self.slots;
+        if n == 0 {
+            return vec![-200.0; self.size];
+        }
+        let rank = ((f32::from(p.clamp(1, 99)) / 100.0 * n as f32).ceil() as usize)
+            .clamp(1, n)
+            - 1;
+        let mut col = vec![0.0f32; n];
+        let mut out = vec![0.0f32; self.size];
+        for i in 0..self.size {
+            for (s, c) in col.iter_mut().enumerate() {
+                *c = self.keep[s * self.size + i];
+            }
+            // Selection rather than a sort: the rank is all that is wanted
+            // and this runs over every bin of every frame.
+            let (_, at, _) = col.select_nth_unstable_by(rank, f32::total_cmp);
+            out[i] = 10.0 * (*at + 1e-20).log10();
+        }
+        out
     }
 
     /// Advance the smoothed trace by one frame of whatever was chosen.
@@ -234,6 +379,8 @@ impl Spectrum {
         self.peak.fill(0.0);
         self.sum.fill(0.0);
         self.last.fill(0.0);
+        self.slots = 0;
+        self.step = 1;
         self.taken = 0;
         self.primed = false;
         self.pending.clear();
@@ -334,7 +481,7 @@ mod tests {
         let mut s = Spectrum::new(1024);
         s.smoothing = 1.0;
         assert!(s.process(&tone(8192, 100.0, 1024, 1.0)));
-        let frame = s.take();
+        let frame = s.take(&[]);
         let peak = frame.peak.iter().cloned().fold(f32::MIN, f32::max);
         assert!(peak.abs() < 0.5, "full scale tone read {peak:.2} dBFS");
     }
@@ -351,7 +498,7 @@ mod tests {
             produced |= s.process(chunk);
         }
         assert!(produced, "no frame from blocks smaller than the FFT");
-        let db = s.take().peak;
+        let db = s.take(&[]).peak;
         let idx = db.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(idx, 2048 + 400);
     }
@@ -367,7 +514,7 @@ mod tests {
             let sig = tone(1 << 20, 100.0, size, 1.0);
             let t = std::time::Instant::now();
             s.process(&sig);
-            s.take();
+            s.take(&[]);
             let secs = t.elapsed().as_secs_f64();
             let rate = 2_400_000.0;
             println!(
@@ -388,7 +535,7 @@ mod tests {
         // A frame's worth of silence, then a full-scale tone at the end.
         s.process(&tone(2048, 32.0, 256, 0.0));
         s.process(&tone(1024, 32.0, 256, 1.0));
-        let frame = s.take();
+        let frame = s.take(&[]);
         s.fold(&frame.sample);
         let drawn = s.power_db().iter().cloned().fold(f32::MIN, f32::max);
         let peak = frame.peak.iter().cloned().fold(f32::MIN, f32::max);
@@ -413,7 +560,7 @@ mod tests {
         s.smoothing = 1.0;
         let dc = vec![C32::new(1.0, 0.0); 2048];
         s.process(&dc);
-        let db = s.take().peak;
+        let db = s.take(&[]).peak;
         let idx = db.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(idx, 128, "DC ended up in bin {idx}, not the centre");
     }
@@ -423,7 +570,7 @@ mod tests {
         let mut s = Spectrum::new(512);
         s.smoothing = 1.0;
         s.process(&tone(8192, 64.0, 512, 1.0));
-        let db = s.take().peak;
+        let db = s.take(&[]).peak;
         let idx = db.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
         assert_eq!(idx, 256 + 64, "positive tone landed in bin {idx}");
     }
@@ -442,7 +589,7 @@ mod tests {
             s.process(&tone(2048, 32.0, 256, amp));
             // The display average advances a frame at a time, which is when
             // the readings are taken rather than when a transform runs.
-            let f = s.take();
+            let f = s.take(&[]);
             s.fold(&f.sample);
         }
         let peak = s.power_db().iter().cloned().fold(f32::MIN, f32::max);
@@ -494,5 +641,80 @@ mod tests {
             .fold(f32::MIN, f32::max);
         // Blackman-Harris reaches roughly -92 dB sidelobes.
         assert!(floor < -80.0, "sidelobes only reached {floor:.1} dBFS");
+    }
+
+    /// A tone keyed for a fifth of the frame, which is exactly the case the
+    /// mean and the peak each read wrong.
+    ///
+    /// 16384 samples at 1024 bins with 50% overlap is 31 transforms, of
+    /// which the loud ones are the first 6. So p50 sits in the silence, p95
+    /// is in the tone, and the peak reads the tone's own level.
+    #[test]
+    fn a_percentile_sits_between_the_floor_and_the_peak() {
+        let mut s = Spectrum::new(1024);
+        let mut sig = tone(3277, 200.0, 1024, 1.0);
+        sig.extend(tone(13107, 200.0, 1024, 0.0));
+        s.process(&sig);
+        let f = s.take(&[Detector::Percentile(50), Detector::Percentile(95)]);
+        let bin = 512 + 200;
+        let p50 = Detector::Percentile(50).of(&f)[bin];
+        let p95 = Detector::Percentile(95).of(&f)[bin];
+        assert!((f.peak[bin] - 0.0).abs() < 1.0, "peak read {:.1} dBFS", f.peak[bin]);
+        assert!(p95 > -3.0, "p95 read {p95:.1} dBFS, which is not the tone");
+        assert!(p50 < -100.0, "p50 read {p50:.1} dBFS, which is not the silence");
+        // The mean of a fifth at full scale is about -7 dB, which is neither.
+        assert!((f.mean[bin] + 7.0).abs() < 2.0, "mean read {:.1} dBFS", f.mean[bin]);
+    }
+
+    /// A percentile is taken over a subsample when a frame holds more
+    /// transforms than there are slots, and the subsample spans the frame
+    /// rather than its tail.
+    #[test]
+    fn a_long_frame_is_subsampled_across_its_whole_length() {
+        let mut s = Spectrum::new(256);
+        // 512 transforms, four times what thinning keeps: loud for the first
+        // half, silent for the second. A tail-biased keep would read silence
+        // at every rank.
+        s.process(&tone(65536, 32.0, 256, 1.0));
+        s.process(&tone(65536, 32.0, 256, 0.0));
+        let f = s.take(&[Detector::Percentile(25), Detector::Percentile(75)]);
+        let bin = 128 + 32;
+        let lo = Detector::Percentile(25).of(&f)[bin];
+        let hi = Detector::Percentile(75).of(&f)[bin];
+        assert!(lo < -100.0, "p25 read {lo:.1} dBFS, expected the silent half");
+        assert!(hi > -3.0, "p75 read {hi:.1} dBFS, expected the loud half");
+    }
+
+    /// A percentile nobody asked for is not computed, and reads as the mean.
+    #[test]
+    fn an_unasked_percentile_falls_back_to_the_mean() {
+        let mut s = Spectrum::new(256);
+        s.process(&tone(4096, 32.0, 256, 1.0));
+        let f = s.take(&[Detector::Percentile(80)]);
+        assert_eq!(f.pct.len(), 1, "only the asked-for rank is computed");
+        assert_eq!(Detector::Percentile(10).of(&f), &f.mean[..]);
+        assert_ne!(Detector::Percentile(80).of(&f), &f.mean[..]);
+    }
+
+    #[test]
+    fn a_detector_survives_being_written_out_and_read_back() {
+        for d in [
+            Detector::Sample,
+            Detector::Average,
+            Detector::Peak,
+            Detector::Percentile(80),
+            Detector::Percentile(1),
+            Detector::Percentile(99),
+        ] {
+            assert_eq!(Detector::parse(&d.label()), d, "{}", d.label());
+        }
+        assert_eq!(Detector::parse("percentile"), Detector::Percentile(DEFAULT_PERCENT));
+        assert_eq!(Detector::parse("p200"), Detector::Percentile(99), "clamped, not discarded");
+        assert_eq!(Detector::parse("p0"), Detector::Percentile(1));
+        assert_eq!(Detector::parse("px"), Detector::Average, "not a number at all");
+        // The picker's options carry whatever is set, or nothing matches.
+        assert_eq!(Detector::options(Detector::Percentile(35))[2], Detector::Percentile(35));
+        assert_eq!(Detector::options(Detector::Peak)[2], Detector::Percentile(DEFAULT_PERCENT));
+        assert_eq!(Detector::Peak.at_percent(35), Detector::Peak, "a peak takes no rank");
     }
 }

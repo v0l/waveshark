@@ -833,7 +833,7 @@ mod tests {
             // The mean over the burst, which is what "averaged over the
             // whole burst" above says: the peak would be the loudest
             // transform rather than the level.
-            spec.take().mean[bin]
+            spec.take(&[]).mean[bin]
         };
         let (h, s) = (far(&hard), far(&soft));
         println!("hard {h:.1} dB, ramped {s:.1} dB, {:.1} dB bought", h - s);

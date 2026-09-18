@@ -115,7 +115,7 @@ the code is in the commit log.
   memory bank, its own voice, what reads speech, the station, the sound
   devices, the survey and its feeds, the datasets and the display.
 - Trace and waterfall detectors chosen apart: the newest transform, the mean,
-  or the loudest.
+  the loudest, or a percentile of the operator's choosing.
 - The channel strip can be put away, from the button on it, and brought back
   from the panels at the right of the top bar.
 - Dataset downloads say how far they have got, in bytes and as a bar.

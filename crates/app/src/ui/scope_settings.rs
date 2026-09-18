@@ -8,6 +8,26 @@ use super::*;
 use crate::ui::widgets::{choice, lamp, section, switch};
 use dsp::spectrum::Detector;
 
+/// The percentile control, on the row under whichever picker is set to one.
+///
+/// Absent for every other detector rather than greyed out, because a number
+/// that does nothing to the picture is a number an operator will try to read
+/// the trace against.
+fn percent_row(ui: &mut egui::Ui, legend: &str, d: &mut Detector) {
+    let Some(p) = d.percent() else { return };
+    let help = "Which rank of the transforms behind a point it shows. 50 is the median, a \
+                floor nothing brief can lift; 95 is nearly the peak. The level is taken \
+                over a subsample of the frame, so a percent is within a rank or two of \
+                exact.";
+    let mut v = f32::from(p);
+    row_help(ui, legend, help, |ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
+        ui.add(egui::Slider::new(&mut v, 1.0..=99.0).show_value(false));
+        theme::Line::new().set(format!("{:.0}%", v)).size(11.0).show(ui);
+    });
+    *d = d.at_percent(v.round() as u8);
+}
+
 /// What the panels want done that they cannot do themselves.
 pub(super) enum Action {
     /// The span or the bin count changed, so old rows no longer line up.
@@ -58,15 +78,17 @@ impl ScopeSettings<'_> {
             });
             let what = "What one point of the trace shows out of the transforms behind it. \
                         Sample is the newest of them, average their mean power, peak the \
-                        loudest each bin reached. Average is a steady floor; peak finds a \
-                        burst shorter than a frame and reads the floor high.";
+                        loudest each bin reached, and pN the level N percent of them fell \
+                        below. Average is a steady floor; peak finds a burst shorter than a \
+                        frame and reads the floor high.";
             row_help(ui, "detector", what, |ui| {
                 let mut d = self.st.trace;
-                let opts = Detector::ALL.map(|v| (v, v.label().to_string()));
+                let opts = Detector::options(d).map(|v| (v, v.label()));
                 if choice(ui, "trace", &mut d, opts) {
                     self.st.trace = d;
                 }
             });
+            percent_row(ui, "trace pct", &mut self.st.trace);
             let smooth = "How much of the last drawn frame the next one keeps. This acts \
                           on frames after the detector above has already decided what each \
                           one holds.";
@@ -102,14 +124,16 @@ impl ScopeSettings<'_> {
             });
             let what = "What a row shows out of the frames behind it. Peak is what finds a \
                         transmission: a burst of a few milliseconds is in one frame of the \
-                        many a row is made of.";
+                        many a row is made of. A high percentile finds one too, without \
+                        drawing the row up to a single stray transform.";
             row_help(ui, "detector", what, |ui| {
                 let mut d = self.st.wf_detector;
-                let opts = Detector::ALL.map(|v| (v, v.label().to_string()));
+                let opts = Detector::options(d).map(|v| (v, v.label()));
                 if choice(ui, "wfdet", &mut d, opts) {
                     self.st.wf_detector = d;
                 }
             });
+            percent_row(ui, "row pct", &mut self.st.wf_detector);
             row_help(ui, "history", "Rows kept, scrolled back to with the wheel.", |ui| {
                 let mut n = self.st.wf_rows;
                 let opts = [256usize, 512, 1024, 2048].map(|v| (v, format!("{v} rows")));
