@@ -13,6 +13,8 @@ ctr.workspace = true
 sha2.workspace = true
 md-5.workspace = true
 hmac.workspace = true
+serde.workspace = true
+serde_yaml_ng.workspace = true
 wgpu = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 poll-promise = { workspace = true, optional = true }

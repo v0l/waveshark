@@ -13,7 +13,7 @@ use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
 use decode::protocols::{
     Acurite609Txc, AcuriteTower, Bresser3Ch, Ev1527, FineOffsetWh51, GtWt02, GtWt03, LacrosseIt,
-    LacrosseTx141thBv2, NexusTh, OregonV3, Rubicson, SomfyRts, X10Rf,
+    LacrosseTx141thBv2, OregonV3, Rubicson, SomfyRts, X10Rf,
 };
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -149,7 +149,8 @@ fn a_nexus_burst_decodes_from_its_timings() {
     let f = [0x5c, 0x90, 0xc2, 0xf3, 0xe0];
     let pkg = ppm(&bits_of(&f, 36), 500, 1000, 2000, 5000);
 
-    let r = NexusTh.decode_package(&pkg).expect("decode");
+    let nexus = decode::script::named("Nexus-TH").expect("a built-in description");
+    let r = nexus.decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x5c)));
     assert_eq!(r.get("channel"), Some(&Value::Int(2)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(19.4)));

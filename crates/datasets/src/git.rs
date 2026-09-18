@@ -675,7 +675,28 @@ pub static FLIPPER_PLAYLIST: Repo = Repo {
     max_bytes: MAX_BYTES,
 };
 
+/// The protocol descriptions the receiver reads sensors and remotes with,
+/// published apart from the build so a fixed or added layout reaches a
+/// receiver without a release. The same files are built in, so a receiver
+/// that never fetches reads what it shipped with.
+pub static PROTOCOLS: Repo = Repo {
+    name: "Protocol descriptions",
+    dir: "waveshark-protocols",
+    head: "https://api.github.com/repos/v0l/waveshark-protocols/branches/main",
+    tarball: "https://codeload.github.com/v0l/waveshark-protocols/tar.gz/refs/heads/main",
+    publisher: "github.com/v0l",
+    about: "One YAML file per sensor or remote: its timing, its frame and \
+     its fields, read both ways. What the receiver decodes the ISM bands \
+     with, kept up to date between releases.",
+    page: "https://github.com/v0l/waveshark-protocols",
+    terms: "MIT",
+    max_age: MAX_AGE,
+    keep: &["yaml"],
+    max_bytes: MAX_BYTES,
+};
+
 pub static REPOS: &[&Repo] = &[
+    &PROTOCOLS,
     &NULLSEC,
     &UBERGUIDOZ,
     &ZERO_SPLOIT,

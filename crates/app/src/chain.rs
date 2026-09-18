@@ -7666,7 +7666,7 @@ mod tx_tests {
             preset: decode::subghz::Preset::Ook,
             protocol: "Princeton".into(),
             bursts: vec![decode::protocols::keyfob::encode_frame(
-                decode::Protocol::timing(&decode::protocols::Princeton),
+                decode::Protocol::timing(&decode::script::named("Princeton").unwrap()),
                 &{
                     let mut b = decode::bits::BitBuffer::with_capacity(24);
                     for i in (0..24).rev() {

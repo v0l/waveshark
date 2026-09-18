@@ -1,0 +1,28 @@
+# Princeton, and the 24-bit "Generic" fixed-code remote many clone it from:
+# the commonest garage-door keyfob on 433.92 MHz.
+#
+# A short mark is a 0 and a long mark a 1 on the air, which is the opposite of
+# the slicer's convention, so the frame is inverted. No checksum, so a frame
+# has to tile the burst and have a few transitions in it to be believed.
+# The serial/button split follows the Flipper's check_remote_controller: a
+# few remotes carry one of four 8-bit button codes in the low byte.
+name: Princeton
+timing: { pwm: [390, 1170], reset_us: 3000 }
+frame: { bits: 24, invert: true, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: code, bits: 24 }
+  - { name: low, at: 16, bits: 8, hidden: true }
+  - when: { low: [0x30, 0xc0, 0x03, 0x0c] }
+    fields:
+      - { name: serial, at: 0, bits: 16 }
+      - { name: btn, at: 16, bits: 8, map: { 0x03: 0xf3, 0x0c: 0xfc } }
+    else:
+      - { name: serial, at: 0, bits: 20 }
+      - { name: btn, at: 20, bits: 4 }
+vectors:
+  - hex: "a1 3f 08"
+    fields: { code: 0xa13f08, serial: 0xa13f0, btn: 0x8 }
+  - hex: "12 34 c0"
+    fields: { code: 0x1234c0, serial: 0x1234, btn: 0xc0 }
+  - hex: "12 34 03"
+    fields: { code: 0x123403, serial: 0x1234, btn: 0xf3 }

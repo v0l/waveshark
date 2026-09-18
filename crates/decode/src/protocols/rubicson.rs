@@ -129,11 +129,14 @@ mod tests {
 
     #[test]
     fn nexus_does_not_also_claim_a_rubicson_frame() {
-        // The two layouts differ only in what the last byte means, so without
-        // the CRC test in the Nexus decoder this frame would be reported twice
-        // and once wrongly.
+        // The two layouts differ only in what the last byte means, so the
+        // Nexus description yields to this one and the registry reports the
+        // frame once, as a Rubicson.
         let f = frame(0x74, 1, 14.9, true);
         assert!(Rubicson.decode(&f).is_ok());
-        assert!(super::super::NexusTh.decode(&f).is_err());
+        let pkg = crate::script::pulses(&Rubicson.timing(), &f, 2);
+        let got = crate::Protocols::all().decode_all(&pkg);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].model, "Rubicson-Temperature");
     }
 }

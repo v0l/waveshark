@@ -24,7 +24,6 @@ mod interlogix;
 mod ism868_link;
 pub mod keyfob;
 mod lacrosse;
-mod nexus;
 mod oregon;
 mod prologue;
 mod rubicson;
@@ -47,11 +46,10 @@ pub use hideki::Hideki;
 pub use interlogix::InterlogixSecurity;
 pub use ism868_link::Ism868Link;
 pub use keyfob::{
-    Ansonic, Bett, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3, NiceFlo, Princeton,
-    came12_bit, came24_bit,
+    Ansonic, Bett, Holtek, HoltekHt12x, KeeLoq, Linear, LinearDelta3, NiceFlo, came12_bit,
+    came24_bit,
 };
 pub use lacrosse::{LacrosseIt, LacrosseTx141thBv2};
-pub use nexus::NexusTh;
 pub use oregon::{OregonV2, OregonV3};
 pub use prologue::PrologueTh;
 pub use rubicson::Rubicson;

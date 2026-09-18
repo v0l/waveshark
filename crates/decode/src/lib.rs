@@ -83,6 +83,7 @@ pub mod recover;
 pub mod rs;
 pub mod rs41;
 pub mod rtty;
+pub mod script;
 pub mod slicer;
 pub mod sstv;
 pub mod subghz;
