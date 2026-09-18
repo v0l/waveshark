@@ -822,9 +822,14 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
     use datasets::{airports, cells, gateways, radioid};
     match which {
         Which::Repo(r) => {
-            git::get(r, cache)?;
-            let moved = git::refresh(r, cache, when)?.is_some();
-            if *r == git::PROTOCOLS && moved {
+            let before = git::held(r, cache).map(|t| t.commit);
+            let mut tree = git::get(r, cache)?;
+            if let Some(t) = git::refresh(r, cache, when)? {
+                tree = t;
+            }
+            // installed at startup from whatever was held, so only a tree
+            // that moved is worth a reload and the rebuild it causes
+            if *r == git::PROTOCOLS && before.as_deref() != Some(tree.commit.as_str()) {
                 crate::protocols::load();
             }
         }
@@ -972,6 +977,9 @@ fn now() -> u64 {
 /// and nothing has asked them a question yet.
 pub fn start() {
     load(Which::Airports, When::IfDue);
+    // The descriptions are the decoders, so a day-old set is checked on
+    // its own: a moved tree installs and the graph rebuilds with it.
+    load(Which::Repo(&git::PROTOCOLS), When::IfDue);
 }
 
 /// Download or revalidate every dataset and report what happened, for
