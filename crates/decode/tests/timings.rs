@@ -11,7 +11,7 @@
 
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
-use decode::protocols::{GtWt02, GtWt03, SomfyRts};
+use decode::protocols::{GtWt02, SomfyRts};
 use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -228,7 +228,7 @@ fn a_gt_wt_03_burst_decodes_from_its_timings() {
     pulses.extend(pwm(&bits_of(&inverted, 41), 256, 625));
     let pkg = package(pulses);
 
-    let r = GtWt03.decode_package(&pkg).expect("decode");
+    let r = named("GT-WT03").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x17)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(26.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));

@@ -292,6 +292,10 @@ pub enum CheckKind {
     NibbleSum,
     /// Every nibble covered exclusive-ored together
     NibbleXor,
+    /// A per-byte LFSR digest, the key seeded from `gen` at every byte and
+    /// only shifted, no feedback across the frame: Globaltronics' rolling
+    /// byte, which is neither a CRC nor a sum
+    Roll8,
 }
 
 impl CheckKind {
@@ -308,6 +312,7 @@ impl CheckKind {
             Self::Complement => over[1] - over[0],
             Self::NibbleSum => 8,
             Self::NibbleXor => 4,
+            Self::Roll8 => 8,
             Self::EvenParity => return None,
         })
     }

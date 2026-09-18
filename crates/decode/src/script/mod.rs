@@ -73,6 +73,7 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/weather/oregon_thgr810.yaml"),
     include_str!("../../protocols/weather/oregon_thn802.yaml"),
     include_str!("../../protocols/weather/oregon_wgr800.yaml"),
+    include_str!("../../protocols/weather/gt_wt03.yaml"),
     include_str!("../../protocols/security/kerui.yaml"),
     include_str!("../../protocols/weather/thermopro_tp12.yaml"),
     include_str!("../../protocols/weather/springfield_soil.yaml"),
@@ -1063,6 +1064,19 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
         }
         CheckKind::NibbleXor => {
             (c.over[0]..c.over[1]).step_by(4).fold(0u64, |x, b| x ^ extract(frame, b, 4))
+        }
+        CheckKind::Roll8 => {
+            let mut sum = 0u8;
+            for &byte in &d {
+                let mut key = c.generator as u16;
+                for i in (0..8).rev() {
+                    if byte >> i & 1 != 0 {
+                        sum ^= key as u8;
+                    }
+                    key >>= 1;
+                }
+            }
+            sum as u64
         }
         CheckKind::EvenParity => return None,
     };
