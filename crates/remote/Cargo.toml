@@ -8,5 +8,5 @@ license.workspace = true
 common.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
-iqstream = { git = "https://github.com/v0l/iqstream", default-features = false }
+iqstream.workspace = true
 tokio = { version = "1", features = ["rt", "net", "time"] }

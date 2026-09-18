@@ -964,6 +964,41 @@ impl std::str::FromStr for Listen {
     }
 }
 
+/// Where the span is served over iqstream, and whether the dial goes with it.
+///
+/// `1234`, `0.0.0.0:1234`, `1234,tune`, or `off`. A bare port binds every
+/// interface rather than loopback, because a stream nothing outside this
+/// machine can reach is not worth serving; MCP defaults the other way because
+/// it is an agent driving this receiver rather than a decoder reading it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Serve(pub Option<crate::chain::IqStreamPlan>);
+
+impl std::str::FromStr for Serve {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (addr, rest) = match s.split_once(',') {
+            Some((a, r)) => (a.trim(), r.trim()),
+            None => (s.trim(), ""),
+        };
+        if matches!(addr.to_ascii_lowercase().as_str(), "off" | "no" | "none") {
+            return Ok(Self(None));
+        }
+        let tunable = match rest.to_ascii_lowercase().as_str() {
+            "" => false,
+            "tune" | "tunable" => true,
+            other => return Err(format!("{other:?} is not `tune`")),
+        };
+        let addr = match addr.parse::<u16>() {
+            Ok(port) => std::net::SocketAddr::from(([0, 0, 0, 0], port)),
+            Err(_) => addr
+                .parse()
+                .map_err(|_| format!("{addr:?} is not a port, a host:port, or off"))?,
+        };
+        Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable })))
+    }
+}
+
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
     let (a, o) = s.split_once(',').ok_or("expected LAT,LON")?;
     let lat: f64 = a.trim().parse().map_err(|_| "latitude is not a number")?;
@@ -1075,6 +1110,13 @@ struct Args {
     #[cfg(feature = "mcp")]
     #[arg(long, value_name = "ADDR", default_value = "8931")]
     mcp_listen: Listen,
+
+    /// Serve the span over iqstream, so another machine can read the same
+    /// samples: a port, or host:port. Every interface unless a host is given.
+    /// Add `,tune` to let a subscriber move this receiver's dial, which moves
+    /// it on this screen too
+    #[arg(long, value_name = "ADDR", default_value = "off")]
+    iqstream_listen: Serve,
 
     /// Open on the picture, for analogue video
     #[arg(long)]
@@ -1515,6 +1557,12 @@ fn main() -> eframe::Result<()> {
                 p.spaces =
                     args.ha_spaces.clone().unwrap_or_else(|| session::DEFAULT_HA_SPACES.into());
                 app.publish_to(p);
+            }
+            // Off unless asked for, unlike the agent server: this one hands
+            // the samples themselves to anything that can reach the port, and
+            // with `,tune` it hands over the dial as well.
+            if let Some(serving) = args.iqstream_listen.0.clone() {
+                app.serve_iqstream(serving);
             }
             // On unless asked otherwise, on the loopback: an agent that has
             // to be enabled by a flag nobody remembers is an agent nobody

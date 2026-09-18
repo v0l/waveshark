@@ -651,6 +651,10 @@ pub enum Cmd {
     /// rebuilt from a plan, so a change is the new list rather than an
     /// instruction to add or remove one.
     Feeds(Vec<nodes::FeedSpec>),
+    /// Where the span is served to network subscribers, or `None` to stop
+    /// serving it. The listening socket outlives the graph, so turning it off
+    /// only takes the stage out; the port is given up when the process ends.
+    IqStream(Option<crate::chain::IqStreamPlan>),
     /// The scanner table, as the complete set for the same reason feeds are:
     /// the graph is rebuilt from a plan, so a change is the new table rather
     /// than an instruction to edit one row of it.
@@ -1253,6 +1257,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         channels: Vec::new(),
         fronts,
         feeds: Vec::new(),
+        iqstream: None,
         tx: None,
         tx_capture: None,
         scan: Default::default(),
@@ -2245,6 +2250,7 @@ impl Audio {
             transcribe_model: String::new(),
             transcribe_device: String::new(),
             feeds: Vec::new(),
+            iqstream: None,
             tx: None,
             tx_capture: None,
             scan: Default::default(),
@@ -2532,6 +2538,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // Feeds arrive from the session or the settings modal, as a
             // command.
             feeds: Vec::new(),
+            iqstream: None,
             tx: None,
             tx_capture: None,
             scan: Default::default(),
@@ -2880,6 +2887,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             Cmd::Feeds(feeds) => {
                 if feeds != self.plan.feeds {
                     self.plan.feeds = feeds;
+                    self.needs_rebuild = true;
+                }
+            }
+            Cmd::IqStream(serving) => {
+                if serving != self.plan.iqstream {
+                    self.plan.iqstream = serving;
                     self.needs_rebuild = true;
                 }
             }
@@ -3937,6 +3950,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
     Plan {
         center,
         rate,
+        iqstream: None,
         zoom: 1,
         dc_block: false,
         refresh_hz: 30.0,

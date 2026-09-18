@@ -1065,6 +1065,11 @@ impl App {
         });
     }
 
+    /// Serve the span to network subscribers, from the command line.
+    pub fn serve_iqstream(&mut self, serving: crate::chain::IqStreamPlan) {
+        self.send(crate::radio::Cmd::IqStream(Some(serving)));
+    }
+
     /// Start the radio without waiting for the play button, which is what a
     /// capture being replayed usually wants and what a screenshot needs.
     /// Open with a settings dialog up, for a screenshot of it.
