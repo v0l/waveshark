@@ -32,7 +32,7 @@ fn load(f: &Fixture) -> common::IqBuf {
 /// Distinct reports from a run of packages, the way the corpus harness
 /// deduplicates them.
 fn reports(pkgs: &[Package]) -> Vec<Report> {
-    let protocols = Protocols::all();
+    let protocols = Protocols::published();
     let mut out: Vec<Report> = Vec::new();
     for p in pkgs {
         for r in protocols.decode_all(p) {

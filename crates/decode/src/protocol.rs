@@ -168,6 +168,14 @@ impl Protocols {
         Self::default()
     }
 
+    /// Every protocol with the published descriptions installed: what a
+    /// test reads a recording with, since nothing is built in and a plain
+    /// `all` sees only what has been installed already
+    pub fn published() -> Self {
+        assert!(crate::script::install_fetched(), "run testdata/fetch.sh");
+        Self::all()
+    }
+
     /// All protocols enabled by the active cargo features.
     pub fn all() -> Self {
         use crate::protocols::*;

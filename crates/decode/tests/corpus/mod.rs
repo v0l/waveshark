@@ -27,6 +27,9 @@ pub fn dir() -> PathBuf {
 /// Missing fixtures are not an error: they are fetched by `testdata/fetch.sh`
 /// and a fresh clone has none, so the tests skip instead of failing.
 pub fn fixtures() -> Vec<Fixture> {
+    // The descriptions are published apart from the build, so a corpus run
+    // reads the same files a receiver fetches
+    assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
     let Ok(entries) = std::fs::read_dir(dir()) else {
         return Vec::new();
     };
@@ -102,7 +105,7 @@ impl Fixture {
     /// Run the capture through both front ends and every protocol, exactly as
     /// the scanner does: nothing here is told which protocol to expect.
     pub fn decode(&self) -> Vec<Report> {
-        let protocols = Protocols::all();
+        let protocols = Protocols::published();
         let mut reports: Vec<Report> = Vec::new();
         for pkg in packages(&self.path) {
             for r in protocols.decode_all(&pkg) {

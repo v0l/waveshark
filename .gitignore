@@ -13,6 +13,10 @@ testdata/*.xz
 # points at the upstream copy rather than vendoring one.
 testdata/rtl433/
 
+# The protocol descriptions, cloned from v0l/waveshark-protocols by
+# testdata/fetch.sh: published apart from the build, so no copy lives here.
+testdata/protocols/
+
 # Off-air captures and generated datasets: fetched or regenerated, never
 # committed. See testdata/offair.toml and crates/amc-data.
 testdata/offair/

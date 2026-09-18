@@ -116,6 +116,10 @@ mod tests {
     /// shape a real remote sent, and the corpus recording is that shape.
     #[test]
     fn the_flipper_corpus_princeton_key_round_trips() {
+        let _g = crate::script::test_lock();
+        if !crate::script::install_fetched() {
+            return;
+        }
         let p = crate::script::named("Princeton").unwrap();
         let mut bits = BitBuffer::with_capacity(24);
         for i in 0..24 {

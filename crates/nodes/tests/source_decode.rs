@@ -136,7 +136,7 @@ fn every_transmitter_decodes_through_its_own_stream() {
     }
     assert!(!packages.is_empty(), "no bursts reached the pulse port");
 
-    let protocols = decode::Protocols::all();
+    let protocols = decode::Protocols::published();
     let mut decoded: Vec<(f64, String)> = Vec::new();
     for p in &packages {
         eprintln!(

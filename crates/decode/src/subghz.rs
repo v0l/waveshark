@@ -529,6 +529,10 @@ TE: 400
 
     #[test]
     fn a_key_file_becomes_pulses_its_own_decoder_reads() {
+        let _g = crate::script::test_lock();
+        if !crate::script::install_fetched() {
+            return;
+        }
         let s = parse(PRINCETON_KEY).expect("the Flipper corpus princeton key");
         assert_eq!(s.protocol, "Princeton");
         let pkg = &s.bursts[0];
@@ -542,6 +546,10 @@ TE: 400
 
     #[test]
     fn a_raw_file_decodes_back_through_the_receiver() {
+        let _g = crate::script::test_lock();
+        if !crate::script::install_fetched() {
+            return;
+        }
         // Sixteen mark/gap pairs, which is two thirds of a Princeton frame:
         // the timings are that protocol's but the frame is short, so the
         // decoder refuses it rather than reading a code out of a fragment.
@@ -558,6 +566,10 @@ TE: 400
     /// that report the complement of what they sliced.
     #[test]
     fn every_key_protocol_written_is_read_back_as_the_same_code() {
+        let _g = crate::script::test_lock();
+        if !crate::script::install_fetched() {
+            return;
+        }
         use crate::protocol::Value;
         let holtek = 0x50_d2_aa_aa_a1_u64;
         let cases: [(&str, &str, u64); 10] = [

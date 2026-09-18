@@ -1950,10 +1950,7 @@ impl App {
                                 None => lamp(
                                     ui,
                                     true,
-                                    &format!(
-                                        "{} descriptions over the built-in set",
-                                        got.names.len()
-                                    ),
+                                    &format!("{} descriptions installed", got.names.len()),
                                 ),
                                 Some((path, why)) => lamp(ui, false, &format!("{path}: {why}")),
                             }

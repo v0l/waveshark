@@ -106,7 +106,7 @@ fn how_far_into_the_noise_each_capture_survives() {
         eprintln!("skipping: no rtl_433 fixtures, run testdata/fetch.sh to enable");
         return;
     }
-    let protocols = Protocols::all();
+    let protocols = Protocols::published();
     // Three noise realisations per level, and every level tried rather than
     // stopping at the first failure. One draw decides a whole row otherwise,
     // and the row then moves by six decibels between runs of the same code,
@@ -242,7 +242,7 @@ fn unverified_claims_in_the_corpus() {
 #[test]
 #[ignore]
 fn false_decodes_on_pure_noise() {
-    let protocols = Protocols::all();
+    let protocols = Protocols::published();
     let rate = 250_000.0;
     let seconds = 60;
     let dir = std::env::temp_dir().join(format!("sr-fp-{}", std::process::id()));
@@ -321,7 +321,7 @@ fn where_a_weak_capture_fails() {
     };
     let src = sources::FileSource::open(&f.path).expect("open");
     let buf = src.read_all().expect("read");
-    let protocols = Protocols::all();
+    let protocols = Protocols::published();
     let rate = buf.rate.as_f64();
     let offset = corpus::carrier_offset(&buf.samples, rate);
     println!("\n{} (carrier {:+.0} Hz off centre)", f.name, offset);

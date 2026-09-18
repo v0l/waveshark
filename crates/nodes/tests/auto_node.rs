@@ -78,7 +78,7 @@ struct Ran {
 }
 
 fn decodes(pk: &[common::Packet], model: &str) -> Vec<(u64, String)> {
-    let protocols = decode::Protocols::all();
+    let protocols = decode::Protocols::published();
     let mut out = Vec::new();
     for p in pk {
         let Some(pkg) = p.package() else { continue };
