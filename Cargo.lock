@@ -1781,6 +1781,7 @@ dependencies = [
  "num-complex",
  "rayon",
  "rustfft",
+ "sources",
  "wide",
 ]
 

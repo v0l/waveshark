@@ -72,8 +72,12 @@ pub const FFSK1200: Tones = Tones { mark_hz: 1200.0, space_hz: 1800.0, baud: BAU
 /// A range rather than a frequency because the scanner decides where APRS
 /// listens, and 144.800, 144.390 and 144.640 are all in use.
 pub fn is_packet_band(center_hz: f64) -> bool {
-    (144_000_000.0..146_000_000.0).contains(&center_hz)
+    (PACKET_BAND.0..PACKET_BAND.1).contains(&center_hz)
 }
+
+/// The range [`is_packet_band`] accepts. Auto mode places the packet decoder
+/// on this and nowhere else, so what it will run is what it will publish.
+pub const PACKET_BAND: (f64, f64) = (144_000_000.0, 146_000_000.0);
 
 /// An AX.25 frame is at least an address pair, a control byte and a PID, and
 /// at most that plus 256 bytes of information. In bits, with the check

@@ -26,6 +26,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::rtty::{self, Shift, Speed};
 use dsp::afsk::Symbol;
 use dsp::fsk::TonePair;
@@ -377,7 +378,7 @@ impl Protocol for Rtty {
     /// Amateur HF, the utility and weather circuits, and a few VHF links:
     /// a teleprinter is wherever somebody put one.
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Amateur, Usage::Utility])
     }
     fn default_hz(&self) -> f64 {
         DEFAULT_HZ

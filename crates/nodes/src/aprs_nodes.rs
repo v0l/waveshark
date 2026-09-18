@@ -14,6 +14,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::{aprs, ax25};
 use dsp::afsk::{AfskConfig, AfskDemod};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -264,7 +265,7 @@ impl Protocol for Aprs {
         "aprs"
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Amateur])
     }
     /// The 2 m packet segment, which is inside the VHF paging allocation:
     /// two protocols really do share that spectrum, and the narrower window

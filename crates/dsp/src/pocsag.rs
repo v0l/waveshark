@@ -84,10 +84,13 @@ pub const DEVIATION_HZ: f64 = 4_500.0;
 /// weakness of the test but of the band plan: 144 to 146 MHz really is inside
 /// 137 to 174, and only the scanner knows which of the two it tuned for.
 pub fn is_pager_band(center_hz: f64) -> bool {
-    (137e6..174e6).contains(&center_hz)
-        || (405e6..470e6).contains(&center_hz)
-        || (929e6..932e6).contains(&center_hz)
+    PAGER_BANDS.iter().any(|(lo, hi)| (*lo..*hi).contains(&center_hz))
 }
+
+/// The allocations [`is_pager_band`] accepts, for a caller that needs the
+/// ranges themselves: auto mode places a pager decoder on these and nowhere
+/// else, and a row is refused outside them, so the two read one list.
+pub const PAGER_BANDS: &[(f64, f64)] = &[(137e6, 174e6), (405e6, 470e6), (929e6, 932e6)];
 
 /// Even parity of a whole word: 1 when the number of set bits is odd.
 fn odd_ones(v: u32) -> bool {

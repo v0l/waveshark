@@ -4239,7 +4239,7 @@ fn audio_channel_stages(
         d.insert("label".into(), V::Text("AM envelope".into()));
         "envelope"
     } else if mode.is_ssb() {
-        d.insert("sideband".into(), V::Text(mode.sideband().to_string()));
+        d.insert("sideband".into(), V::Text(crate::radio::sideband(mode).to_string()));
         if mode == Demod::Cw {
             d.insert("pitch_hz".into(), V::Float(mode.cw_pitch()));
             // On CW the width control is the filter itself, which is the

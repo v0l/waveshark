@@ -15,6 +15,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use codec2::{Codec2, Codec2Mode};
 use common::Result;
+use common::bands::Usage;
 use decode::m17::{self, Assembler, DataType, Event};
 use dsp::m17::{
     BAUD, Body, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ, Frame, M17Config, M17Demod,
@@ -486,7 +487,7 @@ impl Protocol for M17 {
         "m17"
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Amateur, Usage::Utility, Usage::Ism])
     }
     /// Its frequency cannot identify it: it runs wherever an amateur puts it,
     /// which includes the 2 m channels APRS uses and the 70 cm ones near the

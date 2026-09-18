@@ -13,6 +13,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::flex::Fiw;
 use dsp::flex::{CHANNEL_WIDTH_HZ, DEVIATION_HZ, FlexConfig, FlexDemod, Frame};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -198,7 +199,7 @@ impl Protocol for Flex {
         "FLEX pager"
     }
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Utility, Usage::Ism])
     }
     /// The same paging allocations POCSAG watches, claimed one hertz
     /// narrower so that a frame is offered here first: a FLEX frame carries
