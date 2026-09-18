@@ -100,6 +100,45 @@ pub struct AutoNode {
     phases: BTreeMap<String, pipeline::cost::Ring>,
     /// Scratch for the per-kind sums of one block.
     phase_sum: BTreeMap<&'static str, u64>,
+    /// The block the front ends have not read yet.
+    ///
+    /// Detection and extraction of one block are independent of the front
+    /// ends reading the one before, so the two run side by side: block N is
+    /// found and cut out while the front ends read block N-1. That is where
+    /// a many-core machine gets its second core, because inside a block the
+    /// three phases are sequential and the front-end phase is one or two
+    /// jobs. Measured on the busy 2.4 GHz capture at 61.44 MS/s the phases
+    /// were 1.1, 1.1 and 2.9 ms of a 2.13 ms block, in series.
+    ///
+    /// The price is one block of latency on everything the front ends say.
+    pending: Option<Pending>,
+}
+
+/// The longest block the front ends may read one call behind. Ten
+/// milliseconds: a HackRF's 131072 samples at 20 MS/s is 6.5, and a
+/// LimeSDR's at 61.44 is 2.1, where a 31.25 kS/s sonde channel's is 524.
+const PIPELINE_MAX_BLOCK_S: f64 = 0.010;
+
+/// One block, found and cut out, waiting for the front ends.
+struct Pending {
+    iq: Vec<common::C32>,
+    blocks: Vec<SourceBlock>,
+    at_us: u64,
+    /// What the detector had open once this block was found, for the gated
+    /// span-wide front ends, and how far behind the samples it was.
+    settling: bool,
+    detected: Vec<(f64, f64)>,
+    lead: usize,
+    /// Whether one front end held the whole span at that point.
+    watching: bool,
+}
+
+/// What the front ends said about a block.
+struct FrontsOut {
+    wide: Vec<WideResult>,
+    slots: Vec<SlotResult>,
+    fronts_us: u64,
+    ring_us: u64,
 }
 impl AutoNode {
     pub fn new(label: impl Into<String>, cfg: SourceConfig) -> Self {
@@ -123,6 +162,7 @@ impl AutoNode {
             announced: HashMap::new(),
             phases: BTreeMap::new(),
             phase_sum: BTreeMap::new(),
+            pending: None,
         }
     }
 
@@ -130,7 +170,7 @@ impl AutoNode {
     /// their own width, never closed. The extractor takes them from the
     /// current position, so a channel kept before a rebuild starts again
     /// where the new span begins.
-    fn open_kept_channels(&mut self) {
+    fn open_kept_channels(&mut self, busy: &[(u64, f64)]) {
         let c0 = self.center.as_f64();
         let half = self.input_bw / 2.0;
         for id in self.memory.take_pending() {
@@ -145,9 +185,8 @@ impl AutoNode {
             // decoders on one channel are every burst twice in the log, and
             // the new one would start mid-transmission without the header
             // the old one read. It takes over once that source closes.
-            let busy = self.slots.iter().any(|sl| {
-                sl.id.0 < STICKY_ID_BASE && (sl.center_hz.as_f64() - hz).abs() <= width / 2.0
-            });
+            let busy =
+                busy.iter().any(|(id, at)| *id < STICKY_ID_BASE && (at - hz).abs() <= width / 2.0);
             if busy {
                 self.memory.wait_for(id);
                 continue;
@@ -299,6 +338,145 @@ struct WideResult {
     spent_us: u64,
 }
 
+impl AutoNode {
+    /// Find what is transmitting in a block and cut it out: the detector and
+    /// the extractor, with what they cost. `busy` is where a slot is
+    /// already reading, which is what keeps a remembered channel from being
+    /// opened twice.
+    fn find_and_cut(
+        &mut self,
+        iq: &[common::C32],
+        c0: f64,
+        rate: f64,
+        watching: bool,
+        busy: &[(u64, f64)],
+    ) -> (u64, u64) {
+        // While a camera is locked, the span is that camera and there is
+        // nothing to detect in it. Every run inside a 20 MHz FM carrier is a
+        // piece of the picture, and opening each one costs an extraction and
+        // a set of front ends that report sensors nobody transmitted.
+        // Measured on the AKK capture: detection, extraction and the front
+        // ends together ran at nearly four times real time on them, which is
+        // a receiver that cannot keep up rather than one that reads more. The
+        // picture going away puts all of it back.
+        // What a front end already owns, and the tuner's own centre, the
+        // detector refuses for itself; see [`AutoNode::apply_locked`] and
+        // [`dsp::SourceDetector::set_spur`].
+        let t_detect = Instant::now();
+        self.events.clear();
+        let mut found = std::mem::take(&mut self.events);
+        self.watch.admit(iq, c0, watching, &mut found);
+        self.events = found;
+        let detect_us = t_detect.elapsed().as_micros() as u64;
+        self.open_kept_channels(busy);
+        self.memory.set_now(self.watch.position() as f64 / rate);
+        self.blocks.clear();
+        let t_extract = Instant::now();
+        let mut blocks = std::mem::take(&mut self.blocks);
+        self.watch.cut(iq, &self.events, &mut blocks);
+        self.blocks = blocks;
+        (detect_us, t_extract.elapsed().as_micros() as u64)
+    }
+}
+
+/// Every member of every source is a task of its own, not one task per
+/// source: the members share nothing but the block they read, and
+/// per-source tasks left an m17 member decoding voice alone on one lane
+/// while the others sat finished. The span-wide decoders join the same
+/// fanout, since a Mode S correlator over the whole span costs more than
+/// any narrowband member.
+fn run_fronts(
+    wide: &mut [Member],
+    slots: &mut [Slot],
+    wide_ring: &mut Ring,
+    p: &Pending,
+    span: (f64, f64),
+    rate: f64,
+) -> FrontsOut {
+    let iq = &p.iq[..];
+    let (at_us, watching, settling, lead) = (p.at_us, p.watching, p.settling, p.lead);
+    let detected = &p.detected[..];
+    let blocks = &p.blocks[..];
+    // A front end that has claimed the whole span is the only thing on it,
+    // and that goes for the other span-wide decoders as much as for the
+    // detector: an OFDM correlator over 20 MS/s of FM camera carrier is
+    // eighteen times real time spent proving there is no Wi-Fi in a
+    // picture. Whichever member holds the claim keeps running, so the claim
+    // can be given back.
+    let claimant = |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
+    // The span, kept once for every front end over it rather than once
+    // each: they are all handed the same block. A gated front end needs it
+    // whether or not it produces packets, since the lead-in it wakes on
+    // comes out of it.
+    wide_ring.keeps = wide
+        .iter()
+        .any(|m| m.keeps_samples || m.protocol.is_some_and(|p| p.wakes_on() != Wake::Always));
+    let t_ring = Instant::now();
+    wide_ring.push(iq);
+    let ring_us = t_ring.elapsed().as_micros() as u64;
+    let wide_ring = &*wide_ring;
+    let t_fronts = Instant::now();
+    let (wide_results, results): (Vec<WideResult>, Vec<SlotResult>) = rayon::join(
+        || {
+            wide.par_iter_mut()
+                .map(|m| {
+                    // Not this block: nothing the detector can see is on
+                    // the air, something else owns the span, or this front
+                    // end is sampling the air rather than reading all of it.
+                    let awake =
+                        m.awake(settling, detected, iq.len(), rate) && (!watching || claimant(m));
+                    if !awake {
+                        m.sleep(iq.len());
+                        return WideResult {
+                            name: m.name,
+                            events: Vec::new(),
+                            packets: Vec::new(),
+                            spent_us: 0,
+                        };
+                    }
+                    m.wake(wide_ring, lead, iq.len());
+                    if !m.wants(iq.len(), rate) {
+                        m.skip(iq.len());
+                        return WideResult {
+                            name: m.name,
+                            events: Vec::new(),
+                            packets: Vec::new(),
+                            spent_us: 0,
+                        };
+                    }
+                    let mut packets = Vec::new();
+                    let t = Instant::now();
+                    let events = m.run(iq, at_us, &mut packets, wide_ring);
+                    if !packets.is_empty() {
+                        m.read_something();
+                    }
+                    WideResult {
+                        name: m.name,
+                        events,
+                        packets,
+                        spent_us: t.elapsed().as_micros() as u64,
+                    }
+                })
+                .collect()
+        },
+        || {
+            slots
+                .par_iter_mut()
+                .enumerate()
+                .filter_map(|(k, slot)| {
+                    slot.run_block(k, blocks.iter().find(|b| b.id == slot.id), at_us)
+                })
+                .collect()
+        },
+    );
+    FrontsOut {
+        wide: wide_results,
+        slots: results,
+        fronts_us: t_fronts.elapsed().as_micros() as u64,
+        ring_us,
+    }
+}
+
 fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -426,40 +604,32 @@ impl Node for AutoNode {
         }
         let at_us = now_us();
         let rate = c.inputs[0].spec.rate.max(1.0);
-        let out = outputs[OUT_PACKETS].packets_mut();
-
-        // The sources: find, cut out, and read. The span-wide decoders run
-        // beside them, in the same fanout, once the blocks are known.
-        let mut events: Vec<Event> = Vec::new();
-        self.events.clear();
         let c0 = self.center.as_f64();
         let block_s = c.block_seconds;
-        // While a camera is locked, the span is that camera and there is
-        // nothing to detect in it. Every run inside a 20 MHz FM carrier is a
-        // piece of the picture, and opening each one costs an extraction and
-        // a set of front ends that report sensors nobody transmitted.
-        // Measured on the AKK capture: detection, extraction and the front
-        // ends together ran at nearly four times real time on them, which is
-        // a receiver that cannot keep up rather than one that reads more. The
-        // picture going away puts all of it back.
+        let span = (c0 - self.input_bw / 2.0, c0 + self.input_bw / 2.0);
+
+        // The front ends read the block before this one while this one is
+        // found and cut out; see `pending`. Nothing the two touch is shared:
+        // the front ends are the slots, the span-wide members and the ring
+        // behind them, and detection is the watch and what it remembers.
+        let previous = self.pending.take();
         let watching = self.claimed_whole_span();
-        // What a front end already owns, and the tuner's own centre, the
-        // detector refuses for itself; see [`AutoNode::apply_locked`] and
-        // [`dsp::SourceDetector::set_spur`].
-        let t_detect = Instant::now();
-        let mut found = std::mem::take(&mut self.events);
-        self.watch.admit(iq, c0, watching, &mut found);
-        self.events = found;
-        let detect_us = t_detect.elapsed().as_micros() as u64;
-        self.open_kept_channels();
-        self.memory.set_now(self.watch.position() as f64 / rate);
-        self.blocks.clear();
-        let t_extract = Instant::now();
-        let mut blocks = std::mem::take(&mut self.blocks);
-        self.watch.cut(iq, &self.events, &mut blocks);
-        self.blocks = blocks;
-        let extract_us = t_extract.elapsed().as_micros() as u64;
+        let mut wide = std::mem::take(&mut self.wide);
+        let mut slots = std::mem::take(&mut self.slots);
+        let mut wide_ring =
+            std::mem::replace(&mut self.wide_ring, Ring::new(StreamSpec::iq(0.0, Hz(0))));
+        let busy: Vec<(u64, f64)> =
+            slots.iter().map(|sl| (sl.id.0, sl.center_hz.as_f64())).collect();
+        let (fronts, (detect_us, extract_us)) = rayon::join(
+            || previous.map(|p| run_fronts(&mut wide, &mut slots, &mut wide_ring, &p, span, rate)),
+            || self.find_and_cut(iq, c0, rate, watching, &busy),
+        );
+        self.wide = wide;
+        self.slots = slots;
+        self.wide_ring = wide_ring;
         let (bank_feed_us, bank_start_us) = self.watch.bank_cost();
+
+        let mut events: Vec<Event> = Vec::new();
         for ev in &self.events {
             if let SourceEvent::Opened(s) = ev {
                 events.push(Event::Detection {
@@ -483,99 +653,76 @@ impl Node for AutoNode {
                 self.built += 1;
             }
         }
-        self.blocks = blocks;
+        // What the detector has open now is what the gated span-wide front
+        // ends will run on when they get to this block.
+        let (settling, detected) = self.watch.detected_bands(c0);
+        let this = Pending {
+            iq: iq.to_vec(),
+            blocks,
+            at_us,
+            settling,
+            detected,
+            lead: self.watch.latency_samples(),
+            watching,
+        };
+        // A block one call behind is a block of air behind: 2 ms at
+        // 61.44 MS/s and half a second at 31.25 kS/s, and on the narrow span
+        // the latch that keeps a radiosonde's channel then fires a
+        // transmission late and loses the frame. So the front ends run
+        // behind only where a block is short enough that nothing on the air
+        // can tell, and read the block they were handed where it is not.
+        let fronts = if block_s > PIPELINE_MAX_BLOCK_S {
+            // A short block followed by a long one, which a rate change
+            // through a rebuild can do: what the short one found is read now
+            // too, and its packets ride along.
+            let mut fronts = fronts;
+            if let Some(mut earlier) = fronts.take() {
+                let mut now = run_fronts(
+                    &mut self.wide,
+                    &mut self.slots,
+                    &mut self.wide_ring,
+                    &this,
+                    span,
+                    rate,
+                );
+                earlier.wide.append(&mut now.wide);
+                earlier.slots.append(&mut now.slots);
+                earlier.fronts_us += now.fronts_us;
+                earlier.ring_us += now.ring_us;
+                fronts = Some(earlier);
+            }
+            fronts.or_else(|| {
+                Some(run_fronts(
+                    &mut self.wide,
+                    &mut self.slots,
+                    &mut self.wide_ring,
+                    &this,
+                    span,
+                    rate,
+                ))
+            })
+        } else {
+            self.pending = Some(this);
+            fronts
+        };
 
-        // Every member of every source is a task of its own, not one task
-        // per source: the members share nothing but the block they read, and
-        // per-source tasks left an m17 member decoding voice alone on one
-        // lane while the others sat finished. The span-wide decoders join
-        // the same fanout, since a Mode S correlator over the whole span
-        // costs more than any narrowband member.
-        let blocks = &self.blocks;
-        // A front end that has claimed the whole span is the only thing on
-        // it, and that goes for the other span-wide decoders as much as for
-        // the detector: an OFDM correlator over 20 MS/s of FM camera carrier
-        // is eighteen times real time spent proving there is no Wi-Fi in a
-        // picture. Whichever member holds the claim keeps running, so the
-        // claim can be given back.
-        let span = (c0 - self.input_bw / 2.0, c0 + self.input_bw / 2.0);
-        let claimant = |m: &Member| m.band.is_some_and(|(a, b)| a <= span.0 && span.1 <= b);
-        // The span, kept once for every front end over it rather than once
-        // each: they are all handed the same block. A gated front end needs
-        // it whether or not it produces packets, since the lead-in it wakes
-        // on comes out of it.
-        self.wide_ring.keeps = self
-            .wide
-            .iter()
-            .any(|m| m.keeps_samples || m.protocol.is_some_and(|p| p.wakes_on() != Wake::Always));
-        let t_ring = Instant::now();
-        self.wide_ring.push(iq);
-        let ring_us = t_ring.elapsed().as_micros() as u64;
-        // What the detector has open, which is what a gated span-wide front
-        // end runs on, and how much of the lead-in it missed getting there.
-        let detecting = self.watch.detecting();
-        let lead = self.watch.latency_samples();
-        let wide_ring = &self.wide_ring;
-        let wide = &mut self.wide;
-        let slots = &mut self.slots;
-        let t_fronts = Instant::now();
-        let (wide_results, results): (Vec<WideResult>, Vec<SlotResult>) = rayon::join(
-            || {
-                wide.par_iter_mut()
-                    .map(|m| {
-                        // Not this block: nothing the detector can see is on
-                        // the air, something else owns the span, or this
-                        // front end is sampling the air rather than reading
-                        // all of it.
-                        let awake =
-                            m.awake(detecting, iq.len(), rate) && (!watching || claimant(m));
-                        if !awake {
-                            m.sleep(iq.len());
-                            return WideResult {
-                                name: m.name,
-                                events: Vec::new(),
-                                packets: Vec::new(),
-                                spent_us: 0,
-                            };
-                        }
-                        m.wake(wide_ring, lead, iq.len());
-                        if !m.wants(iq.len(), rate) {
-                            m.skip(iq.len());
-                            return WideResult {
-                                name: m.name,
-                                events: Vec::new(),
-                                packets: Vec::new(),
-                                spent_us: 0,
-                            };
-                        }
-                        let mut packets = Vec::new();
-                        let t = Instant::now();
-                        let events = m.run(iq, at_us, &mut packets, wide_ring);
-                        if !packets.is_empty() {
-                            m.read_something();
-                        }
-                        WideResult {
-                            name: m.name,
-                            events,
-                            packets,
-                            spent_us: t.elapsed().as_micros() as u64,
-                        }
-                    })
-                    .collect()
-            },
-            || {
-                slots
-                    .par_iter_mut()
-                    .enumerate()
-                    .filter_map(|(k, slot)| {
-                        slot.run_block(k, blocks.iter().find(|b| b.id == slot.id), at_us)
-                    })
-                    .collect()
-            },
-        );
-        let fronts_us = t_fronts.elapsed().as_micros() as u64;
+        self.phase("detect", detect_us, block_s);
+        self.phase("extract", extract_us, block_s);
+        self.phase("extract bank", bank_feed_us, block_s);
+        self.phase("extract catch-up", bank_start_us, block_s);
+        let Some(FrontsOut { wide: wide_results, slots: results, fronts_us, ring_us }) = fronts
+        else {
+            self.phase("tail", t_block.elapsed().as_micros() as u64, block_s);
+            for e in events {
+                if !matches!(e, Event::Warning { .. }) {
+                    c.emit(e);
+                }
+            }
+            return Ok(());
+        };
+        let out = outputs[OUT_PACKETS].packets_mut();
         let tail_us = (t_block.elapsed().as_micros() as u64)
-            .saturating_sub(detect_us + extract_us + fronts_us + ring_us);
+            .saturating_sub(detect_us.max(fronts_us) + ring_us);
         self.phase_sum.clear();
         // What was asked, by the source it was asked on and the front end
         // that asked. Answered once the slots have settled.
@@ -597,10 +744,6 @@ impl Node for AutoNode {
                 *self.phase_sum.entry(name).or_default() += us;
             }
         }
-        self.phase("detect", detect_us, block_s);
-        self.phase("extract", extract_us, block_s);
-        self.phase("extract bank", bank_feed_us, block_s);
-        self.phase("extract catch-up", bank_start_us, block_s);
         self.phase("fronts", fronts_us, block_s);
         // Keeping the span for the front ends over it, and everything else
         // this node does with a block. Measured because a spike outside every
@@ -929,6 +1072,9 @@ mod tests {
         // Something on the air, since both of these are gated on the
         // detector having found something; see [`protocol::Wake`].
         let busy = keyed_for(rate, 4e6, 2_000_000);
+        // The front ends read a block one call behind its detection, so
+        // what a call's sums say is what the front ends made of the block
+        // before, under whatever the receiver had decided by then.
         let run = |n: &mut AutoNode, block: &[C32]| -> Vec<(String, u64)> {
             let ins = [spec(rate, center)];
             let input = Payload::Iq(block.to_vec());
@@ -963,12 +1109,15 @@ mod tests {
             Request::Claim { lo_hz: center.as_f64() - rate, hi_hz: center.as_f64() + rate },
             &mut out,
         );
+        // One call finds the block under the claim; the next reads it.
+        run(&mut n, block);
         let after = run(&mut n, block);
         assert_eq!(spent(&after, "wifi"), 0, "{after:?}");
         assert!(spent(&after, "video") > 0, "the claimant still reads {after:?}");
 
         // And giving it back puts everything else back on the span.
         n.answer(AskAt::Span, "video", Request::Release, &mut out);
+        run(&mut n, block);
         let back = run(&mut n, block);
         assert!(spent(&back, "wifi") > 0, "{back:?}");
     }

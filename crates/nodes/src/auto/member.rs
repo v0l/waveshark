@@ -371,11 +371,29 @@ impl Member {
     /// detector can see, because the detector is shut out of a claimed band
     /// and would never open a source there: a camera put to sleep the moment
     /// it locked would drop the picture it had just found.
-    pub(super) fn awake(&mut self, detected: bool, samples: usize, rate: f64) -> bool {
+    ///
+    /// `settling` is the detector not yet able to say, which counts as
+    /// something there; `detected` is what it has open. Only a source
+    /// overlapping this front end's own band wakes it: on a busy 2.4 GHz
+    /// band something is open somewhere in every block, so a front end
+    /// woken by any source at all never slept, and the Wi-Fi and DroneID
+    /// receivers ran on every block an ExpressLRS handset hopped through.
+    pub(super) fn awake(
+        &mut self,
+        settling: bool,
+        detected: &[(f64, f64)],
+        samples: usize,
+        rate: f64,
+    ) -> bool {
         let hold_s = match self.protocol.map(|p| p.wakes_on()) {
             None | Some(crate::protocol::Wake::Always) => return true,
             Some(crate::protocol::Wake::Detected { hold_s }) => hold_s,
         };
+        let overlaps = |(lo, hi): (f64, f64)| match self.placed_band {
+            Some((a, b)) => lo < b && a < hi,
+            None => true,
+        };
+        let detected = settling || detected.iter().copied().any(overlaps);
         if detected || self.band.is_some() {
             self.since_detected_s = 0.0;
             return true;

@@ -128,6 +128,8 @@ the code is in the commit log.
   switch are remembered between runs.
 - Auto mode places a decoder only where that service is, so 2.4 GHz no longer
   runs the pager and voice decoders.
+- A busy 2.4 GHz band at 61.44 MS/s runs at 0.8 times real time where it ran
+  at 0.4.
 - The band ribbon names the European land mobile allocations at 162, 410 and
   440 MHz, which read as unallocated.
 

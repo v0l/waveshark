@@ -55,8 +55,12 @@ impl Watch {
     /// that is the first tenth of a second of every stream, which is a tenth
     /// of a second of Wi-Fi a gated front end would otherwise be deaf for
     /// after every retune.
-    pub(super) fn detecting(&self) -> bool {
-        self.detector.as_ref().is_some_and(|d| d.settling() || d.live().next().is_some())
+    /// The bands, in absolute hertz, of everything the detector has open,
+    /// and whether it is still settling and so cannot yet say.
+    pub(super) fn detected_bands(&self, center_hz: f64) -> (bool, Vec<(f64, f64)>) {
+        let Some(d) = self.detector.as_ref() else { return (false, Vec::new()) };
+        let bands = d.live().map(|s| (center_hz + s.lo_hz, center_hz + s.hi_hz)).collect();
+        (d.settling(), bands)
     }
 
     /// How far behind the samples the detector's verdict is, which is the
