@@ -27,6 +27,7 @@ members = [
     "crates/stt-cuda",
     "crates/tts",
     "crates/hfmodel",
+    "crates/wave1090",
 ]
 
 # The MBE vocoder port is opt-in only: its algorithms carry patent
@@ -60,6 +61,7 @@ default-members = [
     "crates/stt",
     "crates/tts",
     "crates/hfmodel",
+    "crates/wave1090",
 ]
 
 [workspace.package]

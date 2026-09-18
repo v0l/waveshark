@@ -1,0 +1,283 @@
+//! A 1090 MHz receiver that speaks dump1090's network protocols.
+//!
+//! Same ports, same formats, so anything already fed by dump1090 (piaware,
+//! readsb, fr24feed, VRS, a Beast client) can be pointed here without
+//! changing. What is different is the demodulator: `dsp::ModeSDetector` frames
+//! on the preamble and then on the parity, sliced at quarter-sample offsets,
+//! which off the same samples reads more DF17 than dump1090 does.
+//!
+//! The samples can come from a dongle on this machine or, unlike dump1090,
+//! from an iqstream server somewhere else, which is how one aerial feeds
+//! several receivers.
+
+mod net;
+mod sbs;
+
+use anyhow::{Context, Result, bail};
+use clap::Parser;
+use common::device::{Device, GainMode};
+use common::{Hz, Sps};
+use decode::adsb::{self, AddressBook};
+use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
+
+/// The frequency this is about. Present as a flag because dump1090 has one,
+/// and because a downconverter puts the band somewhere else.
+const MODE_S_HZ: u64 = 1_090_000_000;
+
+/// Mode S counts time in twelfths of a microsecond, and every Beast client
+/// reads the timestamp that way.
+const BEAST_CLOCK_HZ: f64 = 12_000_000.0;
+
+#[derive(Parser)]
+#[command(name = "wave1090", version, about = "Mode S and ADS-B, speaking dump1090's protocols")]
+struct Args {
+    /// RTL-SDR to use, by index or serial
+    #[arg(long, value_name = "INDEX", default_value = "0")]
+    device_index: String,
+
+    /// Read samples from an iqstream server instead of a local dongle, as
+    /// host:port. One aerial can feed several receivers this way
+    #[arg(long, value_name = "HOST:PORT")]
+    iqstream: Option<String>,
+
+    /// Read a recorded capture instead of a radio, at the rate in its name
+    #[arg(long, value_name = "FILE")]
+    file: Option<std::path::PathBuf>,
+
+    /// Tuner gain in dB, or -10 for the dongle's own control
+    #[arg(long, value_name = "DB", default_value_t = 49.6, allow_negative_numbers = true)]
+    gain: f32,
+
+    /// Frequency to listen on, in Hz
+    #[arg(long, value_name = "HZ", default_value_t = MODE_S_HZ)]
+    freq: u64,
+
+    /// Sample rate in Hz. 2.4 MS/s is what the demodulator is tuned for
+    #[arg(long, value_name = "HZ", default_value_t = 2_400_000)]
+    sample_rate: u32,
+
+    /// Correct the dongle's reference oscillator, in parts per million
+    #[arg(long, value_name = "PPM", default_value_t = 0.0, allow_negative_numbers = true)]
+    ppm: f64,
+
+    /// Enable the dongle's own gain control rather than a fixed gain
+    #[arg(long)]
+    enable_agc: bool,
+
+    /// Print every frame as AVR hex on standard output
+    #[arg(long)]
+    raw: bool,
+
+    /// Address the network ports are served on
+    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0")]
+    net_bind_address: String,
+
+    /// AVR hex output, dump1090's 30002. Zero to serve none
+    #[arg(long, value_name = "PORT", default_value_t = 30002)]
+    net_ro_port: u16,
+
+    /// BaseStation output, dump1090's 30003. Zero to serve none
+    #[arg(long, value_name = "PORT", default_value_t = 30003)]
+    net_sbs_port: u16,
+
+    /// Beast binary output, dump1090's 30005. Zero to serve none
+    #[arg(long, value_name = "PORT", default_value_t = 30005)]
+    net_bo_port: u16,
+
+    /// Say nothing on standard output but what was asked for
+    #[arg(long)]
+    quiet: bool,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let ports = Ports {
+        avr: serve(&args, args.net_ro_port)?,
+        sbs: serve(&args, args.net_sbs_port)?,
+        beast: serve(&args, args.net_bo_port)?,
+    };
+    if !args.quiet {
+        for (name, port) in
+            [("AVR", args.net_ro_port), ("SBS", args.net_sbs_port), ("Beast", args.net_bo_port)]
+        {
+            if port > 0 {
+                println!("{name:<6} on {}:{port}", args.net_bind_address);
+            }
+        }
+    }
+
+    match (&args.file, &args.iqstream) {
+        (Some(path), _) => from_file(&args, path, ports),
+        (None, Some(addr)) => {
+            let dev = remote::iqstream::Device::open(addr)
+                .with_context(|| format!("iqstream {addr}"))?;
+            from_radio(&args, Box::new(dev), true, ports)
+        }
+        (None, None) => {
+            let dev = rtlsdr::RtlSdr::open_by_id(&args.device_index)
+                .with_context(|| format!("no RTL-SDR {}", args.device_index))?;
+            from_radio(&args, Box::new(dev), false, ports)
+        }
+    }
+}
+
+/// Where a decoded frame goes
+struct Ports {
+    avr: Option<net::Fanout>,
+    sbs: Option<net::Fanout>,
+    beast: Option<net::Fanout>,
+}
+
+fn serve(args: &Args, port: u16) -> Result<Option<net::Fanout>> {
+    if port == 0 {
+        return Ok(None);
+    }
+    Ok(Some(
+        net::Fanout::serve(&args.net_bind_address, port)
+            .with_context(|| format!("cannot serve port {port}"))?,
+    ))
+}
+
+/// The state a run carries between blocks.
+struct Reader {
+    det: ModeSDetector,
+    book: AddressBook,
+    sbs: sbs::Sbs,
+    frames: Vec<ModeSFrame>,
+    rate: f64,
+    raw: bool,
+    read: u64,
+    kept: u64,
+}
+
+impl Reader {
+    fn new(rate: f64, raw: bool) -> Self {
+        Self {
+            det: ModeSDetector::new(rate, ModeSConfig::default()),
+            book: AddressBook::new(),
+            sbs: sbs::Sbs::default(),
+            frames: Vec::new(),
+            rate,
+            raw,
+            read: 0,
+            kept: 0,
+        }
+    }
+
+    /// One block of samples in, whatever it held out on every port.
+    fn block(&mut self, iq: &[common::C32], ports: &Ports) {
+        self.read += iq.len() as u64;
+        self.frames.clear();
+        let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
+        self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
+            book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
+        });
+        self.book = book.into_inner();
+
+        let now = chrono::Utc::now();
+        for f in &self.frames {
+            // Correcting a flipped bit is arithmetic on the frame rather than
+            // signal processing, so it happens here, as it does in the
+            // receiver's own Mode S node.
+            let bytes = match f.bytes[0] >> 3 {
+                17 | 18 => adsb::fix_single_bit(&f.bytes).unwrap_or_else(|| f.bytes.clone()),
+                _ => f.bytes.clone(),
+            };
+            let Ok(frame) = adsb::parse(&bytes) else { continue };
+            self.kept += 1;
+
+            if self.raw || ports.avr.is_some() {
+                let line = net::avr(&bytes);
+                if self.raw {
+                    print!("{line}");
+                }
+                if let Some(p) = &ports.avr {
+                    p.send(line.as_bytes());
+                }
+            }
+            if let Some(p) = &ports.beast {
+                let clock =
+                    (f.at_sample as f64 * BEAST_CLOCK_HZ / self.rate) as u64 & 0x0000_ffff_ffff_ffff;
+                p.send(&net::beast(&bytes, clock, f.rssi_dbfs));
+            }
+            if let Some(p) = &ports.sbs {
+                for line in self.sbs.lines(&frame, now) {
+                    p.send(format!("{line}\r\n").as_bytes());
+                }
+            }
+        }
+        self.sbs.expire();
+    }
+}
+
+fn from_radio(args: &Args, mut dev: Box<dyn Device>, remote: bool, ports: Ports) -> Result<()> {
+    // A remote server owns its own tuner: the rate and the dial are whatever
+    // it is already streaming, and asking is how a shared dongle gets shared.
+    if !remote {
+        dev.set_rate(Sps(args.sample_rate as u64)).context("the radio refused that rate")?;
+        dev.correct(args.ppm);
+        dev.set_dial(Hz(args.freq)).context("the radio refused that frequency")?;
+        let gain = match args.enable_agc {
+            true => GainMode::Auto,
+            false => GainMode::Manual(args.gain),
+        };
+        let _ = dev.set_gain("tuner", gain);
+    }
+    let rate = dev.rate().0 as f64;
+    let center = dev.center().0;
+    if !args.quiet {
+        println!("{} at {:.4} MHz, {:.3} MS/s", dev.info().label, center as f64 / 1e6, rate / 1e6);
+    }
+    if (center as i64 - args.freq as i64).abs() > 1_000_000 {
+        bail!("the radio is on {:.4} MHz, not 1090", center as f64 / 1e6);
+    }
+    if rate < 2_000_000.0 {
+        bail!("{:.3} MS/s is too slow to read a microsecond wide chip", rate / 1e6);
+    }
+
+    let mut stream = dev.start_rx().context("the radio would not start")?;
+    let mut reader = Reader::new(rate, args.raw);
+    let began = std::time::Instant::now();
+    let mut said = began;
+    loop {
+        let buf = match stream.read() {
+            Ok(b) => b,
+            Err(e) => bail!("the radio stopped: {e}"),
+        };
+        reader.block(&buf.samples, &ports);
+        if !args.quiet && said.elapsed().as_secs() >= 10 {
+            said = std::time::Instant::now();
+            eprintln!(
+                "{} frames in {:.0} s, {:.1} a second, {} dropped",
+                reader.kept,
+                began.elapsed().as_secs_f64(),
+                reader.kept as f64 / began.elapsed().as_secs_f64(),
+                stream.dropped()
+            );
+        }
+    }
+}
+
+fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
+    let src = sources::FileSource::open(path).with_context(|| format!("{}", path.display()))?;
+    let buf = src.read_all().context("reading the capture")?;
+    let rate = buf.rate.as_f64();
+    if !args.quiet {
+        println!(
+            "{} at {:.4} MHz, {:.3} MS/s, {:.1} s",
+            path.display(),
+            buf.center.as_f64() / 1e6,
+            rate / 1e6,
+            buf.samples.len() as f64 / rate
+        );
+    }
+    let mut reader = Reader::new(rate, args.raw);
+    for block in buf.samples.chunks(65_536) {
+        reader.block(block, &ports);
+    }
+    if !args.quiet {
+        println!("{} frames", reader.kept);
+    }
+    Ok(())
+}

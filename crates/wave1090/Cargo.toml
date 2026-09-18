@@ -1,0 +1,22 @@
+[package]
+name = "wave1090"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A 1090 MHz Mode S receiver that speaks dump1090's network protocols"
+
+[dependencies]
+common.workspace = true
+dsp.workspace = true
+decode.workspace = true
+sources.workspace = true
+rtlsdr.workspace = true
+remote.workspace = true
+clap.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+anyhow.workspace = true
+
+[[bin]]
+name = "wave1090"
+path = "src/main.rs"

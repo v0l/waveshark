@@ -6755,6 +6755,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wave1090"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "common",
+ "decode",
+ "dsp",
+ "remote",
+ "rtlsdr",
+ "sources",
+]
+
+[[package]]
 name = "wayland-backend"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
