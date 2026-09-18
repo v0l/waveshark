@@ -77,6 +77,12 @@ struct Seen {
     /// address only as parity overlay: reading one back is a guess, both
     /// decoders make it, and counting those as aircraft invents traffic.
     known: bool,
+    /// The address a reply that cannot check itself claims
+    ///
+    /// The parity of DF0, 4, 5, 16, 20 and 21 is the address XORed over it, so
+    /// any 56 or 112 bits yield one. It is evidence only against the
+    /// addresses something else proved.
+    overlaid: Option<u32>,
     /// Whether the frame proves itself, whoever reported it
     ///
     /// The parity comes to zero on DF17 and DF18, and on a DF11 answering an
@@ -96,6 +102,9 @@ impl Seen {
             df,
             icao: adsb::parse(bytes).ok().and_then(|f| f.icao),
             known: matches!(df, 17 | 18),
+            overlaid: (!matches!(df, 11 | 17 | 18))
+                .then(|| adsb::overlaid_address(bytes))
+                .flatten(),
             provable: matches!(df, 11 | 17 | 18) && decode::adsb::crc24(bytes) == 0,
             at,
         }
@@ -269,6 +278,41 @@ fn report(theirs: &[Seen], ours: &[Seen]) {
         let tok = theirs.iter().filter(|s| s.df == df && s.provable).count();
         let ook = ours.iter().filter(|s| s.df == df && s.provable).count();
         println!("{df:<6} {t:>9} {o:>9} {missed:>9} {extra:>9} {tok:>9} {ook:>9}");
+    }
+
+    // What confidence is available for the replies neither decoder can
+    // check. Corroboration against the addresses ADS-B proved is the obvious
+    // test and it answers nothing: measured here, near enough none of either
+    // side's overlaid replies name an aircraft that also broadcast a position
+    // in the same window, because an aircraft answering a radar is usually
+    // not the one broadcasting. What is left is repetition. A frame read out
+    // of noise yields a uniformly random address that never comes back, so
+    // the share of frames belonging to an address seen many times is the
+    // share that is real, and the addresses seen once are the invented ones.
+    let proved: std::collections::HashSet<u32> =
+        icaos(theirs).keys().chain(icaos(ours).keys()).copied().collect();
+    println!(
+        "\noverlaid replies, by how often the address they claim comes back \
+         ({} addresses were proved by a parity check)",
+        proved.len()
+    );
+    println!(
+        "{:<12} {:>8} {:>9} {:>10} {:>10}",
+        "", "replies", "addresses", "seen once", "seen 10+"
+    );
+    for (name, all) in [("dump1090", theirs), ("waveshark", ours)] {
+        let mut claims: HashMap<u32, usize> = HashMap::new();
+        for a in all.iter().filter_map(|s| s.overlaid) {
+            *claims.entry(a).or_default() += 1;
+        }
+        let replies: usize = claims.values().sum();
+        let once = claims.values().filter(|n| **n == 1).count();
+        let solid: usize = claims.values().filter(|n| **n >= 10).sum();
+        println!(
+            "{name:<12} {replies:>8} {:>9} {once:>10} {:>9.1}%",
+            claims.len(),
+            pct(solid, replies)
+        );
     }
 
     // Who each side saw is the answer that matters to somebody watching the
