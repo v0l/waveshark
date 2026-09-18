@@ -21,6 +21,15 @@ pub const BEAST_CLOCK_HZ: f64 = 12_000_000.0;
 /// when it is looking for frames to synchronise a clock on
 pub const UNTIMED: u64 = 0x0000_ffff_ffff_ffff;
 
+/// Ticks from the start of the preamble to the instant a Beast reports
+///
+/// A Beast and a Radarcape timestamp the end of bit 56, whatever the frame's
+/// length, and dump1090 follows them: `mm.timestampMsg = sampleTimestamp +
+/// j*5 + (8 + 56) * 12 + bestphase` in its `demod_2400.c`. Preamble and 56
+/// bits is 64 microseconds, and the demodulator here reports the start of the
+/// preamble, so this is what makes the two mean the same instant.
+pub const BEAST_REPORTS_AT: u64 = (8 + 56) * 12;
+
 /// What the sample stream did between one block and the next
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
@@ -72,7 +81,8 @@ impl Clock {
         step
     }
 
-    /// The timestamp for a frame the demodulator put at `at_sample`, or
+    /// The timestamp for a frame the demodulator put at `at_sample` plus
+    /// `at_frac` of a sample, or
     /// [`UNTIMED`] where that is not after the last frame's.
     ///
     /// Out of order rather than merely equal: the two searches each sort what
@@ -81,8 +91,13 @@ impl Clock {
     /// Measured on radarpi, one frame in 7151 and by 8.3 us. Sending the
     /// frame with no usable time keeps it for the feeders and keeps it out of
     /// the clock fit.
-    pub fn at(&mut self, at_sample: u64) -> u64 {
-        let ticks = ((self.base + at_sample) as f64 * self.ticks_per_sample) as u64;
+    pub fn at(&mut self, at_sample: u64, at_frac: f32) -> u64 {
+        // The fraction is what makes this a 12 MHz clock rather than a sample
+        // counter with five written after it: at 2.4 MS/s a sample is five
+        // ticks, so a whole index can only ever land on a multiple of five and
+        // carries the sample grid's own jitter into an mlat fit.
+        let at = (self.base + at_sample) as f64 + at_frac as f64;
+        let ticks = (at * self.ticks_per_sample).max(0.0) as u64 + BEAST_REPORTS_AT;
         if ticks <= self.last {
             return UNTIMED;
         }
@@ -101,8 +116,29 @@ mod tests {
     fn a_sample_is_five_ticks_at_the_rate_the_decoder_is_tuned_for() {
         let mut c = Clock::new(2.4e6);
         assert_eq!(c.block(0, 65_536), Step::Continuous);
-        assert_eq!(c.at(100), 500);
-        assert_eq!(c.at(65_000), 325_000);
+        assert_eq!(c.at(100, 0.0), 500 + BEAST_REPORTS_AT);
+        assert_eq!(c.at(65_000, 0.0), 325_000 + BEAST_REPORTS_AT);
+    }
+
+    /// The clock counts ticks, not samples.
+    ///
+    /// A sample is five ticks at 2.4 MS/s, so a timestamp built from a whole
+    /// sample index can only ever be a multiple of five and is 416 ns coarse
+    /// where the format offers 83 ns. An mlat client fits a line through these
+    /// and calls what does not sit on it an outlier.
+    #[test]
+    fn a_fraction_of_a_sample_is_a_tick_and_not_nothing() {
+        let mut c = Clock::new(2.4e6);
+        c.block(0, 65_536);
+        assert_eq!(c.at(100, 0.2), 501 + BEAST_REPORTS_AT, "a fifth of a sample is one tick");
+        assert_eq!(c.at(100, 0.6), 503 + BEAST_REPORTS_AT);
+        // Backwards inside one sample is still backwards.
+        assert_eq!(c.at(100, 0.4), UNTIMED);
+        // A refined peak can put a frame before the sample it was indexed at,
+        // and landing on a tick already given out is as untimeable as landing
+        // behind one.
+        assert_eq!(c.at(101, -0.4), UNTIMED);
+        assert_eq!(c.at(101, 0.2), 506 + BEAST_REPORTS_AT);
     }
 
     /// The fault this is all about: a dropped buffer is time that passed, and
@@ -111,12 +147,12 @@ mod tests {
     fn samples_the_radio_dropped_still_pass_on_the_clock() {
         let mut c = Clock::new(2.4e6);
         c.block(0, 65_536);
-        assert_eq!(c.at(1_000), 5_000);
+        assert_eq!(c.at(1_000, 0.0), 5_000 + BEAST_REPORTS_AT);
         // The next block begins 65_536 samples late: the driver threw one
         // away. The demodulator is reset and counts from zero again, so the
         // frame at its sample 1000 is 131_072 + 1000 into the stream.
         assert_eq!(c.block(131_072, 65_536), Step::Broke(65_536));
-        assert_eq!(c.at(1_000), (131_072 + 1_000) * 5);
+        assert_eq!(c.at(1_000, 0.0), (131_072 + 1_000) * 5 + BEAST_REPORTS_AT);
     }
 
     #[test]
@@ -125,17 +161,17 @@ mod tests {
         c.block(0, 65_536);
         assert_eq!(c.block(65_536, 65_536), Step::Continuous);
         // The demodulator's index is still the stream's, so no rebasing.
-        assert_eq!(c.at(70_000), 350_000);
+        assert_eq!(c.at(70_000, 0.0), 350_000 + BEAST_REPORTS_AT);
     }
 
     #[test]
     fn a_frame_out_of_order_goes_out_with_no_time_rather_than_a_wrong_one() {
         let mut c = Clock::new(2.4e6);
         c.block(0, 65_536);
-        assert_eq!(c.at(20_000), 100_000);
-        assert_eq!(c.at(19_980), UNTIMED, "a frame before the last one");
-        assert_eq!(c.at(20_000), UNTIMED, "and the same frame twice");
-        assert_eq!(c.at(20_001), 100_005, "the next one is timed again");
+        assert_eq!(c.at(20_000, 0.0), 100_000 + BEAST_REPORTS_AT);
+        assert_eq!(c.at(19_980, 0.0), UNTIMED, "a frame before the last one");
+        assert_eq!(c.at(20_000, 0.0), UNTIMED, "and the same frame twice");
+        assert_eq!(c.at(20_001, 0.0), 100_005 + BEAST_REPORTS_AT, "the next one is timed again");
     }
 
     /// A remote source reconnecting counts from where its server is, which
@@ -144,11 +180,11 @@ mod tests {
     fn a_source_that_starts_counting_again_rebases_rather_than_going_backwards() {
         let mut c = Clock::new(2.4e6);
         c.block(1_000_000, 65_536);
-        assert_eq!(c.at(10), 5_000_050);
+        assert_eq!(c.at(10, 0.0), 5_000_050 + BEAST_REPORTS_AT);
         assert_eq!(c.block(40, 65_536), Step::Broke(0), "no count of what is missing");
         // Behind the last frame's tick, so untimed until the clock catches
         // up, which is the honest answer and not a frame lost.
-        assert_eq!(c.at(10), UNTIMED);
+        assert_eq!(c.at(10, 0.0), UNTIMED);
     }
 
     /// The counter on the wire is 48 bits and rolls over every 6.5 hours, so
@@ -159,7 +195,11 @@ mod tests {
         let mut c = Clock::new(2.4e6);
         let just_under = (UNTIMED / 5) - 1;
         c.block(just_under, 65_536);
-        assert_eq!(c.at(0), (just_under * 5) & UNTIMED);
-        assert_eq!(c.at(2), 4, "the tick after the wrap, counted from zero");
+        assert_eq!(c.at(0, 0.0), (just_under * 5 + BEAST_REPORTS_AT) & UNTIMED);
+        assert_eq!(
+            c.at(2, 0.0),
+            (just_under * 5 + 10 + BEAST_REPORTS_AT) & UNTIMED,
+            "the tick after the wrap, counted from zero"
+        );
     }
 }

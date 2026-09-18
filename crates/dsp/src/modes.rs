@@ -53,6 +53,14 @@ pub struct ModeSFrame {
     /// Sample index of the start of the preamble, counted from the first
     /// sample the detector ever saw.
     pub at_sample: u64,
+    /// Fraction of a sample past `at_sample` that the preamble began on
+    ///
+    /// A sample is 416 ns at 2.4 MS/s where a Beast timestamp counts in 83 ns
+    /// ticks, so a whole sample index throws four fifths of the clock away and
+    /// leaves what is left moving with the noise. Both searches know the
+    /// start better than a sample: the parity search solves for it, and the
+    /// preamble search has its correlation either side of the peak.
+    pub at_frac: f32,
     /// Level of the preamble pulses, referred to full scale.
     pub rssi_dbfs: f32,
     /// Bits whose two halves were within a whisker of each other, and so were
@@ -277,6 +285,7 @@ impl ModeSDetector {
                 continue;
             };
             let start = self.peak(&mag, i, h);
+            let frac = self.refine(&mag, start);
             match self.frame_at(&mag, start, valid).filter(valid) {
                 Some(f) => {
                     let end = start + self.samples_for(f.bytes.len() * 8);
@@ -285,7 +294,7 @@ impl ModeSDetector {
                     // preambles. Held as an absolute index so it survives the
                     // buffer boundary as well.
                     self.next_start = base + end as u64;
-                    found.push(ModeSFrame { at_sample: base + start as u64, ..f });
+                    found.push(ModeSFrame { at_sample: base + start as u64, at_frac: frac, ..f });
                     i = end;
                 }
                 None => i += 1,
@@ -414,9 +423,9 @@ impl ModeSDetector {
                 // 2.4 MS/s: 0.69 samples early before, 0.12 after, which is
                 // 0.29 us of jitter removed from a Beast timestamp that mixes
                 // frames from both searches.
-                let start =
-                    base + (data - DATA_US as f64 * spus + step * 0.5).round().max(0.0) as u64;
-                let f = ModeSFrame { at_sample: start, ..f };
+                let exact = (data - DATA_US as f64 * spus + step * 0.5).max(0.0);
+                let start = base + exact as u64;
+                let f = ModeSFrame { at_sample: start, at_frac: exact.fract() as f32, ..f };
                 if self.already(&f) || found.iter().any(|g| same_frame(g, &f, spus)) {
                     continue;
                 }
@@ -468,7 +477,13 @@ impl ModeSDetector {
         }
         let bytes =
             bits.chunks(8).map(|c| c.iter().fold(0u8, |a, b| (a << 1) | *b as u8)).collect();
-        Some(ModeSFrame { bytes, at_sample: 0, rssi_dbfs: dbfs(high), weak_bits: weak })
+        Some(ModeSFrame {
+            bytes,
+            at_sample: 0,
+            at_frac: 0.0,
+            rssi_dbfs: dbfs(high),
+            weak_bits: weak,
+        })
     }
 
     fn samples_for(&self, bits: usize) -> usize {
@@ -507,6 +522,7 @@ impl ModeSDetector {
             weakest = weakest.min(w);
         }
         let high = sum / 4.0;
+        debug_assert!((high - self.pulse_mean(mag, start)).abs() <= high * 1e-3);
         if high < self.cfg.min_level {
             return None;
         }
@@ -524,6 +540,11 @@ impl ModeSDetector {
             }
         }
         Some(high)
+    }
+
+    /// Mean energy in the four preamble pulses at `start`, ungated
+    fn pulse_mean(&self, mag: &[f32], start: usize) -> f32 {
+        self.pulses.iter().map(|w| self.window(mag, start, *w)).sum::<f32>() / 4.0
     }
 
     /// Walk to the strongest offset in the run of offsets that pass.
@@ -549,6 +570,32 @@ impl ModeSDetector {
             }
         }
         at
+    }
+
+    /// Where between `at` and the samples either side the preamble really
+    /// began, as a fraction of a sample.
+    ///
+    /// The correlation is smooth over a sample or two and peaks at the true
+    /// start, so the standard parabola through the peak and its neighbours
+    /// gives the offset the sample grid cannot. Clamped to half a sample
+    /// either way: a wider answer means the peak was not where `peak` said,
+    /// and moving the frame there on noise is what this is meant to stop.
+    fn refine(&self, mag: &[f32], at: usize) -> f32 {
+        // The gated test, not the raw energy: `preamble` answers only where a
+        // preamble passes, and a sample either side of the peak is exactly
+        // where it stops passing.
+        let (Some(before), Some(here), Some(after)) = (
+            at.checked_sub(1).map(|i| self.pulse_mean(mag, i)),
+            Some(self.pulse_mean(mag, at)),
+            (at + 1 + self.samples_for(0) < mag.len()).then(|| self.pulse_mean(mag, at + 1)),
+        ) else {
+            return 0.0;
+        };
+        let curve = before - 2.0 * here + after;
+        match curve.abs() < f32::EPSILON {
+            true => 0.0,
+            false => (0.5 * (before - after) / curve).clamp(-0.5, 0.5),
+        }
     }
 
     /// Sub-sample offsets tried before giving up on a frame.
@@ -616,7 +663,13 @@ impl ModeSDetector {
         if start + self.samples_for(bits) > mag.len() {
             return None;
         }
-        Some(ModeSFrame { bytes, at_sample: 0, rssi_dbfs: dbfs(high), weak_bits: weak })
+        Some(ModeSFrame {
+            bytes,
+            at_sample: 0,
+            at_frac: 0.0,
+            rssi_dbfs: dbfs(high),
+            weak_bits: weak,
+        })
     }
 }
 
@@ -869,7 +922,8 @@ mod tests {
     /// per-frame jitter, which is what an mlat client cannot fit (#154). The
     /// number is the mean over 60 sub-sample positions of a frame at
     /// 2.4 MS/s: the parity search read 0.69 samples earlier than the
-    /// preamble search before the rounding was fixed, 0.12 after.
+    /// preamble search before the rounding was fixed, and 0.15 now both
+    /// carry the fraction of a sample rather than a whole one.
     #[test]
     fn the_parity_search_times_a_frame_where_the_preamble_search_does() {
         let rate = 2.4e6;
@@ -885,14 +939,17 @@ mod tests {
             let from = (lead * spus) as usize;
             let to = ((lead + DATA_US) * spus) as usize;
             blind[from..to].iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
-            let at = |iq: &[C32]| -> Option<u64> {
+            // The whole position, index and fraction: the fraction is the
+            // point of it, and comparing indices alone would call a frame
+            // timed to a fifth of a sample a frame a sample out.
+            let at = |iq: &[C32]| -> Option<f64> {
                 let mut d = ModeSDetector::new(rate, ModeSConfig::default());
                 let mut out = Vec::new();
                 d.process_valid(iq, &mut out, &|f: &ModeSFrame| f.bytes == LONG);
-                out.iter().find(|f| f.bytes == LONG).map(|f| f.at_sample)
+                out.iter().find(|f| f.bytes == LONG).map(|f| f.at_sample as f64 + f.at_frac as f64)
             };
             if let (Some(a), Some(b)) = (at(&clean), at(&blind)) {
-                gap += a as f64 - b as f64;
+                gap += a - b;
                 n += 1.0;
             }
         }
@@ -919,6 +976,7 @@ mod tests {
                 0x8d, 0x4c, 0xae, 0x5a, 0xf8, 0x23, 0x00, 0x06, 0x00, 0x4a, 0xb8, 0xee, 0x81, 0x90,
             ],
             at_sample: 240_122,
+            at_frac: 0.0,
             rssi_dbfs: -20.0,
             weak_bits: 0,
         };

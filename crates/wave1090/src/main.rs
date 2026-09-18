@@ -318,7 +318,7 @@ impl Reader {
                 17 | 18 => adsb::fix_single_bit(&f.bytes).unwrap_or_else(|| f.bytes.clone()),
                 _ => f.bytes.clone(),
             };
-            let at = self.clock.at(f.at_sample);
+            let at = self.clock.at(f.at_sample, f.at_frac);
             self.publish(&bytes, at, f.rssi_dbfs, ports, now);
         }
         self.frames = frames;
@@ -562,11 +562,17 @@ mod tests {
             "timestamps out of order: {:?}",
             frames.iter().map(|(t, _)| *t).collect::<Vec<_>>()
         );
-        // 2.4 MS/s is five ticks a sample, and four seconds is 9.6 M samples,
-        // so no frame can be past 48 M ticks or on a fraction of a sample.
-        let (first, last) = (frames[0].0, frames[frames.len() - 1].0);
+        // 2.4 MS/s is five ticks a sample and four seconds is 9.6 M samples,
+        // so no frame can be past 48 M ticks.
+        let last = frames[frames.len() - 1].0;
         assert!(last < 48_000_000, "the last frame is at {last}");
-        assert_eq!((first % 5, last % 5), (0, 0), "not a whole sample");
+        // And the clock is finer than the samples it is made from: a whole
+        // sample index can only land on a multiple of five, which is 416 ns of
+        // quantising on a clock that counts in 83 ns. 51 of the 70 sit off the
+        // sample grid, the rest being frames whose peak needed no moving.
+        let between =
+            frames.iter().filter(|(ts, _)| (ts - clock::BEAST_REPORTS_AT) % 5 != 0).count();
+        assert_eq!(between, 49, "timestamps quantised to whole samples");
     }
 
     /// A frame with no time feeds the networks but not the clock.
