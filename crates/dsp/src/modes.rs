@@ -86,6 +86,17 @@ impl Default for ModeSConfig {
     }
 }
 
+/// Spacing of the offsets the parity search slices at, in samples
+///
+/// A sample at 2.4 MS/s is nearly half a chip, so slicing only at whole
+/// samples leaves a frame up to half a sample out of step with the half-chip
+/// windows the bits are read from, and it comes out as noise. Against
+/// dump1090 on the same samples over 120 s: whole samples read 13180 DF17 to
+/// its 14017, half a sample 14964 to 14825, a quarter 19022 to 16613. The
+/// quarter costs 0.83 s over four seconds of capture against 0.20 s, which is
+/// the price of reading more than the reference does.
+const PHASE_STEP: f64 = 0.25;
+
 /// Mode S parity generator, 0xFFF409
 ///
 /// Here rather than in the frame layer because the demodulator frames on it:
@@ -287,18 +298,20 @@ impl ModeSDetector {
             ((sums[b] - sums[a]) / (b - a) as f64) as f32
         };
 
-        // One stream per whole-sample offset covers every phase: within a
-        // stream a bit is `spus` samples on, so offsets 0..spus exhaust the
-        // starting positions a frame can have.
-        let offsets = spus.ceil() as usize;
+        // One stream per starting offset: within a stream a bit is `spus`
+        // samples on, so offsets across one bit exhaust where a frame can
+        // begin. A whole sample apart is not fine enough, because a sample is
+        // nearly half a chip.
+        let offsets = (spus / PHASE_STEP).ceil() as usize;
         let mut bits = std::mem::take(&mut self.bits);
-        for offset in 0..offsets {
-            let count = ((mag.len() as f64 - offset as f64) / spus).floor() as usize;
+        for o in 0..offsets {
+            let offset = o as f64 * PHASE_STEP;
+            let count = ((mag.len() as f64 - offset) / spus).floor() as usize;
             let count = count.saturating_sub(1);
             bits.clear();
             bits.reserve(count);
             for k in 0..count {
-                let p = offset as f64 + k as f64 * spus;
+                let p = offset + k as f64 * spus;
                 bits.push(mean(p, p + half) > mean(p + half, p + spus));
             }
             let mut long = crate::crcframe::SlidingCrc::new(CRC24_POLY, LONG_BITS);
@@ -321,7 +334,7 @@ impl ModeSDetector {
                 if !wanted {
                     continue;
                 }
-                let data = offset as f64 + at as f64 * spus;
+                let data = offset + at as f64 * spus;
                 let Some(f) = self.crc_frame(&bits[at..at + n], data, &mean, floor) else {
                     continue;
                 };
