@@ -47,6 +47,8 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/remotes/ansonic.yaml"),
     include_str!("../../protocols/remotes/bett.yaml"),
     include_str!("../../protocols/remotes/ev1527.yaml"),
+    include_str!("../../protocols/remotes/gate_tx.yaml"),
+    include_str!("../../protocols/remotes/smc5326.yaml"),
     include_str!("../../protocols/weather/prologue.yaml"),
     include_str!("../../protocols/weather/rubicson.yaml"),
     include_str!("../../protocols/weather/bresser_3ch.yaml"),

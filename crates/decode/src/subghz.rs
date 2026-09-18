@@ -178,6 +178,8 @@ pub fn key_of_decode(protocol: &str, fields: &[(String, common::Value)]) -> Opti
         // so its key file value is its code as printed.
         "Linear" => ("Linear", 10, None, true),
         "Linear-Delta3" => ("LinearDelta3", 8, None, false),
+        "GateTX" => ("GateTX", 24, None, false),
+        "SMC5326" => ("SMC5326", 25, Some(320), false),
         _ => return None,
     };
     // `code` for most, `cnt` for the two that call the frame a counter.
@@ -558,8 +560,10 @@ TE: 400
     fn every_key_protocol_written_is_read_back_as_the_same_code() {
         use crate::protocol::Value;
         let holtek = 0x50_d2_aa_aa_a1_u64;
-        let cases: [(&str, &str, u64); 8] = [
+        let cases: [(&str, &str, u64); 10] = [
             ("Princeton", "code", 0xa1_3f_08),
+            ("GateTX", "code", 0xa1_3f_08),
+            ("SMC5326", "code", 0x1_42_7e_11),
             ("Nice-Flo", "code", 0xabc),
             ("Holtek", "code", holtek),
             ("Holtek-HT12x", "code", 0xabc),
