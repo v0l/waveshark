@@ -1,0 +1,10 @@
+# SMC5326 and the PT2262-like fobs on its chip: a 25-bit fixed code at 320
+# us a short mark, the short mark being a 1 as the slicer has it, sent with
+# a long guard between copies. No checksum.
+name: SMC5326
+timing: { pwm: [320, 960], reset_us: 8000 }
+frame: { bits: 25, find: tile, min_transitions: 3, repeats: 3 }
+fields:
+  - { name: code, bits: 25, data: int }
+vectors:
+  - { hex: "a1 3f 08 80", fields: { code: 0x1427e11 } }
