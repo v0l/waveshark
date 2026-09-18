@@ -1,0 +1,28 @@
+# Globaltronics GT-WT03, also sold as Pear SSS-83 and Conrad S5-TTE:
+# 433.92 MHz, PWM behind a sync mark, inverted, 40 data bits and a stop
+# bit. The check is the maker's rolling byte, a per-byte LFSR digest keyed
+# from 0x3100 and only shifted, XORed with 0x2d; neither a CRC nor a sum
+# reproduces it. Humidity 10 is the display's empty reading and 110 its
+# full one; values between the sentinels but outside 20 to 95 are taken as
+# sent rather than refused, which rtl_433 does not allow and this does.
+name: GT-WT03
+timing: { pwm: [256, 625], sync_us: 855, reset_us: 3000 }
+frame: { bits: 41, invert: true, not_constant: 32, repeats: 12 }
+check: { kind: roll8, gen: 0x3100, xor: 0x2d, over: [0, 32], at: 32 }
+fields:
+  - { name: id, bits: 8, data: int }
+  - { name: humidity_pct, bits: 8, data: int, unit: pct, map: { 10: 0, 110: 100 }, max: 100 }
+  - { name: battery_ok, bits: 1, data: bool, type: bool, not: true }
+  - { name: button, bits: 1, data: bool, type: bool, omit_if: 0 }
+  # the two bits above the temperature are the channel, read as a view
+  # over them below
+  - { bits: 2, hidden: true }
+  - { name: temperature_c, bits: 12, data: float, unit: c, type: int, scale: 0.1, min: -50.1, max: 70.1 }
+  - { bits: 8, hidden: true }
+  # the stop bit, counted in the frame's length because it is also what
+  # spaces one repeat from the next, and not always set
+  - { bits: 1, hidden: true }
+  - { name: channel, gather: [18, 19], data: int, offset: 1 }
+vectors:
+  - { hex: "17 30 01 05 cb 00", fields: { id: 0x17, channel: 1, temperature_c: 26.1, humidity_pct: 48, battery_ok: true } }
+  - { hex: "01 37 af d4 57 00", fields: { id: 0x01, channel: 3, temperature_c: -4.4, humidity_pct: 55, battery_ok: false } }

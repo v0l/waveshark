@@ -22,7 +22,7 @@ mod somfy_rts;
 
 pub use ert::{ErtIdm, ErtScm, ErtScmPlus};
 pub use esl::Esl;
-pub use globaltronics::{GtWt02, GtWt03};
+pub use globaltronics::GtWt02;
 pub use hanshow::Hanshow;
 pub use hideki::Hideki;
 pub use interlogix::InterlogixSecurity;
