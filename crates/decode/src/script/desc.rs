@@ -253,9 +253,15 @@ pub struct Check {
     /// nibbles as they read reversed
     #[serde(default)]
     pub reflect: bool,
-    /// An eight bit value is stored with its nibbles swapped
+    /// The stored value's halves are swapped: a byte's nibbles, a sixteen
+    /// bit value's bytes
     #[serde(default)]
     pub swap: bool,
+    /// The parity is odd rather than even
+    #[serde(default)]
+    pub odd: bool,
+    /// Only every `step`th covered bit counts, for an interleaved parity
+    pub step: Option<usize>,
     /// The check applies only when these fields read so
     pub when: Option<Cond>,
     pub unless: Option<Cond>,
@@ -292,6 +298,9 @@ pub enum CheckKind {
     NibbleSum,
     /// Every nibble covered exclusive-ored together
     NibbleXor,
+    /// The covered bits, `step` apart, counted: a stored bit makes the count
+    /// even, or with nothing stored the count must already be even
+    Parity,
     /// A per-byte LFSR digest, the key seeded from `gen` at every byte and
     /// only shifted, no feedback across the frame: Globaltronics' rolling
     /// byte, which is neither a CRC nor a sum
@@ -313,6 +322,7 @@ impl CheckKind {
             Self::NibbleSum => 8,
             Self::NibbleXor => 4,
             Self::Roll8 => 8,
+            Self::Parity => 1,
             Self::EvenParity => return None,
         })
     }
@@ -761,10 +771,19 @@ impl Desc {
                     }
                 }
             }
+            if c.step.is_some_and(|s| s == 0) {
+                return Err(format!("{name}: a check's step counts no bits"));
+            }
+            if c.step.is_some() && c.kind != CheckKind::Parity {
+                return Err(format!("{name}: only a parity check takes step"));
+            }
             match (c.stored(), c.at) {
                 (Some(w), Some(at)) if at + w > f.bits => {
                     return Err(format!("{name}: a check's value runs past the frame"));
                 }
+                // a parity over its own stored bit is how the interleaved
+                // ones read, so it alone may leave `at` out
+                (Some(_), None) if c.kind == CheckKind::Parity => {}
                 (Some(_), None) => return Err(format!("{name}: a {:?} check needs at", c.kind)),
                 (None, Some(_)) => {
                     return Err(format!("{name}: a {:?} check stores nothing", c.kind));
@@ -937,7 +956,7 @@ fn all_fields_mut(items: &mut [Item]) -> Vec<&mut Field> {
     out
 }
 
-pub(super) fn all_fields(items: &[Item]) -> Vec<&Field> {
+pub fn all_fields(items: &[Item]) -> Vec<&Field> {
     let mut out = Vec::new();
     for it in items {
         match it {
