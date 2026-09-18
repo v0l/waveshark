@@ -11,7 +11,7 @@
 
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
-use decode::protocols::{GtWt02, GtWt03, OregonV3, SomfyRts};
+use decode::protocols::{GtWt02, GtWt03, SomfyRts};
 use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -329,7 +329,7 @@ fn an_oregon_v3_burst_decodes_from_manchester_timings() {
     }
     let pkg = package(pulses);
 
-    let r = OregonV3.decode_package(&pkg).expect("decode");
+    let r = named("Oregon-THGR810").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.model, "Oregon-THGR810");
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.7)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));

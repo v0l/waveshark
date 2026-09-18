@@ -1,0 +1,28 @@
+# Oregon Scientific v3 WGR800 anemometer: the family's frame with a
+# direction nibble in 22.5 degree steps and the gust and average speeds in
+# BCD tenths, the checksum seventeen nibbles in.
+name: Oregon-WGR800
+timing: { manchester: [488, 976], reset_us: 2400 }
+frame: { bits: 76, find: sync, sync: "0005", sync_bits: 16, either_polarity: true }
+transform: [reflect_nibbles]
+check: { kind: nibble_sum, over: [0, 68], at: 68, swap: true }
+fields:
+  - { bits: 16, hidden: true, in: [0x1984, 0x1994], default: 0x1984, name: sensor }
+  - { name: channel, bits: 4, data: int }
+  - { bits: 4, hidden: true }
+  - { bits: 4, hidden: true }
+  - { bits: 1, hidden: true }
+  - { name: battery_ok, bits: 1, data: bool, type: bool, not: true }
+  - { bits: 2, hidden: true }
+  - { name: id, gather: [[24, 28], [20, 24]], data: int }
+  - { name: wind_direction_deg, bits: 4, data: float, unit: deg, scale: 22.5, round: 1 }
+  - { bits: 4, hidden: true }
+  - { bits: 4, hidden: true }
+  - { bits: 12, hidden: true }
+  - { bits: 12, hidden: true }
+  - { bits: 8, hidden: true }
+  - { name: wind_gust_ms, gather: [[52, 56], [48, 52], [44, 48]], type: bcd, data: float, unit: m_s, scale: 0.1, max: 56 }
+  - { name: wind_avg_ms, gather: [[64, 68], [60, 64], [56, 60]], type: bcd, data: float, unit: m_s, scale: 0.1, max: 56 }
+vectors:
+  - hex: "19 84 1a 00 90 03 21 54 09 30"
+    fields: { channel: 1, battery_ok: true, id: 0x0a, wind_direction_deg: 202.5, wind_gust_ms: 12.3, wind_avg_ms: 4.5 }

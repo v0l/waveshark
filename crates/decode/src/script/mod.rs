@@ -70,6 +70,9 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/weather/acurite_5n1.yaml"),
     include_str!("../../protocols/weather/alecto_v1.yaml"),
     include_str!("../../protocols/security/honeywell.yaml"),
+    include_str!("../../protocols/weather/oregon_thgr810.yaml"),
+    include_str!("../../protocols/weather/oregon_thn802.yaml"),
+    include_str!("../../protocols/weather/oregon_wgr800.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -528,7 +531,16 @@ impl Walk<'_> {
             return Err(DecodeError::NotThisProtocol);
         }
         let omitted = f.omit_if.iter().any(|o| *o == raw);
-        let v = value_of(f, raw)?;
+        let mut v = value_of(f, raw)?;
+        if let Some(b) = f.sign
+            && self.bits.get(b) == Some(true)
+        {
+            v = match v {
+                Value::Int(n) => Value::Int(-n),
+                Value::Float(x) => Value::Float(-x),
+                other => other,
+            };
+        }
         if !omitted
             && let Some(n) = v.as_f64()
             && (f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m))
@@ -832,6 +844,19 @@ fn owns_any(items: &[Item]) -> bool {
     desc::all_fields(items).iter().any(|f| !f.is_view())
 }
 
+/// A value with its sign taken off, for a field whose sign is a bit
+/// elsewhere
+fn unsigned(f: &Field, v: &Value) -> (Value, bool) {
+    if f.sign.is_none() {
+        return (v.clone(), false);
+    }
+    match v {
+        Value::Int(n) if *n < 0 => (Value::Int(-n), true),
+        Value::Float(x) if *x < 0.0 => (Value::Float(-x), true),
+        other => (other.clone(), false),
+    }
+}
+
 /// What the supplied views say each bit of the frame is. A group whose
 /// condition the supplied fields decide contributes one branch; one they
 /// cannot decide contributes both, and a view whose value does not fit is
@@ -851,9 +876,13 @@ fn known_bits(items: &[Item], fields: &BTreeMap<String, Value>, known: &mut [Opt
             }
             Item::Field(v) if v.is_view() && v.r#const.is_none() => {
                 let (Some(val), Some(pos)) = (fields.get(&v.name), v.positions()) else { continue };
-                let Ok(raw) = raw_of(v, val) else { continue };
+                let (val, negative) = unsigned(v, val);
+                let Ok(raw) = raw_of(v, &val) else { continue };
                 for (i, b) in pos.iter().enumerate() {
                     known[*b] = Some(raw >> (pos.len() - 1 - i) & 1 != 0);
+                }
+                if let Some(s) = v.sign {
+                    known[s] = Some(negative);
                 }
             }
             Item::Field(_) => {}
@@ -926,7 +955,13 @@ impl Writer<'_> {
                     let filled_by_check = self.checks.iter().any(|c| c.at == Some(at));
                     let raw = match (f.r#const, self.fields.get(&f.name)) {
                         (Some(c), _) => c,
-                        (None, Some(v)) => raw_of(f, v)?,
+                        (None, Some(v)) => {
+                            let (v, negative) = unsigned(f, v);
+                            if let Some(s) = f.sign {
+                                self.known[s] = Some(negative);
+                            }
+                            raw_of(f, &v)?
+                        }
                         (None, None) if filled_by_check => 0,
                         (None, None) if f.name.is_empty() => self.viewed(f, at)?.unwrap_or(0),
                         (None, None) => match (self.viewed(f, at)?, f.omit_if.iter().next()) {
@@ -983,6 +1018,7 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
     };
     let width = c.stored()?;
     let v = (v ^ c.xor as u64) & mask(width);
+    let v = if c.swap && width == 8 { (v as u8).rotate_left(4) as u64 } else { v };
     Some(if c.reflect { v.reverse_bits() >> (64 - width) } else { v })
 }
 
@@ -1282,6 +1318,7 @@ mod tests {
             slot: 0,
             gather: Vec::new(),
             default: None,
+            sign: None,
             data: None,
             unit: None,
             other: None,

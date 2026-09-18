@@ -28,7 +28,7 @@ pub use hideki::Hideki;
 pub use interlogix::InterlogixSecurity;
 pub use ism868_link::Ism868Link;
 pub use keyfob::KeeLoq;
-pub use oregon::{OregonV2, OregonV3};
+pub use oregon::OregonV2;
 pub use somfy_rts::SomfyRts;
 
 use crate::bits::BitBuffer;
