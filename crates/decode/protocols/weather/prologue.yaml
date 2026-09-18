@@ -13,7 +13,7 @@
 name: Prologue-TH
 timing: { ppm: [2000, 4000], reset_us: 10000 }
 frame: { bits: 36, find: rows, copies: 2, repeats: 7 }
-yields_to: [AlectoV1-Temperature, AlectoV1-Rain]
+yields_to: [AlectoV1-Temperature, AlectoV1-Rain, Springfield-Soil]
 fields:
   - { name: subtype, bits: 4, data: int, in: [9, 5] }
   - { name: id, bits: 8, data: int }

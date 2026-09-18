@@ -5,7 +5,7 @@
 # measures in Fahrenheit; it reports in Celsius like the rest.
 name: Bresser-3CH
 timing: { pwm: [250, 500], sync_us: 750, reset_us: 1250 }
-frame: { bits: 40, invert: true, repeats: 15 }
+frame: { bits: 40, invert: true, find: rows, copies: 2, row_bits: [40, 41], repeats: 15 }
 check: { kind: sum8, over: [0, 32], at: 32 }
 fields:
   - { name: id, bits: 8, data: int, min: 1 }

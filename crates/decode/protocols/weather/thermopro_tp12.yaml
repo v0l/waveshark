@@ -1,0 +1,20 @@
+# ThermoPro TP08, TP12 and TP20 barbecue thermometers, 433.92 MHz: PPM, a
+# random id drawn when the batteries go in, two probe temperatures in tenths
+# offset 200, an LFSR digest, and a trailing one bit the last copy of a
+# burst drops. Sixteen copies a transmission.
+name: Thermopro-TP12
+timing: { ppm: [500, 1500], reset_us: 4000 }
+frame: { bits: 41, find: rows, copies: 2, row_bits: [40, 41], not_constant: 32, repeats: 16 }
+check: { kind: lfsr8_reflect, gen: 0x51, key: 0x04, over: [0, 32], at: 32 }
+fields:
+  - { name: id, bits: 8, data: int }
+  - { bits: 8, hidden: true }
+  - { bits: 4, hidden: true }
+  - { bits: 4, hidden: true }
+  - { bits: 8, hidden: true }
+  - { name: temperature_1_c, gather: [[16, 20], [8, 16]], data: float, unit: c, scale: 0.1, offset: -20 }
+  - { name: temperature_2_c, gather: [[20, 24], [24, 32]], data: float, unit: c, scale: 0.1, offset: -20 }
+  - { bits: 8, hidden: true }
+  - { bits: 1, hidden: true, default: 1 }
+vectors:
+  - { hex: "38 7a 21 bb 11 80", fields: { id: 56, temperature_1_c: 43.4, temperature_2_c: 24.3 } }

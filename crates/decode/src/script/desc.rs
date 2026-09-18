@@ -290,6 +290,8 @@ pub enum CheckKind {
     Complement,
     /// Every nibble covered added up, `add` on top or taken from `init`
     NibbleSum,
+    /// Every nibble covered exclusive-ored together
+    NibbleXor,
 }
 
 impl CheckKind {
@@ -305,6 +307,7 @@ impl CheckKind {
             Self::Crc16 | Self::Crc16Le => 16,
             Self::Complement => over[1] - over[0],
             Self::NibbleSum => 8,
+            Self::NibbleXor => 4,
             Self::EvenParity => return None,
         })
     }
@@ -768,7 +771,9 @@ impl Desc {
             {
                 return Err(format!("{name}: a {:?} check covers whole bytes", c.kind));
             }
-            if c.kind == CheckKind::NibbleSum && (c.over[1] - c.over[0]) % 4 != 0 {
+            if matches!(c.kind, CheckKind::NibbleSum | CheckKind::NibbleXor)
+                && (c.over[1] - c.over[0]) % 4 != 0
+            {
                 return Err(format!("{name}: a nibble sum covers whole nibbles"));
             }
         }

@@ -8,13 +8,13 @@
 # covered span is what the check does, so it is the seven nibbles it covers.
 name: Rubicson-Temperature
 timing: { ppm: [1000, 2000], reset_us: 4800 }
-frame: { bits: 36, repeats: 12 }
+frame: { bits: 36, not_constant: 24, repeats: 12 }
 check: { kind: crc8, poly: 0x31, init: 0x6c, over: [0, 28], at: 28 }
 fields:
   - { name: id, bits: 8, data: int }
   - { name: battery_ok, bits: 1, data: bool, type: bool }
   - { bits: 1, hidden: true }
-  - { name: channel, bits: 2, data: int, offset: 1 }
+  - { name: channel, bits: 2, data: int, offset: 1, max: 3 }
   - { name: temperature_c, bits: 12, data: float, unit: c, type: int, scale: 0.1, min: -40, max: 70 }
   - { bits: 4, const: 0xf }
   - { bits: 8, hidden: true }
