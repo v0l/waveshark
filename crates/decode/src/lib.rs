@@ -48,6 +48,7 @@ pub mod gsm;
 pub mod ieee802154;
 pub mod imet;
 pub mod inmarsat;
+pub mod iridium;
 pub mod jpeg;
 #[cfg(feature = "tea")]
 pub mod keystream;

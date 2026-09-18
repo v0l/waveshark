@@ -15,6 +15,8 @@ the code is in the commit log.
   keys AX.25 through it.
 - NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
   whether the speech is enciphered. No sound yet.
+- Iridium ring alerts at 1626 MHz: the satellite, its beam and its position,
+  on the map.
 - DAB ensembles on band III: the ensemble name, its stations, their programme
   types and bit rates. No sound yet.
 - DRM on shortwave and medium wave: the services in a multiplex, their
