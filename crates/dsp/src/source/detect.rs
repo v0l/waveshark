@@ -296,6 +296,9 @@ pub struct SourceDetector {
     /// The tuner's own centre, as offsets from the stream centre. See
     /// [`SourceDetector::set_spur`].
     spur: Option<(f64, f64)>,
+    /// Where one tuner's slice ends and the next begins, as offsets from the
+    /// stream centre. See [`SourceDetector::set_seams`].
+    seams: Vec<f64>,
     /// Candidates refused because [`SourceConfig::max_open`] was reached,
     /// counted so a receiver can say it is dropping signal rather than
     /// silently reading less of the band.
@@ -405,6 +408,7 @@ impl SourceDetector {
             cfg,
             locked: Vec::new(),
             spur: None,
+            seams: Vec::new(),
             capped: 0,
             rate,
             n,
@@ -488,6 +492,20 @@ impl SourceDetector {
         let hi = (self.bin_of(hi_hz).ceil() as usize).min(self.n - 1);
         self.cap_skip = (lo <= hi).then_some((lo, hi));
         self.spur = Some((lo_hz, hi_hz));
+    }
+
+    /// Where the tuners of a stitched receiver meet, as offsets from the
+    /// stream centre.
+    ///
+    /// A source whose extent covers one of these was heard by neither tuner
+    /// whole: each side carries its own DC spike and filter rolloff, 6.0 dB
+    /// down on the join (measured in `sources::combine`), and the two slip
+    /// against each other in time however well their frequencies are
+    /// matched. Opening it spends an extraction and a set of front ends on a
+    /// waveform with a hole in it, so it is refused. A source wholly inside
+    /// one slice is untouched.
+    pub fn set_seams(&mut self, offsets: Vec<f64>) {
+        self.seams = offsets;
     }
 
     /// Which bin an offset from the stream centre falls in, unrounded.
@@ -1498,7 +1516,9 @@ impl SourceDetector {
     /// as if it had been read, which is a receiver contradicting its own
     /// decision.
     fn refuse_claimed(&mut self) {
-        if self.events.is_empty() || (self.locked.is_empty() && self.spur.is_none()) {
+        if self.events.is_empty()
+            || (self.locked.is_empty() && self.spur.is_none() && self.seams.is_empty())
+        {
             return;
         }
         let spur = self.spur;
@@ -1507,12 +1527,14 @@ impl SourceDetector {
         // the spur while there is one to follow.
         let others = self.tracks.iter().filter(|t| t.open && !in_spur(t.src.center_hz)).count();
         let locked = &self.locked;
+        let seams = &self.seams;
         let mut refused: Vec<SourceId> = Vec::new();
         self.events.retain(|e| {
             let SourceEvent::Opened(s) = e else { return true };
             let owned =
                 locked.iter().any(|o| o.holds(s.center_hz) && s.bandwidth_hz() <= o.max_width_hz);
-            if owned || (others > 0 && in_spur(s.center_hz)) {
+            let astride = seams.iter().any(|h| (s.lo_hz..=s.hi_hz).contains(h));
+            if owned || astride || (others > 0 && in_spur(s.center_hz)) {
                 refused.push(s.id);
                 return false;
             }

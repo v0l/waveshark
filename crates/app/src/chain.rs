@@ -357,6 +357,13 @@ pub struct Plan {
     /// Where a KISS TNC is served, for packet software to use the radio
     /// through, or `None` for not served at all.
     pub kiss: Option<std::net::SocketAddr>,
+    /// Where one tuner's slice ends and the next begins, on the dial, for a
+    /// receiver stitched out of several. Empty for one tuner.
+    ///
+    /// A plan value because it is the radio's shape rather than anything an
+    /// operator set: it is read off the device on every rebuild and handed to
+    /// the detectors, which open nothing across a join.
+    pub seams: Vec<f64>,
     /// The channel being transmitted on, if any, and what it transmits.
     ///
     /// In the plan because the transmitter is part of what the receiver is
@@ -1330,6 +1337,19 @@ impl Receiver {
                     spec.label,
                     spec.min_rate() / 1e6,
                     plan.eff_rate() / 1e6
+                ));
+            }
+            // A channel put across a join of a stitched receiver is built
+            // and demodulates, but neither tuner heard it whole, so say so
+            // rather than let an operator wonder why a strong signal reads
+            // as nothing.
+            let at = plan.center.as_f64() + spec.offset_hz;
+            let half = spec.bandwidth() / 2.0;
+            if let Some(hz) = plan.seams.iter().find(|h| (at - half..=at + half).contains(h)) {
+                refused = Some(format!(
+                    "{} sits across the join at {:.4} MHz, where neither tuner hears it whole",
+                    spec.label,
+                    hz / 1e6
                 ));
             }
         }
@@ -3356,6 +3376,11 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 // The tuner's own centre, where the DC offset's movement
                 // under a strong signal reads as a burst.
                 s.insert("spur_hz".into(), pipeline::ParamValue::Float(plan.center.as_f64()));
+                // The joins of a stitched receiver inside this band, which
+                // the detector refuses to open a source across.
+                if let Some(list) = seams_in(&plan.seams, band.0, band.1) {
+                    s.insert("seams_hz".into(), pipeline::ParamValue::Text(list));
+                }
                 // The channel plan for the band, so a source found on a
                 // channel is locked to it rather than measured afresh.
                 if let Some(r) = crate::bands::raster_at((band.0 + band.1) / 2.0) {
@@ -3717,7 +3742,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         if !spec.fits_rate(rate) {
             continue;
         }
-        let tail = channel_stages(p, head, spec, plan.center.as_f64(), rate);
+        let tail = channel_stages(p, head, spec, plan.center.as_f64(), rate, &plan.seams);
         want.extend(CHAN_STAGES.iter().map(|w| chan_stage_id(w, spec, rate)));
         // Where the strip listens to it. A played channel ends in audio; a
         // decoded one is heard only if its front end has speech to give, and
@@ -3964,12 +3989,23 @@ fn channel_stages(
     spec: &ChannelSpec,
     center: f64,
     rate: f64,
+    seams: &[f64],
 ) -> u64 {
     match &spec.mode {
         ChanMode::Audio(mode) => audio_channel_stages(p, head, spec, *mode, rate),
         ChanMode::Decode(kind) => decode_channel_stages(p, head, spec, kind, center, rate),
-        ChanMode::Auto => auto_channel_stages(p, head, spec, center, rate),
+        ChanMode::Auto => auto_channel_stages(p, head, spec, center, rate, seams),
     }
+}
+
+/// The joins inside a band, as the list a detector's `seams_hz` setting takes.
+///
+/// Empty for one tuner, and empty for a band that holds no join, so the
+/// setting is absent from the graph a single radio draws.
+fn seams_in(seams: &[f64], lo: f64, hi: f64) -> Option<String> {
+    let inside: Vec<String> =
+        seams.iter().filter(|hz| (lo..=hi).contains(hz)).map(|hz| format!("{hz}")).collect();
+    (!inside.is_empty()).then(|| inside.join(","))
 }
 
 /// One channel watched by the auto front end: the band cut out around the
@@ -3986,6 +4022,7 @@ fn auto_channel_stages(
     spec: &ChannelSpec,
     center: f64,
     rate: f64,
+    seams: &[f64],
 ) -> u64 {
     use crate::patch::Source;
     use pipeline::ParamValue as V;
@@ -4029,6 +4066,12 @@ fn auto_channel_stages(
     // signal reads as a burst. Only when this channel actually covers it.
     if lo < center && center < hi {
         s.insert("spur_hz".into(), V::Float(center));
+    }
+    // A channel dropped across a join: the node is built, so the chain view
+    // still says what was asked for, and the detector inside it opens
+    // nothing on the seam.
+    if let Some(list) = seams_in(seams, lo, hi) {
+        s.insert("seams_hz".into(), V::Text(list));
     }
     if let Some(r) = crate::bands::raster_at((lo + hi) / 2.0) {
         s.insert("raster_hz".into(), V::Float(r.step));
@@ -5063,6 +5106,7 @@ pub(crate) mod tests {
             transcribe_device: String::new(),
             feeds: Vec::new(),
             kiss: None,
+            seams: Vec::new(),
             tx: None,
             scan: Default::default(),
             settings: Default::default(),
@@ -5959,6 +6003,58 @@ pub(crate) mod tests {
 
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert_eq!(rx.channels().len(), 1);
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    /// A receiver made of two tuners: the joins go into the graph, the
+    /// detectors covering one are told, and a channel dropped on one is
+    /// built and said to be on it.
+    #[test]
+    fn a_stitched_span_keeps_its_joins_out_of_what_is_opened() {
+        use pipeline::registry::SettingsExt;
+        // Two 2.4 MS/s tuners at 433 MHz meet 1.05 MHz above the midpoint,
+        // as `sources::Combined::seams` places them.
+        let seam = 434_050_000.0;
+        let mut p = plan(4_200_000.0, Hz::mhz(433));
+        p.seams = vec![seam];
+        p.fronts = vec![anywhere(Front::Auto)];
+        let patch = derived_patch(&p);
+        let span = patch
+            .stages()
+            .iter()
+            .find(|s| s.kind == "auto" && !s.settings.contains_key("channel"))
+            .expect("the span's own front end");
+        assert_eq!(span.settings.str_or("seams_hz", ""), "434050000");
+
+        // A channel on the join and a second clear of it: only the first's
+        // node is told about a seam, and only the first is reported.
+        let mut on = chan(1, seam - 433e6, Demod::Nfm);
+        on.mode = ChanMode::Auto;
+        on.bandwidth_hz = Some(40_000.0);
+        let mut clear = chan(2, -500_000.0, Demod::Nfm);
+        clear.mode = ChanMode::Auto;
+        clear.bandwidth_hz = Some(40_000.0);
+        p.channels = vec![on, clear];
+        let patch = derived_patch(&p);
+        let told: Vec<&str> = patch
+            .stages()
+            .iter()
+            .filter(|s| s.kind == "auto" && s.settings.contains_key("channel"))
+            .map(|s| s.settings.str_or("seams_hz", ""))
+            .collect();
+        assert_eq!(told.len(), 2);
+        assert_eq!(told.iter().filter(|v| **v == "434050000").count(), 1, "{told:?}");
+
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        assert_eq!(rx.channels().len(), 2, "both channels are still built");
+        let said = rx.refused.clone().expect("the operator is told about the join");
+        assert!(said.contains("CH1") && said.contains("434.0500 MHz"), "{said}");
+
+        // One tuner has no joins, so nothing is said and no setting appears.
+        p.seams.clear();
+        let patch = derived_patch(&p);
+        assert!(!patch.stages().iter().any(|s| s.settings.contains_key("seams_hz")));
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 

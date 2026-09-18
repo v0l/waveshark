@@ -347,6 +347,8 @@ impl Node for AutoNode {
         self.set_band(crate::band_of(settings));
         let spur = settings.f64_or("spur_hz", 0.0);
         self.set_spur((spur > 0.0).then_some(spur));
+        let seams = settings.str_or("seams_hz", "");
+        self.set_seams(seams.split(',').filter_map(|s| s.trim().parse().ok()).collect());
         let step = settings.f64_or("raster_hz", 0.0);
         self.set_raster((step > 0.0).then(|| (settings.f64_or("raster_origin_hz", 0.0), step)));
     }
@@ -1181,6 +1183,36 @@ mod tests {
             "the real one opened: {opened:?}"
         );
         assert!(!opened.iter().any(|o| o.abs() < 10_000.0), "the spur opened: {opened:?}");
+    }
+
+    /// The joins of a stitched receiver arrive as a setting, in dial hertz,
+    /// and nothing opens across one. Two tuners of 2.4 MS/s meeting at
+    /// 434.35 MHz, with a transmission on the join and another clear of it.
+    #[test]
+    fn a_transmission_on_a_join_between_two_tuners_does_not_open() {
+        let rate = 1_000_000.0;
+        let center = Hz::mhz(434);
+        let iq = keyed(rate, 350_000.0);
+        let mut plain = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut plain, &[spec(rate, center)]).unwrap();
+        let open = openings(&mut plain, rate, center, &iq);
+        assert!(open.iter().any(|o| (o - 350_000.0).abs() < 10_000.0), "{open:?}");
+
+        let mut stitched = AutoNode::new("auto", SourceConfig::default());
+        let mut s = pipeline::registry::Settings::new();
+        s.insert("seams_hz".into(), pipeline::ParamValue::Text("434350000".into()));
+        Node::configure(&mut stitched, &s);
+        assert_eq!(stitched.seams(), [434_350_000.0]);
+        Node::negotiate(&mut stitched, &[spec(rate, center)]).unwrap();
+        let guarded = openings(&mut stitched, rate, center, &iq);
+        assert_eq!(guarded.len(), 0, "{guarded:?}");
+
+        // A join elsewhere in the span leaves the same transmission alone.
+        let mut elsewhere = AutoNode::new("auto", SourceConfig::default());
+        elsewhere.set_seams(vec![434_100_000.0]);
+        Node::negotiate(&mut elsewhere, &[spec(rate, center)]).unwrap();
+        let clear = openings(&mut elsewhere, rate, center, &iq);
+        assert!(clear.iter().any(|o| (o - 350_000.0).abs() < 10_000.0), "{clear:?}");
     }
 
     #[test]

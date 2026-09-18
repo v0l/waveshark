@@ -1261,6 +1261,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         feeds: Vec::new(),
         iqstream: None,
         kiss: None,
+        seams: Vec::new(),
         tx: None,
         tx_capture: None,
         scan: Default::default(),
@@ -2255,6 +2256,7 @@ impl Audio {
             feeds: Vec::new(),
             iqstream: None,
             kiss: None,
+            seams: Vec::new(),
             tx: None,
             tx_capture: None,
             scan: Default::default(),
@@ -2544,6 +2546,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             feeds: Vec::new(),
             iqstream: None,
             kiss: None,
+            seams: Vec::new(),
             tx: None,
             tx_capture: None,
             scan: Default::default(),
@@ -3335,6 +3338,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             return Flow::Go;
         }
         let _t = tracing::info_span!("rebuild").entered();
+        // Where the tuners of a stitched receiver meet, read off the device
+        // here because the joins move with the dial and with the rate.
+        self.plan.seams = self.dev.seams().iter().map(|h| h.as_f64()).collect();
         // The banks understand nothing on either wideband band, so running
         // them there only spends CPU inventing unknown bursts.
         self.plan.fronts = fronts_here(&self.scanners, &self.plan, self.scan_on);
@@ -3991,6 +3997,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         transcribe_device: String::new(),
         feeds: Vec::new(),
         kiss: None,
+        seams: Vec::new(),
         tx: None,
         tx_capture: None,
         settings: Default::default(),
