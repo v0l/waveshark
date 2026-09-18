@@ -129,6 +129,22 @@ impl Transport {
     pub fn demod_write_reg(&self, page: u8, addr: u16, val: u16, len: u8) -> Result<()> {
         let data: [u8; 2] =
             if len == 1 { [(val & 0xff) as u8, 0] } else { [(val >> 8) as u8, (val & 0xff) as u8] };
+        let r = self.demod_write_once(page, addr, &data[..len as usize]);
+        // The demodulator needs a read between writes or it keeps the old
+        // value; librtlsdr reads this register for the same reason. It runs
+        // whether or not the write landed: the chip stalls endpoint zero now
+        // and then once the bulk stream is running, and this read is what
+        // clears it. Skipping it after a stalled write leaves every later
+        // control transfer stalled, so the dongle can never be retuned again.
+        let _ = self.demod_read_reg(0x0a, 0x01, 1);
+        if r.is_err() {
+            self.demod_write_once(page, addr, &data[..len as usize])?;
+            let _ = self.demod_read_reg(0x0a, 0x01, 1);
+        }
+        Ok(())
+    }
+
+    fn demod_write_once(&self, page: u8, addr: u16, data: &[u8]) -> Result<()> {
         self.iface
             .control_out(
                 ControlOut {
@@ -137,16 +153,12 @@ impl Transport {
                     request: 0,
                     value: (addr << 8) | 0x20,
                     index: 0x10 | page as u16,
-                    data: &data[..len as usize],
+                    data,
                 },
                 CTRL_TIMEOUT,
             )
             .wait()
-            .map_err(|e| Error::usb("demod write", e))?;
-        // The demodulator needs a read between writes or it keeps the old
-        // value; librtlsdr reads this register for the same reason.
-        let _ = self.demod_read_reg(0x0a, 0x01, 1);
-        Ok(())
+            .map_err(|e| Error::usb("demod write", e))
     }
 
     pub fn i2c_write(&self, i2c_addr: u8, data: &[u8]) -> Result<()> {
