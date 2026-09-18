@@ -122,7 +122,8 @@ the code is in the commit log.
 ### Fixed
 
 - The RTL-SDR is driven over USB by the receiver itself, with no librtlsdr
-  anywhere: nothing to install on Linux, one file on Windows.
+  anywhere: nothing to install on Linux, one file on Windows, and two dongles
+  of a kind told apart by the port they are in.
 - LimeSuite is loaded when a LimeSDR is looked for, so the Linux packages
   start on a machine with another version of it, or none.
 - A stripe across the waterfall and a jump in the trace when the dial moved.

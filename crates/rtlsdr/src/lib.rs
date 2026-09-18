@@ -19,8 +19,10 @@ use usb::DirectSampling;
 /// transfer is ~3.4 ms, so 64 is roughly 220 ms of slack before dropping.
 const QUEUE_DEPTH: usize = 64;
 
+pub use usb::Enumerated;
+
 /// List every RTL-SDR attached to the system.
-pub fn enumerate() -> Vec<usb::Enumerated> {
+pub fn enumerate() -> Vec<Enumerated> {
     usb::RtlSdr::list()
 }
 
