@@ -222,6 +222,29 @@ pub fn crc32(data: &[u8], poly: u32, init: u32) -> u32 {
     crc
 }
 
+/// MSB-first CRC of any width over a run of bits rather than of bytes.
+///
+/// A field whose length is not a whole number of bytes has its check taken
+/// over exactly the bits it occupies, so a byte-wise CRC cannot be used on it
+/// at all: NXDN protects 26 bits with a CRC-6 and 80 with a CRC-12, and
+/// rounding either up to bytes changes the answer. `width` is the register in
+/// bits, `poly` its normal representation with the implicit top term dropped.
+/// There is no final inversion, so a caller compares against the bits the
+/// transmitter sent rather than against a residue.
+pub fn crc_bits(bits: &[bool], width: u32, poly: u32, init: u32) -> u32 {
+    let mask = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
+    let top = 1u32 << (width - 1);
+    let mut crc = init & mask;
+    for &b in bits {
+        let high = crc & top != 0;
+        crc = (crc << 1) & mask;
+        if b != high {
+            crc ^= poly;
+        }
+    }
+    crc & mask
+}
+
 /// LSB-first CRC-16, `poly` in its reflected representation: 0x8408 is the
 /// CCITT polynomial as X.25, ARINC 618 and a dozen packet radios use it.
 pub fn crc16le(data: &[u8], poly: u16, init: u16) -> u16 {
@@ -1146,6 +1169,26 @@ mod tests {
     fn crc8_matches_a_known_vector() {
         // CRC-8/NRSC-5: poly 0x31, init 0xff, "123456789" -> 0xf7.
         assert_eq!(crc8(b"123456789", 0x31, 0xff), 0xf7);
+    }
+
+    /// Over whole bytes a bit CRC is the byte CRC, and over the part-byte
+    /// lengths NXDN uses it agrees with MMDVMHost's `NXDNCRC`, run over the
+    /// same ten bytes 01 23 45 67 89 ab cd ef 10 32.
+    #[test]
+    fn a_bit_crc_matches_the_byte_crc_and_nxdns_three_lengths() {
+        let bits = |d: &[u8]| -> Vec<bool> {
+            d.iter().flat_map(|b| (0..8).rev().map(move |k| b >> k & 1 != 0)).collect()
+        };
+        assert_eq!(
+            crc_bits(&bits(b"123456789"), 8, 0x31, 0xff),
+            u32::from(crc8(b"123456789", 0x31, 0xff))
+        );
+        assert_eq!(crc_bits(&bits(b"123456789"), 16, 0x1021, 0xffff), 0x29b1);
+
+        let v = bits(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x10, 0x32]);
+        assert_eq!(crc_bits(&v[..26], 6, 0x27, 0x3f), 0x24);
+        assert_eq!(crc_bits(&v[..80], 12, 0x80f, 0xfff), 0x4ab);
+        assert_eq!(crc_bits(&v[..80], 15, 0x4cc5, 0x7fff), 0x5453);
     }
 
     #[test]

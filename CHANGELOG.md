@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
+  whether the speech is enciphered. No sound yet.
 - DAB ensembles on band III: the ensemble name, its stations, their programme
   types and bit rates. No sound yet.
 - IEEE 802.15.4 at 2.4 GHz: the addresses and networks under Zigbee, Thread

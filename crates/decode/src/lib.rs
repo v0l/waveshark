@@ -68,6 +68,7 @@ pub mod morse;
 pub mod mpegts;
 pub mod mrz;
 pub mod nrf24;
+pub mod nxdn;
 pub mod odid;
 pub mod p25;
 pub mod pocsag;
