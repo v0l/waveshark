@@ -15,10 +15,10 @@ name: Generic-Remote
 timing: { pwm: [464, 1404], reset_us: 1800, tolerance_us: 200 }
 frame: { bits: 25, find: exact }
 fields:
-  - { name: id, bits: 16, not: true, min: 1 }
-  - { name: cmd, bits: 8, not: true, min: 1 }
+  - { name: id, bits: 16, data: int, not: true, min: 1 }
+  - { name: cmd, bits: 8, data: int, not: true, min: 1 }
   - { bits: 1, const: 1 }
-  - { name: tristate, at: 0, bits: 24, type: tristate, not: true }
+  - { name: tristate, at: 0, bits: 24, data: text, type: tristate, not: true }
 vectors:
   - { hex: "5e c0 f7 80", fields: { id: 0xa13f, cmd: 0x08, tristate: "XX0Z011100X0" } }
   - { hex: "00 ff 0f 80", fields: { id: 0xff00, cmd: 0xf0, tristate: "111100001100" } }

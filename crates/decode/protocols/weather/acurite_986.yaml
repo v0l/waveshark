@@ -9,11 +9,11 @@ frame: { bits: 40, find: rows, copies: 1, row_bits: [39, 43], not_constant: 24, 
 transform: [reflect_bytes]
 check: { kind: crc8_le, poly: 0x07, init: 0, over: [0, 32], at: 32 }
 fields:
-  - { name: temperature_c, bits: 8, type: sign_mag, convert: f_to_c, round: 1, min: -40, max: 32.3 }
-  - { name: id, bits: 16 }
-  - { name: status, bits: 7 }
-  - { name: channel, bits: 1, map: { 0: 1R, 1: 2F } }
-  - { name: battery_ok, at: 30, bits: 1, type: bool, not: true }
+  - { name: temperature_c, bits: 8, data: float, unit: c, type: sign_mag, convert: f_to_c, round: 1, min: -40, max: 32.3 }
+  - { name: id, bits: 16, data: int }
+  - { name: status, bits: 7, data: int }
+  - { name: channel, bits: 1, data: text, map: { 0: 1R, 1: 2F } }
+  - { name: battery_ok, at: 30, bits: 1, data: bool, type: bool, not: true }
   - { bits: 8, hidden: true }
 vectors:
   - hex: "85 10 ac 02 e3"

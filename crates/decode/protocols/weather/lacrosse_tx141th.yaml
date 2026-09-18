@@ -6,12 +6,12 @@ timing: { pwm: [208, 417], sync_us: 833, reset_us: 1700 }
 frame: { bits: 40, invert: true, repeats: 12 }
 check: { kind: lfsr8_reflect, gen: 0x31, key: 0xf4, over: [0, 32], at: 32 }
 fields:
-  - { name: id, bits: 8, min: 1 }
-  - { name: battery_ok, bits: 1, type: bool, not: true }
-  - { name: test, bits: 1, type: bool, omit_if: 0 }
-  - { name: channel, bits: 2 }
-  - { name: temperature_c, bits: 12, scale: 0.1, offset: -50, min: -40, max: 60 }
-  - { name: humidity_pct, bits: 8, min: 1, max: 100 }
+  - { name: id, bits: 8, data: int, min: 1 }
+  - { name: battery_ok, bits: 1, data: bool, type: bool, not: true }
+  - { name: test, bits: 1, data: bool, type: bool, omit_if: 0 }
+  - { name: channel, bits: 2, data: int }
+  - { name: temperature_c, bits: 12, data: float, unit: c, scale: 0.1, offset: -50, min: -40, max: 60 }
+  - { name: humidity_pct, bits: 8, data: int, unit: pct, min: 1, max: 100 }
   - { bits: 8, hidden: true }
 vectors:
   - hex: "9c 12 e0 2c e7"

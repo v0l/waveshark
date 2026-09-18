@@ -7,10 +7,10 @@ frame: { bits: 64 }
 check: { kind: crc8, poly: 0x07, init: 0xf0, over: [0, 56], at: 56 }
 fields:
   - { bits: 4, const: 0xf }
-  - { name: flags, bits: 8, type: hex }
-  - { name: id, bits: 28, type: hex, upper: true }
-  - { name: pressure_kpa, bits: 8, scale: 2.5 }
-  - { name: temperature_c, bits: 8, offset: -50, round: 0, min: -50, max: 100 }
+  - { name: flags, bits: 8, data: text, type: hex }
+  - { name: id, bits: 28, data: text, type: hex, upper: true }
+  - { name: pressure_kpa, bits: 8, data: float, unit: kpa, scale: 2.5 }
+  - { name: temperature_c, bits: 8, data: float, unit: c, offset: -50, round: 0, min: -50, max: 100 }
   - { bits: 8, hidden: true }
 vectors:
   - hex: "f3 1a bc de f0 64 49 8e"

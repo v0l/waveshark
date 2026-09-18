@@ -15,14 +15,14 @@ timing: { ppm: [2000, 4000], reset_us: 10000 }
 frame: { bits: 36, find: rows, copies: 2, repeats: 7 }
 yields_to: [AlectoV1-Temperature, AlectoV1-Rain]
 fields:
-  - { name: subtype, bits: 4, in: [9, 5] }
-  - { name: id, bits: 8 }
-  - { name: battery_ok, bits: 1, type: bool }
-  - { name: button, bits: 1, type: bool }
-  - { name: channel, bits: 2, offset: 1 }
-  - { name: temperature_c, bits: 12, type: int, scale: 0.1 }
+  - { name: subtype, bits: 4, data: int, in: [9, 5] }
+  - { name: id, bits: 8, data: int }
+  - { name: battery_ok, bits: 1, data: bool, type: bool }
+  - { name: button, bits: 1, data: bool, type: bool }
+  - { name: channel, bits: 2, data: int, offset: 1 }
+  - { name: temperature_c, bits: 12, data: float, unit: c, type: int, scale: 0.1 }
   # 0xcc is the sensor saying it has no humidity element; zero is a reading
-  - { name: humidity_pct, bits: 8, omit_if: 0xcc }
+  - { name: humidity_pct, bits: 8, data: int, unit: pct, omit_if: 0xcc }
 vectors:
   - hex: "95 c9 0c 23 e0"
     fields: { subtype: 9, id: 0x5c, battery_ok: true, button: false, channel: 2, temperature_c: 19.4, humidity_pct: 62 }

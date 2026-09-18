@@ -1135,7 +1135,12 @@ fn readings(
         if name.is_empty() || out.iter().any(|(n, _, _)| n == name) {
             continue;
         }
-        out.push((name.clone(), value.clone(), unit_of(name)));
+        // a decoder that states the unit outranks the name's suffix
+        let unit = match d.field_type(name).and_then(|t| t.unit) {
+            Some(u) => Some(u.symbol().to_string()),
+            None => unit_of(name),
+        };
+        out.push((name.clone(), value.clone(), unit));
     }
     if p.rssi_dbfs().is_finite() {
         out.push((

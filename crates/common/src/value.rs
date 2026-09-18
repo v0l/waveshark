@@ -42,3 +42,86 @@ impl std::fmt::Display for Value {
         }
     }
 }
+
+/// The type a field's value has, stated rather than read off the value
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Data {
+    Int,
+    Float,
+    Bool,
+    Text,
+}
+
+impl Data {
+    pub fn of(v: &Value) -> Self {
+        match v {
+            Value::Int(_) => Self::Int,
+            Value::Float(_) => Self::Float,
+            Value::Bool(_) => Self::Bool,
+            Value::Text(_) => Self::Text,
+        }
+    }
+}
+
+/// The unit a reading is in, a closed set so a chart or an entity can key
+/// on it rather than on the field's name
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unit {
+    Celsius,
+    Fahrenheit,
+    Percent,
+    HectoPascal,
+    KiloPascal,
+    Psi,
+    Volt,
+    Millivolt,
+    Ampere,
+    Watt,
+    KilowattHour,
+    KmPerHour,
+    MetresPerSecond,
+    Knot,
+    Millimetre,
+    Degree,
+    Ppm,
+    Decibel,
+    Hertz,
+    Megahertz,
+    Second,
+}
+
+impl Unit {
+    /// The symbol a reading is shown with
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Celsius => "\u{b0}C",
+            Self::Fahrenheit => "\u{b0}F",
+            Self::Percent => "%",
+            Self::HectoPascal => "hPa",
+            Self::KiloPascal => "kPa",
+            Self::Psi => "psi",
+            Self::Volt => "V",
+            Self::Millivolt => "mV",
+            Self::Ampere => "A",
+            Self::Watt => "W",
+            Self::KilowattHour => "kWh",
+            Self::KmPerHour => "km/h",
+            Self::MetresPerSecond => "m/s",
+            Self::Knot => "kn",
+            Self::Millimetre => "mm",
+            Self::Degree => "\u{b0}",
+            Self::Ppm => "ppm",
+            Self::Decibel => "dB",
+            Self::Hertz => "Hz",
+            Self::Megahertz => "MHz",
+            Self::Second => "s",
+        }
+    }
+}
+
+/// What a field is: its value type and, for a reading, its unit
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldType {
+    pub data: Data,
+    pub unit: Option<Unit>,
+}

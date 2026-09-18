@@ -344,7 +344,7 @@ pub enum Kind {
     Hex,
     /// Pairs of bits as a PT2262 tristate string, `0`, `1` or `F`
     Tristate,
-    /// Which of the `unit` wide slots is not `idle`, counted from one at
+    /// Which of the `slot` wide slots is not `idle`, counted from one at
     /// the low end; a view for a remote with a slot per button
     Pick,
     /// Text built from other fields, `{name}` or `{name:02}` each
@@ -360,11 +360,91 @@ pub enum Convert {
     FToC,
 }
 
+/// The value type a field reports, as the YAML names it
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Data {
+    Int,
+    Float,
+    Bool,
+    Text,
+}
+
+impl From<Data> for common::Data {
+    fn from(d: Data) -> Self {
+        match d {
+            Data::Int => Self::Int,
+            Data::Float => Self::Float,
+            Data::Bool => Self::Bool,
+            Data::Text => Self::Text,
+        }
+    }
+}
+
+/// A unit as the YAML names it, the way the field names already did
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Unit {
+    C,
+    F,
+    Pct,
+    Hpa,
+    Kpa,
+    Psi,
+    V,
+    Mv,
+    A,
+    W,
+    Kwh,
+    KmH,
+    MS,
+    Kt,
+    Mm,
+    Deg,
+    Ppm,
+    Db,
+    Hz,
+    Mhz,
+    S,
+}
+
+impl From<Unit> for common::Unit {
+    fn from(u: Unit) -> Self {
+        match u {
+            Unit::C => Self::Celsius,
+            Unit::F => Self::Fahrenheit,
+            Unit::Pct => Self::Percent,
+            Unit::Hpa => Self::HectoPascal,
+            Unit::Kpa => Self::KiloPascal,
+            Unit::Psi => Self::Psi,
+            Unit::V => Self::Volt,
+            Unit::Mv => Self::Millivolt,
+            Unit::A => Self::Ampere,
+            Unit::W => Self::Watt,
+            Unit::Kwh => Self::KilowattHour,
+            Unit::KmH => Self::KmPerHour,
+            Unit::MS => Self::MetresPerSecond,
+            Unit::Kt => Self::Knot,
+            Unit::Mm => Self::Millimetre,
+            Unit::Deg => Self::Degree,
+            Unit::Ppm => Self::Ppm,
+            Unit::Db => Self::Decibel,
+            Unit::Hz => Self::Hertz,
+            Unit::Mhz => Self::Megahertz,
+            Unit::S => Self::Second,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
     #[serde(default)]
     pub name: String,
+    /// What the field reports; every reported field says
+    pub data: Option<Data>,
+    /// The unit a reading is in
+    pub unit: Option<Unit>,
     #[serde(default)]
     pub bits: usize,
     /// Bit position from the frame's start, for a view over other fields
@@ -411,7 +491,7 @@ pub struct Field {
     pub upper: bool,
     /// Slot width for `pick`
     #[serde(default)]
-    pub unit: usize,
+    pub slot: usize,
     /// Bits of each byte that carry the value, the rest being parity: the
     /// field's width still counts every bit on the air
     pub per_byte: Option<usize>,
@@ -432,6 +512,35 @@ impl Field {
 
     pub fn is_reported(&self) -> bool {
         !self.hidden && self.r#const.is_none() && !self.name.is_empty()
+    }
+
+    /// The value type the line computes, which `data` has to agree with
+    pub fn computes(&self) -> Data {
+        if let Some(l) = self.map.values().chain(self.other.iter()).next() {
+            return match l {
+                Lit::Bool(_) => Data::Bool,
+                Lit::Int(_) => Data::Int,
+                Lit::Float(_) => Data::Float,
+                Lit::Text(_) => Data::Text,
+            };
+        }
+        match self.kind {
+            Kind::Bool => Data::Bool,
+            Kind::Hex | Kind::Tristate | Kind::Format => Data::Text,
+            Kind::Pick => Data::Int,
+            _ => {
+                let whole = self.scale.is_none_or(|s| s.fract() == 0.0);
+                if !whole || self.convert.is_some() || self.round.is_some() {
+                    Data::Float
+                } else {
+                    Data::Int
+                }
+            }
+        }
+    }
+
+    pub fn field_type(&self) -> common::FieldType {
+        common::FieldType { data: self.computes().into(), unit: self.unit.map(Into::into) }
     }
 }
 
@@ -518,6 +627,30 @@ impl Desc {
         }
         for fld in all_fields(&self.fields) {
             let n = &fld.name;
+            if fld.is_reported() {
+                match fld.data {
+                    None => return Err(format!("{name}: field {n} says no data type")),
+                    Some(d) if d != fld.computes() => {
+                        return Err(format!(
+                            "{name}: field {n} says {d:?} but its line reads a {:?}",
+                            fld.computes()
+                        ));
+                    }
+                    Some(_) => {}
+                }
+                if fld.unit.is_some() && fld.computes() == Data::Text {
+                    return Err(format!("{name}: field {n} is text with a unit"));
+                }
+                let mixed = fld.map.values().chain(fld.other.iter()).any(|l| match l {
+                    Lit::Bool(_) => fld.computes() != Data::Bool,
+                    Lit::Int(_) => fld.computes() != Data::Int,
+                    Lit::Float(_) => fld.computes() != Data::Float,
+                    Lit::Text(_) => fld.computes() != Data::Text,
+                });
+                if mixed {
+                    return Err(format!("{name}: field {n} maps to values of more than one type"));
+                }
+            }
             if fld.kind == Kind::Format {
                 if fld.format.is_empty() || n.is_empty() {
                     return Err(format!("{name}: a format field needs a name and a format"));
@@ -551,9 +684,9 @@ impl Desc {
                 return Err(format!("{name}: field {n} is tristate but not whole pairs"));
             }
             if fld.kind == Kind::Pick
-                && (fld.unit == 0 || fld.bits % fld.unit != 0 || !fld.is_view())
+                && (fld.slot == 0 || fld.bits % fld.slot != 0 || !fld.is_view())
             {
-                return Err(format!("{name}: field {n} is a pick without a unit dividing it"));
+                return Err(format!("{name}: field {n} is a pick without a slot dividing it"));
             }
             if fld.scale == Some(0.0) {
                 return Err(format!("{name}: field {n} has a zero scale"));

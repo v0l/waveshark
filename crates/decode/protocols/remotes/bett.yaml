@@ -7,6 +7,6 @@ name: Bett
 timing: { pwm: [340, 2000], reset_us: 15000 }
 frame: { bits: 18, invert: true, find: tile, min_transitions: 3, repeats: 3 }
 fields:
-  - { name: code, bits: 18 }
+  - { name: code, bits: 18, data: int }
 vectors:
   - { hex: "ea f3 40", fields: { code: 0x3abcd } }

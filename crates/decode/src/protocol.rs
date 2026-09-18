@@ -26,6 +26,9 @@ pub struct Report {
     pub crc_valid: Option<bool>,
     /// Raw frame, for logging and for reporting unknown variants.
     pub raw: Vec<u8>,
+    /// What each field is, for a decoder that says: a description states
+    /// the type and unit of every field it reports
+    pub types: BTreeMap<String, common::FieldType>,
     /// Who transmitted it, where the frame says so.
     ///
     /// Filled from the `id` field, because in this family of protocols that
@@ -38,7 +41,14 @@ pub struct Report {
 
 impl Report {
     pub fn new(model: &'static str) -> Self {
-        Self { model, fields: BTreeMap::new(), crc_valid: None, raw: Vec::new(), device: None }
+        Self {
+            model,
+            fields: BTreeMap::new(),
+            types: BTreeMap::new(),
+            crc_valid: None,
+            raw: Vec::new(),
+            device: None,
+        }
     }
 
     pub fn set(mut self, k: &str, v: Value) -> Self {

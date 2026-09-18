@@ -5,11 +5,11 @@ timing: { ppm: [2000, 4000], reset_us: 10000 }
 frame: { bits: 32, row_bits: [32, 33], not_constant: 24, repeats: 3 }
 check: { kind: lfsr8, gen: 0x98, key: 0xf1, over: [0, 24], at: 24 }
 fields:
-  - { name: id, bits: 8, min: 1 }
-  - { name: battery_ok, bits: 1, type: bool }
-  - { name: button, bits: 1, type: bool }
-  - { name: channel, bits: 2, offset: 1 }
-  - { name: temperature_c, bits: 12, type: int, scale: 0.1, min: -40, max: 70 }
+  - { name: id, bits: 8, data: int, min: 1 }
+  - { name: battery_ok, bits: 1, data: bool, type: bool }
+  - { name: button, bits: 1, data: bool, type: bool }
+  - { name: channel, bits: 2, data: int, offset: 1 }
+  - { name: temperature_c, bits: 12, data: float, unit: c, type: int, scale: 0.1, min: -40, max: 70 }
   - { bits: 8, hidden: true }
 vectors:
   - hex: "a3 80 65 ea"

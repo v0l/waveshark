@@ -415,6 +415,7 @@ pub fn decoded_event(
         .with_text(report.to_string())
         .with_detail(report.fields_line())
         .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .with_types(report.types.iter().map(|(k, t)| (k.clone(), *t)).collect())
         .with_modulation(modulation)
         .with_crc(report.crc_valid);
     if let Some(id) = &report.device {

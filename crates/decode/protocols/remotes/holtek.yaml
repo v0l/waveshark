@@ -9,9 +9,9 @@ name: Holtek
 timing: { pwm: [430, 870], reset_us: 4000 }
 frame: { bits: 40, invert: true, find: tile, min_transitions: 3, repeats: 3 }
 fields:
-  - { name: code, bits: 40 }
+  - { name: code, bits: 40, data: int }
   - { at: 0, bits: 4, const: 0x5 }
-  - { name: serial, at: 4, bits: 20, reflect: true }
-  - { name: btn, at: 24, bits: 16, type: pick, unit: 4, idle: 0xa }
+  - { name: serial, at: 4, bits: 20, data: int, reflect: true }
+  - { name: btn, at: 24, bits: 16, data: int, type: pick, slot: 4, idle: 0xa }
 vectors:
   - { hex: "5a 2c 48 aa a5", fields: { code: 0x5a2c48aaa5, serial: 0x12345, btn: 1 } }

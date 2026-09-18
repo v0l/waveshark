@@ -5,8 +5,8 @@ name: Ansonic
 timing: { pwm: [555, 1111], reset_us: 2500 }
 frame: { bits: 12, find: tile, min_transitions: 3, repeats: 3 }
 fields:
-  - { name: code, bits: 12 }
-  - { name: cnt, at: 0, bits: 12 }
-  - { name: btn, at: 9, bits: 2 }
+  - { name: code, bits: 12, data: int }
+  - { name: cnt, at: 0, bits: 12, data: int }
+  - { name: btn, at: 9, bits: 2, data: int }
 vectors:
   - { hex: "12 30", fields: { code: 0x123, cnt: 0x123, btn: 1 } }
