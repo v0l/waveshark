@@ -17,6 +17,7 @@ pub mod c4fm;
 pub mod channelizer;
 pub mod classify;
 pub mod conv;
+pub mod crcframe;
 pub mod ctcss;
 pub mod cw;
 pub mod d8psk;

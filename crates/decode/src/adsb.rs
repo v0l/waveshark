@@ -122,7 +122,9 @@ impl fmt::Display for FrameError {
 /// this bit rate a receiver sees far more noise than aircraft, so anything
 /// that fails it has to be dropped without a second thought.
 pub fn crc24(data: &[u8]) -> u32 {
-    const POLY: u32 = 0x00ff_f409;
+    // The demodulator frames on this polynomial as well as checking it, so it
+    // is declared beside the waveform.
+    const POLY: u32 = dsp::modes::CRC24_POLY;
     let mut rem: u32 = 0;
     for &b in data {
         rem ^= (b as u32) << 16;

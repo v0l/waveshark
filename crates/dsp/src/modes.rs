@@ -6,7 +6,9 @@
 //! threshold detector producing mark and gap durations has nothing to measure.
 //! What works instead is correlation against a known preamble followed by
 //! comparing the energy in the two halves of each bit, which is what this
-//! does.
+//! does. A second pass then frames by parity alone, sliding a frame-length
+//! window along the bit stream and keeping any position whose CRC comes to
+//! zero, which reads a transmission whose preamble another aircraft sat on.
 //!
 //! ```text
 //!  us  0   1   2   3   4   5   6   7   8      9     ...  120
@@ -70,6 +72,8 @@ pub struct ModeSConfig {
     pub preamble_ratio: f32,
     /// Minimum preamble amplitude, as a fraction of full scale.
     pub min_level: f32,
+    /// Whether to frame by the CRC as well as by the preamble
+    pub crc_framing: bool,
 }
 
 impl Default for ModeSConfig {
@@ -78,9 +82,29 @@ impl Default for ModeSConfig {
         // 3:1 finds 14 of its 40 frames, 2.5:1 finds 25, 2:1 finds 27, and
         // below 2:1 nothing more appears. Looser costs only CPU, because the
         // validator rejects what the CRC does not like, so 2:1 it is.
-        Self { preamble_ratio: 2.0, min_level: 0.004 }
+        Self { preamble_ratio: 2.0, min_level: 0.004, crc_framing: true }
     }
 }
+
+/// Mode S parity generator, 0xFFF409
+///
+/// Here rather than in the frame layer because the demodulator frames on it:
+/// a window of bits whose remainder comes to zero is a frame wherever it sits,
+/// preamble or none. `decode::adsb::crc24` computes the same polynomial over
+/// whole frames.
+pub const CRC24_POLY: u32 = 0x00ff_f409;
+
+/// How far above the block's median magnitude a CRC-framed window must sit.
+///
+/// The preamble test has its own ratio against the quiet slots; a window found
+/// by its parity alone has no preamble to measure, so the only thing saying it
+/// is a transmission rather than a lucky patch of noise is its level.
+///
+/// Measured both ways. On the 1090 MHz capture the pass finds the same two
+/// extra frames at 0:1, 4:1 and 6:1, loses one at 8:1 and two at 12:1. On ten
+/// minutes of synthetic noise at 2.4 MS/s it frames 8 windows with no gate at
+/// all and none at 4:1.
+const CRC_FLOOR_RATIO: f32 = 4.0;
 
 /// Preamble pulse centres, in microseconds from the start of the frame.
 const PULSES_US: [f32; 4] = [0.0, 1.0, 3.5, 4.5];
@@ -106,6 +130,13 @@ pub struct ModeSDetector {
     /// is neither found inside another nor reported twice when the buffer
     /// boundary makes it get scanned twice.
     next_start: u64,
+    /// Running sum of magnitudes, so a half-chip window costs two lookups
+    /// rather than a loop. Kept across calls only to keep the allocation.
+    sums: Vec<f64>,
+    bits: Vec<bool>,
+    /// Frames already reported, with where they started, so the overlap two
+    /// calls scan twice does not report one frame twice.
+    recent: Vec<(u64, Vec<u8>)>,
 }
 
 impl ModeSDetector {
@@ -117,6 +148,9 @@ impl ModeSDetector {
             tail_at: 0,
             seen: 0,
             next_start: 0,
+            sums: Vec::new(),
+            bits: Vec::new(),
+            recent: Vec::new(),
         }
     }
 
@@ -163,6 +197,7 @@ impl ModeSDetector {
         // runs off the end of the buffer is left for the next call, which
         // will see it whole because the tail carries it over.
         let short_need = self.samples_for(SHORT_BITS);
+        let mut found: Vec<ModeSFrame> = Vec::new();
         let mut i = 0usize;
         while i + short_need <= mag.len() {
             if base + i as u64 <= self.next_start {
@@ -182,11 +217,23 @@ impl ModeSDetector {
                     // preambles. Held as an absolute index so it survives the
                     // buffer boundary as well.
                     self.next_start = base + end as u64;
-                    out.push(ModeSFrame { at_sample: base + start as u64, ..f });
+                    found.push(ModeSFrame { at_sample: base + start as u64, ..f });
                     i = end;
                 }
                 None => i += 1,
             }
+        }
+
+        if self.cfg.crc_framing {
+            self.crc_pass(&mag, base, valid, &mut found);
+        }
+
+        // The two searches walk the buffer independently, so what they find
+        // together is not in order. A consumer reads sample indices as time.
+        found.sort_by_key(|f| f.at_sample);
+        for f in found {
+            self.recent.push((f.at_sample, f.bytes.clone()));
+            out.push(f);
         }
 
         // Keep enough for the longest frame that could have started just past
@@ -195,6 +242,143 @@ impl ModeSDetector {
         let keep = self.frame_samples().min(mag.len());
         self.tail_at = base + (mag.len() - keep) as u64;
         self.tail = mag.split_off(mag.len() - keep);
+        let from = self.tail_at.saturating_sub(self.frame_samples() as u64);
+        self.recent.retain(|(at, _)| *at >= from);
+    }
+
+    /// Frame by parity: slide a frame-length window along the bit stream and
+    /// keep any position whose CRC comes to zero.
+    ///
+    /// The point is the frames a preamble search cannot have. Where two
+    /// aircraft overlap, the later one's preamble lands in the earlier one's
+    /// data and is destroyed, but its bits are still there to be read. Cost is
+    /// kept off the hot path two ways: the half-chip energies come from a
+    /// running sum, and the parity is a running remainder
+    /// ([`crate::crcframe::SlidingCrc`]), so a bit position is a handful of
+    /// operations rather than a 112 bit CRC.
+    fn crc_pass(
+        &mut self,
+        mag: &[f32],
+        base: u64,
+        valid: &dyn Fn(&ModeSFrame) -> bool,
+        found: &mut Vec<ModeSFrame>,
+    ) {
+        let spus = self.spus as f64;
+        let half = spus * 0.5;
+        if mag.len() < self.samples_for(LONG_BITS) {
+            return;
+        }
+        self.sums.clear();
+        self.sums.reserve(mag.len() + 1);
+        let mut acc = 0.0f64;
+        self.sums.push(0.0);
+        for m in mag {
+            acc += *m as f64;
+            self.sums.push(acc);
+        }
+        let floor = median(mag);
+        let sums = std::mem::take(&mut self.sums);
+        let mean = |from: f64, to: f64| -> f32 {
+            let a = (from.ceil().max(0.0) as usize).min(mag.len());
+            let b = (to.ceil().max(1.0) as usize).min(mag.len());
+            if a >= b {
+                return 0.0;
+            }
+            ((sums[b] - sums[a]) / (b - a) as f64) as f32
+        };
+
+        // One stream per whole-sample offset covers every phase: within a
+        // stream a bit is `spus` samples on, so offsets 0..spus exhaust the
+        // starting positions a frame can have.
+        let offsets = spus.ceil() as usize;
+        let mut bits = std::mem::take(&mut self.bits);
+        for offset in 0..offsets {
+            let count = ((mag.len() as f64 - offset as f64) / spus).floor() as usize;
+            let count = count.saturating_sub(1);
+            bits.clear();
+            bits.reserve(count);
+            for k in 0..count {
+                let p = offset as f64 + k as f64 * spus;
+                bits.push(mean(p, p + half) > mean(p + half, p + spus));
+            }
+            let mut long = crate::crcframe::SlidingCrc::new(CRC24_POLY, LONG_BITS);
+            let mut short = crate::crcframe::SlidingCrc::new(CRC24_POLY, SHORT_BITS);
+            for k in 0..bits.len() {
+                let (l, s) = (long.push(bits[k]), short.push(bits[k]));
+                // DF17 and DF18 are the only long frames carrying a plain
+                // CRC, and DF11 the only short one, so every other downlink
+                // format reaching zero here is a coincidence rather than a
+                // frame.
+                let window = match (l, s) {
+                    (true, _) if k + 1 >= LONG_BITS => Some(LONG_BITS),
+                    (_, true) if k + 1 >= SHORT_BITS => Some(SHORT_BITS),
+                    _ => None,
+                };
+                let Some(n) = window else { continue };
+                let at = k + 1 - n;
+                let df = bits[at..at + 5].iter().fold(0u8, |a, b| (a << 1) | *b as u8);
+                let wanted = if n == LONG_BITS { matches!(df, 17 | 18) } else { df == 11 };
+                if !wanted {
+                    continue;
+                }
+                let data = offset as f64 + at as f64 * spus;
+                let Some(f) = self.crc_frame(&bits[at..at + n], data, &mean, floor) else {
+                    continue;
+                };
+                let start = base + (data - DATA_US as f64 * spus).max(0.0) as u64;
+                let f = ModeSFrame { at_sample: start, ..f };
+                if self.already(&f) || found.iter().any(|g| same_frame(g, &f, spus)) {
+                    continue;
+                }
+                if valid(&f) {
+                    found.push(f);
+                }
+            }
+        }
+        bits.clear();
+        self.bits = bits;
+        self.sums = sums;
+    }
+
+    /// Whether a frame was already reported on an earlier call, which the
+    /// overlap between one call's tail and the next one's scan can produce.
+    fn already(&self, f: &ModeSFrame) -> bool {
+        self.recent.iter().any(|(at, bytes)| {
+            bytes == &f.bytes && at.abs_diff(f.at_sample) <= (2.0 * self.spus) as u64 + 2
+        })
+    }
+
+    /// Turn a window of bits that passed its parity into a frame, measuring
+    /// the level it was read at, or reject it as too close to the floor.
+    fn crc_frame(
+        &self,
+        bits: &[bool],
+        data: f64,
+        mean: &dyn Fn(f64, f64) -> f32,
+        floor: f32,
+    ) -> Option<ModeSFrame> {
+        let spus = self.spus as f64;
+        let half = spus * 0.5;
+        let (mut high, mut weak) = (0.0f32, 0u16);
+        let mut levels = Vec::with_capacity(bits.len());
+        for k in 0..bits.len() {
+            let p = data + k as f64 * spus;
+            let (a, b) = (mean(p, p + half), mean(p + half, p + spus));
+            levels.push((a, b));
+            high += a.max(b);
+        }
+        high /= bits.len() as f32;
+        if high < self.cfg.min_level || high < floor * CRC_FLOOR_RATIO {
+            return None;
+        }
+        for (a, b) in levels {
+            if (a - b).abs() < high * 0.1 {
+                weak += 1;
+            }
+        }
+        let bytes =
+            bits.chunks(8).map(|c| c.iter().fold(0u8, |a, b| (a << 1) | *b as u8)).collect();
+        Some(ModeSFrame { bytes, at_sample: 0, rssi_dbfs: dbfs(high), weak_bits: weak })
     }
 
     fn samples_for(&self, bits: usize) -> usize {
@@ -340,6 +524,25 @@ impl ModeSDetector {
     }
 }
 
+/// Whether two frames are one frame found twice, by both searches or by two
+/// sampling offsets of the same search.
+fn same_frame(a: &ModeSFrame, b: &ModeSFrame, spus: f64) -> bool {
+    a.bytes == b.bytes && a.at_sample.abs_diff(b.at_sample) <= (2.0 * spus) as u64 + 2
+}
+
+/// Middle magnitude of a block, as the level a CRC-framed window is measured
+/// against. Subsampled, since a percentile of a few thousand samples is the
+/// same number as a percentile of sixty thousand and costs a hundredth as
+/// much.
+fn median(mag: &[f32]) -> f32 {
+    let mut v: Vec<f32> = mag.iter().step_by(32).copied().collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v[v.len() / 2]
+}
+
 /// Whether a downlink format is one of the 112 bit ones.
 ///
 /// Fixed by the standard: DF 16 and above are long, everything below is short,
@@ -380,7 +583,12 @@ mod tests {
 
     /// Deterministic pseudo-noise, so a failure is reproducible.
     fn noisy(v: &mut [C32], level: f32) {
-        let mut state = 0x2545_f491u32;
+        noisy_from(v, level, 0x2545_f491);
+    }
+
+    /// As [`noisy`], carrying the generator's state so a long run is not the
+    /// same short run over and over.
+    fn noisy_from(v: &mut [C32], level: f32, mut state: u32) -> u32 {
         for s in v.iter_mut() {
             state ^= state << 13;
             state ^= state >> 17;
@@ -388,6 +596,7 @@ mod tests {
             let n = |x: u32| (x % 2000) as f32 / 1000.0 - 1.0;
             *s += C32::new(n(state) * level, n(state >> 8) * level);
         }
+        state
     }
 
     const LONG: [u8; 14] =
@@ -473,6 +682,29 @@ mod tests {
             f.bytes.len() == 14 && f.bytes[0] >> 3 == 17 && crc24(&f.bytes) == 0
         });
         assert!(out.is_empty(), "noise passed a CRC as {out:?}");
+    }
+
+    #[test]
+    fn a_minute_of_noise_frames_nothing_by_its_crc() {
+        // The CRC pass tests a window at every sample position, so a 24 bit
+        // remainder comes to zero by chance often enough to matter: with the
+        // level gate removed, ten minutes of this noise frames 8 windows whose
+        // downlink format is 11, 17 or 18, which is an invented aircraft every
+        // minute or two. The gate is what stops it, and this is its test.
+        let rate = 2.4e6;
+        let mut d = ModeSDetector::new(rate, ModeSConfig::default());
+        let mut out = Vec::new();
+        let mut block = vec![C32::new(0.0, 0.0); 1_000_000];
+        let mut state = 0x2545_f491u32;
+        for _ in 0..144 {
+            block.iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
+            state = noisy_from(&mut block, 0.3, state);
+            d.process_valid(&block, &mut out, &|f: &ModeSFrame| {
+                matches!((f.bytes[0] >> 3, f.bytes.len()), (17 | 18, 14) | (11, 7))
+                    && crc24(&f.bytes) == 0
+            });
+        }
+        assert!(out.is_empty(), "noise framed as {out:?}");
     }
 
     #[test]

@@ -106,6 +106,7 @@ impl Simple for ModeSNode {
             Param::float("min_level", self.cfg.min_level as f64, 0.0001..=0.5)
                 .label("Preamble amplitude floor")
                 .log(),
+            Param::bool("crc_framing", self.cfg.crc_framing).label("Also frame by the CRC"),
         ]
     }
 
@@ -114,6 +115,7 @@ impl Simple for ModeSNode {
         match name {
             "preamble_ratio" => self.cfg.preamble_ratio = f.max(1.0) as f32,
             "min_level" => self.cfg.min_level = f.max(0.0) as f32,
+            "crc_framing" => self.cfg.crc_framing = v.as_bool().unwrap_or(true),
             _ => return Err(common::Error::other(format!("mode_s: unknown parameter {name:?}"))),
         }
         // The detector holds its config by value, and its buffered tail is

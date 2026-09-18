@@ -28,6 +28,7 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(3.0),
         min_level: std::env::var("MODES_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.004),
+        crc_framing: std::env::var("MODES_CRC").map(|v| v != "0").unwrap_or(true),
     };
     let mut d = ModeSDetector::new(rate, cfg);
     let mut frames = Vec::new();

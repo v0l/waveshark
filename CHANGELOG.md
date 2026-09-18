@@ -106,6 +106,8 @@ the code is in the commit log.
 
 ### Changed
 
+- Mode S frames are also framed by their CRC, so a reply whose preamble
+  another aircraft sat on is still read.
 - The map draws anything that says where it was, so every sonde appears
   beside the Vaisala ones.
 - One build per platform: the speech models use an NVIDIA card when the
