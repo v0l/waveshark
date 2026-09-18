@@ -11,10 +11,8 @@
 
 mod acurite;
 mod alecto;
-mod ambient;
 mod ert;
 mod esl;
-mod fineoffset;
 mod globaltronics;
 mod hanshow;
 mod hideki;
@@ -29,10 +27,8 @@ mod x10;
 
 pub use acurite::AcuriteWind;
 pub use alecto::AlectoV1;
-pub use ambient::AmbientF007th;
 pub use ert::{ErtIdm, ErtScm, ErtScmPlus};
 pub use esl::Esl;
-pub use fineoffset::{FineOffsetWh51, FineOffsetWh1080};
 pub use globaltronics::{GtWt02, GtWt03};
 pub use hanshow::Hanshow;
 pub use hideki::Hideki;
@@ -42,7 +38,7 @@ pub use keyfob::KeeLoq;
 pub use oregon::{OregonV2, OregonV3};
 pub use security::HoneywellSecurity;
 pub use somfy_rts::SomfyRts;
-pub use tpms::{FordTpms, RenaultTpms, SchraderTpms, ToyotaTpms};
+pub use tpms::{FordTpms, RenaultTpms, ToyotaTpms};
 pub use x10::X10Rf;
 
 use crate::bits::BitBuffer;

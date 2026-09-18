@@ -11,7 +11,6 @@
 //! skips rather than fails, so a fresh clone with no network still passes.
 
 use decode::protocol::Value;
-use decode::protocols::FineOffsetWh1080;
 use decode::{Protocol, Protocols};
 use dsp::{FirDecim, OokDetector, PulseConfig};
 use sources::FileSource;
@@ -96,7 +95,10 @@ fn measured_timings_match_the_published_protocol() {
 #[test]
 fn decodes_and_agrees_with_rtl_433() {
     let pkgs = skip_without_fixture!(packages());
-    let report = FineOffsetWh1080.decode_package(&pkgs[0]).expect("decode the real capture");
+    let report = decode::script::named("Fineoffset-WHx080")
+        .unwrap()
+        .decode_package(&pkgs[0])
+        .expect("decode the real capture");
 
     // Ground truth, from: rtl_433 -r fineoffset_wh1080_433.92M_250k.cu8
     //   model: Fineoffset-WHx080  Station ID: 196  Battery: 1

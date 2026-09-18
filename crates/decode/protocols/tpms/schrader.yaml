@@ -1,0 +1,17 @@
+# Schrader tyre pressure sensors, 315 and 433 MHz: Manchester at 120 us a
+# half symbol, eight bytes opening on an f nibble, with a CRC-8. Pressure in
+# 2.5 kPa steps, temperature offset 50 C.
+name: Schrader
+timing: { manchester: [120, 240], reset_us: 480 }
+frame: { bits: 64 }
+check: { kind: crc8, poly: 0x07, init: 0xf0, over: [0, 56], at: 56 }
+fields:
+  - { bits: 4, const: 0xf }
+  - { name: flags, bits: 8, type: hex }
+  - { name: id, bits: 28, type: hex, upper: true }
+  - { name: pressure_kpa, bits: 8, scale: 2.5 }
+  - { name: temperature_c, bits: 8, offset: -50, round: 0, min: -50, max: 100 }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "f3 1a bc de f0 64 49 8e"
+    fields: { flags: "31", id: "ABCDEF0", pressure_kpa: 250.0, temperature_c: 23.0 }
