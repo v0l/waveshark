@@ -213,7 +213,7 @@ fn listen(
     args: &Args,
     center_hz: u64,
     rate: f64,
-) -> Result<Option<std::sync::Arc<iqstream::Server>>> {
+) -> Result<Option<Fanned>> {
     let Some(spec) = &args.iqstream_listen else { return Ok(None) };
     let addr: std::net::SocketAddr = match spec.parse() {
         Ok(a) => a,
@@ -222,19 +222,32 @@ fn listen(
             Err(_) => bail!("--iqstream-listen wants addr:port or a port, not {spec:?}"),
         },
     };
-    let cfg = iqstream::ServerConfig {
-        name: "wave1090".into(),
-        center_hz,
-        sample_rate: rate as u32,
-        gain_db: Some(args.gain),
-        tunable: false,
-        tune_range_hz: None,
-    };
+    let cfg = iqstream::ServerConfig::single(
+        "wave1090",
+        iqstream::StreamConfig {
+            name: "span".into(),
+            center_hz,
+            sample_rate: rate as u32,
+            gain_db: Some(args.gain),
+            tunable: false,
+            tune_range_hz: None,
+            settings: Vec::new(),
+        },
+    );
     let server = iqstream::Server::start(addr, cfg).context("cannot serve iqstream")?;
     if !args.quiet {
         println!("iqstream on {}", server.addr());
     }
-    Ok(Some(server))
+    let tuner = server.default_stream().context("the server kept no tuner")?;
+    Ok(Some(Fanned { server, tuner }))
+}
+
+/// The one tuner this receiver serves, and the server holding the port open
+struct Fanned {
+    // held only to keep the port open: dropping the server ends its thread
+    #[allow(dead_code)]
+    server: std::sync::Arc<iqstream::Server>,
+    tuner: std::sync::Arc<iqstream::Stream>,
 }
 
 /// The state a run carries between blocks.
@@ -248,7 +261,7 @@ struct Reader {
     read: u64,
     kept: u64,
     /// Where the samples are fanned out, and the buffer they are packed into
-    server: Option<std::sync::Arc<iqstream::Server>>,
+    server: Option<Fanned>,
     uc8: Vec<u8>,
 }
 
@@ -274,11 +287,11 @@ impl Reader {
         // Before the decoding, so a subscriber's copy is not delayed by it,
         // and only where somebody is connected: packing costs a pass over
         // every sample.
-        if let Some(server) = &self.server
-            && server.subscribers() > 0
+        if let Some(fanned) = &self.server
+            && fanned.tuner.subscribers() > 0
         {
             SampleFormat::Cu8.encode(iq, &mut self.uc8);
-            server.push(&self.uc8);
+            fanned.tuner.push(&self.uc8);
             self.uc8.clear();
         }
         self.frames.clear();
