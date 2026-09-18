@@ -138,6 +138,13 @@ the code is in the commit log.
   transcriber, with the weights and the device it runs on, are in that record
   too, so they stay as they were left.
 
+## [0.3.1-rc4] - 2026-09-18
+
+### Added
+
+- A test build of the installers. What is in it is still listed under
+  [Unreleased].
+
 ## [0.3.0] - 2026-09-16
 
 ### Added
