@@ -52,7 +52,7 @@ fn front_of(
     Ok(crate::scanners::Front::Protocol { id: p.id(), hz })
 }
 
-pub(super) fn scanner_json(s: &crate::scanners::Scanner, center: f64, rate: f64) -> Value {
+pub(super) fn scanner_json(s: &crate::scanners::Scanner, at: crate::scanners::Span) -> Value {
     json!({
         "name": s.name,
         "front": s.front.key(),
@@ -66,8 +66,8 @@ pub(super) fn scanner_json(s: &crate::scanners::Scanner, center: f64, rate: f64)
         // What the span covers, and what is actually running on it: a block
         // switched off still covers the frequency it was written for, and an
         // agent asking why nothing is decoding wants both answers.
-        "applies_now": s.applies(center, rate),
-        "running_now": s.enabled && s.applies(center, rate),
+        "applies_now": s.applies(at),
+        "running_now": s.enabled && s.applies(at),
     })
 }
 
@@ -139,13 +139,13 @@ impl super::App {
         let _ = table.save();
         self.scanner_edit = None;
         self.send(Cmd::Scanners(table));
-        let (center, rate) = (self.center, self.rate);
+        let at = crate::scanners::Span::whole(self.center, self.rate);
         json!({
             "scanners": self
                 .scanners
                 .list
                 .iter()
-                .map(|s| scanner_json(s, center, rate))
+                .map(|s| scanner_json(s, at))
                 .collect::<Vec<_>>()
         })
     }

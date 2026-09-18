@@ -4882,7 +4882,7 @@ pub fn scan_marks(
     usable: f64,
 ) -> Vec<ScanMark> {
     let mut out = Vec::new();
-    for at in scanners.fronts(center, usable) {
+    for at in scanners.fronts(crate::scanners::Span::inside(center, rate, usable)) {
         match &at.front {
             Front::Protocol { hz, .. } => {
                 let Some(proto) = at.front.proto() else {

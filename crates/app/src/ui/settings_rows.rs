@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(sc.front, Front::protocol("video", 5_800e6));
 
         let t = Scanners { list: vec![sc], version: VERSION };
-        let fronts = t.fronts(5_800e6, 20e6);
+        let fronts = t.fronts(crate::scanners::Span::whole(5_800e6, 20e6));
         assert_eq!(fronts.len(), 1);
         assert_eq!(fronts[0].front, Front::protocol("video", 5_800e6));
     }

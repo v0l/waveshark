@@ -1105,7 +1105,7 @@ pub(crate) fn replay_receiver(
 pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
     let rate = buf.rate.as_f64();
     let scanners = crate::scanners::Scanners::load();
-    let fronts = scanners.fronts(buf.center.as_f64(), rate);
+    let fronts = scanners.fronts(crate::scanners::Span::whole(buf.center.as_f64(), rate));
     Plan {
         center: buf.center,
         rate,
@@ -3831,7 +3831,11 @@ fn fronts_here(
     if !decode_on {
         return Vec::new();
     }
-    scanners.fronts(plan.center.as_f64(), plan.usable_rate())
+    scanners.fronts(crate::scanners::Span::inside(
+        plan.center.as_f64(),
+        plan.eff_rate(),
+        plan.usable_rate(),
+    ))
 }
 
 /// Publish the chain the receiver is running, for the chain view.
@@ -3910,6 +3914,32 @@ pub(crate) mod tests {
         assert_eq!(fronts_here(&s, &plan, true).len(), 1, "the whole span reaches the channel");
         plan.usable_ratio = 0.75;
         assert_eq!(fronts_here(&s, &plan, true).len(), 0, "a front end in the rolloff");
+    }
+
+    /// A block's span is the rate its decoder needs, not the part of the span
+    /// inside the filter.
+    ///
+    /// Mode S wants 2 MS/s and a dongle samples at 2.4, of which 1.92 is
+    /// inside the analogue filter. Judging the block on the 1.92 refused it,
+    /// and a receiver parked on 1090 MHz drew no ADS-B front end, no packet
+    /// bus and no tracker: nothing decoded anywhere in the span.
+    #[test]
+    fn a_block_is_judged_on_the_rate_the_radio_samples_at() {
+        let s = crate::scanners::Scanners::default();
+        let mut plan = crate::chain::tests::plan(2_400_000.0, Hz(1_090_000_000));
+        plan.fronts = Vec::new();
+        plan.usable_ratio = common::rtl::USABLE_BANDWIDTH_RATIO;
+        assert!((plan.usable_rate() - 1_920_000.0).abs() < 1.0);
+        let fronts = fronts_here(&s, &plan, true);
+        assert_eq!(
+            fronts.iter().map(|f| f.front.key()).collect::<Vec<_>>(),
+            ["mode_s"],
+            "the ADS-B block asks for 2 MS/s and the radio has 2.4"
+        );
+        plan.fronts = fronts;
+        let drawn = crate::chain::derived_patch(&plan);
+        assert_eq!(drawn.stages().iter().filter(|s| s.kind == "mode_s").count(), 1);
+        assert_eq!(drawn.stages().iter().filter(|s| s.kind == "packet_bus").count(), 1);
     }
 
     /// The transmit chain the receiver would draw for a plan, on a radio that
@@ -4940,8 +4970,8 @@ pub(crate) mod tests {
         };
         // The shipped table rather than whatever is in this machine's config:
         // a block the operator deleted should not fail the corpus.
-        let fronts =
-            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        let fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         assert!(
             fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
             "the table put nothing on a span covering channel 38: {fronts:?}"
@@ -4996,8 +5026,8 @@ pub(crate) mod tests {
             eprintln!("skipping: ofdm_wifi_frames_2462M_20000k.cs8 absent, run testdata/fetch.sh");
             return;
         };
-        let fronts =
-            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        let fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         assert!(
             fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
             "the table put nothing on a span covering channel 11: {fronts:?}"
@@ -5055,8 +5085,8 @@ pub(crate) mod tests {
             return;
         };
         let mut plan = replay_plan(&buf, false);
-        plan.fronts =
-            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        plan.fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let read = out.iter().filter(|r| r.model == Some("802.11")).count();
@@ -5154,8 +5184,8 @@ pub(crate) mod tests {
         }
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
         let mut plan = replay_plan(&buf, false);
-        plan.fronts =
-            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        plan.fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("802.11")).collect();
@@ -5299,8 +5329,8 @@ pub(crate) mod tests {
             eprintln!("skipping: gfsk_ble_2426M_20000k.cs8 absent, run testdata/fetch.sh");
             return;
         };
-        let fronts =
-            crate::scanners::Scanners::default().fronts(buf.center.as_f64(), buf.rate.as_f64());
+        let fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         let mut plan = replay_plan(&buf, false);
         plan.fronts = fronts;
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();

@@ -592,8 +592,11 @@ impl App {
         let live: Vec<crate::scanners::Scanner> =
             rows.iter().filter_map(ScannerRow::to_scanner).collect();
         let table = crate::scanners::Scanners { list: live, version: crate::scanners::VERSION };
-        let active: Vec<String> =
-            table.active(center, rate).into_iter().map(|s| s.name.clone()).collect();
+        let active: Vec<String> = table
+            .active(crate::scanners::Span::whole(center, rate))
+            .into_iter()
+            .map(|s| s.name.clone())
+            .collect();
 
         // What the table does here, before the table: the question this
         // pane answers is "why is nothing decoding here".
