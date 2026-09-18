@@ -443,6 +443,43 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "Kerui-Security",
+        ours: "Kerui-Security",
+        fields: &[("id", "id", Num), ("cmd", "cmd", Num), ("state", "state", Text)],
+    },
+    ModelSpec {
+        rtl: "Thermopro-TP12",
+        ours: "Thermopro-TP12",
+        fields: &[
+            ("id", "id", Num),
+            ("temperature_1_C", "temperature_1_c", Num),
+            ("temperature_2_C", "temperature_2_c", Num),
+        ],
+    },
+    ModelSpec {
+        rtl: "Springfield-Soil",
+        ours: "Springfield-Soil",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("temperature_C", "temperature_c", Num),
+            ("moisture", "moisture_pct", Num),
+            ("transmit", "transmit", Text),
+        ],
+    },
+    ModelSpec { rtl: "Quhwa-Doorbell", ours: "Quhwa-Doorbell", fields: &[("id", "id", Num)] },
+    ModelSpec {
+        rtl: "Emos-TTX201",
+        ours: "Emos-TTX201",
+        fields: &[
+            ("id", "id", Num),
+            ("channel", "channel", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("temperature_C", "temperature_c", Num),
+        ],
+    },
+    ModelSpec {
         rtl: "Fineoffset-WH51",
         ours: "Fineoffset-WH51",
         fields: &[

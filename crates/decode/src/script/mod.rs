@@ -73,6 +73,11 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/weather/oregon_thgr810.yaml"),
     include_str!("../../protocols/weather/oregon_thn802.yaml"),
     include_str!("../../protocols/weather/oregon_wgr800.yaml"),
+    include_str!("../../protocols/security/kerui.yaml"),
+    include_str!("../../protocols/weather/thermopro_tp12.yaml"),
+    include_str!("../../protocols/weather/springfield_soil.yaml"),
+    include_str!("../../protocols/home/quhwa_doorbell.yaml"),
+    include_str!("../../protocols/weather/emos_ttx201.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -1003,7 +1008,9 @@ impl Writer<'_> {
                             raw_of(f, &v)?
                         }
                         (None, None) if filled_by_check => 0,
-                        (None, None) if f.name.is_empty() => self.viewed(f, at)?.unwrap_or(0),
+                        (None, None) if f.name.is_empty() => {
+                            self.viewed(f, at)?.unwrap_or(f.default.unwrap_or(0))
+                        }
                         (None, None) => match (self.viewed(f, at)?, f.omit_if.iter().next()) {
                             (Some(raw), _) => {
                                 if let Ok(v) = value_of(f, raw) {
@@ -1053,6 +1060,9 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
             };
             let sum: i64 = (c.over[0]..c.over[1]).step_by(4).map(|b| nibble(b) as i64).sum();
             (if c.negate { c.init as i64 - sum } else { sum + c.add }) as u64
+        }
+        CheckKind::NibbleXor => {
+            (c.over[0]..c.over[1]).step_by(4).fold(0u64, |x, b| x ^ extract(frame, b, 4))
         }
         CheckKind::EvenParity => return None,
     };

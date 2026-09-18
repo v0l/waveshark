@@ -1,0 +1,11 @@
+# Quhwa QH-C-CE-3V and QH-832AC wireless doorbells, also sold as "1 by One",
+# 433.92 MHz: an HS1527 fixed code, PWM, a short mark being a 0, 18 bits of
+# which the last four are always set. No checksum.
+name: Quhwa-Doorbell
+timing: { pwm: [360, 1070], reset_us: 6600, tolerance_us: 80 }
+frame: { bits: 18, invert: true, not_constant: 16, repeats: 5 }
+fields:
+  - { name: id, bits: 16, data: int, min: 1 }
+  - { bits: 2, const: 3 }
+vectors:
+  - { hex: "b8 03 c0", fields: { id: 47107 } }
