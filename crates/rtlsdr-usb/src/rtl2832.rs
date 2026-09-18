@@ -94,6 +94,11 @@ pub struct Enumerated {
     pub manufacturer: String,
     pub product: String,
     pub serial: String,
+    /// Where the dongle is plugged in, as sysfs names it (`7-4.1`)
+    ///
+    /// Every dongle of a kind carries the same serial, `00000001`, so the
+    /// port is the only thing telling two of them apart.
+    pub port: String,
 }
 
 const VID_REALTEK: u16 = 0x0bda;
@@ -119,8 +124,17 @@ pub fn enumerate() -> Vec<Enumerated> {
             manufacturer: d.manufacturer_string().unwrap_or("").to_string(),
             product: d.product_string().unwrap_or("").to_string(),
             serial: d.serial_number().unwrap_or("").to_string(),
+            port: port_path(&d),
         })
         .collect()
+}
+
+fn port_path(d: &nusb::DeviceInfo) -> String {
+    let ports: Vec<String> = d.port_chain().iter().map(|p| p.to_string()).collect();
+    match ports.is_empty() {
+        true => format!("{}-?", d.busnum()),
+        false => format!("{}-{}", d.busnum(), ports.join(".")),
+    }
 }
 
 struct State {
@@ -161,13 +175,13 @@ impl RtlSdr {
         Self::open_enumerated(found)
     }
 
-    /// Open the first dongle whose serial matches, else by index when `id`
+    /// Open the dongle at that port or serial, else by index when `id`
     /// parses as a number.
     pub fn open_by_id(id: &str) -> Result<Self> {
         let list = enumerate();
         let found = list
             .iter()
-            .find(|e| e.serial == id)
+            .find(|e| e.port == id || e.serial == id)
             .cloned()
             .or_else(|| id.parse::<usize>().ok().and_then(|i| list.into_iter().nth(i)))
             .ok_or(Error::NoDevice)?;
@@ -176,11 +190,14 @@ impl RtlSdr {
 
     fn open_enumerated(found: Enumerated) -> Result<Self> {
         let mut devices = nusb::list_devices().wait().map_err(|e| Error::usb("list", e))?;
+        // By port rather than by serial: every dongle of a kind ships with
+        // the same one, so a serial match opens the first of them whichever
+        // was asked for.
         let info = devices
             .find(|d| {
                 d.vendor_id() == found.vid
                     && d.product_id() == found.pid
-                    && d.serial_number() == Some(found.serial.as_str())
+                    && port_path(d) == found.port
             })
             .ok_or(Error::NoDevice)?;
 

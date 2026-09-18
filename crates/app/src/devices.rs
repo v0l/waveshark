@@ -94,15 +94,9 @@ pub const HACKRF_RATES: std::ops::RangeInclusive<Sps> = Sps(2_000_000)..=Sps(20_
 /// Every attached radio, RTL-SDR first because they are the common case.
 pub fn list() -> Vec<Entry> {
     let mut v = Vec::new();
-    for d in rtlsdr::enumerate() {
-        let name = if d.product.is_empty() { d.name.clone() } else { d.product.clone() };
-        let tail = short(&d.serial);
-        v.push(Entry::local(
-            DriverKind::RtlSdr,
-            d.index as usize,
-            if tail.is_empty() { name } else { format!("{name} {tail}") },
-            RTL_RATES,
-        ));
+    let rtls = rtlsdr::enumerate();
+    for (d, label) in rtls.iter().zip(rtl_labels(&rtls)) {
+        v.push(Entry::local(DriverKind::RtlSdr, d.index, label, RTL_RATES));
     }
     for (i, serial) in hackrf::enumerate().into_iter().enumerate() {
         v.push(Entry::local(
@@ -309,6 +303,29 @@ fn stream_entry(index: usize, r: &Remote) -> Entry {
     }
 }
 
+/// What each dongle is called in the receiver list
+///
+/// Nearly every dongle ships with the serial `00000001`, so two of a kind
+/// read the same and the port each is plugged into is the only thing telling
+/// them apart.
+fn rtl_labels(found: &[rtlsdr::Enumerated]) -> Vec<String> {
+    found
+        .iter()
+        .map(|d| {
+            let name = if d.product.is_empty() { &d.name } else { &d.product };
+            let tail = short(&d.serial);
+            let label = if tail.is_empty() { name.clone() } else { format!("{name} {tail}") };
+            let twin = found
+                .iter()
+                .any(|o| o.index != d.index && o.product == d.product && o.serial == d.serial);
+            match twin {
+                true => format!("{label} ({})", d.port),
+                false => label,
+            }
+        })
+        .collect()
+}
+
 /// Serial tails identify a unit; the leading zeros do not.
 fn short(s: &str) -> String {
     let t = s.trim_start_matches('0');
@@ -512,6 +529,27 @@ mod tests {
         assert_eq!(label(2_400_000.0), "2.400M");
         assert_eq!(label(8_000_000.0), "8M");
         assert_eq!(label(250_000.0), "250k");
+    }
+
+    /// Two dongles of a kind carry the same serial, so the list has to say
+    /// which is which or a second receiver cannot be picked at all.
+    #[test]
+    fn two_dongles_of_a_kind_are_told_apart_by_their_port() {
+        let dongle = |index: usize, serial: &str, port: &str| rtlsdr::Enumerated {
+            index,
+            vid: 0x0bda,
+            pid: 0x2838,
+            name: "RTL2838UHIDIR".into(),
+            manufacturer: "Realtek".into(),
+            product: "RTL2838UHIDIR".into(),
+            serial: serial.into(),
+            port: port.into(),
+        };
+        let twins = [dongle(0, "00000001", "7-4"), dongle(1, "00000001", "7-8")];
+        assert_eq!(rtl_labels(&twins), ["RTL2838UHIDIR 1 (7-4)", "RTL2838UHIDIR 1 (7-8)"]);
+
+        let pair = [dongle(0, "00000001", "7-4"), dongle(1, "3579c1df", "7-8")];
+        assert_eq!(rtl_labels(&pair), ["RTL2838UHIDIR 1", "RTL2838UHIDIR 3579c1df"]);
     }
 
     #[test]
