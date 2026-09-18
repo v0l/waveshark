@@ -218,9 +218,53 @@ pub fn biphase_l_bits(chips: &[f32], inverted: bool) -> BitBuffer {
     bits
 }
 
+/// Undo a block interleave: the transmitter wrote the coded bits across a
+/// `rows` by `cols` matrix and sent it down the columns.
+///
+/// One burst of errors on the air is then spread over `cols` positions of the
+/// coded stream, which is what a convolutional code wants. NXDN interleaves
+/// its SACCH over 5 by 12 and its FACCH1 over 9 by 16; a standard that
+/// publishes a table of indices rather than the shape is the same thing
+/// written out.
+pub fn block_deinterleave<T: Copy>(air: &[T], rows: usize, cols: usize) -> Vec<T> {
+    (0..rows * cols).map(|i| air[(i % cols) * rows + i / cols]).collect()
+}
+
+/// The transmitter's side of [`block_deinterleave`].
+pub fn block_interleave<T: Copy>(ordered: &[T], rows: usize, cols: usize) -> Vec<T> {
+    let mut out = Vec::with_capacity(rows * cols);
+    for c in 0..cols {
+        for r in 0..rows {
+            out.push(ordered[r * cols + c]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shapes NXDN uses, both ways round, against the index tables the
+    /// standard publishes for them.
+    #[test]
+    fn a_block_interleave_round_trips_at_both_nxdn_shapes() {
+        for (rows, cols) in [(5usize, 12usize), (9, 16)] {
+            let ordered: Vec<u16> = (0..(rows * cols) as u16).collect();
+            let air = block_interleave(&ordered, rows, cols);
+            assert_eq!(block_deinterleave(&air, rows, cols), ordered);
+        }
+        // The first row of NXDN's SACCH table: the bits the transmitter sent
+        // at 0, 5, 10 .. are the first twelve of the coded stream.
+        let air: Vec<u16> = (0..60u16).collect();
+        let back = block_deinterleave(&air, 5, 12);
+        assert_eq!(&back[..12], &[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]);
+        // And the FACCH1 table's, which steps by nine.
+        let air: Vec<u16> = (0..144u16).collect();
+        let back = block_deinterleave(&air, 9, 16);
+        assert_eq!(&back[..4], &[0, 9, 18, 27]);
+        assert_eq!(back[16], 1, "the second row opens one on");
+    }
 
     fn buffer(bits: &[u8]) -> BitBuffer {
         let mut b = BitBuffer::new();
