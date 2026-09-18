@@ -13,6 +13,8 @@ the code is in the commit log.
 
 - KISS TNC on `--kiss-listen`: packet software reads what the radio heard and
   keys AX.25 through it.
+- FT8 and FT4 on the HF dials: every station in the passband, with their grid
+  squares on the map.
 - NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
   whether the speech is enciphered. No sound yet.
 - Iridium ring alerts at 1626 MHz: the satellite, its beam and its position,

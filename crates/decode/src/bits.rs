@@ -917,6 +917,106 @@ pub fn crc8le(data: &[u8], poly: u8, init: u8) -> u8 {
     crc
 }
 
+/// A low-density parity-check code, held as the codeword bits each check
+/// covers.
+///
+/// The checks are the code: a sparse graph is what belief propagation walks
+/// and what makes it work at all, so a code is given here as its published
+/// check rows rather than derived from a generator. The same rows read from
+/// a systematic generator would be dense and read several dB worse.
+pub struct Ldpc {
+    /// One row per check: the codeword bits that must exclusive-or to zero.
+    checks: Vec<Vec<u16>>,
+    bits: usize,
+}
+
+impl Ldpc {
+    /// Build from the check rows, each naming codeword bits from zero.
+    pub fn new(checks: &[&[u16]], bits: usize) -> Self {
+        Self { checks: checks.iter().map(|c| c.to_vec()).collect(), bits }
+    }
+
+    pub fn codeword_bits(&self) -> usize {
+        self.bits
+    }
+
+    /// How many checks each codeword bit takes part in, which is the degree
+    /// the code was designed to.
+    pub fn degree_of(&self, bit: usize) -> usize {
+        self.checks.iter().filter(|c| c.contains(&(bit as u16))).count()
+    }
+
+    /// Checks a codeword fails. Zero is a word the code accepts.
+    pub fn unsatisfied(&self, code: &[bool]) -> usize {
+        self.checks
+            .iter()
+            .filter(|c| c.iter().fold(false, |acc, &b| acc ^ code[b as usize]))
+            .count()
+    }
+
+    /// Read a codeword off soft bits, where `llr[i]` is the log-likelihood
+    /// ratio of bit `i` being a one, so a positive value leans towards one.
+    ///
+    /// Normalised min-sum belief propagation, which is within a few tenths of
+    /// a dB of the sum-product rule and costs no transcendentals. It stops as
+    /// soon as every check passes; the returned count is what still failed,
+    /// so zero is a word the code accepts and anything else is a failure the
+    /// caller should throw away.
+    pub fn decode(&self, llr: &[f32], iterations: usize) -> (Vec<bool>, usize) {
+        // 0.75 is the usual normalisation for a (174,91) code of this
+        // degree; measured on FT8, 1.0 loses about 1 dB and 0.5 loses more.
+        const SCALE: f32 = 0.75;
+        let n = self.bits;
+        // Belief propagation is written for log P(0)/P(1), where a positive
+        // value leans towards zero, so the caller's convention is negated
+        // once here rather than at every sign.
+        let channel: Vec<f32> = llr.iter().take(n).map(|x| -*x).collect();
+        let mut to_bit: Vec<Vec<f32>> = self.checks.iter().map(|c| vec![0.0; c.len()]).collect();
+        let mut total = channel.clone();
+        let mut hard = vec![false; n];
+        let mut extrinsic: Vec<f32> = Vec::new();
+        let mut failed = self.checks.len();
+        for _ in 0..iterations {
+            for (c, check) in self.checks.iter().enumerate() {
+                // The extrinsic value of each bit, taken before any of them
+                // is written back, then the min-sum rule: the smallest of
+                // the others, signed by the product of their signs.
+                extrinsic.clear();
+                let mut sign = false;
+                let (mut min1, mut min2) = (f32::MAX, f32::MAX);
+                for (k, &b) in check.iter().enumerate() {
+                    let x = total[b as usize] - to_bit[c][k];
+                    extrinsic.push(x);
+                    sign ^= x < 0.0;
+                    let m = x.abs();
+                    if m < min1 {
+                        min2 = min1;
+                        min1 = m;
+                    } else if m < min2 {
+                        min2 = m;
+                    }
+                }
+                for (k, &b) in check.iter().enumerate() {
+                    let x = extrinsic[k];
+                    let mag = if x.abs() == min1 { min2 } else { min1 };
+                    let neg = sign ^ (x < 0.0);
+                    let msg = SCALE * mag * if neg { -1.0 } else { 1.0 };
+                    total[b as usize] = x + msg;
+                    to_bit[c][k] = msg;
+                }
+            }
+            for (b, h) in hard.iter_mut().enumerate() {
+                *h = total[b] < 0.0;
+            }
+            failed = self.unsatisfied(&hard);
+            if failed == 0 {
+                break;
+            }
+        }
+        (hard, failed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

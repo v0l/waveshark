@@ -41,6 +41,7 @@ pub mod flex;
 pub mod flysky;
 pub mod framing;
 pub mod frsky;
+pub mod ft8;
 pub mod geo;
 #[cfg(feature = "tea")]
 pub mod gpu;
