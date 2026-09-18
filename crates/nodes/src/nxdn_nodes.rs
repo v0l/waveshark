@@ -22,6 +22,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+use common::bands::Usage;
 use decode::nxdn::{self, Cipher, MessageType, Superframe};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
@@ -589,10 +590,10 @@ impl Protocol for Nxdn {
     fn aliases(&self) -> &'static [&'static str] {
         &["nexedge", "idas", "nxdn96", "nxdn48"]
     }
-    /// A business radio channel anywhere: NXDN is on VHF and UHF, and what
-    /// makes one an NXDN channel is what is keyed on it.
+    /// A business radio channel on the land mobile allocations: NXDN is on
+    /// VHF and UHF, and what makes one an NXDN channel is what is keyed on it.
     fn placement(&self) -> Placement {
-        Placement::Anywhere
+        Placement::Usage(&[Usage::Utility])
     }
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
