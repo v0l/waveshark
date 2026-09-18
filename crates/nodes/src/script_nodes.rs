@@ -105,7 +105,8 @@ impl ScriptNode {
     }
 
     fn placement(&self) -> Placement {
-        self.proto.as_ref().map_or(Placement::Anywhere, |p| placement_of(p.desc()))
+        // no description named yet, so no band is this protocol's
+        self.proto.as_ref().map_or(Placement::Bands(Vec::new()), |p| placement_of(p.desc()))
     }
 }
 
