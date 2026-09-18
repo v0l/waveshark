@@ -9,6 +9,6 @@ name: CAME-12bit
 timing: { pwm: [320, 640], reset_us: 2500 }
 frame: { bits: 12, invert: true, find: tile, min_transitions: 3, repeats: 3 }
 fields:
-  - { name: code, bits: 12 }
+  - { name: code, bits: 12, data: int }
 vectors:
   - { hex: "ab c0", fields: { code: 0xabc } }

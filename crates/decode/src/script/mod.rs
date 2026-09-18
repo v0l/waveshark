@@ -227,6 +227,11 @@ impl Scripted {
                 r.fields.insert(k, v);
             }
         }
+        for f in desc::all_fields(&self.desc.fields) {
+            if f.is_reported() && r.fields.contains_key(&f.name) {
+                r.types.insert(f.name.clone(), f.field_type());
+            }
+        }
         match walk.id {
             Some(k) => r = r.identified_by(&k),
             None => r = r.identified_by("id"),
@@ -581,8 +586,8 @@ fn value_of(f: &Field, raw: u64) -> Result<Value, DecodeError> {
         }
         Kind::Tristate => return Ok(Value::Text(tristate(raw, f.bits))),
         Kind::Pick => {
-            let slots = f.bits / f.unit;
-            let pressed = (0..slots).find(|i| (raw >> (i * f.unit)) & mask(f.unit) != f.idle);
+            let slots = f.bits / f.slot;
+            let pressed = (0..slots).find(|i| (raw >> (i * f.slot)) & mask(f.slot) != f.idle);
             return pressed.map(|i| Value::Int(i as i64 + 1)).ok_or(DecodeError::NotThisProtocol);
         }
         Kind::Bcd => {
@@ -1126,7 +1131,7 @@ mod tests {
     #[test]
     fn a_condition_must_name_a_field() {
         let e = parse_err(
-            "frame: {bits: 8}\nfields:\n  - {name: a, bits: 8}\n  - {name: b, at: 0, bits: 4, when: {zz: 1}}\n",
+            "frame: {bits: 8}\nfields:\n  - {name: a, bits: 8, data: int}\n  - {name: b, at: 0, bits: 4, data: int, when: {zz: 1}}\n",
         );
         assert!(e.contains("zz"), "{e}");
     }
@@ -1135,6 +1140,25 @@ mod tests {
     fn an_unknown_key_is_refused() {
         let e = parse_err("frame: {bits: 8}\nfields:\n  - {name: a, bits: 8, scael: 2}\n");
         assert!(e.contains("scael"), "{e}");
+    }
+
+    #[test]
+    fn a_field_states_a_type_its_line_agrees_with() {
+        let e = parse_err("frame: {bits: 8}\nfields:\n  - {name: a, bits: 8, data: float}\n");
+        assert!(e.contains("says Float but its line reads a Int"), "{e}");
+        let e = parse_err("frame: {bits: 8}\nfields:\n  - {name: a, bits: 8}\n");
+        assert!(e.contains("no data type"), "{e}");
+        let d = Desc::parse(
+            "name: X\ntiming: {pwm: [400, 1200], reset_us: 3000}\nframe: {bits: 8}\n\
+             fields:\n  - {name: t, bits: 8, data: float, unit: c, scale: 0.5}\n",
+        )
+        .unwrap();
+        let r = Scripted::new(d).read(&BitBuffer::from_bytes(&[40])).unwrap();
+        assert_eq!(r.fields["t"], Value::Float(20.0));
+        assert_eq!(
+            r.types["t"],
+            common::FieldType { data: common::Data::Float, unit: Some(common::Unit::Celsius) }
+        );
     }
 
     #[test]
@@ -1165,7 +1189,9 @@ mod tests {
             max: None,
             omit_if: Default::default(),
             map: BTreeMap::new(),
-            unit: 0,
+            slot: 0,
+            data: None,
+            unit: None,
             other: None,
             at_least: None,
             upper: false,
@@ -1230,7 +1256,7 @@ mod tests {
         let d = Desc::parse(
             "name: X\ntiming: {ppm: [500, 1500], reset_us: 6000}\nframe: {bits: 16}\n\
              check: {kind: complement, over: [0, 8], at: 8}\n\
-             fields:\n  - {name: a, bits: 8}\n  - {bits: 8, hidden: true}\n\
+             fields:\n  - {name: a, bits: 8, data: int}\n  - {bits: 8, hidden: true}\n\
              vectors: [{hex: \"5a a5\", fields: {a: 0x5a}}]\n",
         )
         .unwrap();

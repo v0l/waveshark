@@ -1069,6 +1069,7 @@ fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             if flags & TB_FLAG_ENCRYPTED != 0 { ", enciphered" } else { "" }
         )),
         fields,
+        types: Vec::new(),
         position: None,
         report: common::ReportDetail::Bare,
         identity: None,

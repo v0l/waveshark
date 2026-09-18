@@ -9,11 +9,11 @@ check: { kind: lfsr8, gen: 0x98, key: 0x3e, xor: 0x64, over: [0, 40], at: 40 }
 fields:
   - { bits: 4, const: 4 }
   - { bits: 4, hidden: true }
-  - { name: id, bits: 8 }
-  - { name: battery_ok, bits: 1, type: bool, not: true }
-  - { name: channel, bits: 3, offset: 1 }
-  - { name: temperature_c, bits: 12, scale: 0.1, offset: -40, convert: f_to_c, round: 1, min: -40, max: 60 }
-  - { name: humidity_pct, bits: 8, max: 100 }
+  - { name: id, bits: 8, data: int }
+  - { name: battery_ok, bits: 1, data: bool, type: bool, not: true }
+  - { name: channel, bits: 3, data: int, offset: 1 }
+  - { name: temperature_c, bits: 12, data: float, unit: c, scale: 0.1, offset: -40, convert: f_to_c, round: 1, min: -40, max: 60 }
+  - { name: humidity_pct, bits: 8, data: int, unit: pct, max: 100 }
   - { bits: 8, hidden: true }
 vectors:
   - hex: "40 2a 04 21 2b 11"

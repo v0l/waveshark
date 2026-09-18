@@ -9,14 +9,14 @@ check:
   - { kind: sum8, over: [0, 104], at: 104 }
 fields:
   - { bits: 8, const: 0x51 }
-  - { name: id, bits: 24, type: hex }
-  - { name: boost, bits: 3 }
-  - { name: battery_mv, bits: 5, scale: 100 }
-  - { name: battery_ok, at: 35, bits: 5, type: bool, at_least: 13 }
+  - { name: id, bits: 24, data: text, type: hex }
+  - { name: boost, bits: 3, data: int }
+  - { name: battery_mv, bits: 5, data: int, unit: mv, scale: 100 }
+  - { name: battery_ok, at: 35, bits: 5, data: bool, type: bool, at_least: 13 }
   - { bits: 8, hidden: true }
-  - { name: moisture_pct, bits: 8, max: 100 }
+  - { name: moisture_pct, bits: 8, data: int, unit: pct, max: 100 }
   - { bits: 7, hidden: true }
-  - { name: ad_raw, bits: 9 }
+  - { name: ad_raw, bits: 9, data: int }
   - { bits: 24, hidden: true }
   - { bits: 8, hidden: true }
   - { bits: 8, hidden: true }

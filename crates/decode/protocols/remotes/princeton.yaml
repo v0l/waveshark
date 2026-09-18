@@ -10,15 +10,15 @@ name: Princeton
 timing: { pwm: [390, 1170], reset_us: 3000 }
 frame: { bits: 24, invert: true, find: tile, min_transitions: 3, repeats: 3 }
 fields:
-  - { name: code, bits: 24 }
+  - { name: code, bits: 24, data: int }
   - { name: low, at: 16, bits: 8, hidden: true }
   - when: { low: [0x30, 0xc0, 0x03, 0x0c] }
     fields:
-      - { name: serial, at: 0, bits: 16 }
-      - { name: btn, at: 16, bits: 8, map: { 0x03: 0xf3, 0x0c: 0xfc } }
+      - { name: serial, at: 0, bits: 16, data: int }
+      - { name: btn, at: 16, bits: 8, data: int, map: { 0x03: 0xf3, 0x0c: 0xfc } }
     else:
-      - { name: serial, at: 0, bits: 20 }
-      - { name: btn, at: 20, bits: 4 }
+      - { name: serial, at: 0, bits: 20, data: int }
+      - { name: btn, at: 20, bits: 4, data: int }
 vectors:
   - hex: "a1 3f 08"
     fields: { code: 0xa13f08, serial: 0xa13f0, btn: 0x8 }

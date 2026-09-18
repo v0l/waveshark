@@ -35,4 +35,4 @@ pub use pulse::{
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use units::{Hz, Sps};
-pub use value::Value;
+pub use value::{Data, FieldType, Unit, Value};

@@ -6,6 +6,6 @@ name: Linear-Delta3
 timing: { pwm: [500, 2000], reset_us: 4000 }
 frame: { bits: 8, find: tile, min_transitions: 3, repeats: 3 }
 fields:
-  - { name: cnt, bits: 8 }
+  - { name: cnt, bits: 8, data: int }
 vectors:
   - { hex: "5a", fields: { cnt: 0x5a } }

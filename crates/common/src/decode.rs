@@ -472,6 +472,9 @@ pub struct Decoded {
     /// them, and none of them should be parsing a display string to get there.
     /// Ordered as the decoder emitted them, which is how they read best.
     pub fields: Vec<(String, Value)>,
+    /// What each field is, where the decoder said: a description states
+    /// the type and unit of every field it reports
+    pub types: Vec<(String, crate::FieldType)>,
     /// Who it was between, where the protocol names them. See [`Link`].
     pub link: Option<Link>,
     /// Where the transmitter said it was. What the map plots.
@@ -511,6 +514,7 @@ impl Decoded {
             modulation: None,
             detail: None,
             fields: Vec::new(),
+            types: Vec::new(),
             link: None,
             position: None,
             report: ReportDetail::Bare,
@@ -571,6 +575,16 @@ impl Decoded {
     pub fn with_fields(mut self, fields: Vec<(String, Value)>) -> Self {
         self.fields = fields;
         self
+    }
+
+    pub fn with_types(mut self, types: Vec<(String, crate::FieldType)>) -> Self {
+        self.types = types;
+        self
+    }
+
+    /// The stated type of a field, where the decoder stated one
+    pub fn field_type(&self, name: &str) -> Option<crate::FieldType> {
+        self.types.iter().find(|(k, _)| k == name).map(|(_, t)| *t)
     }
 
     /// One field by name, for a view that needs a particular one.
