@@ -629,8 +629,7 @@ fn same_frame(a: &ModeSFrame, b: &ModeSFrame, spus: f64) -> bool {
     // one frame twice at one sample. Two aircraft cannot start a frame within
     // two microseconds of each other and both decode, so the sample is the
     // identity and the bits are not (#154).
-    a.bytes.len() == b.bytes.len()
-        && a.at_sample.abs_diff(b.at_sample) <= (2.0 * spus) as u64 + 2
+    a.bytes.len() == b.bytes.len() && a.at_sample.abs_diff(b.at_sample) <= (2.0 * spus) as u64 + 2
 }
 
 /// Middle magnitude of a block, as the level a CRC-framed window is measured

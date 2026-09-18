@@ -346,7 +346,14 @@ impl Reader {
                 p.send(line.as_bytes());
             }
         }
-        if let Some(p) = &ports.beast {
+        // A frame with no time is left off Beast rather than sent with the
+        // sentinel: mlat-client reads that value as a timestamp 23456248
+        // seconds in and counts the frame as an outlier against its fit,
+        // where a frame it never saw costs it nothing. AVR and SBS carry no
+        // clock, so the frame is still fed (#154).
+        if let Some(p) = &ports.beast
+            && clock != clock::UNTIMED
+        {
             p.send(&net::beast(bytes, clock, rssi_dbfs));
         }
         if let Some(p) = &ports.sbs {
@@ -546,6 +553,9 @@ mod tests {
         let Some(buf) = capture() else { return };
         let frames = beast_over_the_wire(&blocks(&buf), buf.rate.as_f64());
         assert_eq!(frames.len(), 70, "frames on 30005");
+        // Not merely that they are timed: a frame the clock cannot place is
+        // kept off this port entirely, so the sentinel never reaches a client
+        // that would fit a line through it.
         assert!(frames.iter().all(|(ts, _)| *ts != clock::UNTIMED), "a frame lost its time");
         assert!(
             frames.windows(2).all(|w| w[0].0 < w[1].0),
@@ -557,6 +567,43 @@ mod tests {
         let (first, last) = (frames[0].0, frames[frames.len() - 1].0);
         assert!(last < 48_000_000, "the last frame is at {last}");
         assert_eq!((first % 5, last % 5), (0, 0), "not a whole sample");
+    }
+
+    /// A frame with no time feeds the networks but not the clock.
+    ///
+    /// mlat-client reads the sentinel as a timestamp rather than skipping it,
+    /// and one frame in 35705 off radarpi cannot be timed, so the rule is that
+    /// Beast carries only frames with a clock while AVR carries the lot.
+    #[test]
+    fn a_frame_the_clock_cannot_place_goes_out_on_avr_and_not_on_beast() {
+        let frame =
+            [0x8d, 0x40, 0x7c, 0xaf, 0x99, 0x88, 0x68, 0x37, 0xb8, 0x08, 0x2d, 0xd0, 0xde, 0x39];
+        let read = |port: &net::Fanout| {
+            let mut c = std::net::TcpStream::connect(port.addr()).expect("connect");
+            c.set_read_timeout(Some(std::time::Duration::from_millis(250))).unwrap();
+            c
+        };
+        let (avr, beast) = (
+            net::Fanout::serve("127.0.0.1", 0).unwrap(),
+            net::Fanout::serve("127.0.0.1", 0).unwrap(),
+        );
+        let (mut avr_client, mut beast_client) = (read(&avr), read(&beast));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let ports = Ports { avr: Some(avr), sbs: None, beast: Some(beast) };
+        let mut rx = Reader::new(2.4e6, false, Search::Fine);
+        rx.publish(&frame, clock::UNTIMED, -20.0, &ports, chrono::Utc::now());
+        rx.publish(&frame, 5_000, -20.0, &ports, chrono::Utc::now());
+        drop(ports);
+
+        let mut got = Vec::new();
+        let _ = avr_client.read_to_end(&mut got);
+        assert_eq!(got.len(), net::avr(&frame).len() * 2, "AVR kept both");
+        let mut got = Vec::new();
+        let _ = beast_client.read_to_end(&mut got);
+        let (one, used) = net::next_frame(&got).expect("a frame");
+        assert_eq!(one.as_deref(), Some(&frame[..]), "the timed frame");
+        assert_eq!(used, got.len(), "the untimed frame went out as well");
     }
 
     /// Samples the radio dropped are time that passed.
