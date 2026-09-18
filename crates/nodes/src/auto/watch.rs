@@ -26,6 +26,9 @@ pub(super) struct Watch {
     /// known. See [`AutoNode::set_spur`].
     spur: Option<f64>,
     spur_band: Option<(f64, f64)>,
+    /// Where the tuners of a stitched receiver meet, on the dial. See
+    /// [`AutoNode::set_seams`].
+    seams: Vec<f64>,
     /// The channel plan on this band, as an origin and a step in hertz, when
     /// there is one. See [`snap_to_raster`].
     raster: Option<(f64, f64)>,
@@ -218,6 +221,18 @@ impl AutoNode {
         self.apply_band();
     }
 
+    /// Where one tuner's slice ends and the next begins, on the dial, for a
+    /// receiver made of several. Nothing is opened across one; see
+    /// [`dsp::SourceDetector::set_seams`].
+    pub fn set_seams(&mut self, seams: Vec<f64>) {
+        self.watch.seams = seams;
+        self.apply_band();
+    }
+
+    pub fn seams(&self) -> &[f64] {
+        &self.watch.seams
+    }
+
     pub fn band(&self) -> Option<(f64, f64)> {
         self.watch.band
     }
@@ -246,6 +261,10 @@ impl AutoNode {
         };
         if let (Some(d), Some((lo, hi))) = (w.detector.as_mut(), w.spur_band) {
             d.set_spur(lo - c, hi - c);
+        }
+        let seams: Vec<f64> = w.seams.iter().map(|hz| hz - c).collect();
+        if let Some(d) = w.detector.as_mut() {
+            d.set_seams(seams);
         }
     }
 

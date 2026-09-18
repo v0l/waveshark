@@ -563,6 +563,44 @@ mod tests {
         assert!((opened[1] - 310_000.0).abs() < 2.0 * d.bin_hz(), "{opened:?}");
     }
 
+    /// A stitched receiver's join is not a place to read from: the two slices
+    /// carry their own rolloff and slip against each other, so a transmission
+    /// covering the join is heard by neither tuner whole.
+    #[test]
+    fn a_transmitter_astride_a_seam_does_not_open() {
+        // The two transmitters of the test above, with the seam under the
+        // upper one: what opens at all is pinned there, so what is missing
+        // here is the refusal and not the detection.
+        let sweep = |seams: Vec<f64>| {
+            let mut d = SourceDetector::new(RATE, RATE, cfg());
+            d.set_seams(seams);
+            let mut x = noise(1_000_000, 0.05, 5);
+            for (i, (a, b)) in tone(100_000, -200_000.0, RATE, 0.5)
+                .iter()
+                .zip(tone(100_000, 310_000.0, RATE, 0.5))
+                .enumerate()
+            {
+                x[500_000 + i] += a + b;
+            }
+            let mut opened = Vec::new();
+            for chunk in x.chunks(8192) {
+                opened.extend(d.process(chunk).iter().filter_map(|e| match e {
+                    SourceEvent::Opened(s) => Some(s.center_hz),
+                    _ => None,
+                }));
+            }
+            opened.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            opened
+        };
+        let none = sweep(Vec::new());
+        assert_eq!(none.len(), 2, "{none:?}");
+        let guarded = sweep(vec![310_000.0]);
+        assert_eq!(guarded.len(), 1, "{guarded:?}");
+        assert!((guarded[0] + 200_000.0).abs() < 2_000.0, "{guarded:?}");
+        // A seam a long way from either transmitter refuses neither.
+        assert_eq!(sweep(vec![450_000.0]).len(), 2);
+    }
+
     #[test]
     fn a_narrow_source_is_given_the_whole_stream_it_was_cut_at() {
         // A clean narrowband channel measures a couple of bins across, its
