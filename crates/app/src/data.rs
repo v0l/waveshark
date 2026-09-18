@@ -307,12 +307,25 @@ impl Which {
     pub fn all() -> &'static [Which] {
         static ALL: OnceLock<Vec<Which>> = OnceLock::new();
         ALL.get_or_init(|| {
-            let mut v = vec![Which::Airports, Which::Repeaters, Which::DmrIds, Which::NxdnIds];
+            // the protocol descriptions are what the ISM bands are read with at all
+            let mut v = vec![
+                Which::Repo(&git::PROTOCOLS),
+                Which::Airports,
+                Which::Repeaters,
+                Which::DmrIds,
+                Which::NxdnIds,
+            ];
             v.extend(datasets::gateways::HOST_FILES.iter().copied().map(Which::Gateway));
             v.extend([Which::CellOperators, Which::CellTowers, Which::Artemis, Which::SigIdUnid]);
             v.extend(datasets::tle::GROUPS.iter().copied().map(Which::Satellites));
             v.extend([Which::Transmitters, Which::LaunchSites]);
-            v.extend(git::REPOS.iter().copied().map(Which::Repo));
+            v.extend(
+                git::REPOS
+                    .iter()
+                    .copied()
+                    .filter(|r| !std::ptr::eq(*r, &git::PROTOCOLS))
+                    .map(Which::Repo),
+            );
             v
         })
     }
