@@ -77,6 +77,13 @@ struct Seen {
     /// address only as parity overlay: reading one back is a guess, both
     /// decoders make it, and counting those as aircraft invents traffic.
     known: bool,
+    /// Whether the frame proves itself, whoever reported it
+    ///
+    /// The parity comes to zero on DF17 and DF18, and on a DF11 answering an
+    /// all-call. Everything else is a frame somebody decided to believe, so
+    /// counting those as decodes compares two policies rather than two
+    /// demodulators.
+    provable: bool,
     at: Instant,
 }
 
@@ -89,6 +96,7 @@ impl Seen {
             df,
             icao: adsb::parse(bytes).ok().and_then(|f| f.icao),
             known: matches!(df, 17 | 18),
+            provable: matches!(df, 11 | 17 | 18) && decode::adsb::crc24(bytes) == 0,
             at,
         }
     }
@@ -151,7 +159,22 @@ fn read_iqstream(addr: &str, seconds: f64) -> Vec<Seen> {
     }
     let mut stream = dev.start_rx().expect("the server starts a subscription");
 
-    let cfg = ModeSConfig::default();
+    // The detector's thresholds, so a run can ask what a looser search would
+    // have found without a rebuild: MODES_RATIO, MODES_LEVEL, MODES_CRC.
+    let mut cfg = ModeSConfig::default();
+    if let Some(v) = std::env::var("MODES_RATIO").ok().and_then(|v| v.parse().ok()) {
+        cfg.preamble_ratio = v;
+    }
+    if let Some(v) = std::env::var("MODES_LEVEL").ok().and_then(|v| v.parse().ok()) {
+        cfg.min_level = v;
+    }
+    if let Ok(v) = std::env::var("MODES_CRC") {
+        cfg.crc_framing = v != "0";
+    }
+    println!(
+        "detector: ratio {:.2}, level {:.4}, crc framing {}",
+        cfg.preamble_ratio, cfg.min_level, cfg.crc_framing
+    );
     let mut det = ModeSDetector::new(rate, cfg);
     let mut book = AddressBook::new();
     let mut frames = Vec::new();
@@ -211,8 +234,30 @@ fn report(theirs: &[Seen], ours: &[Seen]) {
         );
     }
 
-    println!("\nby downlink format");
-    println!("{:<6} {:>10} {:>10} {:>10} {:>10}", "df", "dump1090", "ours", "we missed", "we only");
+    // What each side can prove, which is the only comparison of demodulators
+    // rather than of how much unverifiable traffic each is willing to
+    // publish. dump1090 emits DF0, 4, 5, 16, 20 and 21 whose parity is an
+    // address it cannot check, and DF11 whose parity comes to neither zero
+    // nor an interrogator id.
+    let (tp, op): (Vec<&Seen>, Vec<&Seen>) = (
+        theirs.iter().filter(|s| s.provable).collect(),
+        ours.iter().filter(|s| s.provable).collect(),
+    );
+    println!(
+        "\nparity comes to zero: dump1090 {} of {} ({:.1}%), waveshark {} of {} ({:.1}%)",
+        tp.len(),
+        theirs.len(),
+        pct(tp.len(), theirs.len()),
+        op.len(),
+        ours.len(),
+        pct(op.len(), ours.len())
+    );
+
+    println!("\nby downlink format, and of those the ones whose parity comes to zero");
+    println!(
+        "{:<6} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "df", "dump1090", "ours", "we missed", "we only", "their ok", "our ok"
+    );
     let mut dfs: Vec<u8> = theirs.iter().chain(ours).map(|s| s.df).collect();
     dfs.sort_unstable();
     dfs.dedup();
@@ -221,7 +266,9 @@ fn report(theirs: &[Seen], ours: &[Seen]) {
         let o = ours.iter().filter(|s| s.df == df).count();
         let missed = zip_count(theirs, &matched_theirs, df);
         let extra = zip_count(ours, &matched_ours, df);
-        println!("{df:<6} {t:>10} {o:>10} {missed:>10} {extra:>10}");
+        let tok = theirs.iter().filter(|s| s.df == df && s.provable).count();
+        let ook = ours.iter().filter(|s| s.df == df && s.provable).count();
+        println!("{df:<6} {t:>9} {o:>9} {missed:>9} {extra:>9} {tok:>9} {ook:>9}");
     }
 
     // Who each side saw is the answer that matters to somebody watching the
