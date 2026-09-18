@@ -1154,9 +1154,27 @@ struct ChannelRx {
     /// The quietest this channel has been, and whether it is being read.
     floor: f32,
     active: bool,
-    hangover: u8,
+    /// Samples of the span still to be read after the level last stood over
+    /// the floor.
+    hangover: usize,
     seen: u32,
 }
+
+/// How long a channel keeps being read after its level drops.
+///
+/// Time rather than blocks. It was eight blocks, which at a LimeSDR's
+/// 61.44 MS/s is 17 ms: one window 3 dB over the floor bought eight blocks of
+/// mixing, filtering and resampling a 20 MHz channel, and on a busy band with
+/// a neighbour every millisecond the channel never slept at all. Measured on
+/// that capture, 1662 of 1645 blocks fed a channel and 77 produced a frame.
+/// Four milliseconds holds a 1 Mbit/s beacon that straddles a block and the
+/// acknowledgement that follows a frame.
+const HANGOVER_S: f64 = 0.007;
+
+/// Blocks the hangover is never shorter than, however long a block is: the
+/// block after the one that woke the channel is where a frame straddling the
+/// boundary finishes.
+const MIN_HANGOVER_BLOCKS: usize = 3;
 
 impl ChannelRx {
     /// A receiver for one channel of a span, or `None` when the span does not
@@ -1203,9 +1221,10 @@ impl ChannelRx {
         }
     }
 
-    /// Whether this channel is worth reading this block: six decibels over
-    /// the quietest it has been.
-    fn awake(&mut self, spectrum: &[f32]) -> bool {
+    /// Whether this channel is worth reading this block: three decibels over
+    /// the quietest it has been. `block` is the block's length in samples of
+    /// the span, which is what the hangover is counted in.
+    fn awake(&mut self, spectrum: &[f32], block: usize, rate: f64) -> bool {
         let (lo, hi) = self.band;
         let mut power = 0.0f32;
         let mut n = 0usize;
@@ -1234,9 +1253,9 @@ impl ChannelRx {
         // its first frame.
         self.seen = self.seen.saturating_add(1);
         if power > self.floor * 2.0 || self.seen <= 8 {
-            self.hangover = 8;
+            self.hangover = ((HANGOVER_S * rate) as usize).max(block * MIN_HANGOVER_BLOCKS);
         } else {
-            self.hangover = self.hangover.saturating_sub(1);
+            self.hangover = self.hangover.saturating_sub(block);
         }
         self.active = self.hangover > 0;
         self.active
@@ -1312,7 +1331,7 @@ impl WifiSpan {
         };
         // Awake to begin with, like the ones the span opened with: it was
         // opened because something is there.
-        rx.hangover = 8;
+        rx.hangover = (HANGOVER_S * self.rate) as usize;
         self.rxs.push(rx);
         self.rxs.sort_by(|a, b| {
             a.center_hz.partial_cmp(&b.center_hz).unwrap_or(std::cmp::Ordering::Equal)
@@ -1343,7 +1362,7 @@ impl WifiSpan {
     pub fn process(&mut self, iq: &[C32], out: &mut Vec<WifiFrame>) {
         let first = out.len();
         self.measure(iq);
-        let (spectrum, prev) = (&self.spectrum, &self.prev);
+        let (spectrum, prev, rate) = (&self.spectrum, &self.prev, self.rate);
         let found: Vec<Vec<WifiFrame>> = self
             .rxs
             .par_iter_mut()
@@ -1354,7 +1373,7 @@ impl WifiSpan {
                 // the whole chain, extraction included, which is the larger
                 // half of what a channel costs.
                 let was = r.active;
-                if !r.awake(spectrum) {
+                if !r.awake(spectrum, iq.len(), rate) {
                     r.det.advance(iq.len() as i64);
                     return mine;
                 }

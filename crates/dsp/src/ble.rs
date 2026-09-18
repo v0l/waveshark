@@ -43,7 +43,7 @@
 //! and the whitening means a wrong channel index fails it too, so a frame that
 //! reports here was received on the channel it says it was.
 
-use crate::fir::{FirDecim, lowpass};
+use crate::fir::{Cascade, lowpass};
 use crate::gate::{ChannelGate, SpanGate};
 use crate::mixer::Mixer;
 use crate::pulse::LevelGate;
@@ -97,7 +97,7 @@ const MIN_PAYLOAD: usize = 6;
 /// whole advertiser: the weakest of the five failed every CRC while the
 /// strong ones still read, so the front end looked like it worked.
 fn channel_filter(rate: f64, factor: usize) -> Vec<f32> {
-    let taps = (64 * factor) | 1;
+    let taps = (64 * factor.max(1)) | 1;
     lowpass(taps, PASSBAND_HZ / rate, 60.0)
 }
 
@@ -273,7 +273,7 @@ struct ChannelRx {
     /// the caller's own stream has for it.
     factor: usize,
     mixer: Mixer,
-    decim: FirDecim,
+    decim: Cascade,
     level: LevelGate,
     mixed: Vec<C32>,
     narrow: Vec<C32>,
@@ -310,7 +310,7 @@ impl ChannelRx {
             sps: work / BAUD,
             factor,
             mixer: Mixer::new(center_hz - channel_hz, rate),
-            decim: FirDecim::new(channel_filter(rate, factor), factor),
+            decim: Cascade::new(rate, factor, PASSBAND_HZ, 60.0, channel_filter),
             level: LevelGate::new(work, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio),
             mixed: Vec::new(),
             narrow: Vec::new(),
