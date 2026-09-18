@@ -245,6 +245,26 @@ pub fn xor8(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |a, b| a ^ b)
 }
 
+/// Manchester chips to bits, taking the first chip of each pair from
+/// `phase`, with the number of pairs that did not alternate.
+///
+/// A pair of equal chips cannot be a Manchester bit, so the count is how much
+/// of the run was not this code at all. Which chip of the pair carries the bit
+/// is the transmitter's convention and the caller's business: reading the
+/// first chip gives one convention and its complement gives the other, so a
+/// caller with a sync word finds the polarity from that.
+pub fn manchester(chips: &[bool], phase: usize) -> (Vec<bool>, usize) {
+    let mut bits = Vec::with_capacity(chips.len().saturating_sub(phase) / 2);
+    let mut violations = 0usize;
+    for pair in chips[phase.min(chips.len())..].chunks_exact(2) {
+        if pair[0] == pair[1] {
+            violations += 1;
+        }
+        bits.push(pair[0]);
+    }
+    (bits, violations)
+}
+
 /// Reverse the bit order within a byte, for protocols transmitted LSB first.
 pub fn reflect8(b: u8) -> u8 {
     b.reverse_bits()

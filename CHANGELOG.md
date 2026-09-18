@@ -23,6 +23,7 @@ the code is in the commit log.
 - MDC-1200: the unit id a Motorola radio sends when its key goes down.
 - RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
 - Morse off the air: a CW channel read as text, at the speed it was sent.
+- Z-Wave: door locks, sensors and plugs on the 868 and 908 MHz channels.
 - EAS and SAME alert headers, on the seven NOAA Weather Radio channels.
 - Inmarsat STD-C: EGC and SafetyNET broadcasts off an L-band patch antenna.
 - Inmarsat Aero: satellite ACARS and the P channel's signal units.

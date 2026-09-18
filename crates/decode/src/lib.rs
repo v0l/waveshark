@@ -98,6 +98,7 @@ pub mod wefax;
 pub mod whiten;
 pub mod wifi;
 pub mod wmbus;
+pub mod zwave;
 
 pub use analyze::{Analysis, analyze};
 pub use bits::BitBuffer;

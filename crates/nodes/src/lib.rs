@@ -78,6 +78,7 @@ pub mod wfm;
 pub mod wifi_nodes;
 pub mod wigle_nodes;
 pub mod wmbus_nodes;
+pub mod zwave_nodes;
 
 pub use acars_nodes::AcarsNode;
 pub use ais_nodes::AisNode;
@@ -150,6 +151,7 @@ pub use wfm::WfmDemodNode;
 pub use wifi_nodes::WifiNode;
 pub use wigle_nodes::{Account, WigleNode, WigleStatus};
 pub use wmbus_nodes::WmbusNode;
+pub use zwave_nodes::ZWaveNode;
 
 use common::Result;
 use pipeline::node::Node;
@@ -259,6 +261,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (lora_nodes::DESC, lora_nodes::build),
     (elrs_nodes::DESC, elrs_nodes::build),
     (wmbus_nodes::DESC, wmbus_nodes::build),
+    (zwave_nodes::DESC, zwave_nodes::build),
     (dfm_nodes::DESC, dfm_nodes::build),
     (epirb_nodes::DESC, epirb_nodes::build),
     (stdc_nodes::DESC, stdc_nodes::build),
