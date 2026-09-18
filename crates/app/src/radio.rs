@@ -174,6 +174,7 @@ fn restart(
 struct FrontEnd {
     gains: Vec<(String, GainMode)>,
     toggles: Vec<(String, bool)>,
+    numbers: Vec<(String, f64)>,
 }
 
 impl FrontEnd {
@@ -181,6 +182,7 @@ impl FrontEnd {
         Self {
             gains: dev.gains(),
             toggles: dev.toggles().into_iter().map(|t| (t.name, t.on)).collect(),
+            numbers: dev.numbers().into_iter().map(|n| (n.name, n.value)).collect(),
         }
     }
 
@@ -192,6 +194,11 @@ impl FrontEnd {
         }
         for (name, on) in &self.toggles {
             if let Err(e) = dev.set_toggle(name, *on) {
+                tracing::warn!("could not restore {name}: {e}");
+            }
+        }
+        for (name, value) in &self.numbers {
+            if let Err(e) = dev.set_number(name, *value) {
                 tracing::warn!("could not restore {name}: {e}");
             }
         }
@@ -395,6 +402,8 @@ pub enum Cmd {
     Toggle(String, bool),
     /// Pick one of the radio's list settings, such as an antenna port.
     Choice(String, String),
+    /// Set one of the radio's plain numbers, such as a per-tuner trim.
+    Number(String, f64),
     /// Set one parameter on one node of the running graph, by node id.
     NodeParam(usize, String, pipeline::param::ParamValue),
     /// Set one parameter on a stage the receiver draws for itself, by the
@@ -1494,6 +1503,9 @@ pub struct RadioControls {
     pub tx_stages: Vec<common::GainStage>,
     pub toggles: Vec<common::Toggle>,
     pub choices: Vec<common::Choice>,
+    /// Plain numbers the driver takes, such as a per-tuner frequency trim on
+    /// a stitched receiver.
+    pub numbers: Vec<common::Number>,
     /// Read by the agent surface, which reports the whole control set; the
     /// settings modal keeps its own copy.
     #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
@@ -1528,6 +1540,7 @@ impl Default for RadioControls {
             tx_stages: Vec::new(),
             toggles: Vec::new(),
             choices: Vec::new(),
+            numbers: Vec::new(),
             ppm: 0.0,
             offset: 0.0,
             reach: (24e6, 1766e6),
@@ -1566,6 +1579,7 @@ impl RadioControls {
             tx_stages,
             toggles: dev.toggles(),
             choices: dev.choices(),
+            numbers: dev.numbers(),
             ppm,
             offset,
             // Already on the aerial's side of the converter: the front end
@@ -2683,6 +2697,12 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 self.rx.remeasure_dc();
             }
             Cmd::Choice(name, value) => return self.set_choice(&name, &value),
+            Cmd::Number(name, value) => {
+                if let Err(e) = self.dev.set_number(&name, value) {
+                    *self.status.error.lock() = Some(format!("{name}: {e}"));
+                }
+                self.status.set_radio(RadioControls::read(self.dev.as_ref()));
+            }
             Cmd::Ppm(v) => {
                 self.dev.correct(v);
                 // Nothing moves until the tuner is asked for a frequency
@@ -6812,6 +6832,7 @@ mod front_end_tests {
         lna: u32,
         vga: u32,
         bias_tee: bool,
+        trim: f64,
     }
 
     impl ThreeStages {
@@ -6851,6 +6872,7 @@ mod front_end_tests {
                 lna: 0,
                 vga: 0,
                 bias_tee: false,
+                trim: 0.0,
             }
         }
     }
@@ -6918,6 +6940,24 @@ mod front_end_tests {
             }
             Ok(())
         }
+        fn numbers(&self) -> Vec<common::Number> {
+            vec![common::Number {
+                name: "trim".into(),
+                label: "Trim".into(),
+                help: String::new(),
+                range: -1_000.0..=1_000.0,
+                step: 1.0,
+                unit: "Hz".into(),
+                value: self.trim,
+            }]
+        }
+        fn set_number(&mut self, name: &str, value: f64) -> common::Result<()> {
+            match name {
+                "trim" => self.trim = value,
+                _ => return Err(common::Error::other("no such number")),
+            }
+            Ok(())
+        }
         fn start_rx(&mut self) -> common::Result<Box<dyn common::RxStream>> {
             Err(common::Error::other("not a real radio"))
         }
@@ -6928,12 +6968,13 @@ mod front_end_tests {
     /// remembered, and a driver that distributes a total does not land on
     /// what the operator set stage by stage.
     #[test]
-    fn a_reopen_restores_every_stage_and_switch() {
+    fn a_reopen_restores_every_stage_switch_and_number() {
         let mut was = ThreeStages::new();
         was.set_gain("lna", GainMode::Manual(24.0)).unwrap();
         was.set_gain("vga", GainMode::Manual(45.0)).unwrap();
         was.set_gain("amp", GainMode::Manual(14.0)).unwrap();
         was.set_toggle("bias_tee", true).unwrap();
+        was.set_number("trim", -310.0).unwrap();
         // What the hardware landed on, which is not quite what was asked for.
         assert_eq!(
             was.gains(),
@@ -6951,5 +6992,7 @@ mod front_end_tests {
 
         assert_eq!(back.gains(), was.gains());
         assert!(back.bias_tee, "the bias tee is a front end setting and goes back too");
+        assert_eq!(back.numbers()[0].value, -310.0, "and so does a number");
+        assert_eq!(RadioControls::read(&back).numbers[0].value, -310.0);
     }
 }

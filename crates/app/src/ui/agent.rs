@@ -550,6 +550,16 @@ impl App {
                 self.send(Cmd::Choice(a.name, a.value));
                 Ok(ok())
             }
+            Action::Number(a) => {
+                let known = self.radio.as_ref().map(|r| r.status.radio().numbers);
+                let Some(n) = known.and_then(|v| v.into_iter().find(|n| n.name == a.name)) else {
+                    return Err(format!("no number called {:?} on this radio", a.name));
+                };
+                let v = n.quantise(a.value);
+                self.radio_settings.set_number(&a.name, v);
+                self.send(Cmd::Number(a.name, v));
+                Ok(ok())
+            }
             Action::Ppm(a) => {
                 self.set_ppm(a.ppm);
                 self.send(Cmd::Ppm(a.ppm));
@@ -1015,6 +1025,20 @@ impl App {
                         "label": ch.label,
                         "options": ch.options,
                         "selected": ch.selected,
+                    }))
+                    .collect::<Vec<_>>()
+            }),
+            "numbers": controls.as_ref().map(|c| {
+                c.numbers
+                    .iter()
+                    .map(|n| json!({
+                        "name": n.name,
+                        "label": n.label,
+                        "range": [*n.range.start(), *n.range.end()],
+                        "step": n.step,
+                        "unit": n.unit,
+                        "set": n.value,
+                        "help": n.help,
                     }))
                     .collect::<Vec<_>>()
             }),

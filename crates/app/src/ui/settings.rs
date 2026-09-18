@@ -2732,6 +2732,19 @@ impl App {
                     }
                 });
             }
+            for n in &controls.numbers {
+                row_help(ui, &n.label, &n.help, |ui| {
+                    let mut v = n.value;
+                    let drag = egui::DragValue::new(&mut v)
+                        .speed(n.step.max(1.0))
+                        .range(n.range.clone())
+                        .suffix(format!(" {}", n.unit));
+                    if ui.add(drag).changed() {
+                        self.radio_settings.set_number(&n.name, n.quantise(v));
+                        changed = true;
+                    }
+                });
+            }
             for t in &controls.toggles {
                 let mut on = t.on;
                 if switch(ui, &t.label, &mut on, "", &t.help) {

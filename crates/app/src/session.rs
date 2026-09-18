@@ -139,6 +139,8 @@ pub struct RadioSettings {
     /// List settings by driver name and the option chosen, such as which
     /// antenna port the cable is in.
     pub choices: Vec<(String, String)>,
+    /// Plain numbers by driver name, such as a per-tuner trim in hertz.
+    pub numbers: Vec<(String, f64)>,
     /// Reference correction for the radio this applies to. Held here as one
     /// number because the settings pane edits the radio in front of it; the
     /// session keeps one of these per radio.
@@ -168,6 +170,11 @@ impl RadioSettings {
         self.choices.retain(|(n, _)| n != name);
         self.choices.push((name.to_string(), value.to_string()));
     }
+
+    pub fn set_number(&mut self, name: &str, value: f64) {
+        self.numbers.retain(|(n, _)| n != name);
+        self.numbers.push((name.to_string(), value));
+    }
 }
 
 /// What the house is told about unless the operator says otherwise: the
@@ -192,6 +199,8 @@ pub struct Session {
     /// List settings by driver name and the option chosen, such as which
     /// antenna port the cable is in.
     pub choices: Vec<(String, String)>,
+    /// Plain number settings by driver name, such as a per-tuner trim.
+    pub numbers: Vec<(String, f64)>,
     /// Reference correction in parts per million, by device label.
     ///
     /// Per radio rather than one number, because the correction is a property
@@ -428,6 +437,7 @@ impl Default for Session {
             gains: Vec::new(),
             toggles: Vec::new(),
             choices: Vec::new(),
+            numbers: Vec::new(),
             ppm: BTreeMap::new(),
             offset: BTreeMap::new(),
             tx_gain_db: 0.0,
@@ -504,6 +514,7 @@ impl Session {
             gains: self.gains.clone(),
             toggles: self.toggles.clone(),
             choices: self.choices.clone(),
+            numbers: self.numbers.clone(),
             ppm: self.ppm_for(device),
             offset: self.offset_for(device),
             tx_gain_db: self.tx_gain_db,
@@ -665,6 +676,7 @@ impl Session {
         let mut gains = Vec::new();
         let mut toggles = Vec::new();
         let mut choices = Vec::new();
+        let mut numbers = Vec::new();
         let mut feeds = Vec::new();
         let mut streams = Vec::new();
         let mut map_layers = Vec::new();
@@ -687,6 +699,10 @@ impl Session {
                 toggles.push((name.to_string(), v == "true"));
             } else if let Some(name) = k.strip_prefix("choice.") {
                 choices.push((name.to_string(), v.to_string()));
+            } else if let Some(name) = k.strip_prefix("number.") {
+                if let Ok(v) = v.parse() {
+                    numbers.push((name.to_string(), v));
+                }
             } else if let Some(name) = k.strip_prefix("map_layer.") {
                 map_layers.push((name.to_string(), v == "true"));
             } else if let Some(name) = k.strip_prefix("ppm.") {
@@ -735,6 +751,7 @@ impl Session {
             gains,
             toggles,
             choices,
+            numbers,
             ppm,
             offset,
             tx_gain_db: f("tx_gain_db", d.tx_gain_db as f64) as f32,
@@ -981,6 +998,9 @@ impl Session {
         for (name, value) in &self.choices {
             s.push_str(&format!("choice.{name} = {value}\n"));
         }
+        for (name, value) in &self.numbers {
+            s.push_str(&format!("number.{name} = {value}\n"));
+        }
         for (name, on) in &self.map_layers {
             s.push_str(&format!("map_layer.{name} = {on}\n"));
         }
@@ -1071,6 +1091,7 @@ mod tests {
             gains: vec![("tuner".into(), GainMode::Manual(29.7)), ("lna".into(), GainMode::Auto)],
             toggles: vec![("bias_tee".into(), true)],
             choices: vec![("antenna".into(), "LNAH".into())],
+            numbers: vec![("trim1".into(), -1_234.0)],
             ppm: BTreeMap::from([
                 ("RTL2838 #00000001".into(), -3.5),
                 ("HackRF One 78d063dc".into(), 5.25),
@@ -1172,6 +1193,20 @@ mod tests {
             map_layers: vec![("rings".into(), true), ("airports".into(), false)],
         };
         assert_eq!(Session::parse(&s.render()), s);
+    }
+
+    /// A stitched receiver's per-tuner trim is a driver setting like a
+    /// switch or an antenna port, so it is kept by name and comes back as a
+    /// number rather than as the text it was written as.
+    #[test]
+    fn a_number_setting_survives_the_file() {
+        let s = Session::parse("number.trim1 = -1234.5\nnumber.trim2 = banana\n");
+        assert_eq!(s.numbers, vec![("trim1".to_string(), -1234.5)]);
+        let mut rs = s.radio(None);
+        assert_eq!(rs.numbers, vec![("trim1".to_string(), -1234.5)]);
+        rs.set_number("trim1", 60.0);
+        rs.set_number("trim2", 7.0);
+        assert_eq!(rs.numbers, vec![("trim1".to_string(), 60.0), ("trim2".to_string(), 7.0)]);
     }
 
     /// A session written before there was a second protocol says an address

@@ -140,6 +140,7 @@ pub enum Action {
     Gain(args::Gain),
     Toggle(args::Toggle),
     Choice(args::Choice),
+    Number(args::Number),
     Ppm(args::Ppm),
     Location(args::Location),
 
@@ -296,6 +297,14 @@ pub mod args {
         pub name: String,
         /// One of the options `status` lists for it.
         pub value: String,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct Number {
+        /// The setting's driver name, from `status`.
+        pub name: String,
+        /// In the unit `status` gives for it, inside the range it gives.
+        pub value: f64,
     }
 
     #[derive(Debug, Deserialize, JsonSchema)]

@@ -384,6 +384,39 @@ impl Device for Combined {
         Ok(())
     }
 
+    /// One trim per slice above the first, which is the reference. Bounded
+    /// by half the band the slices share, since a tuner further out than
+    /// that has nothing left in the tap for the estimator to match and a
+    /// hand-set figure that large is a mistyped one.
+    fn numbers(&self) -> Vec<common::Number> {
+        let reach = self.child_rate.as_f64() * OVERLAP / 2.0;
+        (1..self.children.len())
+            .map(|i| common::Number {
+                name: format!("trim{i}"),
+                label: format!("Tuner {} trim", i + 1),
+                help: "How far this tuner is above the first one, in hertz, taken off \
+                       before its slice is placed. For a dongle you have measured \
+                       against a beacon: set tuner drift to hold, or tracking \
+                       measures over it."
+                    .into(),
+                range: -reach..=reach,
+                step: 1.0,
+                unit: "Hz".into(),
+                value: self.drift.get(i),
+            })
+            .collect()
+    }
+
+    fn set_number(&mut self, name: &str, value: f64) -> Result<()> {
+        let i = name
+            .strip_prefix("trim")
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|i| *i > 0 && *i < self.children.len())
+            .ok_or_else(|| Error::other(format!("no such setting: {name}")))?;
+        self.correct_slice(i, value);
+        Ok(())
+    }
+
     fn set_ppm(&mut self, ppm: f64) -> Result<()> {
         for c in self.children.iter_mut() {
             c.set_ppm(ppm)?;
@@ -1084,6 +1117,47 @@ mod tests {
         dev.set_choice("drift", "off").unwrap();
         assert_eq!(dev.corrections(), vec![0.0, 0.0]);
         assert!(dev.set_choice("drift", "sideways").is_err());
+    }
+
+    /// The same correction through the trait, which is the only route an
+    /// interface has to it: a number per slice above the first, named,
+    /// bounded and read back off the device.
+    #[test]
+    fn a_slice_trim_is_a_number_on_the_device() {
+        let rate = Sps(2_400_000);
+        let mut dev = combine(
+            vec![
+                radio(Hz(100_000_000), rate, Vec::new()),
+                radio(Hz(100_000_000), rate, Vec::new()),
+                radio(Hz(100_000_000), rate, Vec::new()),
+            ],
+            rate,
+        )
+        .unwrap();
+        let ns = dev.numbers();
+        assert_eq!(ns.len(), 2, "three tuners, two joins, and slice zero is the reference");
+        assert_eq!(ns[0].name, "trim1");
+        assert_eq!(ns[1].name, "trim2");
+        assert_eq!(ns[0].unit, "Hz");
+        assert_eq!(ns[0].step, 1.0);
+        // 2.4 MS/s a slice with an eighth of it shared is 300 kHz of
+        // overlap, so 150 kHz either way.
+        assert_eq!(*ns[0].range.start(), -150_000.0);
+        assert_eq!(*ns[0].range.end(), 150_000.0);
+        assert_eq!(ns[0].value, 0.0);
+
+        dev.set_number("trim2", 1_234.0).unwrap();
+        assert_eq!(dev.corrections(), vec![0.0, 0.0, 1_234.0]);
+        assert_eq!(dev.numbers()[1].value, 1_234.0);
+        assert_eq!(ns[1].quantise(1_234.4), 1_234.0, "a hertz at a time");
+        assert_eq!(ns[1].quantise(200_000.0), 150_000.0, "and no further than the shared band");
+
+        // Slice zero is the reference the others are measured against, and a
+        // name no slice has is a fault rather than a silent no-op.
+        assert!(dev.set_number("trim0", 10.0).is_err());
+        assert!(dev.set_number("trim3", 10.0).is_err());
+        assert!(dev.set_number("drift", 10.0).is_err());
+        assert_eq!(dev.corrections(), vec![0.0, 0.0, 1_234.0]);
     }
 
     #[test]

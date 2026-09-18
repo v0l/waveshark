@@ -798,6 +798,7 @@ impl App {
             s.gains = rs.gains;
             s.toggles = rs.toggles;
             s.choices = rs.choices;
+            s.numbers = rs.numbers;
             s.tx_gain_db = rs.tx_gain_db;
             s.ppm = ppm;
             s.offset = offset;
@@ -891,7 +892,10 @@ impl App {
             return;
         };
         let controls = radio.status.radio();
-        if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
+        if controls.stages.is_empty()
+            && controls.toggles.is_empty()
+            && controls.choices.is_empty()
+            && controls.numbers.is_empty()
         {
             return;
         }
@@ -916,6 +920,11 @@ impl App {
                 self.send(Cmd::Choice(name.clone(), value.clone()));
             }
         }
+        for (name, value) in &want.numbers {
+            if let Some(n) = controls.numbers.iter().find(|n| &n.name == name) {
+                self.send(Cmd::Number(name.clone(), n.quantise(*value)));
+            }
+        }
         self.send(Cmd::Ppm(want.ppm));
         self.send(Cmd::Offset(want.offset));
         if !controls.tx_stages.is_empty() {
@@ -933,7 +942,10 @@ impl App {
             return;
         };
         let controls = radio.status.radio();
-        if controls.stages.is_empty() && controls.toggles.is_empty() && controls.choices.is_empty()
+        if controls.stages.is_empty()
+            && controls.toggles.is_empty()
+            && controls.choices.is_empty()
+            && controls.numbers.is_empty()
         {
             return;
         }

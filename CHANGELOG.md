@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- Tuner trim on a stitched receiver, in hertz per tuner, on the radio card.
 - `wave1090`, a Mode S receiver of its own, serving dump1090's AVR, BaseStation
   and Beast ports off a dongle or an iqstream server, taking mlat results back
   and passing the samples on over iqstream itself.

@@ -23,8 +23,8 @@ pub use decode::{
 };
 pub use demod::Demod;
 pub use device::{
-    Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream, Toggle, TunerRange,
-    Tuning, TxInfo, TxStream,
+    Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, Number, RxStream, Toggle,
+    TunerRange, Tuning, TxInfo, TxStream,
 };
 pub use error::{Error, Result};
 pub use iq::{C32, IqBuf, SampleFormat};

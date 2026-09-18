@@ -496,7 +496,7 @@ mod tests {
         let list = tool_list();
         let list = list.as_array().expect("an array of tools");
         assert_eq!(list.len(), catalog::all().len());
-        assert_eq!(list.len(), 78);
+        assert_eq!(list.len(), 79);
         for t in list {
             let f = &t["function"];
             assert!(f["name"].as_str().is_some_and(|n| !n.is_empty()));

@@ -246,6 +246,12 @@ fn build() -> Vec<Tool> {
             Action::Choice,
         ),
         takes(
+            "set_number",
+            "Set one of the radio's plain numbers, such as a tuner's trim on a stitched \
+             receiver. The unit and the range are in `status`.",
+            Action::Number,
+        ),
+        takes(
             "set_ppm",
             "Correct the reference oscillator of the radio in use, in parts per million.",
             Action::Ppm,
@@ -526,7 +532,7 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(names.len(), before, "a tool name is used twice");
-        assert_eq!(before, 78, "the catalogue changed size");
+        assert_eq!(before, 79, "the catalogue changed size");
     }
 
     /// Every schema is an object, because that is what both the protocol and

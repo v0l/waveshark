@@ -157,6 +157,37 @@ pub struct Choice {
     pub selected: String,
 }
 
+/// A device setting that is a plain number, with a unit.
+///
+/// A gain stage is decibels and a [`Choice`] is a list of words, so a driver
+/// wanting a hertz, a degree or a decibel that is not a gain had no way to
+/// offer it. Like the other two, the interface draws this without knowing
+/// what it means.
+#[derive(Clone, Debug)]
+pub struct Number {
+    pub name: String,
+    pub label: String,
+    pub help: String,
+    pub range: RangeInclusive<f64>,
+    /// Smallest change the control offers, or zero for continuous
+    pub step: f64,
+    /// Shown after the value: "Hz", "dB", "deg"
+    pub unit: String,
+    pub value: f64,
+}
+
+impl Number {
+    /// `v` snapped to the step and held inside the range, which is what the
+    /// driver will be given whatever the control did.
+    pub fn quantise(&self, v: f64) -> f64 {
+        let v = v.clamp(*self.range.start(), *self.range.end());
+        match self.step > 0.0 {
+            true => (v / self.step).round() * self.step,
+            false => v,
+        }
+    }
+}
+
 /// How gain is being controlled for one stage.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GainMode {
@@ -406,6 +437,16 @@ pub trait Device: Send {
 
     /// Select one option by the name it was offered under.
     fn set_choice(&mut self, _name: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Plain numbers this device takes, such as a frequency trim.
+    fn numbers(&self) -> Vec<Number> {
+        Vec::new()
+    }
+
+    /// Set one number by the name it was offered under.
+    fn set_number(&mut self, _name: &str, _value: f64) -> Result<()> {
         Ok(())
     }
 
