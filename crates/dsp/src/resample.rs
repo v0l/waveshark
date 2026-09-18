@@ -20,17 +20,19 @@ use common::C32;
 pub struct Rational {
     l: usize,
     m: usize,
-    /// Taps per phase, which is the cost of one output sample.
-    per_phase: usize,
-    /// `phases[p][k]` is tap `p + k * l` of the prototype.
-    phases: Vec<Vec<f32>>,
-    /// The newest `per_phase` samples twice over, so tap `k` of any phase is
-    /// one index below the last, with no wrap to test and nothing to shift.
-    /// Half a history per input sample is what shifting the window cost, and
-    /// it was as much work again as the taps.
-    hist: Vec<C32>,
-    /// Where the next input sample goes, and so where the newest one is.
-    w: usize,
+    /// Complex samples one phase's window spans: `per_phase` rounded up to
+    /// whole registers of the dot kernel.
+    win: usize,
+    /// Every phase's taps, reversed and doubled up for the kernel the
+    /// decimator uses: `lanes[p]` is `[h[n-1], h[n-1], h[n-2], h[n-2], ...]`
+    /// of tap `p + k * l` of the prototype, front-padded to `win`. Reversed
+    /// so the window is read oldest first, which is the order it lies in.
+    lanes: Vec<Vec<f32>>,
+    /// The last `win - 1` inputs, which the next block's first outputs
+    /// need.
+    tail: Vec<C32>,
+    /// `tail` then the block, so every window is one slice of it.
+    joined: Vec<C32>,
     acc: usize,
     /// Buffers for [`Rational::process_real`], kept so a per-block call does
     /// not allocate.
@@ -83,21 +85,27 @@ impl Rational {
         assert!(l >= 1 && m >= 1);
         let per_phase = 24;
         let taps = crate::fir::lowpass((per_phase * l) | 1, cutoff, 60.0);
-        let mut phases = vec![Vec::with_capacity(per_phase); l];
-        for (p, phase) in phases.iter_mut().enumerate() {
-            for k in 0..per_phase {
+        let half = crate::fir::LANES / 2;
+        let win = per_phase.div_ceil(half) * half;
+        let pad = win - per_phase;
+        let mut lanes = vec![Vec::with_capacity(win * 2); l];
+        for (p, phase) in lanes.iter_mut().enumerate() {
+            phase.resize(pad * 2, 0.0);
+            for k in (0..per_phase).rev() {
                 // Gain `l`, because interpolation spreads one sample's energy
                 // over `l` of them.
-                phase.push(taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32);
+                let h = taps.get(p + k * l).copied().unwrap_or(0.0) * l as f32;
+                phase.push(h);
+                phase.push(h);
             }
         }
         Self {
             l,
             m,
-            per_phase,
-            phases,
-            hist: vec![C32::default(); per_phase * 2],
-            w: 0,
+            win,
+            lanes,
+            tail: vec![C32::default(); win - 1],
+            joined: Vec::new(),
             acc: 0,
             scratch_in: Vec::new(),
             scratch_out: Vec::new(),
@@ -115,8 +123,7 @@ impl Rational {
     }
 
     pub fn reset(&mut self) {
-        self.hist.iter_mut().for_each(|x| *x = C32::default());
-        self.w = 0;
+        self.tail.iter_mut().for_each(|x| *x = C32::default());
         self.acc = 0;
     }
 
@@ -127,29 +134,32 @@ impl Rational {
             return;
         }
         out.reserve(input.len() * self.l / self.m + 1);
-        let n = self.per_phase;
-        for &x in input {
-            self.hist[self.w] = x;
-            self.hist[self.w + n] = x;
-            while self.acc < self.l {
-                let h = &self.phases[self.acc];
-                let mut sum = C32::default();
-                // Tap `k` is `k` samples below the newest, which the doubled
-                // history holds at a contiguous run of indices.
-                let mut at = self.w + n;
-                for &t in h.iter() {
-                    sum += self.hist[at] * t;
-                    at -= 1;
-                }
-                out.push(sum);
-                self.acc += self.m;
+        let n = self.win;
+        // The history joined onto the block, so the window ending at input
+        // `i` is `joined[i..i + n]`: one contiguous run, read forward, with
+        // nothing shifted and nothing written per sample. The join is one
+        // copy of the block, which is far less than the window copy per
+        // input it replaced.
+        self.joined.clear();
+        self.joined.extend_from_slice(&self.tail);
+        self.joined.extend_from_slice(input);
+        let x = crate::fir::as_floats(&self.joined);
+        let dot = crate::fir::Dot::pick();
+        let (l, m) = (self.l, self.m);
+        let mut acc = self.acc;
+        for i in 0..input.len() {
+            let window = &x[i * 2..(i + n) * 2];
+            while acc < l {
+                let s = dot.run(window, &self.lanes[acc]);
+                out.push(C32::new(s[0] + s[2] + s[4] + s[6], s[1] + s[3] + s[5] + s[7]));
+                acc += m;
             }
-            self.acc -= self.l;
-            self.w += 1;
-            if self.w == n {
-                self.w = 0;
-            }
+            acc -= l;
         }
+        self.acc = acc;
+        let keep = self.tail.len();
+        let from = self.joined.len() - keep;
+        self.tail.copy_from_slice(&self.joined[from..]);
     }
 
     /// The same for real samples: audio, a discriminator's output, an

@@ -77,45 +77,35 @@ pub fn pfb_prototype(channels: usize, taps_per_branch: usize, atten_db: f64) -> 
     h
 }
 
-/// Direct-form FIR over complex samples with real taps, keeping state across
-/// calls so block boundaries are seamless.
+/// FIR over complex samples with real taps, keeping every sample and keeping
+/// state across calls so block boundaries are seamless.
+///
+/// A decimator by one: the block kernel is the same dot product either way,
+/// and the sample-at-a-time loop this replaced shifted its whole history for
+/// every input.
 #[derive(Clone)]
-pub struct Fir {
-    taps: Vec<f32>,
-    hist: Vec<C32>,
-}
+pub struct Fir(FirDecim);
 
 impl Fir {
     pub fn new(taps: Vec<f32>) -> Self {
-        let n = taps.len();
-        Self { taps, hist: vec![C32::new(0.0, 0.0); n] }
+        Self(FirDecim::new(taps, 1))
     }
 
     pub fn len(&self) -> usize {
-        self.taps.len()
+        self.0.taps()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.taps.is_empty()
+        self.0.taps() == 0
     }
 
     pub fn reset(&mut self) {
-        self.hist.fill(C32::new(0.0, 0.0));
+        self.0.reset();
     }
 
     /// Filter `input`, appending `input.len()` samples to `out`.
     pub fn process(&mut self, input: &[C32], out: &mut Vec<C32>) {
-        out.reserve(input.len());
-        let n = self.taps.len();
-        for &x in input {
-            self.hist.copy_within(0..n - 1, 1);
-            self.hist[0] = x;
-            let mut acc = C32::new(0.0, 0.0);
-            for (h, s) in self.taps.iter().zip(self.hist.iter()) {
-                acc += s * *h;
-            }
-            out.push(acc);
-        }
+        self.0.process(input, out);
     }
 }
 
@@ -150,13 +140,13 @@ pub struct FirDecim {
 }
 
 /// Lanes in the register the kernels are written for.
-const LANES: usize = 8;
+pub(crate) const LANES: usize = 8;
 
 /// The inner loop's view of complex samples: pairs of floats.
 ///
 /// `Complex<f32>` is `repr(C)` with `re` then `im`, so this is the same bytes,
 /// and it lets the kernel run over one flat slice.
-fn as_floats(v: &[C32]) -> &[f32] {
+pub(crate) fn as_floats(v: &[C32]) -> &[f32] {
     // SAFETY: Complex<f32> is repr(C) { re: f32, im: f32 } with no padding, so
     // n of them are exactly 2n f32 at the same address and alignment.
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const f32, v.len() * 2) }
@@ -170,6 +160,9 @@ fn decimate_block(
     lanes: &[f32],
     win: usize,
     first: usize,
+    // One past the last sample a window may reach, so a scratch buffer
+    // holding more than the windows that belong to it still stops.
+    last: usize,
     factor: usize,
     out: &mut Vec<C32>,
 ) {
@@ -178,11 +171,98 @@ fn decimate_block(
     debug_assert_eq!(lanes.len(), n2);
     let dot = Dot::pick();
     let mut start = first;
-    while start + win <= joined.len() {
+    while start + win <= last.min(joined.len()) {
         let s = dot.run(&x[start * 2..start * 2 + n2], lanes);
         out.push(C32::new(s[0] + s[2] + s[4] + s[6], s[1] + s[3] + s[5] + s[7]));
         start += factor;
     }
+}
+
+/// A decimator in two stages, where one would run a sharp filter at the
+/// input rate for no reason.
+///
+/// A channel filter's tap count is set by how narrow its transition is
+/// against the rate it runs at, so the same response costs proportionally
+/// less the slower the stream under it. Cutting most of the rate away first
+/// with a filter that only has to stop what would fold onto the signal buys
+/// that, and a wide transition is a short filter. Measured on the 61.44 MS/s
+/// span an advertising channel is read from, the single 961 tap filter is
+/// 8.4 million multiplies a block and the pair is 1.3.
+///
+/// The sharp stage is the caller's own: it is handed the rate and factor it
+/// will see and returns the taps it wants, so whatever a front end tuned its
+/// channel filter to is what still runs, at a lower rate.
+pub struct Cascade {
+    coarse: Option<FirDecim>,
+    fine: FirDecim,
+    mid: Vec<C32>,
+}
+
+impl Cascade {
+    pub fn new(
+        rate: f64,
+        factor: usize,
+        passband_hz: f64,
+        atten_db: f64,
+        fine: impl Fn(f64, usize) -> Vec<f32>,
+    ) -> Self {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for f1 in (1..=factor).filter(|f| factor % f == 0) {
+            let f2 = factor / f1;
+            let rate1 = rate / f1 as f64;
+            let Some(t1) = coarse_taps(rate, f1, passband_hz, atten_db) else { continue };
+            let t2 = fine(rate1, f2).len();
+            // Multiplies per input sample: each stage runs at its own
+            // output rate.
+            let cost = t1 as f64 / f1 as f64 + t2 as f64 / factor as f64;
+            if best.is_none_or(|(c, _, _)| cost < c) {
+                best = Some((cost, f1, t1));
+            }
+        }
+        let (_, f1, t1) = best.expect("a factor of one always fits");
+        let f2 = factor / f1;
+        let rate1 = rate / f1 as f64;
+        let coarse = (f1 > 1).then(|| {
+            let stop = rate1 - passband_hz;
+            let cutoff = (passband_hz + stop) / 2.0 / rate;
+            FirDecim::new(lowpass(t1, cutoff, atten_db), f1)
+        });
+        Self { coarse, fine: FirDecim::new(fine(rate1, f2), f2), mid: Vec::new() }
+    }
+
+    /// Taps the pair runs, for a test that wants to say what it cost.
+    pub fn taps(&self) -> (usize, usize) {
+        (self.coarse.as_ref().map_or(0, FirDecim::taps), self.fine.taps())
+    }
+
+    pub fn process(&mut self, input: &[C32], out: &mut Vec<C32>) {
+        match &mut self.coarse {
+            Some(c) => {
+                self.mid.clear();
+                c.process(input, &mut self.mid);
+                self.fine.process(&self.mid, out);
+            }
+            None => self.fine.process(input, out),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(c) = &mut self.coarse {
+            c.reset();
+        }
+        self.fine.reset();
+        self.mid.clear();
+    }
+}
+
+/// Taps a coarse stage needs to decimate by `factor` without folding
+/// anything onto `passband_hz`, or `None` where it would have to fold.
+fn coarse_taps(rate: f64, factor: usize, passband_hz: f64, atten_db: f64) -> Option<usize> {
+    if factor == 1 {
+        return Some(0);
+    }
+    let stop = rate / factor as f64 - passband_hz;
+    (stop > passband_hz * 1.05).then(|| estimate_taps((stop - passband_hz) / rate, atten_db))
 }
 
 /// Eight running sums over two equal slices, lane `k` holding every eighth
@@ -195,7 +275,7 @@ fn decimate_block(
 /// loop written with `wide`, which is two SSE ops per step on x86 and NEON
 /// on ARM.
 #[derive(Clone, Copy)]
-enum Dot {
+pub(crate) enum Dot {
     #[cfg(target_arch = "x86_64")]
     Avx2Fma,
     Portable,
@@ -203,7 +283,7 @@ enum Dot {
 
 impl Dot {
     #[inline]
-    fn pick() -> Self {
+    pub(crate) fn pick() -> Self {
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
             return Dot::Avx2Fma;
@@ -212,7 +292,7 @@ impl Dot {
     }
 
     #[inline]
-    fn run(self, w: &[f32], h: &[f32]) -> [f32; LANES] {
+    pub(crate) fn run(self, w: &[f32], h: &[f32]) -> [f32; LANES] {
         debug_assert_eq!(w.len(), h.len());
         debug_assert_eq!(w.len() % LANES, 0);
         match self {
@@ -383,23 +463,64 @@ impl FirDecim {
         self.phase = 0;
     }
 
+    /// Filter a block, appending one output per `factor` inputs.
+    ///
+    /// Only the windows that straddle the join are copied anywhere: the rest
+    /// are read out of the caller's block where it lies. Joining the whole
+    /// block onto the history first was a second pass over every sample of
+    /// it per filter, and a busy 2.4 GHz span runs two dozen of these over
+    /// the same 61.44 MS/s.
     pub fn process(&mut self, input: &[C32], out: &mut Vec<C32>) {
         if input.is_empty() {
             return;
         }
         out.reserve(input.len() / self.factor + 1);
-        self.joined.clear();
-        self.joined.extend_from_slice(&self.tail);
-        self.joined.extend_from_slice(input);
+        let pad = self.win - 1;
         // The first output lands on the input that brings the phase round to
         // `factor`; its window ends there and starts `win` samples earlier,
-        // which is index 0 of `joined` when that input is the first.
+        // which is index 0 of the history when that input is the first.
         let first = self.factor - 1 - self.phase;
-        decimate_block(&self.joined, &self.lanes, self.win, first, self.factor, out);
+        // Windows reaching back into the history, over the history and as
+        // much of the block as one of them can touch.
+        let lead = input.len().min(pad);
+        self.joined.clear();
+        self.joined.extend_from_slice(&self.tail);
+        self.joined.extend_from_slice(&input[..lead]);
+        decimate_block(&self.joined, &self.lanes, self.win, first, pad + lead, self.factor, out);
+        // And the rest, whose windows are inside the block. The same output
+        // positions counted from the block's own start.
+        if first < pad {
+            let skipped = (pad - first).div_ceil(self.factor);
+            let start = first + skipped * self.factor;
+            if start >= pad {
+                decimate_block(
+                    input,
+                    &self.lanes,
+                    self.win,
+                    start - pad,
+                    input.len(),
+                    self.factor,
+                    out,
+                );
+            }
+        } else {
+            decimate_block(
+                input,
+                &self.lanes,
+                self.win,
+                first - pad,
+                input.len(),
+                self.factor,
+                out,
+            );
+        }
         self.phase = (self.phase + input.len()) % self.factor;
-        let keep = self.tail.len();
-        let from = self.joined.len() - keep;
-        self.tail.copy_from_slice(&self.joined[from..]);
+        if input.len() >= pad {
+            self.tail.copy_from_slice(&input[input.len() - pad..]);
+        } else {
+            self.tail.copy_within(input.len().., 0);
+            self.tail[pad - input.len()..].copy_from_slice(input);
+        }
     }
 }
 
