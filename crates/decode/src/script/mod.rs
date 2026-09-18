@@ -807,7 +807,7 @@ impl Writer<'_> {
 
     /// A view over exactly these bits whose value was supplied, or a
     /// format the field is part of
-    fn from_view(&self, f: &Field, at: usize) -> Result<Option<u64>, EncodeError> {
+    fn viewed(&self, f: &Field, at: usize) -> Result<Option<u64>, EncodeError> {
         for v in &self.views {
             let Some(val) = self.fields.get(&v.name) else { continue };
             if v.at == Some(at) && v.bits == f.bits {
@@ -846,7 +846,7 @@ impl Writer<'_> {
                         (Some(c), _) => c,
                         (None, Some(v)) => raw_of(f, v)?,
                         (None, None) if f.name.is_empty() || filled_by_check => 0,
-                        (None, None) => match (self.from_view(f, at)?, f.omit_if.iter().next()) {
+                        (None, None) => match (self.viewed(f, at)?, f.omit_if.iter().next()) {
                             (Some(raw), _) => {
                                 if let Ok(v) = value_of(f, raw) {
                                     self.derived.insert(f.name.clone(), v);
@@ -1020,7 +1020,7 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
 
 fn hex_bits(hex: &str, n: usize) -> Result<BitBuffer, String> {
     let digits: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return Err(format!("hex {hex:?} has an odd number of digits"));
     }
     let bytes: Result<Vec<u8>, _> =

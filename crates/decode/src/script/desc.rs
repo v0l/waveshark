@@ -228,6 +228,7 @@ impl CheckKind {
 
 /// A field, or a group of fields read when a condition holds
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     Group(Group),
     Field(Field),
