@@ -27,7 +27,7 @@
 //! And the differencing is blind to the polarity of the chip mapping, so a
 //! receiver that has the constellation the other way up reads the same bits.
 
-use crate::fir::{FirDecim, lowpass};
+use crate::fir::{Cascade, lowpass};
 use crate::gate::{ChannelGate, SpanGate};
 use crate::mixer::Mixer;
 use crate::pulse::LevelGate;
@@ -273,7 +273,7 @@ struct ChannelRx {
     patterns: [u32; 16],
     mask: u32,
     mixer: Mixer,
-    decim: FirDecim,
+    decim: Cascade,
     level: LevelGate,
     mixed: Vec<C32>,
     narrow: Vec<C32>,
@@ -316,7 +316,9 @@ impl ChannelRx {
             mask: symbol_mask(&phy),
             phy,
             mixer: Mixer::new(center_hz - channel_hz, rate),
-            decim: FirDecim::new(channel_filter(rate, factor, phy.passband_hz), factor),
+            decim: Cascade::new(rate, factor, phy.passband_hz, 60.0, |r, f| {
+                channel_filter(r, f, phy.passband_hz)
+            }),
             level: LevelGate::new(work, cfg.tau_us, 0.3, cfg.min_snr_db, cfg.noise_threshold_ratio),
             mixed: Vec::new(),
             narrow: Vec::new(),
@@ -547,7 +549,7 @@ const TARGET_SPS: f64 = 4.0;
 /// the decimation, for the reason spelled out in `dsp::ble`: the decimator's
 /// own design leaves the passband three times wider than the signal.
 fn channel_filter(rate: f64, factor: usize, passband_hz: f64) -> Vec<f32> {
-    let taps = (64 * factor) | 1;
+    let taps = (64 * factor.max(1)) | 1;
     lowpass(taps, passband_hz / rate, 60.0)
 }
 

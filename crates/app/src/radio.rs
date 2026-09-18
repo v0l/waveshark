@@ -4932,7 +4932,10 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("BLE-Adv")).collect();
-        assert!(ble.len() >= 6, "read {} advertisements, expected the 8 in the capture", ble.len());
+        // Seven of the eight in the capture. It was six until the channel
+        // filter was split into a coarse and a sharp stage, which is a
+        // cleaner passband as well as a third of the multiplies.
+        assert_eq!(ble.len(), 7, "read {} of the 8 advertisements in the capture", ble.len());
         for r in &ble {
             assert_eq!(r.crc, Some(true), "a packet without its CRC got through: {r:?}");
             assert!(

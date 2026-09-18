@@ -50,6 +50,9 @@ pub const CHANNEL_WIDTH_HZ: f64 = 1_000_000.0;
 /// The two bit rates an XN297 keys. The chip supports no others.
 const BAUDS: [f64; 2] = [250_000.0, 1_000_000.0];
 
+/// Samples a symbol each bit clock is fed, which is where [`BitSync`] stops.
+const SPS: f64 = 4.0;
+
 /// Rate the channel is cut down to before the bit clocks read it: four
 /// samples a symbol at the faster rate, which is where [`BitSync`] stops.
 const WORK_HZ: f64 = 4_000_000.0;
@@ -76,6 +79,16 @@ pub struct Nrf24Node {
 /// One bit rate's clock and the bits it has produced but not yet read a
 /// frame out of.
 struct Reader {
+    /// Down to four samples a symbol for *this* bit rate.
+    ///
+    /// The stream both clocks are handed is four samples a symbol at the
+    /// faster one, which is sixteen at the slower, and a bit clock's channel
+    /// filter is designed against its own baud: at 4 MS/s the 250 kbit
+    /// filter is 119 taps where at 1 MS/s it is 31, and it runs over a
+    /// quarter as many samples. Fifteen times the arithmetic for the same
+    /// bits.
+    decim: Option<FirDecim>,
+    narrow: Vec<common::C32>,
     sync: BitSync,
     bits: Vec<bool>,
     /// Bits dropped off the front, so a frame's position stays a position in
@@ -92,8 +105,13 @@ impl Reader {
         // A GFSK link at modulation index 0.64 occupies about 1.6 times its
         // baud, and the filter in the bit clock is what keeps the rest of
         // the channel's noise out of the discriminator.
+        let occupied = 1.6 * baud;
+        let factor = (rate / (baud * SPS)).floor().max(1.0) as usize;
+        let work = rate / factor as f64;
         Self {
-            sync: BitSync::with_bandwidth(rate, baud, 1.6 * baud),
+            decim: (factor > 1).then(|| FirDecim::design_hz(rate, factor, occupied / 2.0, 60.0)),
+            narrow: Vec::new(),
+            sync: BitSync::with_bandwidth(work, baud, occupied),
             bits: Vec::new(),
             dropped: 0,
             read_from: 0,
@@ -106,7 +124,14 @@ impl Reader {
         if !self.sync.usable() {
             return;
         }
-        self.sync.process(iq, &mut self.bits);
+        match &mut self.decim {
+            Some(d) => {
+                self.narrow.clear();
+                d.process(iq, &mut self.narrow);
+                self.sync.process(&self.narrow, &mut self.bits);
+            }
+            None => self.sync.process(iq, &mut self.bits),
+        }
         let mut from = (self.read_from - self.dropped) as usize;
         while let Some(at) = nrf24::find_preamble(&self.bits, from) {
             // A preamble too near the end may be a frame still arriving, so
@@ -134,6 +159,10 @@ impl Reader {
     }
 
     fn reset(&mut self) {
+        if let Some(d) = &mut self.decim {
+            d.reset();
+        }
+        self.narrow.clear();
         self.sync.reset();
         self.bits.clear();
         self.dropped = 0;

@@ -66,10 +66,23 @@ const MAX_BINS: usize = 512;
 /// channel's noise or the front end behind this could not read it anyway.
 const WAKE_RATIO: f32 = 4.0;
 
-/// Blocks a channel keeps being read after its level drops, so a burst that
-/// straddles a block boundary is read whole and a reply that follows one is
-/// not missed while the gate closes.
-const HANGOVER: u8 = 8;
+/// How long a channel keeps being read after its level drops, so a burst
+/// that straddles a block boundary is read whole and a reply that follows
+/// one is not missed while the gate closes.
+///
+/// Time rather than blocks: eight blocks at a LimeSDR's 61.44 MS/s was 17 ms
+/// of mixing and filtering bought by one window over the median, and on a
+/// busy band the channel then never slept. Four milliseconds is thirty
+/// advertisements or ten 802.15.4 frames long.
+const HANGOVER_S: f64 = 0.007;
+
+/// Blocks the hangover is never shorter than, however long a block is.
+const MIN_HANGOVER_BLOCKS: usize = 3;
+
+/// Blocks read whatever the level, from the start. The gate is a block's
+/// loudest window against its median, and a block that is all burst has the
+/// two equal: a stream opened on a transmission would sleep through it.
+const WARM_BLOCKS: u32 = 8;
 
 /// Fewest windows measured in a block, whatever the burst spacing says.
 ///
@@ -89,6 +102,9 @@ pub struct SpanGate {
     /// alone, and every gate is open whatever is where.
     window: Vec<f32>,
     rate: f64,
+    /// Samples in the block last measured, which is what a channel's
+    /// hangover is counted down in.
+    measured: usize,
     /// Samples between the windows measured, from the shortest burst that
     /// must not be missed.
     step: usize,
@@ -108,6 +124,7 @@ impl SpanGate {
             fft: FftPlanner::new().plan_fft_forward(bins),
             window: crate::window::blackman_harris(bins),
             rate,
+            measured: 0,
             // A window has to fall inside the burst whole, so the spacing is
             // the burst less the window: a step of exactly the burst length
             // lets one slip between two windows and be missed.
@@ -133,6 +150,7 @@ impl SpanGate {
     /// Measure a block. Every gate reading it sees this block until the next.
     pub fn measure(&mut self, iq: &[C32]) {
         self.windows = 0;
+        self.measured = iq.len();
         self.power.clear();
         let step = self.step.min(iq.len() / MIN_WINDOWS).max(self.bins);
         let mut at = 0usize;
@@ -171,17 +189,28 @@ impl SpanGate {
 pub struct ChannelGate {
     band: (usize, usize),
     active: bool,
-    hangover: u8,
+    /// Samples of the span still to be read since the level last stood over
+    /// the median.
+    hangover: usize,
+    /// [`HANGOVER_S`] in samples of the span.
+    hold: usize,
+    /// Blocks measured so far. The first few are read whatever the level,
+    /// because the median is what the block held and a stream that opens
+    /// on a burst would sleep through it.
+    seen: u32,
     /// This block's window powers, sorted, so the median costs no allocation.
     windows: Vec<f32>,
 }
 
 impl ChannelGate {
     pub fn new(span: &SpanGate, offset_hz: f64, half_width_hz: f64) -> Self {
+        let hold = (HANGOVER_S * span.rate) as usize;
         Self {
             band: span.band(offset_hz, half_width_hz),
             active: true,
-            hangover: HANGOVER,
+            hangover: hold,
+            hold,
+            seen: 0,
             windows: Vec::new(),
         }
     }
@@ -196,10 +225,15 @@ impl ChannelGate {
         let loudest = self.windows.iter().copied().fold(0.0f32, f32::max);
         self.windows.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = self.windows[self.windows.len() / 2].max(1e-20);
-        if loudest > median * WAKE_RATIO {
-            self.hangover = HANGOVER;
+        self.seen = self.seen.saturating_add(1);
+        if loudest > median * WAKE_RATIO || self.seen <= WARM_BLOCKS {
+            // And never under two blocks whatever the time: the block after
+            // the one that woke it is where a burst straddling the boundary
+            // finishes, and what a burst still being collected is dropped
+            // with when the channel dozes.
+            self.hangover = self.hold.max(span.measured * MIN_HANGOVER_BLOCKS);
         } else {
-            self.hangover = self.hangover.saturating_sub(1);
+            self.hangover = self.hangover.saturating_sub(span.measured);
         }
         self.active = self.hangover > 0;
         self.active
@@ -212,7 +246,8 @@ impl ChannelGate {
 
     pub fn reset(&mut self) {
         self.active = true;
-        self.hangover = HANGOVER;
+        self.hangover = self.hold;
+        self.seen = 0;
     }
 }
 
