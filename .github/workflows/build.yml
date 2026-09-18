@@ -235,6 +235,13 @@ jobs:
           mkdir -p dist-extra
           dylibbundler -of -b -x target/${{ matrix.target }}/release/waveshark \
             -d dist-extra -p @executable_path/../Resources/
+          # LimeSuite is opened by name at run time rather than linked, so the
+          # binary names it nowhere and dylibbundler cannot follow it in. It
+          # is copied under the name the loader looks for in Resources, and
+          # bundled separately so its own dependencies come from beside it.
+          cp -L "$(brew --prefix limesuite)/lib/libLimeSuite.dylib" dist-extra/
+          dylibbundler -of -b -x dist-extra/libLimeSuite.dylib \
+            -d dist-extra -p @loader_path/
           cargo packager -p app -r --target ${{ matrix.target }} -f app -o "$PWD/dist"
           # cargo-packager signs the Mach-O files it copies and never seals
           # the bundle, and a quarantined bundle with no seal is "damaged" on

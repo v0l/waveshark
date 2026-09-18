@@ -3442,6 +3442,7 @@ name = "limesdr-sys"
 version = "0.3.0"
 dependencies = [
  "bindgen",
+ "libloading 0.8.9",
  "pkg-config",
 ]
 

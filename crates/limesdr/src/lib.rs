@@ -176,6 +176,10 @@ impl Enumerated {
 
 /// Every LimeSDR attached to the system.
 pub fn enumerate() -> Vec<Enumerated> {
+    if !ffi::available() {
+        tracing::debug!("LimeSuite is not installed, so no LimeSDR can be opened");
+        return Vec::new();
+    }
     // Two calls: the first for the count, the second to fill the buffer.
     let n = unsafe { ffi::LMS_GetDeviceList(std::ptr::null_mut()) };
     if n <= 0 {

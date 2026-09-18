@@ -156,9 +156,10 @@ resources = [{ src = "../../dist-extra/*", target = "" }]
 # Not the product name kebab-cased, which would be `wave-shark`.
 package-name = "waveshark"
 section = "hamradio"
-# What the binary links and does not carry. A release build has no ffmpeg and
-# no LimeSuite, so neither is named here; adding them would refuse to install
-# on a machine that cannot get them.
+# What the binary links and does not carry. A release build has no ffmpeg, and
+# LimeSuite is opened by name at run time rather than linked, so neither is
+# named here: LimeSuite's soname carries its version and naming one would
+# refuse to install on every machine carrying another.
 depends = ["librtlsdr0 | librtlsdr2", "libasound2 | libasound2t64", "libusb-1.0-0"]
 
 [package.metadata.generate-rpm]

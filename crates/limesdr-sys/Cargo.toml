@@ -3,10 +3,10 @@ name = "limesdr-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-links = "LimeSuite"
 description = "Generated FFI bindings to LimeSuite (LMS API)"
 
 [dependencies]
+libloading = "0.8"
 
 [build-dependencies]
 bindgen.workspace = true
