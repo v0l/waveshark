@@ -1,0 +1,41 @@
+# Survey measurements used by the locator's tests.
+#
+# Not a capture: a published table of levels and positions, fetched by
+# ./testdata/fetch.sh into testdata/survey/ and never committed, for the same
+# reason the rtl_433 corpus is not. It belongs to the people who recorded it,
+# so this points at their copy.
+#
+# What it is for: crates/survey/src/locate.rs fits a log-distance model to
+# sightings, and every unit test beside it synthesises its sightings from that
+# same model. A drive past a transmitter whose position somebody else surveyed
+# is the only thing that says whether the fit means anything outdoors.
+
+[[dataset]]
+name = "lora_salvora.csv"
+sha256 = "a0570a19657b337f6dca0c6ad774e77236462756a8ab6def106186bb0dd8912f"
+url = "https://zenodo.org/records/13835721/files/dataset.csv?download=1"
+compression = "none"
+description = """
+LoRa signal quality and GPS positioning time series dataset, López Escobar,
+Fondo-Ferreiro, González-Castaño and Gil-Castiñeira, Universidade de Vigo,
+doi 10.5281/zenodo.13835721, CC BY 4.0.
+
+1210 messages from seven moving devices in the Sálvora Archipelago, Galicia,
+each row a position from the device's own GPS and the level three fixed LoRa
+gateways heard that transmission at. A level of 0 means that gateway did not
+hear it.
+
+The path loss is reciprocal, so a row reads as a sighting of the gateway from
+where the device stood, which is the same geometry as a drive past a
+transmitter. The gateways are what makes it evidence: they were placed and
+surveyed, and their positions are published with the data rather than fitted
+from it.
+
+  gateway 1  42.46972, -9.01345, 73 m
+  gateway 2  42.49955, -9.00654,  5 m
+  gateway 3  42.50893, -9.04902, 31 m
+
+Gateway 1 is the one the devices drove past, from 38 m to 1.6 km. Gateways 2
+and 3 were only ever heard from 2.1 km and 4.2 km away and never approached,
+which is the other half of the test.
+"""
