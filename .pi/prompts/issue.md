@@ -12,13 +12,15 @@ changelog says and what a commit message may contain. Nothing below repeats it.
 ## Pick
 
 With no number given, run `gh issue list` and take the oldest open issue first:
-sort by number ascending (`gh issue list --limit 100 | sort -n`) and start at
-the lowest. Say which you are taking in one line before starting. Skip one only
-when it cannot be worked now, for instance when it needs a capture nobody has
-recorded or hardware that is not here; say why you skipped it and move to the
-next oldest.
+sort by number ascending (`gh issue list --limit 100 --search "-label:on-hold" |
+sort -n`) and start at the lowest. An issue labelled `on-hold` is parked and is
+never picked this way. Say which you are taking in one line before starting.
+Skip one only when it cannot be worked now, for instance when it needs a capture
+nobody has recorded or hardware that is not here; say why you skipped it and
+move to the next oldest.
 
-With a number given, `gh issue view N` and take it.
+With a number given, `gh issue view N` and take it, `on-hold` or not: naming a
+number is the decision to work it.
 
 ## An open issue may already be built
 
