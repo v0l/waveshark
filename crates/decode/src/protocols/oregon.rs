@@ -1,4 +1,5 @@
-//! Oregon Scientific v2.1 and v3 sensors.
+//! Oregon Scientific v2.1 sensors. The v3 family, which sends each bit
+//! once, is three descriptions under `crates/decode/protocols/weather`.
 //!
 //! 433.92 MHz, Manchester at 1024 baud, and the first user of the Manchester
 //! slicer, which until now had no protocol behind it. v3 is the THGR810, the
@@ -108,23 +109,6 @@ fn humidity_pct(msg: &[u8]) -> Result<u8, DecodeError> {
     Ok(h)
 }
 
-/// Wind in m/s and degrees, from the WGR800's BCD digits.
-fn wind(msg: &[u8]) -> Result<(f64, f64, f64), DecodeError> {
-    if [msg[5] & 0x0f, msg[6] >> 4, msg[6] & 0x0f, msg[7] >> 4, msg[7] & 0x0f, msg[8] >> 4]
-        .iter()
-        .any(|n| *n > 9)
-    {
-        return Err(DecodeError::Implausible("wind is not BCD"));
-    }
-    let gust = (msg[5] & 0x0f) as f64 / 10.0 + (msg[6] >> 4) as f64 + (msg[6] & 0x0f) as f64 * 10.0;
-    let avg = (msg[7] >> 4) as f64 / 10.0 + (msg[7] & 0x0f) as f64 + (msg[8] >> 4) as f64 * 10.0;
-    // The sensor tops out well below this; anything faster is a bad frame.
-    if gust > 56.0 || avg > 56.0 {
-        return Err(DecodeError::Implausible("wind speed out of range"));
-    }
-    Ok((gust, avg, (msg[4] >> 4) as f64 * 22.5))
-}
-
 /// The fields every one of these frames carries in its first four bytes.
 fn common_fields(model: &'static str, msg: &[u8]) -> Report {
     let mut r = Report::new(model);
@@ -145,113 +129,6 @@ fn sync_offsets(bits: &BitBuffer, sync: u32) -> Vec<usize> {
 
 // ---------------------------------------------------------------------------
 // v3
-// ---------------------------------------------------------------------------
-
-pub struct OregonV3;
-
-/// Sync word ending the preamble, in the polarity the layout is written in,
-/// and the same sync inverted, which is how it arrives when the slicer locks
-/// onto the other half of the symbol.
-const V3_SYNC: [(u32, bool); 2] = [(0x0005, false), (0xfffa, true)];
-/// Longest v3 frame worth reading here, in bytes.
-const V3_MAX_BYTES: usize = 12;
-/// Nibble the THGR810's checksum starts at.
-const CHECKSUM_NIBBLE: usize = 15;
-/// Payload bytes a temperature and humidity frame carries, used by the tests
-/// that build one.
-#[cfg(test)]
-const MSG_BYTES: usize = 9;
-
-/// One v3 layout: which model, where its checksum starts, and what it reports.
-struct V3Model {
-    model: &'static str,
-    checksum_nibble: usize,
-    kind: Kind,
-}
-
-enum Kind {
-    TempHumidity,
-    Temperature,
-    Wind,
-}
-
-/// Known sensor ids. The THGR810 rolled its id several times across rebrands
-/// (Newentor, Unni, Liorque), all differing only in the second nibble.
-fn v3_model_of(id: u16) -> Option<V3Model> {
-    let m = |model, checksum_nibble, kind| Some(V3Model { model, checksum_nibble, kind });
-    match id {
-        0xf824 | 0xf024 | 0xf224 | 0xfa24 | 0xf8b4 => {
-            m("Oregon-THGR810", CHECKSUM_NIBBLE, Kind::TempHumidity)
-        }
-        0xc844 => m("Oregon-THN802", 12, Kind::Temperature),
-        0x1984 | 0x1994 => m("Oregon-WGR800", 17, Kind::Wind),
-        _ => None,
-    }
-}
-
-impl Protocol for OregonV3 {
-    fn name(&self) -> &'static str {
-        "Oregon-v3"
-    }
-
-    fn timing(&self) -> Timing {
-        oregon_timing()
-    }
-
-    fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
-        let mut best = Err(DecodeError::NotThisProtocol);
-        for (sync, invert) in V3_SYNC {
-            for at in sync_offsets(bits, sync) {
-                match v3_frame(bits, at + 16, invert) {
-                    Ok(r) => return Ok(r),
-                    Err(e) => best = keep_worse(best, e),
-                }
-            }
-        }
-        best
-    }
-}
-
-fn v3_frame(bits: &BitBuffer, start: usize, invert: bool) -> Result<Report, DecodeError> {
-    let take = (bits.len() - start).min(V3_MAX_BYTES * 8);
-    let frame = bits.slice(start, take);
-    let frame = if invert { frame.inverted() } else { frame };
-    let msg: Vec<u8> = frame.as_padded_bytes().iter().map(|b| reflect_nibbles(*b)).collect();
-    if msg.len() < 7 {
-        return Err(DecodeError::WrongLength { got: take, want: 7 * 8 });
-    }
-
-    let m =
-        v3_model_of(((msg[0] as u16) << 8) | msg[1] as u16).ok_or(DecodeError::NotThisProtocol)?;
-    if msg.len() < m.checksum_nibble / 2 + 2 {
-        return Err(DecodeError::WrongLength { got: take, want: m.checksum_nibble * 4 + 8 });
-    }
-    let (sum, stored) = checksum(&msg, m.checksum_nibble);
-    if sum != stored {
-        return Err(DecodeError::CrcFailed);
-    }
-
-    let mut r = common_fields(m.model, &msg);
-    match m.kind {
-        Kind::TempHumidity => {
-            r = r
-                .float("temperature_c", round1(temperature_c(&msg)?))
-                .int("humidity_pct", humidity_pct(&msg)? as i64);
-        }
-        Kind::Temperature => r = r.float("temperature_c", round1(temperature_c(&msg)?)),
-        Kind::Wind => {
-            let (gust, avg, direction) = wind(&msg)?;
-            r = r
-                .float("wind_gust_ms", gust)
-                .float("wind_avg_ms", avg)
-                .float("wind_direction_deg", direction);
-        }
-    }
-    Ok(r)
-}
-
-// ---------------------------------------------------------------------------
-// v2.1
 // ---------------------------------------------------------------------------
 
 /// Oregon Scientific v2.1: the THGR122N, THN132N and RTGN318 families.
@@ -410,29 +287,6 @@ mod tests {
     use super::*;
     use crate::protocol::Value;
 
-    /// Build a v3 frame the way the sensor sends it: preamble, sync, then the
-    /// payload with every nibble reflected.
-    fn frame(id: u16, channel: u8, device: u8, temp_c: f64, humidity: u8, low: bool) -> BitBuffer {
-        let nibble = v3_model_of(id).map_or(CHECKSUM_NIBBLE, |m| m.checksum_nibble);
-        let msg = payload(id, channel, device, temp_c, humidity, low, nibble);
-        let mut out = BitBuffer::new();
-        for _ in 0..24 {
-            out.push(false);
-        }
-        // The sync nibble, completing the 0x0005 pattern the decoder looks
-        // for: the preamble above supplies the leading zeros.
-        for bit in [false, true, false, true] {
-            out.push(bit);
-        }
-        for b in msg {
-            let wire = reflect_nibbles(b);
-            for i in 0..8 {
-                out.push(wire & (0x80 >> i) != 0);
-            }
-        }
-        out
-    }
-
     /// The same payload as a v2.1 transmission: preamble of 0x55, the 0x99
     /// sync, then every bit sent twice with the second copy inverted.
     fn frame_v2(
@@ -475,8 +329,8 @@ mod tests {
         humidity: u8,
         low: bool,
         checksum_nibble: usize,
-    ) -> [u8; MSG_BYTES + 2] {
-        let mut msg = [0u8; MSG_BYTES + 2];
+    ) -> [u8; 11] {
+        let mut msg = [0u8; 11];
         msg[0] = (id >> 8) as u8;
         msg[1] = id as u8;
         msg[2] = (channel << 4) | (device & 0x0f);
@@ -497,62 +351,6 @@ mod tests {
             msg[at] = sum.rotate_left(4);
         }
         msg
-    }
-
-    #[test]
-    fn decodes_a_thgr810_frame() {
-        let r = OregonV3.decode(&frame(0xf824, 1, 0x3a, 21.7, 48, false)).unwrap();
-        assert_eq!(r.model, "Oregon-THGR810");
-        assert_eq!(r.get("channel"), Some(&Value::Int(1)));
-        assert_eq!(r.get("id"), Some(&Value::Int(0x3a)));
-        assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.7)));
-        assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));
-        assert_eq!(r.get("battery_ok"), Some(&Value::Bool(true)));
-        assert_eq!(r.crc_valid, Some(true));
-    }
-
-    #[test]
-    fn the_other_manchester_polarity_decodes_the_same() {
-        // Which half of the symbol carries the bit depends on where the
-        // slicer started, and both happen in practice.
-        let f = frame(0xf824, 1, 0x3a, 21.7, 48, false);
-        let a = OregonV3.decode(&f).unwrap();
-        let b = OregonV3.decode(&f.inverted()).unwrap();
-        assert_eq!(a.fields, b.fields);
-    }
-
-    #[test]
-    fn a_frost_reading_carries_its_sign_bit() {
-        let r = OregonV3.decode(&frame(0xf824, 2, 0x3a, -6.3, 91, true)).unwrap();
-        assert_eq!(r.get("temperature_c"), Some(&Value::Float(-6.3)));
-        assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
-    }
-
-    #[test]
-    fn a_temperature_only_sensor_reports_no_humidity() {
-        let r = OregonV3.decode(&frame(0xc844, 1, 0x11, 19.0, 0, false)).unwrap();
-        assert_eq!(r.model, "Oregon-THN802");
-        assert!(r.get("humidity_pct").is_none());
-    }
-
-    #[test]
-    fn an_unknown_sensor_id_is_not_claimed() {
-        // The checksum is eight bits over fifteen nibbles, so the id table is
-        // doing most of the work of not claiming other people's frames.
-        assert_eq!(
-            OregonV3.decode(&frame(0x1234, 1, 0x3a, 21.7, 48, false)),
-            Err(DecodeError::NotThisProtocol)
-        );
-    }
-
-    #[test]
-    fn a_corrupt_frame_fails_its_checksum() {
-        let f = frame(0xf824, 1, 0x3a, 21.7, 48, false);
-        let mut broken = BitBuffer::new();
-        for i in 0..f.len() {
-            broken.push(if i == 60 { !f.get(i).unwrap() } else { f.get(i).unwrap() });
-        }
-        assert_eq!(OregonV3.decode(&broken), Err(DecodeError::CrcFailed));
     }
 
     #[test]

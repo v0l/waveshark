@@ -175,7 +175,6 @@ impl Protocols {
         p.add(Box::new(Hideki));
         p.add(Box::new(GtWt02));
         p.add(Box::new(GtWt03));
-        p.add(Box::new(OregonV3));
         p.add(Box::new(OregonV2));
         p.add(Box::new(KeeLoq));
         p.add(Box::new(SomfyRts));

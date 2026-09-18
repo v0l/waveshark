@@ -202,6 +202,9 @@ pub struct Check {
     /// nibbles as they read reversed
     #[serde(default)]
     pub reflect: bool,
+    /// An eight bit value is stored with its nibbles swapped
+    #[serde(default)]
+    pub swap: bool,
     /// The check applies only when these fields read so
     pub when: Option<Cond>,
     pub unless: Option<Cond>,
@@ -485,6 +488,8 @@ pub struct Field {
     pub gather: Vec<Span>,
     /// What a hidden field is written as when nothing supplies it
     pub default: Option<u64>,
+    /// A bit elsewhere that negates the reading when set
+    pub sign: Option<usize>,
     #[serde(default, rename = "type")]
     pub kind: Kind,
     /// Checked on decode, written on encode; the field needs no name
@@ -737,6 +742,9 @@ impl Desc {
                     return Err(format!("{name}: a format field needs a name and a format"));
                 }
                 continue;
+            }
+            if fld.sign.is_some_and(|b| b >= f.bits) {
+                return Err(format!("{name}: field {n} has a sign bit past the frame"));
             }
             if fld.gather.iter().flat_map(|s| s.bits()).any(|b| b >= f.bits) {
                 return Err(format!("{name}: field {n} gathers a bit past the frame"));
