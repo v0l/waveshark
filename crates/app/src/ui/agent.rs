@@ -1489,13 +1489,9 @@ impl App {
     }
 
     fn agent_scanners(&self) -> Value {
-        let (center, rate) = (self.center, self.rate);
-        let rows: Vec<Value> = self
-            .scanners
-            .list
-            .iter()
-            .map(|s| super::agent_settings::scanner_json(s, center, rate))
-            .collect();
+        let at = crate::scanners::Span::whole(self.center, self.rate);
+        let rows: Vec<Value> =
+            self.scanners.list.iter().map(|s| super::agent_settings::scanner_json(s, at)).collect();
         json!({ "scanners": rows })
     }
 
