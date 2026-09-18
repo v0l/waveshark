@@ -64,7 +64,6 @@ pub fn repeated(pkg: &Package, n: usize, gap: Duration) -> Package {
 mod tests {
     use super::*;
     use crate::protocol::{Protocol, Value};
-    use crate::protocols::Princeton;
     use crate::slicer::slice;
 
     fn bits_of(s: &str) -> BitBuffer {
@@ -117,7 +116,7 @@ mod tests {
     /// shape a real remote sent, and the corpus recording is that shape.
     #[test]
     fn the_flipper_corpus_princeton_key_round_trips() {
-        let p = &Princeton as &dyn Protocol;
+        let p = crate::script::named("Princeton").unwrap();
         let mut bits = BitBuffer::with_capacity(24);
         for i in 0..24 {
             bits.push(0x95_d5_d4 & (1 << (23 - i)) != 0);

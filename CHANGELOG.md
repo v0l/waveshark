@@ -15,6 +15,9 @@ the code is in the commit log.
   keys AX.25 through it.
 - FT8 and FT4 on the HF dials: every station in the passband, with their grid
   squares on the map.
+- Protocol descriptions: sensors and remotes as YAML files fetched from
+  github.com/v0l/waveshark-protocols, so a fixed or added layout arrives
+  without a new build. Files in `~/.config/waveshark/protocols` override it.
 - NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
   whether the speech is enciphered. No sound yet.
 - Iridium ring alerts at 1626 MHz: the satellite, its beam and its position,

@@ -51,6 +51,7 @@ mod packetlog;
 mod patch;
 mod picsave;
 mod prof;
+mod protocols;
 mod radio;
 mod record;
 mod sats;
@@ -990,9 +991,9 @@ impl std::str::FromStr for Serve {
         };
         let addr = match addr.parse::<u16>() {
             Ok(port) => std::net::SocketAddr::from(([0, 0, 0, 0], port)),
-            Err(_) => addr
-                .parse()
-                .map_err(|_| format!("{addr:?} is not a port, a host:port, or off"))?,
+            Err(_) => {
+                addr.parse().map_err(|_| format!("{addr:?} is not a port, a host:port, or off"))?
+            }
         };
         Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable })))
     }
@@ -1406,6 +1407,9 @@ fn main() -> eframe::Result<()> {
         data::fetch_all();
         return Ok(());
     }
+    // Before any path that builds a decoder, so a replay and the receiver
+    // read with the same descriptions.
+    protocols::load();
     if let Some(log) = &args.m17_dump {
         m17_dump(log);
         return Ok(());

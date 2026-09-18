@@ -823,7 +823,10 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
     match which {
         Which::Repo(r) => {
             git::get(r, cache)?;
-            git::refresh(r, cache, when)?;
+            let moved = git::refresh(r, cache, when)?.is_some();
+            if *r == git::PROTOCOLS && moved {
+                crate::protocols::load();
+            }
         }
         Which::Airports => {
             if airports().is_empty() {
@@ -991,6 +994,11 @@ pub fn fetch_all() {
     }
     // Each pair is written refresh first, and arguments evaluate in order, so
     // the count reported is of the file after any update rather than before.
+    each(
+        "protocol descriptions",
+        git::refresh(&git::PROTOCOLS, &cache, When::Now).map(|u| u.is_some()),
+        git::get(&git::PROTOCOLS, &cache).map(|_| crate::protocols::load().names.len()),
+    );
     each(
         "airports",
         datasets::airports::refresh(&cache, When::Now).map(|u| u.is_some()),

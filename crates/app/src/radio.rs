@@ -2292,6 +2292,8 @@ struct RadioThread<'a, R: Fn()> {
     /// The last edits that built, to fall back on when an edit does not.
     last_edits: Option<crate::patch::Edits>,
     needs_rebuild: bool,
+    /// The protocol descriptions the graph was last built with
+    protocols_gen: u64,
     /// The operator's own decoding switch: off, and no front end is built at
     /// all, which is the expensive thing the receiver does.
     scan_on: bool,
@@ -2468,6 +2470,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             last_chain: std::time::Instant::now(),
             last_edits: None,
             needs_rebuild: false,
+            protocols_gen: decode::script::generation(),
             scan_on: true,
             records: Vec::new(),
             hits: 0,
@@ -3210,6 +3213,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
     /// Draw the graph again from the plan, if anything asked for it.
     fn rebuild(&mut self) -> Flow {
+        // a fetched set of descriptions replaces the decoders, which are
+        // built from the registry only when the graph is
+        let now = decode::script::generation();
+        if now != self.protocols_gen {
+            self.protocols_gen = now;
+            self.needs_rebuild = true;
+        }
         if !self.needs_rebuild {
             return Flow::Go;
         }

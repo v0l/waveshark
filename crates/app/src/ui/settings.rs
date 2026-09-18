@@ -1940,6 +1940,24 @@ impl App {
                         if let Some(e) = &r.error {
                             lamp(ui, false, e);
                         }
+                        // What the descriptions read as, not what landed:
+                        // a file that fails its own vectors is on disc and
+                        // running nothing.
+                        if r.which == crate::data::Which::Repo(&datasets::git::PROTOCOLS)
+                            && let Some(got) = crate::protocols::last()
+                        {
+                            match got.refused.first() {
+                                None => lamp(
+                                    ui,
+                                    true,
+                                    &format!(
+                                        "{} descriptions over the built-in set",
+                                        got.names.len()
+                                    ),
+                                ),
+                                Some((path, why)) => lamp(ui, false, &format!("{path}: {why}")),
+                            }
+                        }
                         if let Some(b) = r.blocked {
                             hint(ui, b);
                         }

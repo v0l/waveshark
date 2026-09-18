@@ -533,7 +533,7 @@ TE: 400
         // Decoded back through the receiver's own Princeton decoder, the
         // key comes out complemented (short mark 0 on the air): the same
         // value the Flipper's decoder reports for this file.
-        let p = &crate::protocols::Princeton as &dyn Protocol;
+        let p = crate::script::named("Princeton").unwrap();
         let r = p.decode_package(pkg).expect("the encoder's own pulses decode");
         assert_eq!(r.get("code"), Some(&crate::protocol::Value::Int(0x6a_2a_2b)));
     }
@@ -545,7 +545,7 @@ TE: 400
         // decoder refuses it rather than reading a code out of a fragment.
         let s = parse(PRINCETON_RAW).unwrap();
         assert_eq!(s.bursts[0].pulses.len(), 16);
-        let p = &crate::protocols::Princeton as &dyn Protocol;
+        let p = crate::script::named("Princeton").unwrap();
         assert_eq!(p.decode_package(&s.bursts[0]), Err(DecodeError::NotThisProtocol));
     }
 
@@ -559,8 +559,9 @@ TE: 400
         use crate::protocol::Value;
         use crate::protocols::keyfob;
         let holtek = 0x50_d2_aa_aa_a1_u64;
+        let princeton = crate::script::named("Princeton").unwrap();
         let cases: [(&str, &str, u64, &dyn Protocol); 8] = [
-            ("Princeton", "code", 0xa1_3f_08, &keyfob::Princeton),
+            ("Princeton", "code", 0xa1_3f_08, &princeton),
             ("Nice-Flo", "code", 0xabc, &keyfob::NiceFlo),
             ("Holtek", "code", holtek, &keyfob::Holtek),
             ("Holtek-HT12x", "code", 0xabc, &keyfob::HoltekHt12x),

@@ -133,6 +133,13 @@ pub trait Protocol: Send + Sync {
     /// Interpret sliced bits.
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError>;
 
+    /// Protocols whose decode of the same package outranks this one: a
+    /// near-identical layout whose last byte is a real check where this
+    /// one's is a reading.
+    fn yields_to(&self) -> &[String] {
+        &[]
+    }
+
     /// Try a whole package: slice with this protocol's timings, then decode.
     fn decode_package(&self, pkg: &Package) -> Result<Report, DecodeError> {
         let bits = slice(pkg, &self.timing()).map_err(|_| DecodeError::NotThisProtocol)?;
@@ -165,7 +172,6 @@ impl Protocols {
         p.add(Box::new(LacrosseIt::tx29()));
         p.add(Box::new(LacrosseIt::tx35()));
         p.add(Box::new(Hideki));
-        p.add(Box::new(NexusTh));
         p.add(Box::new(AlectoV1));
         p.add(Box::new(PrologueTh));
         p.add(Box::new(Rubicson));
@@ -178,7 +184,6 @@ impl Protocols {
         p.add(Box::new(OregonV2));
         p.add(Box::new(X10Rf));
         p.add(Box::new(Ev1527));
-        p.add(Box::new(Princeton));
         p.add(Box::new(KeeLoq));
         p.add(Box::new(Holtek));
         p.add(Box::new(HoltekHt12x));
@@ -204,6 +209,9 @@ impl Protocols {
         p.add(Box::new(ErtIdm));
         p.add(Box::new(Hanshow::uplink_500k()));
         p.add(Box::new(Hanshow::uplink_100k()));
+        for s in crate::script::current() {
+            p.add(Box::new(s));
+        }
         p
     }
 
@@ -231,7 +239,16 @@ impl Protocols {
     /// operator should see, not something to be silently resolved by
     /// registration order.
     pub fn decode_all(&self, pkg: &Package) -> Vec<Report> {
-        self.list.iter().filter_map(|p| p.decode_package(pkg).ok()).collect()
+        let read: Vec<(&dyn Protocol, Report)> = self
+            .list
+            .iter()
+            .filter_map(|p| p.decode_package(pkg).ok().map(|r| (&**p, r)))
+            .collect();
+        let models: Vec<&str> = read.iter().map(|(_, r)| r.model).collect();
+        read.into_iter()
+            .filter(|(p, _)| !p.yields_to().iter().any(|m| models.contains(&m.as_str())))
+            .map(|(_, r)| r)
+            .collect()
     }
 
     /// Try every protocol, reporting failures too. For diagnosing an unknown

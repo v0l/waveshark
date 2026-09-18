@@ -28,7 +28,6 @@ mod keeloq;
 mod linear;
 mod linear_delta3;
 mod nice_flo;
-mod princeton;
 
 pub use ansonic::Ansonic;
 pub use bett::Bett;
@@ -40,4 +39,3 @@ pub use keeloq::KeeLoq;
 pub use linear::Linear;
 pub use linear_delta3::LinearDelta3;
 pub use nice_flo::NiceFlo;
-pub use princeton::Princeton;
