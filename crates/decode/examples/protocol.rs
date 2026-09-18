@@ -28,6 +28,10 @@ usage:
   protocol check  <file.yaml|dir>...        every description, both ways and through the slicer
   protocol vector <file.yaml> <hex>         the vectors: entry a frame reads as
   protocol read   <file.yaml|dir> <capture> a recording (.cu8/.cs8/.cs16/.cf32) or a Flipper .sub
+
+options:
+  --rate <sps>   the capture's sample rate, for a file whose name omits it
+                 or carries a wrong one: 250k, 1024k, 2400000
 ";
 
 fn main() {
@@ -35,7 +39,13 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("check") if args.len() >= 2 => check(&args[1..]),
         Some("vector") if args.len() == 3 => vector(Path::new(&args[1]), &args[2]),
-        Some("read") if args.len() == 3 => read(Path::new(&args[1]), Path::new(&args[2])),
+        Some("read") if args.len() >= 3 => match rate_option(&args[3..]) {
+            Ok(rate) => read(Path::new(&args[1]), Path::new(&args[2]), rate),
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
         _ => {
             eprint!("{USAGE}");
             2
@@ -108,7 +118,8 @@ fn advise(p: &Scripted) -> usize {
             .into());
     }
     let reported: Vec<&str> = d.vectors[0].fields.keys().map(String::as_str).collect();
-    if !reported.iter().any(|f| *f == "id" || f.ends_with("_id")) {
+    let named_id = script::desc::all_fields(&d.fields).iter().any(|f| f.id);
+    if !named_id && !reported.iter().any(|f| *f == "id" || f.ends_with("_id")) {
         say("no id field. Two of these sensors in earshot will read as one device".into());
     }
 
@@ -189,7 +200,29 @@ fn yaml_value(v: &Value) -> String {
 
 /// The descriptions against a recording: what a burst detector finds in the
 /// file, read by these descriptions alone
-fn read(path: &Path, capture: &Path) -> i32 {
+fn rate_option(args: &[String]) -> Result<Option<f64>, String> {
+    match args {
+        [] => Ok(None),
+        [flag, value] if flag == "--rate" => {
+            parse_rate(value).map(Some).ok_or_else(|| format!("{value}: not a sample rate"))
+        }
+        _ => Err(USAGE.to_string()),
+    }
+}
+
+/// A rate as the capture names carry it: plain samples, or k or M suffixed
+fn parse_rate(s: &str) -> Option<f64> {
+    let (num, mult) = match s.chars().last()? {
+        'k' | 'K' => (&s[..s.len() - 1], 1e3),
+        'M' | 'm' => (&s[..s.len() - 1], 1e6),
+        c if c.is_ascii_digit() => (s, 1.0),
+        _ => return None,
+    };
+    let v: f64 = num.parse().ok()?;
+    (v > 0.0).then_some(v * mult)
+}
+
+fn read(path: &Path, capture: &Path, rate: Option<f64>) -> i32 {
     let files = gather([path.to_path_buf()]);
     if files.is_empty() {
         eprintln!("{}: no descriptions", path.display());
@@ -222,8 +255,11 @@ fn read(path: &Path, capture: &Path) -> i32 {
             }
         }
     } else {
-        corpus::packages(capture)
+        corpus::packages_at(capture, rate)
     };
+    if let Some(r) = rate {
+        println!("reading {} at {} S/s", capture.display(), r);
+    }
     println!("{} burst{}", packages.len(), if packages.len() == 1 { "" } else { "s" });
 
     let mut read = 0;

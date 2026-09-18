@@ -93,7 +93,7 @@ impl FileSource {
     /// Open a capture, taking centre frequency, rate and format from the
     /// filename where present.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(path.as_ref().to_path_buf(), None)
+        Self::open_inner(path.as_ref().to_path_buf(), None, false)
     }
 
     /// Open a capture whose filename carries no sample rate, supplying one.
@@ -102,10 +102,18 @@ impl FileSource {
     /// than an override: replaying a file at a rate its own name contradicts
     /// is never what the caller meant.
     pub fn open_with_rate(path: impl AsRef<Path>, rate: Sps) -> Result<Self> {
-        Self::open_inner(path.as_ref().to_path_buf(), Some(rate))
+        Self::open_inner(path.as_ref().to_path_buf(), Some(rate), false)
     }
 
-    fn open_inner(path: PathBuf, fallback_rate: Option<Sps>) -> Result<Self> {
+    /// Open a capture at the rate given, whatever its filename says.
+    ///
+    /// For a caller who knows better than the name: a corpus recorded before
+    /// the convention, or a file renamed by hand.
+    pub fn open_at_rate(path: impl AsRef<Path>, rate: Sps) -> Result<Self> {
+        Self::open_inner(path.as_ref().to_path_buf(), Some(rate), true)
+    }
+
+    fn open_inner(path: PathBuf, given_rate: Option<Sps>, rate_wins: bool) -> Result<Self> {
         if !path.exists() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -120,7 +128,8 @@ impl FileSource {
                 path.display()
             ))
         })?;
-        let rate = meta.rate.or(fallback_rate).ok_or_else(|| {
+        let named = if rate_wins { None } else { meta.rate };
+        let rate = named.or(given_rate).ok_or_else(|| {
             Error::other(format!(
                 "cannot tell the sample rate of {}; name it like \
                  <name>_<freq>_<rate>.<format>, e.g. capture_433.92M_250k.cu8, \

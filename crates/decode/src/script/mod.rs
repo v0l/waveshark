@@ -1032,6 +1032,7 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
         CheckKind::Crc16 => bits::crc16(&d, c.poly as u16, c.init as u16) as u64,
         CheckKind::Crc16Le => bits::crc16le(&d, c.poly as u16, c.init as u16) as u64,
         CheckKind::Sum8 => bits::checksum8(&d) as u64,
+        CheckKind::Parity => parity_over(c, frame),
         CheckKind::Xor8 => bits::xor8(&d) as u64,
         CheckKind::Lfsr8 => bits::lfsr_digest8(&d, c.generator as u8, c.key as u8) as u64,
         CheckKind::Lfsr8Reflect => {
@@ -1043,8 +1044,7 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
                 let n = extract(frame, b, 4);
                 if c.reflect { n.reverse_bits() >> 60 } else { n }
             };
-            let sum: i64 = (c.over[0]..c.over[1]).step_by(4).map(|b| nibble(b) as i64).sum();
-            (if c.negate { c.init as i64 - sum } else { sum + c.add }) as u64
+            (c.over[0]..c.over[1]).step_by(4).map(nibble).sum()
         }
         CheckKind::NibbleXor => {
             (c.over[0]..c.over[1]).step_by(4).fold(0u64, |x, b| x ^ extract(frame, b, 4))
@@ -1064,15 +1064,42 @@ fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
         }
         CheckKind::EvenParity => return None,
     };
+    // a sum may be stored with a constant folded in, or as what it takes to
+    // bring the total to `init`
+    let v = match c.kind {
+        CheckKind::Sum8 | CheckKind::NibbleSum if c.negate => (c.init as i64 - v as i64) as u64,
+        CheckKind::Sum8 | CheckKind::NibbleSum => (v as i64 + c.add) as u64,
+        _ => v,
+    };
     let width = c.stored()?;
     let v = (v ^ c.xor as u64) & mask(width);
-    let v = if c.swap && width == 8 { (v as u8).rotate_left(4) as u64 } else { v };
+    let v = match (c.swap, width) {
+        (true, 8) => (v as u8).rotate_left(4) as u64,
+        (true, 16) => (v as u16).swap_bytes() as u64,
+        _ => v,
+    };
     Some(if c.reflect { v.reverse_bits() >> (64 - width) } else { v })
+}
+
+/// The parity bit that brings the covered bits, `step` apart, to even
+fn parity_over(c: &Check, frame: &BitBuffer) -> u64 {
+    let step = c.step.unwrap_or(1);
+    let ones = (c.over[0]..c.over[1])
+        .step_by(step)
+        .filter(|&b| frame.get(b).unwrap_or(false))
+        .count() as u64;
+    (ones ^ u64::from(c.odd)) & 1
 }
 
 fn check_holds(c: &Check, frame: &BitBuffer) -> bool {
     match (c.kind, c.at) {
-        (CheckKind::EvenParity, _) => bits::even_parity(&covered(c, frame)),
+        (CheckKind::EvenParity, _) => {
+            let d = covered(c, frame);
+            if c.odd { d.iter().all(|b| b.count_ones() % 2 == 1) } else { bits::even_parity(&d) }
+        }
+        // the stored bit is inside the span, so the count over the whole of
+        // it is what has to come out even
+        (CheckKind::Parity, None) => parity_over(c, frame) == 0,
         (_, Some(at)) => {
             let width = c.stored().unwrap_or(0);
             check_value(c, frame) == Some(extract(frame, at, width))
@@ -1469,6 +1496,138 @@ vectors: [{hex: "00", fields: {a: 1}}]
         let chips = diff_manchester_chips(&b, false);
         let back = differential_manchester_decode(&chips, 0, 6);
         assert_eq!(back, b, "{} vs {}", back.to_hex(), b.to_hex());
+    }
+
+    #[test]
+    fn a_sum_can_be_stored_negated_or_with_a_constant_folded_in() {
+        // the ESIC EMT7110's shape: every byte including the stored one adds
+        // up to zero
+        let d = Desc::parse(
+            r#"
+name: X
+timing: {ppm: [500, 1500], reset_us: 6000}
+frame: {bits: 24}
+check: {kind: sum8, over: [0, 16], at: 16, negate: true}
+fields:
+  - {name: a, bits: 8, data: int}
+  - {name: b, bits: 8, data: int}
+  - {bits: 8, hidden: true}
+vectors: [{hex: "25 6a 71", fields: {a: 0x25, b: 0x6a}}]
+"#,
+        )
+        .unwrap();
+        check(&Scripted::new(d)).unwrap();
+        // and the EN2058's, where a fixed byte joins the sum
+        let d = Desc::parse(
+            r#"
+name: X
+timing: {ppm: [500, 1500], reset_us: 6000}
+frame: {bits: 24}
+check: {kind: sum8, over: [0, 16], at: 16, add: 0x56}
+fields:
+  - {name: a, bits: 8, data: int}
+  - {name: b, bits: 8, data: int}
+  - {bits: 8, hidden: true}
+vectors: [{hex: "25 6a e5", fields: {a: 0x25, b: 0x6a}}]
+"#,
+        )
+        .unwrap();
+        check(&Scripted::new(d)).unwrap();
+    }
+
+    #[test]
+    fn a_sixteen_bit_check_can_be_stored_low_byte_first() {
+        // the emonTx stores its CRC-16 the way the RF12 packet carries it
+        let d = Desc::parse(
+            r#"
+name: X
+timing: {ppm: [500, 1500], reset_us: 6000}
+frame: {bits: 32}
+check: {kind: crc16_le, poly: 0xa001, init: 0xffff, over: [0, 16], at: 16, swap: true}
+fields:
+  - {name: a, bits: 8, data: int}
+  - {name: b, bits: 8, data: int}
+  - {bits: 16, hidden: true}
+"#,
+        )
+        .unwrap();
+        let frame = BitBuffer::from_bytes(&[0x2d, 0xd2, 0, 0]);
+        let c = d.check.iter().next().unwrap();
+        let plain = bits::crc16le(&[0x2d, 0xd2], 0xa001, 0xffff);
+        assert_eq!(check_value(c, &frame), Some(plain.swap_bytes() as u64));
+    }
+
+    #[test]
+    fn interleaved_parity_bits_are_written_and_read() {
+        // Interlogix: one bit over the even numbered bits, one over the odd,
+        // both odd parity, each covering everything before it
+        let d = Desc::parse(
+            r#"
+name: X
+timing: {ppm: [122, 244], reset_us: 500}
+frame: {bits: 24}
+check:
+  - {kind: parity, over: [0, 16], step: 2, at: 16, odd: true}
+  - {kind: parity, over: [1, 16], step: 2, at: 17, odd: true}
+fields:
+  - {name: a, bits: 8, data: int}
+  - {name: b, bits: 8, data: int}
+  - {bits: 2, hidden: true}
+  - {name: t, bits: 6, data: int}
+vectors: [{hex: "e0 e5 c0", fields: {a: 0xe0, b: 0xe5, t: 0}}]
+"#,
+        )
+        .unwrap();
+        check(&Scripted::new(d)).unwrap();
+    }
+
+    #[test]
+    fn a_parity_over_its_own_bits_needs_no_at() {
+        // WT450's pair: the stored bits sit inside the span, so the count
+        // over the whole of it is what has to come out even
+        let d = Desc::parse(
+            r#"
+name: X
+timing: {ppm: [976, 1952], reset_us: 18000}
+frame: {bits: 16}
+check:
+  - {kind: parity, over: [0, 16], step: 2}
+  - {kind: parity, over: [1, 16], step: 2}
+fields:
+  - {name: a, bits: 16, data: int}
+"#,
+        )
+        .unwrap();
+        let p = Scripted::new(d);
+        assert!(p.read(&BitBuffer::from_bytes(&[0x3c, 0x3c])).is_ok(), "even both ways");
+        assert!(p.read(&BitBuffer::from_bytes(&[0x3c, 0x3d])).is_err(), "one bit off");
+    }
+
+    #[test]
+    fn odd_parity_per_byte_is_its_own_check() {
+        let d = Desc::parse(
+            r#"
+name: X
+timing: {ppm: [500, 1500], reset_us: 6000}
+frame: {bits: 16}
+check: {kind: even_parity, over: [0, 16], odd: true}
+fields:
+  - {name: a, bits: 16, data: int}
+"#,
+        )
+        .unwrap();
+        let p = Scripted::new(d);
+        assert!(p.read(&BitBuffer::from_bytes(&[0x01, 0x07])).is_ok(), "one and three ones");
+        assert!(p.read(&BitBuffer::from_bytes(&[0x01, 0x03])).is_err(), "two ones");
+    }
+
+    #[test]
+    fn a_step_belongs_to_a_parity_check_alone() {
+        let e = parse_err(
+            "frame: {bits: 16}\ncheck: {kind: sum8, over: [0, 8], at: 8, step: 2}\n\
+             fields:\n  - {name: a, bits: 16, data: int}\n",
+        );
+        assert!(e.contains("only a parity check takes step"), "{e}");
     }
 
     #[test]

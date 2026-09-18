@@ -134,7 +134,18 @@ impl Fixture {
 /// channelizer resolves this by mixing each burst down to its own centre; here
 /// the cheaper answer is to try the span whole as well.
 pub fn packages(path: &Path) -> Vec<Package> {
-    let src = FileSource::open(path).expect("open capture");
+    packages_at(path, None)
+}
+
+/// The same, with the sample rate stated rather than read off the filename.
+///
+/// Most of rtl_433's corpus predates the naming convention, so a caller that
+/// knows the rate from a README has to be able to say so.
+pub fn packages_at(path: &Path, rate_hz: Option<f64>) -> Vec<Package> {
+    let src = match rate_hz {
+        Some(r) => FileSource::open_at_rate(path, common::Sps(r as u64)).expect("open capture"),
+        None => FileSource::open(path).expect("open capture"),
+    };
     let buf = src.read_all().expect("read capture");
     let rate = buf.rate.as_f64();
 
