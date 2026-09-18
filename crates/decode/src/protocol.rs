@@ -168,14 +168,8 @@ impl Protocols {
         p.add(Box::new(AcuriteWind));
         p.add(Box::new(Acurite606Tx));
         p.add(Box::new(Acurite986));
-        p.add(Box::new(LacrosseTx141thBv2));
-        p.add(Box::new(LacrosseIt::tx29()));
-        p.add(Box::new(LacrosseIt::tx35()));
         p.add(Box::new(Hideki));
         p.add(Box::new(AlectoV1));
-        p.add(Box::new(PrologueTh));
-        p.add(Box::new(Rubicson));
-        p.add(Box::new(Bresser3Ch));
         p.add(Box::new(GtWt02));
         p.add(Box::new(GtWt03));
         p.add(Box::new(FineOffsetWh51));

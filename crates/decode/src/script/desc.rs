@@ -485,11 +485,17 @@ impl Desc {
                 return Err(format!("{name}: a {:?} check covers whole bytes", c.kind));
             }
         }
-        let mut seen = Vec::new();
         for path in owner_paths(&self.fields) {
             let total: usize = path.iter().map(|f| f.bits).sum();
             if total != f.bits {
                 return Err(format!("{name}: fields own {total} bits of a {} bit frame", f.bits));
+            }
+            let mut seen: Vec<&str> = Vec::new();
+            for fld in path.iter().filter(|f| f.is_reported()) {
+                if seen.contains(&fld.name.as_str()) {
+                    return Err(format!("{name}: field {} is owned twice", fld.name));
+                }
+                seen.push(&fld.name);
             }
         }
         for fld in all_fields(&self.fields) {
@@ -533,12 +539,6 @@ impl Desc {
             }
             if fld.scale == Some(0.0) {
                 return Err(format!("{name}: field {n} has a zero scale"));
-            }
-            if fld.is_reported() && !fld.is_view() && seen.contains(&n) {
-                return Err(format!("{name}: field {n} is owned twice"));
-            }
-            if fld.is_reported() && !fld.is_view() {
-                seen.push(n);
             }
         }
         for c in all_conds(&self.fields) {

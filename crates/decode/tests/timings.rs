@@ -12,9 +12,9 @@
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
 use decode::protocols::{
-    Acurite609Txc, AcuriteTower, Bresser3Ch, FineOffsetWh51, GtWt02, GtWt03, LacrosseIt,
-    LacrosseTx141thBv2, OregonV3, Rubicson, SomfyRts, X10Rf,
+    Acurite609Txc, AcuriteTower, FineOffsetWh51, GtWt02, GtWt03, OregonV3, SomfyRts, X10Rf,
 };
+use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
 
@@ -93,7 +93,7 @@ fn a_lacrosse_tx141th_burst_decodes_through_its_sync_marks() {
     }
     let pkg = package(pulses);
 
-    let r = LacrosseTx141thBv2.decode_package(&pkg).expect("decode");
+    let r = named("LaCrosse-TX141THBv2").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x9c)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.6)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(44)));
@@ -137,7 +137,7 @@ fn a_lacrosse_it_burst_decodes_from_fsk_runs() {
     pulses.push((BIT_US, 4000));
     let pkg = package(pulses);
 
-    let r = LacrosseIt::tx29().decode_package(&pkg).expect("decode");
+    let r = named("LaCrosse-TX29IT").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x25)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.3)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(57)));
@@ -181,7 +181,7 @@ fn a_rubicson_burst_decodes_from_its_timings() {
     let f = [0x74, 0x80, 0x95, 0xf4, 0x90];
     let pkg = ppm(&bits_of(&f, 36), 500, 1000, 2000, 4800);
 
-    let r = Rubicson.decode_package(&pkg).expect("decode");
+    let r = named("Rubicson-Temperature").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x74)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(14.9)));
     // Nexus shares this layout and must hand the frame over rather than
@@ -201,7 +201,7 @@ fn a_bresser_3ch_burst_decodes_from_its_timings() {
     pulses.extend(pwm(&bits_of(&inverted, 40), 250, 500));
     let pkg = package(pulses);
 
-    let r = Bresser3Ch.decode_package(&pkg).expect("decode");
+    let r = named("Bresser-3CH").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x3d)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(20.0)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(51)));

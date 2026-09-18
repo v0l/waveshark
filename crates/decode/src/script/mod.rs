@@ -47,6 +47,12 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/remotes/ansonic.yaml"),
     include_str!("../../protocols/remotes/bett.yaml"),
     include_str!("../../protocols/remotes/ev1527.yaml"),
+    include_str!("../../protocols/weather/prologue.yaml"),
+    include_str!("../../protocols/weather/rubicson.yaml"),
+    include_str!("../../protocols/weather/bresser_3ch.yaml"),
+    include_str!("../../protocols/weather/lacrosse_tx141th.yaml"),
+    include_str!("../../protocols/weather/lacrosse_tx29.yaml"),
+    include_str!("../../protocols/weather/lacrosse_tx35.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -447,13 +453,15 @@ impl Walk<'_> {
         if !f.allowed.is_empty() && !f.allowed.contains(&raw) {
             return Err(DecodeError::NotThisProtocol);
         }
+        let omitted = f.omit_if.iter().any(|o| *o == raw);
         let v = value_of(f, raw)?;
-        if let Some(n) = v.as_f64()
+        if !omitted
+            && let Some(n) = v.as_f64()
             && (f.min.is_some_and(|m| n < m) || f.max.is_some_and(|m| n > m))
         {
             return Err(DecodeError::Implausible("out of range"));
         }
-        let reported = !f.hidden && !f.omit_if.iter().any(|o| *o == raw);
+        let reported = !f.hidden && !omitted;
         if f.id {
             self.id = Some(f.name.clone());
         }
