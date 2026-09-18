@@ -39,6 +39,18 @@ jobs:
             features: --no-default-features --features limesdr,stt,cuda,mcp
             cuda: '12.8.1'
             installers: deb,rpm
+          # A Raspberry Pi 4 or 5 on a 64-bit system, built native on GitHub's
+          # own arm64 runner rather than cross-compiled, so the egui and USB
+          # -sys crates find real headers. No CUDA: there is no card on these
+          # boards and no aarch64 toolkit to build the kernels with, so speech
+          # is read on the CPU. 22.04 is glibc 2.35, which Raspberry Pi OS
+          # bookworm (2.36) satisfies and bullseye (2.31) does not; bullseye
+          # builds from source.
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: --no-default-features --features limesdr,stt,mcp
+            installers: deb,rpm
           # Apple silicon only. The Intel runners are on their way out and
           # nobody has an Intel Mac to check the result on, and a binary
           # nobody has started is not a release asset. No CUDA here: a Mac
@@ -153,9 +165,16 @@ jobs:
             | jq -r '.packages[] | select(.name == "app") | .version')
           echo "VER=$ver" >> "$GITHUB_ENV"
           echo "ASSET=waveshark-$ver-${{ matrix.name }}" >> "$GITHUB_ENV"
+          echo "MODES=wave1090-$ver-${{ matrix.name }}" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p app ${{ matrix.features }}
+
+      # Its own invocation, and no feature list: wave1090 has no features and
+      # takes none of the app's, so naming them here would fail the build on
+      # the one package that does not have them.
+      - name: Build wave1090
+        run: cargo build --release --locked --target ${{ matrix.target }} -p wave1090
 
       # A release carries files, not folders: the installer for the platform,
       # and the binary itself for anyone who would rather not install one.
@@ -169,6 +188,8 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/waveshark "$ASSET"
           chmod +x "$ASSET"
+          cp target/${{ matrix.target }}/release/wave1090 "$MODES"
+          chmod +x "$MODES"
 
       - name: Binary (windows)
         if: runner.os == 'Windows'
@@ -177,6 +198,9 @@ jobs:
           New-Item -ItemType Directory -Force ziproot | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\waveshark.exe" ziproot\
           Compress-Archive -Path ziproot\* -DestinationPath "$env:ASSET.zip"
+          # No zip for this one: it drives the dongle through the tree's own
+          # USB driver and has no DLL to carry beside it.
+          Copy-Item "target\${{ matrix.target }}\release\wave1090.exe" "$env:MODES.exe"
 
       # The installers, built from the metadata in crates/app/Cargo.toml after
       # the binary is copied out and never before it: the macOS step rewrites
@@ -293,7 +317,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: waveshark-${{ matrix.name }}
-          path: waveshark-${{ env.VER }}-${{ matrix.name }}*
+          path: |
+            waveshark-${{ env.VER }}-${{ matrix.name }}*
+            wave1090-${{ env.VER }}-${{ matrix.name }}*
           if-no-files-found: error
 
   release:
@@ -324,4 +350,6 @@ jobs:
           # can be published and installed without offering itself to anybody
           # running the last real one.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: artifacts/waveshark-*
+          files: |
+            artifacts/waveshark-*
+            artifacts/wave1090-*

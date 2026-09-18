@@ -120,6 +120,7 @@ the code is in the commit log.
 - Dataset downloads say how far they have got, in bytes and as a bar.
 - Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
   macOS. Setup fetches the one this machine installs from and opens it.
+- Linux arm64 binaries and packages, for a Raspberry Pi 4 or 5 on 64-bit.
 
 ### Changed
 
