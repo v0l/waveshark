@@ -1,0 +1,25 @@
+# Fine Offset WH51 soil moisture probe: FSK NRZ at 58 us a bit behind the
+# aa2dd4 preamble and sync, fourteen bytes opening on the family byte 0x51,
+# closed by a CRC-8 and then a sum over everything before it.
+name: Fineoffset-WH51
+timing: { nrz: 58, reset_us: 5000 }
+frame: { bits: 112, find: sync, sync: "aa2dd4", sync_bits: 24 }
+check:
+  - { kind: crc8, poly: 0x31, init: 0x00, over: [0, 96], at: 96 }
+  - { kind: sum8, over: [0, 104], at: 104 }
+fields:
+  - { bits: 8, const: 0x51 }
+  - { name: id, bits: 24, type: hex }
+  - { name: boost, bits: 3 }
+  - { name: battery_mv, bits: 5, scale: 100 }
+  - { name: battery_ok, at: 35, bits: 5, type: bool, at_least: 13 }
+  - { bits: 8, hidden: true }
+  - { name: moisture_pct, bits: 8, max: 100 }
+  - { bits: 7, hidden: true }
+  - { name: ad_raw, bits: 9 }
+  - { bits: 24, hidden: true }
+  - { bits: 8, hidden: true }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "51 00 6b 58 6e 00 24 00 d2 00 00 00 4e c6"
+    fields: { id: "006b58", boost: 3, battery_mv: 1400, battery_ok: true, moisture_pct: 36, ad_raw: 210 }

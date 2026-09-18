@@ -57,6 +57,10 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/weather/acurite_tower.yaml"),
     include_str!("../../protocols/weather/acurite_606tx.yaml"),
     include_str!("../../protocols/weather/acurite_986.yaml"),
+    include_str!("../../protocols/weather/fineoffset_whx080.yaml"),
+    include_str!("../../protocols/weather/fineoffset_wh51.yaml"),
+    include_str!("../../protocols/weather/ambient_f007th.yaml"),
+    include_str!("../../protocols/tpms/schrader.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -238,7 +242,16 @@ impl Scripted {
             }
         }
         let mut out = BitBuffer::with_capacity(self.desc.frame.bits);
-        let mut w = Writer { fields, out: &mut out, checks: self.desc.check.iter().collect() };
+        let mut w = Writer {
+            fields,
+            out: &mut out,
+            checks: self.desc.check.iter().collect(),
+            views: desc::all_fields(&self.desc.fields)
+                .into_iter()
+                .filter(|f| f.is_view())
+                .collect(),
+            derived: BTreeMap::new(),
+        };
         w.items(&self.desc.fields)?;
         for c in self.desc.check.iter() {
             if c.kind == CheckKind::EvenParity {
@@ -548,8 +561,21 @@ fn value_of(f: &Field, raw: u64) -> Result<Value, DecodeError> {
     if let Some(l) = f.map.get(&raw) {
         return Ok(l.value());
     }
+    if !f.map.is_empty()
+        && let Some(o) = &f.other
+    {
+        return Ok(o.value());
+    }
     let n: i64 = match f.kind {
-        Kind::Bool => return Ok(Value::Bool(raw != 0)),
+        Kind::Bool => {
+            return Ok(Value::Bool(match f.at_least {
+                Some(m) => raw >= m,
+                None => raw != 0,
+            }));
+        }
+        Kind::Hex if f.upper => {
+            return Ok(Value::Text(format!("{:0width$X}", raw, width = f.bits.div_ceil(4))));
+        }
         Kind::Hex => {
             return Ok(Value::Text(format!("{:0width$x}", raw, width = f.bits.div_ceil(4))));
         }
@@ -560,8 +586,10 @@ fn value_of(f: &Field, raw: u64) -> Result<Value, DecodeError> {
             return pressed.map(|i| Value::Int(i as i64 + 1)).ok_or(DecodeError::NotThisProtocol);
         }
         Kind::Bcd => {
+            // a top digit narrower than a nibble is allowed, for a clock
+            // whose tens of hours are two bits
             let mut n = 0i64;
-            for i in (0..f.bits / 4).rev() {
+            for i in (0..f.bits.div_ceil(4)).rev() {
                 let d = (raw >> (i * 4)) & 0xf;
                 if d > 9 {
                     return Err(DecodeError::Implausible("not a decimal digit"));
@@ -578,9 +606,12 @@ fn value_of(f: &Field, raw: u64) -> Result<Value, DecodeError> {
         Kind::Int | Kind::Uint => raw as i64,
         Kind::Format => unreachable!(),
     };
-    let float = f.scale.is_some() || f.convert.is_some() || f.round.is_some();
+    // a whole-number scale keeps the reading a count: millivolts from a
+    // reading in tenths of a volt
+    let whole = f.scale.is_none_or(|s| s.fract() == 0.0);
+    let float = !whole || f.convert.is_some() || f.round.is_some();
     if !float {
-        return Ok(Value::Int(n + f.offset.unwrap_or(0.0) as i64));
+        return Ok(Value::Int(n * f.scale.unwrap_or(1.0) as i64 + f.offset.unwrap_or(0.0) as i64));
     }
     let mut v = n as f64 * f.scale.unwrap_or(1.0) + f.offset.unwrap_or(0.0);
     if let Some(Convert::FToC) = f.convert {
@@ -628,6 +659,33 @@ fn format_text(fmt: &str, read: &BTreeMap<String, (Value, bool)>) -> Result<Stri
     Ok(out)
 }
 
+/// The numbers a formatted text was built from, by template
+fn unformat(fmt: &str, text: &str) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    let mut rest = fmt;
+    let mut t = text;
+    while let Some(open) = rest.find('{') {
+        let lit = &rest[..open];
+        let Some(after) = t.strip_prefix(lit) else { return out };
+        t = after;
+        let Some(close) = rest[open..].find('}') else { return out };
+        let spec = &rest[open + 1..open + close];
+        let (name, width) = spec.split_once(':').unwrap_or((spec, ""));
+        rest = &rest[open + close + 1..];
+        let next_lit = rest.find('{').map_or(rest, |i| &rest[..i]);
+        let take = match width.strip_prefix('0').and_then(|w| w.parse::<usize>().ok()) {
+            Some(w) => w.min(t.len()),
+            None if next_lit.is_empty() => t.len(),
+            None => t.find(next_lit).unwrap_or(t.len()),
+        };
+        if let Ok(n) = t[..take].parse::<i64>() {
+            out.insert(name.to_string(), n);
+        }
+        t = &t[take..];
+    }
+    out
+}
+
 /// The raw bits of a reported value
 fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
     if !f.map.is_empty()
@@ -636,8 +694,19 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
         return Ok(*raw);
     }
     let err = || EncodeError::OutOfRange(f.name.clone());
+    if !f.map.is_empty()
+        && let Some(o) = &f.other
+        && o.equals(v)
+    {
+        // the lowest raw the map does not name
+        return (0..=mask(f.bits)).find(|r| !f.map.contains_key(r)).ok_or_else(err);
+    }
     let raw: u64 = match (f.kind, v) {
-        (Kind::Bool, Value::Bool(b)) => *b as u64,
+        (Kind::Bool, Value::Bool(b)) => match f.at_least {
+            Some(m) if *b => m,
+            Some(_) => 0,
+            None => *b as u64,
+        },
         (Kind::Bool, _) => return Err(err()),
         (Kind::Hex, Value::Text(t)) => u64::from_str_radix(t, 16).map_err(|_| err())?,
         (Kind::Tristate, Value::Text(t)) => {
@@ -683,11 +752,11 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
                     }
                     let mut raw = 0u64;
                     let mut n = n as u64;
-                    for i in 0..f.bits / 4 {
+                    for i in 0..f.bits.div_ceil(4) {
                         raw |= (n % 10) << (i * 4);
                         n /= 10;
                     }
-                    if n != 0 {
+                    if n != 0 || raw > mask(f.bits) {
                         return Err(err());
                     }
                     raw
@@ -714,10 +783,6 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
     Ok(raw)
 }
 
-fn holds(cond: &desc::Cond, fields: &BTreeMap<String, Value>) -> bool {
-    cond.iter().all(|(k, want)| fields.get(k).is_some_and(|v| want.holds(v)))
-}
-
 fn owns_any(items: &[Item]) -> bool {
     desc::all_fields(items).iter().any(|f| !f.is_view())
 }
@@ -727,9 +792,37 @@ struct Writer<'a> {
     fields: &'a BTreeMap<String, Value>,
     out: &'a mut BitBuffer,
     checks: Vec<&'a Check>,
+    views: Vec<&'a Field>,
+    /// Hidden owners filled from a view over the same bits, so a condition
+    /// on one still decides
+    derived: BTreeMap<String, Value>,
 }
 
 impl Writer<'_> {
+    fn holds(&self, cond: &desc::Cond) -> bool {
+        cond.iter().all(|(k, want)| {
+            self.fields.get(k).or_else(|| self.derived.get(k)).is_some_and(|v| want.holds(v))
+        })
+    }
+
+    /// A view over exactly these bits whose value was supplied, or a
+    /// format the field is part of
+    fn from_view(&self, f: &Field, at: usize) -> Result<Option<u64>, EncodeError> {
+        for v in &self.views {
+            let Some(val) = self.fields.get(&v.name) else { continue };
+            if v.at == Some(at) && v.bits == f.bits {
+                return raw_of(v, val).map(Some);
+            }
+            if v.kind == Kind::Format
+                && let Value::Text(t) = val
+                && let Some(n) = unformat(&v.format, t).get(&f.name)
+            {
+                return raw_of(f, &Value::Int(*n)).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
     fn items(&mut self, items: &[Item]) -> Result<(), EncodeError> {
         for it in items {
             match it {
@@ -737,13 +830,13 @@ impl Writer<'_> {
                     if !owns_any(&g.fields) && !owns_any(&g.otherwise) {
                         continue;
                     }
-                    let branch = if holds(&g.when, self.fields) { &g.fields } else { &g.otherwise };
+                    let branch = if self.holds(&g.when) { &g.fields } else { &g.otherwise };
                     self.items(branch)?;
                 }
                 Item::Field(f) if f.is_view() => {}
                 Item::Field(f) => {
                     if let Some(c) = &f.when
-                        && !holds(c, self.fields)
+                        && !self.holds(c)
                     {
                         continue;
                     }
@@ -753,9 +846,15 @@ impl Writer<'_> {
                         (Some(c), _) => c,
                         (None, Some(v)) => raw_of(f, v)?,
                         (None, None) if f.name.is_empty() || filled_by_check => 0,
-                        (None, None) => match f.omit_if.iter().next() {
-                            Some(d) => *d,
-                            None => return Err(EncodeError::Missing(f.name.clone())),
+                        (None, None) => match (self.from_view(f, at)?, f.omit_if.iter().next()) {
+                            (Some(raw), _) => {
+                                if let Ok(v) = value_of(f, raw) {
+                                    self.derived.insert(f.name.clone(), v);
+                                }
+                                raw
+                            }
+                            (None, Some(d)) => *d,
+                            (None, None) => return Err(EncodeError::Missing(f.name.clone())),
                         },
                     };
                     push(self.out, raw, f.bits);
@@ -886,8 +985,10 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
                     }
                     levels.extend((0..bits.len()).map(|i| bits.get(i).unwrap_or(false)));
                 } else {
-                    for i in 0..bits.len() {
-                        let b = bits.get(i).unwrap_or(false);
+                    // a run of zero bits first, as every transmitter sends,
+                    // so the slicer has the symbol phase before the frame
+                    let lead = std::iter::repeat_n(false, 8);
+                    for b in lead.chain((0..bits.len()).map(|i| bits.get(i).unwrap_or(false))) {
                         levels.push(b);
                         levels.push(!b);
                     }
@@ -1065,6 +1166,9 @@ mod tests {
             omit_if: Default::default(),
             map: BTreeMap::new(),
             unit: 0,
+            other: None,
+            at_least: None,
+            upper: false,
             per_byte: None,
             idle: 0,
             format: String::new(),

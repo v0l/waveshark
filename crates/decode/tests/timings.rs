@@ -11,7 +11,7 @@
 
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
-use decode::protocols::{FineOffsetWh51, GtWt02, GtWt03, OregonV3, SomfyRts, X10Rf};
+use decode::protocols::{GtWt02, GtWt03, OregonV3, SomfyRts, X10Rf};
 use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -281,7 +281,7 @@ fn a_wh51_soil_probe_decodes_from_fsk_runs() {
     bits.extend(bits_of(&f, 14 * 8));
     let pkg = nrz(&bits, 58);
 
-    let r = FineOffsetWh51.decode_package(&pkg).expect("decode");
+    let r = named("Fineoffset-WH51").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Text("006b58".into())));
     assert_eq!(r.get("moisture_pct"), Some(&Value::Int(36)));
     assert_eq!(r.get("ad_raw"), Some(&Value::Int(210)));

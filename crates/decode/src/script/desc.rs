@@ -401,6 +401,13 @@ pub struct Field {
     /// Raw value to reported value, for the ones that are not the number
     #[serde(default)]
     pub map: BTreeMap<u64, Lit>,
+    /// What every raw value the map does not name reads as
+    pub other: Option<Lit>,
+    /// A bool that is whether the raw value reaches this
+    pub at_least: Option<u64>,
+    /// Hex in capitals
+    #[serde(default)]
+    pub upper: bool,
     /// Slot width for `pick`
     #[serde(default)]
     pub unit: usize,
@@ -536,11 +543,8 @@ impl Desc {
             if fld.per_byte.is_some_and(|p| p == 0 || p > 8 || fld.bits % 8 != 0) {
                 return Err(format!("{name}: field {n} has per_byte but is not whole bytes"));
             }
-            if fld.kind == Kind::Bool && fld.bits != 1 {
+            if fld.kind == Kind::Bool && fld.bits != 1 && fld.at_least.is_none() {
                 return Err(format!("{name}: field {n} is a bool wider than a bit"));
-            }
-            if fld.kind == Kind::Bcd && fld.bits % 4 != 0 {
-                return Err(format!("{name}: field {n} is bcd but not whole nibbles"));
             }
             if fld.kind == Kind::Tristate && fld.bits % 2 != 0 {
                 return Err(format!("{name}: field {n} is tristate but not whole pairs"));
