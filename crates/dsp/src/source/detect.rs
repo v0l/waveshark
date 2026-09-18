@@ -158,6 +158,76 @@ impl FloorBank {
     }
 }
 
+/// The floor pass's own loop, over a chunk of bins of one frame.
+///
+/// Every bin does the same arithmetic with no branch in it and no bin
+/// depends on the one before, which is a register's worth at a time. The
+/// whole pass is the largest single cost of a wide span: 61.44 MS/s is eight
+/// thousand bins a frame.
+#[allow(clippy::too_many_arguments)]
+fn ratios(
+    power: &[f32],
+    raw: &[f32],
+    current: &mut [f32],
+    min: &[f32],
+    cap: &[f32],
+    bias: f32,
+    stored: bool,
+    floor: &mut [f32],
+    ratio: &mut [f32],
+    raw_ratio: &mut [f32],
+) {
+    use wide::f32x8;
+    let w = power.len();
+    let load = |v: &[f32], i: usize| f32x8::from(<[f32; 8]>::try_from(&v[i..i + 8]).unwrap());
+    let (zero, inf, b) = (f32x8::ZERO, f32x8::splat(f32::INFINITY), f32x8::splat(bias));
+    let mut i = 0;
+    while i + 8 <= w {
+        let p = load(power, i);
+        let c = load(current, i).min(p);
+        current[i..i + 8].copy_from_slice(&c.to_array());
+        let m = if stored { load(min, i).min(c) } else { c };
+        let fl = m.min(load(cap, i)) * b;
+        // `fl > 0 && fl.is_finite()`: both comparisons are false for a NaN,
+        // which is the same answer the scalar test gives.
+        let ok = fl.simd_gt(zero) & fl.simd_lt(inf);
+        floor[i..i + 8].copy_from_slice(&ok.select(fl, zero).to_array());
+        ratio[i..i + 8].copy_from_slice(&ok.select(p / fl, zero).to_array());
+        raw_ratio[i..i + 8].copy_from_slice(&ok.select(load(raw, i) / fl, zero).to_array());
+        i += 8;
+    }
+    while i < w {
+        current[i] = current[i].min(power[i]);
+        let m = if stored { min[i].min(current[i]) } else { current[i] };
+        write_ratio(
+            m.min(cap[i]) * bias,
+            power[i],
+            raw[i],
+            &mut floor[i],
+            &mut ratio[i],
+            &mut raw_ratio[i],
+        );
+        i += 1;
+    }
+}
+
+/// One bin's floor and the two ratios taken against it, or zeros where the
+/// floor is not yet a number the ratio would mean anything against.
+#[inline]
+fn write_ratio(
+    fl: f32,
+    power: f32,
+    raw: f32,
+    floor: &mut f32,
+    ratio: &mut f32,
+    raw_ratio: &mut f32,
+) {
+    let usable = fl > 0.0 && fl.is_finite();
+    *floor = if usable { fl } else { 0.0 };
+    *ratio = if usable { power / fl } else { 0.0 };
+    *raw_ratio = if usable { raw / fl } else { 0.0 };
+}
+
 /// Feed one bin's smoothed power and return its raw minimum. `stored` is
 /// the sub-window count after this frame.
 #[inline]
@@ -808,47 +878,70 @@ impl SourceDetector {
                     let raw_ratio = &mut rows.raw_ratio[at..at + w];
                     let out_power = &mut rows.power[at..at + w];
                     let floor = &mut rows.floor[at..at + w];
-                    for i in 0..w {
-                        let p = raw[i];
-                        if step.silent {
-                            ratio[i] = 0.0;
-                            raw_ratio[i] = 0.0;
-                            out_power[i] = power[i];
-                            floor[i] = 0.0;
-                            continue;
-                        }
-                        if step.seed {
-                            power[i] = p;
-                        } else {
-                            power[i] += alpha * (p - power[i]);
-                        }
-                        out_power[i] = power[i];
-                        if !step.settled {
-                            ratio[i] = 0.0;
-                            raw_ratio[i] = 0.0;
-                            floor[i] = 0.0;
-                            continue;
-                        }
-                        let m = floor_update(
-                            power[i],
-                            &mut current[i],
-                            &mut mins[i * sc..(i + 1) * sc],
-                            &mut min[i],
-                            step.completing,
-                            step.head,
-                            step.stored,
-                        );
-                        let fl = m.min(cap[i]) * step.bias;
-                        if fl > 0.0 && fl.is_finite() {
-                            floor[i] = fl;
-                            ratio[i] = power[i] / fl;
-                            raw_ratio[i] = p / fl;
-                        } else {
-                            floor[i] = 0.0;
-                            ratio[i] = 0.0;
-                            raw_ratio[i] = 0.0;
+                    // Every one of these is a fact about the frame, not about
+                    // the bin, so the decisions are taken once here rather
+                    // than a thousand times inside the loop. Straight-line
+                    // arithmetic over the chunk is what the compiler will put
+                    // in a register; a branch on a frame flag in the middle
+                    // of it is what stopped it.
+                    if step.silent {
+                        out_power.copy_from_slice(power);
+                        ratio.fill(0.0);
+                        raw_ratio.fill(0.0);
+                        floor.fill(0.0);
+                        continue;
+                    }
+                    if step.seed {
+                        power.copy_from_slice(raw);
+                    } else {
+                        for (p, &r) in power.iter_mut().zip(raw) {
+                            *p += alpha * (r - *p);
                         }
                     }
+                    out_power.copy_from_slice(power);
+                    if !step.settled {
+                        ratio.fill(0.0);
+                        raw_ratio.fill(0.0);
+                        floor.fill(0.0);
+                        continue;
+                    }
+                    // Closing a sub-window is once every few hundred frames
+                    // and rewrites the ring of minima, so it keeps the loop
+                    // it always had.
+                    if step.completing {
+                        for i in 0..w {
+                            let m = floor_update(
+                                power[i],
+                                &mut current[i],
+                                &mut mins[i * sc..(i + 1) * sc],
+                                &mut min[i],
+                                true,
+                                step.head,
+                                step.stored,
+                            );
+                            write_ratio(
+                                m.min(cap[i]) * step.bias,
+                                power[i],
+                                raw[i],
+                                &mut floor[i],
+                                &mut ratio[i],
+                                &mut raw_ratio[i],
+                            );
+                        }
+                        continue;
+                    }
+                    ratios(
+                        power,
+                        raw,
+                        current,
+                        min,
+                        cap,
+                        step.bias,
+                        step.stored > 0,
+                        floor,
+                        ratio,
+                        raw_ratio,
+                    );
                 }
             });
     }
