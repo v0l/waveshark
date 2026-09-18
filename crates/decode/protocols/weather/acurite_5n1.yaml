@@ -1,0 +1,70 @@
+# Acurite 5-in-1 and 3-in-1 weather stations, 433.92 MHz: PWM behind a sync
+# mark, inverted, eight bytes with an additive checksum and even parity over
+# the bytes between the id and the sum. Three messages share the frame: the
+# 5-in-1's wind with rain (0x31) and wind with temperature and humidity
+# (0x38), and the 3-in-1's (0x20), which carries a wider id and a
+# temperature offset differently. Wind is zero for no rotations of the cups
+# and a straight line above that, so zero is named and the line applies to
+# the rest. The station numbers its three repeats, so no two copies match
+# and the rows repeating at the frame's period is the corroboration.
+name: Acurite-5n1
+timing: { pwm: [220, 408], sync_us: 620, reset_us: 4000 }
+frame: { bits: 64, invert: true, repeats: 3 }
+check:
+  - { kind: sum8, over: [0, 56], at: 56 }
+  - { kind: even_parity, over: [16, 56] }
+fields:
+  - { name: channel, bits: 2, data: text, in: [0, 2, 3], map: { 0: C, 2: B, 3: A } }
+  - { name: sequence_num, bits: 2, data: int }
+  # the message type read early, under the name it is reported by, so the
+  # id layout it decides is known before the id is reached
+  - { name: message_type, at: 18, bits: 6, hidden: true, in: [0x31, 0x38, 0x20] }
+  - when: { message_type: 0x20 }
+    model: Acurite-3n1
+    fields:
+      - { name: id, gather: [[2, 16]], data: int }
+      - { bits: 12, hidden: true }
+    else:
+      - { name: id, bits: 12, data: int }
+  - { bits: 1, hidden: true }
+  - { name: battery_ok, bits: 1, data: bool, type: bool }
+  - { name: message_type, bits: 6, data: int }
+  - { bits: 1, hidden: true }
+  - { bits: 7, hidden: true, default: 0 }
+  - { bits: 1, hidden: true }
+  - { bits: 7, hidden: true, default: 0 }
+  - { bits: 1, hidden: true }
+  - { bits: 7, hidden: true, default: 0 }
+  - { bits: 1, hidden: true }
+  - { bits: 7, hidden: true, default: 0 }
+  - { bits: 8, hidden: true }
+  - when: { message_type: 0x20 }
+    fields:
+      - { name: wind_avg_ms, at: 49, bits: 7, data: float, unit: m_s, scale: 0.44704, round: 2 }
+      - { name: temperature_c, gather: [[35, 40], [41, 48]], data: float, unit: c, scale: 0.1, offset: -148, convert: f_to_c, round: 1 }
+      - { name: humidity_pct, at: 25, bits: 7, data: int, unit: pct, max: 100 }
+  - when: { message_type: 0x31 }
+    fields:
+      - { name: wind_avg_ms, gather: [[27, 32], [33, 36]], data: float, unit: m_s, map: { 0: 0.0 }, scale: 0.229944, offset: 0.277778, round: 2 }
+      - name: wind_direction_deg
+        at: 36
+        bits: 4
+        data: float
+        unit: deg
+        map: { 0: 315.0, 1: 247.5, 2: 292.5, 3: 270.0, 4: 337.5, 5: 225.0, 6: 0.0, 7: 202.5, 8: 67.5, 9: 135.0, 10: 90.0, 11: 112.5, 12: 45.0, 13: 157.5, 14: 22.5, 15: 180.0 }
+      - { name: rain_total_mm, gather: [[41, 48], [49, 56]], data: float, unit: mm, scale: 0.254, round: 2 }
+  - when: { message_type: 0x38 }
+    fields:
+      - { name: wind_avg_ms, gather: [[27, 32], [33, 36]], data: float, unit: m_s, map: { 0: 0.0 }, scale: 0.229944, offset: 0.277778, round: 2 }
+      - { name: temperature_c, gather: [[36, 40], [41, 48]], data: float, unit: c, scale: 0.1, offset: -40, convert: f_to_c, round: 1 }
+      - { name: humidity_pct, at: 49, bits: 7, data: int, unit: pct, max: 100 }
+vectors:
+  - hex: "c3 47 71 00 44 00 42 01"
+    fields: { channel: A, sequence_num: 0, id: 0x347, battery_ok: true, message_type: 49, wind_avg_ms: 1.2, wind_direction_deg: 337.5, rain_total_mm: 16.76 }
+  - hex: "d3 47 71 00 84 00 42 51"
+    fields: { channel: A, sequence_num: 1, id: 0x347, battery_ok: true, message_type: 49, wind_avg_ms: 0.0, wind_direction_deg: 337.5, rain_total_mm: 16.76 }
+  - hex: "c3 47 78 00 48 b8 b7 39"
+    fields: { channel: A, sequence_num: 0, id: 0x347, battery_ok: true, message_type: 56, wind_avg_ms: 1.2, temperature_c: 20.0, humidity_pct: 55 }
+  - hex: "df 38 60 2b 8d f6 05 2a"
+    model: Acurite-3n1
+    fields: { channel: A, sequence_num: 1, id: 7992, battery_ok: true, message_type: 32, wind_avg_ms: 2.24, temperature_c: -1.0, humidity_pct: 43 }

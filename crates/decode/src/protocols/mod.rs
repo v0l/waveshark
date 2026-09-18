@@ -9,7 +9,6 @@
 //! rule, that rule is here too: the rules are not cosmetic, they are what
 //! stops a checksum-free protocol claiming every burst on the band.
 
-mod acurite;
 mod alecto;
 mod ert;
 mod esl;
@@ -22,10 +21,7 @@ pub mod keyfob;
 mod oregon;
 mod security;
 mod somfy_rts;
-mod tpms;
-mod x10;
 
-pub use acurite::AcuriteWind;
 pub use alecto::AlectoV1;
 pub use ert::{ErtIdm, ErtScm, ErtScmPlus};
 pub use esl::Esl;
@@ -38,33 +34,8 @@ pub use keyfob::KeeLoq;
 pub use oregon::{OregonV2, OregonV3};
 pub use security::HoneywellSecurity;
 pub use somfy_rts::SomfyRts;
-pub use tpms::{FordTpms, RenaultTpms, ToyotaTpms};
-pub use x10::X10Rf;
 
 use crate::bits::BitBuffer;
-
-/// Find a frame satisfying `ok`, at any bit offset, with corroboration.
-///
-/// A burst holds the same frame many times over and the slicer starts wherever
-/// the detector triggered, so the frame is neither at bit zero nor byte
-/// aligned and has to be searched for. That search is also how a decoder
-/// invents devices: an 8 bit checksum passes on one window in 256, and a five
-/// hundred bit burst of noise offers five hundred windows. Two of them will
-/// pass. Observed in the field as a LaCrosse sensor reporting 43.6 C at 5%
-/// humidity in a British winter.
-///
-/// So a match must be corroborated, in one of the two ways a real burst
-/// provides. Either the buffer holds nothing but this frame, meaning the
-/// detector's own framing agrees with it, or the identical frame appears again
-/// one frame later, which is what these sensors transmit: the same packet
-/// three to twelve times back to back. Noise does neither.
-pub(crate) fn find_frame(
-    bits: &BitBuffer,
-    bytes: usize,
-    ok: impl FnMut(&[u8]) -> bool,
-) -> Option<Vec<u8>> {
-    find_frame_bits(bits, bytes * 8, ok)
-}
 
 /// Could this buffer hold a frame whose row is `row_bits` long?
 ///

@@ -63,6 +63,11 @@ pub const BUILTIN: &[&str] = &[
     include_str!("../../protocols/weather/fineoffset_wh51.yaml"),
     include_str!("../../protocols/weather/ambient_f007th.yaml"),
     include_str!("../../protocols/tpms/schrader.yaml"),
+    include_str!("../../protocols/tpms/toyota.yaml"),
+    include_str!("../../protocols/tpms/ford.yaml"),
+    include_str!("../../protocols/tpms/renault.yaml"),
+    include_str!("../../protocols/home/x10_rf.yaml"),
+    include_str!("../../protocols/weather/acurite_5n1.yaml"),
 ];
 
 /// Every built-in description as a protocol
@@ -249,6 +254,10 @@ impl Scripted {
             }
         }
         let mut out = BitBuffer::with_capacity(self.desc.frame.bits);
+        // every bit a supplied view says, so an owner nobody named (a
+        // hidden slot under a gathered status byte) is still written
+        let mut known: Vec<Option<bool>> = vec![None; self.desc.frame.bits];
+        known_bits(&self.desc.fields, fields, &mut known);
         let mut w = Writer {
             fields,
             out: &mut out,
@@ -257,19 +266,25 @@ impl Scripted {
                 .into_iter()
                 .filter(|f| f.is_view())
                 .collect(),
+            known,
             derived: BTreeMap::new(),
         };
         w.items(&self.desc.fields)?;
-        for c in self.desc.check.iter() {
-            if c.kind == CheckKind::EvenParity {
-                for byte in (c.over[0]..c.over[1]).step_by(8) {
-                    let v = extract(&out, byte, 8);
-                    overwrite(&mut out, byte, 8, v | ((v & 0x7f).count_ones() as u64 & 1) << 7);
+        // a check may cover another's stored value, so every check is
+        // written as many times as there are checks: the last pass sees
+        // every value in place
+        for _ in 0..self.desc.check.iter().count() {
+            for c in self.desc.check.iter() {
+                if c.kind == CheckKind::EvenParity {
+                    for byte in (c.over[0]..c.over[1]).step_by(8) {
+                        let v = extract(&out, byte, 8);
+                        overwrite(&mut out, byte, 8, v | ((v & 0x7f).count_ones() as u64 & 1) << 7);
+                    }
                 }
-            }
-            if let (Some(at), Some(v)) = (c.at, check_value(c, &out)) {
-                let width = c.kind.width(c.over).unwrap_or(0);
-                overwrite(&mut out, at, width, v);
+                if let (Some(at), Some(v)) = (c.at, check_value(c, &out)) {
+                    let width = c.kind.width(c.over).unwrap_or(0);
+                    overwrite(&mut out, at, width, v);
+                }
             }
         }
         Ok(out)
@@ -285,7 +300,9 @@ impl Scripted {
             let chips = match self.desc.frame.decode {
                 Decode::None => air,
                 Decode::Manchester => manchester_chips(&air),
-                Decode::DiffManchester => diff_manchester_chips(&air),
+                Decode::DiffManchester => {
+                    diff_manchester_chips(&air, sync.get(skip.wrapping_sub(1)).unwrap_or(false))
+                }
             };
             let mut with = sync.slice(0, skip);
             for i in 0..chips.len() {
@@ -472,15 +489,23 @@ impl Walk<'_> {
             self.read.insert(f.name.clone(), (Value::Text(text), !f.hidden));
             return Ok(());
         }
-        let pos = match f.at {
-            Some(at) => at,
-            None => {
-                let p = self.cursor;
-                self.cursor += f.bits;
-                p
+        let raw = if !f.gather.is_empty() {
+            let mut v = 0u64;
+            for b in f.gather.iter().flat_map(|s| s.bits()) {
+                v = (v << 1) | self.bits.get(b).unwrap_or(false) as u64;
             }
+            raw_bits(f, v)
+        } else {
+            let pos = match f.at {
+                Some(at) => at,
+                None => {
+                    let p = self.cursor;
+                    self.cursor += f.bits;
+                    p
+                }
+            };
+            raw_bits(f, extract(self.bits, pos, f.bits))
         };
-        let raw = raw_bits(f, extract(self.bits, pos, f.bits));
         if let Some(c) = f.r#const {
             if raw != c {
                 return Err(DecodeError::NotThisProtocol);
@@ -778,6 +803,10 @@ fn raw_of(f: &Field, v: &Value) -> Result<u64, EncodeError> {
             }
         }
     };
+    // a number that is also a mapped raw would read back as the mapped value
+    if f.map.contains_key(&raw) {
+        return Err(err());
+    }
     let mut raw = raw_bits(&Field { per_byte: None, ..f.clone() }, raw);
     if let Some(p) = f.per_byte {
         let n = f.bits / 8;
@@ -794,12 +823,43 @@ fn owns_any(items: &[Item]) -> bool {
     desc::all_fields(items).iter().any(|f| !f.is_view())
 }
 
+/// What the supplied views say each bit of the frame is. A group whose
+/// condition the supplied fields decide contributes one branch; one they
+/// cannot decide contributes both, and a view whose value does not fit is
+/// the other branch's and says nothing.
+fn known_bits(items: &[Item], fields: &BTreeMap<String, Value>, known: &mut [Option<bool>]) {
+    for it in items {
+        match it {
+            Item::Group(g) => {
+                let decidable = g.when.keys().all(|k| fields.contains_key(k));
+                let holds = g.when.iter().all(|(k, w)| fields.get(k).is_some_and(|v| w.holds(v)));
+                if !decidable || holds {
+                    known_bits(&g.fields, fields, known);
+                }
+                if !decidable || !holds {
+                    known_bits(&g.otherwise, fields, known);
+                }
+            }
+            Item::Field(v) if v.is_view() && v.r#const.is_none() => {
+                let (Some(val), Some(pos)) = (fields.get(&v.name), v.positions()) else { continue };
+                let Ok(raw) = raw_of(v, val) else { continue };
+                for (i, b) in pos.iter().enumerate() {
+                    known[*b] = Some(raw >> (pos.len() - 1 - i) & 1 != 0);
+                }
+            }
+            Item::Field(_) => {}
+        }
+    }
+}
+
 /// One pass over the layout, writing
 struct Writer<'a> {
     fields: &'a BTreeMap<String, Value>,
     out: &'a mut BitBuffer,
     checks: Vec<&'a Check>,
     views: Vec<&'a Field>,
+    /// What the supplied views say each bit is
+    known: Vec<Option<bool>>,
     /// Hidden owners filled from a view over the same bits, so a condition
     /// on one still decides
     derived: BTreeMap<String, Value>,
@@ -815,11 +875,17 @@ impl Writer<'_> {
     /// A view over exactly these bits whose value was supplied, or a
     /// format the field is part of
     fn viewed(&self, f: &Field, at: usize) -> Result<Option<u64>, EncodeError> {
+        // what the views say, over the default for the bits they do not
+        let span = &self.known[at..at + f.bits];
+        if span.iter().any(|b| b.is_some()) {
+            let fill = f.default.unwrap_or(0);
+            let raw = span.iter().enumerate().fold(0u64, |v, (i, b)| {
+                (v << 1) | b.unwrap_or(fill >> (f.bits - 1 - i) & 1 != 0) as u64
+            });
+            return Ok(Some(raw));
+        }
         for v in &self.views {
             let Some(val) = self.fields.get(&v.name) else { continue };
-            if v.at == Some(at) && v.bits == f.bits {
-                return raw_of(v, val).map(Some);
-            }
             if v.kind == Kind::Format
                 && let Value::Text(t) = val
                 && let Some(n) = unformat(&v.format, t).get(&f.name)
@@ -852,7 +918,8 @@ impl Writer<'_> {
                     let raw = match (f.r#const, self.fields.get(&f.name)) {
                         (Some(c), _) => c,
                         (None, Some(v)) => raw_of(f, v)?,
-                        (None, None) if f.name.is_empty() || filled_by_check => 0,
+                        (None, None) if filled_by_check => 0,
+                        (None, None) if f.name.is_empty() => self.viewed(f, at)?.unwrap_or(0),
                         (None, None) => match (self.viewed(f, at)?, f.omit_if.iter().next()) {
                             (Some(raw), _) => {
                                 if let Ok(v) = value_of(f, raw) {
@@ -861,7 +928,10 @@ impl Writer<'_> {
                                 raw
                             }
                             (None, Some(d)) => *d,
-                            (None, None) => return Err(EncodeError::Missing(f.name.clone())),
+                            (None, None) => match f.default {
+                                Some(d) => d,
+                                None => return Err(EncodeError::Missing(f.name.clone())),
+                            },
                         },
                     };
                     push(self.out, raw, f.bits);
@@ -941,9 +1011,9 @@ fn manchester_chips(bits: &BitBuffer) -> BitBuffer {
 /// A bit as the pair of chips the differential Manchester decoder reads it
 /// from: a clock transition opens every symbol, and a zero has a second
 /// transition in the middle
-fn diff_manchester_chips(bits: &BitBuffer) -> BitBuffer {
+fn diff_manchester_chips(bits: &BitBuffer, before: bool) -> BitBuffer {
     let mut out = BitBuffer::with_capacity(bits.len() * 2 + 2);
-    let mut level = false;
+    let mut level = before;
     for i in 0..bits.len() {
         level = !level;
         out.push(level);
@@ -1192,6 +1262,8 @@ mod tests {
             omit_if: Default::default(),
             map: BTreeMap::new(),
             slot: 0,
+            gather: Vec::new(),
+            default: None,
             data: None,
             unit: None,
             other: None,
@@ -1248,7 +1320,7 @@ mod tests {
         for bit in [true, false, false, true, true, false] {
             b.push(bit);
         }
-        let chips = diff_manchester_chips(&b);
+        let chips = diff_manchester_chips(&b, false);
         let back = differential_manchester_decode(&chips, 0, 6);
         assert_eq!(back, b, "{} vs {}", back.to_hex(), b.to_hex());
     }

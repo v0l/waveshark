@@ -449,6 +449,12 @@ pub struct Field {
     pub bits: usize,
     /// Bit position from the frame's start, for a view over other fields
     pub at: Option<usize>,
+    /// Bits collected from wherever they are, most significant first: a
+    /// position, or `[from, to]` for a run; a view over other fields
+    #[serde(default)]
+    pub gather: Vec<Span>,
+    /// What a hidden field is written as when nothing supplies it
+    pub default: Option<u64>,
     #[serde(default, rename = "type")]
     pub kind: Kind,
     /// Checked on decode, written on encode; the field needs no name
@@ -504,10 +510,36 @@ pub struct Field {
     pub when: Option<Cond>,
 }
 
+/// One bit, or a run of them with the end exclusive
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Span {
+    Bit(usize),
+    Run([usize; 2]),
+}
+
+impl Span {
+    pub fn bits(self) -> impl Iterator<Item = usize> {
+        match self {
+            Self::Bit(b) => b..b + 1,
+            Self::Run([from, to]) => from..to,
+        }
+    }
+}
+
 impl Field {
     /// Whether the field is read from a place of its own rather than in turn
     pub fn is_view(&self) -> bool {
-        self.at.is_some() || self.kind == Kind::Format
+        self.at.is_some() || self.kind == Kind::Format || !self.gather.is_empty()
+    }
+
+    /// Where each of the field's bits is, most significant first, for a
+    /// field whose place is stated
+    pub fn positions(&self) -> Option<Vec<usize>> {
+        if !self.gather.is_empty() {
+            return Some(self.gather.iter().flat_map(|s| s.bits()).collect());
+        }
+        self.at.map(|at| (at..at + self.bits).collect())
     }
 
     pub fn is_reported(&self) -> bool {
@@ -557,7 +589,13 @@ pub struct Vector {
 
 impl Desc {
     pub fn parse(yaml: &str) -> Result<Self, String> {
-        let d: Desc = serde_yaml_ng::from_str(yaml).map_err(|e| e.to_string())?;
+        let mut d: Desc = serde_yaml_ng::from_str(yaml).map_err(|e| e.to_string())?;
+        // a gathered field's width is its list, so the rest reads `bits`
+        for f in all_fields_mut(&mut d.fields) {
+            if !f.gather.is_empty() {
+                f.bits = f.gather.iter().map(|s| s.bits().count()).sum();
+            }
+        }
         d.validate()?;
         Ok(d)
     }
@@ -657,8 +695,14 @@ impl Desc {
                 }
                 continue;
             }
+            if fld.gather.iter().flat_map(|s| s.bits()).any(|b| b >= f.bits) {
+                return Err(format!("{name}: field {n} gathers a bit past the frame"));
+            }
             if fld.bits == 0 || fld.bits > 64 {
                 return Err(format!("{name}: field {n} is {} bits wide", fld.bits));
+            }
+            if fld.default.is_some() && (!fld.hidden || fld.is_view()) {
+                return Err(format!("{name}: field {n} has a default but is not a hidden owner"));
             }
             if let Some(at) = fld.at
                 && at + fld.bits > f.bits
@@ -742,6 +786,20 @@ fn owner_paths(items: &[Item]) -> Vec<Vec<&Field>> {
         }
     }
     paths
+}
+
+fn all_fields_mut(items: &mut [Item]) -> Vec<&mut Field> {
+    let mut out = Vec::new();
+    for it in items {
+        match it {
+            Item::Field(f) => out.push(f),
+            Item::Group(g) => {
+                out.extend(all_fields_mut(&mut g.fields));
+                out.extend(all_fields_mut(&mut g.otherwise));
+            }
+        }
+    }
+    out
 }
 
 pub(super) fn all_fields(items: &[Item]) -> Vec<&Field> {

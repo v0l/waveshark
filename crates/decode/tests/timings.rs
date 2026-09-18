@@ -11,7 +11,7 @@
 
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::Value;
-use decode::protocols::{GtWt02, GtWt03, OregonV3, SomfyRts, X10Rf};
+use decode::protocols::{GtWt02, GtWt03, OregonV3, SomfyRts};
 use decode::script::named;
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -340,7 +340,7 @@ fn an_x10_press_decodes_from_its_timings() {
     let f = [0x60u8, !0x60u8, 0x00, 0xff];
     let pkg = ppm(&bits_of(&f, 32), 562, 562, 1687, 6000);
 
-    let r = X10Rf.decode_package(&pkg).expect("decode");
+    let r = named("X10-RF").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("channel"), Some(&Value::Text("A".into())));
     assert_eq!(r.get("unit"), Some(&Value::Int(1)));
     assert_eq!(r.get("state"), Some(&Value::Text("ON".into())));

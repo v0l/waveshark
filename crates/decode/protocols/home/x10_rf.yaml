@@ -1,0 +1,40 @@
+# X10 RF: the remotes and motion sensors of the 1980s mains-signalling
+# system, 310 MHz in America and 433.92 in Europe, PPM. Four bytes, the
+# second and fourth the complements of the first and third: a weak check,
+# but one every single-bit error fails. The house code is a scrambled
+# function of its four bits, the way the original rotary switch was wired,
+# and the unit number is scattered across both data bytes.
+name: X10-RF
+timing: { ppm: [562, 1687], reset_us: 6000 }
+frame: { bits: 32, repeats: 5 }
+check:
+  - { kind: complement, over: [0, 8], at: 8 }
+  - { kind: complement, over: [16, 24], at: 24 }
+fields:
+  - name: channel
+    bits: 4
+    data: text
+    map: { 0: M, 1: N, 2: O, 3: P, 4: C, 5: D, 6: A, 7: B, 8: E, 9: F, 10: G, 11: H, 12: K, 13: L, 14: I, 15: J }
+  - { bits: 1, const: 0 }
+  - { bits: 1, hidden: true, default: 0 }
+  - { bits: 2, const: 0 }
+  - { bits: 8, hidden: true }
+  - { name: wide, bits: 1, hidden: true, default: 0 }
+  - { bits: 1, hidden: true, default: 0 }
+  - { bits: 1, hidden: true, default: 0 }
+  - { bits: 1, hidden: true, default: 0 }
+  - { bits: 1, hidden: true, default: 0 }
+  - { bits: 3, const: 0 }
+  - { bits: 8, hidden: true }
+  - when: { wide: 1 }
+    fields:
+      # a house-wide command names no unit
+      - { name: unit, gather: [16], data: int, map: { 1: 0 } }
+      - { name: state, at: 16, bits: 8, data: text, in: [0x98, 0x88, 0x90, 0x80], map: { 0x98: DIM, 0x88: BRIGHT, 0x90: ALL LIGHTS ON, 0x80: ALL OFF } }
+    else:
+      - { name: unit, gather: [5, 17, 20, 19], data: int, offset: 1 }
+      - { name: state, at: 18, bits: 1, data: text, map: { 0: "ON", 1: "OFF" } }
+vectors:
+  - { hex: "60 9f 00 ff", fields: { channel: A, unit: 1, state: "ON" } }
+  - { hex: "64 9b 78 87", fields: { channel: A, unit: 16, state: "OFF" } }
+  - { hex: "60 9f 98 67", fields: { channel: A, unit: 0, state: DIM } }
