@@ -1249,6 +1249,8 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         center: buf.center,
         rate,
         zoom: 1,
+        // A recording is whatever was written to it, edges and all.
+        usable_ratio: 1.0,
         // A file has already been through whatever the receiver did to it.
         dc_block: false,
         refresh_hz: 30.0,
@@ -1643,6 +1645,8 @@ pub struct RadioControls {
     /// Where one tuner's span ends and the next begins, on a receiver made of
     /// several. Empty for one radio.
     pub seams: Vec<f64>,
+    /// Fraction of the span inside the radio's analogue filter
+    pub usable_ratio: f32,
 }
 
 impl Default for RadioControls {
@@ -1658,6 +1662,7 @@ impl Default for RadioControls {
             tx_reach: None,
             tunable: true,
             seams: Vec::new(),
+            usable_ratio: 1.0,
         }
     }
 }
@@ -1707,6 +1712,7 @@ impl RadioControls {
             // where an rtl_tcp server on the same kind of socket retunes.
             tunable: dev.info().tunable,
             seams: dev.seams().iter().map(|h| h.as_f64()).collect(),
+            usable_ratio: dev.info().usable_bandwidth_ratio,
         }
     }
 }
@@ -2233,6 +2239,7 @@ impl Audio {
             center: Hz(0),
             rate,
             zoom: 1,
+            usable_ratio: 1.0,
             dc_block: false,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
@@ -2513,6 +2520,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             center: dev.dial(),
             rate: dev.rate().as_f64(),
             zoom: 1,
+            usable_ratio: dev.info().usable_bandwidth_ratio,
             dc_block: true,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
@@ -3945,7 +3953,7 @@ fn fronts_here(
     if !decode_on {
         return Vec::new();
     }
-    scanners.fronts(plan.center.as_f64(), plan.eff_rate())
+    scanners.fronts(plan.center.as_f64(), plan.usable_rate())
 }
 
 /// Publish the chain the receiver is running, for the chain view.
@@ -3969,6 +3977,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         rate,
         iqstream: None,
         zoom: 1,
+        usable_ratio: 1.0,
         dc_block: false,
         refresh_hz: 30.0,
         smoothing: crate::chain::DEFAULT_SMOOTHING,
@@ -4008,6 +4017,22 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
 pub(crate) mod tests {
     use super::*;
     use crate::chain::OOK_CHANNEL_HZ;
+
+    #[test]
+    fn a_block_in_the_rolloff_is_not_given_a_front_end() {
+        // A pager channel 220 kHz off a 500 kHz span's centre is inside the
+        // span and outside a 0.75 radio's filter, so a demodulator there
+        // reads the anti-alias skirt and reports nothing for the CPU.
+        let s = crate::scanners::Scanners::parse(
+            "[POCSAG]\nrange = 439.9 - 440.1 MHz\nspan = 100 kHz\nfront = pocsag\n\
+             channels = 439.9875 MHz\nmargin = 12.5 kHz\n",
+        );
+        let mut plan = crate::chain::tests::plan(500_000.0, Hz(439_767_500));
+        plan.fronts = Vec::new();
+        assert_eq!(fronts_here(&s, &plan, true).len(), 1, "the whole span reaches the channel");
+        plan.usable_ratio = 0.75;
+        assert_eq!(fronts_here(&s, &plan, true).len(), 0, "a front end in the rolloff");
+    }
 
     /// The transmit chain the receiver would draw for a plan, on a radio that
     /// can transmit with nothing keyed. Named for what it is outside this

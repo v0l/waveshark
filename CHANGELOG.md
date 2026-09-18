@@ -125,6 +125,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- Scanner blocks were placed across a radio's filter rolloff, decoding its
+  own skirt.
 - The RTL-SDR is driven over USB by the receiver itself, with no librtlsdr
   anywhere: nothing to install on Linux, one file on Windows, and two dongles
   of a kind told apart by the port they are in.

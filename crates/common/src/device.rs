@@ -210,9 +210,7 @@ pub struct DeviceInfo {
     /// Gain stages in signal-path order.
     pub gain_stages: Vec<GainStage>,
     pub native_format: SampleFormat,
-    /// Usable fraction of the sample rate before the analogue filter rolls off.
-    /// HackRF's usable span is well under its nominal rate; the channelizer
-    /// uses this to avoid detecting garbage at the band edges.
+    /// Usable fraction of the sample rate before the analogue filter rolls off
     pub usable_bandwidth_ratio: f32,
     /// Whether the dial moves this device. False where the frequency belongs
     /// to somebody else: a capture, or a network server fed by another
@@ -224,6 +222,14 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
+    /// Width of `rate` that is inside the analogue filter, in hertz
+    ///
+    /// Clamped to a tenth at worst: a driver reporting zero or a negative
+    /// ratio would otherwise leave the receiver searching nothing at all.
+    pub fn usable_span(&self, rate: f64) -> f64 {
+        rate * (self.usable_bandwidth_ratio as f64).clamp(0.1, 1.0)
+    }
+
     pub fn covers(&self, f: Hz) -> bool {
         self.ranges.iter().any(|r| r.range.contains(&f))
     }
@@ -603,6 +609,19 @@ mod tuning_tests {
         fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
             Err(crate::Error::other("not a real radio"))
         }
+    }
+
+    #[test]
+    fn the_usable_span_is_the_rate_inside_the_filter() {
+        let mut d = Fake::new();
+        assert_eq!(d.info().usable_span(20e6), 15e6);
+        d.info.usable_bandwidth_ratio = 1.0;
+        assert_eq!(d.info().usable_span(20e6), 20e6);
+        // A driver reporting nonsense searches a tenth rather than nothing.
+        d.info.usable_bandwidth_ratio = 0.0;
+        assert_eq!(d.info().usable_span(20e6), 2e6);
+        d.info.usable_bandwidth_ratio = 4.0;
+        assert_eq!(d.info().usable_span(20e6), 20e6);
     }
 
     /// With nothing on the cable the dial is the tuner: every frequency and
