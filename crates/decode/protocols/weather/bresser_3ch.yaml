@@ -1,0 +1,20 @@
+# Bresser Thermo-/Hygro-Sensor 3CH, also sold as Renkforce DM-7511. 433.92
+# MHz, 40 bits of PWM behind four 750 us sync marks, inverted, fifteen
+# repeats a minute. The sync's width varies between rebrands (the DM-7511
+# sends 1012 us), which the slicer allows for. The only sensor here that
+# measures in Fahrenheit; it reports in Celsius like the rest.
+name: Bresser-3CH
+timing: { pwm: [250, 500], sync_us: 750, reset_us: 1250 }
+frame: { bits: 40, invert: true, repeats: 15 }
+check: { kind: sum8, over: [0, 32], at: 32 }
+fields:
+  - { name: id, bits: 8, min: 1 }
+  - { name: battery_ok, bits: 1, type: bool, not: true }
+  - { bits: 1, hidden: true }
+  - { name: channel, bits: 2, min: 1 }
+  - { name: temperature_c, bits: 12, scale: 0.1, offset: -90, convert: f_to_c, round: 1, min: -28.9, max: 71.1 }
+  - { name: humidity_pct, bits: 8, max: 100 }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "3d 26 2c 33 c2"
+    fields: { id: 0x3d, battery_ok: true, channel: 2, temperature_c: 20.0, humidity_pct: 51 }

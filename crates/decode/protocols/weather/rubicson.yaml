@@ -1,0 +1,23 @@
+# Rubicson, TFA 30.3197 and inFactory PT-310 temperature sensors. 433.92 MHz,
+# 36 bits of PPM, twelve repeats. The layout is all but identical to Nexus,
+# which yields to this one: without that, these frames read as the wrong
+# device with a humidity taken off the CRC.
+#
+# The CRC-8 (0x31, init 0x6c) runs over the first seven nibbles right-padded
+# with a zero nibble, then the CRC itself; padding to bytes at the end of the
+# covered span is what the check does, so it is the seven nibbles it covers.
+name: Rubicson-Temperature
+timing: { ppm: [1000, 2000], reset_us: 4800 }
+frame: { bits: 36, repeats: 12 }
+check: { kind: crc8, poly: 0x31, init: 0x6c, over: [0, 28], at: 28 }
+fields:
+  - { name: id, bits: 8 }
+  - { name: battery_ok, bits: 1, type: bool }
+  - { bits: 1, hidden: true }
+  - { name: channel, bits: 2, offset: 1 }
+  - { name: temperature_c, bits: 12, type: int, scale: 0.1, min: -40, max: 70 }
+  - { bits: 4, const: 0xf }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "74 80 95 f4 90"
+    fields: { id: 0x74, battery_ok: true, channel: 1, temperature_c: 14.9 }

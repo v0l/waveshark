@@ -1,0 +1,26 @@
+# LaCrosse IT+ LaCrosse-TX29IT at 868.24 MHz: FSK NRZ at 55 us a bit behind the
+# 2dd4 sync word, whose last nibble is the model nibble that opens the
+# payload. Temperature is BCD tenths offset 40 C; a humidity of 0x6a means
+# the sensor has no humidity element and 0x7d that the reading is from a
+# second probe, whose id is reported 0x40 higher.
+name: LaCrosse-TX29IT
+timing: { nrz: 55, reset_us: 4000 }
+frame: { bits: 40, find: sync, sync: "a2dd49", sync_bits: 24, sync_skip: 20 }
+check: { kind: crc8, poly: 0x31, init: 0x00, over: [0, 32], at: 32 }
+fields:
+  - { bits: 4, const: 9 }
+  - { name: hum, at: 25, bits: 7, hidden: true }
+  - when: { hum: 0x7d }
+    fields: [{ name: id, bits: 6, offset: 64 }]
+    else: [{ name: id, bits: 6 }]
+  - { name: battery_new, bits: 1, type: bool }
+  - { bits: 1, hidden: true }
+  - { name: temperature_c, bits: 12, type: bcd, scale: 0.1, offset: -40 }
+  - { name: battery_ok, bits: 1, type: bool, not: true }
+  - { name: humidity_pct, bits: 7, omit_if: [0x6a, 0x7d], max: 100 }
+  - { bits: 8, hidden: true }
+vectors:
+  - hex: "99 46 13 39 17"
+    fields: { id: 0x25, battery_new: false, temperature_c: 21.3, battery_ok: true, humidity_pct: 57 }
+  - hex: "99 46 13 6a 3a"
+    fields: { id: 0x25, battery_new: false, temperature_c: 21.3, battery_ok: true }

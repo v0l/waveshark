@@ -1,0 +1,30 @@
+# Prologue thermo-hygrometers, and the sensors sold as FreeTec NC-7104,
+# Pearl NC-7159-675, ThermoPro TX2 and TFA's 30.3240.10 pool thermometer.
+# 433.92 MHz, PPM, 36 bits sent seven times with 9 ms between copies.
+#
+# No checksum, and a four bit type is the only fixed field, so a frame is
+# claimed only where two of the burst's rows are this frame, or where the
+# package is one such row and nothing else. rtl_433 asks for four copies of
+# the seven; this receiver's detector cuts the package at the 9 ms gap, so
+# asking for four here reads none of these sensors at all.
+#
+# The Alecto V1 family sends the same 36 bits at the same timings with a
+# real checksum in the last nibble, so a frame satisfying it is theirs.
+name: Prologue-TH
+timing: { ppm: [2000, 4000], reset_us: 10000 }
+frame: { bits: 36, find: rows, copies: 2, repeats: 7 }
+yields_to: [AlectoV1-Temperature, AlectoV1-Rain]
+fields:
+  - { name: subtype, bits: 4, in: [9, 5] }
+  - { name: id, bits: 8 }
+  - { name: battery_ok, bits: 1, type: bool }
+  - { name: button, bits: 1, type: bool }
+  - { name: channel, bits: 2, offset: 1 }
+  - { name: temperature_c, bits: 12, type: int, scale: 0.1 }
+  # 0xcc is the sensor saying it has no humidity element; zero is a reading
+  - { name: humidity_pct, bits: 8, omit_if: 0xcc }
+vectors:
+  - hex: "95 c9 0c 23 e0"
+    fields: { subtype: 9, id: 0x5c, battery_ok: true, button: false, channel: 2, temperature_c: 19.4, humidity_pct: 62 }
+  - hex: "55 c9 0c 2c c0"
+    fields: { subtype: 5, id: 0x5c, battery_ok: true, button: false, channel: 2, temperature_c: 19.4 }
