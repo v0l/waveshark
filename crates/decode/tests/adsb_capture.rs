@@ -38,7 +38,12 @@ const BLOCK: usize = 65_536;
 /// runs them in parallel, so demodulating inside each one ran the search three
 /// times over and held three copies of the capture at once. The work is
 /// identical, so it happens once and the tests read the frames.
-static FRAMES: LazyLock<Option<Vec<String>>> = LazyLock::new(decode);
+static FRAMES: LazyLock<Option<Vec<String>>> = LazyLock::new(|| decode(ModeSConfig::default()));
+
+/// The same capture with the CRC framing pass switched off, so what that pass
+/// is worth can be stated as a difference rather than asserted on trust.
+static PREAMBLE_ONLY: LazyLock<Option<Vec<String>>> =
+    LazyLock::new(|| decode(ModeSConfig { crc_framing: false, ..ModeSConfig::default() }));
 
 /// What dump1090 made of the same file.
 fn reference() -> HashSet<String> {
@@ -51,9 +56,9 @@ fn reference() -> HashSet<String> {
 }
 
 /// Every frame the receiver believes, as hex.
-fn decode() -> Option<Vec<String>> {
+fn decode(cfg: ModeSConfig) -> Option<Vec<String>> {
     let raw = std::fs::read(testdata(FIXTURE)).ok()?;
-    let mut d = ModeSDetector::new(RATE, ModeSConfig::default());
+    let mut d = ModeSDetector::new(RATE, cfg);
     let book = std::cell::RefCell::new(AddressBook::new());
     let mut frames = Vec::new();
     // Converted a block at a time rather than all at once: the detector reads
@@ -115,8 +120,49 @@ fn most_of_what_dump1090_found_is_found_here_too() {
     let matched = ours.intersection(&theirs).count();
     // dump1090 recovers a few more through two-bit error correction and
     // interrogator-id guessing, neither of which is implemented here, so the
-    // bar is most rather than all. It was 27 of 40 when this was written.
-    assert!(matched >= 25, "matched only {matched} of {} reference frames", theirs.len());
+    // bar is most rather than all. It was 27 of 40 when this was written, and
+    // 29 once frames were also framed by their CRC.
+    assert!(matched >= 29, "matched only {matched} of {} reference frames", theirs.len());
+}
+
+#[test]
+fn framing_by_the_crc_reads_frames_the_preamble_search_never_sees() {
+    // The whole claim of the second pass: a window whose parity comes to zero
+    // is a frame wherever it sits, so a transmission whose preamble another
+    // aircraft sat on is still readable. Both counts are of distinct frames
+    // dump1090 also saw, over the same four seconds.
+    let theirs = reference();
+    let with: HashSet<String> = skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
+    let without: HashSet<String> =
+        skip_without_fixture!(PREAMBLE_ONLY.as_ref()).iter().cloned().collect();
+    assert_eq!(without.intersection(&theirs).count(), 27, "preamble search alone");
+    assert_eq!(with.intersection(&theirs).count(), 29, "with CRC framing");
+    // Two of them: a DF17 velocity report and a DF11 all-call reply.
+    let extra: Vec<&String> = with.difference(&without).collect();
+    assert_eq!(extra.len(), 2, "extra frames: {extra:?}");
+    assert!(extra.iter().all(|f| theirs.contains(*f)), "invented {extra:?}");
+    assert!(without.difference(&with).count() == 0, "the second pass lost a frame");
+}
+
+#[test]
+fn the_second_pass_costs_a_fraction_of_the_time_the_capture_covers() {
+    // It sits in the hot path of a wide span, so what it costs matters as much
+    // as what it finds. Measured on this file: the second pass adds 0.14 s to
+    // the four seconds of 2.4 MS/s the capture holds, about 3.5% of real time.
+    // The ceiling is a fifth of real time, loose enough for a slow or loaded
+    // machine and tight enough to catch the pass being made an order of
+    // magnitude dearer.
+    let seconds = || -> Option<f64> {
+        let t = std::time::Instant::now();
+        decode(ModeSConfig::default())?;
+        let both = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        decode(ModeSConfig { crc_framing: false, ..ModeSConfig::default() })?;
+        Some(both - t.elapsed().as_secs_f64())
+    };
+    let added = skip_without_fixture!(seconds());
+    // Four seconds of signal in the file.
+    assert!(added < 0.8, "the CRC pass added {added:.3} s to four seconds of capture");
 }
 
 #[test]
