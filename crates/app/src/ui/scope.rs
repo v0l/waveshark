@@ -674,22 +674,29 @@ impl Scope<'_> {
     fn ribbon(&self, p: &egui::Painter, r: &Rect) {
         p.rect_filled(*r, 0.0, theme::CHASSIS);
         let (lo, hi) = (self.center - self.rate / 2.0, self.center + self.rate / 2.0);
-        for b in bands::in_span(lo, hi) {
-            let x0 = self.x_of(r, b.lo.max(lo)).max(r.left());
-            let x1 = self.x_of(r, b.hi.min(hi)).min(r.right());
+        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        for s in bands::segments(lo, hi) {
+            let x0 = self.x_of(r, s.lo).max(r.left());
+            let x1 = self.x_of(r, s.hi).min(r.right());
             if x1 - x0 < 1.0 {
                 continue;
             }
             let cell =
                 Rect::from_min_max(Pos2::new(x0, r.top() + 2.0), Pos2::new(x1, r.bottom() - 2.0));
-            p.rect_filled(cell, 1.0, bands::color(b.usage));
-            if x1 - x0 > 60.0 {
-                p.text(
-                    cell.center(),
-                    Align2::CENTER_CENTER,
-                    b.name,
-                    FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into())),
-                    Color32::from_rgb(0xE8, 0xEC, 0xF0),
+            p.rect_filled(cell, 1.0, bands::color(s.band.usage));
+            // Measured rather than guessed at a cell width: a name only fits
+            // its own segment, and one that does not is left off rather than
+            // painted over the band beside it.
+            let galley = p.layout_no_wrap(
+                s.band.name.to_string(),
+                font.clone(),
+                Color32::from_rgb(0xE8, 0xEC, 0xF0),
+            );
+            if galley.size().x + 6.0 <= cell.width() {
+                p.galley(
+                    Align2::CENTER_CENTER.align_size_within_rect(galley.size(), cell).min,
+                    galley,
+                    Color32::PLACEHOLDER,
                 );
             }
         }

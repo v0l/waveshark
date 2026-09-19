@@ -1784,6 +1784,51 @@ pub fn in_span_of(plan: Plan, lo: f64, hi: f64) -> impl Iterator<Item = &'static
     plan.bands().iter().filter(move |b| b.hi > lo && b.lo < hi)
 }
 
+/// A stretch of one band with nothing narrower inside it
+pub struct Segment {
+    pub lo: f64,
+    pub hi: f64,
+    pub band: &'static Band,
+}
+
+/// The span cut into segments, one band each, for drawing the ribbon.
+///
+/// Allocations nest: PMR446 sits inside Land mobile UHF, ISM 433 inside the
+/// 70 cm band. Drawn as they are tabled, the wider one's name is painted
+/// across the narrower one's cell and then half covered by it. So the parent
+/// is cut where a child overlaps, which is the rule [`at_in`] already applies
+/// to a single frequency.
+pub fn segments(lo: f64, hi: f64) -> Vec<Segment> {
+    segments_of(plan(), lo, hi)
+}
+
+pub fn segments_of(plan: Plan, lo: f64, hi: f64) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::new();
+    for b in in_span_of(plan, lo, hi) {
+        let width = b.hi - b.lo;
+        let mut parts = vec![(b.lo.max(lo), b.hi.min(hi))];
+        for child in plan.bands().iter().filter(|c| c.hi - c.lo < width) {
+            let mut cut = Vec::with_capacity(parts.len() + 1);
+            for (a, z) in parts.drain(..) {
+                if child.hi <= a || child.lo >= z {
+                    cut.push((a, z));
+                    continue;
+                }
+                if child.lo > a {
+                    cut.push((a, child.lo));
+                }
+                if child.hi < z {
+                    cut.push((child.hi, z));
+                }
+            }
+            parts = cut;
+        }
+        out.extend(parts.into_iter().map(|(lo, hi)| Segment { lo, hi, band: b }));
+    }
+    out.sort_by(|a, b| a.lo.total_cmp(&b.lo));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2008,6 +2053,49 @@ mod tests {
         assert_eq!(v, ["FM broadcast"]);
         let wide: Vec<_> = in_span_of(Plan::Europe, 100.0e6, 140.0e6).map(|b| b.name).collect();
         assert!(wide.contains(&"Airband") && wide.contains(&"VOR / ILS"));
+    }
+
+    /// PMR446 sits inside Land mobile UHF, so the ribbon gets three segments
+    /// across it and the parent's name has somewhere to go on either side.
+    #[test]
+    fn a_child_band_cuts_the_one_it_sits_inside() {
+        let v: Vec<_> = segments_of(Plan::Europe, 445.9e6, 446.3e6)
+            .iter()
+            .map(|s| (s.band.name, s.lo, s.hi))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("Land mobile UHF", 445.9e6, 446.0e6),
+                ("PMR446", 446.0e6, 446.2e6),
+                ("Land mobile UHF", 446.2e6, 446.3e6),
+            ]
+        );
+        // The 70 cm band holds ISM 433 the same way, and the cut leaves the
+        // amateur allocation either side of it.
+        let v: Vec<_> = segments_of(Plan::Europe, 430.0e6, 440.0e6)
+            .iter()
+            .map(|s| (s.band.name, s.lo, s.hi))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("70 cm", 430.0e6, 433.05e6),
+                ("ISM 433", 433.05e6, 434.79e6),
+                ("70 cm", 434.79e6, 440.0e6),
+            ]
+        );
+    }
+
+    /// A span with no nesting in it is one segment per band, clipped to the
+    /// span, which is what the ribbon drew before.
+    #[test]
+    fn bands_that_do_not_nest_are_left_whole() {
+        let v: Vec<_> = segments_of(Plan::Europe, 95.0e6, 110.0e6)
+            .iter()
+            .map(|s| (s.band.name, s.lo, s.hi))
+            .collect();
+        assert_eq!(v, [("FM broadcast", 95.0e6, 108.0e6), ("VOR / ILS", 108.0e6, 110.0e6)]);
     }
 
     #[test]
