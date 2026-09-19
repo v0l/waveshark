@@ -241,6 +241,35 @@ struct Fanned {
     tuner: std::sync::Arc<iqstream::Stream>,
 }
 
+/// How long a radio may deliver nothing before it is treated as stopped.
+///
+/// At 2.4 MS/s a working tuner hands over a block every 27 ms, so seconds of
+/// nothing is not a slow moment. Long enough that a remote source reconnecting
+/// is not mistaken for a dead one.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// When a source last delivered a sample
+struct Silence(std::time::Instant);
+
+impl Default for Silence {
+    fn default() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl Silence {
+    /// How long the radio has been quiet, once that is long enough to call it
+    /// stopped.
+    fn stalled(&mut self, samples: usize) -> Option<std::time::Duration> {
+        if samples > 0 {
+            self.0 = std::time::Instant::now();
+            return None;
+        }
+        let quiet = self.0.elapsed();
+        (quiet >= SILENCE).then_some(quiet)
+    }
+}
+
 /// The state a run carries between blocks.
 struct Reader {
     det: ModeSDetector,
@@ -401,11 +430,26 @@ fn from_radio(
     reader.sbs.here = station(args);
     let began = std::time::Instant::now();
     let mut said = began;
+    let mut heard = Silence::default();
     loop {
         let buf = match stream.read() {
             Ok(b) => b,
             Err(e) => bail!("the radio stopped: {e}"),
         };
+        // A dongle that falls off the USB bus does not fail a read: it hands
+        // back nothing, for ever, and a loop that only watches for an error
+        // spins on a core feeding nobody while systemd sees a healthy service.
+        // Measured on radarpi: 18 minutes at 82% of a core after the tuner
+        // stopped answering, with every feeder reconnecting every 120 s.
+        if let Some(quiet) = heard.stalled(buf.samples.len()) {
+            bail!("the radio delivered no samples for {:.0} s", quiet.as_secs_f64());
+        }
+        if buf.samples.is_empty() {
+            // Nothing to decode, and nothing to gain from asking again at the
+            // speed of the processor.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        }
         reader.block(buf.seq, &buf.samples, &ports);
         // Whatever came back from an mlat client since the last block, put
         // out as though it had been heard here, which is what
@@ -610,6 +654,31 @@ mod tests {
         let (one, used) = net::next_frame(&got).expect("a frame");
         assert_eq!(one.as_deref(), Some(&frame[..]), "the timed frame");
         assert_eq!(used, got.len(), "the untimed frame went out as well");
+    }
+
+    /// A radio that stops delivering is a radio that stopped.
+    ///
+    /// The fault this is for: a dongle that falls off the USB bus keeps
+    /// answering reads, with nothing in them, so nothing errors and the
+    /// process holds the port open and feeds silence to four networks.
+    /// Exiting lets systemd restart it, which is the only thing that can
+    /// re-open the device.
+    #[test]
+    fn a_radio_that_hands_back_nothing_for_long_enough_has_stopped() {
+        let mut heard = Silence::default();
+        assert_eq!(heard.stalled(65_536), None, "samples arrived");
+        assert_eq!(heard.stalled(0), None, "one empty read is not a dead radio");
+
+        // Wound back past the limit rather than waited out, so the test costs
+        // nothing: the rule is the elapsed time, whoever measures it.
+        heard.0 = std::time::Instant::now() - SILENCE - std::time::Duration::from_millis(1);
+        let quiet = heard.stalled(0).expect("a radio quiet for longer than the limit");
+        assert!(quiet >= SILENCE, "reported {quiet:?}");
+
+        // And a single block puts it right: a source that reconnects carries
+        // on rather than ending the process it just fed.
+        assert_eq!(heard.stalled(1), None);
+        assert_eq!(heard.stalled(0), None);
     }
 
     /// Samples the radio dropped are time that passed.
