@@ -43,3 +43,6 @@ whisper-base.en/
 
 # Published survey measurements: fetched, never committed. See testdata/survey.toml.
 testdata/survey/
+
+# Editor state, one per machine.
+.idea/
