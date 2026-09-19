@@ -7,6 +7,10 @@
 # Fetch them with:  ./testdata/fetch.sh
 # Tests that need a fixture skip cleanly when it is absent, so a fresh clone
 # still builds and passes without network access.
+#
+# Every entry carries a `license`. CC-BY-4.0 is a recording made for this
+# project; anything else came from somewhere else and names it in
+# `license_source`. Terms and the attribution line are in testdata/LICENSE.md.
 
 [[capture]]
 name = "fineoffset_wh1080_433.92M_250k.cu8"
@@ -16,6 +20,7 @@ compression = "xz"
 center_hz = 433_920_000
 rate_sps = 250_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Fine Offset WH1080 weather station, OOK PWM at 433.92 MHz. Captured on an
 RTL-SDR with an R820T tuner at 49.6 dB gain. Contains one complete
@@ -45,6 +50,7 @@ compression = "xz"
 center_hz = 95_500_000
 rate_sps = 1_024_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Broadcast stereo FM at 95.8 MHz, captured with the receiver tuned 300 kHz low
 so the station avoids the RTL2832U's DC spur. RTL-SDR with an R820T tuner at
@@ -71,6 +77,7 @@ compression = "xz"
 center_hz = 92_400_000
 rate_sps = 1_024_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Eighteen seconds of Spirit Radio on 92.4 MHz, carrying RDS. RTL-SDR with an
 R820T tuner at 40.2 dB gain, telescopic antenna. The first eighteen seconds of
@@ -104,6 +111,7 @@ compression = "xz"
 center_hz = 1_090_000_000
 rate_sps = 2_400_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Four seconds of 1090 MHz, RTL-SDR at 49.6 dB gain on a telescopic antenna
 indoors, so the aircraft are the loud ones and the rest of the band is noise.
@@ -139,6 +147,7 @@ compression = "xz"
 center_hz = 1_090_000_000
 rate_sps = 2_400_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Ten seconds of 1090 MHz off radarpi, a Nooelec FlyCatcher on an outdoor
 antenna at 49.6 dB, recorded by rtl_sdr straight to file at Dublin approach
@@ -189,6 +198,7 @@ compression = "xz"
 center_hz = 434_020_000
 rate_sps = 2_400_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Three seconds of 433 MHz ISM with one M17 transmission in it, from an OpenRTX
 handheld on the 433.475 MHz calling channel. HackRF One, tuned 550 kHz above
@@ -224,6 +234,7 @@ compression = "xz"
 center_hz = 391_500_000
 rate_sps = 2_400_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 Eight seconds of the TETRA downlink band, HackRF One at 52 dB of tuner gain,
 holding two base station carriers: 391.181 MHz and 391.7045 MHz, both about 16
@@ -272,6 +283,7 @@ compression = "xz"
 center_hz = 433_450_000
 rate_sps = 2_048_000
 format = "cu8"
+license = "CC-BY-4.0"
 description = """
 One DMR transmission on 433.900 MHz, 450 kHz up in a span tuned to 433.45,
 recorded off air from a hotspot on an RTL-SDR. Three voice LC headers, ten
@@ -321,6 +333,7 @@ compression = "xz"
 center_hz = 2_431_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 description = """
 Open Drone ID over Bluetooth legacy advertising, from a Holybro RemoteID
 module (an ESP32 running ArduRemoteID) on an S500 airframe, on a bench with no
@@ -364,6 +377,7 @@ compression = "xz"
 center_hz = 2_474_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 description = """
 Open Drone ID over Bluetooth 5 Long Range, from the same Holybro RemoteID
 module as odid_holybro_2431M_20000k.cs8 and on the same bench. HackRF at
@@ -412,6 +426,7 @@ compression = "xz"
 center_hz = 5_865_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 description = """
 Analogue video: an AKK RaceRunner transmitting a PAL camera on 5865 MHz,
 which the 5.8 GHz channel plan names A1 or B8 because two bands share that
@@ -464,6 +479,7 @@ compression = "xz"
 center_hz = 2_444_500_000
 rate_sps = 15_360_000
 format = "cs8"
+license = "CC-BY-4.0"
 description = """
 DJI DroneID from a DJI Mini 4K on the bench, powered up indoors with no GNSS
 fix and no controller linked. Recorded with a LimeSDR at 61.44 MS/s centred on
@@ -508,6 +524,7 @@ compression = "xz"
 center_hz = 446_000_000
 rate_sps = 512_000
 format = "cs8"
+license = "CC-BY-4.0"
 description = """
 A PMR446 handheld on channel 1, 446.04915 MHz, saying "one two three, test,
 one two three" into the microphone. Six seconds, HackRF at 512 kS/s tuned
@@ -541,6 +558,7 @@ compression = "xz"
 center_hz = 2_431_000_000
 rate_sps = 61_440_000
 format = "cs16"
+license = "CC-BY-4.0"
 description = """
 Two seconds of a busy 2.4 GHz band, the whole of it: a LimeSDR at 61.44 MS/s
 centred on 2431 MHz, so the span runs from 2400.3 to 2461.7 MHz. Cut whole
@@ -589,6 +607,8 @@ compression = "none"
 center_hz = 0
 rate_sps = 12_500
 format = "wav"
+license = "LGPL-2.0-only"
+license_source = "TLeconte/acarsdec, test.wav, fetched from that repository"
 description = """
 Not IQ and not this project's recording: four ACARS channels of off-air
 audio, already AM detected and decimated to 12.5 kHz, shipped as `test.wav`
@@ -618,6 +638,8 @@ compression = "none"
 center_hz = 136_975_000
 rate_sps = 1_050_000
 format = "s16"
+license = "GPL-3.0"
+license_source = "szpajder/dumpvdl2, test/vdl2_model_16b_1050kHz.wav, fetched from that repository"
 description = """
 A modelled VDL Mode 2 transmission, shipped as `test/vdl2_model_16b_1050kHz.wav`
 with Tomasz Lemiech's dumpvdl2 and fetched here from that repository at a
@@ -645,6 +667,8 @@ compression = "none"
 center_hz = 0
 rate_sps = 44_100
 format = "wav"
+license = "GPL-3.0"
+license_source = "colaclanth/sstv, examples/m1.ogg, converted and re-hosted"
 description = """
 Not IQ: 117 seconds of demodulated audio carrying one Martin 1 SSTV picture,
 320 by 256 in GBR order. It is `examples/m1.ogg` from colaclanth's Python
@@ -672,6 +696,7 @@ compression = "none"
 center_hz = 0
 rate_sps = 44_100
 format = "wav"
+license = "CC-BY-4.0"
 description = """
 Not IQ and not off the air: 36 seconds of Robot 36 audio generated by
 pySSTV from a picture whose every pixel is known. The top half is the
@@ -701,6 +726,7 @@ compression = "none"
 center_hz = 0
 rate_sps = 44_100
 format = "wav"
+license = "CC-BY-4.0"
 description = """
 Martin 2 audio generated by pySSTV from the same colour bars as
 `sstv_robot36_bars_44100.wav`: bars across the top half in the usual order,
@@ -724,6 +750,7 @@ compression = "none"
 center_hz = 0
 rate_sps = 44_100
 format = "wav"
+license = "CC-BY-4.0"
 description = """
 Scottie 1 audio generated by pySSTV from the same colour bars as
 `sstv_robot36_bars_44100.wav`: bars across the top half in the usual order,
@@ -747,6 +774,7 @@ compression = "none"
 center_hz = 0
 rate_sps = 44_100
 format = "wav"
+license = "CC-BY-4.0"
 description = """
 Scottie 2 audio generated by pySSTV from the same colour bars as
 `sstv_robot36_bars_44100.wav`: bars across the top half in the usual order,
@@ -770,6 +798,7 @@ compression = "none"
 center_hz = 0
 rate_sps = 44_100
 format = "wav"
+license = "CC-BY-4.0"
 description = """
 Scottie DX audio generated by pySSTV from the same colour bars as
 `sstv_robot36_bars_44100.wav`: bars across the top half in the usual order,
@@ -793,6 +822,8 @@ compression = "xz"
 center_hz = 429_000_000
 rate_sps = 9_142_857
 format = "cs8"
+license = "unstated"
+license_source = "Ron Economos, w6rz.net/adv16.cfile, cut and requantised and re-hosted"
 description = """
 A DVB-T multiplex in 8K mode: 16-QAM, code rate 2/3, guard interval 1/32, at
 the standard's own 64/7 megasamples a second. It carries one service of high
@@ -839,6 +870,8 @@ compression = "xz"
 center_hz = 405_800_240
 rate_sps = 31_250
 format = "cs16"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files radiosonde.zip, cut and converted and re-hosted"
 description = """
 Vaisala RS41 radiosonde S1720982, recorded 2022-02-15 at 13:23 UTC near
 London and published by SDRangel as its radiosonde example

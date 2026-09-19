@@ -27,6 +27,9 @@
 # name along with the receiver's own coordinates. Both are what makes them
 # evidence; treat them as published, not as private data that happens to be in
 # a test fixture.
+#
+# All of these were recorded for this project and are CC BY 4.0; the terms and
+# the attribution line are in testdata/LICENSE.md.
 
 [[capture]]
 name = "fm_broadcast_95.8M_2000k.cs16"
@@ -36,6 +39,7 @@ compression = "xz"
 center_hz = 95_800_000
 rate_sps = 2_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "fm"
 receiver = "LimeSDR-USB, RX2/LNAL"
 description = """
@@ -60,6 +64,7 @@ compression = "xz"
 center_hz = 868_300_000
 rate_sps = 2_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "fsk"
 receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
 description = """
@@ -78,6 +83,7 @@ compression = "xz"
 center_hz = 2_426_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 family = "msk_gmsk"
 receiver = "HackRF One, 2.4 GHz whip"
 burst_us = [80, 500]
@@ -115,6 +121,7 @@ compression = "xz"
 center_hz = 474_000_000
 rate_sps = 12_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "noise"
 receiver = "LimeSDR-USB, RX2/LNAL"
 description = """
@@ -139,6 +146,7 @@ compression = "xz"
 center_hz = 869_525_000
 rate_sps = 2_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "chirp"
 receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
 description = """
@@ -166,6 +174,7 @@ compression = "xz"
 center_hz = 869_525_000
 rate_sps = 2_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "chirp"
 receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
 description = """
@@ -182,6 +191,7 @@ compression = "xz"
 center_hz = 869_000_000
 rate_sps = 2_400_000
 format = "cu8"
+license = "CC-BY-4.0"
 family = "chirp"
 # Only the packet is scored as a chirp; the wM-Bus burst beside it is 15 ms.
 burst_us = [300000, 700000]
@@ -221,6 +231,7 @@ compression = "xz"
 center_hz = 868_900_000
 rate_sps = 2_048_000
 format = "cu8"
+license = "CC-BY-4.0"
 family = "chirp"
 # Only the packet is scored as a chirp; the bursts around it are sensors.
 burst_us = [900000, 1400000]
@@ -261,6 +272,7 @@ compression = "xz"
 center_hz = 762_000_000
 rate_sps = 12_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "ofdm"
 receiver = "LimeSDR-USB, RX2/LNAL"
 description = """
@@ -286,6 +298,7 @@ compression = "xz"
 center_hz = 2_462_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 family = "ofdm"
 receiver = "HackRF One, 2.4 GHz whip"
 burst_us = [20, 500]
@@ -329,6 +342,7 @@ compression = "xz"
 center_hz = 2_462_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 family = "mixed"
 receiver = "HackRF One, 2.4 GHz whip"
 # Not scored: `family` is deliberately not a family. See below.
@@ -368,6 +382,7 @@ compression = "xz"
 center_hz = 869_525_000
 rate_sps = 2_000_000
 format = "cs16"
+license = "CC-BY-4.0"
 family = "noise"
 receiver = "LimeSDR-USB, RX2/LNAL, 868 MHz antenna"
 description = """
@@ -385,6 +400,7 @@ compression = "xz"
 center_hz = 2_415_000_000
 rate_sps = 20_000_000
 format = "cs8"
+license = "CC-BY-4.0"
 family = "chirp"
 receiver = "HackRF One, 2.4 GHz whip"
 # A packet is seven milliseconds and the next on the same channel is two and

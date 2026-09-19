@@ -5,7 +5,8 @@
 # behind a URL cannot change under the expected decodes. Fetched by
 # testdata/fetch.sh, into testdata/rtl433/, and never committed: the corpus is
 # a gigabyte of contributed recordings under no stated licence, so this project
-# points at it rather than copying it.
+# points at it rather than copying it. Nothing here is re-hosted, and no entry
+# carries a `license` for that reason; testdata/LICENSE.md says the same.
 #
 # Each entry names a .cu8 and the .json beside it. The JSON is the reference:
 # one line per decode rtl_433 25.02 found in that capture, which

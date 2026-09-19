@@ -15,6 +15,8 @@ name = "lora_salvora.csv"
 sha256 = "a0570a19657b337f6dca0c6ad774e77236462756a8ab6def106186bb0dd8912f"
 url = "https://zenodo.org/records/13835721/files/dataset.csv?download=1"
 compression = "none"
+license = "CC-BY-4.0"
+license_source = "Universidade de Vigo, doi 10.5281/zenodo.13835721"
 description = """
 LoRa signal quality and GPS positioning time series dataset, López Escobar,
 Fondo-Ferreiro, González-Castaño and Gil-Castiñeira, Universidade de Vigo,

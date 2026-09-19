@@ -254,3 +254,22 @@ upload, the URL on nostr.download, the centre and rate, and a description
 saying what the capture is evidence of and how that was established. The
 procedure for adding one, including why a capture earns its place only by
 failing something, is in `AGENTS.md`.
+
+Each entry also carries a `license`, and
+[`testdata/LICENSE.md`](../testdata/LICENSE.md) holds the terms: CC BY 4.0 for
+everything recorded or generated for this project, with the attribution line
+to use, and the publisher's own terms for the five fixtures that came from
+somewhere else.
+
+| fixture | publisher | terms |
+|---|---|---|
+| `acars_acarsdec_12500.wav` | TLeconte/acarsdec | LGPL-2.0-only, fetched from that repository, not re-hosted |
+| `vdl2_model_136.975M_1050k.wav` | szpajder/dumpvdl2 | GPL-3.0, fetched from that repository, not re-hosted |
+| `sstv_martin1_44100.wav` | colaclanth/sstv | GPL-3.0, converted here and re-hosted |
+| `dvbt_hd_429M_9142857.cs8` | Ron Economos, w6rz.net | no terms stated, cut here and re-hosted |
+| `rs41_herstmonceux_405.80024M_31.25k.cs16` | SDRangel | no terms stated, cut here and re-hosted |
+
+The rtl_433 corpus (`testdata/rtl433.toml`) is contributed recordings under no
+stated licence and the LoRa survey table (`testdata/survey.toml`) is CC BY 4.0
+from the Universidade de Vigo; both are fetched from their publisher and
+neither is re-hosted.

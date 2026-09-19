@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- Test recordings licensed CC BY 4.0, with each fixture's terms in
+  `testdata/LICENSE.md`.
 - Tuner trim on a stitched receiver, in hertz per tuner, on the radio card.
 - Protocol descriptions read two more checksums: a sum that folds its own
   carry back in, and a nibble sum that starts or ends part way through a

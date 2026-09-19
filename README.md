@@ -250,3 +250,8 @@ rather than an explanation.
 ## Licence
 
 GPL-3.0-or-later, text in [`LICENSE`](LICENSE).
+
+The test recordings are data and are licensed apart from the program:
+[`testdata/LICENSE.md`](testdata/LICENSE.md) holds the terms, CC BY 4.0 for
+the ones recorded here and the publisher's own for the five that came from
+somewhere else.
