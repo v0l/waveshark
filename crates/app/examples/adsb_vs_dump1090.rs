@@ -197,9 +197,7 @@ fn read_iqstream(addr: &str, seconds: f64) -> Vec<Seen> {
         let iq: &[C32] = &buf.samples;
         frames.clear();
         let held = std::cell::RefCell::new(std::mem::take(&mut book));
-        det.process_valid(iq, &mut frames, &|f: &ModeSFrame| {
-            held.borrow_mut().accept(&f.bytes)
-        });
+        det.process_valid(iq, &mut frames, &|f: &ModeSFrame| held.borrow_mut().accept(&f.bytes));
         book = held.into_inner();
         let at = Instant::now();
         for f in &frames {

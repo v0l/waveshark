@@ -18,7 +18,9 @@
 use crate::bits::{crc8, crc16};
 use crate::dab::ProgrammeType;
 use common::C32;
+use common::Decoded;
 use dsp::conv;
+use dsp::drm::{self, Drm, Frame};
 use dsp::drm::{Mode, Occupancy};
 
 /// Bits of information the fast access channel carries in a frame.
@@ -540,6 +542,206 @@ pub fn label_entity(short_id: u8, text: &str) -> Entity {
         }
     }
     Entity { kind: 1, next: false, body }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Multiplex {
+    pub mode: Option<Mode>,
+    pub occupancy: Option<Occupancy>,
+    pub audio_services: u8,
+    pub data_services: u8,
+    /// The services, as the fast access channel describes them one frame at
+    /// a time.
+    pub services: Vec<Service>,
+    /// What the description channel calls them, which arrives in its own
+    /// frame and may name a service no frame has described yet.
+    pub labels: Vec<(u8, String)>,
+}
+impl Multiplex {
+    pub fn service(&self, short_id: u8) -> Option<&Service> {
+        self.services.iter().find(|s| s.short_id == short_id)
+    }
+
+    pub fn label(&self, short_id: u8) -> Option<&str> {
+        self.labels.iter().find(|(id, _)| *id == short_id).map(|(_, s)| s.as_str())
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub frames: u64,
+    pub fac_ok: u64,
+    pub fac_bad: u64,
+    pub sdc_ok: u64,
+    /// Description channels left unread because they were sent in 16-QAM,
+    /// which this does not decode.
+    pub sdc_skipped: u64,
+}
+impl Stats {
+    /// What fraction of the frames read had a fast access channel in them.
+    pub fn quality(&self) -> Option<f32> {
+        (self.frames > 0).then(|| self.fac_ok as f32 / self.frames as f32)
+    }
+}
+
+/// A whole DRM receiver: samples in, a multiplex's services out.
+pub struct DrmReceiver {
+    front: Drm,
+    multiplex: Multiplex,
+    pub stats: Stats,
+    frames: Vec<Frame>,
+    snr_db: f32,
+}
+
+impl Default for DrmReceiver {
+    fn default() -> Self {
+        Self::new(Mode::B)
+    }
+}
+
+impl DrmReceiver {
+    pub fn new(mode: Mode) -> Self {
+        Self {
+            front: Drm::new(mode),
+            multiplex: Multiplex::default(),
+            stats: Stats::default(),
+            frames: Vec::new(),
+            snr_db: f32::NAN,
+        }
+    }
+
+    pub fn multiplex(&self) -> &Multiplex {
+        &self.multiplex
+    }
+
+    pub fn locked(&self) -> bool {
+        self.front.locked()
+    }
+
+    /// Signal to noise off the last frame read, or NaN before any was.
+    pub fn snr_db(&self) -> f32 {
+        self.snr_db
+    }
+
+    pub fn offset_hz(&self) -> f64 {
+        self.front.offset_hz()
+    }
+
+    /// Read what `iq` holds. Returns the frames whose fast access channel
+    /// checked out.
+    pub fn push(&mut self, iq: &[C32]) -> usize {
+        let mut frames = std::mem::take(&mut self.frames);
+        frames.clear();
+        self.front.push(iq, &mut frames);
+        let mut good = 0;
+        for frame in &frames {
+            self.stats.frames += 1;
+            self.snr_db = frame.snr_db;
+            let mode = self.front.mode();
+            let Some(fac) = fac(&frame.cells(drm::fac_cells(mode))) else {
+                self.stats.fac_bad += 1;
+                continue;
+            };
+            self.stats.fac_ok += 1;
+            good += 1;
+            self.take_fac(mode, fac);
+            self.take_sdc(mode, fac, frame);
+        }
+        self.frames = frames;
+        good
+    }
+
+    /// What a frame's fast access channel said about the multiplex and about
+    /// the one service it describes.
+    fn take_fac(&mut self, mode: Mode, fac: Fac) {
+        self.multiplex.mode = Some(mode);
+        self.multiplex.occupancy = fac.occupancy;
+        self.multiplex.audio_services = fac.audio_services;
+        self.multiplex.data_services = fac.data_services;
+        if let Some(occ) = fac.occupancy {
+            self.front.set_occupancy(occ);
+        }
+        match self.multiplex.services.iter_mut().find(|s| s.short_id == fac.service.short_id) {
+            Some(held) => *held = fac.service,
+            None => self.multiplex.services.push(fac.service),
+        }
+    }
+
+    /// The description channel, which is in the first frame of a super frame
+    /// and is what carries the labels.
+    fn take_sdc(&mut self, mode: Mode, fac: Fac, frame: &Frame) {
+        if fac.frame_id != 0 {
+            return;
+        }
+        let Some(occ) = fac.occupancy else { return };
+        if fac.sdc == SdcMode::Qam16 {
+            self.stats.sdc_skipped += 1;
+            return;
+        }
+        let cells = frame.cells(&drm::sdc_cells(mode, occ));
+        let Some(sdc) = sdc(&cells, mode, occ) else { return };
+        self.stats.sdc_ok += 1;
+        for (short_id, label) in sdc.labels {
+            match self.multiplex.labels.iter_mut().find(|(id, _)| *id == short_id) {
+                Some(held) => held.1 = label,
+                None => self.multiplex.labels.push((short_id, label)),
+            }
+        }
+    }
+}
+
+/// A service, as the multiplex describes it.
+/// A service of the multiplex, as a row.
+pub fn service_decoded(
+    rx: &DrmReceiver,
+    service: Service,
+    label: Option<String>,
+    center: common::Hz,
+    at: f64,
+) -> Option<Decoded> {
+    let m = rx.multiplex();
+    let mut fields = vec![
+        ("service_id".into(), common::Value::Text(format!("{:06X}", service.id))),
+        (
+            "service".into(),
+            common::Value::Text(match &label {
+                Some(name) => name.clone(),
+                None => format!("{:06X}", service.id),
+            }),
+        ),
+        (
+            "kind".into(),
+            common::Value::Text(if service.audio { "audio".into() } else { "data".into() }),
+        ),
+        ("language".into(), common::Value::Text(service.language.label().into())),
+        ("snr_db".into(), common::Value::Float(rx.snr_db() as f64)),
+    ];
+    if let Some(mode) = m.mode {
+        fields.push(("mode".into(), common::Value::Text(mode.label().into())));
+    }
+    if let Some(occ) = m.occupancy {
+        fields.push(("occupancy".into(), common::Value::Text(occ.label().into())));
+    }
+    if service.audio && service.programme != crate::dab::ProgrammeType::None {
+        fields.push(("programme".into(), common::Value::Text(service.programme.label().into())));
+    }
+    let detail = match &label {
+        Some(name) => format!("{name} ({:06X})", service.id),
+        None => format!("{:06X}", service.id),
+    };
+    // A DRM service keeps its identifier across frequencies and times of
+    // day, which is what a station list rows on.
+    let mut who = common::Identity::new("drm-service", format!("{:06X}", service.id));
+    if let Some(name) = label.clone() {
+        who = who.named(name);
+    }
+    Some(
+        Decoded::bytes("DRM", center, at, Vec::new())
+            .by(who)
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Ofdm)
+            .with_crc(Some(true)),
+    )
 }
 
 #[cfg(test)]

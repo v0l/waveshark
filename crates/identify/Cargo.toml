@@ -1,0 +1,17 @@
+[package]
+name = "identify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately three. This crate exists so a program holding a recording and a
+# tuning can name what is in it without the flow graph, and without `survey`,
+# whose rusqlite pins a `links = "sqlite3"` version nothing using sqlx can
+# resolve against. Adding `pipeline` or `nodes` here puts that back.
+[dependencies]
+common.workspace = true
+dsp.workspace = true
+decode.workspace = true
+
+[dev-dependencies]
+sources.workspace = true

@@ -14,175 +14,19 @@
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use common::{C32, Result};
-use decode::drm::{Fac, SdcMode, Service};
-use dsp::drm::{self, Drm, Frame, Mode, Occupancy};
+use decode::drm::{self as drmdec, DrmReceiver, Fac, Multiplex, SdcMode, Service, Stats};
+use dsp::drm::{Mode, Occupancy};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::Decoded;
+use identify::Signal;
+pub use identify::drm::BAND_HZ;
+pub use identify::drm::CHANNEL_WIDTH_HZ;
+pub use identify::drm::DEFAULT_HZ;
+pub use identify::drm::DrmProtocol;
+pub use identify::drm::RATE_HZ;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The rate the modes are defined at.
-pub const RATE_HZ: f64 = drm::RATE_HZ;
-/// What a transmission occupies at its widest.
-pub const CHANNEL_WIDTH_HZ: f64 = drm::CHANNEL_WIDTH_HZ;
-/// Where a receiver that has been told nothing else points: the 75 metre
-/// broadcast band, which is inside every shortwave front end's range.
-pub const DEFAULT_HZ: f64 = 3_965_000.0;
-/// Long wave up to the top of the shortwave broadcast bands, which is
-/// everywhere DRM is allocated.
-pub const BAND_HZ: (f64, f64) = (148_500.0, 30_000_000.0);
-
-/// What the receiver has read off a multiplex.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Multiplex {
-    pub mode: Option<Mode>,
-    pub occupancy: Option<Occupancy>,
-    pub audio_services: u8,
-    pub data_services: u8,
-    /// The services, as the fast access channel describes them one frame at
-    /// a time.
-    pub services: Vec<Service>,
-    /// What the description channel calls them, which arrives in its own
-    /// frame and may name a service no frame has described yet.
-    pub labels: Vec<(u8, String)>,
-}
-
-impl Multiplex {
-    pub fn service(&self, short_id: u8) -> Option<&Service> {
-        self.services.iter().find(|s| s.short_id == short_id)
-    }
-
-    pub fn label(&self, short_id: u8) -> Option<&str> {
-        self.labels.iter().find(|(id, _)| *id == short_id).map(|(_, s)| s.as_str())
-    }
-}
-
-/// How many frames were read and how many checked out.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Stats {
-    pub frames: u64,
-    pub fac_ok: u64,
-    pub fac_bad: u64,
-    pub sdc_ok: u64,
-    /// Description channels left unread because they were sent in 16-QAM,
-    /// which this does not decode.
-    pub sdc_skipped: u64,
-}
-
-impl Stats {
-    /// What fraction of the frames read had a fast access channel in them.
-    pub fn quality(&self) -> Option<f32> {
-        (self.frames > 0).then(|| self.fac_ok as f32 / self.frames as f32)
-    }
-}
-
-/// A whole DRM receiver: samples in, a multiplex's services out.
-pub struct DrmReceiver {
-    front: Drm,
-    multiplex: Multiplex,
-    pub stats: Stats,
-    frames: Vec<Frame>,
-    snr_db: f32,
-}
-
-impl Default for DrmReceiver {
-    fn default() -> Self {
-        Self::new(Mode::B)
-    }
-}
-
-impl DrmReceiver {
-    pub fn new(mode: Mode) -> Self {
-        Self {
-            front: Drm::new(mode),
-            multiplex: Multiplex::default(),
-            stats: Stats::default(),
-            frames: Vec::new(),
-            snr_db: f32::NAN,
-        }
-    }
-
-    pub fn multiplex(&self) -> &Multiplex {
-        &self.multiplex
-    }
-
-    pub fn locked(&self) -> bool {
-        self.front.locked()
-    }
-
-    /// Signal to noise off the last frame read, or NaN before any was.
-    pub fn snr_db(&self) -> f32 {
-        self.snr_db
-    }
-
-    pub fn offset_hz(&self) -> f64 {
-        self.front.offset_hz()
-    }
-
-    /// Read what `iq` holds. Returns the frames whose fast access channel
-    /// checked out.
-    pub fn push(&mut self, iq: &[C32]) -> usize {
-        let mut frames = std::mem::take(&mut self.frames);
-        frames.clear();
-        self.front.push(iq, &mut frames);
-        let mut good = 0;
-        for frame in &frames {
-            self.stats.frames += 1;
-            self.snr_db = frame.snr_db;
-            let mode = self.front.mode();
-            let Some(fac) = decode::drm::fac(&frame.cells(drm::fac_cells(mode))) else {
-                self.stats.fac_bad += 1;
-                continue;
-            };
-            self.stats.fac_ok += 1;
-            good += 1;
-            self.take_fac(mode, fac);
-            self.take_sdc(mode, fac, frame);
-        }
-        self.frames = frames;
-        good
-    }
-
-    /// What a frame's fast access channel said about the multiplex and about
-    /// the one service it describes.
-    fn take_fac(&mut self, mode: Mode, fac: Fac) {
-        self.multiplex.mode = Some(mode);
-        self.multiplex.occupancy = fac.occupancy;
-        self.multiplex.audio_services = fac.audio_services;
-        self.multiplex.data_services = fac.data_services;
-        if let Some(occ) = fac.occupancy {
-            self.front.set_occupancy(occ);
-        }
-        match self.multiplex.services.iter_mut().find(|s| s.short_id == fac.service.short_id) {
-            Some(held) => *held = fac.service,
-            None => self.multiplex.services.push(fac.service),
-        }
-    }
-
-    /// The description channel, which is in the first frame of a super frame
-    /// and is what carries the labels.
-    fn take_sdc(&mut self, mode: Mode, fac: Fac, frame: &Frame) {
-        if fac.frame_id != 0 {
-            return;
-        }
-        let Some(occ) = fac.occupancy else { return };
-        if fac.sdc == SdcMode::Qam16 {
-            self.stats.sdc_skipped += 1;
-            return;
-        }
-        let cells = frame.cells(&drm::sdc_cells(mode, occ));
-        let Some(sdc) = decode::drm::sdc(&cells, mode, occ) else { return };
-        self.stats.sdc_ok += 1;
-        for (short_id, label) in sdc.labels {
-            match self.multiplex.labels.iter_mut().find(|(id, _)| *id == short_id) {
-                Some(held) => held.1 = label,
-                None => self.multiplex.labels.push((short_id, label)),
-            }
-        }
-    }
-}
 
 /// One multiplex as a stage.
 pub struct DrmNode {
@@ -228,55 +72,6 @@ impl DrmNode {
 
     pub fn stats(&self) -> Stats {
         self.rx.stats
-    }
-
-    /// A service, as the multiplex describes it.
-    fn announce(&mut self, service: Service, label: Option<String>, c: &mut NodeCtx<'_>) {
-        let m = self.rx.multiplex();
-        let mut fields = vec![
-            ("service_id".into(), common::Value::Text(format!("{:06X}", service.id))),
-            (
-                "service".into(),
-                common::Value::Text(match &label {
-                    Some(name) => name.clone(),
-                    None => format!("{:06X}", service.id),
-                }),
-            ),
-            (
-                "kind".into(),
-                common::Value::Text(if service.audio { "audio".into() } else { "data".into() }),
-            ),
-            ("language".into(), common::Value::Text(service.language.label().into())),
-            ("snr_db".into(), common::Value::Float(self.rx.snr_db() as f64)),
-        ];
-        if let Some(mode) = m.mode {
-            fields.push(("mode".into(), common::Value::Text(mode.label().into())));
-        }
-        if let Some(occ) = m.occupancy {
-            fields.push(("occupancy".into(), common::Value::Text(occ.label().into())));
-        }
-        if service.audio && service.programme != decode::dab::ProgrammeType::None {
-            fields
-                .push(("programme".into(), common::Value::Text(service.programme.label().into())));
-        }
-        let detail = match &label {
-            Some(name) => format!("{name} ({:06X})", service.id),
-            None => format!("{:06X}", service.id),
-        };
-        // A DRM service keeps its identifier across frequencies and times of
-        // day, which is what a station list rows on.
-        let mut who = common::Identity::new("drm-service", format!("{:06X}", service.id));
-        if let Some(name) = label.clone() {
-            who = who.named(name);
-        }
-        c.emit(pipeline::event::Event::Decoded(
-            Decoded::bytes("DRM", common::Hz(self.channel_hz as u64), self.at, Vec::new())
-                .by(who)
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(common::Modulation::Ofdm)
-                .with_crc(Some(true)),
-        ));
     }
 }
 
@@ -334,7 +129,15 @@ impl Simple for DrmNode {
         for (service, label) in fresh {
             self.told.retain(|(id, _)| *id != service.id);
             self.told.push((service.id, label.clone()));
-            self.announce(service, label, c);
+            if let Some(d) = drmdec::service_decoded(
+                &self.rx,
+                service,
+                label,
+                common::Hz(self.channel_hz as u64),
+                self.at,
+            ) {
+                c.emit(pipeline::event::Event::Decoded(d));
+            }
         }
         let _ = o;
         Ok(())
@@ -348,37 +151,29 @@ impl Simple for DrmNode {
     }
 }
 
-pub struct DrmProtocol;
-
 impl Protocol for DrmProtocol {
     fn id(&self) -> &'static str {
-        "drm"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "drm"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["digital radio mondiale"]
+        Signal::aliases(self)
     }
-    /// Long, medium and shortwave, which is where DRM is allocated. The
-    /// 26 MHz band at the top of it carries the local transmissions.
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND_HZ])
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: RATE_HZ,
-            feed_rate_hz: RATE_HZ,
-            span_wide: false,
-            // A broadcast is on the air without stopping, so there is no
-            // burst for the classifier to name.
-            families: &[],
-        }
+        Signal::shape(self)
     }
     fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
+        Signal::default_hz(self)
     }
+
+    /// Long, medium and shortwave, which is where DRM is allocated. The
+    /// 26 MHz band at the top of it carries the local transmissions.
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.0} DRM", hz / 1e3)
     }

@@ -535,11 +535,11 @@ mod tests {
         }
         let mut runs: Vec<(bool, u32)> = Vec::new();
         for &level in &lv {
-            if let Some(last) = runs.last_mut() {
-                if last.0 == level {
-                    last.1 += 1;
-                    continue;
-                }
+            if let Some(last) = runs.last_mut()
+                && last.0 == level
+            {
+                last.1 += 1;
+                continue;
             }
             runs.push((level, 1));
         }

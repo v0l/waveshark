@@ -202,23 +202,34 @@ impl Simple for SurveyNode {
                     protocol,
                     ident,
                     name: name_of(d),
-                    vendor: vendor_of(&d),
+                    vendor: vendor_of(d),
                     sighting: sighting(p, d, self.station),
                 };
                 self.heard += 1;
-                if let Some(db) = self.db.as_mut() {
-                    if db.record(&report).is_err() {
-                        // A survey that cannot write is a survey that stops
-                        // recording, not a receiver that stops receiving. The
-                        // count is what the interface shows.
-                        self.failures += 1;
-                    }
+                if let Some(db) = self.db.as_mut()
+                    && db.record(&report).is_err()
+                {
+                    // A survey that cannot write is a survey that stops
+                    // recording, not a receiver that stops receiving. The
+                    // count is what the interface shows.
+                    self.failures += 1;
                 }
                 break;
             }
         }
         Ok(())
     }
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "survey",
+    summary: "The device database: who was heard, from where, at what level",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(SurveyNode::default()))
 }
 
 #[cfg(test)]
@@ -388,15 +399,4 @@ mod tests {
         assert!(!node.is_recording());
         assert_eq!(node.heard(), 0);
     }
-}
-
-pub const DESC: StageDesc = StageDesc {
-    name: "survey",
-    summary: "The device database: who was heard, from where, at what level",
-    category: Category::Sink,
-    feeds_bus: false,
-};
-
-pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(SurveyNode::default()))
 }

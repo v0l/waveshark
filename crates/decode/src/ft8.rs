@@ -13,6 +13,7 @@
 //! with a payload needs the packing, and neither wants the other's DSP.
 
 use crate::bits::{Ldpc, crc_bits};
+use common::Decoded;
 use std::sync::OnceLock;
 
 /// Bits a station composes.
@@ -684,6 +685,194 @@ pub fn grid_position(grid: &str) -> Option<(f64, f64)> {
     let lon = -180.0 + field_lon * 20.0 + square_lon * 2.0 + 1.0;
     let lat = -90.0 + field_lat * 10.0 + square_lat * 1.0 + 0.5;
     Some((lat, lon))
+}
+
+/// What a frame off the bus says: the message, and who said what to whom.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let mode = Mode::of_tag(*bytes.first()?)?;
+    if bytes.len() != 1 + MESSAGE_BITS.div_ceil(8) {
+        return None;
+    }
+    let mut message = unpack_bits(&bytes[1..], MESSAGE_BITS);
+    if !crc_ok(&message) {
+        return None;
+    }
+    // FT4 keys the payload through a fixed sequence, under the check.
+    if mode == Mode::Ft4 {
+        scramble_ft4(&mut message);
+    }
+    let m = unpack(&message)?;
+    let mut fields = vec![("message".into(), common::Value::Text(m.text.clone()))];
+    if let Some(to) = &m.to {
+        fields.push(("to".into(), common::Value::Text(to.clone())));
+    }
+    if let Some(from) = &m.from {
+        fields.push(("from".into(), common::Value::Text(from.clone())));
+    }
+    if let Some(grid) = &m.grid {
+        fields.push(("grid".into(), common::Value::Text(grid.clone())));
+    }
+    if let Some(report) = m.report {
+        fields.push(("report_db".into(), common::Value::Int(report as i64)));
+    }
+    let mut d = Decoded::bytes(mode.label(), center, 0.0, bytes[1..].to_vec())
+        .with_modulation(match mode {
+            Mode::Ft8 => common::Modulation::Fsk8,
+            Mode::Ft4 => common::Modulation::Fsk4,
+        })
+        .with_crc(Some(true))
+        .with_detail(m.text.clone())
+        .with_fields(fields)
+        // An operator's radio sent it on their behalf, to a station they
+        // named: a call, a report and an acknowledgement are a conversation
+        // however short the form is.
+        .written()
+        .with_text(m.text.clone());
+    if let (Some(from), Some(to)) = (&m.from, &m.to) {
+        d = d.with_link(common::Link::between(
+            common::Party::unit(from.clone()),
+            match to.as_str() {
+                "CQ" | "QRZ" | "DE" => common::Party::group(to.clone()),
+                _ => common::Party::unit(to.clone()),
+            },
+        ));
+    }
+    if let Some((lat, lon)) = m.grid.as_deref().and_then(grid_position) {
+        d = d.at_position(common::Position {
+            lat,
+            lon,
+            altitude_m: None,
+            speed_kt: None,
+            course_deg: None,
+        });
+    }
+    Some(d)
+}
+
+pub fn unpack_bits(bytes: &[u8], n: usize) -> Vec<bool> {
+    (0..n).map(|k| bytes[k / 8] >> (7 - k % 8) & 1 != 0).collect()
+}
+
+/// Which of the two modes a node is reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Ft8,
+    Ft4,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 2] = [Mode::Ft8, Mode::Ft4];
+
+    pub fn waveform(self) -> dsp::mfsk::Waveform {
+        match self {
+            Mode::Ft8 => dsp::mfsk::FT8,
+            Mode::Ft4 => dsp::mfsk::FT4,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Ft8 => "FT8",
+            Mode::Ft4 => "FT4",
+        }
+    }
+
+    /// The byte a frame opens with, so a reader off the bus knows which mode
+    /// read it without guessing from the dial.
+    pub fn tag(self) -> u8 {
+        match self {
+            Mode::Ft8 => 8,
+            Mode::Ft4 => 4,
+        }
+    }
+
+    pub fn of_tag(tag: u8) -> Option<Mode> {
+        Mode::ALL.iter().copied().find(|m| m.tag() == tag)
+    }
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl std::str::FromStr for Mode {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, ()> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ft4" => Ok(Mode::Ft4),
+            "ft8" => Ok(Mode::Ft8),
+            _ => Err(()),
+        }
+    }
+}
+
+/// The passband itself, which is what a station shares with every other.
+pub const PASSBAND_HZ: f64 = 3_000.0;
+
+/// The part of the passband stations use, above the dial. Below 200 Hz is a
+/// receiver's own high-pass and its carrier leak.
+const BAND: (f64, f64) = (200.0, PASSBAND_HZ);
+
+/// Belief propagation passes before a candidate is given up on. Measured on
+/// a synthesised channel of eight stations: 20 passes reads all eight, 10
+/// reads seven, and 50 reads no more than 20 at four times the cost.
+const LDPC_PASSES: usize = 40;
+
+/// Bits as bytes, the first bit most significant, padded with zeros.
+pub fn pack(bits: &[bool]) -> Vec<u8> {
+    bits.chunks(8)
+        .map(|c| c.iter().enumerate().fold(0u8, |acc, (k, &b)| acc | u8::from(b) << (7 - k)))
+        .collect()
+}
+
+/// Read one slot: every candidate the sync search found, through the
+/// code and the check, deduped where one station was found twice.
+/// Every transmission in one whole slot, as the bytes that go on the bus
+/// with the audio frequency and level each was heard at.
+///
+/// The slot is the unit because a station keys at the start of one and stops
+/// 12.6 seconds later, so that is where the decoder cuts. Here rather than
+/// in the node because nothing in it is about the graph: a caller with a
+/// recording cuts its own slots and gets the same answers.
+pub fn read_slot(
+    slot: &mut dsp::mfsk::Slot,
+    samples: &[common::C32],
+    mode: Mode,
+) -> Vec<(Vec<u8>, f64, f32)> {
+    let mut out: Vec<(Vec<u8>, f64, f32)> = Vec::new();
+    for heard in slot.read(samples, BAND) {
+        let (bits, failed) = code().decode(&heard.llr, LDPC_PASSES);
+        if failed != 0 {
+            continue;
+        }
+        // What was on the air, which for FT4 is the payload through its
+        // scrambling sequence: the check the station computed is over
+        // that, so undoing it here would fail the check.
+        let message = &bits[..MESSAGE_BITS];
+        if !crc_ok(message) {
+            continue;
+        }
+        // And it has to say something. The all-zero codeword satisfies
+        // every check and carries a zero CRC, so weak soft bits settle
+        // on it and the payload layer is what refuses it.
+        let mut payload = message.to_vec();
+        if mode == Mode::Ft4 {
+            scramble_ft4(&mut payload);
+        }
+        if unpack(&payload).is_none() {
+            continue;
+        }
+        let mut bytes = vec![mode.tag()];
+        bytes.extend(pack(message));
+        if out.iter().any(|(b, _, _)| *b == bytes) {
+            continue;
+        }
+        out.push((bytes, heard.freq_hz, heard.snr_db));
+    }
+    out
 }
 
 #[cfg(test)]

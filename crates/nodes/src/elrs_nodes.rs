@@ -48,19 +48,25 @@
 //! read. `decode::lora_li` says how another rate was measured.
 
 use crate::NodeSpec;
-use crate::lora_nodes::{ChirpReader, Found};
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::{C32, Result};
 use decode::elrs;
+pub use decode::elrs::ENVELOPE;
+pub use decode::elrs::SPREADING_FACTORS;
+pub use decode::elrs::TAG;
+pub use decode::elrs::decoded;
+pub use decode::elrs::hex;
+pub use decode::elrs::{CODING_RATE, RECOVER_FROM};
+use dsp::lora::{ChirpReader, Found};
+use identify::Signal;
+pub use identify::elrs::CHANNEL_WIDTH_HZ;
+pub use identify::elrs::Elrs;
 use pipeline::event::{Decoded, Request};
 use pipeline::lock::{Lock, Raster};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The one bandwidth every ExpressLRS LoRa rate on 2.4 GHz uses.
-pub const CHANNEL_WIDTH_HZ: f64 = 812_500.0;
 
 /// How much of a channel a source may measure and still be one of this
 /// link's visits: a chirp fills its channel, a source measures it a little
@@ -78,20 +84,6 @@ const WIDTH_SHARE: (f64, f64) = (0.7, 2.0);
 /// spacing covers that with margin and leaves no source that two channels
 /// could both claim.
 const RASTER_TOLERANCE_HZ: f64 = 250_000.0;
-
-/// The spreading factors the 2.4 GHz LoRa rates use.
-const SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 5..=8;
-
-/// Coding rate denominator of the rates that decode: `CR_LI 4/8`.
-const CODING_RATE: u8 = 8;
-
-/// Tag on the bus, so a packet is recognised by its shape.
-pub const TAG: [u8; 4] = *b"ELRS";
-
-/// Bytes before the packet on the bus: the tag, the spreading factor, the
-/// bandwidth in kilohertz, the firmware generation, the two UID bytes the
-/// CRC was checked with, and the counter it took, 0xff for none.
-const ENVELOPE: usize = 11;
 
 pub struct ElrsNode {
     reader: ChirpReader,
@@ -113,11 +105,6 @@ pub struct ElrsNode {
     /// and after it the statement does not change.
     published: bool,
 }
-
-/// Packets held back for the link to be recovered from. Two settle the
-/// high byte; a third is asked for so a stray packet of another link on
-/// the same channel does not pass for agreement.
-const RECOVER_FROM: usize = 3;
 
 impl Default for ElrsNode {
     fn default() -> Self {
@@ -179,27 +166,13 @@ impl ElrsNode {
         self.uid.map(|u| (u, self.uid_whole))
     }
 
-    /// Read a packet's bytes out of its symbols, by the length the symbol
-    /// count says: a Full rate is thirteen bytes, the rest eight.
-    fn payload(symbols: &[u16], sf: u8) -> Option<Vec<u8>> {
-        let n = symbols.len();
-        let len = if n >= decode::lora_li::symbol_count(sf, elrs::PACKET_LEN_FULL) {
-            elrs::PACKET_LEN_FULL
-        } else if n >= decode::lora_li::symbol_count(sf, elrs::PACKET_LEN) {
-            elrs::PACKET_LEN
-        } else {
-            return None;
-        };
-        decode::lora_li::decode(symbols, sf, CODING_RATE, len).map(|d| d.bytes)
-    }
-
     /// Learn the link from a sync packet that checks itself, or from
     /// enough consecutive packets of it, when no UID was given.
     fn learn(&mut self, packet: &[u8]) {
         if self.uid.is_some() {
             return;
         }
-        if let Some(uid) = uid_from_sync(packet, self.ota_version) {
+        if let Some(uid) = elrs::uid_from_sync(packet, self.ota_version) {
             self.uid = Some(uid);
             self.uid_whole = false;
             self.unplaced.clear();
@@ -220,23 +193,6 @@ impl ElrsNode {
             self.unplaced.remove(0);
         }
     }
-}
-
-/// The UID bytes a sync packet names, when its CRC agrees that it is one.
-fn uid_from_sync(packet: &[u8], ota_version: u8) -> Option<[u8; 6]> {
-    let sync = match packet.len() {
-        n if n >= elrs::PACKET_LEN_FULL => elrs::parse_full(packet),
-        n if n >= elrs::PACKET_LEN => elrs::parse(packet),
-        _ => None,
-    }?;
-    let elrs::Packet::Sync(s) = sync else { return None };
-    let uid = [0, 0, 0, 0, s.uid45[0], s.uid45[1]];
-    let checks = if packet.len() >= elrs::PACKET_LEN_FULL {
-        elrs::validate_full(packet, &uid, ota_version).is_some()
-    } else {
-        elrs::validate(packet, &uid, ota_version).is_some()
-    };
-    checks.then_some(uid)
 }
 
 impl Simple for ElrsNode {
@@ -265,7 +221,7 @@ impl Simple for ElrsNode {
         let Some(iq) = i.as_iq() else { return Ok(()) };
         self.reader.feed(iq);
         while let Some(Found { packet, samples, rssi_dbfs, snr_db }) = self.reader.next() {
-            let Some(bytes) = Self::payload(&packet.symbols, packet.sf) else {
+            let Some(bytes) = elrs::payload(&packet.symbols, packet.sf) else {
                 self.refused += 1;
                 c.warn(format!(
                     "SF{}: {} symbols that are not a packet at a rate this reads",
@@ -304,8 +260,14 @@ impl Simple for ElrsNode {
                     self.published = true;
                     c.request(Request::Lock(self.lock(uid)));
                 }
-                let bus =
-                    to_bytes(packet.sf, CHANNEL_WIDTH_HZ, self.ota_version, &uid, d.nonce, &bytes);
+                let bus = elrs::to_bytes(
+                    packet.sf,
+                    CHANNEL_WIDTH_HZ,
+                    self.ota_version,
+                    &uid,
+                    d.nonce,
+                    &bytes,
+                );
                 let mut f = common::Frame::measured(bus, rssi_dbfs, snr_db)
                     .at(self.reader.center_hz() as u64);
                 if let Some(samples) = samples {
@@ -394,94 +356,6 @@ pub fn parse_uid(text: &str) -> Option<[u8; 6]> {
     Some(uid)
 }
 
-/// The bytes a packet travels as on the bus.
-fn to_bytes(sf: u8, bw: f64, ota: u8, uid: &[u8; 6], nonce: Option<u8>, packet: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ENVELOPE + packet.len());
-    out.extend_from_slice(&TAG);
-    out.push(sf);
-    out.extend_from_slice(&((bw / 1e3).round() as u16).to_le_bytes());
-    out.push(ota);
-    out.extend_from_slice(&uid[4..6]);
-    out.push(nonce.unwrap_or(0xff));
-    out.extend_from_slice(packet);
-    out
-}
-
-/// One packet off the bus as a row: which link, what kind of packet, and
-/// what it carried. Checked again against the UID bytes it travelled with,
-/// so a row is never taken on the front end's word alone.
-pub fn elrs_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if bytes.len() < ENVELOPE + elrs::PACKET_LEN || bytes[..4] != TAG {
-        return None;
-    }
-    let sf = bytes[4];
-    let khz = u16::from_le_bytes([bytes[5], bytes[6]]);
-    let ota = bytes[7];
-    let uid = [0, 0, 0, 0, bytes[8], bytes[9]];
-    let packet = &bytes[ENVELOPE..];
-    if !SPREADING_FACTORS.contains(&sf) || khz == 0 {
-        return None;
-    }
-    let d = elrs::decode(packet, &uid, ota)?;
-    let kind = match &d.packet {
-        elrs::Packet::Rc { .. } | elrs::Packet::RcFull { .. } => "rc",
-        elrs::Packet::Sync(_) => "sync",
-        elrs::Packet::Data { .. } => "data",
-        elrs::Packet::Unknown(_) => "unknown",
-    };
-    let link_id = format!("{:02x}{:02x}", uid[4], uid[5]);
-    let mut fields: Vec<(String, Value)> = vec![
-        ("spreading_factor".into(), Value::Int(i64::from(sf))),
-        ("bandwidth_hz".into(), Value::Float(f64::from(khz) * 1e3)),
-        ("link".into(), Value::Text(link_id.clone())),
-        ("full".into(), Value::Bool(packet.len() >= elrs::PACKET_LEN_FULL)),
-    ];
-    fields.extend(elrs::fields(&d));
-    let detail = match &d.packet {
-        elrs::Packet::Rc { channels, armed, .. } => format!(
-            "rc {}{}",
-            channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
-            if *armed { " armed" } else { "" }
-        ),
-        elrs::Packet::RcFull { channels, armed, .. } => format!(
-            "rc {}{}",
-            channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
-            if *armed { " armed" } else { "" }
-        ),
-        elrs::Packet::Sync(s) => format!(
-            "sync {} hop {} counter {}",
-            elrs::RATES_2G4.get(usize::from(s.rate_index)).map_or("unknown rate", |r| r.name),
-            s.fhss_index,
-            s.nonce
-        ),
-        elrs::Packet::Data { package_index, payload } => {
-            format!("data {package_index}: {}", hex(payload))
-        }
-        elrs::Packet::Unknown(k) => format!("packet type {k}"),
-    };
-    let mut out = Decoded::bytes("ExpressLRS", center, 0.0, packet.to_vec())
-        .with_modulation(common::Modulation::Css)
-        .with_crc(Some(true))
-        .with_detail(format!("SF{sf} {kind}: {detail} link {link_id}"))
-        .with_fields(fields);
-    // The handset is the transmitting end and the link's UID bytes are the
-    // nearest thing to its name; the model it flies is the other end.
-    out.link = Some(common::Link {
-        from: Some(common::Party::unit(format!("elrs {link_id}"))),
-        to: Some(common::Party::unit(format!("elrs {link_id} rx"))),
-    });
-    out.identity = Some(common::Identity::new("elrs", link_id));
-    if let Some(control) = elrs::control(&d.packet) {
-        out.report = control;
-    }
-    Some(out)
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -489,41 +363,32 @@ fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-/// ExpressLRS as the auto node knows it: on the 2.4 GHz band, a chirp
-/// 812.5 kHz wide, placed once the classifier has named one.
-pub struct Elrs;
-
 impl Protocol for Elrs {
     fn id(&self) -> &'static str {
-        "elrs"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "elrs"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![(2_400_000_000.0, 2_483_500_000.0)])
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// A chirp like LoRa's, tagged by the front end with the link it checked
     /// the packet against; the check is made again in `read_frame`.
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        elrs_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn default_hz(&self) -> f64 {
-        // The middle of the hop set.
-        2_440_400_000.0
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 0.0,
-            feed_rate_hz: 0.0,
-            span_wide: false,
-            families: &[dsp::Modulation::Chirp],
-        }
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets]
     }
@@ -539,6 +404,37 @@ impl Protocol for Elrs {
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("elrs")]
     }
+}
+
+/// The setting names this stage reads.
+const UID: &str = "uid";
+const PHRASE: &str = "phrase";
+const LINK: &str = "link";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "elrs",
+    summary: "ExpressLRS 2.4 GHz: an SX1280's chirps read as the packets of a \
+              control link, the link learned from its sync packet or given \
+              as a binding phrase",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = ElrsNode::new(parse_uid(s.str_or(UID, "")));
+    let phrase = s.str_or(PHRASE, "");
+    if !phrase.is_empty() {
+        Simple::set_param(&mut n, PHRASE, ParamValue::Text(phrase.into()))?;
+    }
+    // The link a lock carries, so a decoder placed on a claimed hop starts
+    // knowing it rather than recovering it again from the first packets of
+    // every visit. Two bytes, and the node still knows it cannot follow the
+    // sequence with them.
+    let link = s.str_or(LINK, "");
+    if !link.is_empty() && n.uid.is_none() {
+        Simple::set_param(&mut n, LINK, ParamValue::Text(link.into()))?;
+    }
+    Ok(Box::new(n))
 }
 
 #[cfg(test)]
@@ -606,7 +502,7 @@ mod tests {
         assert_eq!(uid[4..], UID[4..]);
         assert!(!whole, "two bytes off a sync packet are not the whole UID");
         let rows: Vec<Decoded> =
-            frames.iter().filter_map(|f| elrs_decoded(&f.bytes, Hz(f.center_hz))).collect();
+            frames.iter().filter_map(|f| decoded(&f.bytes, Hz(f.center_hz))).collect();
         assert_eq!(rows.len(), 3);
         assert!(
             rows[0].detail.as_deref().unwrap().contains("sync LoRa 250 Hz hop 37"),
@@ -666,35 +562,4 @@ mod tests {
         let s = StreamSpec::iq(2_000_000.0, Hz(868_000_000));
         assert!(n.negotiate(&PortSpec { spec: s, latency: 0 }).is_err());
     }
-}
-
-/// The setting names this stage reads.
-const UID: &str = "uid";
-const PHRASE: &str = "phrase";
-const LINK: &str = "link";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "elrs",
-    summary: "ExpressLRS 2.4 GHz: an SX1280's chirps read as the packets of a \
-              control link, the link learned from its sync packet or given \
-              as a binding phrase",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let mut n = ElrsNode::new(parse_uid(s.str_or(UID, "")));
-    let phrase = s.str_or(PHRASE, "");
-    if !phrase.is_empty() {
-        Simple::set_param(&mut n, PHRASE, ParamValue::Text(phrase.into()))?;
-    }
-    // The link a lock carries, so a decoder placed on a claimed hop starts
-    // knowing it rather than recovering it again from the first packets of
-    // every visit. Two bytes, and the node still knows it cannot follow the
-    // sequence with them.
-    let link = s.str_or(LINK, "");
-    if !link.is_empty() && n.uid.is_none() {
-        Simple::set_param(&mut n, LINK, ParamValue::Text(link.into()))?;
-    }
-    Ok(Box::new(n))
 }

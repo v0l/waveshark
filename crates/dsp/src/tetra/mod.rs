@@ -366,13 +366,13 @@ impl TetraDemod {
             }
             if q > self.cfg.min_acquire {
                 // Walk to the top of the peak before trusting the position.
-                if let Some((t, BurstKind::Sync, q, rot)) = self.best_at(pos - lead, self.sps) {
-                    if q > self.cfg.min_acquire {
-                        self.stats.acquisitions += 1;
-                        self.hunt = (t + self.sps) as usize;
-                        self.lock = Some(Lock { next: t, drift: rot, misses: 0, slot: 0 });
-                        return true;
-                    }
+                if let Some((t, BurstKind::Sync, q, rot)) = self.best_at(pos - lead, self.sps)
+                    && q > self.cfg.min_acquire
+                {
+                    self.stats.acquisitions += 1;
+                    self.hunt = (t + self.sps) as usize;
+                    self.lock = Some(Lock { next: t, drift: rot, misses: 0, slot: 0 });
+                    return true;
                 }
             }
             pos += step;

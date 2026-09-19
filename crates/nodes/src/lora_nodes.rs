@@ -27,33 +27,20 @@
 
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
-use common::bands::Usage;
-use common::{C32, Result};
-use decode::lora::{self, Received};
-use decode::lorawan;
-use decode::meshtastic;
-use dsp::FirDecim;
-use dsp::lora::{Demod, OVERSAMPLE};
+use common::Result;
+pub use decode::lora::KNOWN_SYNC;
+pub use decode::lora::decoded;
+use decode::lora::{self};
+pub use dsp::lora::{ChirpReader, Found, HOLD_SECONDS, OUTSIDE_RATIO};
+use identify::Signal;
+pub use identify::lora::ALL_BANDWIDTHS_HZ;
+pub use identify::lora::Lora;
+pub use identify::lora::{BANDWIDTHS_2G4_HZ, BANDWIDTHS_HZ, is_2g4};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The bandwidths LoRa is used at in practice. The standard defines nine,
-/// down to 7.8 kHz, but a receiver that offers all of them has to guess
-/// between neighbours a few kilohertz apart on a measurement worth rather
-/// less than that. 62.5 kHz is MeshCore's European preset (869.618 MHz,
-/// SF8), which arrived at 61 dB and was refused as no channel at all.
-pub const BANDWIDTHS_HZ: [f64; 4] = [62_500.0, 125_000.0, 250_000.0, 500_000.0];
-
-/// The bandwidth LoRa is used at on 2.4 GHz, where every transmitter is an
-/// SX128x: ExpressLRS's LoRa rates are all 812.5 kHz. The chip also does
-/// 1625 kHz, but what is sent that wide there is FLRC, which is not LoRa.
-pub const BANDWIDTHS_2G4_HZ: [f64; 1] = [812_500.0];
-
-/// Every bandwidth a LoRa channel is read at, for the registry.
-const ALL_BANDWIDTHS_HZ: [f64; 5] = [62_500.0, 125_000.0, 250_000.0, 500_000.0, 812_500.0];
 
 /// Widest channel, which is what decides whether a source is one at all.
 pub const CHANNEL_WIDTH_HZ: f64 = 812_500.0;
@@ -65,30 +52,6 @@ pub const CHANNEL_WIDTH_HZ: f64 = 812_500.0;
 /// measure (1.4 of it) is the narrowest a 125 kHz one may.
 const FILL: f64 = 0.7;
 
-/// Sync words of the networks whose frames are believed without a payload
-/// CRC: LoRaWAN public, private (MeshCore among them) and Meshtastic.
-const KNOWN_SYNC: [u8; 3] = [0x34, 0x12, lora::MESHTASTIC_SYNC];
-
-/// Power arriving over power in the channel past which a packet read is
-/// taken to be the alias of a wider channel's. A packet that fills its
-/// channel reads near one; one that fills twice the width reads two.
-const OUTSIDE_RATIO: f32 = 1.5;
-
-/// Seconds of samples held while waiting for a packet to finish.
-///
-/// The longest packet LoRa can send is a 255 byte payload at SF12 over 125
-/// kHz, which is a little over six seconds. Holding that at two samples a
-/// chip costs 12 MB per source at the widest bandwidth, which is why the cap
-/// is on time rather than on symbols: at 500 kHz the same six seconds is the
-/// same buffer and a far longer packet than anyone sends.
-const HOLD_SECONDS: f64 = 6.5;
-
-/// Whether a centre is in the 2.4 GHz ISM band, where LoRa is an SX128x and
-/// therefore inverted.
-fn is_2g4(center_hz: f64) -> bool {
-    (2_400e6..=2_500e6).contains(&center_hz)
-}
-
 pub struct LoraNode {
     /// Channel bandwidth in hertz, or zero to take it from the source.
     bandwidth_hz: f64,
@@ -96,303 +59,6 @@ pub struct LoraNode {
     sf: u8,
     reader: ChirpReader,
     decoded: u64,
-}
-
-/// The half of a LoRa front end that turns a stream into packets of
-/// symbols: bring the stream to two samples a chip, hold it, and ask each
-/// spreading factor's demodulator what it sees. What the symbols mean is
-/// the other half, and it differs: an explicit-header LoRa frame and an
-/// ExpressLRS packet are read by different nodes over the same reader.
-pub(crate) struct ChirpReader {
-    bandwidth_hz: f64,
-    /// The one that has been answering, so the search is not repeated on
-    /// every window of a source that already said what it is.
-    locked_sf: Option<u8>,
-    decim: Option<FirDecim>,
-    /// Input samples the decimator produces per output sample wanted, so the
-    /// stream reaching the demodulator is exactly [`OVERSAMPLE`] per chip. The
-    /// decimator can only divide by a whole number, and a common SDR rate
-    /// (2.048 MS/s) does not divide to 500 kS/s, so what it leaves (512 kS/s)
-    /// is resampled the last 2.4% here. A whole-number-only chain drifts the
-    /// symbol boundary across an SF11 packet and the header checksum fails,
-    /// which read as "no LoRa here" on air even though the preamble locked.
-    resample_step: f64,
-    /// Fractional read position into `pending`, and the tail carried between
-    /// blocks.
-    resample_pos: f64,
-    pending: Vec<C32>,
-    demods: Vec<Demod>,
-    /// How far into `held` each demodulator has already found nothing.
-    ///
-    /// Without it every block scanned the whole of `held` again for every
-    /// spreading factor, so a source open for a second cost a second of
-    /// dechirping per block, six times over, and a strong signal's image
-    /// held open for that long took the whole receiver under real time.
-    scanned: Vec<usize>,
-    /// Samples `held` must reach before a packet found still in progress
-    /// is read again. Every block otherwise re-read the whole of it, from
-    /// its preamble to the buffer's end, and a 640 ms packet cost the last
-    /// of its blocks tens of milliseconds each. Eight symbols later is soon
-    /// enough to notice that it ended.
-    retry_at: usize,
-    /// Samples at [`OVERSAMPLE`] per chip, waiting to be read.
-    held: Vec<C32>,
-    /// Most samples held before the oldest are dropped.
-    hold: usize,
-    center_hz: f64,
-    /// Power of the stream arriving and of the channel cut out of it, each
-    /// smoothed over the last few blocks. Their ratio says whether what is
-    /// transmitting fits the channel: a chirp twice the channel's width
-    /// dechirps, at two spreading factors up, as a packet in the narrower
-    /// one, with half its energy left outside. That packet is an alias of
-    /// the wider channel's and is refused here by the energy that is not in
-    /// the channel; the wider channel's own demodulator reads the real one.
-    in_pow: f32,
-    chan_pow: f32,
-}
-
-/// One packet the reader found: its symbols, the samples it stood in and
-/// the level they had.
-pub(crate) struct Found {
-    pub packet: dsp::lora::Packet,
-    pub samples: Vec<C32>,
-    pub rssi_dbfs: f32,
-    pub snr_db: f32,
-}
-
-impl ChirpReader {
-    pub(crate) fn new() -> Self {
-        Self {
-            bandwidth_hz: 0.0,
-            locked_sf: None,
-            decim: None,
-            resample_step: 1.0,
-            resample_pos: 0.0,
-            pending: Vec::new(),
-            demods: Vec::new(),
-            scanned: Vec::new(),
-            retry_at: 0,
-            held: Vec::new(),
-            hold: 0,
-            center_hz: 0.0,
-            in_pow: 0.0,
-            chan_pow: 0.0,
-        }
-    }
-
-    pub(crate) fn bandwidth(&self) -> f64 {
-        self.bandwidth_hz
-    }
-
-    pub(crate) fn center_hz(&self) -> f64 {
-        self.center_hz
-    }
-
-    pub(crate) fn locked_sf(&self) -> Option<u8> {
-        self.locked_sf
-    }
-
-    /// The rate the samples a packet leaves with are at.
-    pub(crate) fn sample_rate(&self) -> f64 {
-        self.bandwidth_hz * OVERSAMPLE as f64
-    }
-
-    /// Design for a stream at `rate` centred on `center_hz`, reading a
-    /// channel `bw` wide at the spreading factors given.
-    pub(crate) fn design(
-        &mut self,
-        rate: f64,
-        center_hz: f64,
-        bw: f64,
-        sfs: impl IntoIterator<Item = u8>,
-        inverted: bool,
-    ) -> Result<()> {
-        // Two samples a chip, exactly. The decimator divides by a whole
-        // number and lands near the target; the last few percent is a
-        // fractional resample here. It is not optional: the demodulator's
-        // symbol length is a whole number of samples at OVERSAMPLE per chip,
-        // and a rate 2.4% off (512 kS/s from a 2.048 MS/s SDR against the
-        // 500 kS/s a 250 kHz channel wants) drifts the symbol boundary far
-        // enough across an SF11 packet that the header checksum fails.
-        let want = bw * OVERSAMPLE as f64;
-        // The stream has to carry two samples a chip before any resample: a
-        // resample can retime samples that exist, not invent ones a rate
-        // below the target never had.
-        if rate < want {
-            return Err(common::Error::other(format!(
-                "lora needs {want:.0} S/s for a {bw:.0} Hz channel and this \
-                 stream is only {rate:.0}"
-            )));
-        }
-        let factor = (rate / want).round().max(1.0) as usize;
-        let got = rate / factor as f64;
-        if got < want {
-            // The decimator must not land below the wanted rate, or the
-            // resample would have to invent samples: pick the factor that
-            // leaves it at or above `want`.
-            let factor = factor.saturating_sub(1).max(1);
-            self.resample_step = (rate / factor as f64) / want;
-            self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
-        } else {
-            self.resample_step = got / want;
-            self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
-        }
-        self.resample_pos = 0.0;
-        self.pending.clear();
-        self.bandwidth_hz = bw;
-        self.center_hz = center_hz;
-        let cfg = |sf: u8| {
-            if inverted {
-                dsp::lora::Config::inverted_for_sf(sf)
-            } else {
-                dsp::lora::Config::for_sf(sf)
-            }
-        };
-        self.demods = sfs.into_iter().map(|sf| Demod::new(cfg(sf))).collect();
-        if self.demods.is_empty() {
-            return Err(common::Error::other("lora: no spreading factor to read"));
-        }
-        self.scanned = vec![0; self.demods.len()];
-        self.held.clear();
-        self.locked_sf = None;
-        self.hold = (want * HOLD_SECONDS) as usize;
-        Ok(())
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.held.clear();
-        self.scanned.fill(0);
-        self.retry_at = 0;
-        self.pending.clear();
-        self.resample_pos = 0.0;
-        self.locked_sf = None;
-        if let Some(d) = &mut self.decim {
-            d.reset();
-        }
-    }
-
-    pub(crate) fn unlock(&mut self) {
-        self.locked_sf = None;
-    }
-
-    /// Bring a block to two samples a chip and hold it.
-    pub(crate) fn feed(&mut self, iq: &[C32]) {
-        let Some(decim) = self.decim.as_mut() else { return };
-        // Decimate to near the target, then resample the last few percent to
-        // exactly OVERSAMPLE per chip. `pending` holds the decimator output
-        // with the fractional read position carried between blocks.
-        let before = self.pending.len();
-        decim.process(iq, &mut self.pending);
-        if !iq.is_empty() && self.pending.len() > before {
-            let mean = |s: &[C32]| s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len() as f32;
-            let (a, b) = (mean(iq), mean(&self.pending[before..]));
-            self.in_pow += (a - self.in_pow) * 0.2;
-            self.chan_pow += (b - self.chan_pow) * 0.2;
-        }
-        let step = self.resample_step;
-        while (self.resample_pos as usize) + 1 < self.pending.len() {
-            let idx = self.resample_pos as usize;
-            let frac = (self.resample_pos - idx as f64) as f32;
-            self.held.push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
-            self.resample_pos += step;
-        }
-        // Drop consumed pending samples, keeping the one the position still
-        // sits inside so the next block continues the phase.
-        let consumed = self.resample_pos as usize;
-        if consumed > 0 && consumed <= self.pending.len() {
-            self.pending.drain(..consumed);
-            self.resample_pos -= consumed as f64;
-        }
-    }
-
-    /// The next complete packet in what is held, or None when there is
-    /// nothing whole to read yet. The packet's samples are taken out of the
-    /// hold before it is returned, so the caller reads the packet and asks
-    /// again.
-    pub(crate) fn next(&mut self) -> Option<Found> {
-        if self.demods.is_empty() || self.held.len() < self.retry_at {
-            return None;
-        }
-        self.retry_at = 0;
-        loop {
-            // The one that has worked before is asked first, both because it
-            // is usually right and because a wrong spreading factor can find
-            // a preamble in another one's payload.
-            let order: Vec<usize> = match self.locked_sf {
-                Some(sf) => {
-                    let at = self.demods.iter().position(|d| d.spreading_factor() == sf);
-                    at.into_iter()
-                        .chain((0..self.demods.len()).filter(|k| Some(*k) != at))
-                        .collect()
-                }
-                None => (0..self.demods.len()).collect(),
-            };
-
-            let mut found = None;
-            for k in order {
-                let Some(p) = self.demods[k].detect(&self.held, self.scanned[k]) else {
-                    self.scanned[k] = self.demods[k].resume();
-                    continue;
-                };
-                if !p.complete {
-                    // The window ends inside a transmission. Keeping the
-                    // samples and asking again is the whole point of holding
-                    // them; decoding now would report a truncated packet as
-                    // a CRC failure, which is a worse answer than silence.
-                    self.retry_at = self.held.len() + 8 * self.demods[k].symbol_len();
-                    return None;
-                }
-                found = Some(p);
-                break;
-            }
-            let Some(packet) = found else {
-                // Nothing here. Keep a packet's worth in case one is
-                // arriving, and drop the rest so a quiet source does not
-                // grow a buffer for as long as it stays open.
-                if self.held.len() > self.hold {
-                    let drop = self.held.len() - self.hold;
-                    self.held.drain(..drop);
-                    for s in &mut self.scanned {
-                        *s = s.saturating_sub(drop);
-                    }
-                }
-                return None;
-            };
-
-            let end = packet.end.min(self.held.len());
-            // More than twice the channel's power arriving than is in the
-            // channel: what was read is the middle of something wider.
-            if self.in_pow > self.chan_pow * OUTSIDE_RATIO {
-                self.held.drain(..end);
-                self.scanned.fill(0);
-                if self.held.len() < self.demods[0].symbol_len() * 4 {
-                    return None;
-                }
-                continue;
-            }
-            // The packet's own samples, at two a chip, and the level they
-            // stood at against the channel just before the preamble. A
-            // dechirp's peak over its transform is a processing gain, not a
-            // channel SNR, so the level is measured on the samples
-            // themselves.
-            let samples = self.held[packet.start..end].to_vec();
-            let power =
-                |s: &[C32]| s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len().max(1) as f32;
-            let sig = power(&samples);
-            let sym = self.demods[0].symbol_len();
-            let before = &self.held[packet.start.saturating_sub(2 * sym)..packet.start];
-            let (rssi_dbfs, snr_db) = if before.len() >= sym / 2 && sig > 0.0 {
-                let noise = power(before).max(1e-20);
-                (10.0 * sig.log10(), 10.0 * ((sig - noise).max(noise * 0.01) / noise).log10())
-            } else {
-                (10.0 * sig.max(1e-20).log10(), f32::NAN)
-            };
-            self.locked_sf = Some(packet.sf);
-            self.held.drain(..end);
-            self.scanned.fill(0);
-            return Some(Found { packet, samples, rssi_dbfs, snr_db });
-        }
-    }
 }
 
 impl Default for LoraNode {
@@ -587,403 +253,6 @@ impl Simple for LoraNode {
     }
 }
 
-/// One frame off the bus as a row: what the radio parameters were, what the
-/// header said, and whose packet it is where that can be read.
-///
-/// Recognised the way an M17 transmission is, by its shape rather than by
-/// its frequency, because a chirp arrives wherever somebody put it: 433, 868
-/// and 915 MHz are all in use and none of them is only LoRa.
-pub fn lora_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let r = Received::parse(bytes)?;
-    let cr = format!("4/{}", 4 + r.coding_rate);
-    let mut fields: Vec<(String, Value)> = vec![
-        ("spreading_factor".into(), Value::Int(i64::from(r.sf))),
-        ("bandwidth_hz".into(), Value::Float(r.bandwidth_hz)),
-        ("coding_rate".into(), Value::Text(cr.clone())),
-        ("sync_word".into(), Value::Text(format!("0x{:02x}", r.sync_word))),
-        ("payload_len".into(), Value::Int(r.payload.len() as i64)),
-    ];
-
-    let mut fix: Option<common::Position> = None;
-    let mut media = pipeline::event::media::BYTES;
-    // Somebody typing into a phone, as opposed to a node reporting where it
-    // is or what its battery is doing. Only the first belongs in the
-    // message view.
-    let mut written = false;
-    let mut report = common::ReportDetail::Bare;
-    let mesh = r.meshtastic();
-    if let Some(m) = &mesh {
-        let dest = if m.is_broadcast() {
-            "broadcast".to_string()
-        } else {
-            format!("{:08x}", m.destination)
-        };
-        fields.extend([
-            ("source".into(), Value::Text(format!("{:08x}", m.source))),
-            ("destination".into(), Value::Text(dest)),
-            ("packet_id".into(), Value::Text(format!("{:08x}", m.packet_id))),
-            ("hops".into(), Value::Text(format!("{}/{}", m.hop_limit, m.hop_start))),
-            ("channel_hash".into(), Value::Int(i64::from(m.channel_hash))),
-        ]);
-    }
-
-    // What the packet says, where the default key or one of the operator's
-    // channel keys opens it, and which channel that was.
-    let opened = r.meshtastic_message_on();
-    let channel_name: Option<String> = match (&mesh, &opened) {
-        (Some(_), Some((_, Some(name)))) => Some(name.clone()),
-        (Some(m), _) => m.well_known_channel().map(str::to_string),
-        _ => None,
-    };
-    if let Some(name) = &channel_name {
-        fields.push(("channel".into(), Value::Text(name.clone())));
-    }
-    let body = opened.map(|(d, _)| d);
-    if let Some(d) = &body {
-        fields.push(("port".into(), Value::Text(d.port().into())));
-        if d.data.reply_id != 0 {
-            fields.push(("reply_to".into(), Value::Text(format!("{:08x}", d.data.reply_id))));
-        }
-        match &d.message {
-            meshtastic::Message::Text(t) => {
-                fields.push(("text".into(), Value::Text(t.clone())));
-                media = pipeline::event::media::TEXT;
-                written = true;
-            }
-            meshtastic::Message::Position(p) => {
-                report = common::ReportDetail::Mesh {
-                    long_name: None,
-                    short_name: None,
-                    battery_pct: None,
-                    precision_bits: p.precision_bits,
-                    temperature_c: None,
-                    humidity_pct: None,
-                    pressure_hpa: None,
-                };
-                if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
-                    fix = Some(common::Position {
-                        lat,
-                        lon,
-                        altitude_m: p.altitude.map(f64::from),
-                        speed_kt: None,
-                        course_deg: None,
-                    });
-                    fields.push(("latitude".into(), Value::Float(lat)));
-                    fields.push(("longitude".into(), Value::Float(lon)));
-                }
-                if let Some(a) = p.altitude {
-                    fields.push(("altitude_m".into(), Value::Int(i64::from(a))));
-                }
-                if let Some(s) = p.sats_in_view {
-                    fields.push(("satellites".into(), Value::Int(i64::from(s))));
-                }
-                // Worth showing: a low precision is the sender deliberately
-                // blurring where it is, not a poor fix.
-                if let Some(b) = p.precision_bits {
-                    fields.push(("precision_bits".into(), Value::Int(i64::from(b))));
-                }
-            }
-            meshtastic::Message::NodeInfo(u) => {
-                report = common::ReportDetail::Mesh {
-                    long_name: (!u.long_name.is_empty()).then(|| u.long_name.clone()),
-                    short_name: (!u.short_name.is_empty()).then(|| u.short_name.clone()),
-                    battery_pct: None,
-                    precision_bits: None,
-                    temperature_c: None,
-                    humidity_pct: None,
-                    pressure_hpa: None,
-                };
-                fields.push(("name".into(), Value::Text(u.long_name.clone())));
-                fields.push(("short_name".into(), Value::Text(u.short_name.clone())));
-                if u.is_licensed {
-                    fields.push(("licensed".into(), Value::Bool(true)));
-                }
-            }
-            meshtastic::Message::Telemetry(t) => {
-                report = common::ReportDetail::Mesh {
-                    long_name: None,
-                    short_name: None,
-                    battery_pct: t.battery_level,
-                    precision_bits: None,
-                    temperature_c: t.temperature,
-                    humidity_pct: t.relative_humidity,
-                    pressure_hpa: t.barometric_pressure,
-                };
-                if let Some(b) = t.battery_level {
-                    fields.push(("battery".into(), Value::Int(i64::from(b))));
-                }
-                if let Some(v) = t.voltage {
-                    fields.push(("voltage".into(), Value::Float(f64::from(v))));
-                }
-                if let Some(c) = t.channel_utilization {
-                    fields.push(("channel_util".into(), Value::Float(f64::from(c))));
-                }
-                if let Some(c) = t.temperature {
-                    fields.push(("temperature".into(), Value::Float(f64::from(c))));
-                }
-                if let Some(u) = t.uptime_seconds {
-                    fields.push(("uptime_s".into(), Value::Int(i64::from(u))));
-                }
-            }
-            meshtastic::Message::Opaque => {}
-        }
-    }
-
-    // MeshCore keeps its routing in the clear, so the shape of the packet
-    // reads whether or not its payload does; an advert is the whole node.
-    let core = r.meshcore();
-    let mut core_link: Option<pipeline::event::Link> = None;
-    if let Some(p) = &core {
-        fields.push(("type".into(), Value::Text(p.payload_type.name().into())));
-        fields.push(("route".into(), Value::Text(p.route.name().into())));
-        fields.push(("hops".into(), Value::Int(p.hops() as i64)));
-        // MeshCore has no sync word of its own, so say plainly whether
-        // anything past the header agreed this is one.
-        fields.push(("verified".into(), Value::Bool(p.corroborated())));
-        if p.payload_type.is_encrypted() {
-            fields.push(("encrypted".into(), Value::Bool(true)));
-        }
-        if let Some(a) = p.advert() {
-            report = common::ReportDetail::MeshCore {
-                role: a.node_type.name(),
-                fixed: matches!(
-                    a.node_type,
-                    decode::meshcore::NodeType::Repeater
-                        | decode::meshcore::NodeType::RoomServer
-                        | decode::meshcore::NodeType::Sensor
-                ),
-            };
-            core_link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
-                "{:02x}",
-                a.hash()
-            ))));
-            fields.push(("node".into(), Value::Text(a.node_type.name().into())));
-            fields.push(("node_hash".into(), Value::Text(format!("{:02x}", a.hash()))));
-            if let Some(n) = &a.name {
-                fields.push(("name".into(), Value::Text(n.clone())));
-            }
-            if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
-                fix = Some(common::Position {
-                    lat,
-                    lon,
-                    altitude_m: None,
-                    speed_kt: None,
-                    course_deg: None,
-                });
-                fields.push(("latitude".into(), Value::Float(lat)));
-                fields.push(("longitude".into(), Value::Float(lon)));
-            }
-        }
-        if let Some((m, on)) = p.any_message() {
-            fields.push((
-                "channel".into(),
-                Value::Text(on.unwrap_or_else(|| "Public (default key)".into())),
-            ));
-            // The text travels as `sender: message`, and the name in front of
-            // it is part of the plaintext rather than a protocol field. A
-            // group message carries no signature, so anyone holding the
-            // channel key can write any name there; `text` is what was sent,
-            // and `from` is only what it claims to be.
-            //
-            // Named `sender` and not `from`, because `from` is the end of a
-            // link and this is a name typed into a phone. The message view
-            // prefers this one; the links directory keys on the node hash,
-            // which is at least something the radio said.
-            let (sender, body) = m.sender_and_body();
-            if let Some(s) = sender {
-                fields.push(("sender".into(), Value::Text(s.to_string())));
-            }
-            fields.push(("text".into(), Value::Text(body.to_string())));
-            media = pipeline::event::media::TEXT;
-            written = true;
-        }
-    }
-
-    // LoRaWAN: the keys are per device and not published, so this is the
-    // metadata around a payload that stays shut. A join request is the
-    // exception and names the device outright.
-    let wan = r.lorawan();
-    if let Some(f) = &wan {
-        fields.push(("type".into(), Value::Text(f.mtype.name().into())));
-        match &f.body {
-            lorawan::Body::Join(j) => {
-                fields.push(("dev_eui".into(), Value::Text(lorawan::format_eui(j.dev_eui))));
-                fields.push(("join_eui".into(), Value::Text(lorawan::format_eui(j.join_eui))));
-                fields.push(("dev_nonce".into(), Value::Int(i64::from(j.dev_nonce))));
-            }
-            lorawan::Body::Data(d) => {
-                fields.push(("dev_addr".into(), Value::Text(format!("{:08x}", d.dev_addr))));
-                fields.push(("frame_counter".into(), Value::Int(i64::from(d.f_cnt))));
-                if let Some(p) = d.f_port {
-                    fields.push(("port".into(), Value::Int(i64::from(p))));
-                }
-                fields.push(("payload_len".into(), Value::Int(d.payload_len as i64)));
-                if d.adr {
-                    fields.push(("adr".into(), Value::Bool(true)));
-                }
-                if d.ack {
-                    fields.push(("ack".into(), Value::Bool(true)));
-                }
-                if d.f_pending {
-                    fields.push(("pending".into(), Value::Bool(true)));
-                }
-                if d.f_opts_len > 0 {
-                    fields.push(("mac_bytes".into(), Value::Int(i64::from(d.f_opts_len))));
-                }
-                // The payload is enciphered under a session key that is not
-                // public, so say so rather than leaving it to be inferred.
-                if d.payload_len > 0 {
-                    fields.push(("encrypted".into(), Value::Bool(true)));
-                }
-            }
-            lorawan::Body::JoinAccept | lorawan::Body::Opaque => {}
-        }
-    }
-
-    let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
-    let detail = match &mesh {
-        Some(m) => {
-            let chan = match &channel_name {
-                Some(name) => format!(" on {name}"),
-                None => format!(" on channel #{:02x}", m.channel_hash),
-            };
-            // What it says comes first past the routing, since that is what
-            // a reader is looking for; the radio shape stays in front because
-            // it is what tells two networks apart.
-            let says = match body.as_ref().map(|d| (&d.message, d.port())) {
-                Some((meshtastic::Message::Text(t), _)) => format!(", \"{t}\""),
-                Some((meshtastic::Message::Position(p), _)) => match (p.latitude, p.longitude) {
-                    (Some(lat), Some(lon)) => format!(", at {lat:.5}, {lon:.5}"),
-                    _ => ", position".to_string(),
-                },
-                Some((meshtastic::Message::NodeInfo(u), _)) => {
-                    format!(", is {} ({})", u.long_name, u.short_name)
-                }
-                Some((meshtastic::Message::Telemetry(t), _)) => match t.battery_level {
-                    Some(b) => format!(", telemetry, battery {b}%"),
-                    None => ", telemetry".to_string(),
-                },
-                Some((meshtastic::Message::Opaque, port)) => format!(", {port}"),
-                None => String::new(),
-            };
-            format!(
-                "{shape}, {:08x} to {}, {} of {} hops left{chan}{says}",
-                m.source,
-                if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
-                m.hop_limit,
-                m.hop_start,
-            )
-        }
-        None => match &core {
-            Some(p) => {
-                let mut s = format!("{shape}, {} {}", p.payload_type.name(), p.route.name());
-                if p.hops() > 0 {
-                    s.push_str(&format!(", {} hops", p.hops()));
-                }
-                if let Some(a) = p.advert() {
-                    match &a.name {
-                        Some(n) => s.push_str(&format!(", \"{n}\" ({})", a.node_type.name())),
-                        None => s.push_str(&format!(", {}", a.node_type.name())),
-                    }
-                    if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
-                        s.push_str(&format!(" at {lat:.5}, {lon:.5}"));
-                    }
-                } else if let Some((m, _)) = p.any_message() {
-                    let (sender, body) = m.sender_and_body();
-                    match sender {
-                        Some(who) => s.push_str(&format!(", {who}: \"{body}\"")),
-                        None => s.push_str(&format!(", \"{body}\"")),
-                    }
-                } else {
-                    // Nothing but the header said this was MeshCore, and a
-                    // packet from another network on the same sync word can
-                    // say that much. Do not let it read as a certainty.
-                    s.push_str(", header only");
-                }
-                s
-            }
-            None => match &wan {
-                Some(f) => {
-                    let mut s = format!("{shape}, {}", f.mtype.name());
-                    match &f.body {
-                        lorawan::Body::Join(j) => s.push_str(&format!(
-                            ", device {} joining {}",
-                            lorawan::format_eui(j.dev_eui),
-                            lorawan::format_eui(j.join_eui)
-                        )),
-                        lorawan::Body::Data(d) => {
-                            s.push_str(&format!(", {:08x} frame {}", d.dev_addr, d.f_cnt));
-                            match d.f_port {
-                                Some(0) => s.push_str(", mac commands"),
-                                Some(p) => s.push_str(&format!(", port {p}")),
-                                None => {}
-                            }
-                            if d.payload_len > 0 {
-                                s.push_str(&format!(", {} bytes sealed", d.payload_len));
-                            }
-                        }
-                        lorawan::Body::JoinAccept => s.push_str(", sealed"),
-                        lorawan::Body::Opaque => {}
-                    }
-                    s
-                }
-                None => {
-                    format!("{shape}, {} byte payload, sync 0x{:02x}", r.payload.len(), r.sync_word)
-                }
-            },
-        },
-    };
-
-    let protocol = if mesh.is_some() {
-        "Meshtastic"
-    } else if core.is_some() {
-        "MeshCore"
-    } else if wan.is_some() {
-        "LoRaWAN"
-    } else {
-        "LoRa"
-    };
-
-    let link = mesh.as_ref().map(|m| pipeline::event::Link {
-        from: Some(pipeline::event::Party::unit(format!("{:08x}", m.source))),
-        to: Some(if m.is_broadcast() {
-            pipeline::event::Party::broadcast()
-        } else {
-            pipeline::event::Party::unit(format!("{:08x}", m.destination))
-        }),
-    });
-    let mut d = Decoded::bytes(protocol, center, 0.0, r.payload.clone())
-        .with_modulation(common::Modulation::Css)
-        .with_crc(r.crc_ok)
-        .with_detail(detail)
-        .with_fields(fields);
-    d.link = link.or(core_link);
-    d.position = fix;
-    d.report = report;
-    d.media_type = media;
-    d.written = written;
-    // A mesh node is a device: Meshtastic names itself in every header, and
-    // MeshCore in its advert, which is the packet a survey wants.
-    d.identity = mesh
-        .as_ref()
-        .map(|m| common::Identity::new("meshtastic", format!("{:08x}", m.source)))
-        .or_else(|| {
-            core.as_ref().and_then(|p| p.advert()).map(|a| {
-                common::Identity::new(
-                    "meshcore",
-                    a.public_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-                )
-            })
-        });
-    if let (Some(who), Some(name)) =
-        (d.identity.as_mut(), core.as_ref().and_then(|p| p.advert()).and_then(|a| a.name.clone()))
-    {
-        who.name = Some(name);
-    }
-    Some(d)
-}
-
 fn now_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -991,23 +260,23 @@ fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-/// LoRa as the auto node knows it: placed on the classifier's verdict, not
-/// on width, because it is the dearest decoder to run and a chirp is the
-/// one thing the classifier names reliably. On a band of hard-keyed sensors
-/// most sources measure over 44 kHz from their splatter, and dechirping six
-/// spreading factors on each of them was the largest line on a busy span.
-pub struct Lora;
-
 impl Protocol for Lora {
     fn id(&self) -> &'static str {
-        "lora"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "lora"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Ism, Usage::Wlan])
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The same chirp is legal at 433, 868 and 915 MHz and none of those
     /// bands is only LoRa, so the claim is the front end's tag plus a
     /// spreading factor, a bandwidth and a coding rate that LoRa defines.
@@ -1015,22 +284,12 @@ impl Protocol for Lora {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        lora_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &ALL_BANDWIDTHS_HZ,
-            min_rate_hz: 0.0,
-            feed_rate_hz: 0.0,
-            span_wide: false,
-            families: &[dsp::Modulation::Chirp],
-        }
-    }
+
     /// The Meshtastic EU_868 slot, which is where a LoRa packet heard in
     /// Europe most often is.
-    fn default_hz(&self) -> f64 {
-        869_525_000.0
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets]
     }
@@ -1052,6 +311,28 @@ impl Protocol for Lora {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(BANDWIDTH_HZ, at.width_hz)]
     }
+}
+
+/// The setting names this stage reads.
+const BANDWIDTH_HZ: &str = "bandwidth_hz";
+const SF: &str = "sf";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "lora",
+    summary: "LoRa chirp spread spectrum: dechirp, then the frame \
+              behind it, at any spreading factor over 125 to 500 kHz",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = LoraNode::new(s.f64_or(BANDWIDTH_HZ, 0.0));
+    // Nought is "find it", and so is anything the demodulator cannot run at.
+    let sf = s.f64_or(SF, 0.0) as u8;
+    if dsp::lora::SPREADING_FACTORS.contains(&sf) {
+        Simple::set_param(&mut n, SF, ParamValue::Float(sf as f64))?;
+    }
+    Ok(Box::new(n))
 }
 
 #[cfg(test)]
@@ -1078,12 +359,12 @@ mod tests {
         let mut s = StreamSpec::iq(4_000_000.0, Hz(2_440_400_000));
         s.bandwidth = 812_500.0;
         n.negotiate(&PortSpec { spec: s, latency: 0 }).expect("a 2.4 GHz source");
-        assert_eq!(n.reader.demods.len(), 4, "SF5 to SF8, which is what the band uses");
-        assert!(n.reader.demods.iter().all(|d| d.inverted()));
+        assert_eq!(n.reader.demods().len(), 4, "SF5 to SF8, which is what the band uses");
+        assert!(n.reader.demods().iter().all(|d| d.inverted()));
 
         let mut n = LoraNode::new(250_000.0);
         n.negotiate(&spec(2_000_000.0, 250_000.0)).expect("an 868 MHz source");
-        assert!(n.reader.demods.iter().all(|d| !d.inverted()));
+        assert!(n.reader.demods().iter().all(|d| !d.inverted()));
     }
 
     #[test]
@@ -1111,26 +392,4 @@ mod tests {
         let mut n = LoraNode::default();
         assert!(n.negotiate(&spec(2_000_000.0, 25_000.0)).is_err(), "not a LoRa channel");
     }
-}
-
-/// The setting names this stage reads.
-const BANDWIDTH_HZ: &str = "bandwidth_hz";
-const SF: &str = "sf";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "lora",
-    summary: "LoRa chirp spread spectrum: dechirp, then the frame \
-              behind it, at any spreading factor over 125 to 500 kHz",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let mut n = LoraNode::new(s.f64_or(BANDWIDTH_HZ, 0.0));
-    // Nought is "find it", and so is anything the demodulator cannot run at.
-    let sf = s.f64_or(SF, 0.0) as u8;
-    if dsp::lora::SPREADING_FACTORS.contains(&sf) {
-        Simple::set_param(&mut n, SF, ParamValue::Float(sf as f64))?;
-    }
-    Ok(Box::new(n))
 }

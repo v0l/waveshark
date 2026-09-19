@@ -292,7 +292,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let default = format!("0.0.0.0:{DEFAULT_PORT}");
     let addr = s.str_or(ADDRESS, &default);
     let stream = s.str_or(STREAM, DEFAULT_STREAM);
-    Ok(Box::new(IqStreamServerNode::named(&addr, &stream, s.bool_or(TUNABLE, false))))
+    Ok(Box::new(IqStreamServerNode::named(addr, stream, s.bool_or(TUNABLE, false))))
 }
 
 #[cfg(test)]

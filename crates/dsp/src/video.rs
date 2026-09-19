@@ -1039,12 +1039,12 @@ impl SyncSeparator {
             out.push((u, v));
         }
         // The delay line: mean with the line above.
-        if let Some(prev_row) = self.chroma.last() {
-            if prev_row.len() == out.len() {
-                for (o, p) in out.iter_mut().zip(prev_row) {
-                    o.0 = (o.0 + p.0) / 2.0;
-                    o.1 = (o.1 + p.1) / 2.0;
-                }
+        if let Some(prev_row) = self.chroma.last()
+            && prev_row.len() == out.len()
+        {
+            for (o, p) in out.iter_mut().zip(prev_row) {
+                o.0 = (o.0 + p.0) / 2.0;
+                o.1 = (o.1 + p.1) / 2.0;
             }
         }
         out

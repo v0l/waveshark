@@ -771,7 +771,7 @@ impl SchDetector {
             }
             for n in 1..=10u32 {
                 let fnum = frame_number + n;
-                if fnum % 51 % 4 != 0 || fnum % 51 >= 48 {
+                if !(fnum % 51).is_multiple_of(4) || fnum % 51 >= 48 {
                     continue;
                 }
                 self.blocks.push(PendingBlock {

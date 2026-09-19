@@ -208,12 +208,12 @@ impl Node for WfmDemodNode {
             out.push(*r);
         }
 
-        if self.rds_enabled {
-            if let Some(rds) = &mut self.rds {
-                self.bits.clear();
-                rds.process(&self.mpx, self.stereo.phases(), &mut self.bits);
-                self.emit_rds(c);
-            }
+        if self.rds_enabled
+            && let Some(rds) = &mut self.rds
+        {
+            self.bits.clear();
+            rds.process(&self.mpx, self.stereo.phases(), &mut self.bits);
+            self.emit_rds(c);
         }
 
         let locked = self.stereo.is_locked();

@@ -22,6 +22,7 @@ use crate::bits::crc16;
 use crate::geo::{ecef_to_geodetic, ecef_velocity_to_enu};
 use crate::rs::ReedSolomon;
 use crate::whiten;
+use common::Decoded;
 
 /// Header the sonde keys before anything else, as it arrives, least
 /// significant bit first. This is what a receiver correlates against: the
@@ -302,6 +303,143 @@ fn le16(b: &[u8]) -> u16 {
 
 fn le32(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// Bits held while looking for a header. Two long frames and the gap
+/// between them: enough that a frame straddling two blocks is never lost,
+/// and bounded so a channel with nothing on it cannot grow.
+const MAX_BITS: usize = FRAME_AUX * 8 * 3;
+
+/// Header bit errors tolerated. The header is 64 bits and a sonde at the
+/// edge of reception loses a few; more than this and it is not a header.
+/// Four leaves a false alarm rate of about one in a million bit positions,
+/// which at 4800 baud is one spurious search every three minutes and costs
+/// nothing, because the Reed-Solomon code then refuses it.
+const HEADER_SLACK: u32 = 4;
+
+/// A sonde's frames cut out of a stream of bits
+///
+/// Above the waveform and below the payload: the bits come from any 4800
+/// baud FSK demodulator, and what leaves is a descrambled, Reed-Solomon
+/// corrected frame ready for [`parse`]. The receiver's node and anything
+/// naming a recording read the same one, so a correction made here reaches
+/// both.
+#[derive(Default)]
+pub struct Framer {
+    bits: Vec<bool>,
+    /// Bits already searched and known not to start a header. Only appended
+    /// to, so what was rejected stays rejected.
+    scanned: usize,
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The buffer a bit clock appends into.
+    pub fn sink(&mut self) -> &mut Vec<bool> {
+        &mut self.bits
+    }
+
+    /// Every frame behind a header in the bits held, taken out of the buffer
+    /// as they are read.
+    pub fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let header = header_bits();
+        let mut at = self.scanned;
+        while at + header.len() <= self.bits.len() {
+            let mut wrong = 0u32;
+            for (k, &want) in header.iter().enumerate() {
+                if self.bits[at + k] != want {
+                    wrong += 1;
+                    if wrong > HEADER_SLACK {
+                        break;
+                    }
+                }
+            }
+            if wrong > HEADER_SLACK {
+                at += 1;
+                continue;
+            }
+            match self.frame_at(at) {
+                // A header with a frame behind it: take both out of the
+                // buffer so the search does not walk back into them.
+                Some(Some(frame)) => {
+                    let used = frame.len() * 8;
+                    out.push(frame);
+                    self.bits.drain(..at + used);
+                    at = 0;
+                    self.scanned = 0;
+                }
+                // A header whose frame has not all arrived: wait here.
+                Some(None) => {
+                    self.scanned = at;
+                    return out;
+                }
+                None => at += 1,
+            }
+        }
+        self.scanned = at;
+        out
+    }
+
+    /// Drop what has been searched and found wanting, so a channel with
+    /// nothing on it holds a bounded buffer.
+    pub fn trim(&mut self) {
+        if self.bits.len() > MAX_BITS {
+            let drop = self.bits.len() - MAX_BITS;
+            self.bits.drain(..drop);
+            self.scanned = self.scanned.saturating_sub(drop);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.bits.clear();
+        self.scanned = 0;
+    }
+
+    /// Read the frame starting at bit `at`. `None` where those bits are not
+    /// a frame, `Some(None)` where not enough of them have arrived.
+    fn frame_at(&self, at: usize) -> Option<Option<Vec<u8>>> {
+        // Not enough bits yet is not the same answer as not a frame: the
+        // search resumes where it stopped, so treating a short buffer as a
+        // rejection walks the cursor past the header and loses the frame
+        // that was about to arrive.
+        let Some(mut probe) = pack(&self.bits, at, FRAME_STD) else { return Some(None) };
+        descramble(&mut probe);
+        // The length marker sits in the data, so it has to be read before
+        // the code has passed on it; a wrong bit here costs one frame.
+        let len = frame_len(probe[DATA_AT])?;
+        let mut frame = if len == FRAME_STD {
+            probe
+        } else {
+            let Some(mut long) = pack(&self.bits, at, len) else { return Some(None) };
+            descramble(&mut long);
+            long
+        };
+        correct(&mut frame)?;
+        Some(Some(frame))
+    }
+}
+
+/// The header as it arrives: eight bytes, least significant bit first.
+fn header_bits() -> Vec<bool> {
+    HEADER_AIR.iter().flat_map(|b| (0..8).map(move |k| b >> k & 1 != 0)).collect()
+}
+
+/// `len` bytes from bit `at`, least significant bit first, or `None` where
+/// the bits are not all there.
+fn pack(bits: &[bool], at: usize, len: usize) -> Option<Vec<u8>> {
+    if at + len * 8 > bits.len() {
+        return None;
+    }
+    Some(
+        bits[at..at + len * 8]
+            .chunks(8)
+            .map(|c| c.iter().enumerate().fold(0u8, |b, (k, &s)| b | (s as u8) << k))
+            .collect(),
+    )
 }
 
 /// Read a descrambled, corrected frame.
@@ -603,6 +741,60 @@ impl Frame {
             sensor_temp_c: cal.humidity_sensor_temperature_c(meas),
         }
     }
+}
+
+/// What the protocols node makes of a sonde frame: which balloon it is,
+/// where, and how it is flying.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let f = parse(bytes)?;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("serial".into(), common::Value::Text(f.serial.clone())),
+        ("frame".into(), common::Value::Int(f.frame_no as i64)),
+        ("battery_v".into(), common::Value::Float(f.battery_v as f64)),
+        ("state".into(), common::Value::Text(f.flight.label().into())),
+    ];
+    if f.has_position() {
+        fields.push(("altitude_m".into(), common::Value::Float(f.altitude_m)));
+        fields.push(("climb_ms".into(), common::Value::Float(f.climb_ms)));
+        fields.push(("speed_kt".into(), common::Value::Float(f.speed_kt)));
+        fields.push(("course_deg".into(), common::Value::Float(f.course_deg)));
+        fields.push(("satellites".into(), common::Value::Int(f.satellites as i64)));
+    }
+    if let (Some(w), Some(t)) = (f.gps_week, f.gps_tow_ms) {
+        fields.push(("gps_week".into(), common::Value::Int(w as i64)));
+        fields.push(("gps_tow_ms".into(), common::Value::Int(t as i64)));
+    }
+    fields.push(("pcb_temp_c".into(), common::Value::Int(f.pcb_temp_c as i64)));
+    if f.bad_blocks > 0 {
+        fields.push(("bad_blocks".into(), common::Value::Int(f.bad_blocks as i64)));
+    }
+
+    let mut d = Decoded::bytes("rs41", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(f.bad_blocks == 0))
+        .with_text(f.summary())
+        .with_detail(format!("frame {}, {:.1} V, {}", f.frame_no, f.battery_v, f.flight.label()))
+        .with_fields(fields)
+        .by(common::Identity::new("vaisala", f.serial.clone()).made_by("Vaisala"));
+    if f.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: f.altitude_m,
+                climb_ms: f.climb_ms,
+                battery_v: f.battery_v,
+                satellites: f.satellites,
+                descending: f.flight == Flight::Descent,
+                sensors: f.meas.map(|meas| common::SondeSensors { meas, calibration: f.subframe }),
+            })
+            .at_position(common::Position {
+                lat: f.lat_deg,
+                lon: f.lon_deg,
+                altitude_m: Some(f.altitude_m),
+                speed_kt: Some(f.speed_kt),
+                course_deg: Some(f.course_deg),
+            });
+    }
+    Some(d)
 }
 
 #[cfg(test)]

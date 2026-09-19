@@ -13,6 +13,7 @@
 //! it is, and the bytes as they arrived, which is what rtl_433 reports too.
 
 use crate::protocol::{Proof, Report};
+use common::Decoded;
 
 /// Meter types of EN 13757-3, in the words rtl_433 uses for them.
 pub fn device_type(t: u8) -> &'static str {
@@ -152,6 +153,33 @@ pub fn parse(bytes: &[u8], mode: Option<&str>) -> Option<Report> {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// What the protocols node makes of a meter frame: who sent it and what it
+/// is, with the bytes as they arrived.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes, None)?;
+    let mut d = Decoded::bytes("Wireless-MBus", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(true));
+    let fields: Vec<(String, common::Value)> = r
+        .fields
+        .iter()
+        .filter(|(k, _)| k.as_str() != "data")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
+    let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
+    let kind = r.get("type_string").map(|v| v.to_string()).unwrap_or_default();
+    let enc = r.get("payload_encrypted").is_some();
+    let text = format!("{m} {kind} {id}{}", if enc { ", payload encrypted" } else { "" });
+    d = d.with_text(text.clone()).with_detail(r.fields_line()).with_fields(fields);
+    if !id.is_empty() {
+        d = d
+            .with_link(common::Link::beacon(common::Party::unit(format!("{m}-{id}"))))
+            .by(common::Identity::new("wmbus", format!("{m}-{id}")).made_by(m.clone()));
+    }
+    Some(d)
 }
 
 #[cfg(test)]

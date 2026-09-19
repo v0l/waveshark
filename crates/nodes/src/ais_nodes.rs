@@ -13,16 +13,17 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use decode::ais::{self, Message};
+pub use decode::ais::decoded;
+pub use decode::ais::round;
+use decode::ais::{self};
 use dsp::ais::{AisConfig, AisDetector, AisFrame, BAND_CENTER_HZ, CHANNEL_HZ};
+use identify::Signal;
+pub use identify::ais::Ais;
+pub use identify::ais::CHANNEL_WIDTH_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// The width one AIS channel occupies, which is what a frame was heard
-/// through whichever of the two carried it.
-pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
 
 pub struct AisNode {
     cfg: AisConfig,
@@ -109,158 +110,25 @@ impl Simple for AisNode {
     }
 }
 
-/// The decode an AIS payload becomes.
-///
-/// Takes the bytes rather than a parsed message for the same reason the Mode S
-/// one does: what travels on the bus is the payload, and a consumer draws its
-/// own conclusions from it.
-pub fn ais_decoded(frame: &ais::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    // The identity every message carries, and the field that turns a stream of
-    // them into tracks.
-    fields.push(("mmsi".into(), Value::Int(i64::from(frame.mmsi))));
-
-    let mut position = None;
-    let mut name = None;
-    let mut report = common::ReportDetail::Bare;
-    let protocol = match &frame.kind {
-        Message::Position(p) => {
-            if let Some((lat, lon)) = p.position {
-                position = Some(common::Position {
-                    lat,
-                    lon,
-                    altitude_m: None,
-                    speed_kt: p.sog_kt,
-                    course_deg: p.cog_deg,
-                });
-            }
-            report = common::ReportDetail::Vessel {
-                heading_deg: p.heading_deg,
-                nav_status: p.nav_status.map(ais::nav_status_name),
-                ship_type: None,
-                destination: None,
-                class_b: p.class_b,
-            };
-            {}
-            if let Some((lat, lon)) = p.position {
-                fields.push(("lat".into(), Value::Float(round(lat, 5))));
-                fields.push(("lon".into(), Value::Float(round(lon, 5))));
-            }
-            if let Some(v) = p.sog_kt {
-                fields.push(("ground_speed_kt".into(), Value::Float(v)));
-            }
-            if let Some(v) = p.cog_deg {
-                fields.push(("track_deg".into(), Value::Float(v)));
-            }
-            if let Some(v) = p.heading_deg {
-                fields.push(("heading_deg".into(), Value::Float(v)));
-            }
-            if let Some(v) = p.nav_status {
-                fields.push(("nav_status".into(), Value::Text(ais::nav_status_name(v).into())));
-            }
-            if p.class_b { "AIS-PositionB" } else { "AIS-Position" }
-        }
-        Message::Static(s) => {
-            // No coordinates in a static message: what it carries is what the
-            // ship is and where it is going.
-            report = common::ReportDetail::Vessel {
-                heading_deg: None,
-                nav_status: None,
-                ship_type: s.ship_type.map(ais::ship_type_name),
-                destination: s.destination.clone(),
-                class_b: false,
-            };
-            if let Some(n) = &s.name {
-                name = Some(n.clone());
-                fields.push(("name".into(), Value::Text(n.clone())));
-            }
-            if let Some(c) = &s.callsign {
-                fields.push(("callsign".into(), Value::Text(c.clone())));
-            }
-            if let Some(t) = s.ship_type {
-                fields.push(("ship_type".into(), Value::Text(ais::ship_type_name(t).into())));
-            }
-            if let Some(d) = &s.destination {
-                fields.push(("destination".into(), Value::Text(d.clone())));
-            }
-            if let Some(d) = s.draught_m {
-                fields.push(("draught_m".into(), Value::Float(d)));
-            }
-            "AIS-Static"
-        }
-        Message::BaseStation { position: p, .. } => {
-            if let Some((lat, lon)) = p {
-                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
-                report = common::ReportDetail::Station { aid: false };
-                fields.push(("lat".into(), Value::Float(round(*lat, 5))));
-                fields.push(("lon".into(), Value::Float(round(*lon, 5))));
-            }
-            "AIS-BaseStation"
-        }
-        Message::AidToNavigation { name: n, position: p, .. } => {
-            if let Some(n) = n {
-                name = Some(n.clone());
-                fields.push(("name".into(), Value::Text(n.clone())));
-            }
-            if let Some((lat, lon)) = p {
-                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
-                report = common::ReportDetail::Station { aid: true };
-                fields.push(("lat".into(), Value::Float(round(*lat, 5))));
-                fields.push(("lon".into(), Value::Float(round(*lon, 5))));
-            }
-            "AIS-AidToNav"
-        }
-        Message::Unsupported { msg_type } => {
-            fields.push(("msg_type".into(), Value::Int(i64::from(*msg_type))));
-            "AIS-Other"
-        }
-    };
-
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut who = common::Identity::new("ais", frame.mmsi.to_string());
-    who.name = name;
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(
-            frame.mmsi.to_string(),
-        )))
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Gmsk)
-        // Every frame that reaches here passed the X.25 frame check sequence
-        // in the demodulator, which is a real integrity check and not a
-        // plausibility argument.
-        .with_crc(Some(true));
-    d.position = position;
-    d.report = report;
-    d
-}
-
-fn round(v: f64, places: i32) -> f64 {
-    let f = 10f64.powi(places);
-    (v * f).round() / f
-}
-
-/// AIS as the auto node and the tables know it: both channels at once,
-/// since stations alternate between them and half of them is half the
-/// traffic.
-pub struct Ais;
-
 impl Protocol for Ais {
     fn id(&self) -> &'static str {
-        "ais"
+        Signal::id(self)
     }
+    fn label(&self) -> &'static str {
+        Signal::label(self)
+    }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+
     /// A position report is most of what the vessels send.
     fn reports_position(&self) -> bool {
         true
     }
-    fn label(&self) -> &'static str {
-        "ais"
-    }
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![(CHANNEL_HZ[0] - CHANNEL_WIDTH_HZ, CHANNEL_HZ[1] + CHANNEL_WIDTH_HZ)])
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 200_000 }
     }
@@ -269,7 +137,7 @@ impl Protocol for Ais {
             return None;
         }
         let center = common::Hz(p.center_hz());
-        Some(ais::parse(bytes).map(|f| vec![ais_decoded(&f, bytes, center)]).unwrap_or_default())
+        Some(ais::parse(bytes).map(|f| vec![decoded(&f, bytes, center)]).unwrap_or_default())
     }
     /// It mixes its two channels out of the span itself, rather than taking
     /// one from the bank the extractor channelizes the span with.
@@ -282,17 +150,7 @@ impl Protocol for Ais {
     /// megasamples. Where a span were wide enough, a bank channel arrives at
     /// 2 MS/s against the 600 kHz asked for below, so the front end would
     /// pay three times over per sample for the privilege.
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_HZ[1] - CHANNEL_HZ[0] + 2.0 * CHANNEL_WIDTH_HZ],
-            // The detector mixes both channels itself and wants room between
-            // them, so this stays well above their separation.
-            min_rate_hz: 150_000.0,
-            feed_rate_hz: 600_000.0,
-            span_wide: true,
-            families: &[],
-        }
-    }
+
     fn stage_label(&self, _hz: f64) -> String {
         "162 AIS".into()
     }
@@ -312,10 +170,22 @@ impl Protocol for Ais {
     }
 }
 
+pub const DESC: StageDesc = StageDesc {
+    name: "ais",
+    summary: "Both marine AIS channels: GMSK demodulation and HDLC framing",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AisNode::default()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use common::Hz;
+    use decode::ais::{self, Message};
 
     fn spec(rate: f64, center: f64) -> PortSpec {
         PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
@@ -351,7 +221,7 @@ mod tests {
             0x21, 0x6f, 0xff, 0x9c, 0x00, 0x56, 0x78,
         ];
         let frame = ais::parse(&bytes).unwrap();
-        let d = ais_decoded(&frame, &bytes, Hz(BAND_CENTER_HZ as u64));
+        let d = decoded(&frame, &bytes, Hz(BAND_CENTER_HZ as u64));
         assert_eq!(d.protocol, "AIS-Position");
         assert_eq!(d.crc_ok, Some(true), "it passed the check sequence to get here");
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -426,19 +296,8 @@ mod tests {
         assert!((lon - 0.131_38).abs() < 1e-5, "longitude {lon}");
 
         // And the row the packet list would show for it.
-        let d = ais_decoded(&parsed, &frames[0], Hz(BAND_CENTER_HZ as u64));
+        let d = decoded(&parsed, &frames[0], Hz(BAND_CENTER_HZ as u64));
         assert_eq!(d.protocol, "AIS-Position");
         assert_eq!(d.crc_ok, Some(true));
     }
-}
-
-pub const DESC: StageDesc = StageDesc {
-    name: "ais",
-    summary: "Both marine AIS channels: GMSK demodulation and HDLC framing",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(AisNode::default()))
 }

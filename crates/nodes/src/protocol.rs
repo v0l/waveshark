@@ -14,104 +14,13 @@
 
 use crate::NodeSpec;
 use common::Packet;
-use dsp::Modulation;
 use pipeline::event::Decoded;
 use pipeline::port::PortKind;
 
-/// Where in the spectrum a protocol's transmitters can be.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Placement {
-    /// Wherever the band plan says that service is: a pager is on the utility
-    /// allocations, M17 on the amateur ones, LoRa on the licence-free ones.
-    ///
-    /// Naming the service rather than the megahertz is what keeps a decoder
-    /// off a band it was never on. Before this, every narrow source a busy
-    /// 2.4 GHz band opened got M17, DMR, P25, POCSAG, FLEX, MDC-1200,
-    /// two-tone, APRS and SSTV built on it, which measured about 4 ms of a
-    /// 2.13 ms block. It also follows the regional plan, which 902 to
-    /// 928 MHz is the reason for: licence-free in the Americas and the GSM
-    /// uplink in Europe.
-    ///
-    /// Auto mode is what reads this. An operator who wants a decoder
-    /// somewhere else adds the channel by hand and names the protocol, and
-    /// no table is consulted.
-    Usage(&'static [common::bands::Usage]),
-    /// Inside licensed allocations, in absolute hertz: the TETRA downlinks,
-    /// the GSM downlinks. Knowledge about the world the plan does not carry.
-    Bands(Vec<(f64, f64)>),
-    /// On fixed frequencies the standard put it on: 1090 MHz, the two AIS
-    /// channels, the three BLE advertising channels.
-    Channels(Vec<f64>),
-}
-
-impl Placement {
-    /// Whether a transmitter at `hz` could be this protocol. A channel
-    /// placement counts within half its width.
-    pub fn covers(&self, hz: f64, width_hz: f64) -> bool {
-        match self {
-            Placement::Usage(u) => common::bands::at(hz).is_some_and(|b| u.contains(&b.usage)),
-            Placement::Bands(bands) => bands.iter().any(|(lo, hi)| (*lo..*hi).contains(&hz)),
-            Placement::Channels(chs) => chs.iter().any(|c| (c - hz).abs() <= width_hz / 2.0),
-        }
-    }
-
-    /// The bands a span-wide decoder is placed on, each with the width it
-    /// owns: one per channel, or the band itself.
-    pub fn bands(&self, width_hz: f64) -> Vec<(f64, f64)> {
-        match self {
-            Placement::Usage(u) => common::bands::ranges_for(u),
-            Placement::Bands(bands) => bands.clone(),
-            Placement::Channels(chs) => {
-                chs.iter().map(|c| (c - width_hz / 2.0, c + width_hz / 2.0)).collect()
-            }
-        }
-    }
-
-    /// Whether this protocol has a frequency of its own to offer, the way a
-    /// strip channel picked from a menu wants one.
-    pub fn default_hz(&self) -> Option<f64> {
-        match self {
-            // A service is not a frequency, so a protocol placed by one says
-            // where to put a hand-placed channel itself.
-            Placement::Usage(_) => None,
-            Placement::Bands(b) => b.first().map(|(lo, hi)| (lo + hi) / 2.0),
-            Placement::Channels(c) => c.first().copied(),
-        }
-    }
-}
-
-/// The stream a protocol's decoder reads.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Shape {
-    /// The channel widths it is keyed at, in hertz. For a span-wide decoder,
-    /// the width it owns around each placement.
-    pub widths: &'static [f64],
-    /// The slowest stream it will accept.
-    pub min_rate_hz: f64,
-    /// The rate to hand it when the receiver cuts a band out for it, which
-    /// leaves the decoder room above its floor: four samples a symbol where
-    /// three is refused, a transition band for its own filter. Zero to let
-    /// the receiver choose from the width.
-    pub feed_rate_hz: f64,
-    /// Reads the span itself, where the span reaches its placement, rather
-    /// than a source cut out of it: Mode S is shorter than a detector frame,
-    /// a camera's carrier is the whole span.
-    pub span_wide: bool,
-    /// The modulations the burst classifier would name it. A decoder listed
-    /// here is built once the classifier has named a burst on the source,
-    /// and reads the samples it missed from the ring; one listing none is
-    /// built the moment the source opens.
-    ///
-    /// For a decoder that is dear to run and whose modulation the
-    /// classifier names reliably, which so far is LoRa and its chirp. It
-    /// is not a general saving: measured on the off-air M17 capture, the
-    /// classifier names the handheld's 4-FSK `Unknown` for the whole
-    /// transmission, so a voice decoder gated on `Fsk4` would never have
-    /// been built. A decoder that is cheap beside the classifier, or whose
-    /// modulation the classifier is unsure of, lists nothing and is built
-    /// on open.
-    pub families: &'static [Modulation],
-}
+/// Where a protocol can be and what stream it reads live below this crate,
+/// in `identify`, so a program with a recording and a tuning can ask the
+/// same table without the flow graph.
+pub use identify::{CHANNEL_WIDTH_TOLERANCE, Placement, Shape};
 
 /// What the receiver does with a channel once a protocol has read on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -329,14 +238,6 @@ pub struct Placed {
     /// placed on the span itself has no span position to be told.
     pub origin: Option<Origin>,
 }
-
-/// How much wider than its declared channel a source may measure and still
-/// have that channel's decoder placed on it. A clean channel measures a
-/// little over its width (an M17 12.5 kHz channel lands around 25 kHz once
-/// extracted); splatter and a nearby spur can measure it far wider, and past
-/// this a 12.5 kHz decoder does not belong on the signal. Three times keeps
-/// the old ~40 kHz ceiling for a 12.5 kHz channel while scaling with width.
-pub const CHANNEL_WIDTH_TOLERANCE: f64 = 3.0;
 
 /// The widest source the burst router is placed on, in hertz.
 ///
@@ -866,6 +767,31 @@ mod tests {
         assert_eq!(words.len(), count, "two protocols answer to one word");
     }
 
+    /// Every protocol compiled in is described once, below the graph.
+    ///
+    /// The receiver and anything naming a recording have to agree about
+    /// where a protocol is and what stream it reads, or the second is no
+    /// longer evidence about the first. They agree by both asking
+    /// `identify`, and this checks that none has been added to one and not
+    /// the other.
+    #[test]
+    fn every_protocol_is_described_once_below_the_graph() {
+        use identify::Signal;
+        let mut theirs: Vec<&str> = identify::all().iter().map(|s| s.id()).collect();
+        let mut ours: Vec<&str> = compiled().iter().map(|p| p.id()).collect();
+        theirs.sort();
+        ours.sort();
+        assert_eq!(ours, theirs, "a protocol is described in one place and not the other");
+        for s in identify::all() {
+            let p = by_id(s.id()).unwrap_or_else(|| panic!("{} is registered", s.id()));
+            assert_eq!(p.placement(), s.placement(), "{}", s.id());
+            assert_eq!(p.shape(), s.shape(), "{}", s.id());
+            assert_eq!(p.label(), s.label(), "{}", s.id());
+            assert_eq!(p.aliases(), s.aliases(), "{}", s.id());
+            assert_eq!(p.default_hz(), s.default_hz(), "{}", s.id());
+        }
+    }
+
     #[test]
     fn ids_are_unique() {
         let mut ids: Vec<&str> = all().iter().map(|p| p.id()).collect();
@@ -894,16 +820,5 @@ mod tests {
         );
         // And well under a span: this is the whole saving.
         assert!(max < 5e6, "{max} Hz is most of a 20 MHz span");
-    }
-
-    #[test]
-    fn a_band_placement_covers_its_band_and_nothing_else() {
-        let p = Placement::Bands(vec![(390e6, 400e6)]);
-        assert!(p.covers(391e6, 25e3));
-        assert!(!p.covers(401e6, 25e3));
-        let c = Placement::Channels(vec![1090e6]);
-        assert!(c.covers(1090.5e6, 2e6));
-        assert!(!c.covers(1092e6, 2e6));
-        assert_eq!(c.bands(2e6), vec![(1089e6, 1091e6)]);
     }
 }

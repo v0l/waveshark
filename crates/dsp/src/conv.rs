@@ -558,13 +558,13 @@ impl Viterbi {
             since_normal: 0,
             ends: Ends::Anywhere,
             butterfly,
-            wide: butterfly && half >= 8 && half % 8 == 0 && wide_available(),
+            wide: butterfly && half >= 8 && half.is_multiple_of(8) && wide_available(),
             // Sixteen states either side of the butterfly, which K=7 has and
             // the K=5 codes do not.
             narrow: butterfly
                 && code.rate() == 2
                 && half >= 16
-                && half % 16 == 0
+                && half.is_multiple_of(16)
                 && wide_available(),
             cost16: {
                 let mut c = vec![i16::MAX; states];
@@ -1092,7 +1092,7 @@ mod tests {
         let mut flipped = 0;
         for v in soft.iter_mut() {
             s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            if (s >> 8) % 40 == 0 {
+            if (s >> 8).is_multiple_of(40) {
                 *v = -*v;
                 flipped += 1;
             }

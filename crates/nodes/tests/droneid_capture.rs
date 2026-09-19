@@ -103,7 +103,7 @@ fn every_frame_carries_its_measurements_and_its_samples() {
 #[test]
 fn a_frame_becomes_a_row_naming_the_serial() {
     let Some(frames) = frames() else { return };
-    let d = nodes::droneid_nodes::droneid_decoded(&frames[0].bytes, Hz(CENTER)).expect("a row");
+    let d = decode::droneid::decoded(&frames[0].bytes, Hz(CENTER)).expect("a row");
     assert_eq!(d.protocol, "DJI-DroneID");
     assert_eq!(d.crc_ok, Some(true));
     let detail = d.detail.as_deref().unwrap();

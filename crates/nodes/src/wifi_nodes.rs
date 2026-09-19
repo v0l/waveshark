@@ -25,17 +25,18 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
 use decode::wifi as mac;
+pub use decode::wifi::CHANNEL_WIDTH_HZ;
+pub use decode::wifi::channel_of;
+pub use decode::wifi::decoded;
 use dsp::wifi::{WifiConfig, WifiFrame, WifiSpan, ofdm};
+use identify::Signal;
+pub use identify::wifi::DEFAULT_HZ;
+pub use identify::wifi::Wifi;
+pub use identify::wifi::channels;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// One channel's width, which is the whole span this reads.
-pub const CHANNEL_WIDTH_HZ: f64 = ofdm::CHANNEL_WIDTH_HZ;
-
-/// Channel 6, which is where a 2.4 GHz receiver that has to pick one sits.
-pub const DEFAULT_HZ: f64 = 2_437_000_000.0;
 
 /// Samples kept behind the receiver so a frame can carry its own. Six
 /// milliseconds is longer than any legal frame at 6 Mbit/s, so nothing is
@@ -52,15 +53,6 @@ const KEEP_S: f64 = 0.006;
 /// symbols are where that is visible.
 const MAX_FRAME_IQ: usize = 32_768;
 
-/// Every 20 MHz channel this can be placed on: the 2.4 GHz band and the
-/// 5 GHz one.
-pub fn channels() -> Vec<f64> {
-    let mut v: Vec<f64> = (1..=13).filter_map(dsp::wifi::channel_2ghz).collect();
-    v.push(2_484_000_000.0);
-    v.extend(dsp::wifi::channels_5ghz());
-    v
-}
-
 /// The channels a span starts on.
 ///
 /// At 2.4 GHz the channels overlap on a 5 MHz grid, so reading all thirteen
@@ -75,23 +67,6 @@ pub fn starting_channels() -> Vec<f64> {
         [1u8, 6, 11, 13, 14].iter().filter_map(|&n| dsp::wifi::channel_2ghz(n)).collect();
     v.extend(dsp::wifi::channels_5ghz());
     v
-}
-
-/// The channel number a centre names, if it names one.
-///
-/// Half a megahertz, which is tight because the bands are crowded: BLE's
-/// advertising channel 38 is at 2426 MHz and Wi-Fi channel 4 is at 2427, so
-/// a wider window would file every Bluetooth advertisement under a Wi-Fi
-/// channel and try to read it as a MAC frame.
-pub fn channel_of(center_hz: f64) -> Option<u16> {
-    for n in 1..=14u8 {
-        if let Some(hz) = dsp::wifi::channel_2ghz(n) {
-            if (hz - center_hz).abs() <= 0.5e6 {
-                return Some(u16::from(n));
-            }
-        }
-    }
-    (1..=196u16).find(|&n| (dsp::wifi::channel_5ghz(n) - center_hz).abs() <= 0.5e6 && n >= 32)
 }
 
 /// Whether a packet's reported centre says it came off a Wi-Fi channel.
@@ -190,10 +165,10 @@ impl Simple for WifiNode {
             .filter_map(dsp::wifi::channel_2ghz)
             .collect();
         for hz in claimed {
-            if let Some(s) = self.span.as_mut() {
-                if s.open(hz, self.cfg) {
-                    self.opened += 1;
-                }
+            if let Some(s) = self.span.as_mut()
+                && s.open(hz, self.cfg)
+            {
+                self.opened += 1;
             }
         }
 
@@ -223,145 +198,23 @@ impl Simple for WifiNode {
     }
 }
 
-/// The row a MAC frame becomes.
-///
-/// `None` when the bytes are not a MAC frame, which is how the packet bus
-/// tells one from anything else arriving on the same centre.
-pub fn wifi_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let r = mac::Received::parse(bytes)?;
-    if !dsp::wifi::fcs_ok(&r.mpdu) {
-        return None;
-    }
-    let f = mac::parse(&r.mpdu)?;
-    let mut fields: Vec<(String, Value)> = vec![
-        ("type".into(), Value::Text(f.kind.name().into())),
-        ("phy".into(), Value::Text(r.phy())),
-    ];
-    if r.short_gi {
-        fields.push(("short_gi".into(), Value::Int(1)));
-    }
-    if r.aggregated {
-        fields.push(("aggregated".into(), Value::Int(1)));
-    }
-    let heard_channel = channel_of(center.as_f64());
-    if let Some(ch) = heard_channel {
-        fields.push(("channel".into(), Value::Int(i64::from(ch))));
-    }
-    if let Some(n) = &f.network {
-        if let Some(ssid) = &n.ssid {
-            fields.push(("ssid".into(), Value::Text(ssid.clone())));
-        } else if matches!(f.kind, mac::Kind::Management(8)) {
-            fields.push(("ssid".into(), Value::Text("<hidden>".into())));
-        }
-        if let Some(ch) = n.channel {
-            fields.push(("claims_channel".into(), Value::Int(i64::from(ch))));
-        }
-        if n.beacon_interval > 0 {
-            fields
-                .push(("beacon_ms".into(), Value::Int(i64::from(n.beacon_interval) * 1024 / 1000)));
-        }
-        let security = match (n.rsn, n.privacy) {
-            (true, _) => "wpa2",
-            (false, true) => "wep",
-            (false, false) => "open",
-        };
-        fields.push(("security".into(), Value::Text(security.into())));
-    }
-    if f.protected {
-        fields.push(("protected".into(), Value::Int(1)));
-    }
-    if let Some(a) = f.source() {
-        if a.is_local() {
-            fields.push(("randomised".into(), Value::Int(1)));
-        }
-    }
-    if let Some(s) = f.seq {
-        fields.push(("seq".into(), Value::Int(i64::from(s))));
-    }
-    // An aircraft's broadcast is not a row about a network that happens to
-    // carry some bytes, so it is named for what it is and its own fields go
-    // in front of the link layer's, as they do on Bluetooth.
-    let mut odid: Vec<decode::odid::Parsed> = f
-        .vendor
-        .iter()
-        .filter_map(|v| decode::odid::from_vendor_element(v.oui, v.kind, &v.data))
-        .flatten()
-        .collect();
-    if let Some(a) = &f.action {
-        if let Some(pack) = decode::odid::from_nan_action(a.category, a.code, &a.body) {
-            odid.extend(pack);
-        }
-    }
-    let protocol = if odid.is_empty() { "802.11" } else { "OpenDroneID" };
-    if !odid.is_empty() {
-        let mut f = decode::odid::fields(&odid);
-        f.append(&mut fields);
-        fields = f;
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = pipeline::event::Link {
-        from: f.source().map(|a| pipeline::event::Party::unit(a.to_string())),
-        to: Some(if f.addr1.is_broadcast() {
-            pipeline::event::Party::broadcast()
-        } else {
-            pipeline::event::Party::unit(f.addr1.to_string())
-        }),
-    };
-    // The row is filed under whoever transmitted it. A control frame names
-    // nobody, so it is filed under the station it is addressed to, which is
-    // the only party it has.
-    let who_addr = f.source().unwrap_or(f.addr1);
-    let mut who = common::Identity::new("wifi", who_addr.to_string());
-    who.name = f.network.as_ref().and_then(|n| n.ssid.clone());
-    let mut d = Decoded::bytes(protocol, center, 0.0, r.mpdu.clone());
-    if let Some(p) = decode::odid::position(&odid) {
-        d = d.at_position(p);
-    }
-    if let Some(ch) = heard_channel {
-        // What a beacon says about its own security is a statement about the
-        // network, so it travels with the channel rather than being read
-        // back out of a field name. A frame that is not a beacon says
-        // nothing either way, which is what `Unsaid` is for.
-        let secrecy = match f.network.as_ref() {
-            Some(n) if n.rsn => common::Secrecy::Encrypted(Some("wpa2".into())),
-            Some(n) if n.privacy => common::Secrecy::Encrypted(Some("wep".into())),
-            Some(_) => common::Secrecy::Clear,
-            None => common::Secrecy::Unsaid,
-        };
-        d = d.on_channel(
-            common::ChannelUse::new(common::ChannelPlan::Wifi, ch, CHANNEL_WIDTH_HZ as u32)
-                .claiming(f.network.as_ref().and_then(|n| n.channel).map(u16::from))
-                .protected_by(secrecy),
-        );
-    }
-    Some(
-        d.with_link(link)
-            .by(who)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Ofdm)
-            // Nothing reaches here without the frame check sequence, which
-            // is a real CRC-32 over the whole frame.
-            .with_crc(Some(true)),
-    )
-}
-
-/// 802.11a/g as the auto node and the tables know it: one 20 MHz channel,
-/// read off the span because there is no narrower stream an OFDM frame can
-/// be cut into.
-pub struct Wifi;
-
 impl Protocol for Wifi {
     fn id(&self) -> &'static str {
-        "wifi"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "wifi"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(channels())
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 1_000_000 }
     }
@@ -372,20 +225,9 @@ impl Protocol for Wifi {
         if !is_wifi_channel(p.center_hz() as f64) {
             return None;
         }
-        wifi_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: ofdm::RATE_HZ,
-            feed_rate_hz: ofdm::RATE_HZ,
-            span_wide: true,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     /// Nothing is locked. A latch on a span-wide decoder hands it its whole
     /// band from the moment the span reaches it, and this band is 20 MHz of
     /// shared spectrum: 2.4 GHz holds Bluetooth and every ISM device there
@@ -540,7 +382,7 @@ mod tests {
         assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
         assert!(frames[0].iq.is_some(), "a frame carries what it was read from");
 
-        let d = wifi_decoded(&frames[0].bytes, Hz(2_437_000_000)).expect("a decode");
+        let d = decoded(&frames[0].bytes, Hz(2_437_000_000)).expect("a decode");
         assert_eq!(d.protocol, "802.11");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("ssid=waveshark"), "{detail}");
@@ -574,8 +416,8 @@ mod tests {
         v.extend_from_slice(&ie);
         v.extend(dsp::wifi::crc32(&v).to_le_bytes());
 
-        let d = wifi_decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000))
-            .expect("a decode");
+        let d =
+            decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000)).expect("a decode");
         assert_eq!(d.protocol, "OpenDroneID");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
@@ -609,8 +451,8 @@ mod tests {
         v.extend_from_slice(&sda);
         v.extend(dsp::wifi::crc32(&v).to_le_bytes());
 
-        let d = wifi_decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000))
-            .expect("a decode");
+        let d =
+            decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000)).expect("a decode");
         assert_eq!(d.protocol, "OpenDroneID");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
@@ -619,14 +461,12 @@ mod tests {
 
     #[test]
     fn bytes_that_are_not_a_frame_are_not_a_row() {
-        assert!(wifi_decoded(&[0u8; 20], Hz(2_437_000_000)).is_none());
+        assert!(decoded(&[0u8; 20], Hz(2_437_000_000)).is_none());
         // A MAC frame with no envelope in front of it did not come from here.
-        assert!(wifi_decoded(&beacon(), Hz(2_437_000_000)).is_none());
+        assert!(decoded(&beacon(), Hz(2_437_000_000)).is_none());
         let mut bad = beacon();
         bad[8] ^= 0xff;
-        assert!(
-            wifi_decoded(&mac::wrap(&bad, None, 6.0, false, false), Hz(2_437_000_000)).is_none()
-        );
+        assert!(decoded(&mac::wrap(&bad, None, 6.0, false, false), Hz(2_437_000_000)).is_none());
     }
 
     /// The row says how the frame arrived, which is the only place that can
@@ -634,11 +474,11 @@ mod tests {
     #[test]
     fn a_row_names_the_rate_the_frame_arrived_at() {
         let b = mac::wrap(&beacon(), Some(7), 65.0, true, true);
-        let d = wifi_decoded(&b, Hz(2_437_000_000)).expect("a decode");
+        let d = decoded(&b, Hz(2_437_000_000)).expect("a decode");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("phy=MCS 7"), "{detail}");
         assert!(detail.contains("aggregated=1"), "{detail}");
-        assert_eq!(d.detail.is_some(), true);
+        assert!(d.detail.is_some());
     }
 
     /// A span starts on the channels that cover the band, and opens another

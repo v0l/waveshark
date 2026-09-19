@@ -205,7 +205,7 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
         f.center_hz()
     );
     let PacketBody::Frame(frame) = &f.body else { unreachable!() };
-    let pages = nodes::pocsag_nodes::pocsag_decoded(&frame.bytes, Hz(f.center_hz()));
+    let pages = decode::pocsag::decoded(&frame.bytes, Hz(f.center_hz()));
     assert_eq!(pages.len(), 1, "{pages:?}");
     assert_eq!(pages[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
 }
@@ -340,7 +340,7 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
     let rows: Vec<pipeline::event::Decoded> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => nodes::m17_nodes::m17_decoded(&f.bytes, Hz(p.center_hz())),
+            PacketBody::Frame(f) => decode::m17::decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -383,7 +383,7 @@ fn auto_finds_dmr_in_a_real_capture() {
     let dmr: Vec<_> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => nodes::dmr_nodes::dmr_decoded(&f.bytes, Hz(p.center_hz())),
+            PacketBody::Frame(f) => decode::dmr::decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -417,7 +417,7 @@ fn auto_finds_lora_in_a_real_capture() {
     let lora: Vec<_> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => nodes::lora_nodes::lora_decoded(&f.bytes, Hz(p.center_hz())),
+            PacketBody::Frame(f) => decode::lora::decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -460,7 +460,7 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
     let rows: Vec<_> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(p.center_hz())),
+            PacketBody::Frame(f) => decode::elrs::decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -548,7 +548,7 @@ fn a_hopping_link_is_one_transmitter_on_a_busy_band() {
     let rows: Vec<_> = pk
         .iter()
         .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(p.center_hz())),
+            PacketBody::Frame(f) => decode::elrs::decoded(&f.bytes, Hz(p.center_hz())),
             _ => None,
         })
         .collect();
@@ -612,7 +612,7 @@ fn a_channel_that_decoded_is_remembered() {
             measures += p.iter().filter(|p| p.measure.is_some()).count();
             decoded += p
                 .iter()
-                .filter(|p| matches!(&p.body, PacketBody::Frame(f) if nodes::lora_nodes::lora_decoded(&f.bytes, Hz(p.center_hz())).is_some()))
+                .filter(|p| matches!(&p.body, PacketBody::Frame(f) if decode::lora::decoded(&f.bytes, Hz(p.center_hz())).is_some()))
                 .count();
         }
     }

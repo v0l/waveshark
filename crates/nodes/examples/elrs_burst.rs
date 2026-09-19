@@ -41,8 +41,7 @@ fn main() {
                 if let common::PacketBody::Frame(f) = &p.body {
                     eprintln!(
                         "{:?}",
-                        nodes::elrs_nodes::elrs_decoded(&f.bytes, Hz(f.center_hz))
-                            .map(|d| d.detail)
+                        decode::elrs::decoded(&f.bytes, Hz(f.center_hz)).map(|d| d.detail)
                     );
                 }
             }

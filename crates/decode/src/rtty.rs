@@ -13,6 +13,7 @@
 //! national use. A station keying international ITA2 differs in those eight
 //! positions alone.
 
+use common::Decoded;
 use std::fmt;
 use std::str::FromStr;
 
@@ -270,6 +271,151 @@ pub fn line(codes: &[u8], stop: Stop, per_bit: usize) -> Vec<bool> {
     }
     out.extend(std::iter::repeat_n(true, 8 * per_bit));
     out
+}
+
+/// What a run of codes off the bus becomes: one row, the text a teleprinter
+/// would have printed.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let text = text(bytes);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let fields = vec![
+        ("characters".into(), common::Value::Int(bytes.len() as i64)),
+        ("message".into(), common::Value::Text(text.clone())),
+    ];
+    Some(
+        Decoded::bytes("RTTY", center, 0.0, bytes.to_vec())
+            .with_modulation(common::Modulation::Fsk2)
+            .with_detail(format!("{} characters", bytes.len()))
+            .with_fields(fields)
+            // An operator typed it and sent it to whoever was listening, so
+            // it belongs in the message view beside anything else somebody
+            // wrote, rather than in the packet list with the machines.
+            .written()
+            .with_text(text),
+    )
+}
+
+/// Symbol times with no character framed either way up before a run is
+/// closed and published. A stop element is at most two symbols and the next
+/// character follows it, so this is the line resting rather than a gap
+/// inside an over: about half a second at 45 baud.
+pub const IDLE_SYMBOLS: usize = 24;
+
+/// Undecided symbols in a row that close a run. One is a fade or a symbol
+/// the correlators straddled; a pair is the station having stopped.
+pub const QUIET_SYMBOLS: usize = 2;
+
+/// Characters a run must hold before it is worth publishing. Below this a
+/// run is as likely to be noise framed by luck as anything anybody sent.
+pub const MIN_CHARS: usize = 6;
+
+/// How much of a run has to be a character the tables have. Letters case
+/// has one for every code but zero, so this is a low bar by itself and the
+/// framing is what does the real refusing.
+pub const MIN_PRINTABLE: f32 = 0.9;
+
+/// The longest run held before it is forced out, in characters.
+pub const MAX_CHARS: usize = 4_096;
+
+/// The asynchronous line, read both ways up at once.
+///
+/// One line per polarity, and a run closes on the channel falling quiet or
+/// on neither having read a character for a while, so the closing does not
+/// depend on knowing which way up the station is. The line itself is
+/// [`dsp::slice::Uart`] at five bits, which is Baudot.
+pub struct Framer {
+    upright: dsp::slice::Uart,
+    inverted: dsp::slice::Uart,
+    up: Vec<u8>,
+    down: Vec<u8>,
+    since_char: usize,
+    undecided: usize,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self {
+            // Baudot has no idle count of its own: a run is closed by this
+            // framer, on either polarity having framed nothing.
+            upright: dsp::slice::Uart::new(5, usize::MAX),
+            inverted: dsp::slice::Uart::new(5, usize::MAX),
+            up: Vec::new(),
+            down: Vec::new(),
+            since_char: 0,
+            undecided: 0,
+        }
+    }
+
+    /// Feed one symbol, and hand back a run of codes where it ended one.
+    pub fn push(&mut self, sym: dsp::afsk::Symbol) -> Option<Vec<u8>> {
+        let flipped = dsp::afsk::Symbol { mark: !sym.mark, quiet: sym.quiet };
+        let a = read_into(&mut self.upright, sym, &mut self.up);
+        let b = read_into(&mut self.inverted, flipped, &mut self.down);
+        self.since_char = match a || b {
+            true => 0,
+            false => self.since_char + 1,
+        };
+        self.undecided = match sym.quiet {
+            true => self.undecided + 1,
+            false => 0,
+        };
+        let resting = self.undecided >= QUIET_SYMBOLS || self.since_char >= IDLE_SYMBOLS;
+        if !resting {
+            return match self.up.len().max(self.down.len()) >= MAX_CHARS {
+                true => self.take(),
+                false => None,
+            };
+        }
+        self.take()
+    }
+
+    /// Close whatever is open, and publish the better reading of it.
+    pub fn take(&mut self) -> Option<Vec<u8>> {
+        let up = std::mem::take(&mut self.up);
+        let down = std::mem::take(&mut self.down);
+        self.upright.reset();
+        self.inverted.reset();
+        self.undecided = 0;
+        self.since_char = 0;
+        // More characters framed is the first evidence, because a station
+        // read upside down loses its stop bits and frames almost nothing.
+        // Where both framed the same count, the tables decide.
+        let best = match (up.len(), down.len()) {
+            (a, b) if a > b => up,
+            (a, b) if b > a => down,
+            _ if printable(&down) > printable(&up) => down,
+            _ => up,
+        };
+        if best.len() < MIN_CHARS || printable(&best) < MIN_PRINTABLE {
+            return None;
+        }
+        Some(best)
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// One symbol into one line, keeping the character where it framed.
+fn read_into(line: &mut dsp::slice::Uart, sym: dsp::afsk::Symbol, codes: &mut Vec<u8>) -> bool {
+    match line.push(sym) {
+        dsp::slice::Read::Byte(code) => {
+            if codes.len() < MAX_CHARS {
+                codes.push(code);
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

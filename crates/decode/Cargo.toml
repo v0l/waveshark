@@ -8,6 +8,7 @@ license.workspace = true
 common.workspace = true
 dsp.workspace = true
 tracing.workspace = true
+chrono.workspace = true
 aes.workspace = true
 ctr.workspace = true
 sha2.workspace = true

@@ -14,36 +14,23 @@
 
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
-use common::bands::Usage;
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::wefax;
 use dsp::resample::Rational;
 use dsp::ssb::{Sideband, SsbDemod};
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::wefax::AUDIO_HZ;
+pub use identify::wefax::CHANNEL_WIDTH_HZ;
+pub use identify::wefax::DEFAULT_HZ;
+pub use identify::wefax::Wefax;
+pub use identify::wefax::{PASS_HIGH_HZ, PASS_LOW_HZ};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// What a transmission is called on the video bus.
 const SYSTEM: &str = "weather fax";
-
-/// Hamburg/Pinneberg on 7880 kHz, which is the schedule most of Europe
-/// listens to and is on the air around the clock.
-pub const DEFAULT_HZ: f64 = 7_880_000.0;
-
-/// The channel a fax broadcast occupies: 400 Hz either side of a tone at
-/// 1900, and the room a sideband filter needs around that.
-pub const CHANNEL_WIDTH_HZ: f64 = 3_000.0;
-
-/// The rate the picture is read at. A line is 1809 pixels in half a second at
-/// 120 lines a minute, so this is twelve samples a pixel, and the
-/// discriminator has nothing to gain from more.
-const AUDIO_HZ: f64 = 44_100.0;
-
-/// What the sideband filter passes: the shift with room either side for a
-/// transmitter tuned a little off.
-const PASS_LOW_HZ: f64 = 1_100.0;
-const PASS_HIGH_HZ: f64 = 2_700.0;
 
 pub struct WefaxNode {
     channel_hz: f64,
@@ -186,39 +173,33 @@ impl Simple for WefaxNode {
     }
 }
 
-pub struct Wefax;
-
 impl Protocol for Wefax {
     fn id(&self) -> &'static str {
-        "wefax"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "wefax"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["radiofax", "weatherfax", "fax"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Video]
     }
     /// Wherever a schedule puts one: the marine and meteorological
     /// broadcasts are scattered from 2 to 20 MHz and each service has its
     /// own list, so this is a frequency an operator sets.
-    fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility])
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: AUDIO_HZ,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.3} FAX", hz / 1e6)
     }

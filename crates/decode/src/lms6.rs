@@ -11,6 +11,8 @@
 
 use crate::bits::crc16;
 use crate::rs::ReedSolomon;
+use common::Decoded;
+use dsp::conv::{Code, Ends, Viterbi};
 
 /// The bytes a frame starts with.
 pub const SYNC: [u8; 4] = [0x24, 0x54, 0x00, 0x00];
@@ -144,6 +146,199 @@ pub fn parse(frame: &[u8]) -> Option<Report> {
         return None;
     }
     Some(r)
+}
+
+/// What the protocols node makes of an LMS6 frame.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes)?;
+    let (h, m, s) = r.utc;
+    let serial = format!("{}", r.serial);
+    let fields: Vec<(String, common::Value)> = vec![
+        ("model".into(), common::Value::Text("LMS6".into())),
+        ("serial".into(), common::Value::Text(serial.clone())),
+        ("frame".into(), common::Value::Int(r.frame_no as i64)),
+        ("altitude_m".into(), common::Value::Float(r.altitude_m)),
+        ("climb_ms".into(), common::Value::Float(r.climb_ms)),
+        ("speed_kt".into(), common::Value::Float(r.speed_kt)),
+        ("course_deg".into(), common::Value::Float(r.course_deg)),
+        ("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:06.3}"))),
+    ];
+
+    let mut d = Decoded::bytes("lms6", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(true))
+        .with_text(r.summary())
+        .with_detail(format!("LMS6, frame {}", r.frame_no))
+        .with_fields(fields)
+        .by(common::Identity::new("lms6", serial).made_by("Lockheed Martin"));
+    if r.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: r.altitude_m,
+                climb_ms: r.climb_ms,
+                // The frame carries no battery voltage.
+                battery_v: f32::NAN,
+                satellites: 0,
+                descending: r.climb_ms < -1.0,
+                sensors: None,
+            })
+            .at_position(common::Position {
+                lat: r.lat_deg,
+                lon: r.lon_deg,
+                altitude_m: Some(r.altitude_m),
+                speed_kt: Some(r.speed_kt),
+                course_deg: Some(r.course_deg),
+            });
+    }
+    Some(d)
+}
+
+/// This sonde's own rate 1/2 code: constraint seven, and neither of the two
+/// polynomials every other standard here uses.
+pub const CODE: Code = Code { constraint: 7, polys: &[0x4F, 0x6D] };
+
+/// Bytes in a block: the sync and the Reed-Solomon codeword.
+pub const BLOCK: usize = BLOCK_SYNC.len() + CODEWORD;
+
+/// Bits in a block once the trellis has run, and coded bits on the air. One
+/// byte of tail is read with it, as the decoder it came from does, so the
+/// last bits of the block have something behind them in the trellis.
+pub const BLOCK_BITS: usize = (BLOCK + 1) * 8;
+
+pub const CODED_BITS: usize = BLOCK_BITS * 2;
+
+/// Coded bits held while looking for a block: two blocks and a bit.
+pub const MAX_BITS: usize = CODED_BITS * 2;
+
+/// Coded bits of the sync allowed to be wrong. The Reed-Solomon behind it
+/// refuses what a false sync produces, and a sonde at the edge of reception
+/// loses a few.
+pub const SYNC_SLACK: u32 = 8;
+
+/// The block sync as it goes out: through the same code the data does, with
+/// the second of each pair inverted.
+pub fn sync_bits() -> Vec<bool> {
+    let mut enc = dsp::conv::Encoder::new(CODE);
+    let mut coded = Vec::new();
+    for byte in BLOCK_SYNC {
+        for k in (0..8).rev() {
+            enc.push(byte >> k & 1, &mut coded);
+        }
+    }
+    coded.iter().enumerate().map(|(i, b)| (*b == 1) != (i % 2 == 1)).collect()
+}
+
+/// Whether the sync sits at `at`, and which way up.
+pub fn matches(bits: &[bool], at: usize, sync: &[bool]) -> Option<bool> {
+    let mut wrong = [0u32; 2];
+    for (k, &want) in sync.iter().enumerate() {
+        wrong[usize::from(bits[at + k] == want)] += 1;
+    }
+    match (wrong[0] <= SYNC_SLACK, wrong[1] <= SYNC_SLACK) {
+        (true, _) => Some(false),
+        (_, true) => Some(true),
+        _ => None,
+    }
+}
+
+/// Frames cut out of a stream of bits.
+///
+/// Above the waveform and below the payload: the bits come from any FSK
+/// demodulator at this sonde's baud, and what leaves is what the payload
+/// reader takes.
+pub struct Framer {
+    bits: Vec<bool>,
+    /// Positions already searched and known not to start a header.
+    scanned: usize,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self { bits: Vec::new(), scanned: 0 }
+    }
+
+    /// The buffer a bit clock appends into.
+    pub fn sink(&mut self) -> &mut Vec<bool> {
+        &mut self.bits
+    }
+
+    pub fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let sync = sync_bits();
+        let mut at = self.scanned;
+        while at + sync.len() <= self.bits.len() {
+            let Some(inverted) = matches(&self.bits, at, &sync) else {
+                at += 1;
+                continue;
+            };
+            if at + CODED_BITS > self.bits.len() {
+                self.scanned = at;
+                return out;
+            }
+            match self.read_block(at, inverted) {
+                Some(frame) => {
+                    out.push(frame);
+                    self.bits.drain(..at + CODED_BITS);
+                    at = 0;
+                    self.scanned = 0;
+                }
+                None => at += 1,
+            }
+        }
+        self.scanned = at;
+        out
+    }
+
+    /// The block starting at coded bit `at`: the trellis, the block code,
+    /// and the frame inside it.
+    fn read_block(&self, at: usize, inverted: bool) -> Option<Vec<u8>> {
+        // The trellis reads soft values, and what a hard slicer produces is
+        // the same thing with every value at full confidence.
+        let soft: Vec<f32> = self.bits[at..at + CODED_BITS]
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| {
+                // The second of each coded pair goes out inverted, and the
+                // whole stream may be over as well.
+                let bit = b != inverted && i % 2 == 0 || b == inverted && i % 2 == 1;
+                match bit {
+                    true => -1.0,
+                    false => 1.0,
+                }
+            })
+            .collect();
+        let decoded =
+            Viterbi::decode_block(CODE, &soft, dsp::conv::P_1_2, BLOCK_BITS, Ends::Anywhere);
+        let bytes: Vec<u8> =
+            decoded.chunks(8).map(|b| b.iter().fold(0u8, |v, bit| v << 1 | (*bit & 1))).collect();
+        if bytes.len() < BLOCK || bytes[..BLOCK_SYNC.len()] != BLOCK_SYNC {
+            return None;
+        }
+        let mut block = bytes[BLOCK_SYNC.len()..BLOCK].to_vec();
+        correct(&mut block)?;
+        let frame = block[..FRAME].to_vec();
+        parse(&frame).is_some().then_some(frame)
+    }
+
+    /// Drop what has been searched and found wanting.
+    pub fn trim(&mut self) {
+        if self.bits.len() > MAX_BITS {
+            let drop = self.bits.len() - MAX_BITS;
+            self.bits.drain(..drop);
+            self.scanned = self.scanned.saturating_sub(drop);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.bits.clear();
+        self.scanned = 0;
+    }
 }
 
 #[cfg(test)]

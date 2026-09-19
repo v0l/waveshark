@@ -15,6 +15,7 @@
 //! whose own number says which model it is.
 
 use crate::bits::hamming84;
+use common::Decoded;
 
 /// The frame header, 16 bits, once the Manchester coding is off.
 pub const HEADER: u16 = 0x45CF;
@@ -441,6 +442,210 @@ fn identity(conf: &[[u8; CONF_NIBBLES]]) -> (Model, String) {
     match (halves[0], halves[1]) {
         (Some(hi), Some(lo)) => (model, format!("{}", (u32::from(hi) << 16) | u32::from(lo))),
         _ => (model, String::new()),
+    }
+}
+
+/// What the protocols node makes of a gathered record.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes)?;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("model".into(), common::Value::Text(r.model.label().into())),
+        ("frame".into(), common::Value::Int(r.frame_no as i64)),
+    ];
+    if !r.serial.is_empty() {
+        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
+    }
+    if r.has_position() {
+        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
+        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
+        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
+        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+    }
+    if r.satellites > 0 {
+        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
+    }
+    if let Some((y, mo, d, h, mi)) = r.date {
+        fields.push((
+            "utc".into(),
+            common::Value::Text(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")),
+        ));
+    }
+
+    // The serial is what a chaser follows and what SondeHub files a flight
+    // under; a sonde that has not sent both halves of it yet is still a
+    // sonde, so it is reported without an identity rather than under a
+    // made-up one.
+    let mut d = Decoded::bytes("dfm", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(true))
+        .with_text(r.summary())
+        .with_detail(format!("{}, frame {}", r.model.label(), r.frame_no))
+        .with_fields(fields);
+    if !r.serial.is_empty() {
+        d = d.by(common::Identity::new("graw", r.serial.clone()).made_by("Graw"));
+    }
+    if r.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: r.altitude_m,
+                climb_ms: r.climb_ms,
+                // A DFM sends no battery voltage; not-a-number is how a
+                // sonde track says a reading has not been read.
+                battery_v: f32::NAN,
+                satellites: r.satellites,
+                descending: r.climb_ms < -1.0,
+                sensors: None,
+            })
+            .at_position(common::Position {
+                lat: r.lat_deg,
+                lon: r.lon_deg,
+                altitude_m: Some(r.altitude_m),
+                speed_kt: Some(r.speed_kt),
+                course_deg: Some(r.course_deg),
+            });
+    }
+    Some(d)
+}
+
+/// Chips in one frame.
+pub const FRAME_CHIPS: usize = FRAME_BITS * 2;
+
+/// Chips held while looking for a header: three frames, so a frame
+/// straddling two blocks is never lost and a quiet channel cannot grow.
+pub const MAX_CHIPS: usize = FRAME_CHIPS * 3;
+
+/// Chips of the header allowed to be wrong. The header is 32 chips and
+/// every nibble behind it is protected, so a false header costs one Hamming
+/// failure and nothing else.
+pub const HEADER_SLACK: u32 = 4;
+
+/// Whether the header sits at `at`, and which way up it is. `Some(true)`
+/// where the chips are inverted, which is how a DFM-06 and a DFM-09 differ.
+pub fn matches(chips: &[bool], at: usize, header: &[bool]) -> Option<bool> {
+    let mut wrong = [0u32; 2];
+    for (k, &want) in header.iter().enumerate() {
+        let got = chips[at + k];
+        wrong[(got == want) as usize] += 1;
+        if wrong[0] > HEADER_SLACK && wrong[1] > HEADER_SLACK {
+            return None;
+        }
+    }
+    match (wrong[0] <= HEADER_SLACK, wrong[1] <= HEADER_SLACK) {
+        (true, _) => Some(false),
+        (_, true) => Some(true),
+        _ => None,
+    }
+}
+
+/// The header as it arrives: every bit as two chips, `01` for a one.
+pub fn header_chips() -> Vec<bool> {
+    (0..16)
+        .flat_map(|k| {
+            let bit = HEADER >> (15 - k) & 1 != 0;
+            [!bit, bit]
+        })
+        .collect()
+}
+
+/// Manchester chips back to bits. The second chip of each pair is the bit,
+/// and a pair that is not a transition is left to the Hamming code: half a
+/// wrong pair is one wrong bit, which is what that code is for.
+pub fn manchester(chips: &[bool], inverted: bool) -> Vec<bool> {
+    chips.chunks(2).map(|c| c[c.len() - 1] != inverted).collect()
+}
+
+/// Frames cut out of a stream of chips.
+///
+/// Above the waveform and below the payload: the chips come from any FSK
+/// demodulator at this sonde's baud, and what leaves is what the payload
+/// reader takes.
+pub struct Framer {
+    chips: Vec<bool>,
+    /// Frames whose every nibble came through the Hamming code.
+    frames: u64,
+    /// Records gathered, which is what a reader takes.
+    records: u64,
+    /// Positions already searched and known not to start a header.
+    scanned: usize,
+    gather: Gather,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self { chips: Vec::new(), scanned: 0, frames: 0, records: 0, gather: Gather::new() }
+    }
+
+    /// The buffer a bit clock appends into.
+    pub fn sink(&mut self) -> &mut Vec<bool> {
+        &mut self.chips
+    }
+
+    /// Frames whose every nibble came through the Hamming code.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Records gathered out of those frames.
+    pub fn records(&self) -> u64 {
+        self.records
+    }
+
+    /// Look for headers in the chips held, returning every record a frame
+    /// behind one completed.
+    pub fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let header = header_chips();
+        let mut at = self.scanned;
+        while at + header.len() <= self.chips.len() {
+            let Some(inverted) = matches(&self.chips, at, &header) else {
+                at += 1;
+                continue;
+            };
+            if at + FRAME_CHIPS > self.chips.len() {
+                // Not enough of the frame has arrived. Waiting here rather
+                // than walking past it is what keeps a frame that straddles
+                // two blocks.
+                self.scanned = at;
+                return out;
+            }
+            let bits = manchester(&self.chips[at..at + FRAME_CHIPS], inverted);
+            match read(&bits) {
+                Some(frame) => {
+                    self.frames += 1;
+                    if let Some(record) = self.gather.take(&frame) {
+                        self.records += 1;
+                        out.push(record);
+                    }
+                    self.chips.drain(..at + FRAME_CHIPS);
+                    at = 0;
+                    self.scanned = 0;
+                }
+                None => at += 1,
+            }
+        }
+        self.scanned = at;
+        out
+    }
+
+    /// Drop what has been searched and found wanting.
+    pub fn trim(&mut self) {
+        if self.chips.len() > MAX_CHIPS {
+            let drop = self.chips.len() - MAX_CHIPS;
+            self.chips.drain(..drop);
+            self.scanned = self.scanned.saturating_sub(drop);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.chips.clear();
+        self.scanned = 0;
+        self.gather = Gather::new();
     }
 }
 

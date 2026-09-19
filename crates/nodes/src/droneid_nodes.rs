@@ -32,44 +32,20 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
+pub use decode::droneid::TAG;
+pub use decode::droneid::decoded;
+pub use decode::droneid::wrap;
+use identify::Signal;
+pub use identify::droneid::DEFAULT_HZ;
+pub use identify::droneid::DroneId;
+pub use identify::droneid::RATE_HZ;
+pub use identify::droneid::THRESHOLD;
+pub use identify::droneid::WIDTH_HZ;
+pub use identify::droneid::channels;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// The occupied bandwidth: 600 carriers 15 kHz apart, plus guards.
-pub const WIDTH_HZ: f64 = dsp::droneid::WIDTH_HZ;
-
-/// The rate the frame is defined at, which is also the rate this asks for.
-pub const RATE_HZ: f64 = dsp::droneid::RATE;
-
-/// The centre a receiver picks when it has to pick one: the middle of the
-/// 2.4 GHz set, where the bursts in the bench captures were.
-pub const DEFAULT_HZ: f64 = 2_444_500_000.0;
-
-/// How strongly the Zadoff-Chu symbol has to correlate. Off air, a burst
-/// scores 0.88 to 0.99 and nothing else in a busy 2.4 GHz band comes near
-/// half of that, so this is not a knife edge.
-const THRESHOLD: f32 = 0.5;
-
-/// Every centre DroneID has been seen on, 2.4 GHz then 5.8.
-pub fn channels() -> Vec<f64> {
-    dsp::droneid::CENTERS_2G4_HZ
-        .iter()
-        .chain(dsp::droneid::CENTERS_5G8_HZ.iter())
-        .copied()
-        .collect()
-}
-
-/// The tag in front of a frame on the bus, so a row can be told from any
-/// other 91 bytes arriving on the same centre.
-const TAG: [u8; 4] = *b"DJID";
-
-pub fn wrap(frame: &[u8]) -> Vec<u8> {
-    let mut v = TAG.to_vec();
-    v.extend_from_slice(frame);
-    v
-}
 
 pub struct DroneIdNode {
     span: Option<dsp::droneid::DroneIdSpan>,
@@ -161,56 +137,23 @@ impl Simple for DroneIdNode {
     }
 }
 
-/// The row a frame becomes.
-///
-/// `None` when the bytes are not a DroneID frame, which is how the packet bus
-/// tells one from anything else arriving on the same centre.
-pub fn droneid_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if bytes.len() < TAG.len() + decode::droneid::FRAME_LEN || bytes[..4] != TAG {
-        return None;
-    }
-    let f = decode::droneid::parse(&bytes[4..])?;
-    let mut fields = decode::droneid::fields(&f);
-    fields.push(("protocol".into(), Value::Text("DJI DroneID".into())));
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-
-    // The row is filed under the airframe's serial, which is the identity
-    // this protocol exists to broadcast and is printed on the aircraft.
-    let mut who = common::Identity::new("dji", f.serial.clone());
-    who.name = decode::droneid::device_name(f.device_type).map(str::to_string);
-    who.vendor = Some("DJI".into());
-    let mut d = Decoded::bytes("DJI-DroneID", center, 0.0, bytes[4..].to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Ofdm)
-        // A CRC-16 over the frame and a CRC-24 over the block it rode in.
-        .with_crc(Some(true));
-    if let (Some(lat), Some(lon)) = (f.latitude, f.longitude) {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: Some(f.altitude_m),
-            ..Default::default()
-        });
-    }
-    Some(d)
-}
-
-/// DroneID as the auto node and the tables know it.
-pub struct DroneId;
-
 impl Protocol for DroneId {
     fn id(&self) -> &'static str {
-        "droneid"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "droneid"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(channels())
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The front end puts its own tag in front of the frame, which is the
     /// most specific claim there is and the only one that tells a DroneID
     /// frame from the 91 bytes anything else might read on a 2.4 GHz centre.
@@ -218,20 +161,9 @@ impl Protocol for DroneId {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        droneid_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[WIDTH_HZ],
-            min_rate_hz: RATE_HZ,
-            feed_rate_hz: RATE_HZ,
-            span_wide: true,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     /// A burst is 720 us roughly twice a second, so a decoder that owns its
     /// channel between bursts owns 10 MHz of a shared band for nothing. The
     /// band is shared: 2.4 GHz holds Wi-Fi, Bluetooth and every ISM device
@@ -279,6 +211,17 @@ impl Protocol for DroneId {
     }
 }
 
+pub const DESC: StageDesc = StageDesc {
+    name: "droneid",
+    summary: "DJI DroneID: the 15.36 MS/s OFDM burst an aircraft broadcasts about itself",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(DroneIdNode::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,7 +243,7 @@ mod tests {
         frame.resize(decode::droneid::FRAME_LEN - 2, 0);
         let crc = decode::droneid::crc16(&frame);
         frame.extend(crc.to_le_bytes());
-        let d = droneid_decoded(&wrap(&frame), common::Hz(2_444_500_000)).expect("a row");
+        let d = decoded(&wrap(&frame), common::Hz(2_444_500_000)).expect("a row");
         assert_eq!(d.protocol, "DJI-DroneID");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("serial=F8PJC254J001JR4R"), "{detail}");
@@ -309,13 +252,13 @@ mod tests {
 
     #[test]
     fn bytes_that_are_not_a_frame_are_not_a_row() {
-        assert!(droneid_decoded(&[0u8; 40], common::Hz(2_444_500_000)).is_none());
+        assert!(decoded(&[0u8; 40], common::Hz(2_444_500_000)).is_none());
         // A frame with no tag in front of it did not come from here.
-        assert!(droneid_decoded(&off_air(), common::Hz(2_444_500_000)).is_none());
+        assert!(decoded(&off_air(), common::Hz(2_444_500_000)).is_none());
         // And one whose CRC does not check is not reported at all.
         let mut bad = off_air();
         bad.resize(decode::droneid::FRAME_LEN, 0);
-        assert!(droneid_decoded(&wrap(&bad), common::Hz(2_444_500_000)).is_none());
+        assert!(decoded(&wrap(&bad), common::Hz(2_444_500_000)).is_none());
     }
 
     #[test]
@@ -329,15 +272,4 @@ mod tests {
         assert!(n.negotiate(&spec(dsp::droneid::RATE)).is_ok());
         assert!(n.negotiate(&spec(20_000_000.0)).is_ok());
     }
-}
-
-pub const DESC: StageDesc = StageDesc {
-    name: "droneid",
-    summary: "DJI DroneID: the 15.36 MS/s OFDM burst an aircraft broadcasts about itself",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(DroneIdNode::new()))
 }

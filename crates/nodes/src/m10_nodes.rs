@@ -18,54 +18,23 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::m10;
+pub use decode::m10::decoded;
 use dsp::fsk::BitSync;
+use identify::Signal;
+pub use identify::m10::BAND;
+pub use identify::m10::BAUD;
+pub use identify::m10::CHANNEL_WIDTH_HZ;
+pub use identify::m10::M10;
+pub use identify::m10::OCCUPIED_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// Chips a second. An M10 keys 9615 and an M20 9600, which is a sixth of a
-/// chip apart over a whole frame and well inside what the clock recovery
-/// follows, so both are read at the one rate.
-pub const BAUD: f64 = 9_615.0;
-
-/// The channel a Meteomodem sonde is tuned to.
-pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
-
-/// What the signal occupies.
-pub const OCCUPIED_HZ: f64 = 20_000.0;
-
-/// The meteorological aids band.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// The sync header, as chips. Not a byte of the frame: the frame's own
-/// length and type follow it, and this is what says where they start.
-const SYNC: [bool; 32] = {
-    let raw = *b"10011001100110010100110010011001";
-    let mut out = [false; 32];
-    let mut i = 0;
-    while i < 32 {
-        out[i] = raw[i] == b'1';
-        i += 1;
-    }
-    out
-};
-
-/// Chips of the sync allowed to be wrong. There is no error correction in
-/// either sonde, so a false sync costs one checksum and nothing else.
-const SYNC_SLACK: u32 = 4;
-
-/// Chips held while looking for a sync: two of the longest frames and their
-/// headers.
-const MAX_CHIPS: usize = (m10::MAX_FRAME + 2) * 8 * 2 * 2;
-
 pub struct M10Node {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
-    chips: Vec<bool>,
-    /// Chips already searched and known not to start a sync.
-    scanned: usize,
-    frames: u64,
+    framer: m10::Framer,
 }
 
 impl Default for M10Node {
@@ -76,116 +45,13 @@ impl Default for M10Node {
 
 impl M10Node {
     pub fn new() -> Self {
-        Self {
-            sync: None,
-            meter: crate::FrameMeter::new(1.0, 0, 0.6),
-            chips: Vec::new(),
-            scanned: 0,
-            frames: 0,
-        }
+        Self { sync: None, meter: crate::FrameMeter::new(1.0, 0, 0.6), framer: m10::Framer::new() }
     }
 
     /// Frames whose checksum held.
     pub fn frames(&self) -> u64 {
-        self.frames
+        self.framer.frames()
     }
-
-    /// Look for syncs in the chips held, returning every frame behind one.
-    fn search(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut at = self.scanned;
-        while at + SYNC.len() <= self.chips.len() {
-            if !synced(&self.chips, at) {
-                at += 1;
-                continue;
-            }
-            match self.read_frame(at + SYNC.len(), self.chips[at + SYNC.len() - 1]) {
-                Some(Some(frame)) => {
-                    self.frames += 1;
-                    let used = at + SYNC.len() + frame.len() * 16;
-                    out.push(frame);
-                    self.chips.drain(..used.min(self.chips.len()));
-                    at = 0;
-                    self.scanned = 0;
-                }
-                // A sync whose frame has not all arrived: wait here, so a
-                // frame split across two blocks is not walked past.
-                Some(None) => {
-                    self.scanned = at;
-                    return out;
-                }
-                None => at += 1,
-            }
-        }
-        self.scanned = at;
-        out
-    }
-
-    /// The frame starting at chip `at`. `None` where those chips are not a
-    /// frame, `Some(None)` where not enough of them have arrived.
-    ///
-    /// The length is in the frame's first byte, so two bytes are read to
-    /// find out how many more to read.
-    ///
-    /// `seed` is the pair the first bit is measured against, which is the
-    /// last pair of the sync header: the sonde's differential encoder ran
-    /// through the header without stopping, and taking the reference from
-    /// there is what makes the whole frame read the same either way up.
-    /// Where that gives no frame the other reference is tried, since it can
-    /// only change the first bit of the length byte and trying it costs one
-    /// checksum.
-    fn read_frame(&self, at: usize, seed: bool) -> Option<Option<Vec<u8>>> {
-        let mut short = false;
-        for seed in [seed, !seed] {
-            let Some(head) = bytes(&self.chips, at, 2, seed) else {
-                short = true;
-                continue;
-            };
-            let Some(len) = m10::declared_len(&head) else { continue };
-            let Some(frame) = bytes(&self.chips, at, len + 1, seed) else {
-                short = true;
-                continue;
-            };
-            if m10::check_ok(&frame) {
-                return Some(Some(frame));
-            }
-        }
-        match short {
-            true => Some(None),
-            false => None,
-        }
-    }
-}
-
-/// Whether the sync sits at `at`, either way up. Which way is not worth
-/// keeping: the frame behind it is differentially coded, so it reads the
-/// same whichever way the receiver put it.
-fn synced(chips: &[bool], at: usize) -> bool {
-    let mut wrong = [0u32; 2];
-    for (k, &want) in SYNC.iter().enumerate() {
-        wrong[(chips[at + k] == want) as usize] += 1;
-    }
-    wrong[0] <= SYNC_SLACK || wrong[1] <= SYNC_SLACK
-}
-
-/// `count` bytes of frame from chip `at`, or `None` where the chips have not
-/// all arrived.
-///
-/// Two chips make a bit and the bit is whether the pair went the same way as
-/// the pair before it, the first pair being measured against a fall. Bits
-/// are most significant first within a byte.
-fn bytes(chips: &[bool], at: usize, count: usize, seed: bool) -> Option<Vec<u8>> {
-    if at + count * 16 > chips.len() {
-        return None;
-    }
-    let mut out = vec![0u8; count];
-    let mut last = seed;
-    for i in 0..count * 8 {
-        let pair = chips[at + 2 * i + 1];
-        out[i / 8] = out[i / 8] << 1 | u8::from(pair == last);
-        last = pair;
-    }
-    Some(out)
 }
 
 impl Simple for M10Node {
@@ -216,113 +82,43 @@ impl Simple for M10Node {
             return Ok(());
         };
         self.meter.feed(iq);
-        s.process(iq, &mut self.chips);
-        for frame in self.search() {
+        s.process(iq, self.framer.sink());
+        for frame in self.framer.take() {
             o.frames_mut().push(self.meter.frame(frame));
         }
-        if self.chips.len() > MAX_CHIPS {
-            let drop = self.chips.len() - MAX_CHIPS;
-            self.chips.drain(..drop);
-            self.scanned = self.scanned.saturating_sub(drop);
-        }
+        self.framer.trim();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.meter.reset();
-        self.chips.clear();
-        self.scanned = 0;
+        self.framer.reset();
         if let Some(s) = &mut self.sync {
             s.reset();
         }
     }
 }
 
-/// What the protocols node makes of a Meteomodem frame.
-pub fn m10_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = m10::parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text(r.model.label().into())),
-        ("serial".into(), common::Value::Text(r.serial.clone())),
-        ("counter".into(), common::Value::Int(r.counter as i64)),
-    ];
-    if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
-    }
-    if r.satellites > 0 {
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if r.gps_week > 0 {
-        fields.push(("gps_week".into(), common::Value::Int(r.gps_week as i64)));
-    }
-    if let Some((y, mo, d, h, mi, s)) = r.utc {
-        fields.push((
-            "utc".into(),
-            common::Value::Text(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:04.1}")),
-        ));
-    }
-
-    let mut d = Decoded::bytes("m10", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("{}, counter {}", r.model.label(), r.counter))
-        .with_fields(fields)
-        .by(common::Identity::new("meteomodem", r.serial.clone()).made_by("Meteomodem"));
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // Neither sonde sends its battery voltage in the standard
-                // part of the frame; not-a-number is how a sonde track says
-                // a reading has not been read.
-                battery_v: f32::NAN,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct M10;
-
 impl Protocol for M10 {
     fn id(&self) -> &'static str {
-        "m10"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "m10"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["m20", "meteomodem"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        403_000_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 4.0 * BAUD,
-            feed_rate_hz: 96_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -334,7 +130,7 @@ impl Protocol for M10 {
         if !(BAND.0..BAND.1).contains(&hz) || m10::frame_len(bytes).is_none() {
             return None;
         }
-        Some(m10_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -358,6 +154,7 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use decode::m10::SYNC;
 
     /// A frame on the air: the sync header, then every bit as a pair of
     /// chips that either repeats the last pair or turns it over.
@@ -418,15 +215,13 @@ mod tests {
             n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
             let mut got = Vec::new();
             for block in iq.chunks(2048) {
-                let mut chips = Vec::new();
-                n.sync.as_mut().unwrap().process(block, &mut chips);
-                n.chips.extend(chips);
-                got.extend(n.search());
+                n.sync.as_mut().unwrap().process(block, n.framer.sink());
+                got.extend(n.framer.take());
             }
             assert_eq!(got.len(), 1, "{} frames, inverted {inverted}", got.len());
             assert_eq!(got[0], frame, "the bytes are not the ones that were keyed");
 
-            let d = m10_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
             assert_eq!(d.field("model").map(|v| v.to_string()).as_deref(), Some("M10"));
             let p = d.position.expect("a position");
             assert!((p.lat - 53.35).abs() < 1e-6, "{}", p.lat);
@@ -454,15 +249,9 @@ mod tests {
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
         let mut frames = 0;
         for block in iq.chunks(4096) {
-            let mut chips = Vec::new();
-            n.sync.as_mut().unwrap().process(block, &mut chips);
-            n.chips.extend(chips);
-            frames += n.search().len();
-            if n.chips.len() > MAX_CHIPS {
-                let drop = n.chips.len() - MAX_CHIPS;
-                n.chips.drain(..drop);
-                n.scanned = n.scanned.saturating_sub(drop);
-            }
+            n.sync.as_mut().unwrap().process(block, n.framer.sink());
+            frames += n.framer.take().len();
+            n.framer.trim();
         }
         assert_eq!(frames, 0, "{frames} frames out of twenty seconds of noise");
     }

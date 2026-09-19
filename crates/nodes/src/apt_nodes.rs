@@ -17,31 +17,19 @@ use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::apt;
 use dsp::resample::Rational;
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::apt::AUDIO_HZ;
+pub use identify::apt::Apt;
+pub use identify::apt::CHANNEL_WIDTH_HZ;
+pub use identify::apt::DEFAULT_HZ;
+pub use identify::apt::DEVIATION_HZ;
+pub use identify::apt::SATELLITES;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// What a transmission is called on the video bus.
 const SYSTEM: &str = "APT";
-
-/// The three birds still sending pictures, and what they are called.
-pub const SATELLITES: [(&str, f64); 3] =
-    [("NOAA 19", 137_100_000.0), ("NOAA 15", 137_620_000.0), ("NOAA 18", 137_912_500.0)];
-
-/// NOAA 19, which is the one most likely to be overhead and working.
-pub const DEFAULT_HZ: f64 = 137_100_000.0;
-
-/// The channel a satellite occupies: the transponder is 34 kHz wide and the
-/// spacing on the band is 40.
-pub const CHANNEL_WIDTH_HZ: f64 = 40_000.0;
-
-/// The rate the picture is read at: ten samples a word, which is a whole
-/// number of them and leaves the channel room, since a 34 kHz channel cannot
-/// be demodulated at the 20.8 kHz that five samples a word would give.
-const AUDIO_HZ: f64 = 10.0 * apt::WORD_RATE;
-
-/// Peak deviation of the downlink, which the guide gives as 17 kHz.
-const DEVIATION_HZ: f64 = 17_000.0;
 
 pub struct AptNode {
     channel_hz: f64,
@@ -192,38 +180,32 @@ impl Simple for AptNode {
     }
 }
 
-pub struct Apt;
-
 impl Protocol for Apt {
     fn id(&self) -> &'static str {
-        "apt"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "apt"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["noaa"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Video]
     }
     /// The three channels the birds are on and nowhere else: APT is a
     /// downlink with three transmitters in the sky.
-    fn placement(&self) -> Placement {
-        Placement::Channels(SATELLITES.iter().map(|(_, hz)| *hz).collect())
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: AUDIO_HZ,
-            feed_rate_hz: 100_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         match SATELLITES.iter().find(|(_, c)| (c - hz).abs() < CHANNEL_WIDTH_HZ / 2.0) {
             Some((name, _)) => format!("{name} APT"),

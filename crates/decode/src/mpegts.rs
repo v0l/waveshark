@@ -304,10 +304,10 @@ impl Mux {
         if h.payload.is_some() {
             self.counters.insert(h.pid, h.counter);
         }
-        if let (Some(at), Some(a)) = (h.payload, self.following.get_mut(&h.pid)) {
-            if let Some(pes) = a.push(h.pid, &packet[at..], h.start) {
-                self.ready.push(pes);
-            }
+        if let (Some(at), Some(a)) = (h.payload, self.following.get_mut(&h.pid))
+            && let Some(pes) = a.push(h.pid, &packet[at..], h.start)
+        {
+            self.ready.push(pes);
         }
         let table = h.pid == PID_PAT
             || h.pid == PID_SDT

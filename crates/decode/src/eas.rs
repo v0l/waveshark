@@ -27,6 +27,7 @@
 //! who originated it, what it is about, the counties it covers as FIPS
 //! codes, how long it runs, when it was issued and who sent it.
 
+use common::Decoded;
 /// The preamble byte, sixteen of which open every burst.
 pub const PREAMBLE: u8 = 0xAB;
 pub const PREAMBLE_BYTES: usize = 16;
@@ -689,6 +690,60 @@ pub fn encode_bits(header: &str) -> Vec<bool> {
         }
     }
     bits
+}
+
+/// One row: what the alert is, who sent it, where it applies and how long it
+/// runs.
+///
+/// A machine wrote it and addressed it to everybody, so it is not `written`:
+/// the fields and the summary are what a person reads, and the message view
+/// is for people writing to people.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let alert = parse(bytes)?;
+    let mut fields: Vec<(String, common::Value)> = Vec::new();
+    let (detail, text, identity) = match &alert {
+        Header::EndOfMessage => {
+            fields.push(("event".into(), common::Value::Text("end of message".into())));
+            ("end of message".to_string(), "The alert is over.".to_string(), None)
+        }
+        Header::Alert(a) => {
+            fields.push(("event".into(), common::Value::Text(a.event().to_string())));
+            fields.push(("event_code".into(), common::Value::Text(a.event_code.clone())));
+            fields
+                .push(("originator".into(), common::Value::Text(a.originator.label().to_string())));
+            fields.push(("originator_code".into(), common::Value::Text(a.originator_code.clone())));
+            fields.push(("station".into(), common::Value::Text(a.station.clone())));
+            fields.push(("counties".into(), common::Value::Int(a.locations.len() as i64)));
+            fields.push(("area".into(), common::Value::Text(a.where_label())));
+            fields.push((
+                "fips".into(),
+                common::Value::Text(
+                    a.locations.iter().map(|l| l.code()).collect::<Vec<_>>().join(" "),
+                ),
+            ));
+            fields.push(("valid_minutes".into(), common::Value::Int(i64::from(a.valid_minutes))));
+            fields.push(("issued".into(), common::Value::Text(a.issued.label())));
+            (
+                format!("{} from {}", a.event(), a.station),
+                a.summary(),
+                Some(common::Identity::new("eas-station", a.station.clone())),
+            )
+        }
+    };
+    let mut d = Decoded::bytes("EAS", center, 0.0, bytes.to_vec())
+        .with_media(common::media::TEXT)
+        .with_detail(detail)
+        .with_text(text)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Afsk)
+        // SAME carries no check sequence at all. The three copies and the
+        // form of the header are what stand in for one, so there is nothing
+        // here to report as passed.
+        .with_crc(None);
+    if let Some(who) = identity {
+        d = d.by(who);
+    }
+    Some(d)
 }
 
 #[cfg(test)]

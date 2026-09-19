@@ -18,6 +18,7 @@
 
 use crate::bits::{bch63_16, hamming10_6};
 use crate::rs::ReedSolomon;
+use common::Decoded;
 
 /// The frame synchronisation word, 48 bits, most significant first. It keys
 /// only the outer two levels, so it survives a badly closed eye.
@@ -433,6 +434,300 @@ pub fn hex_words(bytes: &[u8]) -> Vec<u8> {
     let bits: Vec<u8> = bytes.iter().flat_map(|b| (0..8).rev().map(move |i| b >> i & 1)).collect();
     bits.chunks(6).map(|c| c.iter().fold(0u8, |v, &b| v << 1 | b)).collect()
 }
+
+/// Recognise and describe a P25 row for the packet log. `None` for anything
+/// this node did not write, so it is safe to try on every frame.
+///
+/// A voice frame is 180 ms of the channel and says so; where it carried the
+/// link control it names the talkgroup and the radio, which is what puts the
+/// call in the call list rather than only in the log. Nothing here is written
+/// by a person, so nothing is marked as written.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    if bytes.len() < HEAD_LEN || bytes[..2] != P25_TAG {
+        return None;
+    }
+    let nac = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let duid = Duid::from_bits(bytes[4]);
+    let flags = bytes[5];
+    let dst = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
+    let src = u32::from_be_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+    let payload = &bytes[HEAD_LEN..];
+
+    let mut fields: Vec<(String, Value)> = vec![
+        ("nac".to_string(), Value::Text(format!("{nac:03X}"))),
+        ("frame".to_string(), Value::Text(duid.name().to_string())),
+    ];
+    if flags & FLAG_HAVE_LC != 0 {
+        fields.push(("to".to_string(), Value::Text(dst.to_string())));
+        fields.push(("from".to_string(), Value::Text(src.to_string())));
+        fields.push((
+            "call_type".to_string(),
+            Value::Text(if flags & FLAG_GROUP != 0 { "group" } else { "private" }.to_string()),
+        ));
+        if flags & FLAG_EMERGENCY != 0 {
+            fields.push(("emergency".to_string(), Value::Bool(true)));
+        }
+    }
+    if flags & FLAG_HAVE_ES != 0 && payload.len() == 12 {
+        let (algid, kid) = (payload[9], u16::from_be_bytes([payload[10], payload[11]]));
+        if algid != Encryption::CLEAR {
+            fields.push(("algorithm".to_string(), Value::Text(algorithm(algid).to_string())));
+            fields.push(("key_id".to_string(), Value::Int(i64::from(kid))));
+        }
+    }
+    if flags & FLAG_ENCRYPTED != 0 {
+        fields.push(("encrypted".to_string(), Value::Bool(true)));
+    }
+    if duid.voice() {
+        fields.push(("voice".to_string(), Value::Bool(true)));
+        fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
+        fields.push(("seconds".to_string(), Value::Float(VOICE_SECONDS)));
+        fields.push(("live".to_string(), Value::Bool(true)));
+    }
+
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let mut d = Decoded::bytes(duid.label(), center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Fsk4)
+        // The network identifier passed its BCH and, on a voice frame, the
+        // words passed Hamming and Reed-Solomon; nothing reaches here that
+        // did not.
+        .with_crc(Some(true));
+    if flags & FLAG_HAVE_LC != 0 {
+        use common::Party;
+        let to = if flags & FLAG_GROUP != 0 {
+            Party::group(dst.to_string())
+        } else {
+            Party::unit(dst.to_string())
+        };
+        d.link = Some(common::Link::between(Party::unit(src.to_string()), to));
+        d.identity = Some(common::Identity::new("p25", src.to_string()));
+    }
+    if duid.voice() {
+        d.airtime = Some(common::Airtime {
+            seconds: VOICE_SECONDS,
+            voice: true,
+            live: true,
+            secrecy: if flags & FLAG_ENCRYPTED != 0 {
+                common::Secrecy::Encrypted(None)
+            } else {
+                common::Secrecy::Clear
+            },
+            codec: Some(CODEC),
+        });
+    }
+    Some(d)
+}
+
+/// Speech is IMBE at 4400 bit/s under 2800 of FEC, and P25 phase 1 has no
+/// other vocoder.
+pub const CODEC: &str = "IMBE 4400";
+
+pub const FLAG_EMERGENCY: u8 = 0x08;
+
+pub const FLAG_ENCRYPTED: u8 = 0x04;
+
+pub const FLAG_GROUP: u8 = 0x02;
+
+pub const FLAG_HAVE_ES: u8 = 0x10;
+
+pub const FLAG_HAVE_LC: u8 = 0x01;
+
+/// Tag, NAC, data unit id, flags, destination, source.
+pub const HEAD_LEN: usize = 2 + 2 + 1 + 1 + 4 + 4;
+
+/// Tag identifying a packet body this node wrote. "P1".
+///
+/// The body is what the frame said about itself: the network access code, the
+/// data unit id, and where the frame carried identities, those. The link
+/// control or encryption sync it was read from travels with it, so a reader
+/// later can take more out of the same bytes.
+pub const P25_TAG: [u8; 2] = *b"P1";
+
+/// One voice frame is nine IMBE frames of 20 ms.
+pub const VOICE_SECONDS: f64 = 0.18;
+
+/// Serialise a frame as the bytes that reach the bus.
+pub fn encode_frame(f: &P25Frame) -> Vec<u8> {
+    let mut v = P25_TAG.to_vec();
+    v.extend_from_slice(&f.nac.to_be_bytes());
+    v.push(f.duid.as_bits());
+    let mut flags = 0u8;
+    let (mut dst, mut src) = (0u32, 0u32);
+    if let Some(lc) = &f.lc {
+        flags |= FLAG_HAVE_LC;
+        if let Some(tg) = lc.talkgroup() {
+            flags |= FLAG_GROUP;
+            dst = u32::from(tg);
+        } else if let Some(t) = lc.target() {
+            dst = t;
+        }
+        src = lc.source().unwrap_or(0);
+        if lc.encrypted() {
+            flags |= FLAG_ENCRYPTED;
+        }
+        if lc.emergency() {
+            flags |= FLAG_EMERGENCY;
+        }
+    }
+    if let Some(es) = &f.es {
+        flags |= FLAG_HAVE_ES;
+        if !es.clear() {
+            flags |= FLAG_ENCRYPTED;
+        }
+    }
+    v.push(flags);
+    v.extend_from_slice(&dst.to_be_bytes());
+    v.extend_from_slice(&src.to_be_bytes());
+    if let Some(lc) = &f.lc {
+        v.extend_from_slice(&lc.bytes);
+    } else if let Some(es) = &f.es {
+        v.extend_from_slice(&es.mi);
+        v.push(es.algid);
+        v.extend_from_slice(&es.kid.to_be_bytes());
+    }
+    v
+}
+
+/// What one frame turned out to be.
+pub struct P25Frame {
+    /// Absolute symbol index the sync word began at.
+    pub at: usize,
+    pub nac: u16,
+    pub duid: Duid,
+    pub lc: Option<LinkControl>,
+    pub es: Option<Encryption>,
+}
+
+/// Finds frames in the symbol stream and reads what they carry.
+///
+/// A rolling window of symbol values with an absolute index, so a frame whose
+/// sync arrived in one block is read when the rest of it arrives in the next.
+/// Each frame is found by its own sync word rather than by a clock: P25 puts
+/// frames back to back with no gaps, and a hunt costs one comparison a symbol
+/// where a predicted boundary would need every frame length in the standard.
+pub struct Framer {
+    marks: Vec<f32>,
+    base: usize,
+    scan: usize,
+    /// Which way up the discriminator is, once a frame has settled it.
+    polarity: Option<bool>,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self { marks: Vec::new(), base: 0, scan: 0, polarity: None }
+    }
+
+    pub fn reset(&mut self) {
+        self.marks.clear();
+        self.base = 0;
+        self.scan = 0;
+        self.polarity = None;
+    }
+
+    /// Level index to dibit: P25 sends +3 as 01, +1 as 00, -1 as 10 and -3
+    /// as 11 (TIA-102.BAAA clause 6.2).
+    fn dibit(level: u8, flip: bool) -> u8 {
+        match if flip { 3 - level } else { level } {
+            3 => 1,
+            2 => 0,
+            1 => 2,
+            _ => 3,
+        }
+    }
+
+    /// Append recovered symbols and pull out the frames they complete.
+    pub fn push(&mut self, syms: &[f32], out: &mut Vec<P25Frame>) {
+        self.marks.extend_from_slice(syms);
+        if self.marks.len() < WINDOW {
+            return;
+        }
+        let Some(levels) = dsp::c4fm::slice(&self.marks) else {
+            return;
+        };
+        let mut i = self.scan.saturating_sub(self.base);
+        'hunt: while i + HEAD_DIBITS + SYNC_DIBITS.len() <= levels.len() {
+            let polarities: [bool; 2] = match self.polarity {
+                Some(p) => [p, p],
+                None => [false, true],
+            };
+            let mut read = None;
+            for flip in polarities {
+                let wrong = SYNC_DIBITS
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, d)| Self::dibit(levels[i + k], flip) != **d)
+                    .count();
+                if wrong > SYNC_TOLERANCE {
+                    continue;
+                }
+                // A voice frame is only read once all of it has arrived; the
+                // scan stays where it is until then.
+                let want = (i + LDU_DIBITS).min(levels.len());
+                let dibits: Vec<u8> =
+                    levels[i..want].iter().map(|l| Self::dibit(*l, flip)).collect();
+                let data = status_free(&dibits);
+                let Some(nid) = nid(&data) else { continue };
+                if nid.duid.voice() && data.len() < LDU_DATA_DIBITS {
+                    // The rest of the frame has not arrived. Stop here with
+                    // the hunt where it is, so the next block reads it once.
+                    break 'hunt;
+                }
+                let words = words(&data);
+                let (lc, es) = match (nid.duid, words) {
+                    (Duid::Voice1, Some(w)) => (LinkControl::from_words(&w), None),
+                    (Duid::Voice2, Some(w)) => (None, Encryption::from_words(&w)),
+                    _ => (None, None),
+                };
+                // A link control that is itself enciphered describes nothing,
+                // so it is carried but not read for identities.
+                let lc = lc.filter(|lc| !lc.protected());
+                read = Some((
+                    flip,
+                    P25Frame { at: self.base + i, nac: nid.nac, duid: nid.duid, lc, es },
+                ));
+                break;
+            }
+            match read {
+                Some((flip, frame)) => {
+                    self.polarity = Some(flip);
+                    out.push(frame);
+                    i += HEAD_DIBITS;
+                }
+                None => i += 1,
+            }
+        }
+        self.scan = self.base + i;
+        // Drain what is behind the hunt, keeping a frame of history so a sync
+        // straddling two blocks is still found.
+        let keep = self.scan.saturating_sub(LDU_DIBITS);
+        if keep > self.base {
+            let drop = (keep - self.base).min(self.marks.len());
+            self.marks.drain(..drop);
+            self.base += drop;
+        }
+    }
+}
+
+/// Symbols held before the framer will slice: a whole voice frame, because
+/// the four levels are fitted over the window and a sync word carries only
+/// the outer two.
+pub const WINDOW: usize = LDU_DIBITS;
+
+/// Wrong dibits tolerated in a 48-bit sync word. Two of twenty-four: with
+/// three the false match rate off noise stops being negligible, and a frame
+/// needing more than two put back has a network identifier that will not
+/// pass its BCH either.
+pub const SYNC_TOLERANCE: usize = 2;
 
 #[cfg(test)]
 mod tests {

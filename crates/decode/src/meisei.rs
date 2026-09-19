@@ -19,6 +19,7 @@
 //! `demod/mod/meisei100mod.c`.
 
 use crate::bits::bch63_51;
+use common::Decoded;
 
 /// The two half-frame headers, 24 bits each. Which one arrived says which
 /// half it is; one is the other's complement bar two bits.
@@ -274,6 +275,213 @@ pub fn parse(record: &[u8]) -> Option<Report> {
         year_digit: (date % 10) as u8,
         utc: ((a[11] >> 8) as u8, (a[11] & 0xFF) as u8, f64::from(a[10]) / 1000.0),
     })
+}
+
+/// What the protocols node makes of a gathered record.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes)?;
+    let year = year_near(r.year_digit, this_year());
+    let (h, m, s) = r.utc;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("model".into(), common::Value::Text("iMS-100".into())),
+        ("frame".into(), common::Value::Int(r.counter as i64)),
+        (
+            "utc".into(),
+            common::Value::Text(format!(
+                "{year:04}-{:02}-{:02} {h:02}:{m:02}:{s:06.3}",
+                r.month, r.day
+            )),
+        ),
+    ];
+    if !r.serial.is_empty() {
+        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
+    }
+    if r.has_position() {
+        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
+        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
+        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
+        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+    }
+
+    let mut d = Decoded::bytes("ims100", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(true))
+        .with_text(r.summary())
+        .with_detail(format!("iMS-100, frame {}", r.counter))
+        .with_fields(fields);
+    if !r.serial.is_empty() {
+        d = d.by(common::Identity::new("meisei", r.serial.clone()).made_by("Meisei"));
+    }
+    if r.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: r.altitude_m,
+                climb_ms: r.climb_ms,
+                // The standard frame carries no battery voltage.
+                battery_v: f32::NAN,
+                satellites: 0,
+                descending: r.climb_ms < -1.0,
+                sensors: None,
+            })
+            .at_position(common::Position {
+                lat: r.lat_deg,
+                lon: r.lon_deg,
+                altitude_m: Some(r.altitude_m),
+                speed_kt: Some(r.speed_kt),
+                course_deg: Some(r.course_deg),
+            });
+    }
+    Some(d)
+}
+
+/// The year the receiver is running in, for the decade the sonde leaves off.
+pub fn this_year() -> u16 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    use chrono::Datelike;
+    chrono::DateTime::from_timestamp(secs as i64, 0).map(|t| t.year() as u16).unwrap_or(1970)
+}
+
+/// Chips in one half-frame.
+pub const HALF_CHIPS: usize = HALF_BITS * 2;
+
+/// Chips held while looking for a header: three half-frames.
+pub const MAX_CHIPS: usize = HALF_CHIPS * 3;
+
+/// Chips of the header allowed to be wrong. The BCH code behind it refuses
+/// what a false header would produce, so slack here costs nothing.
+pub const HEADER_SLACK: u32 = 6;
+
+/// Both headers, each as chips, each way up: four patterns, because a header
+/// is what fixes the chip pairing and the pairing is what the coding needs.
+pub fn header_chips() -> Vec<Vec<bool>> {
+    let mut out = Vec::with_capacity(4);
+    for header in [HEADER_A, HEADER_B] {
+        let mut chips = Vec::with_capacity(48);
+        // Biphase: the level turns over at every bit, and again in the
+        // middle of a zero.
+        let mut level = false;
+        for k in (0..24).rev() {
+            level = !level;
+            chips.push(level);
+            if header >> k & 1 == 0 {
+                level = !level;
+            }
+            chips.push(level);
+        }
+        out.push(chips.iter().map(|c| !c).collect());
+        out.push(chips);
+    }
+    out
+}
+
+pub fn matches(chips: &[bool], at: usize, header: &[bool]) -> bool {
+    let mut wrong = 0;
+    for (k, &want) in header.iter().enumerate() {
+        wrong += u32::from(chips[at + k] != want);
+        if wrong > HEADER_SLACK {
+            return false;
+        }
+    }
+    true
+}
+
+/// Biphase chips back to bits: a pair that does not turn over is a one.
+/// Nothing here depends on which way up the signal arrived.
+pub fn biphase(chips: &[bool]) -> Vec<bool> {
+    chips.chunks(2).map(|c| c.len() == 2 && c[0] == c[1]).collect()
+}
+
+/// Frames cut out of a stream of chips.
+///
+/// Above the waveform and below the payload: the chips come from any FSK
+/// demodulator at this sonde's baud, and what leaves is what the payload
+/// reader takes.
+pub struct Framer {
+    chips: Vec<bool>,
+    /// Half-frames read, two of which make a record.
+    halves: u64,
+    /// Records gathered out of those halves.
+    records: u64,
+    /// Positions already searched and known not to start a header.
+    scanned: usize,
+    gather: Gather,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self { chips: Vec::new(), scanned: 0, halves: 0, records: 0, gather: Gather::new() }
+    }
+
+    /// The buffer a bit clock appends into.
+    pub fn sink(&mut self) -> &mut Vec<bool> {
+        &mut self.chips
+    }
+
+    /// Half-frames read, two of which make a record.
+    pub fn halves(&self) -> u64 {
+        self.halves
+    }
+
+    /// Records gathered out of those halves.
+    pub fn records(&self) -> u64 {
+        self.records
+    }
+
+    pub fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let headers = header_chips();
+        let mut at = self.scanned;
+        while at + 48 <= self.chips.len() {
+            if !headers.iter().any(|h| matches(&self.chips, at, h)) {
+                at += 1;
+                continue;
+            }
+            if at + HALF_CHIPS > self.chips.len() {
+                self.scanned = at;
+                return out;
+            }
+            let bits = biphase(&self.chips[at..at + HALF_CHIPS]);
+            match read(&bits) {
+                Some(half) => {
+                    self.halves += 1;
+                    if let Some(record) = self.gather.take(&half) {
+                        self.records += 1;
+                        out.push(record);
+                    }
+                    self.chips.drain(..at + HALF_CHIPS);
+                    at = 0;
+                    self.scanned = 0;
+                }
+                None => at += 1,
+            }
+        }
+        self.scanned = at;
+        out
+    }
+
+    /// Drop what has been searched and found wanting.
+    pub fn trim(&mut self) {
+        if self.chips.len() > MAX_CHIPS {
+            let drop = self.chips.len() - MAX_CHIPS;
+            self.chips.drain(..drop);
+            self.scanned = self.scanned.saturating_sub(drop);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.chips.clear();
+        self.scanned = 0;
+        self.gather = Gather::new();
+    }
 }
 
 #[cfg(test)]

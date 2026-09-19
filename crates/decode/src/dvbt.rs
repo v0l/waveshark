@@ -14,7 +14,12 @@
 //! through the branch with no delay, so it is still every 204th byte on the
 //! air, and that is how a receiver finds the packets at all.
 
+use crate::mpegts::Mux;
 use crate::rs::ReedSolomon;
+use common::C32;
+use common::Decoded;
+use dsp::conv;
+use dsp::dvbt::{Inner, Mode, Params, Symbol};
 
 /// A transport packet, sync byte included.
 pub const PACKET: usize = 188;
@@ -368,7 +373,7 @@ impl OuterTx {
     pub fn push(&mut self, packet: &[u8], out: &mut Vec<u8>) {
         assert_eq!(packet.len(), PACKET, "a transport packet is {PACKET} bytes");
         let mut block = packet.to_vec();
-        if self.packets % GROUP == 0 {
+        if self.packets.is_multiple_of(GROUP) {
             self.randomiser.reset();
             block[0] = SYNC_INVERTED;
         }
@@ -379,6 +384,180 @@ impl OuterTx {
             out.push(self.interleaver.push(b));
         }
     }
+}
+
+/// The multiplex itself, once the TPS has said what it is.
+/// A whole DVB-T receiver: samples in, transport packets out.
+pub struct DvbtReceiver {
+    front: dsp::dvbt::Dvbt,
+    inner: Option<Inner>,
+    viterbi: conv::Viterbi,
+    outer: Outer,
+    params: Option<Params>,
+    /// Whether the super frame boundary has been seen and the inner decoder
+    /// started on it.
+    started: bool,
+    symbols: Vec<Symbol>,
+    soft: Vec<f32>,
+    bits: Vec<u8>,
+    bytes: Vec<u8>,
+    /// Bits of a byte not yet whole.
+    partial: (u8, u8),
+}
+
+impl Default for DvbtReceiver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DvbtReceiver {
+    pub fn new() -> Self {
+        Self {
+            front: dsp::dvbt::Dvbt::new(),
+            inner: None,
+            viterbi: conv::Viterbi::new(conv::K7_X_FIRST),
+            outer: Outer::new(),
+            params: None,
+            started: false,
+            symbols: Vec::new(),
+            soft: Vec::new(),
+            bits: Vec::new(),
+            bytes: Vec::new(),
+            partial: (0, 0),
+        }
+    }
+
+    /// The multiplex's parameters, once the TPS has said what they are.
+    pub fn params(&self) -> Option<Params> {
+        self.params
+    }
+
+    /// The mode and guard, which are known before the parameters are.
+    pub fn mode_guard(&self) -> Option<(Mode, dsp::dvbt::Guard)> {
+        self.front.mode_guard()
+    }
+
+    /// How the outer code is faring.
+    pub fn stats(&self) -> Stats {
+        self.outer.stats
+    }
+
+    /// Signal to noise on the pilots of the last symbol read.
+    pub fn snr_db(&self) -> Option<f32> {
+        self.symbols.last().map(|s| s.snr_db)
+    }
+
+    /// Read what `iq` holds, appending every transport packet it completes.
+    pub fn push(&mut self, iq: &[C32], out: &mut Vec<TsPacket>) {
+        self.symbols.clear();
+        let mut symbols = std::mem::take(&mut self.symbols);
+        self.front.push(iq, &mut symbols);
+        for symbol in &symbols {
+            self.symbol(symbol, out);
+        }
+        self.symbols = symbols;
+    }
+
+    fn symbol(&mut self, symbol: &Symbol, out: &mut Vec<TsPacket>) {
+        let Some(params) = self.front.params() else { return };
+        if self.params != Some(params) {
+            // A different multiplex, or the first word read: everything below
+            // the carriers is about to change shape.
+            self.params = Some(params);
+            self.inner = Some(Inner::new(params.mode, params.constellation));
+            self.started = false;
+        }
+        let (Some(index), Some(frame)) = (symbol.index, symbol.frame) else { return };
+        if !self.started {
+            if frame != 0 || index != 0 {
+                return;
+            }
+            self.started = true;
+            self.viterbi.reset();
+            self.outer.reset();
+            self.partial = (0, 0);
+        }
+        let Some(inner) = &mut self.inner else { return };
+
+        self.soft.clear();
+        inner.demodulate(&symbol.cells, &symbol.csi, index, &mut self.soft);
+        self.bits.clear();
+        let rate = params.code_rate_hp;
+        self.viterbi.push(&self.soft, rate.mask(), &mut self.bits);
+
+        self.bytes.clear();
+        let (mut acc, mut have) = self.partial;
+        for &bit in &self.bits {
+            acc = (acc << 1) | bit;
+            have += 1;
+            if have == 8 {
+                self.bytes.push(acc);
+                acc = 0;
+                have = 0;
+            }
+        }
+        self.partial = (acc, have);
+        self.outer.push(&self.bytes, out);
+    }
+}
+
+/// What the multiplex's own parameters say about it.
+pub fn multiplex_decoded(params: Params, snr: f32, center: common::Hz, at: f64) -> Decoded {
+    let mut fields = vec![
+        ("mode".into(), common::Value::Text(params.mode.label().into())),
+        ("guard".into(), common::Value::Text(params.guard.label().into())),
+        ("constellation".into(), common::Value::Text(params.constellation.label().into())),
+        ("code_rate".into(), common::Value::Text(params.code_rate_hp.label().into())),
+        ("bitrate".into(), common::Value::Float(params.bitrate())),
+        ("snr_db".into(), common::Value::Float(snr as f64)),
+    ];
+    if let Some(cell) = params.cell_id {
+        fields.push(("cell_id".into(), common::Value::Text(format!("{cell:04X}"))));
+    }
+    let detail = format!("{} {:.1} Mbit/s", params.label(), params.bitrate() / 1e6);
+    Decoded::bytes("DVB-T", center, at, Vec::new())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Ofdm)
+        .with_crc(Some(true))
+}
+
+/// A service, once the description table has named it.
+pub fn service_decoded(mux: &Mux, id: u16, center: common::Hz, at: f64) -> Option<Decoded> {
+    let Some(service) = mux.service(id) else { return None };
+    let Some(name) = service.name.clone() else { return None };
+    let mut fields = vec![
+        ("service".into(), common::Value::Text(name.clone())),
+        ("service_id".into(), common::Value::Int(id as i64)),
+    ];
+    if let Some(p) = &service.provider {
+        fields.push(("provider".into(), common::Value::Text(p.clone())));
+    }
+    if let Some(v) = service.video() {
+        fields.push(("video".into(), common::Value::Text(v.kind.label().into())));
+    }
+    if let Some(a) = service.audio() {
+        fields.push(("audio".into(), common::Value::Text(a.kind.label().into())));
+    }
+    if service.scrambled {
+        fields.push(("scrambled".into(), common::Value::Text("yes".into())));
+    }
+    let detail = match &service.provider {
+        Some(p) => format!("{name} ({p})"),
+        None => name.clone(),
+    };
+    // A service keeps its identity across multiplexes and retunes, which
+    // is what the device list rows on.
+    let who = common::Identity::new("dvb-service", format!("{id}")).named(name);
+    Some(
+        Decoded::bytes("DVB-T", center, at, Vec::new())
+            .by(who)
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Ofdm)
+            .with_crc(Some(true)),
+    )
 }
 
 #[cfg(test)]

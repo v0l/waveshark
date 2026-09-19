@@ -13,10 +13,12 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use decode::flex::Fiw;
+pub use decode::flex::decoded;
 use dsp::flex::{CHANNEL_WIDTH_HZ, DEVIATION_HZ, FlexConfig, FlexDemod, Frame};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::flex::AUDIO_HZ;
+pub use identify::flex::Flex;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -25,10 +27,6 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 /// A UK FLEX paging channel, and only the default the node is built with
 /// before the scanner table tells it where to listen.
 pub const DEFAULT_HZ: f64 = 153_275_000.0;
-
-/// Audio rate the discriminator output is decimated to. A whole number of
-/// samples per symbol at both FLEX speeds: 24 and 12.
-const AUDIO_HZ: f64 = 38_400.0;
 
 pub struct FlexNode {
     channel_hz: f64,
@@ -132,75 +130,23 @@ impl Simple for FlexNode {
     }
 }
 
-/// The decodes one frame becomes: one per page, across every phase.
-///
-/// A frame carries the whole transmitter's queue for its slot, so it is
-/// several pages to several pagers and each is a row of its own. What they
-/// share is the bytes they came out of, which travel with each so that the
-/// log holds the evidence.
-pub fn flex_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    use common::Value;
-    let Some(frame) = Frame::from_bytes(bytes) else { return Vec::new() };
-    let fiw = Fiw::parse(frame.fiw);
-    let names = frame.mode.phase_names();
-    let mut out = Vec::new();
-    for (phase, name) in frame.phases.iter().zip(names) {
-        for page in decode::flex::pages(phase, *name) {
-            let mut fields: Vec<(String, Value)> = vec![
-                ("capcode".into(), Value::Int(i64::from(page.capcode))),
-                ("baud".into(), Value::Int(i64::from(frame.mode.baud))),
-                ("levels".into(), Value::Int(i64::from(frame.mode.levels))),
-                ("phase".into(), Value::Text(page.phase.to_string())),
-            ];
-            if let Some(f) = fiw {
-                fields.push(("cycle".into(), Value::Int(i64::from(f.cycle))));
-                fields.push(("frame".into(), Value::Int(i64::from(f.frame))));
-            }
-            if let Some(t) = &page.text {
-                fields.push(("message".into(), Value::Text(t.clone())));
-            }
-            let detail = match &page.text {
-                Some(t) => format!("capcode={} {t}", page.capcode),
-                None => format!("capcode={} tone only", page.capcode),
-            };
-            let mut d = Decoded::bytes(page.kind.label(), center, 0.0, bytes.to_vec())
-                .by(common::Identity::new("flex", page.capcode.to_string()))
-                .with_link(pipeline::event::Link {
-                    from: None,
-                    to: Some(pipeline::event::Party::unit(page.capcode.to_string())),
-                })
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(match frame.mode.levels {
-                    4 => common::Modulation::Fsk4,
-                    _ => common::Modulation::Fsk2,
-                })
-                // Every word behind this page passed BCH(31,21) and the
-                // word's own parity bit, or was corrected by them.
-                .with_crc(Some(true));
-            if let Some(t) = page.text {
-                // A page is written to whoever carries the pager, whether a
-                // person typed it or an alarm system did.
-                d = d.written().with_text(t);
-            }
-            out.push(d);
-        }
-    }
-    out
-}
-
-pub struct Flex;
-
 impl Protocol for Flex {
     fn id(&self) -> &'static str {
-        "flex"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "FLEX pager"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility, Usage::Ism])
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The same paging allocations POCSAG watches, claimed one hertz
     /// narrower so that a frame is offered here first: a FLEX frame carries
     /// its sync code in its first two bytes and is refused below if it is
@@ -212,23 +158,13 @@ impl Protocol for Flex {
         if !dsp::pocsag::is_pager_band(p.center_hz() as f64) {
             return None;
         }
-        let decoded = flex_decoded(bytes, common::Hz(p.center_hz()));
+        let decoded = decoded(bytes, common::Hz(p.center_hz()));
         (!decoded.is_empty()).then_some(decoded)
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// A Dutch national FLEX channel: the one most likely to be carrying
     /// traffic anywhere a European operator points the receiver.
-    fn default_hz(&self) -> f64 {
-        169_650_000.0
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} FLEX", hz / 1e6)
     }
@@ -240,11 +176,26 @@ impl Protocol for Flex {
     }
 }
 
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "flex",
+    summary: "One FLEX paging channel: narrowband FM at 1600 or 3200 baud, two or four level",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(FlexNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use common::Hz;
     use decode::flex::Body;
+    use decode::flex::Fiw;
     use dsp::flex::{Mode, encode_symbols};
 
     /// One frame as it reaches the packet bus, off a VHF pager channel.
@@ -331,7 +282,7 @@ mod tests {
             }
         }
         assert_eq!(frames.len(), 1, "expected one frame off the air");
-        flex_decoded(&frames[0], Hz(center as u64))
+        decoded(&frames[0], Hz(center as u64))
     }
 
     #[test]
@@ -436,24 +387,10 @@ mod tests {
             node.process(&input, &mut out, &mut ctx).unwrap();
             if let Payload::Frames(f) = out {
                 for frame in f {
-                    rows += flex_decoded(&frame.bytes, Hz(center as u64)).len();
+                    rows += decoded(&frame.bytes, Hz(center as u64)).len();
                 }
             }
         }
         assert_eq!(rows, 0, "noise was read as pages");
     }
-}
-
-/// The carrier this stage is pointed at.
-const CHANNEL_HZ: &str = "channel_hz";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "flex",
-    summary: "One FLEX paging channel: narrowband FM at 1600 or 3200 baud, two or four level",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(FlexNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

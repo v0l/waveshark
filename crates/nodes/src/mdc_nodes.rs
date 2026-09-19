@@ -17,31 +17,20 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
 use decode::mdc1200;
+pub use decode::mdc1200::decoded;
 use dsp::afsk::{AfskBits, AfskConfig, FFSK1200};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::mdc::CHANNEL_WIDTH_HZ;
+pub use identify::mdc::DEFAULT_HZ;
+pub use identify::mdc::Mdc;
+pub use identify::mdc::{AUDIO_HZ, DEVIATION_HZ};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// A VHF business channel, which is where most of this traffic is. Nothing
-/// about MDC is band specific: it is the frequency the node is built with
-/// until the scanner table or an operator says another.
-pub const DEFAULT_HZ: f64 = 154_000_000.0;
-
-/// The channel an LMR transmission occupies. Narrowband, which is what every
-/// fleet was made to move to.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// Peak deviation of a narrowband channel.
-const DEVIATION_HZ: f64 = 2_500.0;
-
-/// Audio rate the discriminator output is decimated to: well above the
-/// 1800 Hz tone, and a rate the correlators are tested at.
-const AUDIO_HZ: f64 = 24_000.0;
 
 const CHANNEL_HZ: &str = "channel_hz";
 
@@ -194,62 +183,26 @@ impl Simple for MdcNode {
     }
 }
 
-/// One row: which radio, and what it was saying.
-pub fn mdc_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let m = mdc1200::parse(bytes)?;
-    let unit = m.unit_hex();
-    let role = match m.operation.addresses_target() {
-        true => "target",
-        false => "unit",
-    };
-    let fields = vec![
-        (role.to_string(), common::Value::Text(unit.clone())),
-        ("operation".into(), common::Value::Text(m.operation.label())),
-        ("op".into(), common::Value::Int(i64::from(m.op))),
-        ("arg".into(), common::Value::Int(i64::from(m.arg))),
-        ("status".into(), common::Value::Int(i64::from(m.status))),
-    ];
-    Some(
-        Decoded::bytes("MDC-1200", center, 0.0, bytes.to_vec())
-            // The same namespace `ident` publishes a DTMF PTT-ID under: one
-            // fleet's unit numbers, sent two ways.
-            .by(common::Identity::new("radio-unit", unit.clone()))
-            .with_detail(format!("{unit} {}", m.operation.label()))
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Msk)
-            // The burst carried a CRC over its four information bytes and
-            // this row exists because it passed.
-            .with_crc(Some(true)),
-    )
-}
-
-pub struct Mdc;
-
 impl Protocol for Mdc {
     fn id(&self) -> &'static str {
-        "mdc1200"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "mdc-1200"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["mdc", "ani"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility, Usage::Amateur])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 96_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The seven bytes carry a CRC over four of them, and nothing else on
     /// the bus is seven bytes that pass it: the frame identifies itself
     /// without being told where it was heard, which matters because MDC
@@ -258,7 +211,7 @@ impl Protocol for Mdc {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        mdc_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} MDC", hz / 1e6)
@@ -362,7 +315,7 @@ mod tests {
         assert_eq!(n.read(), 1);
         assert_eq!(n.refused(), 0);
 
-        let d = mdc_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.protocol, "MDC-1200");
         assert_eq!(d.field("unit"), Some(&common::Value::Text("1234".into())));
         assert_eq!(d.field("operation"), Some(&common::Value::Text("PTT-ID".into())));
@@ -378,7 +331,7 @@ mod tests {
         let mut n = node(DEFAULT_HZ);
         let frames = run(&mut n, &keyed(0x63, 0x85, 0xABCD, 0.0, 0.0), DEFAULT_HZ);
         assert_eq!(frames.len(), 1);
-        let d = mdc_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.field("target"), Some(&common::Value::Text("ABCD".into())));
         assert_eq!(d.field("unit"), None, "a call alert is not the sender's id");
     }

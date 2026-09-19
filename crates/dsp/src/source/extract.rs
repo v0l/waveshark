@@ -438,10 +438,10 @@ impl SourceExtractor {
     pub fn process(&mut self, input: &[C32], events: &[SourceEvent], out: &mut Vec<SourceBlock>) {
         self.ring.push(input);
         let end = self.ring.end();
-        if let Some(b) = &mut self.bank {
-            if b.running {
-                b.feed(input, end - input.len() as u64);
-            }
+        if let Some(b) = &mut self.bank
+            && b.running
+        {
+            b.feed(input, end - input.len() as u64);
         }
 
         for e in events {
@@ -500,17 +500,17 @@ impl SourceExtractor {
         self.chans.retain(|c| !closed.contains(&c.id));
         out.extend(blocks);
 
-        if let Some(b) = &mut self.bank {
-            if b.running {
-                if self.chans.iter().any(|c| matches!(c.feed, Feed::Bank { .. })) {
-                    b.idle = 0;
-                } else {
-                    b.idle += input.len() as u64;
-                    if b.idle as f64 >= BANK_IDLE_S * self.rate {
-                        b.running = false;
-                        b.base = 0;
-                        b.head = 0;
-                    }
+        if let Some(b) = &mut self.bank
+            && b.running
+        {
+            if self.chans.iter().any(|c| matches!(c.feed, Feed::Bank { .. })) {
+                b.idle = 0;
+            } else {
+                b.idle += input.len() as u64;
+                if b.idle as f64 >= BANK_IDLE_S * self.rate {
+                    b.running = false;
+                    b.base = 0;
+                    b.head = 0;
                 }
             }
         }

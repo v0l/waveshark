@@ -6,8 +6,9 @@
 //! or does not.
 
 use common::C32;
+use decode::dvbt::DvbtReceiver;
 use dsp::resample::Rational;
-use nodes::dvbt_nodes::{DvbtReceiver, RATE_HZ};
+use nodes::dvbt_nodes::RATE_HZ;
 
 fn main() {
     let mut args = std::env::args().skip(1);

@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(out.len(), 256);
         // The first sample of the file: I = 0 of 255 in offset binary, which
         // is full scale negative, and Q = 128, which is nothing.
-        assert!((out[0].re - -1.0 * DEFAULT_LEVEL).abs() < 0.01, "{:?}", out[0]);
+        assert!((out[0].re - -DEFAULT_LEVEL).abs() < 0.01, "{:?}", out[0]);
         assert!(out[0].im.abs() < 0.01, "{:?}", out[0]);
         // A quarter of a 1024 sample file in one block of 256.
         assert!((n.progress() - 0.25).abs() < 0.05, "played {}", n.progress());

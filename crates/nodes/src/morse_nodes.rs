@@ -25,65 +25,25 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use dsp::cw::{CwConfig, CwDetector};
+pub use decode::morse::ENVELOPE;
+pub use decode::morse::TAG;
+pub use decode::morse::decoded;
+pub use decode::morse::{MIN_CHARS, MIN_FIT, MIN_KNOWN};
+pub use decode::morse::{config, framed};
+use dsp::cw::CwDetector;
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::morse::AUDIO_HZ;
+pub use identify::morse::CHANNEL_WIDTH_HZ;
+pub use identify::morse::DEFAULT_HZ;
+pub use identify::morse::Morse;
+pub use identify::morse::REACH_HZ;
+pub use identify::morse::{EDGE_HZ, PITCH_HZ};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The 20 m QRP calling frequency, which has a CW operator on it at most
-/// hours of the day.
-pub const DEFAULT_HZ: f64 = 14_060_000.0;
-
-/// Where the tuned carrier is put in the audio, in hertz. A beat note an
-/// operator would choose, and far enough up that the tracker's range reaches
-/// as far below the dial as above it.
-pub const PITCH_HZ: f64 = 1_000.0;
-
-/// How far either side of the dial the pitch tracker reaches, in hertz.
-const REACH_HZ: f64 = 700.0;
-
-/// The channel a CW station occupies, as far as this node is concerned: the
-/// keying itself is a few tens of hertz wide, and the rest is how far out
-/// the operator may have left the dial.
-pub const CHANNEL_WIDTH_HZ: f64 = 2.0 * REACH_HZ;
-
-/// Where the channel filter's stopband starts, in hertz of audio. Far
-/// enough past the tracker's reach to leave the filter a transition band,
-/// and near enough that the next station up is gone.
-const EDGE_HZ: f64 = PITCH_HZ + REACH_HZ + 300.0;
-
-/// Rate the channel is decimated to before the tone is tracked. Twice the
-/// highest pitch the tracker will follow, with room for the filter.
-const AUDIO_HZ: f64 = 8_000.0;
-
-/// Bytes before the text on the bus: the tag the front end writes and the
-/// dot length it measured, little endian.
-pub const TAG: [u8; 4] = *b"MORS";
-const ENVELOPE: usize = TAG.len() + 4;
-
-/// Characters a transmission must hold before it is published. Two letters
-/// is the shortest thing worth showing somebody, and a pair of noise pulses
-/// that got past the level test makes one.
-const MIN_CHARS: usize = 3;
-
-/// How much of a transmission has to be a pattern the table has. A burst
-/// read at the wrong pitch or through a fade produces element counts no
-/// letter uses, and those come back as `?`.
-const MIN_KNOWN: f32 = 0.75;
-
-/// How much of a transmission's timing has to sit on the 1:3:7 grid a hand
-/// on a key produces. See [`decode::morse::fits`].
-///
-/// Measured on a synthetic 18 wpm over at 48 kS/s: a station in the channel
-/// scores 1.0 at any speed and with a 15% fist, and a strong station a
-/// kilohertz outside the channel, whose keying reaches the envelope through
-/// the filter skirt as a string of blips, scores 0.52 at 900 Hz out and 0.72
-/// at 1000. Nothing measured sits between 0.72 and 1.0.
-const MIN_FIT: f32 = 0.8;
 
 pub struct MorseNode {
     channel_hz: f64,
@@ -115,7 +75,7 @@ impl MorseNode {
             factor: 1,
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_band(AUDIO_HZ, 1, PITCH_HZ + REACH_HZ, EDGE_HZ, 60.0),
-            det: CwDetector::new(AUDIO_HZ, config()),
+            det: CwDetector::new(AUDIO_HZ, config(PITCH_HZ, REACH_HZ)),
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
@@ -135,11 +95,6 @@ impl MorseNode {
     pub fn pitch_hz(&self) -> f64 {
         self.det.tone_hz()
     }
-}
-
-/// The pitch range the dial's reach becomes.
-fn config() -> CwConfig {
-    CwConfig { pitch_hz: (PITCH_HZ - REACH_HZ, PITCH_HZ + REACH_HZ), ..CwConfig::default() }
 }
 
 impl Simple for MorseNode {
@@ -169,7 +124,7 @@ impl Simple for MorseNode {
         // anything 300 Hz beyond it is gone, so a strong station outside the
         // channel cannot key the envelope through the skirt.
         self.decim = FirDecim::design_band(rate, self.factor, PITCH_HZ + REACH_HZ, EDGE_HZ, 60.0);
-        self.det = CwDetector::new(audio_rate, config());
+        self.det = CwDetector::new(audio_rate, config(PITCH_HZ, REACH_HZ));
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
         let mut out = i.spec.with_kind(PortKind::Frames);
@@ -223,87 +178,30 @@ impl Simple for MorseNode {
     }
 }
 
-/// What a transmission puts on the bus: the tag, the dot length it was sent
-/// at, and the text. `None` where too little of it was Morse at all.
-///
-/// The check is the timing and the text, because Morse has no other: the
-/// elements either sit on the grid a hand produces or they do not, and a
-/// pattern of them either is a letter or is not.
-fn framed(pkg: &common::Package) -> Option<Vec<u8>> {
-    if decode::morse::fits(pkg) < MIN_FIT {
-        return None;
-    }
-    let text = decode::morse::decode(pkg);
-    let letters = text.chars().filter(|c| !c.is_whitespace()).count();
-    if letters < MIN_CHARS {
-        return None;
-    }
-    let known = text.chars().filter(|c| !c.is_whitespace() && *c != '?').count();
-    if (known as f32) / (letters as f32) < MIN_KNOWN {
-        return None;
-    }
-    let mut out = Vec::with_capacity(ENVELOPE + text.len());
-    out.extend_from_slice(&TAG);
-    out.extend_from_slice(&decode::morse::dot_of(pkg).to_le_bytes());
-    out.extend_from_slice(text.as_bytes());
-    Some(out)
-}
-
-/// One row: what was sent, and how fast.
-pub fn morse_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    if bytes.len() <= ENVELOPE || bytes[..TAG.len()] != TAG {
-        return None;
-    }
-    let dot_us = u32::from_le_bytes(bytes[TAG.len()..ENVELOPE].try_into().ok()?);
-    let text = String::from_utf8_lossy(&bytes[ENVELOPE..]).to_string();
-    let wpm = decode::morse::wpm(dot_us);
-    let fields = vec![
-        ("speed".into(), common::Value::Float(wpm as f64)),
-        ("dot_ms".into(), common::Value::Float(dot_us as f64 / 1000.0)),
-        ("message".into(), common::Value::Text(text.clone())),
-    ];
-    Some(
-        Decoded::bytes("Morse", center, 0.0, bytes.to_vec())
-            .with_modulation(common::Modulation::Ook)
-            .with_detail(format!("{wpm:.0} wpm"))
-            .with_fields(fields)
-            // A person sent it to another person, so it belongs beside
-            // anything else somebody wrote rather than in the packet list.
-            .written()
-            .with_text(text),
-    )
-}
-
-pub struct Morse;
-
 impl Protocol for Morse {
     fn id(&self) -> &'static str {
-        "morse"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "morse"
+        Signal::label(self)
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        Signal::aliases(self)
+    }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// Not `cw`, which is already the audio mode that puts a beat note on
     /// the speaker: an operator asking for that wants to listen, and one
     /// asking for this wants it read.
-    fn aliases(&self) -> &'static [&'static str] {
-        &["morse code"]
-    }
-    fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Amateur, Usage::Utility])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 2.0 * (PITCH_HZ + REACH_HZ),
-            feed_rate_hz: AUDIO_HZ,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// The front end writes its tag and the dot length in front of the text
     /// it read, which is the only thing that separates a line of Morse from
     /// any other decoder's ASCII on the bus.
@@ -311,7 +209,7 @@ impl Protocol for Morse {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        morse_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} MORSE", hz / 1e6)
@@ -374,11 +272,11 @@ mod tests {
         let samples = |us: f32| (us as f64 * rate / 1e6).round() as usize;
         let mut out: Vec<C32> = Vec::new();
         let mut phase = 0.0f64;
-        let mut key = |out: &mut Vec<C32>,
-                       n: usize,
-                       on: bool,
-                       phase: &mut f64,
-                       rng: &mut dyn FnMut() -> f32| {
+        let key = |out: &mut Vec<C32>,
+                   n: usize,
+                   on: bool,
+                   phase: &mut f64,
+                   rng: &mut dyn FnMut() -> f32| {
             for _ in 0..n {
                 *phase += std::f64::consts::TAU * offset_hz / rate;
                 let c = match on {
@@ -430,7 +328,7 @@ mod tests {
         let frames = run(&mut node, &iq, rate, center);
 
         assert_eq!(frames.len(), 1, "{} transmissions off the air", frames.len());
-        let d = morse_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
         assert_eq!(d.text.as_deref(), Some(OVER));
         assert_eq!(d.protocol, "Morse");
         assert!(d.written, "an operator sent it");
@@ -452,7 +350,7 @@ mod tests {
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "{want} wpm: {} transmissions", frames.len());
-            let d = morse_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+            let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
             assert_eq!(d.text.as_deref(), Some("SOS DE EI2ABC"), "at {want} wpm");
             let got = d.field("speed").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
             assert!((got - want).abs() < want * 0.1, "{want} wpm read as {got:.1}");
@@ -472,10 +370,7 @@ mod tests {
             let mut node = MorseNode::default();
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
-            frames
-                .first()
-                .and_then(|b| morse_decoded(b, Hz(center as u64)))
-                .and_then(|d| d.text.clone())
+            frames.first().and_then(|b| decoded(b, Hz(center as u64))).and_then(|d| d.text.clone())
         };
         assert_eq!(read(0.10).as_deref(), Some(OVER), "a 10% fist");
         assert_eq!(read(0.15).as_deref(), Some(OVER), "a 15% fist");
@@ -499,7 +394,7 @@ mod tests {
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "{offset} Hz off: {} transmissions", frames.len());
-            let d = morse_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+            let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
             assert_eq!(d.text.as_deref(), Some("SOS DE EI2ABC"), "{offset} Hz off");
             let pitch = node.pitch_hz();
             assert!((pitch - (PITCH_HZ + offset)).abs() < 30.0, "pitch {pitch:.0} at {offset} Hz");
@@ -538,12 +433,12 @@ mod tests {
     /// the text of one that is comes back whole.
     #[test]
     fn only_a_tagged_frame_is_claimed() {
-        assert!(morse_decoded(b"CQ CQ DE MI0ABC", Hz(0)).is_none());
-        assert!(morse_decoded(&TAG, Hz(0)).is_none(), "a tag with no text");
+        assert!(decoded(b"CQ CQ DE MI0ABC", Hz(0)).is_none());
+        assert!(decoded(&TAG, Hz(0)).is_none(), "a tag with no text");
         let mut bytes = TAG.to_vec();
         bytes.extend_from_slice(&66_667u32.to_le_bytes());
         bytes.extend_from_slice(b"SOS");
-        let d = morse_decoded(&bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.text.as_deref(), Some("SOS"));
         assert_eq!(d.detail.as_deref(), Some("18 wpm"));
     }

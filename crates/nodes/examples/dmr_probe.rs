@@ -19,7 +19,7 @@ fn run(label: &str, iq: &[C32], rate: f64, center: f64, channel: f64) {
                 voice += p.audio.as_ref().map(|a| a.pcm.len()).unwrap_or(0);
                 if let common::PacketBody::Frame(fr) = &p.body {
                     let b = &fr.bytes;
-                    if let Some(d) = nodes::dmr_nodes::dmr_decoded(b, common::Hz(p.center_hz())) {
+                    if let Some(d) = decode::dmr::decoded(b, common::Hz(p.center_hz())) {
                         eprintln!("  {label}: {:?}", d.detail);
                     }
                 }

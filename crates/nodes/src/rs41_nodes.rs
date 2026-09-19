@@ -18,39 +18,17 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::rs41;
+pub use decode::rs41::decoded;
 use dsp::fsk::BitSync;
+use identify::Signal;
 use pipeline::event::{Decoded, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// Symbols a second.
-pub const BAUD: f64 = 4_800.0;
-
-/// The channel a sonde is tuned to, which is the 10 kHz raster Vaisala
-/// steps through the band on. The signal itself is 9.6 kHz, so the channel
-/// is barely wider than what is in it and the two neighbours are clear.
-pub const CHANNEL_WIDTH_HZ: f64 = 10_000.0;
-
-/// What the signal itself occupies: 4800 baud keyed 2.4 kHz either way is
-/// 9.6 kHz by Carson's rule, which is also what Vaisala quotes.
-pub const OCCUPIED_HZ: f64 = 9_600.0;
-
-/// The band sondes are launched into (ITU meteorological aids, region 1 and
-/// beyond). Vaisala tunes an RS41 anywhere in it in 10 kHz steps.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// Bits held while looking for a header. Two long frames and the gap
-/// between them: enough that a frame straddling two blocks is never lost,
-/// and bounded so a channel with nothing on it cannot grow.
-const MAX_BITS: usize = rs41::FRAME_AUX * 8 * 3;
-
-/// Header bit errors tolerated. The header is 64 bits and a sonde at the
-/// edge of reception loses a few; more than this and it is not a header.
-/// Four leaves a false alarm rate of about one in a million bit positions,
-/// which at 4800 baud is one spurious search every three minutes and costs
-/// nothing, because the Reed-Solomon code then refuses it.
-const HEADER_SLACK: u32 = 4;
+/// The waveform and the band are `identify::rs41`, which anything holding a
+/// recording reads without a graph.
+pub use identify::rs41::{BAND, BAUD, CHANNEL_WIDTH_HZ, OCCUPIED_HZ, Rs41};
 
 /// How far off the middle of its channel a sonde may sit before the channel
 /// is moved onto it.
@@ -73,10 +51,7 @@ const MOVE_EVERY_S: f64 = 10.0;
 pub struct Rs41Node {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
-    bits: Vec<bool>,
-    /// Bits already searched and known not to start a header. Only appended
-    /// to, so what was rejected stays rejected.
-    scanned: usize,
+    framer: rs41::Framer,
     frames: u64,
     /// The middle of the stream this node was handed, which is what a
     /// measured offset is measured from.
@@ -96,8 +71,7 @@ impl Rs41Node {
         Self {
             sync: None,
             meter: crate::FrameMeter::new(1.0, 0, 0.6),
-            bits: Vec::new(),
-            scanned: 0,
+            framer: rs41::Framer::new(),
             frames: 0,
             center_hz: 0.0,
             moved_s: None,
@@ -132,89 +106,6 @@ impl Rs41Node {
             hi_hz: hz + CHANNEL_WIDTH_HZ / 2.0,
         });
     }
-
-    /// Look for headers in the bits held, returning every frame behind one.
-    fn search(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        let header = header_bits();
-        let mut at = self.scanned;
-        while at + header.len() <= self.bits.len() {
-            let mut wrong = 0u32;
-            for (k, &want) in header.iter().enumerate() {
-                if self.bits[at + k] != want {
-                    wrong += 1;
-                    if wrong > HEADER_SLACK {
-                        break;
-                    }
-                }
-            }
-            if wrong > HEADER_SLACK {
-                at += 1;
-                continue;
-            }
-            match self.read_frame(at) {
-                // A header with a frame behind it: take both out of the
-                // buffer so the search does not walk back into them.
-                Some(Some(frame)) => {
-                    let used = frame.len() * 8;
-                    out.push(frame);
-                    self.bits.drain(..at + used);
-                    at = 0;
-                    self.scanned = 0;
-                }
-                // A header whose frame has not all arrived: wait here.
-                Some(None) => {
-                    self.scanned = at;
-                    return out;
-                }
-                None => at += 1,
-            }
-        }
-        self.scanned = at;
-        out
-    }
-
-    /// Read the frame starting at bit `at`. `None` where those bits are not
-    /// a frame, `Some(None)` where not enough of them have arrived.
-    fn read_frame(&self, at: usize) -> Option<Option<Vec<u8>>> {
-        // Not enough bits yet is not the same answer as not a frame: the
-        // search resumes where it stopped, so treating a short buffer as a
-        // rejection walks the cursor past the header and loses the frame
-        // that was about to arrive.
-        let Some(mut probe) = pack(&self.bits, at, rs41::FRAME_STD) else { return Some(None) };
-        rs41::descramble(&mut probe);
-        // The length marker sits in the data, so it has to be read before
-        // the code has passed on it; a wrong bit here costs one frame.
-        let len = rs41::frame_len(probe[rs41::DATA_AT])?;
-        let mut frame = if len == rs41::FRAME_STD {
-            probe
-        } else {
-            let Some(mut long) = pack(&self.bits, at, len) else { return Some(None) };
-            rs41::descramble(&mut long);
-            long
-        };
-        rs41::correct(&mut frame)?;
-        Some(Some(frame))
-    }
-}
-
-/// The header as it arrives: eight bytes, least significant bit first.
-fn header_bits() -> Vec<bool> {
-    rs41::HEADER_AIR.iter().flat_map(|b| (0..8).map(move |k| b >> k & 1 != 0)).collect()
-}
-
-/// `len` bytes from bit `at`, least significant bit first, or `None` where
-/// the bits are not all there.
-fn pack(bits: &[bool], at: usize, len: usize) -> Option<Vec<u8>> {
-    if at + len * 8 > bits.len() {
-        return None;
-    }
-    Some(
-        bits[at..at + len * 8]
-            .chunks(8)
-            .map(|c| c.iter().enumerate().fold(0u8, |b, (k, &s)| b | (s as u8) << k))
-            .collect(),
-    )
 }
 
 impl Simple for Rs41Node {
@@ -248,9 +139,9 @@ impl Simple for Rs41Node {
             return Ok(());
         };
         self.meter.feed(iq);
-        s.process(iq, &mut self.bits);
+        s.process(iq, self.framer.sink());
         let offset_hz = s.offset_hz();
-        let frames = self.search();
+        let frames = self.framer.take();
         let decoded = !frames.is_empty();
         for frame in frames {
             self.frames += 1;
@@ -259,18 +150,13 @@ impl Simple for Rs41Node {
         if decoded {
             self.follow_drift(offset_hz, c);
         }
-        if self.bits.len() > MAX_BITS {
-            let drop = self.bits.len() - MAX_BITS;
-            self.bits.drain(..drop);
-            self.scanned = self.scanned.saturating_sub(drop);
-        }
+        self.framer.trim();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.meter.reset();
-        self.bits.clear();
-        self.scanned = 0;
+        self.framer.reset();
         self.moved_s = None;
         if let Some(s) = &mut self.sync {
             s.reset();
@@ -278,77 +164,18 @@ impl Simple for Rs41Node {
     }
 }
 
-/// What the protocols node makes of a sonde frame: which balloon it is,
-/// where, and how it is flying.
-pub fn rs41_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let f = rs41::parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("serial".into(), common::Value::Text(f.serial.clone())),
-        ("frame".into(), common::Value::Int(f.frame_no as i64)),
-        ("battery_v".into(), common::Value::Float(f.battery_v as f64)),
-        ("state".into(), common::Value::Text(f.flight.label().into())),
-    ];
-    if f.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(f.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(f.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(f.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(f.course_deg)));
-        fields.push(("satellites".into(), common::Value::Int(f.satellites as i64)));
-    }
-    if let (Some(w), Some(t)) = (f.gps_week, f.gps_tow_ms) {
-        fields.push(("gps_week".into(), common::Value::Int(w as i64)));
-        fields.push(("gps_tow_ms".into(), common::Value::Int(t as i64)));
-    }
-    fields.push(("pcb_temp_c".into(), common::Value::Int(f.pcb_temp_c as i64)));
-    if f.bad_blocks > 0 {
-        fields.push(("bad_blocks".into(), common::Value::Int(f.bad_blocks as i64)));
-    }
-
-    let mut d = Decoded::bytes("rs41", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(f.bad_blocks == 0))
-        .with_text(f.summary())
-        .with_detail(format!("frame {}, {:.1} V, {}", f.frame_no, f.battery_v, f.flight.label()))
-        .with_fields(fields)
-        .by(common::Identity::new("vaisala", f.serial.clone()).made_by("Vaisala"));
-    if f.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: f.altitude_m,
-                climb_ms: f.climb_ms,
-                battery_v: f.battery_v,
-                satellites: f.satellites,
-                descending: f.flight == rs41::Flight::Descent,
-                sensors: f.meas.map(|meas| common::SondeSensors { meas, calibration: f.subframe }),
-            })
-            .at_position(common::Position {
-                lat: f.lat_deg,
-                lon: f.lon_deg,
-                altitude_m: Some(f.altitude_m),
-                speed_kt: Some(f.speed_kt),
-                course_deg: Some(f.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct Rs41;
-
 impl Protocol for Rs41 {
     fn id(&self) -> &'static str {
-        "rs41"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "rs41"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["radiosonde", "sonde", "vaisala"]
+        Signal::aliases(self)
     }
-    /// The meteorological aids allocation. Placed by band rather than
-    /// anywhere: 4800 baud FSK in a 15 kHz channel is a shape a great many
-    /// things have, and outside this band none of them is a sonde.
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
+        Signal::placement(self)
     }
     /// The middle of the band. Europe launches mostly between 402 and 405
     /// MHz, and a sonde is found by scanning rather than by being known.
@@ -356,15 +183,7 @@ impl Protocol for Rs41 {
         403_000_000.0
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            // Four samples a symbol is the demodulator's floor.
-            min_rate_hz: 4.0 * BAUD,
-            // Ten, which leaves the timing loop room to interpolate.
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
     /// The six megahertz of the sonde band, which nothing else here claims.
     fn frame_claim(&self) -> FrameClaim {
@@ -399,7 +218,7 @@ impl Protocol for Rs41 {
         {
             return None;
         }
-        Some(rs41_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -488,16 +307,14 @@ mod tests {
         let iq = key(&frame, rate);
         let mut n = Rs41Node::new();
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
-        let mut got = Vec::new();
+        let mut got: Vec<Vec<u8>> = Vec::new();
         for block in iq.chunks(2048) {
-            let mut bits = Vec::new();
-            n.sync.as_mut().unwrap().process(block, &mut bits);
-            n.bits.extend(bits);
-            got.extend(n.search());
+            n.sync.as_mut().unwrap().process(block, n.framer.sink());
+            got.extend(n.framer.take());
         }
         assert_eq!(got.len(), 1, "{} frames off one transmission", got.len());
         assert_eq!(got[0], frame, "the bytes are not the ones that were keyed");
-        let d = rs41_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+        let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
         assert_eq!(d.field("serial").map(|v| v.to_string()).as_deref(), Some("W1234567"));
         assert_eq!(d.crc_ok, Some(true));
         let p = d.position.expect("a position");
@@ -613,15 +430,9 @@ mod tests {
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
         let mut frames = 0;
         for block in iq.chunks(4096) {
-            let mut bits = Vec::new();
-            n.sync.as_mut().unwrap().process(block, &mut bits);
-            n.bits.extend(bits);
-            frames += n.search().len();
-            if n.bits.len() > MAX_BITS {
-                let drop = n.bits.len() - MAX_BITS;
-                n.bits.drain(..drop);
-                n.scanned = n.scanned.saturating_sub(drop);
-            }
+            n.sync.as_mut().unwrap().process(block, n.framer.sink());
+            frames += n.framer.take().len();
+            n.framer.trim();
         }
         assert_eq!(frames, 0, "{frames} frames out of twenty seconds of noise");
     }

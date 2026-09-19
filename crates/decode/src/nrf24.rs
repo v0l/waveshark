@@ -26,7 +26,10 @@
 //! Tables and layout from `pascallanger/DIY-Multiprotocol-TX-Module`
 //! (`XN297_EMU.ino`), whose emulation real toys bind to.
 
+use common::Decoded;
 use common::Value;
+use dsp::FirDecim;
+use dsp::fsk::BitSync;
 
 /// The XN297's fixed preamble, most significant bit first: 28 bits.
 pub const PREAMBLE: u32 = 0x0c71_0f55;
@@ -248,6 +251,152 @@ pub fn fields(p: &Packet) -> Vec<(String, Value)> {
         ("scrambled".into(), Value::Bool(p.scrambled)),
     ]
 }
+
+/// The row a frame off the bus becomes.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    let p = from_on_air(bytes)?;
+    let mut fields = fields(&p);
+    if let Some(ch) = channel_of(center.as_f64()) {
+        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
+    }
+    let address =
+        fields.iter().find(|(k, _)| k == "address").map(|(_, v)| v.to_string()).unwrap_or_default();
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    Some(
+        Decoded::bytes("XN297", center, 0.0, bytes.to_vec())
+            .by(common::Identity::new("nrf24", address.clone()))
+            .with_link(common::Link { from: Some(common::Party::unit(address)), to: None })
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Gfsk)
+            // The CRC-16 was checked again here, on the bytes in the row,
+            // rather than taken on trust from whatever put them on the bus.
+            .with_crc(Some(true)),
+    )
+}
+
+/// The channel index a centre names, as the chip's own register value.
+pub fn channel_of(center_hz: f64) -> Option<u8> {
+    let ch = ((center_hz - BAND.0) / 1e6).round();
+    (0.0..=125.0).contains(&ch).then_some(ch as u8)
+}
+
+/// Where the chip can tune: a megahertz a step from 2400 MHz, 126 channels.
+pub const BAND: (f64, f64) = (2_400_000_000.0, 2_526_000_000.0);
+
+/// The two bit rates an XN297 keys. The chip supports no others.
+pub const BAUDS: [f64; 2] = [250_000.0, 1_000_000.0];
+
+/// One bit rate's clock and the bits it has produced but not yet read a
+/// frame out of.
+pub struct Reader {
+    /// Down to four samples a symbol for *this* bit rate.
+    ///
+    /// The stream both clocks are handed is four samples a symbol at the
+    /// faster one, which is sixteen at the slower, and a bit clock's channel
+    /// filter is designed against its own baud: at 4 MS/s the 250 kbit
+    /// filter is 119 taps where at 1 MS/s it is 31, and it runs over a
+    /// quarter as many samples. Fifteen times the arithmetic for the same
+    /// bits.
+    decim: Option<FirDecim>,
+    narrow: Vec<common::C32>,
+    sync: BitSync,
+    bits: Vec<bool>,
+    /// Bits dropped off the front, so a frame's position stays a position in
+    /// the stream rather than in what is left of it.
+    dropped: u64,
+    /// Where the search has reached, counted in the same stream positions.
+    /// The tail is kept for a frame that is still arriving, so without this
+    /// the frame at the end of one block is read again out of the next.
+    read_from: u64,
+}
+
+impl Reader {
+    pub fn new(rate: f64, baud: f64) -> Self {
+        // A GFSK link at modulation index 0.64 occupies about 1.6 times its
+        // baud, and the filter in the bit clock is what keeps the rest of
+        // the channel's noise out of the discriminator.
+        let occupied = 1.6 * baud;
+        let factor = (rate / (baud * SPS)).floor().max(1.0) as usize;
+        let work = rate / factor as f64;
+        Self {
+            decim: (factor > 1).then(|| FirDecim::design_hz(rate, factor, occupied / 2.0, 60.0)),
+            narrow: Vec::new(),
+            sync: BitSync::with_bandwidth(work, baud, occupied),
+            bits: Vec::new(),
+            dropped: 0,
+            read_from: 0,
+        }
+    }
+
+    /// Demodulate a block and hand back every frame that closed inside it,
+    /// each with the bit it started at.
+    /// Whether this rate's clock can run on the stream it was given.
+    pub fn usable(&self) -> bool {
+        self.sync.usable()
+    }
+
+    pub fn read(&mut self, iq: &[common::C32], out: &mut Vec<(u64, Packet)>) {
+        if !self.sync.usable() {
+            return;
+        }
+        match &mut self.decim {
+            Some(d) => {
+                self.narrow.clear();
+                d.process(iq, &mut self.narrow);
+                self.sync.process(&self.narrow, &mut self.bits);
+            }
+            None => self.sync.process(iq, &mut self.bits),
+        }
+        let mut from = (self.read_from - self.dropped) as usize;
+        while let Some(at) = find_preamble(&self.bits, from) {
+            // A preamble too near the end may be a frame still arriving, so
+            // leave it for the next block rather than deciding on half of it.
+            if self.bits.len() - at < MAX_FRAME_BITS {
+                from = at;
+                break;
+            }
+            match decode(&self.bits, at) {
+                Some(p) => {
+                    from = at + p.bits();
+                    out.push((self.dropped + at as u64, p));
+                }
+                None => from = at + 1,
+            }
+        }
+        self.read_from = self.dropped + from as u64;
+        let keep = self.bits.len().min(KEEP_BITS);
+        let cut = self.bits.len() - keep;
+        if cut > 0 {
+            self.bits.drain(..cut);
+            self.dropped += cut as u64;
+            self.read_from = self.read_from.max(self.dropped);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        if let Some(d) = &mut self.decim {
+            d.reset();
+        }
+        self.narrow.clear();
+        self.sync.reset();
+        self.bits.clear();
+        self.dropped = 0;
+        self.read_from = 0;
+    }
+}
+
+/// Samples a symbol each bit clock is fed, which is where [`BitSync`] stops.
+pub const SPS: f64 = 4.0;
+
+/// The longest frame the chip sends: five address bytes, thirty-two of
+/// payload and the check, behind the preamble.
+pub const MAX_FRAME_BITS: usize = PREAMBLE_BITS + (5 + 32 + 2) * 8;
+
+/// Bits kept behind the search so a frame split across two blocks is still
+/// whole when the second arrives.
+pub const KEEP_BITS: usize = MAX_FRAME_BITS * 2;
 
 #[cfg(test)]
 mod tests {

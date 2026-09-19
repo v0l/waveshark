@@ -27,6 +27,7 @@
 //! rather than the ground station that sent it.
 
 use crate::protocol::Value;
+use common::Decoded;
 
 const SYN: u8 = 0x16;
 const SOH: u8 = 0x01;
@@ -239,7 +240,7 @@ impl Framer {
             }
             State::Text => {
                 self.text.push(r);
-                if r.count_ones() % 2 == 0 {
+                if r.count_ones().is_multiple_of(2) {
                     self.errors += 1;
                     if self.errors > MAX_PARITY_ERRORS {
                         self.restart();
@@ -310,13 +311,36 @@ pub fn crc(text: &[u8], check: &[u8; 2]) -> u16 {
     crate::bits::crc16le(&whole, 0x8408, 0)
 }
 
+/// The decode an ACARS block becomes.
+pub fn decoded(m: &Message, bytes: &[u8], center: common::Hz) -> Decoded {
+    let fields = m.fields();
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let protocol = if m.downlink { "ACARS-Downlink" } else { "ACARS-Uplink" };
+    // The aircraft either way: an uplink is addressed to the aeroplane, not
+    // sent by the ground station whose name is nowhere in the block.
+    let name = m.flight.clone().filter(|f| !f.trim().is_empty()).unwrap_or_default();
+    let mut who = common::Identity::new("acars", m.registration.clone());
+    if !name.is_empty() {
+        who = who.named(name);
+    }
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        .by(who)
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Msk)
+        // Odd parity on every character and a CRC-16 over the block.
+        .with_crc(Some(true));
+    d.media_type = if m.text.is_empty() { common::media::BYTES } else { common::media::TEXT };
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Odd parity, which every character on the wire carries.
     fn parity(b: u8) -> u8 {
-        if b.count_ones() % 2 == 0 { b | 0x80 } else { b }
+        if b.count_ones().is_multiple_of(2) { b | 0x80 } else { b }
     }
 
     /// A transmission as the bits arrive: sync, header, block, check bytes.

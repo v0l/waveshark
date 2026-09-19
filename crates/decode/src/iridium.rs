@@ -26,6 +26,7 @@
 //! rather than from a published specification.
 
 use crate::bits::{BCH_31_21_IRIDIUM_GEN, bch_repair2};
+use common::Decoded;
 use common::Value;
 
 /// Symbols a second on every Iridium channel, duplex and simplex alike.
@@ -506,6 +507,75 @@ pub fn encode_ring_alert(r: &RingAlert) -> Vec<bool> {
         out.extend(interleave(&coded.iter().map(|b| b.as_slice()).collect::<Vec<_>>()));
     }
     out
+}
+
+/// The row a frame becomes.
+///
+/// Nobody wrote any of it: a ring alert is one machine paging another, so
+/// the row carries its fields, its position and no claim that it is a
+/// message.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let bits = unpack(bytes)?;
+    let f = parse(&bits)?;
+    let mut fields = f.fields();
+    if let Some(ch) = channel_at(center.as_f64()) {
+        fields.insert(1, ("channel".into(), common::Value::Text(ch.label())));
+    }
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let mut who = common::Identity::new("iridium", format!("SV{:03}", f.sat()));
+    who.name = Some(format!("Iridium {}", f.sat()));
+    who.vendor = Some("Iridium".into());
+    let mut d = Decoded::bytes("Iridium", center, 0.0, bytes.to_vec())
+        .by(who)
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_media(common::media::BYTES)
+        .with_modulation(common::Modulation::Dqpsk)
+        // Every block carried a BCH(31,21) and a parity bit, and a frame
+        // reaching here had all of them agree.
+        .with_crc(Some(true));
+    if let Some((lat, lon, altitude_km)) = f.position() {
+        d = d.at_position(common::Position {
+            lat,
+            lon,
+            altitude_m: Some(altitude_km * 1000.0),
+            ..Default::default()
+        });
+    }
+    Some(d)
+}
+
+/// The bits back out of a frame the front end wrote.
+pub fn unpack(bytes: &[u8]) -> Option<Vec<bool>> {
+    if bytes.len() < 5 || bytes[..3] != TAG {
+        return None;
+    }
+    let count = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
+    let body = &bytes[5..];
+    (count <= body.len() * 8 && count <= MAX_FRAME_BITS)
+        .then(|| (0..count).map(|i| body[i / 8] >> (7 - i % 8) & 1 == 1).collect())
+}
+
+/// The longest frame: the access word, the ring alert header and twelve
+/// pages, each page a 64 bit group.
+pub const MAX_FRAME_BITS: usize = 24 + 96 + 13 * 64;
+
+/// What the front end writes in front of a frame's bits, so the packet bus
+/// can tell one from anything else arriving on an L-band centre.
+pub const TAG: [u8; 3] = *b"IRD";
+
+/// A burst's bits as a frame for the bus: the tag, how many bits there are,
+/// and the bits from the access word on.
+pub fn pack(bits: &[bool]) -> Option<Vec<u8>> {
+    let at = find_access(bits, &DOWNLINK_ACCESS)?;
+    let from = at - DOWNLINK_ACCESS.len();
+    let bits = &bits[from..bits.len().min(from + MAX_FRAME_BITS)];
+    let mut out = TAG.to_vec();
+    out.extend((bits.len() as u16).to_be_bytes());
+    out.extend(bits.chunks(8).map(|byte| {
+        byte.iter().enumerate().fold(0u8, |acc, (i, b)| acc | u8::from(*b) << (7 - i))
+    }));
+    Some(out)
 }
 
 #[cfg(test)]

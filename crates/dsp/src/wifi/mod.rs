@@ -446,13 +446,13 @@ impl WifiDetector {
             // longer than any frame can. The second is not optional: without
             // it a gate held open by a carrier never closes, and everything
             // behind it waits for ever.
-            if let Some(f) = self.burst_from {
-                if self.quiet >= QUIET || at - f > MAX_DSSS_SAMPLES as u64 {
-                    self.bursts.push((f, at));
-                    self.burst_from = None;
-                    self.in_burst = false;
-                    self.quiet = 0;
-                }
+            if let Some(f) = self.burst_from
+                && (self.quiet >= QUIET || at - f > MAX_DSSS_SAMPLES as u64)
+            {
+                self.bursts.push((f, at));
+                self.burst_from = None;
+                self.in_burst = false;
+                self.quiet = 0;
             }
         }
 

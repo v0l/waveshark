@@ -16,6 +16,7 @@
 
 use crate::bits::crc16le;
 use crate::geo::{ecef_to_geodetic, ecef_velocity_to_enu};
+use common::Decoded;
 
 /// The bytes every frame starts with: a marker, a subtype and a length.
 pub const SYNC: [u8; 3] = [0xAA, 0xBF, 0x35];
@@ -253,6 +254,173 @@ pub fn parse(record: &[u8]) -> Option<Report> {
         ));
     }
     Some(r)
+}
+
+/// What the protocols node makes of a gathered record.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes)?;
+    let (h, m, s) = r.utc;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("model".into(), common::Value::Text("MRZ".into())),
+        ("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:02}"))),
+        ("altitude_m".into(), common::Value::Float(r.altitude_m)),
+        ("climb_ms".into(), common::Value::Float(r.climb_ms)),
+        ("speed_kt".into(), common::Value::Float(r.speed_kt)),
+        ("course_deg".into(), common::Value::Float(r.course_deg)),
+    ];
+    if !r.serial.is_empty() {
+        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
+    }
+    if r.satellites > 0 {
+        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
+    }
+    if let Some((y, mo, d)) = r.date {
+        fields.push(("date".into(), common::Value::Text(format!("{y:04}-{mo:02}-{d:02}"))));
+    }
+
+    let mut d = Decoded::bytes("mrz", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(true))
+        .with_text(r.summary())
+        .with_detail(format!("MRZ, {h:02}:{m:02}:{s:02} UTC"))
+        .with_fields(fields);
+    if !r.serial.is_empty() {
+        d = d.by(common::Identity::new("mrz", r.serial.clone()).made_by("Meteo-Radiy"));
+    }
+    if r.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: r.altitude_m,
+                climb_ms: r.climb_ms,
+                // The frame carries sensor counts rather than a battery
+                // voltage; not-a-number is how a track says unread.
+                battery_v: f32::NAN,
+                satellites: r.satellites,
+                descending: r.climb_ms < -1.0,
+                sensors: None,
+            })
+            .at_position(common::Position {
+                lat: r.lat_deg,
+                lon: r.lon_deg,
+                altitude_m: Some(r.altitude_m),
+                speed_kt: Some(r.speed_kt),
+                course_deg: Some(r.course_deg),
+            });
+    }
+    Some(d)
+}
+
+/// Chips in the longest frame.
+pub const FRAME_CHIPS: usize = FRAME_ECEF * 8 * 2;
+
+/// Chips held while looking for a frame: three of them.
+pub const MAX_CHIPS: usize = FRAME_CHIPS * 3;
+
+/// Chips of the three sync bytes allowed to be wrong. The CRC behind them
+/// refuses what a false sync would produce.
+pub const SYNC_SLACK: u32 = 4;
+
+/// The three sync bytes as chips, each way up. Manchester: a one is a fall
+/// and a zero a rise, or the other way about when the receiver has the
+/// signal over.
+pub fn sync_chips() -> [Vec<bool>; 2] {
+    let upright: Vec<bool> = SYNC
+        .iter()
+        .flat_map(|b| (0..8).rev().map(move |k| b >> k & 1 != 0))
+        .flat_map(|bit| [bit, !bit])
+        .collect();
+    let inverted = upright.iter().map(|c| !c).collect();
+    [upright, inverted]
+}
+
+pub fn matches(chips: &[bool], at: usize, want: &[bool]) -> bool {
+    let mut wrong = 0;
+    for (k, &w) in want.iter().enumerate() {
+        wrong += u32::from(chips[at + k] != w);
+        if wrong > SYNC_SLACK {
+            return false;
+        }
+    }
+    true
+}
+
+/// Manchester chips back to bytes, most significant bit first.
+pub fn manchester(chips: &[bool], inverted: bool) -> Vec<u8> {
+    let bits: Vec<bool> = chips.chunks(2).map(|c| (c[0] && !c[c.len() - 1]) != inverted).collect();
+    bits.chunks(8).map(|b| b.iter().fold(0u8, |v, bit| v << 1 | u8::from(*bit))).collect()
+}
+
+/// Frames cut out of a stream of chips.
+///
+/// Above the waveform and below the payload: the chips come from any FSK
+/// demodulator at this sonde's baud, and what leaves is what the payload
+/// reader takes.
+pub struct Framer {
+    chips: Vec<bool>,
+    /// Positions already searched and known not to start a header.
+    scanned: usize,
+    gather: Gather,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self { chips: Vec::new(), scanned: 0, gather: Gather::new() }
+    }
+
+    /// The buffer a bit clock appends into.
+    pub fn sink(&mut self) -> &mut Vec<bool> {
+        &mut self.chips
+    }
+
+    pub fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let sync = sync_chips();
+        let mut at = self.scanned;
+        while at + sync[0].len() <= self.chips.len() {
+            let Some(inverted) = sync.iter().position(|s| matches(&self.chips, at, s)) else {
+                at += 1;
+                continue;
+            };
+            if at + FRAME_CHIPS > self.chips.len() {
+                self.scanned = at;
+                return out;
+            }
+            let frame = manchester(&self.chips[at..at + FRAME_CHIPS], inverted == 1);
+            match self.gather.take(&frame) {
+                Some(record) => {
+                    let used = at + record.len().saturating_sub(12) * 16;
+                    out.push(record);
+                    self.chips.drain(..used.min(self.chips.len()));
+                    at = 0;
+                    self.scanned = 0;
+                }
+                None => at += 1,
+            }
+        }
+        self.scanned = at;
+        out
+    }
+
+    /// Drop what has been searched and found wanting.
+    pub fn trim(&mut self) {
+        if self.chips.len() > MAX_CHIPS {
+            let drop = self.chips.len() - MAX_CHIPS;
+            self.chips.drain(..drop);
+            self.scanned = self.scanned.saturating_sub(drop);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.chips.clear();
+        self.scanned = 0;
+        self.gather = Gather::new();
+    }
 }
 
 #[cfg(test)]

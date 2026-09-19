@@ -10,14 +10,15 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+pub use decode::wmbus::decoded;
 use dsp::wmbus::{CHIP_RATE, Demod};
+use identify::Signal;
+pub use identify::wmbus::CHANNEL_WIDTH_HZ;
+pub use identify::wmbus::Wmbus;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// Width a mode T or C transmission occupies, for the port and the log.
-pub const CHANNEL_WIDTH_HZ: f64 = 250_000.0;
 
 pub struct WmbusNode {
     demod: Option<Demod>,
@@ -88,56 +89,33 @@ impl Simple for WmbusNode {
     }
 }
 
-/// What the protocols node makes of a meter frame: who sent it and what it
-/// is, with the bytes as they arrived.
-pub fn wmbus_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = decode::wmbus::parse(bytes, None)?;
-    let mut d = Decoded::bytes("Wireless-MBus", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true));
-    let fields: Vec<(String, common::Value)> = r
-        .fields
-        .iter()
-        .filter(|(k, _)| k.as_str() != "data")
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let m = r.get("M").map(|v| v.to_string()).unwrap_or_default();
-    let id = r.get("id").map(|v| v.to_string()).unwrap_or_default();
-    let kind = r.get("type_string").map(|v| v.to_string()).unwrap_or_default();
-    let enc = r.get("payload_encrypted").is_some();
-    let text = format!("{m} {kind} {id}{}", if enc { ", payload encrypted" } else { "" });
-    d = d.with_text(text.clone()).with_detail(r.fields_line()).with_fields(fields);
-    if !id.is_empty() {
-        d = d
-            .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(format!(
-                "{m}-{id}"
-            ))))
-            .by(common::Identity::new("wmbus", format!("{m}-{id}")).made_by(m.clone()));
-    }
-    Some(d)
-}
-
 /// Widths a meter transmission has: 100 kchip/s keyed 50 kHz either way,
 /// with what the extraction adds around it.
 const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
 
-pub struct Wmbus;
-
 impl Protocol for Wmbus {
     fn id(&self) -> &'static str {
-        "wmbus"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "wmbus"
+        Signal::label(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// Where meters transmit (EN 13757-4). Placed by band rather than
     /// anywhere, because a meter transmission's width is a width many
     /// things have: placed by width alone the decoder was built on every
     /// 200 kHz GSM carrier and every splattering 433 MHz sensor, and ran on
     /// all of them for nothing.
-    fn placement(&self) -> Placement {
-        Placement::Bands(dsp::wmbus::BANDS.to_vec())
-    }
+
     /// The wider of the two meter bands, the 868.95 MHz uplink.
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 500_000 }
@@ -146,24 +124,14 @@ impl Protocol for Wmbus {
         if !dsp::wmbus::is_wmbus_band(p.center_hz() as f64) {
             return None;
         }
-        Some(wmbus_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 0.0,
-            feed_rate_hz: 0.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {
         METER_HZ.contains(&source_width_hz)
     }
     /// Mode T and C meters, at 868.95 MHz.
-    fn default_hz(&self) -> f64 {
-        868_950_000.0
-    }
+
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("wmbus")]
     }

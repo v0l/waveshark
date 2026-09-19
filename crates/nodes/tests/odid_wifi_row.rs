@@ -80,7 +80,7 @@ fn heard(center: f64, at: f64) -> Vec<pipeline::event::Decoded> {
         .as_frames()
         .expect("frames")
         .iter()
-        .filter_map(|f| nodes::wifi_nodes::wifi_decoded(&f.bytes, Hz(center as u64)))
+        .filter_map(|f| decode::wifi::decoded(&f.bytes, Hz(center as u64)))
         .collect()
 }
 
@@ -158,7 +158,7 @@ fn noise_reports_no_aircraft() {
         .as_frames()
         .expect("frames")
         .iter()
-        .filter_map(|f| nodes::wifi_nodes::wifi_decoded(&f.bytes, Hz(CHANNEL_6 as u64)))
+        .filter_map(|f| decode::wifi::decoded(&f.bytes, Hz(CHANNEL_6 as u64)))
         .filter(|d| d.protocol == "OpenDroneID")
         .collect();
     assert_eq!(rows.len(), 0);

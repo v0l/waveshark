@@ -957,6 +957,151 @@ pub fn decode(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Decoded> 
     Some(Decoded { packet: parse(packet)?, nonce })
 }
 
+/// One packet off the bus as a row: which link, what kind of packet, and
+/// what it carried. Checked again against the UID bytes it travelled with,
+/// so a row is never taken on the front end's word alone.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<common::Decoded> {
+    use common::Value;
+    if bytes.len() < ENVELOPE + PACKET_LEN || bytes[..4] != TAG {
+        return None;
+    }
+    let sf = bytes[4];
+    let khz = u16::from_le_bytes([bytes[5], bytes[6]]);
+    let ota = bytes[7];
+    let uid = [0, 0, 0, 0, bytes[8], bytes[9]];
+    let packet = &bytes[ENVELOPE..];
+    if !SPREADING_FACTORS.contains(&sf) || khz == 0 {
+        return None;
+    }
+    let d = decode(packet, &uid, ota)?;
+    let kind = match &d.packet {
+        Packet::Rc { .. } | Packet::RcFull { .. } => "rc",
+        Packet::Sync(_) => "sync",
+        Packet::Data { .. } => "data",
+        Packet::Unknown(_) => "unknown",
+    };
+    let link_id = format!("{:02x}{:02x}", uid[4], uid[5]);
+    let mut fields: Vec<(String, Value)> = vec![
+        ("spreading_factor".into(), Value::Int(i64::from(sf))),
+        ("bandwidth_hz".into(), Value::Float(f64::from(khz) * 1e3)),
+        ("link".into(), Value::Text(link_id.clone())),
+        ("full".into(), Value::Bool(packet.len() >= PACKET_LEN_FULL)),
+    ];
+    fields.extend(crate::elrs::fields(&d));
+    let detail = match &d.packet {
+        Packet::Rc { channels, armed, .. } => format!(
+            "rc {}{}",
+            channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
+            if *armed { " armed" } else { "" }
+        ),
+        Packet::RcFull { channels, armed, .. } => format!(
+            "rc {}{}",
+            channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
+            if *armed { " armed" } else { "" }
+        ),
+        Packet::Sync(s) => format!(
+            "sync {} hop {} counter {}",
+            RATES_2G4.get(usize::from(s.rate_index)).map_or("unknown rate", |r| r.name),
+            s.fhss_index,
+            s.nonce
+        ),
+        Packet::Data { package_index, payload } => {
+            format!("data {package_index}: {}", hex(payload))
+        }
+        Packet::Unknown(k) => format!("packet type {k}"),
+    };
+    let mut out = common::Decoded::bytes("ExpressLRS", center, 0.0, packet.to_vec())
+        .with_modulation(common::Modulation::Css)
+        .with_crc(Some(true))
+        .with_detail(format!("SF{sf} {kind}: {detail} link {link_id}"))
+        .with_fields(fields);
+    // The handset is the transmitting end and the link's UID bytes are the
+    // nearest thing to its name; the model it flies is the other end.
+    out.link = Some(common::Link {
+        from: Some(common::Party::unit(format!("elrs {link_id}"))),
+        to: Some(common::Party::unit(format!("elrs {link_id} rx"))),
+    });
+    out.identity = Some(common::Identity::new("elrs", link_id));
+    if let Some(control) = control(&d.packet) {
+        out.report = control;
+    }
+    Some(out)
+}
+
+pub fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Bytes before the packet on the bus: the tag, the spreading factor, the
+/// bandwidth in kilohertz, the firmware generation, the two UID bytes the
+/// CRC was checked with, and the counter it took, 0xff for none.
+pub const ENVELOPE: usize = 11;
+
+/// The spreading factors the 2.4 GHz LoRa rates use.
+pub const SPREADING_FACTORS: std::ops::RangeInclusive<u8> = 5..=8;
+
+/// Tag on the bus, so a packet is recognised by its shape.
+pub const TAG: [u8; 4] = *b"ELRS";
+
+/// Coding rate denominator of the rates that decode: `CR_LI 4/8`.
+pub const CODING_RATE: u8 = 8;
+
+/// Packets held back for the link to be recovered from. Two settle the
+/// high byte; a third is asked for so a stray packet of another link on
+/// the same channel does not pass for agreement.
+pub const RECOVER_FROM: usize = 3;
+
+/// Read a packet's bytes out of its symbols, by the length the symbol
+/// count says: a Full rate is thirteen bytes, the rest eight.
+pub fn payload(symbols: &[u16], sf: u8) -> Option<Vec<u8>> {
+    let n = symbols.len();
+    let len = if n >= crate::lora_li::symbol_count(sf, PACKET_LEN_FULL) {
+        PACKET_LEN_FULL
+    } else if n >= crate::lora_li::symbol_count(sf, PACKET_LEN) {
+        PACKET_LEN
+    } else {
+        return None;
+    };
+    crate::lora_li::decode(symbols, sf, CODING_RATE, len).map(|d| d.bytes)
+}
+
+/// The UID bytes a sync packet names, when its CRC agrees that it is one.
+pub fn uid_from_sync(packet: &[u8], ota_version: u8) -> Option<[u8; 6]> {
+    let sync = match packet.len() {
+        n if n >= PACKET_LEN_FULL => parse_full(packet),
+        n if n >= PACKET_LEN => parse(packet),
+        _ => None,
+    }?;
+    let Packet::Sync(s) = sync else { return None };
+    let uid = [0, 0, 0, 0, s.uid45[0], s.uid45[1]];
+    let checks = if packet.len() >= PACKET_LEN_FULL {
+        validate_full(packet, &uid, ota_version).is_some()
+    } else {
+        validate(packet, &uid, ota_version).is_some()
+    };
+    checks.then_some(uid)
+}
+
+/// The bytes a packet travels as on the bus.
+pub fn to_bytes(
+    sf: u8,
+    bw: f64,
+    ota: u8,
+    uid: &[u8; 6],
+    nonce: Option<u8>,
+    packet: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ENVELOPE + packet.len());
+    out.extend_from_slice(&TAG);
+    out.push(sf);
+    out.extend_from_slice(&((bw / 1e3).round() as u16).to_le_bytes());
+    out.push(ota);
+    out.extend_from_slice(&uid[4..6]);
+    out.push(nonce.unwrap_or(0xff));
+    out.extend_from_slice(packet);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

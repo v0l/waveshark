@@ -19,7 +19,10 @@
 
 use crate::bits::crc16;
 use crate::whiten::Prbs9;
+use common::C32;
+use common::Decoded;
 use dsp::conv;
+use dsp::dab::{Dab, Mode, Symbol};
 
 /// Bits in one fast information block, its CRC included.
 pub const FIB_BITS: usize = 256;
@@ -934,6 +937,146 @@ pub fn encode(fibs: &[u8]) -> Vec<u8> {
     }
     let mask = puncture();
     coded.iter().zip(mask.iter()).filter(|&(_, &keep)| keep == 1).map(|(&bit, _)| bit).collect()
+}
+
+/// A whole DAB receiver: samples in, an ensemble's tables out.
+pub struct DabReceiver {
+    pub front: Dab,
+    fic: Fic,
+    symbols: Vec<Symbol>,
+    snr_db: f32,
+}
+
+impl Default for DabReceiver {
+    fn default() -> Self {
+        Self::new(Mode::I)
+    }
+}
+
+impl DabReceiver {
+    pub fn new(mode: Mode) -> Self {
+        Self { front: Dab::new(mode), fic: Fic::new(), symbols: Vec::new(), snr_db: f32::NAN }
+    }
+
+    /// The ensemble as its tables describe it so far.
+    pub fn ensemble(&self) -> &Ensemble {
+        self.fic.ensemble()
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.fic.stats
+    }
+
+    pub fn locked(&self) -> bool {
+        self.front.locked()
+    }
+
+    pub fn frames(&self) -> u64 {
+        self.front.frames()
+    }
+
+    /// Signal to noise off the last symbol read, or NaN before any was.
+    pub fn snr_db(&self) -> f32 {
+        self.snr_db
+    }
+
+    /// The frequency error the front end is correcting.
+    pub fn offset_hz(&self) -> f64 {
+        self.front.offset_hz()
+    }
+
+    /// Read what `iq` holds. Returns the blocks that passed their check.
+    pub fn push(&mut self, iq: &[C32]) -> usize {
+        let mut symbols = std::mem::take(&mut self.symbols);
+        symbols.clear();
+        self.front.push(iq, &mut symbols);
+        let fic_symbols = self.front.mode().fic_symbols();
+        let mut good = 0;
+        for symbol in &symbols {
+            self.snr_db = symbol.snr_db;
+            // The fast information channel is the first symbols of a frame;
+            // the rest is the main service channel, which nothing here reads.
+            if symbol.index <= fic_symbols {
+                good += self.fic.push(&symbol.soft);
+            }
+        }
+        self.symbols = symbols;
+        good
+    }
+}
+
+/// What an ensemble is, once its name has arrived.
+///
+/// A row rather than a port, because what DAB puts on the air about itself is
+/// a description of the multiplex and not a packet anybody sent. `None` until
+/// the ensemble label has been read.
+pub fn ensemble_decoded(rx: &DabReceiver, center: common::Hz, at: f64) -> Option<Decoded> {
+    let e = rx.ensemble();
+    let Some(name) = e.name.clone() else { return None };
+    let stats = rx.stats();
+    let mut fields = vec![
+        ("ensemble".into(), common::Value::Text(name.clone())),
+        ("mode".into(), common::Value::Text(rx.front.mode().label().into())),
+        ("services".into(), common::Value::Int(e.services.len() as i64)),
+        ("snr_db".into(), common::Value::Float(rx.snr_db() as f64)),
+    ];
+    if let Some(id) = e.id {
+        fields.push(("ensemble_id".into(), common::Value::Text(format!("{id:04X}"))));
+    }
+    if let Some(q) = stats.quality() {
+        fields.push(("blocks_ok".into(), common::Value::Float((100.0 * q) as f64)));
+    }
+    let detail = match e.id {
+        Some(id) => format!("{name} ({id:04X})"),
+        None => name.clone(),
+    };
+    Some(
+        Decoded::bytes("DAB", center, at, Vec::new())
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Ofdm)
+            .with_crc(Some(true)),
+    )
+}
+
+/// A service of the ensemble, once the tables have named it.
+pub fn service_decoded(rx: &DabReceiver, id: u32, center: common::Hz, at: f64) -> Option<Decoded> {
+    let e = rx.ensemble();
+    let Some(service) = e.service(id) else { return None };
+    let Some(name) = service.name.clone() else { return None };
+    let audio = service.audio();
+    let sub = audio.and_then(|(id, _)| e.sub_channel(id)).copied();
+    let mut fields = vec![
+        ("service".into(), common::Value::Text(name.clone())),
+        ("service_id".into(), common::Value::Text(format!("{id:04X}"))),
+    ];
+    if let Some((_, kind)) = audio {
+        fields.push(("audio".into(), common::Value::Text(kind.label())));
+    }
+    if let Some(pty) = service.programme_type.filter(|p| *p != ProgrammeType::None) {
+        fields.push(("programme".into(), common::Value::Text(pty.label().into())));
+    }
+    if let Some(sub) = sub {
+        fields.push(("subchannel".into(), common::Value::Int(sub.id as i64)));
+        fields.push(("bitrate".into(), common::Value::Int(sub.bitrate_kbps as i64)));
+        fields.push(("protection".into(), common::Value::Text(sub.protection.label())));
+    }
+    let detail = match (audio.map(|(_, k)| k.label()), sub.map(|s| s.bitrate_kbps)) {
+        (Some(kind), Some(rate)) => format!("{name} ({kind}, {rate} kbit/s)"),
+        (Some(kind), None) => format!("{name} ({kind})"),
+        _ => name.clone(),
+    };
+    // A service keeps its identifier across ensembles and retunes, which
+    // is what a station list rows on.
+    let who = common::Identity::new("dab-service", format!("{id:04X}")).named(name);
+    Some(
+        Decoded::bytes("DAB", center, at, Vec::new())
+            .by(who)
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Ofdm)
+            .with_crc(Some(true)),
+    )
 }
 
 #[cfg(test)]

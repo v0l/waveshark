@@ -4,6 +4,7 @@ members = [
     "crates/common",
     "crates/mbe",
     "crates/dsp",
+    "crates/identify",
     "crates/nodes",
     "crates/pipeline",
     "crates/hackrf",
@@ -39,6 +40,7 @@ members = [
 default-members = [
     "crates/common",
     "crates/dsp",
+    "crates/identify",
     "crates/nodes",
     "crates/pipeline",
     "crates/hackrf",
@@ -82,6 +84,7 @@ stt = { path = "crates/stt", default-features = false }
 tts = { path = "crates/tts", default-features = false }
 hfmodel = { path = "crates/hfmodel" }
 dsp = { path = "crates/dsp" }
+identify = { path = "crates/identify" }
 pipeline = { path = "crates/pipeline" }
 nodes = { path = "crates/nodes" }
 audio = { path = "crates/audio" }

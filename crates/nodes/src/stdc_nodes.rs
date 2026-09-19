@@ -15,28 +15,20 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+pub use decode::inmarsat::decoded;
 use decode::inmarsat::{BAND_HZ, stdc};
 use dsp::bpsk::{BpskConfig, BpskDemod};
 use dsp::{FirDecim, Mixer};
-use pipeline::event::{Decoded, media};
+use identify::Signal;
+pub use identify::stdc::CHANNEL_WIDTH_HZ;
+pub use identify::stdc::DEFAULT_HZ;
+pub use identify::stdc::FEED_HZ;
+pub use identify::stdc::Stdc;
+pub use identify::stdc::WORK_HZ;
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// A network control station's common channel, which is what an idle
-/// terminal listens to. Which one is in view depends on the ocean region, so
-/// this is only what the node is built with before it is told otherwise.
-pub const DEFAULT_HZ: f64 = 1_541_450_000.0;
-
-/// What one channel occupies. The carrier is 1200 symbols a second and a
-/// receiver is told to give it 5 to 10 kHz.
-pub const CHANNEL_WIDTH_HZ: f64 = 6_000.0;
-
-/// The rate the symbols are recovered at: eight samples a symbol.
-const WORK_HZ: f64 = 9_600.0;
-
-/// The rate to ask the receiver for, which decimates to [`WORK_HZ`] by four.
-const FEED_HZ: f64 = 38_400.0;
 
 /// The carrier this stage is pointed at.
 const CHANNEL_HZ: &str = "channel_hz";
@@ -153,70 +145,30 @@ impl Simple for StdcNode {
     }
 }
 
-/// The row a packet becomes.
-///
-/// An EGC broadcast carries text, and no person wrote it: a coast station's
-/// computer addressed an area, so it goes out with a media type and its
-/// fields and `written` left false.
-pub fn stdc_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let packets = stdc::packets(bytes);
-    let p = packets.first()?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("packet".into(), common::Value::Text(p.descriptor.label().into())),
-        ("descriptor".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
-    ];
-    let mut d = Decoded::bytes("Inmarsat-C", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Psk2)
-        .with_crc(Some(p.check_ok))
-        .by(common::Identity::new("inmarsat-c", "egc").named("Inmarsat-C"));
-
-    let egc = matches!(p.descriptor, stdc::Descriptor::EgcHeader1 | stdc::Descriptor::EgcHeader2)
-        .then(|| stdc::Egc::parse(&p.bytes))
-        .flatten();
-    if let Some(e) = egc {
-        fields.push(("service".into(), common::Value::Text(e.service.label().into())));
-        fields.push(("priority".into(), common::Value::Text(e.priority.label().into())));
-        fields.push(("message_id".into(), common::Value::Int(i64::from(e.message_id))));
-        fields.push(("part".into(), common::Value::Int(i64::from(e.packet_no))));
-        let text = e.text();
-        let summary = format!("{}: {}", e.service.label(), text.trim());
-        d = d.with_text(text).with_detail(summary).with_media(media::TEXT);
-    } else {
-        d = d.with_detail(p.descriptor.label().to_string());
-    }
-    Some(d.with_fields(fields))
-}
-
-pub struct Stdc;
-
 impl Protocol for Stdc {
     fn id(&self) -> &'static str {
-        "stdc"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "std-c"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["inmarsat-c", "inmarsatc", "egc", "safetynet"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The L-band downlinks to mobiles. Which channel a network control
     /// station is on depends on the satellite in view, so the band is the
     /// claim and the scanner table names the carriers inside it.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND_HZ])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: WORK_HZ,
-            feed_rate_hz: FEED_HZ,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} STD-C", hz / 1e6)
     }
@@ -233,7 +185,7 @@ impl Protocol for Stdc {
         if bytes.len() == decode::inmarsat::aero::SU_BYTES {
             return None;
         }
-        Some(stdc_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -254,6 +206,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::media;
     use common::{C32, Hz};
 
     /// Run a channel through the node and collect what reached the bus.
@@ -311,7 +264,7 @@ mod tests {
         let frames = read(&mut n, rate, &iq);
         assert_eq!(frames.len(), 1, "one packet out of two frames");
         assert_eq!(n.packets(), 1);
-        let d = stdc_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a row");
+        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a row");
         assert_eq!(d.protocol, "Inmarsat-C");
         assert_eq!(d.crc_ok, Some(true));
         assert_eq!(d.detail.as_deref(), Some("bulletin board"));
@@ -331,7 +284,7 @@ mod tests {
         let n = egc.len();
         egc[n - 2..].copy_from_slice(&check);
 
-        let d = stdc_decoded(&egc, Hz(DEFAULT_HZ as u64)).expect("a row");
+        let d = decoded(&egc, Hz(DEFAULT_HZ as u64)).expect("a row");
         assert!(!d.written, "a coast station's computer did not write it");
         assert_eq!(d.media_type, media::TEXT);
         assert_eq!(d.text.as_deref(), Some("NAVAREA I 123/25 NORTH SEA UNLIT BUOY ADRIFT"));

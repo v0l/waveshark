@@ -18,6 +18,8 @@
 //! wherever it is.
 
 use crate::bits::{BCH_63_51_GEN, BCH_127_106_GEN, bch_parity, bch63_51, bch127_106};
+use common::Decoded;
+use dsp::biphase::CHIPS_PER_BIT;
 
 /// Bits of the short message, and of the long one.
 pub const SHORT_BITS: usize = 112;
@@ -528,6 +530,206 @@ fn standard_position(format: Format, bits: &[bool]) -> Option<(f64, f64)> {
             false => lon,
         },
     ))
+}
+
+/// What the receiver makes of a beacon message.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let b = parse(bytes)?;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("hex_id".into(), common::Value::Text(b.hex_id.clone())),
+        ("country".into(), common::Value::Int(i64::from(b.country))),
+        ("protocol".into(), common::Value::Text(b.coding.label().into())),
+        ("beacon".into(), common::Value::Text(b.kind().into())),
+        (
+            "mode".into(),
+            common::Value::Text(
+                match b.mode {
+                    Mode::Distress => "distress",
+                    Mode::SelfTest => "self test",
+                }
+                .into(),
+            ),
+        ),
+    ];
+    match b.identity {
+        Identity::Mmsi { last_six, beacon } => {
+            fields.push(("mmsi_last_six".into(), common::Value::Int(i64::from(last_six))));
+            fields.push(("beacon_number".into(), common::Value::Int(i64::from(beacon))));
+        }
+        Identity::AircraftAddress(a) => {
+            fields.push(("aircraft_address".into(), common::Value::Text(format!("{a:06X}"))));
+        }
+        Identity::Serial { certificate, serial } => {
+            fields.push(("certificate".into(), common::Value::Int(i64::from(certificate))));
+            fields.push(("serial".into(), common::Value::Int(i64::from(serial))));
+        }
+        Identity::Unknown => {}
+    }
+    if let Some(homing) = b.homing_121_5 {
+        fields.push(("homing_121_5".into(), common::Value::Bool(homing)));
+    }
+    if b.corrected > 0 {
+        fields.push(("corrected_bits".into(), common::Value::Int(i64::from(b.corrected))));
+    }
+
+    let mut d = Decoded::bytes("epirb", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Psk2)
+        .with_crc(Some(true))
+        .with_text(b.summary())
+        .with_detail(detail(&b))
+        .with_fields(fields)
+        .by(common::Identity::new("epirb", b.hex_id.clone()).named(b.kind()));
+    if let Some((lat, lon)) = b.position {
+        d = d.at_position(common::Position {
+            lat,
+            lon,
+            altitude_m: None,
+            speed_kt: None,
+            course_deg: None,
+        });
+    }
+    Some(d)
+}
+
+pub fn detail(b: &Beacon) -> String {
+    let coding = match b.coding {
+        Coding::User(_) => "user protocol",
+        Coding::Location(_) => "location protocol",
+    };
+    format!("{}, {coding}, country {}", b.coding.label(), b.country)
+}
+
+/// Chips of the preamble that may disagree and still count as a match.
+///
+/// The preamble is 24 bits, so 48 chips. Measured on synthesised bursts in
+/// noise: at 8 allowed, every burst is read down to the 7.8 dB the chips
+/// themselves survive, and ten minutes of noise produces no message at all,
+/// because the two codes refuse what the preamble let through.
+pub const SYNC_TOLERANCE: usize = 5;
+
+/// Bits of the preamble the search matches on: the frame synchronisation
+/// pattern and the tail of the bit synchronisation run.
+pub const SYNC_BITS: usize = 16;
+
+/// How far the phase must swing, in radians, averaged over the chips the
+/// preamble was matched on, before the match counts as a transmission.
+///
+/// A beacon keys 1.1 radians either side of the carrier. Measured as the
+/// mean size of a chip: 0.95 radians on the keyed message, 0.00 to 0.11 on
+/// the unmodulated carrier in front of it, and 0.37 on noise alone, where
+/// the phase is uniform and a chip averages what the integration leaves. So
+/// this separates a message from both, and without it four beacons come out
+/// of ten minutes of noise: a pattern match on noise is rare but ten
+/// minutes is a million chances at it.
+pub const MIN_SWING_RAD: f32 = 0.6;
+
+/// A beacon message, less the preamble, in chips.
+pub const SHORT_CHIPS: usize = (SHORT_BITS - 24) * CHIPS_PER_BIT;
+
+pub const LONG_CHIPS: usize = (LONG_BITS - 24) * CHIPS_PER_BIT;
+
+/// A message being read off the chips that followed a preamble.
+struct Reading {
+    mode: Mode,
+    inverted: bool,
+    chips: Vec<f32>,
+}
+
+/// Messages cut out of a stream of biphase chips.
+///
+/// Above the waveform and below the payload: the chips come from any
+/// [`dsp::biphase`] demodulator at 400 baud, and what leaves is a whole
+/// transmission from bit one, preamble included, that [`parse`] accepted.
+#[derive(Default)]
+pub struct Framer {
+    reading: Option<Reading>,
+    /// The chips being scored against the preamble.
+    window: Vec<f32>,
+    frames: u64,
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Messages that checked.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Feed one chip, and hand back the message where it completed one.
+    ///
+    /// The bits of the preamble are known rather than read, so what is
+    /// emitted is the whole transmission from bit one, which is 14 bytes for
+    /// a short message and 18 for a long one.
+    pub fn push(&mut self, chip: f32) -> Option<Vec<u8>> {
+        if let Some(mut reading) = self.reading.take() {
+            reading.chips.push(chip);
+            // The format flag is the first bit after the preamble, so how
+            // much is still to come is known two chips in.
+            let want = match reading.chips.first().zip(reading.chips.get(1)) {
+                Some((a, b)) => match (a - b > 0.0) != reading.inverted {
+                    true => LONG_CHIPS,
+                    false => SHORT_CHIPS,
+                },
+                None => LONG_CHIPS,
+            };
+            if reading.chips.len() < want {
+                self.reading = Some(reading);
+                return None;
+            }
+            let mut bits = reading.mode.preamble();
+            let read = crate::framing::biphase_l_bits(&reading.chips, reading.inverted);
+            bits.extend((0..read.len()).filter_map(|i| read.get(i)));
+            let bytes: Vec<u8> = bits
+                .chunks(8)
+                .map(|b| b.iter().fold(0u8, |acc, v| acc << 1 | u8::from(*v)))
+                .collect();
+            parse(&bytes)?;
+            self.frames += 1;
+            return Some(bytes);
+        }
+
+        // One chip more than the preamble, because the decision is taken a
+        // chip late: a preamble that opens with a run of identical bits
+        // reads almost as well one chip early and upside down, and only the
+        // two scores side by side tell them apart.
+        let preamble = SYNC_BITS * CHIPS_PER_BIT;
+        self.window.push(chip);
+        if self.window.len() > preamble + 1 {
+            self.window.remove(0);
+        }
+        if self.window.len() <= preamble {
+            return None;
+        }
+        let swing = self.window[..preamble].iter().map(|c| c.abs()).sum::<f32>() / preamble as f32;
+        if swing < MIN_SWING_RAD {
+            return None;
+        }
+        for mode in [Mode::Distress, Mode::SelfTest] {
+            let all = mode.preamble();
+            let bits = &all[all.len() - SYNC_BITS..];
+            let here = crate::framing::biphase_l_match(&self.window[..preamble], bits);
+            let next = crate::framing::biphase_l_match(&self.window[1..], bits);
+            let Some((wrong, inverted)) = here else { continue };
+            if wrong > SYNC_TOLERANCE || next.is_some_and(|(w, _)| w < wrong) {
+                continue;
+            }
+            // The preamble ended a chip ago, so the message starts with the
+            // chip that has just arrived.
+            let mut chips = Vec::with_capacity(LONG_CHIPS);
+            chips.push(chip);
+            self.reading = Some(Reading { mode, inverted, chips });
+            self.window.clear();
+            break;
+        }
+        None
+    }
 }
 
 #[cfg(test)]

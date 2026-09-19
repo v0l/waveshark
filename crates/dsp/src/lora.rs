@@ -31,6 +31,7 @@
 //! factors other than 11 and low data rate optimisation are implemented but
 //! have not met a real transmission here.
 
+use crate::FirDecim;
 use common::C32;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
@@ -597,6 +598,325 @@ pub fn symbol_period(sf: u8, bw: f64) -> f64 {
 pub fn ldro_default(sf: u8, bw: f64) -> bool {
     symbol_period(sf, bw) > 16e-3
 }
+
+/// One packet the reader found: its symbols, the samples it stood in and
+/// the level they had.
+pub struct Found {
+    pub packet: Packet,
+    pub samples: Vec<C32>,
+    pub rssi_dbfs: f32,
+    pub snr_db: f32,
+}
+
+/// The half of a LoRa front end that turns a stream into packets of
+/// symbols: bring the stream to two samples a chip, hold it, and ask each
+/// spreading factor's demodulator what it sees. What the symbols mean is
+/// the other half, and it differs: an explicit-header LoRa frame and an
+/// ExpressLRS packet are read by different nodes over the same reader.
+pub struct ChirpReader {
+    bandwidth_hz: f64,
+    /// The one that has been answering, so the search is not repeated on
+    /// every window of a source that already said what it is.
+    locked_sf: Option<u8>,
+    decim: Option<FirDecim>,
+    /// Input samples the decimator produces per output sample wanted, so the
+    /// stream reaching the demodulator is exactly [`OVERSAMPLE`] per chip. The
+    /// decimator can only divide by a whole number, and a common SDR rate
+    /// (2.048 MS/s) does not divide to 500 kS/s, so what it leaves (512 kS/s)
+    /// is resampled the last 2.4% here. A whole-number-only chain drifts the
+    /// symbol boundary across an SF11 packet and the header checksum fails,
+    /// which read as "no LoRa here" on air even though the preamble locked.
+    resample_step: f64,
+    /// Fractional read position into `pending`, and the tail carried between
+    /// blocks.
+    resample_pos: f64,
+    pending: Vec<C32>,
+    demods: Vec<Demod>,
+    /// How far into `held` each demodulator has already found nothing.
+    ///
+    /// Without it every block scanned the whole of `held` again for every
+    /// spreading factor, so a source open for a second cost a second of
+    /// dechirping per block, six times over, and a strong signal's image
+    /// held open for that long took the whole receiver under real time.
+    scanned: Vec<usize>,
+    /// Samples `held` must reach before a packet found still in progress
+    /// is read again. Every block otherwise re-read the whole of it, from
+    /// its preamble to the buffer's end, and a 640 ms packet cost the last
+    /// of its blocks tens of milliseconds each. Eight symbols later is soon
+    /// enough to notice that it ended.
+    retry_at: usize,
+    /// Samples at [`OVERSAMPLE`] per chip, waiting to be read.
+    held: Vec<C32>,
+    /// Most samples held before the oldest are dropped.
+    hold: usize,
+    center_hz: f64,
+    /// Power of the stream arriving and of the channel cut out of it, each
+    /// smoothed over the last few blocks. Their ratio says whether what is
+    /// transmitting fits the channel: a chirp twice the channel's width
+    /// dechirps, at two spreading factors up, as a packet in the narrower
+    /// one, with half its energy left outside. That packet is an alias of
+    /// the wider channel's and is refused here by the energy that is not in
+    /// the channel; the wider channel's own demodulator reads the real one.
+    in_pow: f32,
+    chan_pow: f32,
+}
+
+impl Default for ChirpReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChirpReader {
+    pub fn new() -> Self {
+        Self {
+            bandwidth_hz: 0.0,
+            locked_sf: None,
+            decim: None,
+            resample_step: 1.0,
+            resample_pos: 0.0,
+            pending: Vec::new(),
+            demods: Vec::new(),
+            scanned: Vec::new(),
+            retry_at: 0,
+            held: Vec::new(),
+            hold: 0,
+            center_hz: 0.0,
+            in_pow: 0.0,
+            chan_pow: 0.0,
+        }
+    }
+
+    pub fn bandwidth(&self) -> f64 {
+        self.bandwidth_hz
+    }
+
+    pub fn center_hz(&self) -> f64 {
+        self.center_hz
+    }
+
+    /// The per-spreading-factor demodulators it was designed with, which is
+    /// what says which factors a channel is being read at.
+    pub fn demods(&self) -> &[Demod] {
+        &self.demods
+    }
+
+    pub fn locked_sf(&self) -> Option<u8> {
+        self.locked_sf
+    }
+
+    /// The rate the samples a packet leaves with are at.
+    pub fn sample_rate(&self) -> f64 {
+        self.bandwidth_hz * OVERSAMPLE as f64
+    }
+
+    /// Design for a stream at `rate` centred on `center_hz`, reading a
+    /// channel `bw` wide at the spreading factors given.
+    pub fn design(
+        &mut self,
+        rate: f64,
+        center_hz: f64,
+        bw: f64,
+        sfs: impl IntoIterator<Item = u8>,
+        inverted: bool,
+    ) -> common::Result<()> {
+        // Two samples a chip, exactly. The decimator divides by a whole
+        // number and lands near the target; the last few percent is a
+        // fractional resample here. It is not optional: the demodulator's
+        // symbol length is a whole number of samples at OVERSAMPLE per chip,
+        // and a rate 2.4% off (512 kS/s from a 2.048 MS/s SDR against the
+        // 500 kS/s a 250 kHz channel wants) drifts the symbol boundary far
+        // enough across an SF11 packet that the header checksum fails.
+        let want = bw * OVERSAMPLE as f64;
+        // The stream has to carry two samples a chip before any resample: a
+        // resample can retime samples that exist, not invent ones a rate
+        // below the target never had.
+        if rate < want {
+            return Err(common::Error::other(format!(
+                "lora needs {want:.0} S/s for a {bw:.0} Hz channel and this \
+                 stream is only {rate:.0}"
+            )));
+        }
+        let factor = (rate / want).round().max(1.0) as usize;
+        let got = rate / factor as f64;
+        if got < want {
+            // The decimator must not land below the wanted rate, or the
+            // resample would have to invent samples: pick the factor that
+            // leaves it at or above `want`.
+            let factor = factor.saturating_sub(1).max(1);
+            self.resample_step = (rate / factor as f64) / want;
+            self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
+        } else {
+            self.resample_step = got / want;
+            self.decim = Some(FirDecim::design_hz(rate, factor, bw / 2.0, 60.0));
+        }
+        self.resample_pos = 0.0;
+        self.pending.clear();
+        self.bandwidth_hz = bw;
+        self.center_hz = center_hz;
+        let cfg = |sf: u8| {
+            if inverted { Config::inverted_for_sf(sf) } else { Config::for_sf(sf) }
+        };
+        self.demods = sfs.into_iter().map(|sf| Demod::new(cfg(sf))).collect();
+        if self.demods.is_empty() {
+            return Err(common::Error::other("lora: no spreading factor to read"));
+        }
+        self.scanned = vec![0; self.demods.len()];
+        self.held.clear();
+        self.locked_sf = None;
+        self.hold = (want * HOLD_SECONDS) as usize;
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.held.clear();
+        self.scanned.fill(0);
+        self.retry_at = 0;
+        self.pending.clear();
+        self.resample_pos = 0.0;
+        self.locked_sf = None;
+        if let Some(d) = &mut self.decim {
+            d.reset();
+        }
+    }
+
+    pub fn unlock(&mut self) {
+        self.locked_sf = None;
+    }
+
+    /// Bring a block to two samples a chip and hold it.
+    pub fn feed(&mut self, iq: &[C32]) {
+        let Some(decim) = self.decim.as_mut() else { return };
+        // Decimate to near the target, then resample the last few percent to
+        // exactly OVERSAMPLE per chip. `pending` holds the decimator output
+        // with the fractional read position carried between blocks.
+        let before = self.pending.len();
+        decim.process(iq, &mut self.pending);
+        if !iq.is_empty() && self.pending.len() > before {
+            let mean = |s: &[C32]| s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len() as f32;
+            let (a, b) = (mean(iq), mean(&self.pending[before..]));
+            self.in_pow += (a - self.in_pow) * 0.2;
+            self.chan_pow += (b - self.chan_pow) * 0.2;
+        }
+        let step = self.resample_step;
+        while (self.resample_pos as usize) + 1 < self.pending.len() {
+            let idx = self.resample_pos as usize;
+            let frac = (self.resample_pos - idx as f64) as f32;
+            self.held.push(self.pending[idx] * (1.0 - frac) + self.pending[idx + 1] * frac);
+            self.resample_pos += step;
+        }
+        // Drop consumed pending samples, keeping the one the position still
+        // sits inside so the next block continues the phase.
+        let consumed = self.resample_pos as usize;
+        if consumed > 0 && consumed <= self.pending.len() {
+            self.pending.drain(..consumed);
+            self.resample_pos -= consumed as f64;
+        }
+    }
+
+    /// The next complete packet in what is held, or None when there is
+    /// nothing whole to read yet. The packet's samples are taken out of the
+    /// hold before it is returned, so the caller reads the packet and asks
+    /// again.
+    pub fn next(&mut self) -> Option<Found> {
+        if self.demods.is_empty() || self.held.len() < self.retry_at {
+            return None;
+        }
+        self.retry_at = 0;
+        loop {
+            // The one that has worked before is asked first, both because it
+            // is usually right and because a wrong spreading factor can find
+            // a preamble in another one's payload.
+            let order: Vec<usize> = match self.locked_sf {
+                Some(sf) => {
+                    let at = self.demods.iter().position(|d| d.spreading_factor() == sf);
+                    at.into_iter()
+                        .chain((0..self.demods.len()).filter(|k| Some(*k) != at))
+                        .collect()
+                }
+                None => (0..self.demods.len()).collect(),
+            };
+
+            let mut found = None;
+            for k in order {
+                let Some(p) = self.demods[k].detect(&self.held, self.scanned[k]) else {
+                    self.scanned[k] = self.demods[k].resume();
+                    continue;
+                };
+                if !p.complete {
+                    // The window ends inside a transmission. Keeping the
+                    // samples and asking again is the whole point of holding
+                    // them; decoding now would report a truncated packet as
+                    // a CRC failure, which is a worse answer than silence.
+                    self.retry_at = self.held.len() + 8 * self.demods[k].symbol_len();
+                    return None;
+                }
+                found = Some(p);
+                break;
+            }
+            let Some(packet) = found else {
+                // Nothing here. Keep a packet's worth in case one is
+                // arriving, and drop the rest so a quiet source does not
+                // grow a buffer for as long as it stays open.
+                if self.held.len() > self.hold {
+                    let drop = self.held.len() - self.hold;
+                    self.held.drain(..drop);
+                    for s in &mut self.scanned {
+                        *s = s.saturating_sub(drop);
+                    }
+                }
+                return None;
+            };
+
+            let end = packet.end.min(self.held.len());
+            // More than twice the channel's power arriving than is in the
+            // channel: what was read is the middle of something wider.
+            if self.in_pow > self.chan_pow * OUTSIDE_RATIO {
+                self.held.drain(..end);
+                self.scanned.fill(0);
+                if self.held.len() < self.demods[0].symbol_len() * 4 {
+                    return None;
+                }
+                continue;
+            }
+            // The packet's own samples, at two a chip, and the level they
+            // stood at against the channel just before the preamble. A
+            // dechirp's peak over its transform is a processing gain, not a
+            // channel SNR, so the level is measured on the samples
+            // themselves.
+            let samples = self.held[packet.start..end].to_vec();
+            let power =
+                |s: &[C32]| s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len().max(1) as f32;
+            let sig = power(&samples);
+            let sym = self.demods[0].symbol_len();
+            let before = &self.held[packet.start.saturating_sub(2 * sym)..packet.start];
+            let (rssi_dbfs, snr_db) = if before.len() >= sym / 2 && sig > 0.0 {
+                let noise = power(before).max(1e-20);
+                (10.0 * sig.log10(), 10.0 * ((sig - noise).max(noise * 0.01) / noise).log10())
+            } else {
+                (10.0 * sig.max(1e-20).log10(), f32::NAN)
+            };
+            self.locked_sf = Some(packet.sf);
+            self.held.drain(..end);
+            self.scanned.fill(0);
+            return Some(Found { packet, samples, rssi_dbfs, snr_db });
+        }
+    }
+}
+
+/// Power arriving over power in the channel past which a packet read is
+/// taken to be the alias of a wider channel's. A packet that fills its
+/// channel reads near one; one that fills twice the width reads two.
+pub const OUTSIDE_RATIO: f32 = 1.5;
+
+/// Seconds of samples held while waiting for a packet to finish.
+///
+/// The longest packet LoRa can send is a 255 byte payload at SF12 over 125
+/// kHz, which is a little over six seconds. Holding that at two samples a
+/// chip costs 12 MB per source at the widest bandwidth, which is why the cap
+/// is on time rather than on symbols: at 500 kHz the same six seconds is the
+/// same buffer and a far longer packet than anyone sends.
+pub const HOLD_SECONDS: f64 = 6.5;
 
 #[cfg(test)]
 mod tests {

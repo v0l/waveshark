@@ -30,8 +30,7 @@ fn main() {
         node.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx).unwrap();
         for f in output.as_frames().unwrap_or(&Vec::new()) {
             rows += 1;
-            let d = nodes::droneid_nodes::droneid_decoded(&f.bytes, common::Hz(f.center_hz))
-                .expect("a row");
+            let d = decode::droneid::decoded(&f.bytes, common::Hz(f.center_hz)).expect("a row");
             println!(
                 "{rows:>3}  {:>6.1} dBFS  {:>5.1} dB  {}",
                 f.rssi_dbfs,

@@ -15,27 +15,19 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::vdl2;
+pub use decode::vdl2::decoded;
 use dsp::d8psk::{Burst, D8pskConfig, D8pskDemod};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::{Decoded, media};
+use identify::Signal;
+pub use identify::vdl2::BAND_HZ;
+pub use identify::vdl2::CHANNEL_WIDTH_HZ;
+pub use identify::vdl2::DEFAULT_HZ;
+pub use identify::vdl2::Vdl2;
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The busiest of the European VDL2 channels and the one every ground station
-/// carries: the common signalling channel.
-pub const DEFAULT_HZ: f64 = 136_975_000.0;
-
-/// An airband channel on the 25 kHz grid.
-pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
-
-/// Where VDL Mode 2 is allocated, which is wider than the European group.
-///
-/// 136.100 is an ARINC channel in North America and sits nearly a megahertz
-/// below the rest, so a band that started at 136.65 was a band that could not
-/// decode it however it was tuned.
-pub const BAND_HZ: (f64, f64) = (136_050_000.0, 137_000_000.0);
 
 pub struct Vdl2Node {
     channel_hz: f64,
@@ -147,54 +139,26 @@ impl Simple for Vdl2Node {
     }
 }
 
-/// The decode an AVLC frame becomes.
-pub fn vdl2_decoded(f: &vdl2::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("from".into(), common::Value::Text(format!("{:06X}", f.src.addr))),
-        ("from_kind".into(), common::Value::Text(f.src.kind.label().into())),
-        ("to".into(), common::Value::Text(format!("{:06X}", f.dst.addr))),
-        ("to_kind".into(), common::Value::Text(f.dst.kind.label().into())),
-        ("frame".into(), common::Value::Text(f.control.label().into())),
-    ];
-    let acars = f.acars();
-    if let Some(a) = &acars {
-        fields.extend(a.fields());
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    // An aircraft is named by its ICAO address, which is the same number
-    // ADS-B carries, so a frame here and a position there are one aeroplane.
-    let who = if f.src.kind.is_aircraft() {
-        common::Identity::new("icao", format!("{:06X}", f.src.addr))
-    } else {
-        common::Identity::new("vdl2-gs", format!("{:06X}", f.src.addr))
-    };
-    let mut d = Decoded::bytes("VDL2", center, 0.0, bytes.to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::D8psk)
-        // The frame check sequence, over the whole frame.
-        .with_crc(Some(true));
-    if acars.as_ref().is_some_and(|a| !a.text.is_empty()) {
-        d.media_type = media::TEXT;
-    }
-    d
-}
-
-pub struct Vdl2;
-
 impl Protocol for Vdl2 {
     fn id(&self) -> &'static str {
-        "vdl2"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "vdl2"
+        Signal::label(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The VHF datalink sub-band, which is the same everywhere: 136.65 is a
     /// guard channel and the datalink channels run up from it.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND_HZ])
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 400_000 }
     }
@@ -203,20 +167,9 @@ impl Protocol for Vdl2 {
             return None;
         }
         let f = vdl2::parse_frame(bytes)?;
-        Some(vec![vdl2_decoded(&f, bytes, common::Hz(p.center_hz()))])
+        Some(vec![decoded(&f, bytes, common::Hz(p.center_hz()))])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 105_000.0,
-            feed_rate_hz: 200_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.3} VDL2", hz / 1e6)
     }

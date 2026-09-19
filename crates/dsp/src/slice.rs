@@ -292,3 +292,88 @@ mod tests {
         assert!(Slicer::new(61_440_000.0, 2_457e6, 20e6, &[2_484e6], 3072).is_none());
     }
 }
+
+/// What one symbol of an asynchronous line produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    Byte(u8),
+    /// The line has rested long enough to end a transmission.
+    Idle,
+    Nothing,
+}
+
+/// An asynchronous line: a start bit, `bits` data bits least significant
+/// first, and a stop element of mark.
+///
+/// Its own piece rather than part of a decoder because nothing about it
+/// belongs to one: it is how a serial port has worked since teleprinters,
+/// and an iMet sonde's eight-bit characters and RTTY's five-bit Baudot are
+/// the same machine with a different width. The stop is read as one symbol
+/// however long the station holds it, since the next start bit is a falling
+/// edge the tone pair's clock resynchronises on.
+#[derive(Clone, Debug)]
+pub struct Uart {
+    bits: u32,
+    idle_symbols: usize,
+    /// Bits of the character so far, or `None` between characters.
+    partial: Option<(u8, u32)>,
+    idle: usize,
+}
+
+impl Uart {
+    /// A line of `bits` data bits, resting after `idle_symbols` marks.
+    pub fn new(bits: u32, idle_symbols: usize) -> Self {
+        Self { bits, idle_symbols, partial: None, idle: 0 }
+    }
+
+    pub fn reset(&mut self) {
+        self.partial = None;
+        self.idle = 0;
+    }
+
+    pub fn push(&mut self, sym: crate::afsk::Symbol) -> Read {
+        if sym.quiet {
+            self.partial = None;
+            self.idle += 1;
+            return self.rest();
+        }
+        match &mut self.partial {
+            // A mark between characters is the line resting.
+            None if sym.mark => {
+                self.idle += 1;
+                self.rest()
+            }
+            // A space between characters is a start bit.
+            None => {
+                self.idle = 0;
+                self.partial = Some((0, 0));
+                Read::Nothing
+            }
+            Some((byte, have)) => {
+                if *have < self.bits {
+                    *byte |= u8::from(sym.mark) << *have;
+                    *have += 1;
+                    return Read::Nothing;
+                }
+                // The stop bit. A space here is a framing slip, and the
+                // character it would have made is not a character.
+                let (byte, ok) = (*byte, sym.mark);
+                self.partial = None;
+                match ok {
+                    true => Read::Byte(byte),
+                    false => Read::Nothing,
+                }
+            }
+        }
+    }
+
+    /// Whether this symbol is the one that ends a transmission. Only the
+    /// symbol that reaches the count says so, so a line resting for a minute
+    /// ends one transmission and not a thousand.
+    fn rest(&self) -> Read {
+        match self.idle == self.idle_symbols {
+            true => Read::Idle,
+            false => Read::Nothing,
+        }
+    }
+}

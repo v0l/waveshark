@@ -453,43 +453,6 @@ fn pulse_taps(g: &Graph) -> Vec<Out> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pipeline::node::Node;
-
-    fn spec(rate: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
-    }
-
-    #[test]
-    fn the_detector_negotiates_a_sources_port() {
-        let mut n = SourceDetectNode::default();
-        let out = Node::negotiate(&mut n, &[spec(2_400_000.0)]).unwrap();
-        assert_eq!(out[0].kind, PortKind::Sources);
-        assert_eq!(out[0].rate, 0.0);
-    }
-
-    #[test]
-    fn the_decoder_shows_its_graph_before_any_source_opens() {
-        let mut n = SourceDecodeNode::new("sources", crate::ism_decode_graph);
-        let mut s = spec(2_400_000.0);
-        s.spec.kind = PortKind::Sources;
-        s.spec.rate = 0.0;
-        let out = Node::negotiate(&mut n, &[s]).unwrap();
-        assert_eq!(out[0].kind, PortKind::Pulses);
-        let inner = Node::subgraphs(&n).pop().expect("template graph");
-        assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
-        assert!(!Node::params(&n).is_empty(), "the decoder's knobs are the node's");
-    }
-
-    #[test]
-    fn the_decoder_refuses_iq() {
-        let mut n = SourceDecodeNode::new("sources", crate::ism_decode_graph);
-        assert!(Node::negotiate(&mut n, &[spec(2_400_000.0)]).is_err());
-    }
-}
-
 /// The setting names a source detector reads, shared with the auto node,
 /// which watches the same way.
 pub(crate) const OPEN_DB: &str = "open_db";
@@ -542,4 +505,41 @@ pub const SOURCE_DECODE: StageDesc = StageDesc {
 
 pub fn build_source_decode(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     Ok(Box::new(SourceDecodeNode::new("sources", crate::ism_decode_graph)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pipeline::node::Node;
+
+    fn spec(rate: f64) -> PortSpec {
+        PortSpec { spec: StreamSpec::iq(rate, Hz(433_920_000)), latency: 0 }
+    }
+
+    #[test]
+    fn the_detector_negotiates_a_sources_port() {
+        let mut n = SourceDetectNode::default();
+        let out = Node::negotiate(&mut n, &[spec(2_400_000.0)]).unwrap();
+        assert_eq!(out[0].kind, PortKind::Sources);
+        assert_eq!(out[0].rate, 0.0);
+    }
+
+    #[test]
+    fn the_decoder_shows_its_graph_before_any_source_opens() {
+        let mut n = SourceDecodeNode::new("sources", crate::ism_decode_graph);
+        let mut s = spec(2_400_000.0);
+        s.spec.kind = PortKind::Sources;
+        s.spec.rate = 0.0;
+        let out = Node::negotiate(&mut n, &[s]).unwrap();
+        assert_eq!(out[0].kind, PortKind::Pulses);
+        let inner = Node::subgraphs(&n).pop().expect("template graph");
+        assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
+        assert!(!Node::params(&n).is_empty(), "the decoder's knobs are the node's");
+    }
+
+    #[test]
+    fn the_decoder_refuses_iq() {
+        let mut n = SourceDecodeNode::new("sources", crate::ism_decode_graph);
+        assert!(Node::negotiate(&mut n, &[spec(2_400_000.0)]).is_err());
+    }
 }

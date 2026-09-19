@@ -27,6 +27,7 @@
 //! minute. A tracker therefore has far less to do with AIS than with ADS-B,
 //! and none of the zone ambiguity that makes a single Mode S frame dangerous.
 
+use common::Decoded;
 /// Longitude and latitude arrive as ten-thousandths of a minute, so a degree
 /// is sixty minutes of ten thousand units.
 const COORD_SCALE: f64 = 600_000.0;
@@ -317,6 +318,137 @@ pub fn ship_type_name(v: u8) -> &'static str {
         80..=89 => "tanker",
         _ => "other",
     }
+}
+
+/// The decode an AIS payload becomes.
+///
+/// Takes the bytes rather than a parsed message for the same reason the Mode S
+/// one does: what travels on the bus is the payload, and a consumer draws its
+/// own conclusions from it.
+pub fn decoded(frame: &Frame, bytes: &[u8], center: common::Hz) -> Decoded {
+    use common::Value;
+    let mut fields: Vec<(String, Value)> = Vec::new();
+    // The identity every message carries, and the field that turns a stream of
+    // them into tracks.
+    fields.push(("mmsi".into(), Value::Int(i64::from(frame.mmsi))));
+
+    let mut position = None;
+    let mut name = None;
+    let mut report = common::ReportDetail::Bare;
+    let protocol = match &frame.kind {
+        Message::Position(p) => {
+            if let Some((lat, lon)) = p.position {
+                position = Some(common::Position {
+                    lat,
+                    lon,
+                    altitude_m: None,
+                    speed_kt: p.sog_kt,
+                    course_deg: p.cog_deg,
+                });
+            }
+            report = common::ReportDetail::Vessel {
+                heading_deg: p.heading_deg,
+                nav_status: p.nav_status.map(nav_status_name),
+                ship_type: None,
+                destination: None,
+                class_b: p.class_b,
+            };
+            {}
+            if let Some((lat, lon)) = p.position {
+                fields.push(("lat".into(), Value::Float(round(lat, 5))));
+                fields.push(("lon".into(), Value::Float(round(lon, 5))));
+            }
+            if let Some(v) = p.sog_kt {
+                fields.push(("ground_speed_kt".into(), Value::Float(v)));
+            }
+            if let Some(v) = p.cog_deg {
+                fields.push(("track_deg".into(), Value::Float(v)));
+            }
+            if let Some(v) = p.heading_deg {
+                fields.push(("heading_deg".into(), Value::Float(v)));
+            }
+            if let Some(v) = p.nav_status {
+                fields.push(("nav_status".into(), Value::Text(nav_status_name(v).into())));
+            }
+            if p.class_b { "AIS-PositionB" } else { "AIS-Position" }
+        }
+        Message::Static(s) => {
+            // No coordinates in a static message: what it carries is what the
+            // ship is and where it is going.
+            report = common::ReportDetail::Vessel {
+                heading_deg: None,
+                nav_status: None,
+                ship_type: s.ship_type.map(ship_type_name),
+                destination: s.destination.clone(),
+                class_b: false,
+            };
+            if let Some(n) = &s.name {
+                name = Some(n.clone());
+                fields.push(("name".into(), Value::Text(n.clone())));
+            }
+            if let Some(c) = &s.callsign {
+                fields.push(("callsign".into(), Value::Text(c.clone())));
+            }
+            if let Some(t) = s.ship_type {
+                fields.push(("ship_type".into(), Value::Text(ship_type_name(t).into())));
+            }
+            if let Some(d) = &s.destination {
+                fields.push(("destination".into(), Value::Text(d.clone())));
+            }
+            if let Some(d) = s.draught_m {
+                fields.push(("draught_m".into(), Value::Float(d)));
+            }
+            "AIS-Static"
+        }
+        Message::BaseStation { position: p, .. } => {
+            if let Some((lat, lon)) = p {
+                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
+                report = common::ReportDetail::Station { aid: false };
+                fields.push(("lat".into(), Value::Float(round(*lat, 5))));
+                fields.push(("lon".into(), Value::Float(round(*lon, 5))));
+            }
+            "AIS-BaseStation"
+        }
+        Message::AidToNavigation { name: n, position: p, .. } => {
+            if let Some(n) = n {
+                name = Some(n.clone());
+                fields.push(("name".into(), Value::Text(n.clone())));
+            }
+            if let Some((lat, lon)) = p {
+                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
+                report = common::ReportDetail::Station { aid: true };
+                fields.push(("lat".into(), Value::Float(round(*lat, 5))));
+                fields.push(("lon".into(), Value::Float(round(*lon, 5))));
+            }
+            "AIS-AidToNav"
+        }
+        Message::Unsupported { msg_type } => {
+            fields.push(("msg_type".into(), Value::Int(i64::from(*msg_type))));
+            "AIS-Other"
+        }
+    };
+
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let mut who = common::Identity::new("ais", frame.mmsi.to_string());
+    who.name = name;
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+        .with_link(common::Link::beacon(common::Party::unit(frame.mmsi.to_string())))
+        .by(who)
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Gmsk)
+        // Every frame that reaches here passed the X.25 frame check sequence
+        // in the demodulator, which is a real integrity check and not a
+        // plausibility argument.
+        .with_crc(Some(true));
+    d.position = position;
+    d.report = report;
+    d
+}
+
+pub fn round(v: f64, places: i32) -> f64 {
+    let f = 10f64.powi(places);
+    (v * f).round() / f
 }
 
 #[cfg(test)]

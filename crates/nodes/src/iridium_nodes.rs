@@ -19,37 +19,29 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
+pub use decode::iridium::MAX_FRAME_BITS;
+pub use decode::iridium::TAG;
+pub use decode::iridium::decoded;
+pub use decode::iridium::pack;
+pub use decode::iridium::unpack;
 use decode::iridium::{self, RING_ALERT_HZ};
 use dsp::dqpsk::{DqpskBurst, DqpskConfig, DqpskDemod};
 use dsp::{FirDecim, Mixer};
-use pipeline::event::{Decoded, media};
+use identify::Signal;
+pub use identify::iridium::FEED_HZ;
+pub use identify::iridium::Iridium;
+pub use identify::iridium::WORK_HZ;
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The rate the demodulator runs at: ten samples a symbol at 25 kbaud, which
-/// is enough to put the symbol clock inside a tenth of a symbol without
-/// interpolating.
-const WORK_HZ: f64 = 250_000.0;
-
-/// The rate to ask the receiver for. Two work rates, so the channel filter
-/// has somewhere to roll off.
-const FEED_HZ: f64 = 500_000.0;
 
 /// Half the width the channel filter passes: the channel itself and the
 /// doppler either side of it.
 const HALF_PASS_HZ: f64 = iridium::CHANNEL_WIDTH_HZ / 2.0 + iridium::DOPPLER_HZ;
 
-/// What the front end writes in front of a frame's bits, so the packet bus
-/// can tell one from anything else arriving on an L-band centre.
-pub const TAG: [u8; 3] = *b"IRD";
-
 /// The carrier this stage is pointed at.
 const CHANNEL_HZ: &str = "channel_hz";
-
-/// The longest frame: the access word, the ring alert header and twelve
-/// pages, each page a 64 bit group.
-const MAX_FRAME_BITS: usize = 24 + 96 + 13 * 64;
 
 pub struct IridiumNode {
     channel_hz: f64,
@@ -93,31 +85,6 @@ impl IridiumNode {
     pub fn frames(&self) -> u64 {
         self.frames
     }
-}
-
-/// A burst's bits as a frame for the bus: the tag, how many bits there are,
-/// and the bits from the access word on.
-fn pack(bits: &[bool]) -> Option<Vec<u8>> {
-    let at = iridium::find_access(bits, &iridium::DOWNLINK_ACCESS)?;
-    let from = at - iridium::DOWNLINK_ACCESS.len();
-    let bits = &bits[from..bits.len().min(from + MAX_FRAME_BITS)];
-    let mut out = TAG.to_vec();
-    out.extend((bits.len() as u16).to_be_bytes());
-    out.extend(bits.chunks(8).map(|byte| {
-        byte.iter().enumerate().fold(0u8, |acc, (i, b)| acc | u8::from(*b) << (7 - i))
-    }));
-    Some(out)
-}
-
-/// The bits back out of a frame the front end wrote.
-pub fn unpack(bytes: &[u8]) -> Option<Vec<bool>> {
-    if bytes.len() < 5 || bytes[..3] != TAG {
-        return None;
-    }
-    let count = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
-    let body = &bytes[5..];
-    (count <= body.len() * 8 && count <= MAX_FRAME_BITS)
-        .then(|| (0..count).map(|i| body[i / 8] >> (7 - i % 8) & 1 == 1).collect())
 }
 
 impl Simple for IridiumNode {
@@ -195,77 +162,33 @@ impl Simple for IridiumNode {
     }
 }
 
-/// The row a frame becomes.
-///
-/// Nobody wrote any of it: a ring alert is one machine paging another, so
-/// the row carries its fields, its position and no claim that it is a
-/// message.
-pub fn iridium_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let bits = unpack(bytes)?;
-    let f = iridium::parse(&bits)?;
-    let mut fields = f.fields();
-    if let Some(ch) = iridium::channel_at(center.as_f64()) {
-        fields.insert(1, ("channel".into(), common::Value::Text(ch.label())));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut who = common::Identity::new("iridium", format!("SV{:03}", f.sat()));
-    who.name = Some(format!("Iridium {}", f.sat()));
-    who.vendor = Some("Iridium".into());
-    let mut d = Decoded::bytes("Iridium", center, 0.0, bytes.to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_media(media::BYTES)
-        .with_modulation(common::Modulation::Dqpsk)
-        // Every block carried a BCH(31,21) and a parity bit, and a frame
-        // reaching here had all of them agree.
-        .with_crc(Some(true));
-    if let Some((lat, lon, altitude_km)) = f.position() {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: Some(altitude_km * 1000.0),
-            ..Default::default()
-        });
-    }
-    Some(d)
-}
-
-/// Iridium as the auto node and the tables know it.
-pub struct Iridium;
-
 impl Protocol for Iridium {
     fn id(&self) -> &'static str {
-        "iridium"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "iridium"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["ira", "ring alert", "iridium-ra"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The downlink band, duplex channels and the simplex ones above them:
     /// ring alerts are on the simplex channels and broadcasts on the duplex,
     /// and a scanner block may name either.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![(iridium::BASE_HZ, iridium::SIMPLEX_BAND_HZ.1)])
-    }
+
     /// The ring alert channel, which is the one frequency worth parking on:
     /// every satellite overhead transmits there.
-    fn default_hz(&self) -> f64 {
-        RING_ALERT_HZ
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[iridium::CHANNEL_WIDTH_HZ],
-            // The channel and the doppler either side of it, which is what
-            // the demodulator searches over.
-            min_rate_hz: 150_000.0,
-            feed_rate_hz: FEED_HZ,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// The front end's own tag, which is the only thing that tells these
     /// bits from any other burst read on an L-band centre: Inmarsat's
     /// channels are in the same band and its frames are bytes too.
@@ -273,7 +196,7 @@ impl Protocol for Iridium {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        iridium_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     /// A ring alert says where the satellite that sent it is, which is a
     /// track the map can draw.
@@ -501,7 +424,7 @@ mod tests {
     #[test]
     fn a_frame_without_the_tag_is_not_claimed() {
         assert!(unpack(&[0, 1, 2, 3, 4, 5]).is_none());
-        assert!(iridium_decoded(b"IRD\x00\x08\xff", Hz(RING_ALERT_HZ as u64)).is_none());
+        assert!(decoded(b"IRD\x00\x08\xff", Hz(RING_ALERT_HZ as u64)).is_none());
         assert!(
             Iridium
                 .read_frame(

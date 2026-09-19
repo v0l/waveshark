@@ -521,10 +521,10 @@ impl Simple for HighBlendNode {
         // Last tag in the window rather than the first: it is the most recent
         // estimate, and a block covers many of them at audio rate.
         for t in c.in_tags(0) {
-            if t.key == "noise" {
-                if let TagValue::Float(v) = t.value {
-                    self.noise = v as f32;
-                }
+            if t.key == "noise"
+                && let TagValue::Float(v) = t.value
+            {
+                self.noise = v as f32;
             }
         }
         let out = o.real_mut();
@@ -1331,7 +1331,7 @@ mod squelch_tests {
     /// harmonics, and nothing under 150 Hz.
     fn talking(seconds: f64) -> Vec<f32> {
         let n = (RATE * seconds) as usize;
-        let mut phase = vec![0.0f64; 11];
+        let mut phase = [0.0f64; 11];
         (0..n)
             .map(|i| {
                 let t = i as f64 / RATE;

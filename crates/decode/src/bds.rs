@@ -269,10 +269,10 @@ fn bds50(p: u64) -> Option<Report> {
     }
     // True airspeed and ground speed differ by the wind, which is tens of
     // knots, not hundreds.
-    if let (Some(g), Some(t)) = (gs, tas) {
-        if (t - g).abs() > 200.0 {
-            return None;
-        }
+    if let (Some(g), Some(t)) = (gs, tas)
+        && (t - g).abs() > 200.0
+    {
+        return None;
     }
     if roll.is_none() && gs.is_none() && tas.is_none() {
         return None;

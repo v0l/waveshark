@@ -457,6 +457,29 @@ impl Simple for DedupeNode {
     }
 }
 
+pub const PROTOCOLS: StageDesc = StageDesc {
+    name: "protocols",
+    summary: "Run every known protocol over everything on the bus, once",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build_protocols(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(PacketDecodeNode::default()))
+}
+
+pub const DEDUPE: StageDesc = StageDesc {
+    name: "dedupe",
+    summary: "One row per burst: drop the copies the neighbouring \
+              channels and the other front end read of it",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build_dedupe(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(DedupeNode::default()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,27 +900,4 @@ mod tests {
         assert!(DEDUPE_WINDOW >= std::time::Duration::from_millis(250));
         assert!(DEDUPE_WINDOW <= std::time::Duration::from_millis(400));
     }
-}
-
-pub const PROTOCOLS: StageDesc = StageDesc {
-    name: "protocols",
-    summary: "Run every known protocol over everything on the bus, once",
-    category: Category::Decode,
-    feeds_bus: false,
-};
-
-pub fn build_protocols(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(PacketDecodeNode::default()))
-}
-
-pub const DEDUPE: StageDesc = StageDesc {
-    name: "dedupe",
-    summary: "One row per burst: drop the copies the neighbouring \
-              channels and the other front end read of it",
-    category: Category::Decode,
-    feeds_bus: false,
-};
-
-pub fn build_dedupe(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(DedupeNode::default()))
 }

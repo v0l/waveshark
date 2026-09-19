@@ -13,6 +13,7 @@
 //! the air says whose they are, so a name comes from a list the operator
 //! supplies ([`Pagers`]) and a page with no match still reports its pair.
 
+use common::Decoded;
 use dsp::tone::Run;
 
 /// What was sent: a pair addressed to one pager, or a long tone addressed to
@@ -188,6 +189,88 @@ impl Pagers {
             Page::Group { hz, .. } => near(*hz, p.b_hz),
         })
     }
+}
+
+/// One row: which tones, how long each was held, and whose pager that is
+/// where the operator said.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    if bytes.len() <= TAG.len() || bytes[..TAG.len()] != TAG {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&bytes[TAG.len()..]).to_string();
+    let (kind, rest) = body.split_once(' ')?;
+    // The name is whatever is left after the numbers, spaces and all.
+    let mut words = match kind {
+        "pair" => rest.splitn(5, ' '),
+        _ => rest.splitn(3, ' '),
+    };
+    let num = |w: Option<&str>| w.and_then(|w| w.parse::<f64>().ok());
+    let mut fields: Vec<(String, common::Value)> = Vec::new();
+    let (tones, seconds, name) = match kind {
+        "pair" => {
+            let (a_hz, a_s, b_hz, b_s) =
+                (num(words.next())?, num(words.next())?, num(words.next())?, num(words.next())?);
+            fields.push(("tone_a_hz".into(), common::Value::Float(a_hz)));
+            fields.push(("tone_b_hz".into(), common::Value::Float(b_hz)));
+            fields.push(("tone_a_s".into(), common::Value::Float(a_s)));
+            fields.push(("tone_b_s".into(), common::Value::Float(b_s)));
+            (format!("{a_hz:.1}/{b_hz:.1}"), a_s + b_s, words.next())
+        }
+        "group" => {
+            let (hz, seconds) = (num(words.next())?, num(words.next())?);
+            fields.push(("tone_hz".into(), common::Value::Float(hz)));
+            fields.push(("tone_s".into(), common::Value::Float(seconds)));
+            // A long tone opens every pager on it, so it is addressed to a
+            // fleet rather than to one radio.
+            fields.push(("call".into(), common::Value::Text("group".into())));
+            (format!("{hz:.1}"), seconds, words.next())
+        }
+        _ => return None,
+    };
+    fields.insert(0, ("tones".into(), common::Value::Text(tones.clone())));
+    let detail = match name {
+        Some(name) => {
+            fields.push(("pager".into(), common::Value::Text(name.to_string())));
+            format!("{name} on {tones}")
+        }
+        None => format!("{tones} for {seconds:.1} s"),
+    };
+    let mut d = Decoded::bytes("Two-tone page", center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Fm);
+    // The tones are the address, so a named pager is a device heard rather
+    // than a field: the operator's list is what turns a pair into a who.
+    if let Some(name) = name {
+        d = d.by(common::Identity::new("pager-tones", tones).named(name.to_string()));
+    }
+    // Nothing checks, because two tones carry nothing to check with.
+    d.crc_ok = None;
+    Some(d)
+}
+
+/// Bytes before the page on the bus: the tag this front end writes, which is
+/// what separates a page from any other decoder's text. A page has no check
+/// sequence of its own, because two tones carry none.
+pub const TAG: [u8; 4] = *b"2TON";
+
+/// What a page puts on the bus: the tag, then the tones and their lengths as
+/// text, and the name where the operator's list had one.
+pub fn framed(page: &Page, name: Option<&str>) -> Vec<u8> {
+    let body = match page {
+        Page::Pair { a_hz, a_s, b_hz, b_s, .. } => {
+            format!("pair {a_hz:.1} {a_s:.2} {b_hz:.1} {b_s:.2}")
+        }
+        Page::Group { hz, seconds, .. } => format!("group {hz:.1} {seconds:.2}"),
+    };
+    let mut out = Vec::with_capacity(TAG.len() + body.len() + 16);
+    out.extend_from_slice(&TAG);
+    out.extend_from_slice(body.as_bytes());
+    if let Some(name) = name {
+        out.push(b' ');
+        out.extend_from_slice(name.as_bytes());
+    }
+    out
 }
 
 #[cfg(test)]

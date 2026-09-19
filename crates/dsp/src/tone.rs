@@ -318,7 +318,7 @@ mod tests {
     /// thing a tone detector on a voice channel has to refuse.
     fn talking(seconds: f64) -> Vec<f32> {
         let n = (RATE * seconds) as usize;
-        let mut phase = vec![0.0f64; 11];
+        let mut phase = [0.0f64; 11];
         (0..n)
             .map(|i| {
                 let t = i as f64 / RATE;

@@ -21,7 +21,9 @@
 //! description, the note is beside the constant.
 
 use crate::bits::crc16le;
+use common::Decoded;
 use dsp::conv::{self, Viterbi};
+use dsp::msk::MskConfig;
 
 /// The service band: the satellites' L-band downlinks to mobiles.
 pub const BAND_HZ: (f64, f64) = (1_525_000_000.0, 1_559_000_000.0);
@@ -976,6 +978,91 @@ pub mod aero {
         su
     }
 }
+
+/// The row a packet becomes.
+///
+/// An EGC broadcast carries text, and no person wrote it: a coast station's
+/// computer addressed an area, so it goes out with a media type and its
+/// fields and `written` left false.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let packets = stdc::packets(bytes);
+    let p = packets.first()?;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("packet".into(), common::Value::Text(p.descriptor.label().into())),
+        ("descriptor".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
+    ];
+    let mut d = Decoded::bytes("Inmarsat-C", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Psk2)
+        .with_crc(Some(p.check_ok))
+        .by(common::Identity::new("inmarsat-c", "egc").named("Inmarsat-C"));
+
+    let egc = matches!(p.descriptor, stdc::Descriptor::EgcHeader1 | stdc::Descriptor::EgcHeader2)
+        .then(|| stdc::Egc::parse(&p.bytes))
+        .flatten();
+    if let Some(e) = egc {
+        fields.push(("service".into(), common::Value::Text(e.service.label().into())));
+        fields.push(("priority".into(), common::Value::Text(e.priority.label().into())));
+        fields.push(("message_id".into(), common::Value::Int(i64::from(e.message_id))));
+        fields.push(("part".into(), common::Value::Int(i64::from(e.packet_no))));
+        let text = e.text();
+        let summary = format!("{}: {}", e.service.label(), text.trim());
+        d = d.with_text(text).with_detail(summary).with_media(common::media::TEXT);
+    } else {
+        d = d.with_detail(p.descriptor.label().to_string());
+    }
+    Some(d.with_fields(fields))
+}
+
+/// The row a signal unit or an assembled message becomes.
+///
+/// A signal unit is the satellite talking about itself: a channel
+/// assignment, a log on acknowledgement, a table of frequencies. An
+/// assembled message is ACARS, which is an aircraft's computer and a ground
+/// station's, so neither is `written` and both carry their fields.
+pub fn aero_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    if let Some(block) = aero::acars_block(bytes) {
+        let m = crate::acars::parse(block)?;
+        let mut d = crate::acars::decoded(&m, block, center);
+        d.protocol = "Aero-ACARS";
+        return Some(d.with_modulation(common::Modulation::Msk));
+    }
+    if bytes.len() != aero::SU_BYTES {
+        return None;
+    }
+    let kind = aero::SuType::of(bytes[0]);
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("unit".into(), common::Value::Text(kind.label().into())),
+        ("type".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
+    ];
+    let mut who = common::Identity::new("aero", "ges");
+    // A user data unit names the aircraft and the ground station; the rest
+    // of the units are the network's own business.
+    if kind == aero::SuType::UserDataInitial {
+        let aes = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]);
+        fields.push(("aes".into(), common::Value::Text(format!("{aes:06X}"))));
+        fields.push(("ges".into(), common::Value::Int(i64::from(bytes[4]))));
+        who = common::Identity::new("icao", format!("{aes:06X}"));
+    }
+    Some(
+        Decoded::bytes("Aero", center, 0.0, bytes.to_vec())
+            .with_modulation(common::Modulation::Msk)
+            .with_crc(Some(aero::su_crc_ok(bytes)))
+            .with_detail(kind.label().to_string())
+            .with_media(common::media::BYTES)
+            .with_fields(fields)
+            .by(who),
+    )
+}
+
+pub fn config(rate: aero::Rate) -> MskConfig {
+    MskConfig { baud: rate.baud(), carrier_hz: rate.baud() * CARRIER_RATIO }
+}
+
+/// Where the two tones are centred, as a fraction of the bit rate.
+///
+/// The demodulator counts its bit clock in turns of this carrier, and the
+/// one ratio it is known to read is ACARS's 1800 Hz against 2400 baud.
+pub const CARRIER_RATIO: f64 = 0.75;
 
 #[cfg(test)]
 mod tests {

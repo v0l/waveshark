@@ -16,63 +16,24 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use decode::epirb::{self, Beacon, Coding, Identity, Mode};
-use decode::framing;
-use dsp::biphase::{BiphaseDemod, CHIPS_PER_BIT};
+use decode::epirb::Mode;
+pub use decode::epirb::decoded;
+pub use decode::epirb::detail;
+use decode::epirb::{self};
+use dsp::biphase::BiphaseDemod;
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::epirb::BAND;
+pub use identify::epirb::BAUD;
+pub use identify::epirb::CHANNEL_WIDTH_HZ;
+pub use identify::epirb::DEFAULT_HZ;
+pub use identify::epirb::Epirb;
+pub use identify::epirb::FEED_HZ;
+pub use identify::epirb::WORK_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// The 406 MHz distress band. Nothing else may transmit in it, and beacons
-/// sit on channels 3 kHz apart across the lower half of it.
-pub const BAND: (f64, f64) = (406_000_000.0, 406_100_000.0);
-
-/// The channel to offer when somebody places one by hand.
-pub const DEFAULT_HZ: f64 = 406_025_000.0;
-
-/// How much of the band one decoder reads. Wide enough to hold a beacon
-/// keyed anywhere near the channel it was set to, and to leave the carrier
-/// tracker something to find.
-pub const CHANNEL_WIDTH_HZ: f64 = 20_000.0;
-
-/// The rate the chips are recovered at: twelve samples a chip, which is what
-/// the zero-crossing clock wants and no more.
-const WORK_HZ: f64 = 9_600.0;
-
-/// The rate to ask the receiver for, which decimates to [`WORK_HZ`] by four.
-const FEED_HZ: f64 = 38_400.0;
-
-pub const BAUD: f64 = 400.0;
-
-/// Chips of the preamble that may disagree and still count as a match.
-///
-/// The preamble is 24 bits, so 48 chips. Measured on synthesised bursts in
-/// noise: at 8 allowed, every burst is read down to the 7.8 dB the chips
-/// themselves survive, and ten minutes of noise produces no message at all,
-/// because the two codes refuse what the preamble let through.
-const SYNC_TOLERANCE: usize = 5;
-
-/// Bits of the preamble the search matches on: the frame synchronisation
-/// pattern and the tail of the bit synchronisation run.
-const SYNC_BITS: usize = 16;
-
-/// How far the phase must swing, in radians, averaged over the chips the
-/// preamble was matched on, before the match counts as a transmission.
-///
-/// A beacon keys 1.1 radians either side of the carrier. Measured as the
-/// mean size of a chip: 0.95 radians on the keyed message, 0.00 to 0.11 on
-/// the unmodulated carrier in front of it, and 0.37 on noise alone, where
-/// the phase is uniform and a chip averages what the integration leaves. So
-/// this separates a message from both, and without it four beacons come out
-/// of ten minutes of noise: a pattern match on noise is rare but ten
-/// minutes is a million chances at it.
-const MIN_SWING_RAD: f32 = 0.6;
-
-/// A beacon message, less the preamble, in chips.
-const SHORT_CHIPS: usize = (epirb::SHORT_BITS - 24) * CHIPS_PER_BIT;
-const LONG_CHIPS: usize = (epirb::LONG_BITS - 24) * CHIPS_PER_BIT;
 
 pub struct EpirbNode {
     channel_hz: f64,
@@ -81,20 +42,9 @@ pub struct EpirbNode {
     demod: BiphaseDemod,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
-    chips: Vec<f32>,
-    /// The chips of the preamble just matched, and what it said.
-    reading: Option<Reading>,
-    /// The last chips seen, for the preamble search.
-    window: Vec<f32>,
     meter: crate::FrameMeter,
-    frames: u64,
-}
-
-/// A message being read off the chips that followed a preamble.
-struct Reading {
-    mode: Mode,
-    inverted: bool,
-    chips: Vec<f32>,
+    framer: epirb::Framer,
+    scratch: Vec<f32>,
 }
 
 impl Default for EpirbNode {
@@ -112,86 +62,15 @@ impl EpirbNode {
             demod: BiphaseDemod::new(WORK_HZ, BAUD),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            chips: Vec::new(),
-            reading: None,
-            window: Vec::new(),
             meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 2.0),
-            frames: 0,
+            framer: epirb::Framer::new(),
+            scratch: Vec::new(),
         }
     }
 
     /// Messages that checked.
     pub fn frames(&self) -> u64 {
-        self.frames
-    }
-
-    /// Feed one chip, and hand back the message where it completed one.
-    ///
-    /// The bits of the preamble are known rather than read, so what is
-    /// emitted is the whole transmission from bit one, which is 14 bytes for
-    /// a short message and 18 for a long one.
-    fn feed(&mut self, chip: f32) -> Option<Vec<u8>> {
-        if let Some(mut reading) = self.reading.take() {
-            reading.chips.push(chip);
-            // The format flag is the first bit after the preamble, so how
-            // much is still to come is known two chips in.
-            let want = match reading.chips.first().zip(reading.chips.get(1)) {
-                Some((a, b)) => match (a - b > 0.0) != reading.inverted {
-                    true => LONG_CHIPS,
-                    false => SHORT_CHIPS,
-                },
-                None => LONG_CHIPS,
-            };
-            if reading.chips.len() < want {
-                self.reading = Some(reading);
-                return None;
-            }
-            let mut bits = reading.mode.preamble();
-            let read = framing::biphase_l_bits(&reading.chips, reading.inverted);
-            bits.extend((0..read.len()).filter_map(|i| read.get(i)));
-            let bytes: Vec<u8> = bits
-                .chunks(8)
-                .map(|b| b.iter().fold(0u8, |acc, v| acc << 1 | u8::from(*v)))
-                .collect();
-            epirb::parse(&bytes)?;
-            self.frames += 1;
-            return Some(bytes);
-        }
-
-        // One chip more than the preamble, because the decision is taken a
-        // chip late: a preamble that opens with a run of identical bits
-        // reads almost as well one chip early and upside down, and only the
-        // two scores side by side tell them apart.
-        let preamble = SYNC_BITS * CHIPS_PER_BIT;
-        self.window.push(chip);
-        if self.window.len() > preamble + 1 {
-            self.window.remove(0);
-        }
-        if self.window.len() <= preamble {
-            return None;
-        }
-        let swing = self.window[..preamble].iter().map(|c| c.abs()).sum::<f32>() / preamble as f32;
-        if swing < MIN_SWING_RAD {
-            return None;
-        }
-        for mode in [Mode::Distress, Mode::SelfTest] {
-            let all = mode.preamble();
-            let bits = &all[all.len() - SYNC_BITS..];
-            let here = framing::biphase_l_match(&self.window[..preamble], bits);
-            let next = framing::biphase_l_match(&self.window[1..], bits);
-            let Some((wrong, inverted)) = here else { continue };
-            if wrong > SYNC_TOLERANCE || next.is_some_and(|(w, _)| w < wrong) {
-                continue;
-            }
-            // The preamble ended a chip ago, so the message starts with the
-            // chip that has just arrived.
-            let mut chips = Vec::with_capacity(LONG_CHIPS);
-            chips.push(chip);
-            self.reading = Some(Reading { mode, inverted, chips });
-            self.window.clear();
-            break;
-        }
-        None
+        self.framer.frames()
     }
 }
 
@@ -212,8 +91,7 @@ impl Simple for EpirbNode {
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.demod = BiphaseDemod::new(work, BAUD);
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 2.0);
-        self.reading = None;
-        self.window.clear();
+        self.framer.reset();
 
         let mut out = i.spec.with_kind(PortKind::Frames);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
@@ -228,15 +106,15 @@ impl Simple for EpirbNode {
         self.decim.process(&self.mixed, &mut self.narrow);
         self.meter.feed(&self.narrow);
 
-        let mut chips = std::mem::take(&mut self.chips);
+        let mut chips = std::mem::take(&mut self.scratch);
         chips.clear();
         self.demod.process(&self.narrow, &mut chips);
         for chip in &chips {
-            if let Some(message) = self.feed(*chip) {
+            if let Some(message) = self.framer.push(*chip) {
                 o.frames_mut().push(self.meter.frame(message));
             }
         }
-        self.chips = chips;
+        self.scratch = chips;
         Ok(())
     }
 
@@ -244,109 +122,35 @@ impl Simple for EpirbNode {
         self.mixer.reset();
         self.decim.reset();
         self.demod.reset();
-        self.reading = None;
-        self.window.clear();
+        self.framer.reset();
         self.meter.reset();
     }
 }
 
-/// What the receiver makes of a beacon message.
-pub fn epirb_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let b = epirb::parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("hex_id".into(), common::Value::Text(b.hex_id.clone())),
-        ("country".into(), common::Value::Int(i64::from(b.country))),
-        ("protocol".into(), common::Value::Text(b.coding.label().into())),
-        ("beacon".into(), common::Value::Text(b.kind().into())),
-        (
-            "mode".into(),
-            common::Value::Text(
-                match b.mode {
-                    Mode::Distress => "distress",
-                    Mode::SelfTest => "self test",
-                }
-                .into(),
-            ),
-        ),
-    ];
-    match b.identity {
-        Identity::Mmsi { last_six, beacon } => {
-            fields.push(("mmsi_last_six".into(), common::Value::Int(i64::from(last_six))));
-            fields.push(("beacon_number".into(), common::Value::Int(i64::from(beacon))));
-        }
-        Identity::AircraftAddress(a) => {
-            fields.push(("aircraft_address".into(), common::Value::Text(format!("{a:06X}"))));
-        }
-        Identity::Serial { certificate, serial } => {
-            fields.push(("certificate".into(), common::Value::Int(i64::from(certificate))));
-            fields.push(("serial".into(), common::Value::Int(i64::from(serial))));
-        }
-        Identity::Unknown => {}
-    }
-    if let Some(homing) = b.homing_121_5 {
-        fields.push(("homing_121_5".into(), common::Value::Bool(homing)));
-    }
-    if b.corrected > 0 {
-        fields.push(("corrected_bits".into(), common::Value::Int(i64::from(b.corrected))));
-    }
-
-    let mut d = Decoded::bytes("epirb", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Psk2)
-        .with_crc(Some(true))
-        .with_text(b.summary())
-        .with_detail(detail(&b))
-        .with_fields(fields)
-        .by(common::Identity::new("epirb", b.hex_id.clone()).named(b.kind()));
-    if let Some((lat, lon)) = b.position {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: None,
-            speed_kt: None,
-            course_deg: None,
-        });
-    }
-    Some(d)
-}
-
-fn detail(b: &Beacon) -> String {
-    let coding = match b.coding {
-        Coding::User(_) => "user protocol",
-        Coding::Location(_) => "location protocol",
-    };
-    format!("{}, {coding}, country {}", b.coding.label(), b.country)
-}
-
-pub struct Epirb;
-
 impl Protocol for Epirb {
     fn id(&self) -> &'static str {
-        "epirb"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "epirb"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["cospas-sarsat", "sarsat", "plb", "elt", "406"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The whole allocation rather than one channel: beacons are assigned
     /// channels 3 kHz apart across it, and nothing else may transmit there,
     /// so anything found in the band is worth pointing this at.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: WORK_HZ,
-            feed_rate_hz: FEED_HZ,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -355,7 +159,7 @@ impl Protocol for Epirb {
         if !(BAND.0..BAND.1).contains(&hz) {
             return None;
         }
-        Some(epirb_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -459,7 +263,7 @@ mod tests {
             let mut chips = Vec::new();
             n.demod.process(block, &mut chips);
             for chip in chips {
-                if let Some(message) = n.feed(chip) {
+                if let Some(message) = n.framer.push(chip) {
                     got.push(message);
                 }
             }
@@ -477,7 +281,7 @@ mod tests {
         assert_eq!(got.len(), 1, "{} messages", got.len());
         assert_eq!(got[0], air, "the bytes are not the ones that were keyed");
 
-        let d = epirb_decoded(&got[0], common::Hz(406_025_000)).expect("a decode");
+        let d = decoded(&got[0], common::Hz(406_025_000)).expect("a decode");
         assert_eq!(d.field("hex_id").map(|v| v.to_string()).as_deref(), Some("1D043C4802FFBFF"));
         assert_eq!(d.field("mmsi_last_six").map(|v| v.to_string()).as_deref(), Some("123456"));
         assert_eq!(d.field("beacon").map(|v| v.to_string()).as_deref(), Some("EPIRB"));
@@ -500,7 +304,7 @@ mod tests {
         air[2] ^= 0xff;
         let got = read(&a_burst(&air, rate, 0.0, 0.1), rate);
         assert_eq!(got.len(), 1, "{} messages", got.len());
-        let d = epirb_decoded(&got[0], common::Hz(406_025_000)).expect("a decode");
+        let d = decoded(&got[0], common::Hz(406_025_000)).expect("a decode");
         assert_eq!(d.field("mode").map(|v| v.to_string()).as_deref(), Some("self test"));
         assert_eq!(d.field("hex_id").map(|v| v.to_string()).as_deref(), Some("1D043C4802FFBFF"));
     }

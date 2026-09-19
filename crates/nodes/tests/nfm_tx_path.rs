@@ -146,10 +146,10 @@ fn a_block_the_radio_refuses_does_not_stop_the_graph() {
     // Stop the radio underneath the running graph, which is what a HackRF
     // being unplugged mid-transmission looks like.
     let id = g.order().last().map(|(id, _)| id).unwrap();
-    if let Some(n) = g.node_mut(id) {
-        if let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>() {
-            tx.finish(std::time::Duration::from_millis(10));
-        }
+    if let Some(n) = g.node_mut(id)
+        && let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>()
+    {
+        tx.finish(std::time::Duration::from_millis(10));
     }
     transmit(&mut g, 2);
 }

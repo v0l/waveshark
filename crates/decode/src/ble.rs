@@ -21,6 +21,7 @@
 //! type 0xff, opens with a company identifier and the rest is the vendor's
 //! own, which is where most of what a device is actually saying lives.
 
+use common::Decoded;
 use common::Value;
 
 /// PDU types on the primary advertising channels.
@@ -356,6 +357,81 @@ pub fn company_name(id: u16) -> Option<&'static str> {
         _ => return None,
     })
 }
+
+/// The decode an advertising PDU becomes.
+///
+/// `None` when the bytes are not a PDU this reads, which is how the packet bus
+/// tells a BLE frame from anything else that arrived on the same centre.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    let adv = parse(bytes)?;
+    let mut fields = adv.fields();
+    // An aircraft's broadcast is not a row about a Bluetooth device that
+    // happens to carry some bytes, so it is named for what it is and its own
+    // fields go in front of the link layer's.
+    let odid: Vec<crate::odid::Parsed> = adv
+        .data
+        .iter()
+        .filter(|s| s.kind == 0x16)
+        .filter_map(|s| crate::odid::from_service_data(&s.value))
+        .flatten()
+        .collect();
+    let protocol = if odid.is_empty() { "BLE-Adv" } else { "OpenDroneID" };
+    if !odid.is_empty() {
+        let mut f = crate::odid::fields(&odid);
+        f.append(&mut fields);
+        fields = f;
+    }
+    let channel = channel_of(center.as_f64());
+    if let Some(ch) = channel {
+        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
+    }
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let link = common::Link {
+        from: Some(common::Party::unit(adv.address.to_string())),
+        to: Some(match adv.target {
+            Some(t) => common::Party::unit(t.to_string()),
+            None => common::Party::broadcast(),
+        }),
+    };
+    let mut who = common::Identity::new("ble", adv.address.to_string());
+    who.name = adv.name.clone();
+    who.vendor = adv.company.and_then(company_name).map(str::to_string);
+    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec());
+    if let Some(p) = crate::odid::position(&odid) {
+        d = d.at_position(p);
+    }
+    if let Some(ch) = channel {
+        d = d.on_channel(common::ChannelUse::new(
+            common::ChannelPlan::Ble,
+            u16::from(ch),
+            CHANNEL_WIDTH_HZ as u32,
+        ));
+    }
+    Some(
+        d.with_link(link)
+            .by(who)
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Gfsk)
+            // Everything that reaches here passed the link layer's CRC-24 in
+            // the demodulator, which is a real check and not an argument
+            // from plausibility.
+            .with_crc(Some(true)),
+    )
+}
+
+/// The advertising channel index a centre names, if it names one.
+pub fn channel_of(center_hz: f64) -> Option<u8> {
+    dsp::ble::ADV_CHANNELS
+        .iter()
+        .find(|(_, hz)| (hz - center_hz).abs() < 500_000.0)
+        .map(|&(ch, _)| ch)
+}
+
+/// The width one advertising channel occupies: 1 MHz of modulation with the
+/// guard that puts the neighbours 2 MHz away.
+pub const CHANNEL_WIDTH_HZ: f64 = 2_000_000.0;
 
 #[cfg(test)]
 mod tests {

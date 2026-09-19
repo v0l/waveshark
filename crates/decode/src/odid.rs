@@ -387,10 +387,12 @@ pub fn from_nan_action(category: u8, code: u8, body: &[u8]) -> Option<Vec<Parsed
         // A descriptor is the service id, an instance id, the instance it
         // answers, the service control byte and the length of the service
         // info; the info itself opens with a message counter.
-        if b[0] == NAN_SERVICE_DESCRIPTOR && value.len() > 11 && value[..6] == NAN_SERVICE_ID {
-            if let Some(pack) = parse_pack(&value[11..]) {
-                return Some(pack);
-            }
+        if b[0] == NAN_SERVICE_DESCRIPTOR
+            && value.len() > 11
+            && value[..6] == NAN_SERVICE_ID
+            && let Some(pack) = parse_pack(&value[11..])
+        {
+            return Some(pack);
         }
         b = &b[3 + len..];
     }

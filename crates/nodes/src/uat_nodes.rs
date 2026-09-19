@@ -13,27 +13,24 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use decode::uat::{self, Frame as UatFrame};
-use dsp::fsk::{SyncBurst, SyncDetector, SyncPattern};
+pub use decode::uat::MAX_SYNC_ERRORS;
+pub use decode::uat::adsb_decoded;
+pub use decode::uat::decoded;
+pub use decode::uat::product_decoded;
+pub use decode::uat::round1;
+pub use decode::uat::round5;
+pub use decode::uat::uplink_decoded;
+use decode::uat::{self};
+pub use decode::uat::{ADSB, UPLINK, patterns};
+pub use decode::uat::{correct, pack};
+use dsp::fsk::{SyncBurst, SyncDetector};
+use identify::Signal;
+pub use identify::uat::CHANNEL_WIDTH_HZ;
+pub use identify::uat::Uat;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// What the signal occupies: 1.04 Mbit/s keyed 312.5 kHz either side, which
-/// is about 1.4 MHz by Carson's rule, plus room for a tuner's error.
-pub const CHANNEL_WIDTH_HZ: f64 = 2_000_000.0;
-
-/// How many sync bits may be wrong and the word still be this one.
-///
-/// Four of 36. The cost of raising it is candidates the Reed-Solomon decode
-/// then throws away: measured on synthesised noise, four allowed gives 4
-/// candidates in 4.8 million samples and none of them corrects.
-const MAX_SYNC_ERRORS: u32 = 4;
-
-/// Which of the detector's two patterns matched.
-const ADSB: usize = 0;
-const UPLINK: usize = 1;
 
 pub struct UatNode {
     det: SyncDetector,
@@ -46,25 +43,6 @@ impl Default for UatNode {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn patterns() -> Vec<SyncPattern> {
-    vec![
-        SyncPattern {
-            word: uat::ADSB_SYNC,
-            bits: uat::SYNC_BITS,
-            // The long form always: a basic message is the first 30 bytes of
-            // it, and which one it was is the payload type code's to say.
-            payload_bits: uat::LONG_BYTES * 8,
-            max_errors: MAX_SYNC_ERRORS,
-        },
-        SyncPattern {
-            word: uat::UPLINK_SYNC,
-            bits: uat::SYNC_BITS,
-            payload_bits: uat::UPLINK_BYTES * 8,
-            max_errors: MAX_SYNC_ERRORS,
-        },
-    ]
 }
 
 impl UatNode {
@@ -83,25 +61,6 @@ impl UatNode {
     /// Frames that corrected since the node was built.
     pub fn accepted(&self) -> u64 {
         self.accepted
-    }
-}
-
-/// The bits of a burst as bytes, most significant bit first, which is the
-/// order UAT keys them in.
-fn pack(bits: &[bool]) -> Vec<u8> {
-    bits.chunks(8)
-        .map(|c| c.iter().enumerate().fold(0u8, |b, (i, &v)| b | (u8::from(v) << (7 - i))))
-        .collect()
-}
-
-/// The payload a burst carries once its code has corrected it, or nothing
-/// where the sync word was noise.
-fn correct(b: &SyncBurst) -> Option<uat::Corrected> {
-    let bytes = pack(&b.bits);
-    match b.pattern {
-        ADSB => uat::correct_adsb(&bytes),
-        UPLINK => uat::correct_uplink(&bytes),
-        _ => None,
     }
 }
 
@@ -159,225 +118,28 @@ impl Simple for UatNode {
     }
 }
 
-/// The rows a corrected UAT payload becomes: one for an aircraft, and for a
-/// ground station one for the station and one per product it sent.
-pub fn uat_decoded(frame: &UatFrame, bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    match frame {
-        UatFrame::Adsb(a) => vec![adsb_decoded(a, bytes, center)],
-        UatFrame::Uplink(u) => uplink_decoded(u, bytes, center),
-    }
-}
-
-fn round1(v: f64) -> f64 {
-    (v * 10.0).round() / 10.0
-}
-
-fn round5(v: f64) -> f64 {
-    (v * 100_000.0).round() / 100_000.0
-}
-
-fn adsb_decoded(a: &uat::Adsb, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    let address = format!("{:06x}", a.address);
-    fields.push(("address".into(), Value::Text(address.clone())));
-    fields.push(("address_type".into(), Value::Text(a.qualifier.name().into())));
-
-    let mut position = None;
-    let mut altitude_ft = None;
-    let mut ground_speed_kt = None;
-    let mut track_deg = None;
-    let mut vertical_rate_fpm = None;
-    if let Some(sv) = &a.state {
-        if let Some((lat, lon)) = sv.position {
-            fields.push(("lat".into(), Value::Float(round5(lat))));
-            fields.push(("lon".into(), Value::Float(round5(lon))));
-        }
-        if let Some(alt) = sv.altitude_ft {
-            altitude_ft = Some(alt);
-            fields.push(("altitude_ft".into(), Value::Int(i64::from(alt))));
-        }
-        if let Some(src) = sv.altitude_source {
-            fields.push(("altitude_source".into(), Value::Text(src.name().into())));
-        }
-        if let Some(v) = sv.ground_speed_kt {
-            ground_speed_kt = Some(v);
-            fields.push(("ground_speed_kt".into(), Value::Float(round1(v))));
-        }
-        if let (Some(d), Some(k)) = (sv.track_deg, sv.track_kind) {
-            track_deg = Some(d);
-            fields.push((k.name().replace(' ', "_"), Value::Float(round1(d))));
-        }
-        if let Some(v) = sv.vertical_rate_fpm {
-            vertical_rate_fpm = Some(v);
-            fields.push(("vertical_rate_fpm".into(), Value::Int(i64::from(v))));
-        }
-        fields.push(("nic".into(), Value::Int(i64::from(sv.nic))));
-        position = sv.position.map(|(lat, lon)| common::Position {
-            lat,
-            lon,
-            altitude_m: sv.altitude_ft.map(|ft| f64::from(ft) * 0.3048),
-            speed_kt: sv.ground_speed_kt,
-            course_deg: sv.track_deg,
-        });
-    }
-
-    let mut name = None;
-    if let Some(ms) = &a.status {
-        if let Some(cs) = &ms.callsign {
-            let key = if ms.callsign_is_squawk { "squawk" } else { "callsign" };
-            if !ms.callsign_is_squawk {
-                name = Some(cs.clone());
-            }
-            fields.push((key.into(), Value::Text(cs.clone())));
-        }
-        fields.push(("emitter".into(), Value::Text(ms.emitter.name().into())));
-        if ms.emergency != uat::Emergency::None {
-            fields.push(("emergency".into(), Value::Text(ms.emergency.name().into())));
-        }
-        if ms.ident_active {
-            fields.push(("ident".into(), Value::Bool(true)));
-        }
-    }
-    if let Some(alt) = a.secondary_altitude_ft {
-        fields.push(("secondary_altitude_ft".into(), Value::Int(i64::from(alt))));
-    }
-
-    // Named for what the frame says, not for its type code: a frame with a
-    // position is a position report whichever of the eleven forms carried it.
-    let protocol = match (position.is_some(), a.qualifier) {
-        (_, uat::AddressQualifier::IcaoTisb | uat::AddressQualifier::TisbTrackFile) => "UAT-TISB",
-        (true, _) => "UAT-Position",
-        (false, _) => "UAT-Status",
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk2)
-        // Every frame here corrected under its Reed-Solomon code, which is a
-        // real integrity check.
-        .with_crc(Some(true))
-        .reporting(common::ReportDetail::Aircraft {
-            altitude_ft,
-            ground_speed_kt,
-            track_deg,
-            vertical_rate_fpm,
-            squawk: None,
-            wind: None,
-            temp_c: None,
-            // UAT sends the position itself: nothing to pair up across
-            // frames the way 1090 MHz needs.
-            cpr: None,
-        });
-    d.position = position;
-    // A track file number is the ground station's bookkeeping and not an
-    // address, so it names nobody.
-    if a.qualifier.is_icao() || a.qualifier == uat::AddressQualifier::Vehicle {
-        d.link = Some(pipeline::event::Link::beacon(pipeline::event::Party::unit(address.clone())));
-        let mut who = common::Identity::new("uat", address);
-        who.name = name;
-        d.identity = Some(who);
-    }
-    d
-}
-
-fn uplink_decoded(u: &uat::Uplink, bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    if let Some((lat, lon)) = u.position {
-        fields.push(("lat".into(), Value::Float(round5(lat))));
-        fields.push(("lon".into(), Value::Float(round5(lon))));
-    }
-    fields.push(("position_valid".into(), Value::Bool(u.position_valid)));
-    fields.push(("slot".into(), Value::Int(i64::from(u.slot_id))));
-    fields.push(("tisb_site".into(), Value::Int(i64::from(u.tisb_site_id))));
-    fields.push(("frames".into(), Value::Int(u.frames.len() as i64)));
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let station = format!("gs{:02}", u.tisb_site_id);
-    let mut d = Decoded::bytes("UAT-Uplink", center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .reporting(common::ReportDetail::Station { aid: false });
-    // The station vouches for its own position, so a doubtful one is not
-    // plotted.
-    if u.position_valid {
-        d.position =
-            u.position.map(|(lat, lon)| common::Position { lat, lon, ..Default::default() });
-    }
-    d.identity = Some(common::Identity::new("uat-gs", station));
-    let mut out = vec![d];
-    out.extend(u.frames.iter().filter_map(|f| product_decoded(f, center)));
-    out
-}
-
-fn product_decoded(f: &uat::InfoFrame, center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let fisb = f.fisb.as_ref()?;
-    let mut fields: Vec<(String, Value)> = vec![
-        ("product".into(), Value::Text(uat::product_name(fisb.product_id).into())),
-        ("product_id".into(), Value::Int(i64::from(fisb.product_id))),
-        ("format".into(), Value::Text(fisb.format.name().into())),
-        (
-            "issued".into(),
-            Value::Text(match (fisb.month_day, fisb.seconds) {
-                (Some((m, day)), Some(s)) => {
-                    format!("{m:02}-{day:02} {:02}:{:02}:{s:02}", fisb.hours, fisb.minutes)
-                }
-                (Some((m, day)), None) => {
-                    format!("{m:02}-{day:02} {:02}:{:02}", fisb.hours, fisb.minutes)
-                }
-                (None, Some(s)) => format!("{:02}:{:02}:{s:02}", fisb.hours, fisb.minutes),
-                (None, None) => format!("{:02}:{:02}", fisb.hours, fisb.minutes),
-            }),
-        ),
-        ("bytes".into(), Value::Int(fisb.data.len() as i64)),
-    ];
-    let text = fisb.text.as_ref().map(|t| t.trim_end().to_string()).filter(|t| !t.is_empty());
-    if let Some(t) = &text {
-        fields.push(("text".into(), Value::Text(t.clone())));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes("FISB", center, 0.0, fisb.data.clone())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true));
-    if let Some(t) = text {
-        d.media_type = common::media::TEXT;
-        d.text = Some(t);
-        // A weather report a machine composed and broadcast to everybody in
-        // range. Nobody wrote it and it is addressed to nobody, so it
-        // belongs in the packet list and not in the messages.
-        d.written = false;
-    }
-    Some(d)
-}
-
-/// UAT as the auto node and the tables know it: the 978 MHz channel, read
-/// off the span because a frame is over before a detector could open a
-/// source on it.
-pub struct Uat;
-
 impl Protocol for Uat {
     fn id(&self) -> &'static str {
-        "uat"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "uat"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["uat978", "adsb978", "fisb"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+
     /// An aircraft sends its own position, and a ground station its site.
     fn reports_position(&self) -> bool {
         true
     }
-    fn placement(&self) -> Placement {
-        Placement::Channels(vec![uat::CHANNEL_HZ])
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 2_000_000 }
     }
@@ -389,18 +151,9 @@ impl Protocol for Uat {
             return None;
         }
         let center = common::Hz(p.center_hz());
-        Some(uat::parse(bytes).map(|f| uat_decoded(&f, bytes, center)).unwrap_or_default())
+        Some(uat::parse(bytes).map(|f| decoded(&f, bytes, center)).unwrap_or_default())
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            // Two samples a bit is the floor the correlator reads at.
-            min_rate_hz: 2.0 * uat::BAUD,
-            feed_rate_hz: 2_400_000.0,
-            span_wide: true,
-            families: &[],
-        }
-    }
+
     fn stage_label(&self, _hz: f64) -> String {
         "978 UAT".into()
     }
@@ -648,11 +401,9 @@ mod tests {
         f[16] = (vv << 4) as u8;
         // "N172SP", three characters to every two bytes, base 40, the first
         // of them the emitter category.
-        for (at, v) in [
-            (17, 1u16 * 1600 + 23 * 40 + 1),
-            (19, 7 * 1600 + 2 * 40 + 28),
-            (21, 25 * 1600 + 36 * 40 + 36),
-        ] {
+        for (at, v) in
+            [(17, 1600 + 23 * 40 + 1), (19, 7 * 1600 + 2 * 40 + 28), (21, 25 * 1600 + 36 * 40 + 36)]
+        {
             f[at] = (v >> 8) as u8;
             f[at + 1] = v as u8;
         }

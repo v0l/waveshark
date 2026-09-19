@@ -276,10 +276,10 @@ impl Publisher {
 
     fn disconnect(&self) {
         self.connected.store(false, Ordering::Relaxed);
-        if let Ok(mut c) = self.client.lock() {
-            if let Some(client) = c.take() {
-                let _ = client.try_disconnect();
-            }
+        if let Ok(mut c) = self.client.lock()
+            && let Some(client) = c.take()
+        {
+            let _ = client.try_disconnect();
         }
     }
 

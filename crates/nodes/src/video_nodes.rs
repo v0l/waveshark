@@ -16,6 +16,11 @@ use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use common::{Pixels, Result, VideoFrame};
 use dsp::video::{Lock, Standard, SyncSeparator, find_lines};
+use identify::Signal;
+pub use identify::video::CHANNEL_HALF_HZ;
+pub use identify::video::Video;
+pub use identify::video::WORK_RATE_HZ;
+pub use identify::video::{DEVIATION_HZ, WIDTH, decimation};
 use pipeline::event::Request;
 use pipeline::node::{NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
@@ -25,16 +30,6 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 /// What a camera's transmission is called, on a frame and on the sound that
 /// came with it.
 const SYSTEM: &str = "analogue video";
-
-/// What the picture is resampled to. A PAL line holds about 720 samples at
-/// broadcast rates and a small camera rather fewer, so this is a choice rather
-/// than a measurement.
-const WIDTH: usize = 640;
-
-/// Peak deviation mapped to full scale. Only the contrast depends on it, and
-/// the separator normalises again from the sync tip, so it need not be exact:
-/// the 5.8 GHz transmitter measured here was about 1 MHz rms.
-const DEVIATION_HZ: f64 = 6e6;
 
 pub struct VideoNode {
     demod: dsp::FmDemod,
@@ -310,24 +305,24 @@ impl pipeline::node::Node for VideoNode {
             self.wide_demod.process(iq, &mut self.wide);
             self.pcm.clear();
             sound.process(&self.wide, &mut self.pcm);
-            if !self.pcm.is_empty() {
-                if let Some(v) = sound_out.first_mut() {
-                    v.voice_mut().push(common::Voice {
-                        system: SYSTEM,
-                        channel_hz: self.center_hz,
-                        // No party, because there is none: this is the sound
-                        // half of a transmission, not a call somebody placed
-                        // to somebody. It is heard because the receiver is
-                        // receiving it, and the picture is what says which
-                        // channel it came from.
-                        to: None,
-                        from: None,
-                        code: None,
-                        rate: sound.rate(),
-                        channels: 1,
-                        pcm: std::mem::take(&mut self.pcm),
-                    });
-                }
+            if !self.pcm.is_empty()
+                && let Some(v) = sound_out.first_mut()
+            {
+                v.voice_mut().push(common::Voice {
+                    system: SYSTEM,
+                    channel_hz: self.center_hz,
+                    // No party, because there is none: this is the sound
+                    // half of a transmission, not a call somebody placed
+                    // to somebody. It is heard because the receiver is
+                    // receiving it, and the picture is what says which
+                    // channel it came from.
+                    to: None,
+                    from: None,
+                    code: None,
+                    rate: sound.rate(),
+                    channels: 1,
+                    pcm: std::mem::take(&mut self.pcm),
+                });
             }
         }
 
@@ -413,62 +408,20 @@ impl pipeline::node::Node for VideoNode {
     }
 }
 
-/// Analogue video as the auto node knows it: on the span, where the
-/// channel plan reaches, and owning the band only once it has a picture.
-///
-/// A camera's carrier is not a channel a detector can cut out: FM video at
-/// 5.8 GHz occupies the best part of twenty megahertz, and what a detector
-/// measures is the few megahertz around the carrier that stand above the
-/// floor. Cut to that, the picture is gone. And claiming the span before
-/// there is a picture would turn the band off for everything else on the
-/// chance a camera turns up.
-pub struct Video;
-
-/// Half of what a channel of the plan occupies.
-const CHANNEL_HALF_HZ: f64 = 9e6;
-
-/// What the front end would rather read, in samples per second.
-///
-/// Enough for the whole FM signal (4.6 MHz measured on the AKK capture) and
-/// for the 4.43 MHz colour subcarrier in the baseband that comes out of it,
-/// and no more: the noise a discriminator sees is the bandwidth it is
-/// handed. A line is then 640 samples, which is exactly the width a field is
-/// resampled to.
-const WORK_RATE_HZ: f64 = 10e6;
-
-/// How much to divide a span by to reach [`WORK_RATE_HZ`] without going
-/// under it. A 20 MS/s span stays whole, since halving it would leave 10.
-fn decimation(rate: f64) -> usize {
-    let mut f = 1usize;
-    while rate / (f * 2) as f64 >= WORK_RATE_HZ {
-        f *= 2;
-    }
-    f
-}
-
 impl Protocol for Video {
     fn id(&self) -> &'static str {
-        "video"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "video"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(
-            decode::video_channels::channels().iter().map(|ch| ch.hz as f64).collect(),
-        )
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[2.0 * CHANNEL_HALF_HZ],
-            // PAL luma reaches 5 MHz with the colour subcarrier at 4.43, so
-            // a slower stream cannot be carrying a picture.
-            min_rate_hz: 12e6,
-            feed_rate_hz: WORK_RATE_HZ,
-            span_wide: true,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+
     fn stickiness(&self) -> Stickiness {
         Stickiness::Claim
     }
@@ -502,6 +455,26 @@ impl Protocol for Video {
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new("video")]
     }
+}
+
+/// The setting names this stage reads.
+const STANDARD: &str = "standard";
+const COLOUR: &str = "colour";
+
+/// What the standard setting is called when the node is to measure it
+/// rather than be told.
+const AUTO: &str = "auto";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "video",
+    summary: "Analogue video: FM to composite, sync separation, PAL or NTSC fields, colour",
+    category: Category::Decode,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let forced = s.str_or(STANDARD, AUTO).parse().ok();
+    Ok(Box::new(VideoNode::new(forced, s.bool_or(COLOUR, true))))
 }
 
 #[cfg(test)]
@@ -642,24 +615,4 @@ mod tests {
         // repeated one.
         assert!(fields.windows(2).all(|w| w[1].sequence > w[0].sequence));
     }
-}
-
-/// The setting names this stage reads.
-const STANDARD: &str = "standard";
-const COLOUR: &str = "colour";
-
-/// What the standard setting is called when the node is to measure it
-/// rather than be told.
-const AUTO: &str = "auto";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "video",
-    summary: "Analogue video: FM to composite, sync separation, PAL or NTSC fields, colour",
-    category: Category::Decode,
-    feeds_bus: false,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let forced = s.str_or(STANDARD, AUTO).parse().ok();
-    Ok(Box::new(VideoNode::new(forced, s.bool_or(COLOUR, true))))
 }

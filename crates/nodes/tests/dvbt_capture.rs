@@ -12,9 +12,10 @@
 //! skips rather than fails, so a fresh clone with no network still passes.
 
 use common::C32;
+use decode::dvbt::DvbtReceiver;
 use decode::mpegts::{Mux, StreamKind};
 use dsp::dvbt::{CodeRate, Constellation, Guard, Hierarchy, Mode, Params};
-use nodes::dvbt_nodes::{DvbtNode, DvbtReceiver};
+use nodes::dvbt_nodes::DvbtNode;
 
 const FIXTURE: &str = "dvbt_hd_429M_9142857.cs8";
 
@@ -377,13 +378,12 @@ fn a_chosen_service_survives_a_rebuild() {
         s.insert("channel_hz".into(), ParamValue::Float(429e6));
         s.insert(SERVICE.into(), v);
         let node = build(&s).expect("the stage");
-        let dvbt = node
-            .as_any()
+
+        node.as_any()
             .downcast_ref::<nodes::dvbt_nodes::DvbtNode>()
             .expect("a dvbt node")
             .wanted()
-            .clone();
-        dvbt
+            .clone()
     };
     assert_eq!(named(Want::Named("RTE One".into()).setting()), Want::Named("RTE One".into()));
     assert_eq!(named(Want::Id(4).setting()), Want::Id(4));

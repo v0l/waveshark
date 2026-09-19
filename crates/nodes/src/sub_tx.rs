@@ -118,7 +118,7 @@ impl Simple for SubTxNode {
     ) -> Result<()> {
         // A block of clock and nothing loaded is silence, which is the
         // stage's idle state rather than a refusal.
-        if input.len() == 0 || self.bursts.is_empty() {
+        if input.is_empty() || self.bursts.is_empty() {
             return Ok(());
         }
         let out = output.pulses_mut();
@@ -129,10 +129,10 @@ impl Simple for SubTxNode {
         for burst in &self.bursts {
             out.push(burst.clone());
         }
-        if let Some(last) = out.last_mut() {
-            if let Some(p) = last.pulses.last_mut() {
-                p.gap = p.gap.max(self.pause.as_micros() as u32);
-            }
+        if let Some(last) = out.last_mut()
+            && let Some(p) = last.pulses.last_mut()
+        {
+            p.gap = p.gap.max(self.pause.as_micros() as u32);
         }
         Ok(())
     }

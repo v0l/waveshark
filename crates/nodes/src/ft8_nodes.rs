@@ -22,125 +22,22 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
 use decode::ft8;
-use dsp::mfsk::{self, Slot, Waveform};
+pub use decode::ft8::Mode;
+pub use decode::ft8::PASSBAND_HZ;
+pub use decode::ft8::decoded;
+pub use decode::ft8::unpack_bits;
+use dsp::mfsk::Slot;
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::ft8::Ft8;
+pub use identify::ft8::{
+    AUDIO_HZ, CHANNEL_WIDTH_HZ, DEFAULT_HZ, FT4_DEFAULT_HZ, FT4_DIALS, FT8_DIALS, Ft4, shape,
+};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The 20 m FT8 dial, which is the busiest frequency on any amateur band.
-pub const DEFAULT_HZ: f64 = 14_074_000.0;
-
-/// The 20 m FT4 dial.
-pub const FT4_DEFAULT_HZ: f64 = 14_080_000.0;
-
-/// The channel a decoder needs cut out for it: the dial and the passband
-/// above it, plus as much below, because a channel is cut symmetrically
-/// around the frequency it is placed at and every station sits above the
-/// dial.
-pub const CHANNEL_WIDTH_HZ: f64 = 6_000.0;
-
-/// The passband itself, which is what a station shares with every other.
-pub const PASSBAND_HZ: f64 = 3_000.0;
-
-/// Rate the channel is read at. Two samples per hertz of passband, and a
-/// whole number of samples a symbol at both modes' baud rates.
-const AUDIO_HZ: f64 = 12_000.0;
-
-/// The part of the passband stations use, above the dial. Below 200 Hz is a
-/// receiver's own high-pass and its carrier leak.
-const BAND: (f64, f64) = (200.0, PASSBAND_HZ);
-
-/// Belief propagation passes before a candidate is given up on. Measured on
-/// a synthesised channel of eight stations: 20 passes reads all eight, 10
-/// reads seven, and 50 reads no more than 20 at four times the cost.
-const LDPC_PASSES: usize = 40;
-
-/// The dial frequencies stations are told to use, by band, in hertz.
-const FT8_DIALS: &[f64] = &[
-    1_840_000.0,
-    3_573_000.0,
-    5_357_000.0,
-    7_074_000.0,
-    10_136_000.0,
-    14_074_000.0,
-    18_100_000.0,
-    21_074_000.0,
-    24_915_000.0,
-    28_074_000.0,
-    50_313_000.0,
-    144_174_000.0,
-];
-
-const FT4_DIALS: &[f64] = &[
-    3_575_000.0,
-    7_047_500.0,
-    10_140_000.0,
-    14_080_000.0,
-    18_104_000.0,
-    21_140_000.0,
-    24_919_000.0,
-    28_180_000.0,
-    50_318_000.0,
-];
-
-/// Which of the two modes a node is reading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Mode {
-    #[default]
-    Ft8,
-    Ft4,
-}
-
-impl Mode {
-    pub const ALL: [Mode; 2] = [Mode::Ft8, Mode::Ft4];
-
-    fn waveform(self) -> Waveform {
-        match self {
-            Mode::Ft8 => mfsk::FT8,
-            Mode::Ft4 => mfsk::FT4,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Ft8 => "FT8",
-            Mode::Ft4 => "FT4",
-        }
-    }
-
-    /// The byte a frame opens with, so a reader off the bus knows which mode
-    /// read it without guessing from the dial.
-    fn tag(self) -> u8 {
-        match self {
-            Mode::Ft8 => 8,
-            Mode::Ft4 => 4,
-        }
-    }
-
-    fn of_tag(tag: u8) -> Option<Mode> {
-        Mode::ALL.iter().copied().find(|m| m.tag() == tag)
-    }
-}
-
-impl std::fmt::Display for Mode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-impl std::str::FromStr for Mode {
-    type Err = ();
-    fn from_str(s: &str) -> std::result::Result<Self, ()> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "ft4" => Ok(Mode::Ft4),
-            "ft8" => Ok(Mode::Ft8),
-            _ => Err(()),
-        }
-    }
-}
 
 pub struct Ft8Node {
     dial_hz: f64,
@@ -223,55 +120,6 @@ impl Ft8Node {
         let into = now.rem_euclid(slot_s);
         self.skip = ((slot_s - into) * self.audio_rate()).round() as usize;
     }
-
-    /// Read one slot: every candidate the sync search found, through the
-    /// code and the check, deduped where one station was found twice.
-    fn read_slot(&mut self, slot: &[common::C32]) -> Vec<(Vec<u8>, f64, f32)> {
-        self.slots += 1;
-        let mut out: Vec<(Vec<u8>, f64, f32)> = Vec::new();
-        for heard in self.slot.read(slot, BAND) {
-            let (bits, failed) = ft8::code().decode(&heard.llr, LDPC_PASSES);
-            if failed != 0 {
-                continue;
-            }
-            // What was on the air, which for FT4 is the payload through its
-            // scrambling sequence: the check the station computed is over
-            // that, so undoing it here would fail the check.
-            let message = &bits[..ft8::MESSAGE_BITS];
-            if !ft8::crc_ok(message) {
-                continue;
-            }
-            // And it has to say something. The all-zero codeword satisfies
-            // every check and carries a zero CRC, so weak soft bits settle
-            // on it and the payload layer is what refuses it.
-            let mut payload = message.to_vec();
-            if self.mode == Mode::Ft4 {
-                ft8::scramble_ft4(&mut payload);
-            }
-            if ft8::unpack(&payload).is_none() {
-                continue;
-            }
-            let mut bytes = vec![self.mode.tag()];
-            bytes.extend(pack(message));
-            if out.iter().any(|(b, _, _)| *b == bytes) {
-                continue;
-            }
-            out.push((bytes, heard.freq_hz, heard.snr_db));
-        }
-        self.read += out.len() as u64;
-        out
-    }
-}
-
-/// Bits as bytes, the first bit most significant, padded with zeros.
-fn pack(bits: &[bool]) -> Vec<u8> {
-    bits.chunks(8)
-        .map(|c| c.iter().enumerate().fold(0u8, |acc, (k, &b)| acc | u8::from(b) << (7 - k)))
-        .collect()
-}
-
-fn unpack_bits(bytes: &[u8], n: usize) -> Vec<bool> {
-    (0..n).map(|k| bytes[k / 8] >> (7 - k % 8) & 1 != 0).collect()
 }
 
 impl Simple for Ft8Node {
@@ -329,7 +177,10 @@ impl Simple for Ft8Node {
         let want = self.slot.slot_samples();
         while self.buffer.len() >= want {
             let slot: Vec<common::C32> = self.buffer.drain(..want).collect();
-            for (bytes, freq_hz, snr_db) in self.read_slot(&slot) {
+            let heard = ft8::read_slot(&mut self.slot, &slot, self.mode);
+            self.slots += 1;
+            self.read += heard.len() as u64;
+            for (bytes, freq_hz, snr_db) in heard {
                 let center = (self.dial_hz + freq_hz).round().max(0.0) as u64;
                 let frame = self.meter.frame(bytes);
                 o.frames_mut().push(common::Frame { snr_db, ..frame }.at(center));
@@ -360,68 +211,6 @@ impl Simple for Ft8Node {
     }
 }
 
-/// What a frame off the bus says: the message, and who said what to whom.
-pub fn ft8_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let mode = Mode::of_tag(*bytes.first()?)?;
-    if bytes.len() != 1 + ft8::MESSAGE_BITS.div_ceil(8) {
-        return None;
-    }
-    let mut message = unpack_bits(&bytes[1..], ft8::MESSAGE_BITS);
-    if !ft8::crc_ok(&message) {
-        return None;
-    }
-    // FT4 keys the payload through a fixed sequence, under the check.
-    if mode == Mode::Ft4 {
-        ft8::scramble_ft4(&mut message);
-    }
-    let m = ft8::unpack(&message)?;
-    let mut fields = vec![("message".into(), common::Value::Text(m.text.clone()))];
-    if let Some(to) = &m.to {
-        fields.push(("to".into(), common::Value::Text(to.clone())));
-    }
-    if let Some(from) = &m.from {
-        fields.push(("from".into(), common::Value::Text(from.clone())));
-    }
-    if let Some(grid) = &m.grid {
-        fields.push(("grid".into(), common::Value::Text(grid.clone())));
-    }
-    if let Some(report) = m.report {
-        fields.push(("report_db".into(), common::Value::Int(report as i64)));
-    }
-    let mut d = Decoded::bytes(mode.label(), center, 0.0, bytes[1..].to_vec())
-        .with_modulation(match mode {
-            Mode::Ft8 => common::Modulation::Fsk8,
-            Mode::Ft4 => common::Modulation::Fsk4,
-        })
-        .with_crc(Some(true))
-        .with_detail(m.text.clone())
-        .with_fields(fields)
-        // An operator's radio sent it on their behalf, to a station they
-        // named: a call, a report and an acknowledgement are a conversation
-        // however short the form is.
-        .written()
-        .with_text(m.text.clone());
-    if let (Some(from), Some(to)) = (&m.from, &m.to) {
-        d = d.with_link(pipeline::event::Link::between(
-            pipeline::event::Party::unit(from.clone()),
-            match to.as_str() {
-                "CQ" | "QRZ" | "DE" => pipeline::event::Party::group(to.clone()),
-                _ => pipeline::event::Party::unit(to.clone()),
-            },
-        ));
-    }
-    if let Some((lat, lon)) = m.grid.as_deref().and_then(ft8::grid_position) {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: None,
-            speed_kt: None,
-            course_deg: None,
-        });
-    }
-    Some(d)
-}
-
 /// Whether a frame off the bus is one of these: the mode byte a front end
 /// wrote, the length, and the check the transmitter computed.
 fn is_ftx(bytes: &[u8]) -> bool {
@@ -430,41 +219,30 @@ fn is_ftx(bytes: &[u8]) -> bool {
         && ft8::crc_ok(&unpack_bits(&bytes[1..], ft8::MESSAGE_BITS))
 }
 
-/// The shape both modes declare, which differs only in the dials.
-fn shape() -> Shape {
-    Shape {
-        widths: &[CHANNEL_WIDTH_HZ],
-        min_rate_hz: 8_000.0,
-        feed_rate_hz: AUDIO_HZ,
-        span_wide: false,
-        families: &[],
-    }
-}
-
-pub struct Ft8;
-
 impl Protocol for Ft8 {
     fn id(&self) -> &'static str {
-        "ft8"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "ft8"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["wsjt", "jt"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The dials stations are told to use. A station is not found anywhere
     /// else, because the whole mode depends on everybody being in the same
     /// 3 kHz.
-    fn placement(&self) -> Placement {
-        Placement::Channels(FT8_DIALS.to_vec())
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
-    fn shape(&self) -> Shape {
-        shape()
-    }
+
     fn stickiness(&self) -> Stickiness {
         Stickiness::SESSION
     }
@@ -480,7 +258,7 @@ impl Protocol for Ft8 {
         if !is_ftx(bytes) || bytes[0] != Mode::Ft8.tag() {
             return None;
         }
-        Some(ft8_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} FT8", hz / 1e6)
@@ -493,24 +271,23 @@ impl Protocol for Ft8 {
     }
 }
 
-pub struct Ft4;
-
 impl Protocol for Ft4 {
     fn id(&self) -> &'static str {
-        "ft4"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "ft4"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(FT4_DIALS.to_vec())
+        Signal::placement(self)
     }
     fn default_hz(&self) -> f64 {
-        FT4_DEFAULT_HZ
+        Signal::default_hz(self)
     }
     fn shape(&self) -> Shape {
-        shape()
+        Signal::shape(self)
     }
+
     fn stickiness(&self) -> Stickiness {
         Stickiness::SESSION
     }
@@ -524,7 +301,7 @@ impl Protocol for Ft4 {
         if !is_ftx(bytes) || bytes[0] != Mode::Ft4.tag() {
             return None;
         }
-        Some(ft8_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} FT4", hz / 1e6)
@@ -565,6 +342,7 @@ pub fn build_ft4(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 mod tests {
     use super::*;
     use common::{C32, Hz};
+    use dsp::mfsk;
     use std::f64::consts::TAU;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
@@ -667,7 +445,7 @@ mod tests {
         assert!(f.snr_db.is_finite() && f.rssi_dbfs.is_finite());
         assert!(f.iq.is_some(), "the samples it was read from");
 
-        let d = ft8_decoded(&f.bytes, Hz(f.center_hz)).expect("a decode");
+        let d = decoded(&f.bytes, Hz(f.center_hz)).expect("a decode");
         assert_eq!(d.protocol, "FT8");
         assert_eq!(d.text.as_deref(), Some("CQ MI0ABC IO74"));
         assert_eq!(d.crc_ok, Some(true));
@@ -710,7 +488,7 @@ mod tests {
 
         let mut read: Vec<String> = frames
             .iter()
-            .map(|f| ft8_decoded(&f.bytes, Hz(f.center_hz)).expect("a decode").text.unwrap())
+            .map(|f| decoded(&f.bytes, Hz(f.center_hz)).expect("a decode").text.unwrap())
             .collect();
         read.sort();
         let mut want: Vec<String> = sent.iter().map(|(a, b, c)| format!("{a} {b} {c}")).collect();
@@ -727,7 +505,7 @@ mod tests {
         let mut node = at_slot_start(FT4_DEFAULT_HZ, Mode::Ft4);
         let frames = run(&mut node, &iq, AUDIO_HZ, FT4_DEFAULT_HZ);
         assert_eq!(frames.len(), 1, "{} transmissions", frames.len());
-        let d = ft8_decoded(&frames[0].bytes, Hz(frames[0].center_hz)).expect("a decode");
+        let d = decoded(&frames[0].bytes, Hz(frames[0].center_hz)).expect("a decode");
         assert_eq!(d.protocol, "FT4");
         assert_eq!(d.text.as_deref(), Some("G4XYZ MI0ABC R+05"));
         assert_eq!(d.field("report_db").and_then(|v| v.as_i64()), Some(5));
@@ -764,7 +542,7 @@ mod tests {
                 assert!((f.snr_db - snr).abs() < 1.0, "{} dB at {amplitude}", f.snr_db);
             }
             for f in &frames {
-                let d = ft8_decoded(&f.bytes, Hz(f.center_hz)).expect("a decode");
+                let d = decoded(&f.bytes, Hz(f.center_hz)).expect("a decode");
                 assert_eq!(d.text.as_deref(), Some("CQ MI0ABC IO74"), "wrong text at {amplitude}");
             }
         }
@@ -798,7 +576,7 @@ mod tests {
         let payload = ft8::pack_standard("CQ", "MI0ABC", "IO74").unwrap();
         let message = ft8::with_crc(&payload);
         let mut bytes = vec![8u8];
-        bytes.extend(pack(&message));
+        bytes.extend(ft8::pack(&message));
         assert!(is_ftx(&bytes));
         let p = common::Packet::of_frame(
             0,

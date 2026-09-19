@@ -26,51 +26,22 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
+pub use decode::rtty::decoded;
 use decode::rtty::{self, Shift, Speed};
+pub use decode::rtty::{IDLE_SYMBOLS, MAX_CHARS, MIN_CHARS, MIN_PRINTABLE, QUIET_SYMBOLS};
 use dsp::afsk::Symbol;
 use dsp::fsk::TonePair;
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::rtty::AUDIO_HZ;
+pub use identify::rtty::CHANNEL_WIDTH_HZ;
+pub use identify::rtty::DEFAULT_HZ;
+pub use identify::rtty::Rtty;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The 20 m RTTY sub-band, which is where a station is most likely to be
-/// found at any hour.
-pub const DEFAULT_HZ: f64 = 14_083_000.0;
-
-/// The channel an RTTY station occupies. The widest shift in use is 850 Hz,
-/// and the 250 Hz an amateur station takes sits well inside that.
-pub const CHANNEL_WIDTH_HZ: f64 = 1_000.0;
-
-/// Rate the channel is decimated to before the tone pair reads it. Five
-/// times the widest shift, so the correlators have room and every speed has
-/// far more than the four samples a symbol they need.
-const AUDIO_HZ: f64 = 8_000.0;
-
-/// Symbol times with no character framed either way up before a run is
-/// closed and published. A stop element is at most two symbols and the next
-/// character follows it, so this is the line resting rather than a gap
-/// inside an over: about half a second at 45 baud.
-const IDLE_SYMBOLS: usize = 24;
-
-/// Undecided symbols in a row that close a run. One is a fade or a symbol
-/// the correlators straddled; a pair is the station having stopped.
-const QUIET_SYMBOLS: usize = 2;
-
-/// Characters a run must hold before it is worth publishing. Below this a
-/// run is as likely to be noise framed by luck as anything anybody sent.
-const MIN_CHARS: usize = 6;
-
-/// How much of a run has to be a character the tables have. Letters case
-/// has one for every code but zero, so this is a low bar by itself and the
-/// framing is what does the real refusing.
-const MIN_PRINTABLE: f32 = 0.9;
-
-/// The longest run held before it is forced out, in characters.
-const MAX_CHARS: usize = 4_096;
 
 pub struct RttyNode {
     channel_hz: f64,
@@ -85,7 +56,7 @@ pub struct RttyNode {
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     symbols: Vec<Symbol>,
-    line: Line,
+    line: rtty::Framer,
     meter: crate::FrameMeter,
     runs: u64,
 }
@@ -111,7 +82,7 @@ impl RttyNode {
             mixed: Vec::new(),
             narrow: Vec::new(),
             symbols: Vec::new(),
-            line: Line::default(),
+            line: rtty::Framer::new(),
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
             runs: 0,
         }
@@ -134,111 +105,6 @@ impl RttyNode {
         self.decim = FirDecim::design_hz(rate, factor, self.passband_hz(), 60.0);
         self.tones = TonePair::new(audio_rate, self.speed.baud(), self.shift.hz());
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
-    }
-}
-
-/// The asynchronous line, read both ways up at once.
-///
-/// One framer per polarity, and a run closes on the channel falling quiet or
-/// on neither framer having read a character for a while, so the closing
-/// does not depend on knowing which way up the station is.
-#[derive(Default)]
-struct Line {
-    upright: Uart,
-    inverted: Uart,
-    since_char: usize,
-    undecided: usize,
-}
-
-impl Line {
-    /// Feed one symbol, and hand back a run of codes where it ended one.
-    fn push(&mut self, sym: Symbol) -> Option<Vec<u8>> {
-        let flipped = Symbol { mark: !sym.mark, quiet: sym.quiet };
-        let a = self.upright.push(sym);
-        let b = self.inverted.push(flipped);
-        self.since_char = match a || b {
-            true => 0,
-            false => self.since_char + 1,
-        };
-        self.undecided = match sym.quiet {
-            true => self.undecided + 1,
-            false => 0,
-        };
-        let resting = self.undecided >= QUIET_SYMBOLS || self.since_char >= IDLE_SYMBOLS;
-        if !resting {
-            return match self.upright.codes.len().max(self.inverted.codes.len()) >= MAX_CHARS {
-                true => self.take(),
-                false => None,
-            };
-        }
-        self.take()
-    }
-
-    /// Close whatever is open, and publish the better reading of it.
-    fn take(&mut self) -> Option<Vec<u8>> {
-        let up = std::mem::take(&mut self.upright);
-        self.undecided = 0;
-        let down = std::mem::take(&mut self.inverted);
-        self.since_char = 0;
-        // More characters framed is the first evidence, because a station
-        // read upside down loses its stop bits and frames almost nothing.
-        // Where both framed the same count, the tables decide.
-        let best = match (up.codes.len(), down.codes.len()) {
-            (a, b) if a > b => up.codes,
-            (a, b) if b > a => down.codes,
-            _ if rtty::printable(&down.codes) > rtty::printable(&up.codes) => down.codes,
-            _ => up.codes,
-        };
-        if best.len() < MIN_CHARS || rtty::printable(&best) < MIN_PRINTABLE {
-            return None;
-        }
-        Some(best)
-    }
-}
-
-/// A start bit, five data bits with the first on the air least significant,
-/// and a stop element of mark.
-///
-/// The stop is read as one symbol however long the station holds it: a
-/// teleprinter's one and a half or a machine's two are both mark, and the
-/// next start bit is a falling edge the tone pair's clock resynchronises on.
-#[derive(Default)]
-struct Uart {
-    partial: Option<(u8, u32)>,
-    codes: Vec<u8>,
-}
-
-impl Uart {
-    /// Feed one symbol, returning whether it completed a character.
-    fn push(&mut self, sym: Symbol) -> bool {
-        if sym.quiet {
-            self.partial = None;
-            return false;
-        }
-        match &mut self.partial {
-            // A mark between characters is the line resting.
-            None if sym.mark => false,
-            // A space between characters is a start bit.
-            None => {
-                self.partial = Some((0, 0));
-                false
-            }
-            Some((code, have)) => {
-                if *have < 5 {
-                    *code |= u8::from(sym.mark) << *have;
-                    *have += 1;
-                    return false;
-                }
-                // The stop element. A space here is a framing slip, and the
-                // character it would have made is not a character.
-                let (code, ok) = (*code, sym.mark);
-                self.partial = None;
-                if ok && self.codes.len() < MAX_CHARS {
-                    self.codes.push(code);
-                }
-                ok
-            }
-        }
     }
 }
 
@@ -294,7 +160,7 @@ impl Simple for RttyNode {
         self.mixer.reset();
         self.decim.reset();
         self.tones.reset();
-        self.line = Line::default();
+        self.line.reset();
         self.meter.reset();
     }
 
@@ -330,30 +196,6 @@ impl Simple for RttyNode {
     }
 }
 
-/// What a run of codes off the bus becomes: one row, the text a teleprinter
-/// would have printed.
-pub fn rtty_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let text = rtty::text(bytes);
-    if text.trim().is_empty() {
-        return None;
-    }
-    let fields = vec![
-        ("characters".into(), common::Value::Int(bytes.len() as i64)),
-        ("message".into(), common::Value::Text(text.clone())),
-    ];
-    Some(
-        Decoded::bytes("RTTY", center, 0.0, bytes.to_vec())
-            .with_modulation(common::Modulation::Fsk2)
-            .with_detail(format!("{} characters", bytes.len()))
-            .with_fields(fields)
-            // An operator typed it and sent it to whoever was listening, so
-            // it belongs in the message view beside anything else somebody
-            // wrote, rather than in the packet list with the machines.
-            .written()
-            .with_text(text),
-    )
-}
-
 /// Whether a frame off the bus could be a run of Baudot codes. Five bits is
 /// all a code has, so anything with a byte above 31 in it was framed by
 /// something else.
@@ -363,35 +205,29 @@ fn is_baudot(bytes: &[u8]) -> bool {
         && rtty::printable(bytes) >= MIN_PRINTABLE
 }
 
-pub struct Rtty;
-
 impl Protocol for Rtty {
     fn id(&self) -> &'static str {
-        "rtty"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "rtty"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["baudot", "teleprinter"]
+        Signal::aliases(self)
     }
-    /// Amateur HF, the utility and weather circuits, and a few VHF links:
-    /// a teleprinter is wherever somebody put one.
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Amateur, Usage::Utility])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 2.0 * CHANNEL_WIDTH_HZ,
-            feed_rate_hz: AUDIO_HZ,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
+    /// Amateur HF, the utility and weather circuits, and a few VHF links:
+    /// a teleprinter is wherever somebody put one.
+
     /// A run of five-bit codes is a shape no other decoder on the bus
     /// produces, but nothing in RTTY checks, so the claim is HF-wide and
     /// late rather than specific.
@@ -402,7 +238,7 @@ impl Protocol for Rtty {
         if !is_baudot(bytes) {
             return None;
         }
-        Some(rtty_decoded(bytes, common::Hz(_p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(_p.center_hz())).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} RTTY", hz / 1e6)
@@ -548,6 +384,56 @@ impl Simple for RttyTxNode {
     }
 }
 
+/// The carrier this stage is pointed at, and how it is keyed.
+const CHANNEL_HZ: &str = "channel_hz";
+const SPEED: &str = "speed";
+const SHIFT: &str = "shift";
+const TEXT: &str = "text";
+
+pub const RTTY_TX: StageDesc = StageDesc {
+    name: "rtty_tx",
+    summary: "Key an over as Baudot: a start element, five bits and a stop",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
+    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
+    Ok(Box::new(RttyTxNode::new(s.str_or(TEXT, ""), speed, shift)))
+}
+
+pub const DESC: StageDesc = StageDesc {
+    name: "rtty",
+    summary: "One RTTY channel: Baudot at 45.45 to 200 baud, 170 to 850 Hz shift",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
+    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
+    Ok(Box::new(RttyNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), speed, shift)))
+}
+
+/// A saved patch holds the choice as an index and a person writing one holds
+/// it as a number of baud, so both are read here and parsed once.
+fn speed_of(v: &ParamValue) -> Option<Speed> {
+    match v {
+        ParamValue::Choice(k) => Speed::ALL.get(*k).copied(),
+        ParamValue::Text(s) => s.parse().ok(),
+        other => other.as_f64().map(|b| b.to_string()).and_then(|s| s.parse().ok()),
+    }
+}
+
+fn shift_of(v: &ParamValue) -> Option<Shift> {
+    match v {
+        ParamValue::Choice(k) => Shift::ALL.get(*k).copied(),
+        ParamValue::Text(s) => s.parse().ok(),
+        other => other.as_f64().map(|h| h.to_string()).and_then(|s| s.parse().ok()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,7 +514,7 @@ mod tests {
         let frames = run(&mut node, &iq, rate, center);
 
         assert_eq!(frames.len(), 1, "{} runs off the air", frames.len());
-        let d = rtty_decoded(&frames[0], Hz(channel as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(channel as u64)).expect("a decode");
         assert_eq!(d.text.as_deref(), Some(OVER));
         assert_eq!(d.protocol, "RTTY");
         assert!(d.written, "an operator typed it");
@@ -664,7 +550,7 @@ mod tests {
         node.negotiate(&spec(rate, center)).unwrap();
         let frames = run(&mut node, &air, rate, center);
         assert_eq!(frames.len(), 1, "{} runs off the air", frames.len());
-        let d = rtty_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
         assert_eq!(d.text.as_deref(), Some(OVER));
         assert_eq!(d.field("characters").and_then(|v| v.as_i64()), Some(29));
     }
@@ -681,7 +567,7 @@ mod tests {
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "inverted={invert}: {} runs", frames.len());
-            let d = rtty_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+            let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
             assert_eq!(d.text.as_deref(), Some(OVER), "inverted={invert}");
         }
     }
@@ -746,55 +632,5 @@ mod tests {
         assert!(!is_baudot(&rtty::encode("OM")), "two characters is not a run");
         assert!(!is_baudot(&[0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47]));
         assert!(!is_baudot(&[0; 16]), "an unassigned code is not a character");
-    }
-}
-
-/// The carrier this stage is pointed at, and how it is keyed.
-const CHANNEL_HZ: &str = "channel_hz";
-const SPEED: &str = "speed";
-const SHIFT: &str = "shift";
-const TEXT: &str = "text";
-
-pub const RTTY_TX: StageDesc = StageDesc {
-    name: "rtty_tx",
-    summary: "Key an over as Baudot: a start element, five bits and a stop",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
-    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
-    Ok(Box::new(RttyTxNode::new(s.str_or(TEXT, ""), speed, shift)))
-}
-
-pub const DESC: StageDesc = StageDesc {
-    name: "rtty",
-    summary: "One RTTY channel: Baudot at 45.45 to 200 baud, 170 to 850 Hz shift",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
-    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
-    Ok(Box::new(RttyNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), speed, shift)))
-}
-
-/// A saved patch holds the choice as an index and a person writing one holds
-/// it as a number of baud, so both are read here and parsed once.
-fn speed_of(v: &ParamValue) -> Option<Speed> {
-    match v {
-        ParamValue::Choice(k) => Speed::ALL.get(*k).copied(),
-        ParamValue::Text(s) => s.parse().ok(),
-        other => other.as_f64().map(|b| b.to_string()).and_then(|s| s.parse().ok()),
-    }
-}
-
-fn shift_of(v: &ParamValue) -> Option<Shift> {
-    match v {
-        ParamValue::Choice(k) => Shift::ALL.get(*k).copied(),
-        ParamValue::Text(s) => s.parse().ok(),
-        other => other.as_f64().map(|h| h.to_string()).and_then(|s| s.parse().ok()),
     }
 }

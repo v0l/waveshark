@@ -1548,11 +1548,12 @@ impl SourceDetector {
                     // other would take turns evicting one another.
                     let mut room = *open_now < max_open;
                     if !room {
-                        if let Some((id, db)) = weakest {
-                            if displaced.is_none() && t.peak_hi > db + 3.0 {
-                                *displaced = Some(id);
-                                room = true;
-                            }
+                        if let Some((id, db)) = weakest
+                            && displaced.is_none()
+                            && t.peak_hi > db + 3.0
+                        {
+                            *displaced = Some(id);
+                            room = true;
                         }
                         if !room {
                             *capped += 1;

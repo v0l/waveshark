@@ -1058,7 +1058,7 @@ mod tests {
 
     /// Through the Mode S decoder, the way the bus feeds the map.
     fn feed_adsb(t: &mut Tracks, f: &adsb::Frame, at: std::time::Instant) {
-        let d = nodes::modes_nodes::adsb_decoded(f, &f.raw, common::Hz(1_090_000_000));
+        let d = decode::adsb::decoded(f, &f.raw, common::Hz(1_090_000_000));
         t.update_decoded(&d, at);
     }
 
@@ -1086,12 +1086,12 @@ mod tests {
     /// tracker now: the map reads what the protocols concluded.
     fn feed_ais(t: &mut Tracks, payload: &[u8], at: std::time::Instant) {
         let f = ais_frame(payload);
-        let d = nodes::ais_nodes::ais_decoded(&f, payload, common::Hz(162_025_000));
+        let d = decode::ais::decoded(&f, payload, common::Hz(162_025_000));
         assert!(t.update_decoded(&d, at), "the tracker refused an AIS decode");
     }
 
     fn feed_aprs(t: &mut Tracks, frame: &ax25::Frame, at: std::time::Instant) -> bool {
-        let d = nodes::aprs_nodes::aprs_decoded(frame, &[], common::Hz(144_800_000));
+        let d = decode::aprs::decoded(frame, &[], common::Hz(144_800_000));
         t.update_decoded(&d, at)
     }
 

@@ -17,43 +17,24 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::meisei;
+pub use decode::meisei::decoded;
+pub use decode::meisei::this_year;
 use dsp::fsk::BitSync;
+use identify::Signal;
+pub use identify::meisei::BAND;
+pub use identify::meisei::BAUD;
+pub use identify::meisei::CHANNEL_WIDTH_HZ;
+pub use identify::meisei::Meisei;
+pub use identify::meisei::OCCUPIED_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// Chips a second. Two to a bit.
-pub const BAUD: f64 = 2_400.0;
-
-/// The channel an iMS-100 is tuned to.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// What the signal occupies.
-pub const OCCUPIED_HZ: f64 = 12_000.0;
-
-/// The meteorological aids band.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// Chips in one half-frame.
-const HALF_CHIPS: usize = meisei::HALF_BITS * 2;
-
-/// Chips held while looking for a header: three half-frames.
-const MAX_CHIPS: usize = HALF_CHIPS * 3;
-
-/// Chips of the header allowed to be wrong. The BCH code behind it refuses
-/// what a false header would produce, so slack here costs nothing.
-const HEADER_SLACK: u32 = 6;
-
 pub struct MeiseiNode {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
-    gather: meisei::Gather,
-    chips: Vec<bool>,
-    /// Chips already searched and known not to start a header.
-    scanned: usize,
-    halves: u64,
-    records: u64,
+    framer: meisei::Framer,
 }
 
 impl Default for MeiseiNode {
@@ -67,95 +48,19 @@ impl MeiseiNode {
         Self {
             sync: None,
             meter: crate::FrameMeter::new(1.0, 0, 0.6),
-            gather: meisei::Gather::new(),
-            chips: Vec::new(),
-            scanned: 0,
-            halves: 0,
-            records: 0,
+            framer: meisei::Framer::new(),
         }
     }
 
     /// Half-frames whose codewords all came through the BCH.
     pub fn halves(&self) -> u64 {
-        self.halves
+        self.framer.halves()
     }
 
     /// Records gathered, which is what reaches the bus.
     pub fn records(&self) -> u64 {
-        self.records
+        self.framer.records()
     }
-
-    fn search(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        let headers = header_chips();
-        let mut at = self.scanned;
-        while at + 48 <= self.chips.len() {
-            if !headers.iter().any(|h| matches(&self.chips, at, h)) {
-                at += 1;
-                continue;
-            }
-            if at + HALF_CHIPS > self.chips.len() {
-                self.scanned = at;
-                return out;
-            }
-            let bits = biphase(&self.chips[at..at + HALF_CHIPS]);
-            match meisei::read(&bits) {
-                Some(half) => {
-                    self.halves += 1;
-                    if let Some(record) = self.gather.take(&half) {
-                        self.records += 1;
-                        out.push(record);
-                    }
-                    self.chips.drain(..at + HALF_CHIPS);
-                    at = 0;
-                    self.scanned = 0;
-                }
-                None => at += 1,
-            }
-        }
-        self.scanned = at;
-        out
-    }
-}
-
-/// Both headers, each as chips, each way up: four patterns, because a header
-/// is what fixes the chip pairing and the pairing is what the coding needs.
-fn header_chips() -> Vec<Vec<bool>> {
-    let mut out = Vec::with_capacity(4);
-    for header in [meisei::HEADER_A, meisei::HEADER_B] {
-        let mut chips = Vec::with_capacity(48);
-        // Biphase: the level turns over at every bit, and again in the
-        // middle of a zero.
-        let mut level = false;
-        for k in (0..24).rev() {
-            level = !level;
-            chips.push(level);
-            if header >> k & 1 == 0 {
-                level = !level;
-            }
-            chips.push(level);
-        }
-        out.push(chips.iter().map(|c| !c).collect());
-        out.push(chips);
-    }
-    out
-}
-
-fn matches(chips: &[bool], at: usize, header: &[bool]) -> bool {
-    let mut wrong = 0;
-    for (k, &want) in header.iter().enumerate() {
-        wrong += u32::from(chips[at + k] != want);
-        if wrong > HEADER_SLACK {
-            return false;
-        }
-    }
-    true
-}
-
-/// Biphase chips back to bits: a pair that does not turn over is a one.
-/// Nothing here depends on which way up the signal arrived.
-fn biphase(chips: &[bool]) -> Vec<bool> {
-    chips.chunks(2).map(|c| c.len() == 2 && c[0] == c[1]).collect()
 }
 
 impl Simple for MeiseiNode {
@@ -186,123 +91,43 @@ impl Simple for MeiseiNode {
             return Ok(());
         };
         self.meter.feed(iq);
-        s.process(iq, &mut self.chips);
-        for record in self.search() {
+        s.process(iq, self.framer.sink());
+        for record in self.framer.take() {
             o.frames_mut().push(self.meter.frame(record));
         }
-        if self.chips.len() > MAX_CHIPS {
-            let drop = self.chips.len() - MAX_CHIPS;
-            self.chips.drain(..drop);
-            self.scanned = self.scanned.saturating_sub(drop);
-        }
+        self.framer.trim();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.meter.reset();
-        self.chips.clear();
-        self.scanned = 0;
-        self.gather = meisei::Gather::new();
+        self.framer.reset();
         if let Some(s) = &mut self.sync {
             s.reset();
         }
     }
 }
 
-/// The year the receiver is running in, for the decade the sonde leaves off.
-fn this_year() -> u16 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    use chrono::Datelike;
-    chrono::DateTime::from_timestamp(secs as i64, 0).map(|t| t.year() as u16).unwrap_or(1970)
-}
-
-/// What the protocols node makes of a gathered record.
-pub fn meisei_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = meisei::parse(bytes)?;
-    let year = meisei::year_near(r.year_digit, this_year());
-    let (h, m, s) = r.utc;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text("iMS-100".into())),
-        ("frame".into(), common::Value::Int(r.counter as i64)),
-        (
-            "utc".into(),
-            common::Value::Text(format!(
-                "{year:04}-{:02}-{:02} {h:02}:{m:02}:{s:06.3}",
-                r.month, r.day
-            )),
-        ),
-    ];
-    if !r.serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
-    }
-    if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
-    }
-
-    let mut d = Decoded::bytes("ims100", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("iMS-100, frame {}", r.counter))
-        .with_fields(fields);
-    if !r.serial.is_empty() {
-        d = d.by(common::Identity::new("meisei", r.serial.clone()).made_by("Meisei"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // The standard frame carries no battery voltage.
-                battery_v: f32::NAN,
-                satellites: 0,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct Meisei;
-
 impl Protocol for Meisei {
     fn id(&self) -> &'static str {
-        "ims100"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "ims100"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["meisei", "ims-100", "rs-11g"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        403_000_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 4.0 * BAUD,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -311,7 +136,7 @@ impl Protocol for Meisei {
         if !(BAND.0..BAND.1).contains(&hz) || bytes.len() != meisei::RECORD {
             return None;
         }
-        Some(meisei_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -433,15 +258,13 @@ mod tests {
             n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
             let mut got = Vec::new();
             for block in iq.chunks(2048) {
-                let mut chips = Vec::new();
-                n.sync.as_mut().unwrap().process(block, &mut chips);
-                n.chips.extend(chips);
-                got.extend(n.search());
+                n.sync.as_mut().unwrap().process(block, n.framer.sink());
+                got.extend(n.framer.take());
             }
             assert_eq!(got.len(), 1, "{} records, inverted {inverted}", got.len());
             assert_eq!(n.halves(), 2, "{} half-frames read", n.halves());
 
-            let d = meisei_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
             assert_eq!(d.field("model").map(|v| v.to_string()).as_deref(), Some("iMS-100"));
             let p = d.position.expect("a position");
             assert!((p.lat - 53.35).abs() < 1e-6, "{}", p.lat);
@@ -467,15 +290,9 @@ mod tests {
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
         let mut records = 0;
         for block in iq.chunks(4096) {
-            let mut chips = Vec::new();
-            n.sync.as_mut().unwrap().process(block, &mut chips);
-            n.chips.extend(chips);
-            records += n.search().len();
-            if n.chips.len() > MAX_CHIPS {
-                let drop = n.chips.len() - MAX_CHIPS;
-                n.chips.drain(..drop);
-                n.scanned = n.scanned.saturating_sub(drop);
-            }
+            n.sync.as_mut().unwrap().process(block, n.framer.sink());
+            records += n.framer.take().len();
+            n.framer.trim();
         }
         assert_eq!(records, 0, "{records} records out of twenty seconds of noise");
     }

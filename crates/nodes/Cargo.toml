@@ -10,6 +10,7 @@ chrono.workspace = true
 tracing.workspace = true
 audio.workspace = true
 dsp.workspace = true
+identify.workspace = true
 rustfft.workspace = true
 pipeline.workspace = true
 decode.workspace = true

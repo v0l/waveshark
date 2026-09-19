@@ -15,30 +15,18 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::acars;
+pub use decode::acars::decoded;
 use dsp::msk::{MskConfig, MskDemod};
 use dsp::{AmDemod, FirDecim, Mixer};
-use pipeline::event::{Decoded, media};
+use identify::Signal;
+pub use identify::acars::Acars;
+pub use identify::acars::CHANNEL_WIDTH_HZ;
+pub use identify::acars::DEFAULT_HZ;
+pub use identify::acars::{AUDIO_HZ, CARRIER_TRACK_HZ};
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The primary ACARS channel across Europe. North America uses 131.550 and
-/// there are half a dozen others; the scanner table decides, and this is only
-/// what the node is built with before it is told.
-pub const DEFAULT_HZ: f64 = 131_725_000.0;
-
-/// An airband channel is 25 kHz on the grid and the signal inside it is a few
-/// kilohertz of MSK on an AM carrier.
-pub const CHANNEL_WIDTH_HZ: f64 = 15_000.0;
-
-/// Audio rate the envelope is decimated to, which is what `acarsdec` works at
-/// and what the demodulator's constants were measured at.
-const AUDIO_HZ: f64 = 12_500.0;
-
-/// How fast the carrier estimate follows a fading aircraft. A few hertz: fast
-/// enough for an aircraft turning, slow enough to leave the 1200 Hz tone
-/// alone.
-const CARRIER_TRACK_HZ: f64 = 5.0;
 
 pub struct AcarsNode {
     channel_hz: f64,
@@ -152,44 +140,27 @@ impl Simple for AcarsNode {
     }
 }
 
-/// The decode an ACARS block becomes.
-pub fn acars_decoded(m: &acars::Message, bytes: &[u8], center: common::Hz) -> Decoded {
-    let fields = m.fields();
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let protocol = if m.downlink { "ACARS-Downlink" } else { "ACARS-Uplink" };
-    // The aircraft either way: an uplink is addressed to the aeroplane, not
-    // sent by the ground station whose name is nowhere in the block.
-    let name = m.flight.clone().filter(|f| !f.trim().is_empty()).unwrap_or_default();
-    let mut who = common::Identity::new("acars", m.registration.clone());
-    if !name.is_empty() {
-        who = who.named(name);
-    }
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Msk)
-        // Odd parity on every character and a CRC-16 over the block.
-        .with_crc(Some(true));
-    d.media_type = if m.text.is_empty() { media::BYTES } else { media::TEXT };
-    d
-}
-
-pub struct Acars;
-
 impl Protocol for Acars {
     fn id(&self) -> &'static str {
-        "acars"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "acars"
+        Signal::label(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The data half of the VHF airband. Which channels are in use is
     /// regional, so the band is the claim and the scanner table names the
     /// carriers inside it.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![(129e6, 137e6)])
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 8_000_000 }
     }
@@ -198,20 +169,9 @@ impl Protocol for Acars {
             return None;
         }
         let m = acars::parse(bytes)?;
-        Some(vec![acars_decoded(&m, bytes, common::Hz(p.center_hz()))])
+        Some(vec![decoded(&m, bytes, common::Hz(p.center_hz()))])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 100_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.3} ACARS", hz / 1e6)
     }
@@ -254,7 +214,7 @@ mod tests {
     fn a_block_becomes_a_row_naming_the_aircraft() {
         let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
         let m = acars::parse(block).expect("a message");
-        let d = acars_decoded(&m, block, Hz(131_725_000));
+        let d = decoded(&m, block, Hz(131_725_000));
         assert_eq!(d.protocol, "ACARS-Downlink");
         assert_eq!(d.crc_ok, Some(true));
         let detail = d.detail.clone().unwrap_or_default();

@@ -31,8 +31,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use decode::dmr::{self, LinkControl};
+use decode::dmr::{self, DmrEvent, Framer, LinkControl};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
 use dsp::m17::rrc_taps;
@@ -42,63 +41,36 @@ use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
 mod dmr_ambe;
+pub use decode::dmr::BODY_LEN;
+pub use decode::dmr::BURST_BYTES;
+pub use decode::dmr::CODEC;
+pub use decode::dmr::DMR_TAG;
+pub use decode::dmr::FLAG_EMERGENCY;
+pub use decode::dmr::FLAG_ENCRYPTED;
+pub use decode::dmr::FLAG_GROUP;
+pub use decode::dmr::FLAG_HAVE_LC;
+pub use decode::dmr::OVER_LEN;
+pub use decode::dmr::OVER_TAG;
+pub use decode::dmr::POS_DATA;
+pub use decode::dmr::PRIVACY;
+pub use decode::dmr::REANCHOR;
+pub use decode::dmr::SLOT_STRIDE;
+pub use decode::dmr::SYM_BURST;
+pub use decode::dmr::SYM_PAYLOAD;
+pub use decode::dmr::SYM_SYNC;
+pub use decode::dmr::lc_airtime;
+pub use decode::dmr::lc_fields;
+pub use decode::dmr::lc_link;
+pub use decode::dmr::unpack_bits;
+pub use decode::dmr::{MAX_MISSES, lc_flags, pack_bits};
+pub use decode::dmr::{decoded, over_decoded};
 use dmr_ambe::Vocoder;
+use identify::Signal;
+pub use identify::dmr::CHANNEL_WIDTH_HZ;
+pub use identify::dmr::DEFAULT_HZ;
+pub use identify::dmr::Dmr;
+pub use identify::dmr::{AUDIO_HZ, BAUD, DEVIATION_HZ, RRC_ALPHA};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// Tag identifying a packet body this node wrote: one DMR burst. "DB".
-///
-/// A packet is one burst off the air, the 264 bits of it as received, with
-/// what the framer knew when it read them: where in the superframe it sat,
-/// the colour code, and the link control in force for the transmission,
-/// which the burst itself carries only if it is a header or a terminator.
-/// Everything the log shows about it is read back out of these bytes, so a
-/// replay decodes the same burst again and a decoder written later gets its
-/// chance at it. What the packet does not carry is the whole over: that is
-/// reconstructed downstream from the run of bursts, the way a stream is
-/// followed across frames.
-const DMR_TAG: [u8; 2] = *b"DB";
-
-/// Body: tag, position, colour, flags, destination, source, 264 bits.
-const BODY_LEN: usize = 2 + 1 + 1 + 1 + 4 + 4 + BURST_BYTES;
-/// 264 bits, packed most significant bit first.
-const BURST_BYTES: usize = SYM_BURST * 2 / 8;
-
-/// Position byte: voice bursts A to F of a superframe, or a burst with a
-/// data sync, whose slot type is in the bits.
-const POS_DATA: u8 = 0xff;
-
-const FLAG_HAVE_LC: u8 = 0x01;
-const FLAG_GROUP: u8 = 0x02;
-const FLAG_ENCRYPTED: u8 = 0x04;
-const FLAG_EMERGENCY: u8 = 0x08;
-
-/// The tag of the row the node used to write, one per over, kept readable
-/// so an old log still labels.
-const OVER_TAG: [u8; 2] = *b"DV";
-const OVER_LEN: usize = 2 + 4 + 1 + 4 + 4;
-
-fn pack_bits(bits: &[u8]) -> Vec<u8> {
-    bits.chunks(8).map(|c| c.iter().fold(0u8, |v, &b| (v << 1) | (b & 1))).collect()
-}
-
-fn unpack_bits(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().flat_map(|b| (0..8).rev().map(move |i| (b >> i) & 1)).collect()
-}
-
-fn lc_flags(lc: Option<&LinkControl>) -> u8 {
-    let Some(lc) = lc else { return 0 };
-    let mut flags = FLAG_HAVE_LC;
-    if lc.group() {
-        flags |= FLAG_GROUP;
-    }
-    if lc.encrypted() {
-        flags |= FLAG_ENCRYPTED;
-    }
-    if lc.emergency() {
-        flags |= FLAG_EMERGENCY;
-    }
-    flags
-}
 
 /// Motorola's feature set, whose privacy bit means Basic Privacy when no
 /// key id was signalled.
@@ -121,18 +93,6 @@ fn privacy_keystream(lc: &LinkControl) -> Option<[bool; 49]> {
         .and_then(|k| decode::dmr_bp::keystream(k.key[0]))
 }
 
-/// Serialise one burst with the framer's context for it.
-fn encode_burst(pos: u8, colour: Option<u8>, lc: Option<&LinkControl>, bits: &[u8]) -> Vec<u8> {
-    let mut v = DMR_TAG.to_vec();
-    v.push(pos);
-    v.push(colour.unwrap_or(0xff));
-    v.push(lc_flags(lc));
-    v.extend_from_slice(&lc.map_or(0, |l| l.dst).to_be_bytes());
-    v.extend_from_slice(&lc.map_or(0, |l| l.src).to_be_bytes());
-    v.extend(pack_bits(bits));
-    v
-}
-
 /// The AMBE frames of a voice burst's bits, as [`Framer::voice_frames`]
 /// reads them, for anything that wants to hear a logged burst again.
 pub fn burst_voice_frames(bytes: &[u8]) -> Option<[[u8; 9]; 3]> {
@@ -141,177 +101,6 @@ pub fn burst_voice_frames(bytes: &[u8]) -> Option<[[u8; 9]; 3]> {
     }
     Some(Framer::voice_frames(&unpack_bits(&bytes[13..])))
 }
-
-/// Who an over was between, from the same link control the fields come from.
-fn lc_link(flags: u8, dst: u32, src: u32) -> Option<pipeline::event::Link> {
-    use pipeline::event::Party;
-    if flags & FLAG_HAVE_LC == 0 {
-        return None;
-    }
-    let to = if flags & FLAG_GROUP != 0 {
-        Party::group(dst.to_string())
-    } else {
-        Party::unit(dst.to_string())
-    };
-    Some(pipeline::event::Link::between(Party::unit(src.to_string()), to))
-}
-
-/// What the link control says about the call itself: that it is speech, in
-/// which vocoder, and what protects it. The call list reads this rather than
-/// the fields beside it.
-fn lc_airtime(flags: u8, seconds: f64, live: bool) -> Option<common::Airtime> {
-    if flags & FLAG_HAVE_LC == 0 {
-        return None;
-    }
-    Some(common::Airtime {
-        seconds,
-        voice: true,
-        live,
-        secrecy: if flags & FLAG_ENCRYPTED != 0 {
-            common::Secrecy::Encrypted(Some(PRIVACY.into()))
-        } else {
-            common::Secrecy::Clear
-        },
-        codec: Some(CODEC),
-    })
-}
-
-/// DMR speech is always AMBE+2 at 2450 bit/s of speech under 1150 of FEC;
-/// there is no other vocoder in the standard.
-const CODEC: &str = "AMBE+2 2450";
-
-/// What the standard calls its own encryption, which is all a link control
-/// says about it.
-const PRIVACY: &str = "privacy";
-
-fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Value)>) {
-    use common::Value;
-    if flags & FLAG_HAVE_LC == 0 {
-        return;
-    }
-    let group = flags & FLAG_GROUP != 0;
-    fields.push(("voice".to_string(), Value::Bool(true)));
-    fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
-    fields.push(("to".to_string(), Value::Text(dst.to_string())));
-    fields.push(("from".to_string(), Value::Text(src.to_string())));
-    fields.push((
-        "call_type".to_string(),
-        Value::Text(if group { "group" } else { "private" }.to_string()),
-    ));
-    if flags & FLAG_ENCRYPTED != 0 {
-        fields.push(("encrypted".to_string(), Value::Bool(true)));
-        fields.push(("encryption".to_string(), Value::Text(PRIVACY.to_string())));
-    }
-    if flags & FLAG_EMERGENCY != 0 {
-        fields.push(("emergency".to_string(), Value::Bool(true)));
-    }
-}
-
-/// Recognise and describe a DMR row for the packet log. Returns `None` for
-/// anything this node did not write, so it is safe to try on every frame the
-/// way `m17_decoded` is.
-///
-/// A voice burst is `DMR-Voice`, 60 ms of the channel, `live` while the
-/// transmission runs; a header is the same with the over starting, and a
-/// terminator ends it. A row with a link control names its talkgroup and
-/// radio and says `voice`, which is what puts it in the call list rather
-/// than only in the log.
-pub fn dmr_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if bytes.len() == OVER_LEN && bytes[..2] == OVER_TAG {
-        return over_decoded(bytes, center);
-    }
-    if bytes.len() != BODY_LEN || bytes[..2] != DMR_TAG {
-        return None;
-    }
-    let pos = bytes[2];
-    let colour = bytes[3];
-    let flags = bytes[4];
-    let dst = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
-    let src = u32::from_be_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]);
-    let bits = unpack_bits(&bytes[13..]);
-    let mut fields = Vec::new();
-    if colour != 0xff {
-        fields.push(("colour_code".to_string(), Value::Int(i64::from(colour))));
-    }
-    // Seconds of the channel this row is worth, and whether the over is
-    // still running: a header opens one, a burst is 60 ms of it, and a
-    // terminator is the over ending.
-    let mut airtime = (0.0, false);
-    let model = if pos == POS_DATA {
-        let mut slot = bits[98..108].to_vec();
-        slot.extend_from_slice(&bits[156..166]);
-        let dt = dmr::slot_type(&slot).map(|(_, dt)| dt);
-        match dt {
-            Some(dmr::DT_VOICE_LC_HEADER) => {
-                lc_fields(flags, dst, src, &mut fields);
-                fields.push(("live".to_string(), Value::Bool(true)));
-                airtime = (0.0, true);
-                "DMR-Header"
-            }
-            Some(dmr::DT_TERMINATOR_LC) => {
-                lc_fields(flags, dst, src, &mut fields);
-                "DMR-Terminator"
-            }
-            Some(dt) => {
-                fields.push(("data_type".to_string(), Value::Int(i64::from(dt))));
-                "DMR-Data"
-            }
-            None => "DMR-Data",
-        }
-    } else {
-        // One burst is one 60 ms slot on this logical channel.
-        fields.push(("seconds".to_string(), Value::Float(0.06)));
-        fields.push(("burst".to_string(), Value::Text(((b'A' + pos.min(5)) as char).to_string())));
-        lc_fields(flags, dst, src, &mut fields);
-        fields.push(("live".to_string(), Value::Bool(true)));
-        airtime = (0.06, true);
-        "DMR-Voice"
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(model, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4);
-    d.link = lc_link(flags, dst, src);
-    if flags & FLAG_HAVE_LC != 0 {
-        d.identity = Some(common::Identity::new("dmr", src.to_string()));
-    }
-    d.airtime = lc_airtime(flags, airtime.0, airtime.1);
-    Some(d)
-}
-
-/// The old one-row-per-over body, for logs written before bursts were logged.
-fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let bursts = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
-    let flags = bytes[6];
-    let dst = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
-    let src = u32::from_be_bytes([bytes[11], bytes[12], bytes[13], bytes[14]]);
-    let mut fields = vec![
-        ("seconds".to_string(), Value::Float(f64::from(bursts) * 0.06)),
-        ("bursts".to_string(), Value::Int(i64::from(bursts))),
-    ];
-    lc_fields(flags, dst, src, &mut fields);
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4);
-    d.link = lc_link(flags, dst, src);
-    if flags & FLAG_HAVE_LC != 0 {
-        d.identity = Some(common::Identity::new("dmr", src.to_string()));
-    }
-    d.airtime = lc_airtime(flags, f64::from(bursts) * 0.06, false);
-    Some(d)
-}
-
-/// A common DMR simplex frequency in Region 1, and only the default before the
-/// scanner table says where to listen.
-pub const DEFAULT_HZ: f64 = 433_450_000.0;
-
-/// 12.5 kHz channel grid.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
 
 /// Silence after the last voice burst before the link control it was under
 /// is forgotten, so a transmission that dropped without a terminator does
@@ -325,470 +114,12 @@ const OVER_SILENCE_S: f64 = 1.5;
 /// are clipped and the four-level eye closes.
 const FILTER_CUTOFF_HZ: f64 = 10_000.0;
 
-/// Discriminator output rate: ~10 samples per symbol at 4800 baud.
-const AUDIO_HZ: f64 = 48_000.0;
-
-/// Symbol rate.
-const BAUD: f64 = 4_800.0;
-
-/// Roll-off of the root raised cosine DMR transmits with, and so of the
-/// matched filter here (TS 102 361-1 clause 6.2.1).
-///
-/// It is not optional. Without it the sync words still correlate, because
-/// they use only the outer two levels, but the inner levels never separate:
-/// on the corpus capture every BPTC(196,96) in the file failed with nine bad
-/// rows out of nine, and with the filter the same bursts come out clean. A
-/// receiver without it finds transmissions and can say nothing about them.
-const RRC_ALPHA: f64 = 0.2;
-
 /// Vocoder output rate.
 pub const VOICE_HZ: f64 = 8_000.0;
-
-/// Nominal outer-symbol deviation. Nothing downstream depends on the exact
-/// value: the slicer fits its own levels per burst.
-const DEVIATION_HZ: f64 = 1_944.0;
-
-/// A burst is 108 payload + 48 sync/embedded + 108 payload bits, which at two
-/// bits a symbol is 54 + 24 + 54 = 132 symbols.
-const SYM_PAYLOAD: usize = 54;
-const SYM_SYNC: usize = 24;
-const SYM_BURST: usize = SYM_PAYLOAD + SYM_SYNC + SYM_PAYLOAD;
-
-/// Bursts on one timeslot are 288 symbols apart (60 ms, one two-slot TDMA
-/// frame). A voice superframe is six of them.
-const SLOT_STRIDE: usize = 288;
-const SUPERFRAME_BURSTS: usize = 6;
-
-/// How far either side of the expected burst position to look when locked.
-/// The Gardner loop holds the symbol clock; this absorbs the symbol or two a
-/// re-lock after fading can be out by.
-const REANCHOR: usize = 2;
-
-/// Bursts that pass no check before the clock is abandoned and the sync hunt
-/// starts again. Six is one superframe, long enough to ride through a fade
-/// that would otherwise end the over.
-const MAX_MISSES: u32 = 8;
 
 /// Channel samples kept behind the symbol clock, in seconds: everything the
 /// framer may still read, which is a burst plus its re-anchoring.
 const KEEP_S: f64 = (SYM_BURST + SLOT_STRIDE + MAX_MISSES as usize * SLOT_STRIDE) as f64 / BAUD;
-
-/// The DMR sync words as level-index strings (0=-3,1=-1,2=+1,3=+3), derived
-/// from the canonical hex by mapping each dibit 01,00,10,11. Voice bursts and
-/// data bursts carry different words, which is how a voice superframe is told
-/// from signalling.
-///
-/// Beware: each voice word is the exact inverse of its data word (invert
-/// `MS_voice` symbol by symbol and `MS_data` is what comes out). A
-/// discriminator whose sign is unknown therefore cannot tell a voice burst
-/// from a data burst by the sync alone, and picking the wrong one locks the
-/// framer onto a transmission it then reads as signalling that never
-/// decodes. `Framer::confirm_voice` is what settles it.
-const SYNCS: [(&str, &str, bool); 6] = [
-    ("BS_voice", "303333000330030030330030", true),
-    ("BS_data", "030000333003303303003303", false),
-    ("MS_voice", "300030033303033330030003", true),
-    ("MS_data", "033303300030300003303330", false),
-    ("T1_voice", "330333303000303033300000", true),
-    ("T2_voice", "300300000333003333033300", true),
-];
-
-/// Finds bursts in the symbol stream and reads what they carry.
-///
-/// Holds a rolling window of symbol values with an absolute index, so a burst
-/// whose start arrived in one block can still be read when the rest of it
-/// arrives in the next.
-struct Framer {
-    /// Symbol values, oldest first.
-    marks: Vec<f32>,
-    /// Absolute index of `marks[0]`.
-    base: usize,
-    /// Next absolute index to test for a sync word while hunting.
-    scan: usize,
-    /// First symbol of the next expected burst, once the clock is locked.
-    next: Option<usize>,
-    /// Consecutive expected bursts that passed no check.
-    misses: u32,
-    /// Bursts since the last voice sync, so B to F of a superframe are known
-    /// by where they are rather than by an EMB field that decodes noise as
-    /// valid a fair fraction of the time.
-    since_sync: usize,
-    /// Colour code of the system being followed, so another user of the same
-    /// channel does not steal the lock.
-    colour: Option<u8>,
-    /// Sync polarity once locked: the discriminator's sign is receiver-set.
-    polarity: Option<bool>,
-    /// Parsed sync patterns as level indices.
-    patterns: Vec<(&'static str, Vec<u8>, bool)>,
-    /// The four embedded LC fragments of a superframe, as they arrive.
-    embedded: dmr::EmbeddedLc,
-}
-
-/// One thing the framer found. `at` is the absolute symbol index the burst
-/// began at and `bits` its 264 bits as received.
-pub enum DmrEvent {
-    /// A voice burst: three 72-bit AMBE frames, 9 bytes each. `pos` is its
-    /// place in the superframe, 0 for burst A, the one carrying the sync.
-    Voice { at: usize, bits: Vec<u8>, frames: [[u8; 9]; 3], pos: u8 },
-    /// Who is talking, from a header, a terminator or an embedded LC.
-    Lc(LinkControl),
-    /// A data/signalling burst, by its slot type (`dmr::DT_*`), or `None`
-    /// when the slot type would not decode.
-    Data { at: usize, bits: Vec<u8>, data_type: Option<u8> },
-}
-
-impl Framer {
-    fn new() -> Self {
-        let patterns = SYNCS
-            .iter()
-            .map(|(n, p, v)| (*n, p.bytes().map(|c| c - b'0').collect::<Vec<u8>>(), *v))
-            .collect();
-        Self {
-            marks: Vec::new(),
-            base: 0,
-            scan: 0,
-            next: None,
-            misses: 0,
-            since_sync: usize::MAX,
-            colour: None,
-            polarity: None,
-            patterns,
-            embedded: dmr::EmbeddedLc::new(),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.marks.clear();
-        self.base = 0;
-        self.scan = 0;
-        self.next = None;
-        self.misses = 0;
-        self.since_sync = usize::MAX;
-        self.colour = None;
-        self.polarity = None;
-        self.embedded.reset();
-    }
-
-    /// Fit four level centres to a window by percentiles. The window must
-    /// contain all four levels for the inner two centres to be right, so it
-    /// is always a whole burst or more, never the sync symbols alone (which
-    /// carry only the outer two levels).
-    fn centers(window: &[f32]) -> [f32; 4] {
-        let mut sorted: Vec<f32> = window.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let q = |f: f32| sorted[((sorted.len() as f32 * f) as usize).min(sorted.len() - 1)];
-        [q(0.12), q(0.37), q(0.62), q(0.87)]
-    }
-
-    /// Map symbol values to level indices 0..3 using given centres.
-    fn apply(vals: &[f32], centers: &[f32; 4], flip: bool) -> Vec<u8> {
-        vals.iter()
-            .map(|&v| {
-                let mut best = 0u8;
-                let mut bd = f32::INFINITY;
-                for (i, &c) in centers.iter().enumerate() {
-                    let d = (v - c).abs();
-                    if d < bd {
-                        bd = d;
-                        best = i as u8;
-                    }
-                }
-                if flip { 3 - best } else { best }
-            })
-            .collect()
-    }
-
-    /// Level index -> dibit (DMR +3=01,+1=00,-1=10,-3=11), MSB first.
-    fn dibit(l: u8) -> [u8; 2] {
-        match l {
-            3 => [0, 1],
-            2 => [0, 0],
-            1 => [1, 0],
-            _ => [1, 1],
-        }
-    }
-
-    /// The 264 bits of the burst starting at absolute index `start`, or None
-    /// if it is not fully buffered. Levels are fitted over the whole burst,
-    /// which is the only window that contains all four of them.
-    fn burst_bits(&self, start: usize, flip: bool) -> Option<Vec<u8>> {
-        if start < self.base || start + SYM_BURST > self.base + self.marks.len() {
-            return None;
-        }
-        let s = start - self.base;
-        let window = &self.marks[s..s + SYM_BURST];
-        let centers = Self::centers(window);
-        let lv = Self::apply(window, &centers, flip);
-        let mut bits = Vec::with_capacity(SYM_BURST * 2);
-        for &l in &lv {
-            bits.extend_from_slice(&Self::dibit(l));
-        }
-        Some(bits)
-    }
-
-    /// The three AMBE frames of a voice burst: 108 bits either side of the
-    /// middle field, nine bytes each.
-    fn voice_frames(bits: &[u8]) -> [[u8; 9]; 3] {
-        let payload: Vec<u8> = bits[..SYM_PAYLOAD * 2]
-            .iter()
-            .chain(&bits[(SYM_PAYLOAD + SYM_SYNC) * 2..])
-            .copied()
-            .collect();
-        let mut frames = [[0u8; 9]; 3];
-        for (f, frame) in frames.iter_mut().enumerate() {
-            for (b, byte) in payload[f * 72..(f + 1) * 72].chunks(8).enumerate() {
-                frame[b] = byte.iter().fold(0u8, |v, &bit| (v << 1) | (bit & 1));
-            }
-        }
-        frames
-    }
-
-    /// Whether the burst at `start` really is burst B of a voice superframe,
-    /// used to settle the polarity: its middle field has to hold an EMB the
-    /// QR(16,7,6) accepts, which the same burst read the other way up does
-    /// not. Without this a wrongly inverted lock reads a voice call as
-    /// signalling and drops it.
-    fn confirm_voice(&self, start: usize, flip: bool) -> bool {
-        let Some(bits) = self.burst_bits(start, flip) else {
-            return false;
-        };
-        let mid = &bits[SYM_PAYLOAD * 2..(SYM_PAYLOAD + SYM_SYNC) * 2];
-        let mut emb_bits = mid[..8].to_vec();
-        emb_bits.extend_from_slice(&mid[40..48]);
-        dmr::emb(&emb_bits).is_some_and(|e| self.colour.is_none_or(|c| c == e.colour))
-    }
-
-    /// Dibit -> level index, the inverse of [`Framer::dibit`].
-    fn level(d: &[u8]) -> u8 {
-        match (d[0] & 1, d[1] & 1) {
-            (0, 1) => 3,
-            (0, 0) => 2,
-            (1, 0) => 1,
-            _ => 0,
-        }
-    }
-
-    /// Read the burst starting at absolute index `start` and say what it is.
-    ///
-    /// `hunting` is the stricter test used with no clock: a sync word has to
-    /// match closely and an EMB is not enough, because seven information bits
-    /// will match noise often enough to lock onto nothing.
-    fn classify(&self, start: usize, flip: bool, hunting: bool) -> Option<Burst> {
-        let bits = self.burst_bits(start, flip)?;
-        let mid = &bits[SYM_PAYLOAD * 2..(SYM_PAYLOAD + SYM_SYNC) * 2];
-        let lv: Vec<u8> = mid.chunks(2).map(Self::level).collect();
-        let tol = if hunting { 2 } else { 4 };
-        for (_name, pat, voice) in &self.patterns {
-            let err = lv.iter().zip(pat).filter(|(a, b)| a != b).count();
-            if err > tol {
-                continue;
-            }
-            if *voice {
-                return Some(Burst::Voice {
-                    frames: Self::voice_frames(&bits),
-                    start: true,
-                    lcss: 0,
-                    embedded: Vec::new(),
-                    bits,
-                });
-            }
-            let mut slot = bits[98..108].to_vec();
-            slot.extend_from_slice(&bits[156..166]);
-            // A data sync with no readable slot type is a sync word matched
-            // in noise: the Golay(20,8) over it is the second opinion.
-            let (cc, dt) = dmr::slot_type(&slot)?;
-            if self.colour.is_some_and(|c| c != cc) {
-                return None;
-            }
-            let lc = match dt {
-                dmr::DT_VOICE_LC_HEADER | dmr::DT_TERMINATOR_LC => {
-                    let mut info = bits[0..98].to_vec();
-                    info.extend_from_slice(&bits[166..264]);
-                    dmr::full_lc(&info)
-                }
-                _ => None,
-            };
-            return Some(Burst::Data { colour: Some(cc), data_type: Some(dt), lc, bits });
-        }
-        if hunting {
-            return None;
-        }
-        // No sync, so this should be burst B to F of a superframe: the middle
-        // field is EMB, embedded signalling, EMB. Which fragment it carries
-        // is decided by the position in the superframe, since the burst clock
-        // is a stronger statement than seven information bits are.
-        let mut emb_bits = mid[..8].to_vec();
-        emb_bits.extend_from_slice(&mid[40..48]);
-        let e = dmr::emb(&emb_bits);
-        let pos = self.since_sync.saturating_add(1);
-        if let Some(e) = e {
-            if self.colour.is_some_and(|c| c != e.colour) {
-                return None;
-            }
-        } else if pos >= SUPERFRAME_BURSTS {
-            // Out of the superframe the sync anchored, with nothing in the
-            // burst itself saying it is voice: this is noise or another
-            // system, not the transmission being followed.
-            return None;
-        }
-        // Burst B carries the first LC fragment, C and D continuations, E
-        // the last; F carries none. `since_sync` still counts the burst
-        // before this one, so B is one past a zero.
-        let lcss = match pos {
-            1 => 1,
-            2 | 3 => 3,
-            4 => 2,
-            _ => 0,
-        };
-        Some(Burst::Voice {
-            frames: Self::voice_frames(&bits),
-            start: false,
-            lcss,
-            embedded: mid[8..40].to_vec(),
-            bits,
-        })
-    }
-
-    /// Append recovered symbols and pull out the bursts they complete.
-    fn push(&mut self, syms: &[f32], out: &mut Vec<DmrEvent>) {
-        self.marks.extend_from_slice(syms);
-        loop {
-            let last = self.base + self.marks.len();
-            match self.next {
-                Some(next) => {
-                    if next + SYM_BURST + REANCHOR > last || next < self.base + REANCHOR {
-                        break;
-                    }
-                    let flip = self.polarity.unwrap_or(false);
-                    // Nearest first: a burst is far more likely on time than
-                    // a symbol out, and taking the first match at the wrong
-                    // offset would drag the clock off.
-                    let mut hit = None;
-                    for off in [0isize, -1, 1, -2, 2] {
-                        if off.unsigned_abs() > REANCHOR {
-                            continue;
-                        }
-                        let at = next.wrapping_add_signed(off);
-                        if let Some(b) = self.classify(at, flip, false) {
-                            hit = Some((at, b));
-                            break;
-                        }
-                    }
-                    match hit {
-                        Some((at, burst)) => {
-                            self.misses = 0;
-                            self.next = Some(at + SLOT_STRIDE);
-                            self.emit(at, burst, out);
-                        }
-                        None => {
-                            self.misses += 1;
-                            self.since_sync = self.since_sync.saturating_add(1);
-                            if self.misses > MAX_MISSES {
-                                self.next = None;
-                                self.colour = None;
-                                self.embedded.reset();
-                                self.scan = self.scan.max(next);
-                            } else {
-                                self.next = Some(next + SLOT_STRIDE);
-                            }
-                        }
-                    }
-                }
-                None => {
-                    self.scan = self.scan.max(self.base);
-                    let mut locked = false;
-                    // Confirming a voice lock reads the following burst, so
-                    // hunting needs that much buffered before it commits.
-                    let mut waiting = false;
-                    while self.scan + SYM_BURST <= last {
-                        let polarities: [bool; 2] = match self.polarity {
-                            Some(p) => [p, p],
-                            None => [false, true],
-                        };
-                        let mut found = None;
-                        for flip in polarities {
-                            let Some(b) = self.classify(self.scan, flip, true) else {
-                                continue;
-                            };
-                            if matches!(b, Burst::Voice { start: true, .. }) {
-                                if self.scan + SLOT_STRIDE + SYM_BURST > last {
-                                    waiting = true;
-                                    break;
-                                }
-                                if !self.confirm_voice(self.scan + SLOT_STRIDE, flip) {
-                                    continue;
-                                }
-                            }
-                            found = Some((flip, b));
-                            break;
-                        }
-                        if waiting {
-                            break;
-                        }
-                        if let Some((flip, burst)) = found {
-                            self.polarity = Some(flip);
-                            self.misses = 0;
-                            self.next = Some(self.scan + SLOT_STRIDE);
-                            self.emit(self.scan, burst, out);
-                            locked = true;
-                            break;
-                        }
-                        self.scan += 1;
-                    }
-                    if !locked || waiting {
-                        break;
-                    }
-                }
-            }
-        }
-        // Drain marks behind whatever is still to be read.
-        let keep = self
-            .next
-            .map_or(self.scan, |n| n.saturating_sub(REANCHOR))
-            .min(self.scan.max(self.base));
-        if keep > self.base {
-            let drop = (keep - self.base).min(self.marks.len());
-            self.marks.drain(..drop);
-            self.base += drop;
-        }
-    }
-
-    /// Turn a read burst into the events the node acts on, gathering the
-    /// embedded link control as the fragments arrive.
-    fn emit(&mut self, at: usize, burst: Burst, out: &mut Vec<DmrEvent>) {
-        match burst {
-            Burst::Voice { frames, start, lcss, embedded, bits } => {
-                if start {
-                    self.since_sync = 0;
-                    self.embedded.reset();
-                } else {
-                    self.since_sync = self.since_sync.saturating_add(1);
-                    if let Some(lc) = self.embedded.push(lcss, &embedded) {
-                        out.push(DmrEvent::Lc(lc));
-                    }
-                }
-                let pos = self.since_sync.min(5) as u8;
-                out.push(DmrEvent::Voice { at, bits, frames, pos });
-            }
-            Burst::Data { colour, data_type, lc, bits } => {
-                self.since_sync = usize::MAX;
-                if let Some(cc) = colour {
-                    self.colour = Some(cc);
-                }
-                if let Some(lc) = lc {
-                    out.push(DmrEvent::Lc(lc));
-                }
-                out.push(DmrEvent::Data { at, bits, data_type });
-            }
-        }
-    }
-}
-
-/// What one burst turned out to be, before the framer folds it into events.
-enum Burst {
-    Voice { frames: [[u8; 9]; 3], start: bool, lcss: u8, embedded: Vec<u8>, bits: Vec<u8> },
-    Data { colour: Option<u8>, data_type: Option<u8>, lc: Option<LinkControl>, bits: Vec<u8> },
-}
 
 pub struct DmrNode {
     channel_hz: f64,
@@ -797,7 +128,7 @@ pub struct DmrNode {
     fm: FmDemod,
     rrc: FirDecimReal,
     sync: SymbolClock,
-    framer: Framer,
+    framer: dmr::Framer,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
@@ -845,7 +176,7 @@ impl DmrNode {
             fm: FmDemod::new(AUDIO_HZ, DEVIATION_HZ),
             rrc: FirDecimReal::new(rrc_taps(AUDIO_HZ / BAUD, RRC_ALPHA, 8), 1),
             sync: SymbolClock::new(AUDIO_HZ, BAUD),
-            framer: Framer::new(),
+            framer: dmr::Framer::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
@@ -908,7 +239,7 @@ impl DmrNode {
             .unwrap_or(0);
         self.accepted += 1;
         let sps = self.audio_rate / BAUD;
-        let bytes = encode_burst(pos, self.framer.colour, self.lc.as_ref(), bits);
+        let bytes = dmr::encode_burst(pos, self.framer.colour, self.lc.as_ref(), bits);
         let (start, len) = ((at as f64 * sps) as u64, (SYM_BURST as f64 * sps) as usize);
         let snr_db = self.meter.snr_db_at(start, len);
         let frame = self.meter.frame_measured(bytes, start, len, snr_db);
@@ -918,201 +249,37 @@ impl DmrNode {
     }
 }
 
-pub struct Dmr;
-
 impl Protocol for Dmr {
     fn id(&self) -> &'static str {
-        "dmr"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "dmr"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Amateur, Usage::Utility, Usage::Ism])
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// Like M17 it runs wherever it is put, so it is recognised by its own
     /// tagged body rather than by band.
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        dmr_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use common::Hz;
-    use pipeline::node::NodeCtx;
-    use pipeline::port::StreamSpec;
-
-    fn spec(rate: f64, center: f64) -> PortSpec {
-        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
-    }
-
-    #[test]
-    fn negotiates_a_channel_inside_the_span() {
-        let mut n = DmrNode::default();
-        assert!(n.negotiate(&[spec(2_048_000.0, DEFAULT_HZ)]).is_ok());
-        assert!(n.negotiate(&[spec(2_048_000.0, 460_000_000.0)]).is_err());
-    }
-
-    #[test]
-    fn labels_only_its_own_bursts() {
-        let bits = vec![0u8; SYM_BURST * 2];
-        let body = encode_burst(2, Some(1), None, &bits);
-        let d = dmr_decoded(&body, common::Hz(433_450_000)).expect("a DMR row");
-        assert_eq!(d.protocol, "DMR-Voice");
-        // One burst is 60 ms of the channel, and the over is still running.
-        assert!(d.detail.as_deref().unwrap_or_default().contains("seconds=0.06"), "{:?}", d.detail);
-        assert!(d.detail.as_deref().unwrap_or_default().contains("burst=C"), "{:?}", d.detail);
-        assert!(d.fields.iter().any(|(k, v)| k == "live" && *v == common::Value::Bool(true)));
-        // Without a link control there is nobody to put in the call list.
-        assert!(!d.fields.iter().any(|(k, _)| k == "to"));
-        // The bits come back out as they went in.
-        assert_eq!(unpack_bits(&body[13..]), bits);
-
-        // With one, the row names the talkgroup and the radio, and says it
-        // is voice, which is what the call table needs to keep it.
-        let lc = LinkControl { flco: dmr::FLCO_GROUP, fid: 0, options: 0, dst: 91, src: 2_345_678 };
-        let d = dmr_decoded(&encode_burst(0, None, Some(&lc), &bits), common::Hz(433_450_000))
-            .expect("a row");
-        let get = |k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
-        };
-        assert_eq!(get("to"), "91");
-        assert_eq!(get("from"), "2345678");
-        assert_eq!(get("voice"), "true");
-        assert_eq!(get("call_type"), "group");
-        // The same said in types, which is what the call list reads: 60 ms
-        // of speech in the one vocoder DMR has, in the clear, still running.
-        let air = d.airtime.as_ref().expect("a link control with no airtime");
-        assert!(air.voice && air.live);
-        assert_eq!(air.seconds, 0.06);
-        assert_eq!(air.codec, Some(CODEC));
-        assert_eq!(air.secrecy, common::Secrecy::Clear);
-        // Not anyone else's frame.
-        assert!(dmr_decoded(b"random", common::Hz(0)).is_none());
-        assert!(dmr_decoded(b"DB", common::Hz(0)).is_none());
-    }
-
-    /// Run a capture through the node's own path and report what came out:
-    /// speech samples, packet rows and the link control on each.
-    fn replay(path: &str, rate: f64, center: f64, hz: f64) -> (usize, Vec<common::Packet>) {
-        let raw = std::fs::read(path).unwrap();
-        let iq: Vec<common::C32> = raw
-            .chunks_exact(2)
-            .map(|c| common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
-            .collect();
-        let mut node = DmrNode::new(hz);
-        node.negotiate(&[spec(rate, center)]).unwrap();
-        let ins = [spec(rate, center)];
-        let tags = Vec::new();
-        let (mut live, mut packets) = (0usize, Vec::new());
-        for chunk in iq.chunks(65_536) {
-            let input = Payload::Iq(chunk.to_vec());
-            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
-            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&[&input], &mut out, &mut ctx).unwrap();
-            if let [Payload::Packets(ps), Payload::Voice(vs)] = &out {
-                live += vs.iter().map(|v| v.pcm.len()).sum::<usize>();
-                packets.extend(ps.iter().cloned());
-            }
-        }
-        (live, packets)
-    }
-
-    /// The corpus capture against what the transmission says about itself:
-    /// one over, talkgroup 9, radio 1234567, three and a half seconds of it.
-    /// `testdata/fixtures.toml` says what the capture is evidence of and how
-    /// those values were established. Skips cleanly without the file.
-    #[test]
-    fn reads_one_over_and_its_link_control_off_air() {
-        const NAME: &str = "dmr_tg9_433.45M_2048k.cu8";
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dmr_tg9_433.45M_2048k.cu8");
-        if !std::path::Path::new(path).exists() {
-            eprintln!("skipping: {NAME} absent, run testdata/fetch.sh");
-            return;
-        }
-        let (live, packets) = replay(path, 2_048_000.0, 433_450_000.0, 433_900_000.0);
-        // One packet per burst off the air: the headers, the voice, the
-        // terminator, each carrying the link control in force. The over is
-        // the run of them, added up downstream.
-        let rows: Vec<Decoded> = packets
-            .iter()
-            .filter_map(|p| match &p.body {
-                common::PacketBody::Frame(f) => dmr_decoded(&f.bytes, common::Hz(p.center_hz())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rows.len(), packets.len(), "every packet labels as DMR");
-        let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
-        };
-        let voice: Vec<&Decoded> = rows.iter().filter(|d| d.protocol == "DMR-Voice").collect();
-        let seconds: f64 =
-            voice.iter().map(|d| get(d, "seconds").parse::<f64>().unwrap_or(0.0)).sum();
-        assert!(
-            seconds > 3.0,
-            "the over ran {seconds:.2} s of voice bursts, expected the whole 3.6"
-        );
-        // Every voice burst after the header names the call, so the call list
-        // has it from the first burst and not from the terminator.
-        let named =
-            voice.iter().filter(|d| get(d, "to") == "9" && get(d, "from") == "1234567").count();
-        assert!(
-            named * 10 > voice.len() * 9,
-            "{named} of {} voice bursts carried the link control",
-            voice.len()
-        );
-        assert!(voice.iter().all(|d| get(d, "live") == "true"));
-        assert!(rows.iter().any(|d| d.protocol == "DMR-Header"), "no header row");
-        assert!(rows.iter().any(|d| d.protocol == "DMR-Terminator"), "no terminator row");
-        // Each burst carries what it was heard at, the samples it was read
-        // from, and bits that read back as AMBE frames.
-        assert!(
-            packets.iter().all(|p| p.samples().is_some_and(|q| !q.samples.is_empty())),
-            "a burst without its samples"
-        );
-        assert!(
-            packets.iter().all(|p| p.rssi_dbfs().is_finite() && p.snr_db().is_finite()),
-            "a burst without its level"
-        );
-        let frames = packets
-            .iter()
-            .filter_map(|p| match &p.body {
-                common::PacketBody::Frame(f) => burst_voice_frames(&f.bytes),
-                _ => None,
-            })
-            .count();
-        assert_eq!(frames, voice.len());
-
-        // The vocoder is what turns the AMBE frames into samples, so speech
-        // is only asserted where it is built in. Ten superframes of it.
-        if cfg!(feature = "ambe") {
-            let secs = live as f64 / VOICE_HZ;
-            assert!(secs > 3.0, "decoded {secs:.2} s of speech, expected the whole over");
-        }
     }
 }
 
@@ -1145,7 +312,7 @@ impl Node for DmrNode {
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.rrc = FirDecimReal::new(rrc_taps(audio_rate / BAUD, RRC_ALPHA, 8), 1);
         self.sync = SymbolClock::new(audio_rate, BAUD);
-        self.framer = Framer::new();
+        self.framer = dmr::Framer::new();
         self.in_rate = rate;
         self.audio_rate = audio_rate;
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S);
@@ -1304,4 +471,162 @@ pub const DESC: StageDesc = StageDesc {
 
 pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
     Ok(Box::new(DmrNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::Hz;
+    use pipeline::node::NodeCtx;
+    use pipeline::port::StreamSpec;
+
+    fn spec(rate: f64, center: f64) -> PortSpec {
+        PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }
+    }
+
+    #[test]
+    fn negotiates_a_channel_inside_the_span() {
+        let mut n = DmrNode::default();
+        assert!(n.negotiate(&[spec(2_048_000.0, DEFAULT_HZ)]).is_ok());
+        assert!(n.negotiate(&[spec(2_048_000.0, 460_000_000.0)]).is_err());
+    }
+
+    #[test]
+    fn labels_only_its_own_bursts() {
+        let bits = vec![0u8; SYM_BURST * 2];
+        let body = dmr::encode_burst(2, Some(1), None, &bits);
+        let d = decoded(&body, common::Hz(433_450_000)).expect("a DMR row");
+        assert_eq!(d.protocol, "DMR-Voice");
+        // One burst is 60 ms of the channel, and the over is still running.
+        assert!(d.detail.as_deref().unwrap_or_default().contains("seconds=0.06"), "{:?}", d.detail);
+        assert!(d.detail.as_deref().unwrap_or_default().contains("burst=C"), "{:?}", d.detail);
+        assert!(d.fields.iter().any(|(k, v)| k == "live" && *v == common::Value::Bool(true)));
+        // Without a link control there is nobody to put in the call list.
+        assert!(!d.fields.iter().any(|(k, _)| k == "to"));
+        // The bits come back out as they went in.
+        assert_eq!(unpack_bits(&body[13..]), bits);
+
+        // With one, the row names the talkgroup and the radio, and says it
+        // is voice, which is what the call table needs to keep it.
+        let lc = LinkControl { flco: dmr::FLCO_GROUP, fid: 0, options: 0, dst: 91, src: 2_345_678 };
+        let d = decoded(&dmr::encode_burst(0, None, Some(&lc), &bits), common::Hz(433_450_000))
+            .expect("a row");
+        let get = |k: &str| {
+            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
+        };
+        assert_eq!(get("to"), "91");
+        assert_eq!(get("from"), "2345678");
+        assert_eq!(get("voice"), "true");
+        assert_eq!(get("call_type"), "group");
+        // The same said in types, which is what the call list reads: 60 ms
+        // of speech in the one vocoder DMR has, in the clear, still running.
+        let air = d.airtime.as_ref().expect("a link control with no airtime");
+        assert!(air.voice && air.live);
+        assert_eq!(air.seconds, 0.06);
+        assert_eq!(air.codec, Some(CODEC));
+        assert_eq!(air.secrecy, common::Secrecy::Clear);
+        // Not anyone else's frame.
+        assert!(decoded(b"random", common::Hz(0)).is_none());
+        assert!(decoded(b"DB", common::Hz(0)).is_none());
+    }
+
+    /// Run a capture through the node's own path and report what came out:
+    /// speech samples, packet rows and the link control on each.
+    fn replay(path: &str, rate: f64, center: f64, hz: f64) -> (usize, Vec<common::Packet>) {
+        let raw = std::fs::read(path).unwrap();
+        let iq: Vec<common::C32> = raw
+            .chunks_exact(2)
+            .map(|c| common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5))
+            .collect();
+        let mut node = DmrNode::new(hz);
+        node.negotiate(&[spec(rate, center)]).unwrap();
+        let ins = [spec(rate, center)];
+        let tags = Vec::new();
+        let (mut live, mut packets) = (0usize, Vec::new());
+        for chunk in iq.chunks(65_536) {
+            let input = Payload::Iq(chunk.to_vec());
+            let mut out = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            node.process(&[&input], &mut out, &mut ctx).unwrap();
+            if let [Payload::Packets(ps), Payload::Voice(vs)] = &out {
+                live += vs.iter().map(|v| v.pcm.len()).sum::<usize>();
+                packets.extend(ps.iter().cloned());
+            }
+        }
+        (live, packets)
+    }
+
+    /// The corpus capture against what the transmission says about itself:
+    /// one over, talkgroup 9, radio 1234567, three and a half seconds of it.
+    /// `testdata/fixtures.toml` says what the capture is evidence of and how
+    /// those values were established. Skips cleanly without the file.
+    #[test]
+    fn reads_one_over_and_its_link_control_off_air() {
+        const NAME: &str = "dmr_tg9_433.45M_2048k.cu8";
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/dmr_tg9_433.45M_2048k.cu8");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: {NAME} absent, run testdata/fetch.sh");
+            return;
+        }
+        let (live, packets) = replay(path, 2_048_000.0, 433_450_000.0, 433_900_000.0);
+        // One packet per burst off the air: the headers, the voice, the
+        // terminator, each carrying the link control in force. The over is
+        // the run of them, added up downstream.
+        let rows: Vec<Decoded> = packets
+            .iter()
+            .filter_map(|p| match &p.body {
+                common::PacketBody::Frame(f) => decoded(&f.bytes, common::Hz(p.center_hz())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), packets.len(), "every packet labels as DMR");
+        let get = |d: &Decoded, k: &str| {
+            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
+        };
+        let voice: Vec<&Decoded> = rows.iter().filter(|d| d.protocol == "DMR-Voice").collect();
+        let seconds: f64 =
+            voice.iter().map(|d| get(d, "seconds").parse::<f64>().unwrap_or(0.0)).sum();
+        assert!(
+            seconds > 3.0,
+            "the over ran {seconds:.2} s of voice bursts, expected the whole 3.6"
+        );
+        // Every voice burst after the header names the call, so the call list
+        // has it from the first burst and not from the terminator.
+        let named =
+            voice.iter().filter(|d| get(d, "to") == "9" && get(d, "from") == "1234567").count();
+        assert!(
+            named * 10 > voice.len() * 9,
+            "{named} of {} voice bursts carried the link control",
+            voice.len()
+        );
+        assert!(voice.iter().all(|d| get(d, "live") == "true"));
+        assert!(rows.iter().any(|d| d.protocol == "DMR-Header"), "no header row");
+        assert!(rows.iter().any(|d| d.protocol == "DMR-Terminator"), "no terminator row");
+        // Each burst carries what it was heard at, the samples it was read
+        // from, and bits that read back as AMBE frames.
+        assert!(
+            packets.iter().all(|p| p.samples().is_some_and(|q| !q.samples.is_empty())),
+            "a burst without its samples"
+        );
+        assert!(
+            packets.iter().all(|p| p.rssi_dbfs().is_finite() && p.snr_db().is_finite()),
+            "a burst without its level"
+        );
+        let frames = packets
+            .iter()
+            .filter_map(|p| match &p.body {
+                common::PacketBody::Frame(f) => burst_voice_frames(&f.bytes),
+                _ => None,
+            })
+            .count();
+        assert_eq!(frames, voice.len());
+
+        // The vocoder is what turns the AMBE frames into samples, so speech
+        // is only asserted where it is built in. Ten superframes of it.
+        if cfg!(feature = "ambe") {
+            let secs = live as f64 / VOICE_HZ;
+            assert!(secs > 3.0, "decoded {secs:.2} s of speech, expected the whole over");
+        }
+    }
 }

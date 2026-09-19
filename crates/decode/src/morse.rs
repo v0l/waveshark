@@ -6,7 +6,9 @@
 //! a dash is three dots, elements inside a character are separated by one
 //! dot, characters by three, and words by seven.
 
+use common::Decoded;
 use common::{Package, Pulse};
+use dsp::cw::CwConfig;
 
 /// Dot length in microseconds at a given speed.
 pub fn dot_us(wpm: f32) -> u32 {
@@ -81,19 +83,19 @@ pub fn encode(text: &str, wpm: f32) -> Package {
     let mut words = 0usize;
 
     for word in text.split_whitespace() {
-        if words > 0 {
-            if let Some(p) = pulses.last_mut() {
-                p.gap = dot * 7;
-            }
+        if words > 0
+            && let Some(p) = pulses.last_mut()
+        {
+            p.gap = dot * 7;
         }
         words += 1;
         let mut chars = 0usize;
         for ch in word.chars() {
             let Some(pat) = pattern(ch) else { continue };
-            if chars > 0 {
-                if let Some(p) = pulses.last_mut() {
-                    p.gap = dot * 3;
-                }
+            if chars > 0
+                && let Some(p) = pulses.last_mut()
+            {
+                p.gap = dot * 3;
             }
             chars += 1;
             for el in pat.chars() {
@@ -182,6 +184,88 @@ pub fn decode(pkg: &Package) -> String {
     }
     out
 }
+
+/// One row: what was sent, and how fast.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    if bytes.len() <= ENVELOPE || bytes[..TAG.len()] != TAG {
+        return None;
+    }
+    let dot_us = u32::from_le_bytes(bytes[TAG.len()..ENVELOPE].try_into().ok()?);
+    let text = String::from_utf8_lossy(&bytes[ENVELOPE..]).to_string();
+    let wpm = wpm(dot_us);
+    let fields = vec![
+        ("speed".into(), common::Value::Float(wpm as f64)),
+        ("dot_ms".into(), common::Value::Float(dot_us as f64 / 1000.0)),
+        ("message".into(), common::Value::Text(text.clone())),
+    ];
+    Some(
+        Decoded::bytes("Morse", center, 0.0, bytes.to_vec())
+            .with_modulation(common::Modulation::Ook)
+            .with_detail(format!("{wpm:.0} wpm"))
+            .with_fields(fields)
+            // A person sent it to another person, so it belongs beside
+            // anything else somebody wrote rather than in the packet list.
+            .written()
+            .with_text(text),
+    )
+}
+
+pub const ENVELOPE: usize = TAG.len() + 4;
+
+/// Bytes before the text on the bus: the tag the front end writes and the
+/// dot length it measured, little endian.
+pub const TAG: [u8; 4] = *b"MORS";
+
+/// What a transmission puts on the bus: the tag, the dot length it was sent
+/// at, and the text. `None` where too little of it was Morse at all.
+///
+/// The check is the timing and the text, because Morse has no other: the
+/// elements either sit on the grid a hand produces or they do not, and a
+/// pattern of them either is a letter or is not.
+pub fn framed(pkg: &common::Package) -> Option<Vec<u8>> {
+    if fits(pkg) < MIN_FIT {
+        return None;
+    }
+    let text = decode(pkg);
+    let letters = text.chars().filter(|c| !c.is_whitespace()).count();
+    if letters < MIN_CHARS {
+        return None;
+    }
+    let known = text.chars().filter(|c| !c.is_whitespace() && *c != '?').count();
+    if (known as f32) / (letters as f32) < MIN_KNOWN {
+        return None;
+    }
+    let mut out = Vec::with_capacity(ENVELOPE + text.len());
+    out.extend_from_slice(&TAG);
+    out.extend_from_slice(&dot_of(pkg).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+    Some(out)
+}
+
+/// The pitch range the dial's reach becomes.
+pub fn config(pitch_hz: f64, reach_hz: f64) -> CwConfig {
+    CwConfig { pitch_hz: (pitch_hz - reach_hz, pitch_hz + reach_hz), ..CwConfig::default() }
+}
+
+/// How much of a transmission's timing has to sit on the 1:3:7 grid a hand
+/// on a key produces. See [`fits`].
+///
+/// Measured on a synthetic 18 wpm over at 48 kS/s: a station in the channel
+/// scores 1.0 at any speed and with a 15% fist, and a strong station a
+/// kilohertz outside the channel, whose keying reaches the envelope through
+/// the filter skirt as a string of blips, scores 0.52 at 900 Hz out and 0.72
+/// at 1000. Nothing measured sits between 0.72 and 1.0.
+pub const MIN_FIT: f32 = 0.8;
+
+/// Characters a transmission must hold before it is published. Two letters
+/// is the shortest thing worth showing somebody, and a pair of noise pulses
+/// that got past the level test makes one.
+pub const MIN_CHARS: usize = 3;
+
+/// How much of a transmission has to be a pattern the table has. A burst
+/// read at the wrong pitch or through a fade produces element counts no
+/// letter uses, and those come back as `?`.
+pub const MIN_KNOWN: f32 = 0.75;
 
 #[cfg(test)]
 mod tests {

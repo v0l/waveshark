@@ -22,39 +22,41 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use decode::nxdn::{self, Cipher, MessageType, Superframe};
+pub use decode::nxdn::CODEC;
+pub use decode::nxdn::FLAG_EMERGENCY;
+pub use decode::nxdn::FLAG_ENCRYPTED;
+pub use decode::nxdn::FLAG_GROUP;
+pub use decode::nxdn::FLAG_HAVE_CALL;
+pub use decode::nxdn::FLAG_HAVE_MSG;
+pub use decode::nxdn::FLAG_HAVE_RAN;
+pub use decode::nxdn::FLAG_NARROW;
+pub use decode::nxdn::FLAG_OUTBOUND;
+pub use decode::nxdn::HEAD_LEN;
+pub use decode::nxdn::NARROW_BAUD;
+pub use decode::nxdn::NXDN_TAG;
+pub use decode::nxdn::WIDE_BAUD;
+pub use decode::nxdn::decoded;
+pub use decode::nxdn::encode_frame;
+pub use decode::nxdn::frame_seconds;
+pub use decode::nxdn::row_label;
+use decode::nxdn::{self, NxdnFrame};
+use decode::nxdn::{Cipher, MessageType};
+pub use decode::nxdn::{WINDOW, cipher_code};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
 use dsp::m17::rrc_taps;
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::nxdn::DEFAULT_HZ;
+pub use identify::nxdn::NARROW_HZ;
+pub use identify::nxdn::Nxdn;
+pub use identify::nxdn::WIDE_HZ;
+pub use identify::nxdn::width_for;
+pub use identify::nxdn::{AUDIO_HZ, RRC_ALPHA, deviation_hz};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// A UK business radio channel in the 12.5 kHz part of the band, and only the
-/// default before the scanner table says where to listen.
-pub const DEFAULT_HZ: f64 = 453_050_000.0;
-
-/// The wide channel and its symbol rate, and the narrow one and its: 9600 and
-/// 4800 bit/s over two bits a symbol (NXDN TS 1-A Table 2.3-1).
-pub const WIDE_HZ: f64 = 12_500.0;
-pub const NARROW_HZ: f64 = 6_250.0;
-pub const WIDE_BAUD: f64 = 4_800.0;
-pub const NARROW_BAUD: f64 = 2_400.0;
-
-/// Discriminator output rate: ten samples a symbol at 4800 baud.
-const AUDIO_HZ: f64 = 48_000.0;
-
-/// Roll-off of the root raised cosine NXDN shapes its symbols with, and so of
-/// the matched filter here (TS 1-A clause 3.4).
-const RRC_ALPHA: f64 = 0.2;
-
-/// Symbols held before the framer will slice: two frames, because the four
-/// levels are fitted over the window and a sync word carries only three of
-/// them.
-const WINDOW: usize = 2 * nxdn::FRAME_DIBITS;
 
 /// Channel samples kept behind the symbol clock, in seconds, so a frame's own
 /// samples are still there when its packet is built.
@@ -65,358 +67,10 @@ const WINDOW: usize = 2 * nxdn::FRAME_DIBITS;
 /// frames of history is then gone before anything in it is asked for.
 const KEEP_S: f64 = 1.0;
 
-/// Tag identifying a packet body this node wrote. "NX".
-const NXDN_TAG: [u8; 2] = *b"NX";
-
-/// Tag, LICH, flags, RAN, message type, call type, source, destination,
-/// cipher, key, voice channels.
-const HEAD_LEN: usize = 2 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 1 + 1 + 1;
-
-const FLAG_OUTBOUND: u8 = 0x01;
-const FLAG_HAVE_RAN: u8 = 0x02;
-const FLAG_HAVE_MSG: u8 = 0x04;
-const FLAG_HAVE_CALL: u8 = 0x08;
-const FLAG_GROUP: u8 = 0x10;
-const FLAG_EMERGENCY: u8 = 0x20;
-const FLAG_ENCRYPTED: u8 = 0x40;
-const FLAG_NARROW: u8 = 0x80;
-
-/// Speech is AMBE+2 at 3600 bit/s, which is what both channel widths carry.
-const CODEC: &str = "AMBE+2 3600";
-
-/// Nominal outer-symbol deviation for a width: +-2400 Hz at 12.5 kHz and
-/// +-1050 at 6.25 (TS 1-A Table 3.3-1). Nothing downstream depends on the
-/// exact value, since the slicer fits its own levels.
-fn deviation_hz(baud: f64) -> f64 {
-    if baud >= WIDE_BAUD { 2_400.0 } else { 1_050.0 }
-}
-
 /// One-sided filter cutoff, wide enough for the outer symbols and the
 /// transmitter's drift.
 fn cutoff_hz(baud: f64) -> f64 {
     if baud >= WIDE_BAUD { 7_000.0 } else { 3_500.0 }
-}
-
-pub fn width_for(baud: f64) -> f64 {
-    if baud >= WIDE_BAUD { WIDE_HZ } else { NARROW_HZ }
-}
-
-/// What one frame turned out to be, and where the speech in it puts the call.
-pub struct NxdnFrame {
-    /// Absolute symbol index the sync word began at.
-    pub at: usize,
-    pub frame: nxdn::Frame,
-    /// The message, off this frame's stolen half or off the superframe the
-    /// slow channel just completed.
-    pub message: Option<nxdn::Message>,
-}
-
-fn encode_frame(f: &NxdnFrame, narrow: bool) -> Vec<u8> {
-    let mut v = NXDN_TAG.to_vec();
-    v.push(f.frame.lich.raw);
-    let mut flags = 0u8;
-    if f.frame.lich.outbound {
-        flags |= FLAG_OUTBOUND;
-    }
-    if narrow {
-        flags |= FLAG_NARROW;
-    }
-    let ran = f.frame.ran().inspect(|_| flags |= FLAG_HAVE_RAN).unwrap_or(0);
-    let call = f.message.as_ref().and_then(|m| m.call);
-    if let Some(c) = &call {
-        flags |= FLAG_HAVE_CALL;
-        if c.call_type.group() {
-            flags |= FLAG_GROUP;
-        }
-        if c.emergency {
-            flags |= FLAG_EMERGENCY;
-        }
-        if c.cipher != Cipher::Clear {
-            flags |= FLAG_ENCRYPTED;
-        }
-    }
-    if f.message.is_some() {
-        flags |= FLAG_HAVE_MSG;
-    }
-    v.push(flags);
-    v.push(ran);
-    v.push(match f.message.as_ref().map(|m| m.kind) {
-        Some(MessageType::Other(t)) => t,
-        Some(k) => message_code(k),
-        None => 0xff,
-    });
-    v.push(call.map(|c| call_code(c.call_type)).unwrap_or(0xff));
-    v.extend_from_slice(&call.map(|c| c.source).unwrap_or(0).to_be_bytes());
-    v.extend_from_slice(&call.map(|c| c.dest).unwrap_or(0).to_be_bytes());
-    v.push(call.map(|c| cipher_code(c.cipher)).unwrap_or(0));
-    v.push(call.map(|c| c.key_id).unwrap_or(0));
-    v.push(f.frame.voice_slots as u8);
-    if let Some(m) = &f.message {
-        v.extend_from_slice(&m.bytes);
-    }
-    v
-}
-
-fn message_code(k: MessageType) -> u8 {
-    match k {
-        MessageType::VCall => 0x01,
-        MessageType::VCallIv => 0x03,
-        MessageType::VCallAssign => 0x04,
-        MessageType::VCallAssignDup => 0x05,
-        MessageType::TxReleaseExt => 0x07,
-        MessageType::TxRelease => 0x08,
-        MessageType::DCallHeader => 0x09,
-        MessageType::DCallData => 0x0b,
-        MessageType::DCallAck => 0x0c,
-        MessageType::HeadDelay => 0x0f,
-        MessageType::Idle => 0x10,
-        MessageType::Disconnect => 0x11,
-        MessageType::Other(v) => v,
-    }
-}
-
-fn call_code(c: decode::nxdn::CallType) -> u8 {
-    use decode::nxdn::CallType;
-    match c {
-        CallType::Broadcast => 0,
-        CallType::Group => 1,
-        CallType::Idle => 2,
-        CallType::Session => 3,
-        CallType::Individual => 4,
-        CallType::Interconnect => 6,
-        CallType::SpeedDial => 7,
-        CallType::Other(v) => v,
-    }
-}
-
-fn cipher_code(c: Cipher) -> u8 {
-    match c {
-        Cipher::Clear => 0,
-        Cipher::Scrambler => 1,
-        Cipher::Des => 2,
-        Cipher::Aes => 3,
-    }
-}
-
-/// How long one frame holds the channel, at a width: 384 bits at 9600 or
-/// 4800 bit/s.
-fn frame_seconds(narrow: bool) -> f64 {
-    nxdn::FRAME_DIBITS as f64 / if narrow { NARROW_BAUD } else { WIDE_BAUD }
-}
-
-/// What the packet log calls the row: the message where the frame carried
-/// one, speech where it carried that, and NXDN alone where all that read was
-/// the slow channel.
-fn row_label(have_message: bool, kind: MessageType, voice: bool) -> &'static str {
-    if !have_message {
-        return if voice { "NXDN-Voice" } else { "NXDN" };
-    }
-    match kind {
-        MessageType::VCall => "NXDN-VCALL",
-        MessageType::VCallIv => "NXDN-VCALL_IV",
-        MessageType::VCallAssign => "NXDN-VCALL_ASSGN",
-        MessageType::VCallAssignDup => "NXDN-VCALL_ASSGN_DUP",
-        MessageType::TxRelease => "NXDN-TX_REL",
-        MessageType::TxReleaseExt => "NXDN-TX_REL_EXT",
-        MessageType::Disconnect => "NXDN-DISC",
-        MessageType::DCallHeader => "NXDN-DCALL_HDR",
-        MessageType::DCallData => "NXDN-DCALL_DATA",
-        MessageType::DCallAck => "NXDN-DCALL_ACK",
-        MessageType::HeadDelay => "NXDN-HEAD_DLY",
-        MessageType::Idle => "NXDN-IDLE",
-        MessageType::Other(_) => "NXDN-Message",
-    }
-}
-
-/// Recognise and describe an NXDN row for the packet log. `None` for anything
-/// this node did not write, so it is safe to try on every frame.
-///
-/// A frame carrying speech is that much of the channel and says so; where it
-/// named the call it names the talkgroup and the radio, which is what puts it
-/// in the call list rather than only in the log. Nothing here is written by a
-/// person, so nothing is marked as written.
-pub fn nxdn_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if bytes.len() < HEAD_LEN || bytes[..2] != NXDN_TAG {
-        return None;
-    }
-    let lich = nxdn::Lich::from_dibits(&nxdn::Lich::dibits(bytes[2] >> 1))?;
-    let flags = bytes[3];
-    let ran = bytes[4];
-    let kind = MessageType::from_bits(bytes[5]);
-    let call_type = decode::nxdn::CallType::from_bits(bytes[6]);
-    let source = u16::from_be_bytes([bytes[7], bytes[8]]);
-    let dest = u16::from_be_bytes([bytes[9], bytes[10]]);
-    let cipher = Cipher::from_bits(bytes[11]);
-    let key_id = bytes[12];
-    let voice_slots = bytes[13];
-    let narrow = flags & FLAG_NARROW != 0;
-
-    let mut fields: Vec<(String, Value)> = vec![
-        ("channel".to_string(), Value::Text(lich.rf.label().to_string())),
-        (
-            "direction".to_string(),
-            Value::Text(if flags & FLAG_OUTBOUND != 0 { "out" } else { "in" }.to_string()),
-        ),
-        ("width".to_string(), Value::Text(if narrow { "6.25k" } else { "12.5k" }.to_string())),
-    ];
-    if flags & FLAG_HAVE_RAN != 0 {
-        fields.push(("ran".to_string(), Value::Int(i64::from(ran))));
-    }
-    if flags & FLAG_HAVE_MSG != 0 {
-        fields.push(("message".to_string(), Value::Text(kind.label())));
-    }
-    if flags & FLAG_HAVE_CALL != 0 {
-        fields.push(("from".to_string(), Value::Int(i64::from(source))));
-        fields.push(("to".to_string(), Value::Int(i64::from(dest))));
-        fields.push(("call_type".to_string(), Value::Text(call_type.label())));
-        if flags & FLAG_EMERGENCY != 0 {
-            fields.push(("emergency".to_string(), Value::Bool(true)));
-        }
-        if flags & FLAG_ENCRYPTED != 0 {
-            fields.push(("encrypted".to_string(), Value::Bool(true)));
-            fields.push(("algorithm".to_string(), Value::Text(cipher.label().to_string())));
-            fields.push(("key_id".to_string(), Value::Int(i64::from(key_id))));
-        }
-    }
-    // What the frame carried of speech, not how long it held the channel: a
-    // frame with a half stolen for signalling is half a frame of talking.
-    let seconds = frame_seconds(narrow) * f64::from(voice_slots) / 4.0;
-    if voice_slots > 0 {
-        fields.push(("voice".to_string(), Value::Bool(true)));
-        fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
-        fields.push(("seconds".to_string(), Value::Float(seconds)));
-        fields.push(("live".to_string(), Value::Bool(true)));
-    }
-
-    let label = row_label(flags & FLAG_HAVE_MSG != 0, kind, voice_slots > 0);
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(label, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4)
-        // The LICH passed its parity and whatever else is here passed a CRC;
-        // nothing reaches this point that did not.
-        .with_crc(Some(true));
-    if flags & FLAG_HAVE_CALL != 0 {
-        use pipeline::event::Party;
-        let to = match flags & FLAG_GROUP != 0 {
-            true => Party::group(dest.to_string()),
-            false => Party::unit(dest.to_string()),
-        };
-        d.link = Some(pipeline::event::Link::between(Party::unit(source.to_string()), to));
-        d.identity = Some(common::Identity::new("nxdn", source.to_string()));
-    }
-    if voice_slots > 0 {
-        d.airtime = Some(common::Airtime {
-            seconds,
-            voice: true,
-            live: true,
-            secrecy: match flags & FLAG_ENCRYPTED != 0 {
-                true => common::Secrecy::Encrypted(None),
-                false => common::Secrecy::Clear,
-            },
-            codec: Some(CODEC),
-        });
-    }
-    Some(d)
-}
-
-/// Finds frames in the symbol stream and reads what they carry.
-///
-/// A rolling window of symbol values with an absolute index, so a frame whose
-/// sync arrived in one block is read when the rest of it arrives in the next.
-/// The slow channel's quarters are assembled here rather than in the decoder
-/// because only the framer sees consecutive frames.
-struct Framer {
-    marks: Vec<f32>,
-    base: usize,
-    scan: usize,
-    /// Which way up the discriminator is, once a frame has settled it.
-    polarity: Option<bool>,
-    superframe: Superframe,
-}
-
-impl Framer {
-    fn new() -> Self {
-        Self {
-            marks: Vec::new(),
-            base: 0,
-            scan: 0,
-            polarity: None,
-            superframe: Superframe::default(),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.marks.clear();
-        self.base = 0;
-        self.scan = 0;
-        self.polarity = None;
-        self.superframe.reset();
-    }
-
-    /// Level index to dibit: NXDN sends +3 as 01, +1 as 00, -1 as 10 and -3
-    /// as 11 (TS 1-A Table 3.3-1), and the slicer numbers levels up the band.
-    fn dibit(level: u8, flip: bool) -> u8 {
-        match if flip { 3 - level } else { level } {
-            3 => 1,
-            2 => 0,
-            1 => 2,
-            _ => 3,
-        }
-    }
-
-    /// Append recovered symbols and pull out the frames they complete.
-    fn push(&mut self, syms: &[f32], out: &mut Vec<NxdnFrame>) {
-        self.marks.extend_from_slice(syms);
-        if self.marks.len() < WINDOW {
-            return;
-        }
-        let Some(levels) = dsp::c4fm::slice(&self.marks) else {
-            return;
-        };
-        let polarities: [bool; 2] = match self.polarity {
-            Some(p) => [p, p],
-            None => [false, true],
-        };
-        let mut from = self.scan.saturating_sub(self.base);
-        for flip in polarities {
-            let dibits: Vec<u8> = levels.iter().map(|l| Self::dibit(*l, flip)).collect();
-            let mut at = from;
-            let mut found = false;
-            while let Some(f) = nxdn::find(&dibits, at) {
-                at = f.at + nxdn::FRAME_DIBITS;
-                found = true;
-                self.polarity = Some(flip);
-                // The quarter goes in whether or not this frame also stole a
-                // half for the same message: leaving it out on the frame
-                // that opens a call loses that whole superframe.
-                let whole =
-                    f.sacch.filter(|_| f.lich.superframe()).and_then(|s| self.superframe.push(&s));
-                let message = f
-                    .facch1
-                    .first()
-                    .cloned()
-                    .or_else(|| whole.as_deref().and_then(nxdn::message))
-                    .filter(|m| m.kind != MessageType::Idle);
-                out.push(NxdnFrame { at: self.base + f.at, frame: f, message });
-            }
-            from = at;
-            if found || self.polarity.is_some() {
-                break;
-            }
-        }
-        // Where the hunt reached, less a frame of history so a sync word
-        // straddling two blocks is still found.
-        self.scan = self.base + from;
-        let keep = self.scan.saturating_sub(nxdn::FRAME_DIBITS);
-        if keep > self.base {
-            let drop = (keep - self.base).min(self.marks.len());
-            self.marks.drain(..drop);
-            self.base += drop;
-        }
-    }
 }
 
 pub struct NxdnNode {
@@ -427,7 +81,7 @@ pub struct NxdnNode {
     fm: FmDemod,
     rrc: FirDecimReal,
     clock: SymbolClock,
-    framer: Framer,
+    framer: nxdn::Framer,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
@@ -455,7 +109,7 @@ impl NxdnNode {
             fm: FmDemod::new(AUDIO_HZ, deviation_hz(baud)),
             rrc: FirDecimReal::new(rrc_taps(AUDIO_HZ / baud, RRC_ALPHA, 8), 1),
             clock: SymbolClock::new(AUDIO_HZ, baud),
-            framer: Framer::new(),
+            framer: nxdn::Framer::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
@@ -518,7 +172,7 @@ impl Simple for NxdnNode {
         self.fm = FmDemod::new(audio_rate, deviation_hz(self.baud));
         self.rrc = FirDecimReal::new(rrc_taps(audio_rate / self.baud, RRC_ALPHA, 8), 1);
         self.clock = SymbolClock::new(audio_rate, self.baud);
-        self.framer = Framer::new();
+        self.framer = nxdn::Framer::new();
         self.audio_rate = audio_rate;
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S);
 
@@ -578,38 +232,36 @@ impl Simple for NxdnNode {
     }
 }
 
-pub struct Nxdn;
-
 impl Protocol for Nxdn {
     fn id(&self) -> &'static str {
-        "nxdn"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "NXDN"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["nexedge", "idas", "nxdn96", "nxdn48"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// A business radio channel on the land mobile allocations: NXDN is on
     /// VHF and UHF, and what makes one an NXDN channel is what is keyed on it.
-    fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility])
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        nxdn_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[WIDE_HZ, NARROW_HZ],
-            min_rate_hz: WIDE_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// Which of the two widths a source is, decided at the geometric mean of
     /// them: a 6.25 kHz channel measures wider than it is and a 12.5 kHz one
     /// narrower, and the halfway point on a log scale splits them evenly.
@@ -619,9 +271,7 @@ impl Protocol for Nxdn {
             false => vec![WIDE_HZ],
         }
     }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets]
     }
@@ -720,7 +370,7 @@ mod tests {
                     if let common::PacketBody::Frame(f) = &p.body {
                         assert!(p.rssi_dbfs().is_finite() && p.snr_db().is_finite());
                         assert!(p.samples().is_some_and(|q| !q.samples.is_empty()));
-                        rows.extend(nxdn_decoded(&f.bytes, common::Hz(p.center_hz())));
+                        rows.extend(decoded(&f.bytes, common::Hz(p.center_hz())));
                     }
                 }
             }
@@ -794,7 +444,7 @@ mod tests {
             )),
         };
         let bytes = encode_frame(&frame, false);
-        let d = nxdn_decoded(&bytes, Hz(453_050_000)).expect("an NXDN row");
+        let d = decoded(&bytes, Hz(453_050_000)).expect("an NXDN row");
         assert_eq!(d.protocol, "NXDN-VCALL");
         let get = |k: &str| {
             d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
@@ -811,8 +461,8 @@ mod tests {
         assert_eq!(air.codec, Some(CODEC));
         // Nobody wrote this, so it is not a message.
         assert!(!d.written);
-        assert!(nxdn_decoded(b"random", Hz(0)).is_none());
-        assert!(nxdn_decoded(b"NX", Hz(0)).is_none());
+        assert!(decoded(b"random", Hz(0)).is_none());
+        assert!(decoded(b"NX", Hz(0)).is_none());
     }
 
     /// A keyed call off the node's own front end: every frame of it read, the

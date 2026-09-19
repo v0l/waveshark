@@ -28,6 +28,7 @@
 //! produced the on-air blocks the tests carry.
 
 use crate::bits;
+use common::Decoded;
 
 /// The sync word every MDC decoder looks for, most significant bit first.
 pub const SYNC: u64 = 0x07_09_2A_44_6F;
@@ -342,6 +343,35 @@ pub fn encode_tones(op: u8, arg: u8, unit: u16, status: u8, leader_bytes: usize)
             !changed
         })
         .collect()
+}
+
+/// One row: which radio, and what it was saying.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let m = parse(bytes)?;
+    let unit = m.unit_hex();
+    let role = match m.operation.addresses_target() {
+        true => "target",
+        false => "unit",
+    };
+    let fields = vec![
+        (role.to_string(), common::Value::Text(unit.clone())),
+        ("operation".into(), common::Value::Text(m.operation.label())),
+        ("op".into(), common::Value::Int(i64::from(m.op))),
+        ("arg".into(), common::Value::Int(i64::from(m.arg))),
+        ("status".into(), common::Value::Int(i64::from(m.status))),
+    ];
+    Some(
+        Decoded::bytes("MDC-1200", center, 0.0, bytes.to_vec())
+            // The same namespace `ident` publishes a DTMF PTT-ID under: one
+            // fleet's unit numbers, sent two ways.
+            .by(common::Identity::new("radio-unit", unit.clone()))
+            .with_detail(format!("{unit} {}", m.operation.label()))
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Msk)
+            // The burst carried a CRC over its four information bytes and
+            // this row exists because it passed.
+            .with_crc(Some(true)),
+    )
 }
 
 #[cfg(test)]

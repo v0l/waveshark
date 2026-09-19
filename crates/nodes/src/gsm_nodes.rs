@@ -18,22 +18,19 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Origin, Placed, Placement, Protocol, Shape};
 use common::Result;
+pub use decode::gsm::arfcn_field;
+pub use decode::gsm::{block_rows, decoded, rows, sync_decoded};
 use dsp::gsm::{self, GsmConfig, Hit, SchDetector, sch};
+use identify::Signal;
+pub use identify::gsm::CHANNEL_WIDTH_HZ;
+pub use identify::gsm::DEFAULT_HZ;
+pub use identify::gsm::Gsm;
 use pipeline::event::{Decoded, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use std::collections::HashMap;
-
-/// What one carrier occupies, and the width a burst was heard through.
-pub const CHANNEL_WIDTH_HZ: f64 = gsm::CHANNEL_SPACING_HZ;
-
-/// Where to look when nothing says otherwise: the middle of the E-GSM 900
-/// downlink, which is the band most likely to hold a beacon in Europe. There
-/// is no frequency worth compiling in beyond that, so the scanner table
-/// carries the channel and this is only what an unconfigured node opens on.
-pub const DEFAULT_HZ: f64 = 947_400_000.0;
 
 /// How long a carrier a cell sent a phone to is kept after the last block
 /// decoded on it, in seconds. A signalling channel holds a transaction for
@@ -324,254 +321,26 @@ fn snr_of(quality: f32) -> f32 {
     (10.0 * (q / (1.0 - q)).max(1e-3).log10()).clamp(-10.0, 40.0)
 }
 
-pub fn gsm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    gsm_rows(bytes, center).into_iter().next()
-}
-
-/// What one block says, as rows.
-///
-/// Usually one. A paging request names up to four phones in a single
-/// message, and each of those is a link between the cell and one handset, so
-/// it becomes a row each: the same shape POCSAG has, where a transmitter
-/// empties its queue in one go and the queue is what a reader wants.
-pub fn gsm_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    match bytes.len() {
-        4 => sync_decoded(bytes, center).into_iter().collect(),
-        gsm::bcch::BLOCK_BYTES => block_rows(bytes, center),
-        _ => Vec::new(),
-    }
-}
-
-/// The channel number, where the frequency names one.
-fn arfcn_field(center: common::Hz, fields: &mut Vec<(String, common::Value)>) -> Option<u16> {
-    let n = gsm::arfcn(center.as_f64())?;
-    fields.push(("arfcn".into(), common::Value::Int(i64::from(n))));
-    Some(n)
-}
-
-fn sync_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let sch = sch::unpack(bytes)?;
-    let mut fields: Vec<(String, Value)> = vec![
-        ("bsic".into(), Value::Int(i64::from(sch.bsic()))),
-        ("ncc".into(), Value::Int(i64::from(sch.ncc))),
-        ("bcc".into(), Value::Int(i64::from(sch.bcc))),
-        ("frame".into(), Value::Int(i64::from(sch.frame_number))),
-    ];
-    let arfcn = arfcn_field(center, &mut fields);
-
-    // The cell, as it is written down: the colour code as two octal digits,
-    // which is how a base station is configured and how a survey names it.
-    let cell = match arfcn {
-        Some(n) => format!("ARFCN {n} BSIC {}{}", sch.ncc, sch.bcc),
-        None => format!("BSIC {}{}", sch.ncc, sch.bcc),
-    };
-    let detail = format!("{cell} frame {}", sch.frame_number);
-    Some(
-        Decoded::bytes("GSM-SCH", center, 0.0, bytes.to_vec())
-            .with_link(pipeline::event::Link::beacon(pipeline::event::Party::unit(cell)))
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Gmsk)
-            // The ten parity bits held in the demodulator, which is a real
-            // check and the only reason this burst exists rather than a
-            // Viterbi decoder's best guess at noise.
-            .with_crc(Some(true)),
-    )
-}
-
-fn block_rows(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    use common::Value;
-    // Two kinds of block share one length. A broadcast block addresses
-    // nobody and starts with a pseudo length; a block off a channel the cell
-    // assigned has a link layer in front of it. The broadcast reading is
-    // tried first because it is the more specific claim: it requires the
-    // radio resource discriminator in a fixed place.
-    let Some(msg) = decode::gsm::parse(bytes).or_else(|| decode::gsm::parse_dedicated(bytes))
-    else {
-        return Vec::new();
-    };
-    let mut fields: Vec<(String, Value)> = vec![
-        ("message".into(), Value::Text(msg.name.into())),
-        ("message_type".into(), Value::Int(i64::from(msg.type_id))),
-    ];
-    let arfcn = arfcn_field(center, &mut fields);
-    if let Some(id) = msg.cell_id {
-        fields.push(("cell_id".into(), Value::Int(i64::from(id))));
-    }
-    // The neighbours a cell tells phones to measure are where the rest of
-    // the network is: a scan that reads one cell has been handed the channel
-    // numbers of the others. Its own allocation is a different list and says
-    // where its traffic hops, so the two are not run together.
-    let list = msg.channels.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",");
-    let list_name = if msg.channels_are_neighbours { "neighbours" } else { "allocation" };
-    if !msg.channels.is_empty() {
-        fields.push((list_name.into(), Value::Text(list.clone())));
-    }
-    if !msg.pages.is_empty() {
-        let who = msg.pages.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
-        fields.push(("paging".into(), Value::Text(who)));
-        // A network pages by temporary identity, which it reallocates. One
-        // that pages by permanent identity has given that up, and a row that
-        // does not separate the two hides it.
-        let permanent =
-            msg.pages.iter().filter(|p| !matches!(p, decode::gsm::Identity::Tmsi(_))).count();
-        if permanent > 0 {
-            fields.push(("paged_by_identity".into(), Value::Int(permanent as i64)));
-        }
-    }
-    if let Some(id) = &msg.identity {
-        fields.push(("phone".into(), Value::Text(id.to_string())));
-    }
-    if let Some((power, ta)) = msg.sacch {
-        fields.push(("ordered_power".into(), Value::Int(i64::from(power))));
-        fields.push(("timing_advance".into(), Value::Int(i64::from(ta))));
-        fields.push(("range_m".into(), Value::Int(i64::from(ta) * 554)));
-    }
-    if msg.sapi != 0 {
-        fields.push(("sapi".into(), Value::Int(i64::from(msg.sapi))));
-    }
-    if let Some(g) = msg.grant {
-        fields.push(("channel_type".into(), Value::Text(g.kind.into())));
-        fields.push(("timeslot".into(), Value::Int(i64::from(g.timeslot))));
-        fields.push(("tsc".into(), Value::Int(i64::from(g.tsc))));
-        if let Some(n) = g.arfcn {
-            fields.push(("granted_arfcn".into(), Value::Int(i64::from(n))));
-        }
-        if let Some((maio, hsn)) = g.hopping {
-            fields.push(("hopping".into(), Value::Text(format!("MAIO {maio} HSN {hsn}"))));
-        }
-        // The timing advance is how long the phone's burst took to arrive,
-        // so it is a range to it and worth a field of its own.
-        fields.push(("timing_advance".into(), Value::Int(i64::from(g.timing_advance))));
-        fields.push(("range_m".into(), Value::Int(i64::from(g.distance_m()))));
-    }
-    if let Some(lai) = msg.lai {
-        fields.push(("mcc".into(), Value::Int(i64::from(lai.mcc))));
-        fields.push(("mnc".into(), Value::Int(i64::from(lai.mnc))));
-        fields.push(("lac".into(), Value::Int(i64::from(lai.lac))));
-        fields.push(("plmn".into(), Value::Text(lai.to_string())));
-    }
-
-    // A cell that names itself is a party worth tracking across sightings;
-    // one that does not is still a message from whatever carrier this is.
-    let mut detail = msg.name.to_string();
-    let mut party = None;
-    let mut who: Option<common::Identity> = None;
-    if let Some(lai) = msg.lai {
-        detail.push_str(&format!(" {lai} LAC {}", lai.lac));
-        if let Some(id) = msg.cell_id {
-            detail.push_str(&format!(" CI {id}"));
-            // Operator, area and cell: the identity a cell is known by
-            // everywhere, so two receivers in different places agree about
-            // which one they heard and a survey can accumulate it.
-            let cell = format!("{lai}-{}-{id}", lai.lac);
-            fields.push(("cell".into(), Value::Text(cell.clone())));
-            party = Some(cell.clone());
-            // A cell is a transmitter that names itself, so it says so here
-            // rather than leaving a device list to know that GSM keeps its
-            // identity in a field called `cell`. A synchronisation burst
-            // carries only a colour code, which is reused a few streets away
-            // and is not an identity, so only a block with the whole of it
-            // claims one.
-            who = Some(common::Identity::new("gsm", cell).made_by(lai.to_string()));
-        }
-    }
-    if !msg.channels.is_empty() {
-        detail.push_str(&format!(" {list_name} {list}"));
-    }
-    for p in &msg.pages {
-        detail.push_str(&format!(" {p}"));
-    }
-    if let Some(id) = &msg.identity {
-        detail.push_str(&format!(" {id}"));
-    }
-    if let Some((_, ta)) = msg.sacch {
-        detail.push_str(&format!(" {} m away", u32::from(ta) * 554));
-    }
-    if let Some(g) = msg.grant {
-        detail.push_str(&format!(" {} sub {} TS {}", g.kind, g.subchannel, g.timeslot));
-        match (g.arfcn, g.hopping) {
-            (Some(n), _) => detail.push_str(&format!(" ARFCN {n}")),
-            (_, Some((maio, hsn))) => detail.push_str(&format!(" MAIO {maio} HSN {hsn}")),
-            _ => {}
-        }
-        detail.push_str(&format!(" {} m away", g.distance_m()));
-    }
-    if party.is_none() {
-        party = arfcn.map(|n| format!("ARFCN {n}"));
-    }
-
-    let protocol = match msg.name {
-        n if n.starts_with("SI") => "GSM-SI",
-        n if n.starts_with("Paging") || n.starts_with("Imm") => "GSM-CCCH",
-        // A channel the cell assigned: what happens on it is a transaction
-        // with one phone rather than something broadcast.
-        _ => "GSM-SDCCH",
-    };
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Gmsk)
-        // Forty bits of Fire code held over the block before it left the
-        // demodulator.
-        .with_crc(Some(true));
-    if let Some(p) = &party {
-        d = d.with_link(pipeline::event::Link::beacon(pipeline::event::Party::infrastructure(
-            p.clone(),
-        )));
-    }
-    if let Some(who) = who {
-        d = d.by(who);
-    }
-
-    // A page is a link: this cell calling one handset. One row each, because
-    // a link is a pair and a message that names four phones is four calls.
-    // The identity is the phone's, and what kind it is matters: a temporary
-    // one is reallocated, so it is a party for as long as it lasts and never
-    // a device. Neither is: the cell transmits, the phone is only spoken of.
-    if !msg.pages.is_empty() {
-        let cell = pipeline::event::Party::infrastructure(
-            party.clone().unwrap_or_else(|| format!("{:.1} MHz", center.as_f64() / 1e6)),
-        );
-        let rows: Vec<Decoded> = msg
-            .pages
-            .iter()
-            .map(|id| {
-                let to = match id {
-                    decode::gsm::Identity::Tmsi(_) => {
-                        pipeline::event::Party::temporary(id.to_string())
-                    }
-                    _ => pipeline::event::Party::unit(id.to_string()),
-                };
-                let mut r = d.clone();
-                r.detail = Some(format!("{} {id}", msg.name));
-                r.fields.retain(|(k, _)| k != "paging");
-                r.fields.push(("paged".into(), Value::Text(id.to_string())));
-                r.link = Some(pipeline::event::Link::between(cell.clone(), to));
-                r
-            })
-            .collect();
-        return rows;
-    }
-    vec![d]
-}
-
-pub struct Gsm;
-
 impl Protocol for Gsm {
     fn id(&self) -> &'static str {
-        "gsm"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "gsm"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["gsm-sch"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(gsm::DOWNLINK_BANDS.to_vec())
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The widest of the downlink bands, P-GSM and E-GSM 900 together.
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 35_000_000 }
@@ -583,28 +352,13 @@ impl Protocol for Gsm {
         if !gsm::is_downlink_band(p.center_hz() as f64) {
             return None;
         }
-        Some(gsm_rows(bytes, common::Hz(p.center_hz())))
+        Some(rows(bytes, common::Hz(p.center_hz())))
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            // Three samples a symbol is the floor the detector refuses
-            // below; fed by band it is given four, since the burst is
-            // sampled where the training sequence says, not where a sample
-            // happens to land, so the interpolator wants something to work
-            // with.
-            min_rate_hz: gsm::SYMBOL_RATE * 3.0,
-            feed_rate_hz: 1_200_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// The middle of the E-GSM 900 downlink. A beacon has no frequency
     /// worth compiling in: which carriers a network uses is licensed per
     /// operator and per country.
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         match gsm::arfcn(hz) {
             Some(n) => format!("ARFCN {n}"),
@@ -628,6 +382,23 @@ impl Protocol for Gsm {
         }
         vec![n]
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "gsm",
+    summary: "One GSM carrier: the frequency correction tone, then the \
+              synchronisation burst's cell identity and frame number",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let mut n = GsmNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), GsmConfig::default());
+    n.configure(s);
+    Ok(Box::new(n))
 }
 
 #[cfg(test)]
@@ -666,7 +437,7 @@ mod tests {
         use common::Value;
         let sch = Sch { ncc: 5, bcc: 3, frame_number: 51 * 26 * 42 + 21 };
         let bytes = sch::pack(&sch).unwrap();
-        let d = gsm_decoded(&bytes, Hz(947_400_000)).expect("a row");
+        let d = decoded(&bytes, Hz(947_400_000)).expect("a row");
         assert_eq!(d.protocol, "GSM-SCH");
         assert_eq!(d.crc_ok, Some(true));
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -721,7 +492,7 @@ mod tests {
         }
         let f = &frames[0];
 
-        let d = gsm_decoded(&f.bytes, Hz(f.center_hz)).expect("a row");
+        let d = decoded(&f.bytes, Hz(f.center_hz)).expect("a row");
         assert_eq!(d.detail.as_deref(), Some("ARFCN 62 BSIC 26 frame 11965"));
     }
 
@@ -732,7 +503,7 @@ mod tests {
         use common::Value;
         let mut block = [0x2Bu8; 23];
         block[..8].copy_from_slice(&[0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10]);
-        let d = gsm_decoded(&block, Hz(947_400_000)).expect("a row");
+        let d = decoded(&block, Hz(947_400_000)).expect("a row");
         assert_eq!(d.protocol, "GSM-SI");
         assert_eq!(d.crc_ok, Some(true));
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -751,7 +522,7 @@ mod tests {
         b.extend_from_slice(&[0x00, 0xF1, 0x10, 0x00, 0x01, 0x33]);
         b.extend_from_slice(&[0x05, 0xF4, 0xAA, 0xBB, 0xCC, 0xDD]);
         b.resize(23, 0x2B);
-        let d = gsm_decoded(&b, Hz(947_400_000)).expect("a row");
+        let d = decoded(&b, Hz(947_400_000)).expect("a row");
         assert_eq!(d.protocol, "GSM-SDCCH");
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("message"), Some(Value::Text("LocationUpdatingRequest".into())));
@@ -763,7 +534,7 @@ mod tests {
     /// blocks with 0x2B, and every one of those passes the Fire code.
     #[test]
     fn padding_is_not_a_row() {
-        assert!(gsm_decoded(&[0x2Bu8; 23], Hz(947_400_000)).is_none());
+        assert!(decoded(&[0x2Bu8; 23], Hz(947_400_000)).is_none());
     }
 
     /// Two beacons ten frames apart, which is what the control multiframe
@@ -817,7 +588,7 @@ mod tests {
         b.extend_from_slice(&[0x17, 0x08, 0x29, 0x27, 0x10, 0x43, 0x65, 0x87, 0x09, 0x21]);
         b.resize(23, 0x2B);
 
-        let rows = gsm_rows(&b, Hz(947_400_000));
+        let rows = rows(&b, Hz(947_400_000));
         assert_eq!(rows.len(), 2, "a request naming two phones is two rows");
         let to: Vec<_> = rows.iter().filter_map(|r| r.link.as_ref()?.to.clone()).collect();
         assert_eq!(to[0].kind, PartyKind::Temporary, "a TMSI is not a lasting name");
@@ -965,7 +736,7 @@ mod tests {
         let blocks: Vec<&common::Frame> = frames.iter().filter(|f| f.bytes.len() == 23).collect();
         assert_eq!(blocks.len(), 1, "expected the block off the other carrier, got {frames:?}");
         assert_eq!(blocks[0].bytes, lur);
-        let d = gsm_decoded(&blocks[0].bytes, Hz(other_hz as u64)).expect("a row");
+        let d = decoded(&blocks[0].bytes, Hz(other_hz as u64)).expect("a row");
         assert_eq!(d.protocol, "GSM-SDCCH");
 
         // A carrier with no anchor and no beacon reads nothing: the anchor
@@ -975,21 +746,4 @@ mod tests {
         let (frames, _) = run(&mut c, rate, other_hz, &other);
         assert!(frames.is_empty(), "{frames:?}");
     }
-}
-
-/// The carrier this stage is pointed at.
-const CHANNEL_HZ: &str = "channel_hz";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "gsm",
-    summary: "One GSM carrier: the frequency correction tone, then the \
-              synchronisation burst's cell identity and frame number",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let mut n = GsmNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), GsmConfig::default());
-    n.configure(s);
-    Ok(Box::new(n))
 }

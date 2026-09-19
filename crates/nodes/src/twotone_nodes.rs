@@ -14,38 +14,25 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use decode::twotone::{Page, Pagers, Sequential};
+pub use decode::twotone::TAG;
+pub use decode::twotone::decoded;
+pub use decode::twotone::framed;
+use decode::twotone::{Pagers, Sequential};
 use dsp::tone::{RunConfig, ToneRuns};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::twotone::CHANNEL_WIDTH_HZ;
+pub use identify::twotone::DEFAULT_HZ;
+pub use identify::twotone::TwoTone;
+pub use identify::twotone::{AUDIO_HZ, DEVIATION_HZ};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
-/// A VHF fire and ambulance dispatch channel, which is the traffic this
-/// reads. Nothing about the scheme is band specific: it is the frequency the
-/// node is built with until the scanner table or an operator says another.
-pub const DEFAULT_HZ: f64 = 154_000_000.0;
-
-/// A dispatch channel is wide FM, and a narrowband one fits inside it.
-pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
-
-/// Peak deviation of a wideband LMR channel.
-const DEVIATION_HZ: f64 = 5_000.0;
-
-/// Audio rate the discriminator output is decimated to. Twice the top of the
-/// tone band with room for the filter.
-const AUDIO_HZ: f64 = 8_000.0;
-
 const CHANNEL_HZ: &str = "channel_hz";
 const PAGERS: &str = "pagers";
-
-/// Bytes before the page on the bus: the tag this front end writes, which is
-/// what separates a page from any other decoder's text. A page has no check
-/// sequence of its own, because two tones carry none.
-pub const TAG: [u8; 4] = *b"2TON";
 
 pub struct TwoToneNode {
     channel_hz: f64,
@@ -203,110 +190,26 @@ impl Simple for TwoToneNode {
     }
 }
 
-/// What a page puts on the bus: the tag, then the tones and their lengths as
-/// text, and the name where the operator's list had one.
-fn framed(page: &Page, name: Option<&str>) -> Vec<u8> {
-    let body = match page {
-        Page::Pair { a_hz, a_s, b_hz, b_s, .. } => {
-            format!("pair {a_hz:.1} {a_s:.2} {b_hz:.1} {b_s:.2}")
-        }
-        Page::Group { hz, seconds, .. } => format!("group {hz:.1} {seconds:.2}"),
-    };
-    let mut out = Vec::with_capacity(TAG.len() + body.len() + 16);
-    out.extend_from_slice(&TAG);
-    out.extend_from_slice(body.as_bytes());
-    if let Some(name) = name {
-        out.push(b' ');
-        out.extend_from_slice(name.as_bytes());
-    }
-    out
-}
-
-/// One row: which tones, how long each was held, and whose pager that is
-/// where the operator said.
-pub fn twotone_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    if bytes.len() <= TAG.len() || bytes[..TAG.len()] != TAG {
-        return None;
-    }
-    let body = String::from_utf8_lossy(&bytes[TAG.len()..]).to_string();
-    let (kind, rest) = body.split_once(' ')?;
-    // The name is whatever is left after the numbers, spaces and all.
-    let mut words = match kind {
-        "pair" => rest.splitn(5, ' '),
-        _ => rest.splitn(3, ' '),
-    };
-    let num = |w: Option<&str>| w.and_then(|w| w.parse::<f64>().ok());
-    let mut fields: Vec<(String, common::Value)> = Vec::new();
-    let (tones, seconds, name) = match kind {
-        "pair" => {
-            let (a_hz, a_s, b_hz, b_s) =
-                (num(words.next())?, num(words.next())?, num(words.next())?, num(words.next())?);
-            fields.push(("tone_a_hz".into(), common::Value::Float(a_hz)));
-            fields.push(("tone_b_hz".into(), common::Value::Float(b_hz)));
-            fields.push(("tone_a_s".into(), common::Value::Float(a_s)));
-            fields.push(("tone_b_s".into(), common::Value::Float(b_s)));
-            (format!("{a_hz:.1}/{b_hz:.1}"), a_s + b_s, words.next())
-        }
-        "group" => {
-            let (hz, seconds) = (num(words.next())?, num(words.next())?);
-            fields.push(("tone_hz".into(), common::Value::Float(hz)));
-            fields.push(("tone_s".into(), common::Value::Float(seconds)));
-            // A long tone opens every pager on it, so it is addressed to a
-            // fleet rather than to one radio.
-            fields.push(("call".into(), common::Value::Text("group".into())));
-            (format!("{hz:.1}"), seconds, words.next())
-        }
-        _ => return None,
-    };
-    fields.insert(0, ("tones".into(), common::Value::Text(tones.clone())));
-    let detail = match name {
-        Some(name) => {
-            fields.push(("pager".into(), common::Value::Text(name.to_string())));
-            format!("{name} on {tones}")
-        }
-        None => format!("{tones} for {seconds:.1} s"),
-    };
-    let mut d = Decoded::bytes("Two-tone page", center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fm);
-    // The tones are the address, so a named pager is a device heard rather
-    // than a field: the operator's list is what turns a pair into a who.
-    if let Some(name) = name {
-        d = d.by(common::Identity::new("pager-tones", tones).named(name.to_string()));
-    }
-    // Nothing checks, because two tones carry nothing to check with.
-    d.crc_ok = None;
-    Some(d)
-}
-
-pub struct TwoTone;
-
 impl Protocol for TwoTone {
     fn id(&self) -> &'static str {
-        "twotone"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "two-tone"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["quick call", "qcii", "two tone paging"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The front end writes its tag in front of the tones, which is the only
     /// thing that separates a page from any other decoder's text: two tones
     /// carry no check sequence and no address anybody else would recognise.
@@ -314,7 +217,7 @@ impl Protocol for TwoTone {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        twotone_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} 2-TONE", hz / 1e6)
@@ -432,7 +335,7 @@ mod tests {
         assert_eq!(frames.len(), 1, "{} pages off the air", frames.len());
         assert_eq!(n.read(), 1);
 
-        let d = twotone_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.protocol, "Two-tone page");
         // The tone reading is a few hertz off, which is what a 25 ms window
         // measures a tone to; the pager list matches within 1.5%.
@@ -457,7 +360,7 @@ mod tests {
         let mut n = node(DEFAULT_HZ, "");
         let frames = run(&mut n, &keyed(&[(600.9, 1.0), (1153.4, 3.0)], 0.0), DEFAULT_HZ);
         assert_eq!(frames.len(), 1);
-        let d = twotone_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.field("pager"), None);
         assert_eq!(d.identity, None, "an unlisted pair names nobody");
         let tones = d.field("tones").map(|v| v.to_string()).unwrap_or_default();
@@ -471,7 +374,7 @@ mod tests {
         let mut n = node(DEFAULT_HZ, "Fire brigade = 1122.5/1153.4\n");
         let frames = run(&mut n, &keyed(&[(1153.4, 8.0)], 0.0), DEFAULT_HZ);
         assert_eq!(frames.len(), 1);
-        let d = twotone_decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.field("call"), Some(&common::Value::Text("group".into())));
         assert_eq!(d.field("pager"), Some(&common::Value::Text("Fire brigade".into())));
         let seconds = d.field("tone_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -483,7 +386,7 @@ mod tests {
     /// what stops every over becoming a page.
     #[test]
     fn speech_on_the_channel_is_not_a_page() {
-        let mut phase = vec![0.0f64; 11];
+        let mut phase = [0.0f64; 11];
         let mut audio: Vec<f32> = Vec::new();
         for i in 0..(RATE * 20.0) as usize {
             let t = i as f64 / RATE;

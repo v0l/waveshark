@@ -19,8 +19,11 @@
 //! Z-Wave layer, which agree on all of it; the header type values are
 //! `zwave-js`'s `MPDUHeaderType`.
 
+use crate::bits::manchester;
 use crate::bits::{crc16, xor8};
+use common::Decoded;
 use common::Value;
+use dsp::fsk::BitSync;
 
 /// The byte a transmitter repeats while a receiver finds the clock: twenty
 /// of them at 9.6 and 40 kbit/s, about twenty-five at 100.
@@ -430,6 +433,131 @@ pub fn keyed(frame: &[u8], preamble_bytes: usize) -> Vec<bool> {
 pub fn singlecast_control(sequence: u8, ack_request: bool) -> [u8; 2] {
     [0x1 | if ack_request { 0x40 } else { 0 }, sequence & 0xf]
 }
+
+/// The row a frame off the bus becomes.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let f = parse(bytes)?;
+    let fields = f.fields();
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let link = common::Link {
+        from: Some(common::Party::unit(f.source_id())),
+        to: Some(if f.dest == NODE_BROADCAST {
+            common::Party::broadcast()
+        } else {
+            common::Party::unit(f.dest_id())
+        }),
+    };
+    let text = match f.command_class() {
+        Some(cc) => format!("{} {} -> {}", command_class(cc), f.source, f.dest),
+        None => format!("{} {} -> {}", f.header, f.source, f.dest),
+    };
+    Some(
+        Decoded::bytes("Z-Wave", center, 0.0, bytes.to_vec())
+            .by(common::Identity::new("zwave", f.source_id()))
+            .with_link(link)
+            .with_text(text)
+            .with_detail(detail)
+            .with_fields(fields)
+            // 9.6 kbit/s is keyed the same way and Manchester coded above
+            // it, so the modulation is the same for all three rates.
+            .with_modulation(common::Modulation::Fsk2)
+            // The check was run again here, on the bytes in the row, rather
+            // than taken on trust from whatever put them on the bus.
+            .with_crc(Some(true)),
+    )
+}
+
+/// Symbols kept behind the search, so a frame split across two blocks is
+/// whole when the second arrives.
+pub const KEEP_BITS: usize = MAX_FRAME_BITS * 2;
+
+/// The three rates, as the symbol clock sees them: the baud to run at, how
+/// much spectrum to filter to, and whether the symbols are Manchester chips
+/// rather than bits.
+pub const RATES: [(f64, f64, bool); 3] = [
+    // 9.6 kbit/s: Manchester, so the clock runs at twice the bit rate.
+    (19_200.0, 60_000.0, true),
+    (40_000.0, 80_000.0, false),
+    (100_000.0, 160_000.0, false),
+];
+
+/// Read every whole frame in a bit stream from `from`, and say where the
+/// last of them ended.
+fn scan(bits: &[bool], from: usize, out: &mut Vec<Frame>) -> usize {
+    let mut at = from;
+    while let Some(f) = decode(bits, at) {
+        at = f.start + f.bits();
+        out.push(f);
+    }
+    at
+}
+
+/// One rate's clock and the symbols it has produced but not yet read a frame
+/// out of.
+pub struct Reader {
+    sync: BitSync,
+    manchester: bool,
+    symbols: Vec<bool>,
+    /// Symbols dropped off the front, so a frame's position stays a position
+    /// in the stream rather than in what is left of it.
+    dropped: u64,
+    /// Where the search has reached, in the same stream positions. A frame
+    /// still arriving is not searched past, so without this the frame at the
+    /// end of one block would be reported again out of the next.
+    read_from: u64,
+}
+
+impl Reader {
+    pub fn new(rate: f64, baud: f64, bandwidth_hz: f64, manchester: bool) -> Self {
+        Self {
+            sync: BitSync::with_bandwidth(rate, baud, bandwidth_hz),
+            manchester,
+            symbols: Vec::new(),
+            dropped: 0,
+            read_from: 0,
+        }
+    }
+
+    /// Demodulate a block and hand back every frame that closed inside it.
+    pub fn read(&mut self, iq: &[common::C32], out: &mut Vec<Frame>) {
+        if !self.sync.usable() {
+            return;
+        }
+        self.sync.process(iq, &mut self.symbols);
+        let from = (self.read_from - self.dropped) as usize;
+        let read_to = if self.manchester {
+            // Only one folding is searched. A Manchester bit is a pair of
+            // chips and nothing says which chip of the pair a frame starts
+            // on, but pairing from the other chip gives the first stream
+            // complemented and aligned the same way, and the start byte
+            // already decides polarity. Searching both found every frame
+            // twice.
+            let (bits, _violations) = manchester(&self.symbols, 0);
+            scan(&bits, from / 2, out) * 2
+        } else {
+            scan(&self.symbols, from, out)
+        };
+        self.read_from = self.dropped + read_to as u64;
+        let keep = self.symbols.len().min(KEEP_BITS);
+        let cut = self.symbols.len() - keep;
+        if cut > 0 {
+            self.symbols.drain(..cut);
+            self.dropped += cut as u64;
+            self.read_from = self.read_from.max(self.dropped);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.sync.reset();
+        self.symbols.clear();
+        self.dropped = 0;
+        self.read_from = 0;
+    }
+}
+
+/// Longest frame on the air: a 255 byte length field behind the preamble and
+/// the start byte, in Manchester chips.
+pub const MAX_FRAME_BITS: usize = (25 + 1 + 255) * 8 * 2;
 
 #[cfg(test)]
 mod tests {

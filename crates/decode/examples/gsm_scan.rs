@@ -87,11 +87,12 @@ fn main() {
                 if let Hit::Block(b) = h {
                     let msg = decode::gsm::parse(&b.bytes)
                         .or_else(|| decode::gsm::parse_dedicated(&b.bytes));
-                    if let Some(g) = msg.and_then(|m| m.grant) {
-                        if g.kind.starts_with("SDCCH") && g.arfcn == Some(*arfcn) && g.timeslot != 0
-                        {
-                            det.follow(g.timeslot);
-                        }
+                    if let Some(g) = msg.and_then(|m| m.grant)
+                        && g.kind.starts_with("SDCCH")
+                        && g.arfcn == Some(*arfcn)
+                        && g.timeslot != 0
+                    {
+                        det.follow(g.timeslot);
                     }
                 }
             }

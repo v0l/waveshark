@@ -24,146 +24,29 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use decode::bits::manchester;
 use decode::zwave;
-use dsp::fsk::BitSync;
+pub use decode::zwave::decoded;
+pub use decode::zwave::{KEEP_BITS, MAX_FRAME_BITS, RATES};
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::zwave::CHANNEL_WIDTH_HZ;
+pub use identify::zwave::CHANNELS;
+pub use identify::zwave::WORK_HZ;
+pub use identify::zwave::ZWave;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
-/// Where Z-Wave is, by region, from the Z-Wave Alliance's frequency chart:
-/// 868 MHz across Europe, 908.4 and 916 MHz under FCC part 15.249, 919.8 and
-/// 921.4 in Australia and Brazil, and the three Japanese channels. The 100
-/// kbit/s channel is a different one from the slower pair in most regions,
-/// which is why they are all here rather than one per region.
-pub const CHANNELS: [f64; 12] = [
-    865_200_000.0,
-    868_400_000.0,
-    868_420_000.0,
-    869_850_000.0,
-    908_400_000.0,
-    908_420_000.0,
-    916_000_000.0,
-    919_800_000.0,
-    921_400_000.0,
-    922_500_000.0,
-    923_900_000.0,
-    926_300_000.0,
-];
-
-/// The width a transmission occupies. The widest of the three is 100 kbit/s
-/// keyed 29 kHz either way, which is 158 kHz by Carson; the slower two are
-/// keyed 20 kHz either way and are narrower than their own channel spacing.
-pub const CHANNEL_WIDTH_HZ: f64 = 200_000.0;
-
-/// The three rates, as the symbol clock sees them: the baud to run at, how
-/// much spectrum to filter to, and whether the symbols are Manchester chips
-/// rather than bits.
-const RATES: [(f64, f64, bool); 3] = [
-    // 9.6 kbit/s: Manchester, so the clock runs at twice the bit rate.
-    (19_200.0, 60_000.0, true),
-    (40_000.0, 80_000.0, false),
-    (100_000.0, 160_000.0, false),
-];
-
-/// Rate the channel is cut down to before the clocks read it: eight samples
-/// a symbol at 100 kbit/s, which leaves the widest of the three a transition
-/// band and the narrowest more resolution than it can use.
-const WORK_HZ: f64 = 800_000.0;
-
-/// Longest frame on the air: a 255 byte length field behind the preamble and
-/// the start byte, in Manchester chips.
-const MAX_FRAME_BITS: usize = (25 + 1 + 255) * 8 * 2;
-
-/// Symbols kept behind the search, so a frame split across two blocks is
-/// whole when the second arrives.
-const KEEP_BITS: usize = MAX_FRAME_BITS * 2;
-
 pub struct ZWaveNode {
     channel_hz: f64,
     mixer: Mixer,
     decim: FirDecim,
-    readers: Vec<Reader>,
+    readers: Vec<zwave::Reader>,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     meter: crate::FrameMeter,
     accepted: u64,
-}
-
-/// One rate's clock and the symbols it has produced but not yet read a frame
-/// out of.
-struct Reader {
-    sync: BitSync,
-    manchester: bool,
-    symbols: Vec<bool>,
-    /// Symbols dropped off the front, so a frame's position stays a position
-    /// in the stream rather than in what is left of it.
-    dropped: u64,
-    /// Where the search has reached, in the same stream positions. A frame
-    /// still arriving is not searched past, so without this the frame at the
-    /// end of one block would be reported again out of the next.
-    read_from: u64,
-}
-
-/// Read every whole frame in a bit stream from `from`, and say where the
-/// last of them ended.
-fn scan(bits: &[bool], from: usize, out: &mut Vec<zwave::Frame>) -> usize {
-    let mut at = from;
-    while let Some(f) = zwave::decode(bits, at) {
-        at = f.start + f.bits();
-        out.push(f);
-    }
-    at
-}
-
-impl Reader {
-    fn new(rate: f64, baud: f64, bandwidth_hz: f64, manchester: bool) -> Self {
-        Self {
-            sync: BitSync::with_bandwidth(rate, baud, bandwidth_hz),
-            manchester,
-            symbols: Vec::new(),
-            dropped: 0,
-            read_from: 0,
-        }
-    }
-
-    /// Demodulate a block and hand back every frame that closed inside it.
-    fn read(&mut self, iq: &[common::C32], out: &mut Vec<zwave::Frame>) {
-        if !self.sync.usable() {
-            return;
-        }
-        self.sync.process(iq, &mut self.symbols);
-        let from = (self.read_from - self.dropped) as usize;
-        let read_to = if self.manchester {
-            // Only one folding is searched. A Manchester bit is a pair of
-            // chips and nothing says which chip of the pair a frame starts
-            // on, but pairing from the other chip gives the first stream
-            // complemented and aligned the same way, and the start byte
-            // already decides polarity. Searching both found every frame
-            // twice.
-            let (bits, _violations) = manchester(&self.symbols, 0);
-            scan(&bits, from / 2, out) * 2
-        } else {
-            scan(&self.symbols, from, out)
-        };
-        self.read_from = self.dropped + read_to as u64;
-        let keep = self.symbols.len().min(KEEP_BITS);
-        let cut = self.symbols.len() - keep;
-        if cut > 0 {
-            self.symbols.drain(..cut);
-            self.dropped += cut as u64;
-            self.read_from = self.read_from.max(self.dropped);
-        }
-    }
-
-    fn reset(&mut self) {
-        self.sync.reset();
-        self.symbols.clear();
-        self.dropped = 0;
-        self.read_from = 0;
-    }
 }
 
 impl Default for ZWaveNode {
@@ -181,7 +64,7 @@ impl ZWaveNode {
             decim: FirDecim::design_hz(WORK_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             readers: RATES
                 .iter()
-                .map(|(baud, bw, man)| Reader::new(WORK_HZ, *baud, *bw, *man))
+                .map(|(baud, bw, man)| zwave::Reader::new(WORK_HZ, *baud, *bw, *man))
                 .collect(),
             mixed: Vec::new(),
             narrow: Vec::new(),
@@ -224,8 +107,10 @@ impl Simple for ZWaveNode {
         }
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.readers =
-            RATES.iter().map(|(baud, bw, man)| Reader::new(work, *baud, *bw, *man)).collect();
+        self.readers = RATES
+            .iter()
+            .map(|(baud, bw, man)| zwave::Reader::new(work, *baud, *bw, *man))
+            .collect();
         // Fifty milliseconds: the longest frame at 9.6 kbit/s is about
         // 60 ms of preamble and payload, and a shorter ring would hand a
         // slow frame samples that are not its own.
@@ -270,67 +155,28 @@ impl Simple for ZWaveNode {
     }
 }
 
-/// The row a frame off the bus becomes.
-pub fn zwave_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let f = zwave::parse(bytes)?;
-    let fields = f.fields();
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = pipeline::event::Link {
-        from: Some(pipeline::event::Party::unit(f.source_id())),
-        to: Some(if f.dest == zwave::NODE_BROADCAST {
-            pipeline::event::Party::broadcast()
-        } else {
-            pipeline::event::Party::unit(f.dest_id())
-        }),
-    };
-    let text = match f.command_class() {
-        Some(cc) => format!("{} {} -> {}", zwave::command_class(cc), f.source, f.dest),
-        None => format!("{} {} -> {}", f.header, f.source, f.dest),
-    };
-    Some(
-        Decoded::bytes("Z-Wave", center, 0.0, bytes.to_vec())
-            .by(common::Identity::new("zwave", f.source_id()))
-            .with_link(link)
-            .with_text(text)
-            .with_detail(detail)
-            .with_fields(fields)
-            // 9.6 kbit/s is keyed the same way and Manchester coded above
-            // it, so the modulation is the same for all three rates.
-            .with_modulation(common::Modulation::Fsk2)
-            // The check was run again here, on the bytes in the row, rather
-            // than taken on trust from whatever put them on the bus.
-            .with_crc(Some(true)),
-    )
-}
-
-pub struct ZWave;
-
 impl Protocol for ZWave {
     fn id(&self) -> &'static str {
-        "zwave"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "zwave"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["z-wave", "g9959"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(CHANNELS.to_vec())
-    }
-    /// The European channel, which is where most of the world's Z-Wave is.
-    fn default_hz(&self) -> f64 {
-        868_420_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 400_000.0,
-            feed_rate_hz: WORK_HZ,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
+    /// The European channel, which is where most of the world's Z-Wave is.
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: CHANNEL_WIDTH_HZ as u64 }
     }
@@ -339,7 +185,7 @@ impl Protocol for ZWave {
         if !CHANNELS.iter().any(|c| (c - hz).abs() <= CHANNEL_WIDTH_HZ / 2.0) {
             return None;
         }
-        Some(zwave_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn marks(&self, hz: f64) -> Vec<Mark> {
         vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label: "Z-WAVE".into() }]
@@ -437,7 +283,7 @@ mod tests {
             assert_eq!(frames.len(), 1, "{baud} baud: {} frames", frames.len());
             assert_eq!(frames[0], frame, "{baud} baud: the bytes came back changed");
 
-            let d = zwave_decoded(&frames[0], Hz(channel as u64)).expect("a decode");
+            let d = decoded(&frames[0], Hz(channel as u64)).expect("a decode");
             assert_eq!(d.protocol, "Z-Wave");
             assert_eq!(d.crc_ok, Some(true));
             assert!(!d.written, "a plug being switched is a machine talking");
@@ -478,7 +324,7 @@ mod tests {
             })
             .collect();
         assert_eq!(read, vec![(1, 7), (7, 1)], "the exchange came back out of order");
-        let d = zwave_decoded(&frames[1], Hz(center as u64)).expect("a decode");
+        let d = decoded(&frames[1], Hz(center as u64)).expect("a decode");
         assert_eq!(d.text.as_deref(), Some("ack 7 -> 1"));
     }
 

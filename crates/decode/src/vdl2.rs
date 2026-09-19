@@ -17,6 +17,7 @@
 //! the output against.
 
 use crate::rs::ReedSolomon;
+use common::Decoded;
 
 /// The scrambler's starting state: a 15-bit register, x^15 + x + 1.
 const LFSR_IV: u16 = 0x6959;
@@ -430,7 +431,7 @@ fn unstuff(bits: &[bool]) -> Vec<Vec<u8>> {
                 // The last eight bits are the flag itself.
                 if cur.len() > 8 {
                     let keep = cur.len() - 8;
-                    if keep % 8 == 0 {
+                    if keep.is_multiple_of(8) {
                         frames.push(pack_lsbfirst(&cur[..keep]));
                     }
                 }
@@ -488,6 +489,40 @@ pub fn parse_frame(buf: &[u8]) -> Option<Frame> {
     })
 }
 
+/// The decode an AVLC frame becomes.
+pub fn decoded(f: &Frame, bytes: &[u8], center: common::Hz) -> Decoded {
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("from".into(), common::Value::Text(format!("{:06X}", f.src.addr))),
+        ("from_kind".into(), common::Value::Text(f.src.kind.label().into())),
+        ("to".into(), common::Value::Text(format!("{:06X}", f.dst.addr))),
+        ("to_kind".into(), common::Value::Text(f.dst.kind.label().into())),
+        ("frame".into(), common::Value::Text(f.control.label().into())),
+    ];
+    let acars = f.acars();
+    if let Some(a) = &acars {
+        fields.extend(a.fields());
+    }
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    // An aircraft is named by its ICAO address, which is the same number
+    // ADS-B carries, so a frame here and a position there are one aeroplane.
+    let who = if f.src.kind.is_aircraft() {
+        common::Identity::new("icao", format!("{:06X}", f.src.addr))
+    } else {
+        common::Identity::new("vdl2-gs", format!("{:06X}", f.src.addr))
+    };
+    let mut d = Decoded::bytes("VDL2", center, 0.0, bytes.to_vec())
+        .by(who)
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::D8psk)
+        // The frame check sequence, over the whole frame.
+        .with_crc(Some(true));
+    if acars.as_ref().is_some_and(|a| !a.text.is_empty()) {
+        d.media_type = common::media::TEXT;
+    }
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,7 +546,7 @@ mod tests {
     #[test]
     fn one_flipped_header_bit_is_put_back() {
         // A length of 1000 bits, in the field's own bit order.
-        let mut good = (reverse(1000, TRLEN) as u32) << HDRFECLEN;
+        let mut good = reverse(1000, TRLEN) << HDRFECLEN;
         let mut parity = 0u32;
         for (i, h) in H.iter().enumerate() {
             parity |= ((good & h).count_ones() & 1) << (HDRFECLEN - 1 - i);

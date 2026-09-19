@@ -15,31 +15,23 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use codec2::{Codec2, Codec2Mode};
 use common::Result;
-use common::bands::Usage;
-use decode::m17::{self, Assembler, DataType, Event};
+pub use decode::m17::decoded;
+pub use decode::m17::hex;
+use decode::m17::{Assembler, DataType, Event};
 use dsp::m17::{
     BAUD, Body, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ, Frame, M17Config, M17Demod,
     SYMBOLS_PER_FRAME,
 };
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::m17::AUDIO_HZ;
+pub use identify::m17::CHANNEL_WIDTH_HZ;
+pub use identify::m17::DEFAULT_HZ;
+pub use identify::m17::M17;
 use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The M17 calling frequency in Region 1, and only the default the node is
-/// built with before the scanner table says where to listen.
-pub const DEFAULT_HZ: f64 = 433_475_000.0;
-
-/// The channel an M17 transmission occupies. The signal is 9 kHz wide and the
-/// allocations are on a 12.5 kHz grid, so this is the grid rather than the
-/// signal: it is what decides whether a channel fits inside the span.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// Audio rate the discriminator output is decimated to. Ten samples per
-/// symbol at 4800 baud, which is what the specification recommends for the
-/// shaping filter either end.
-const AUDIO_HZ: f64 = 48_000.0;
 
 /// Rate Codec 2 speaks. Everything downstream resamples from this rather than
 /// the codec being asked for something it does not do.
@@ -368,127 +360,23 @@ pub fn decode_stream_voice(payloads: &[u8]) -> Vec<f32> {
     out
 }
 
-/// Payload bytes as hex, so a row carries what was on the air in a form that
-/// can be pasted into another decoder.
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// The row a transmission becomes.
-pub fn m17_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let event = Event::parse(bytes)?;
-    let lsf = match &event {
-        Event::LinkSetup { lsf, .. } => Some(lsf),
-        Event::Packet { lsf, .. } | Event::Stream { lsf, .. } | Event::StreamFrame { lsf, .. } => {
-            lsf.as_ref()
-        }
-    };
-    let mut fields: Vec<(String, Value)> = lsf.map(m17::fields).unwrap_or_default();
-    let mut text = None;
-
-    let protocol = match &event {
-        Event::LinkSetup { late, .. } => {
-            if *late {
-                // Rebuilt from the link information channel rather than heard
-                // outright, which is worth saying: it means the receiver
-                // joined the transmission after it started.
-                fields.push(("late_entry".into(), Value::Bool(true)));
-            }
-            "M17-Setup"
-        }
-        Event::Packet { data, .. } => {
-            let (id, payload) = data.split_first().unwrap_or((&0, &[]));
-            if let Some(name) = m17::packet_protocol(*id) {
-                fields.push(("packet_type".into(), Value::Text(name.into())));
-            } else {
-                fields.push(("packet_type".into(), Value::Int(i64::from(*id))));
-            }
-            fields.push(("bytes".into(), Value::Int(data.len() as i64)));
-            // SMS is a null-terminated UTF-8 string, and every other type may
-            // or may not be text. Only the one the specification says is text
-            // is shown as text.
-            if *id == 0x05 {
-                let s = String::from_utf8_lossy(payload).trim_end_matches('\0').to_string();
-                fields.push(("message".into(), Value::Text(s.clone())));
-                text = Some(s);
-            }
-            "M17-Packet"
-        }
-        // One frame of a stream, which is what the log holds and what the
-        // audio is rebuilt from. The row is deliberately thin: a list showing
-        // twenty-five of these a second is a list nobody reads, and the
-        // interface folds them into the transmission they belong to.
-        Event::StreamFrame { number, payload, .. } => {
-            fields.push(("frame".into(), Value::Int(i64::from(*number))));
-            // 40 ms, the one duration in M17 that needs no clock, so anything
-            // counting airtime can add these up without waiting for the
-            // transmission to end.
-            fields.push(("seconds".into(), Value::Float(0.04)));
-            fields.push(("live".into(), Value::Bool(true)));
-            fields.push(("payload".into(), Value::Text(hex(payload))));
-            match lsf.map(|l| l.data_type()) {
-                Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
-                _ => "M17-Stream",
-            }
-        }
-        Event::Stream { frames, complete, .. } => {
-            // The end of the run of frames, each of which carried its own
-            // 40 ms; anything adding airtime up has done so already.
-            fields.push(("frames".into(), Value::Int(i64::from(*frames))));
-            if !complete {
-                fields.push(("truncated".into(), Value::Bool(true)));
-            }
-            match lsf.map(|l| l.data_type()) {
-                Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
-                _ => "M17-Stream",
-            }
-        }
-    };
-
-    let link = lsf.map(|l| {
-        let dst = l.destination().to_string();
-        // ALL and a reflector's own name are many listeners under one name;
-        // anything else is the callsign of one station.
-        let to = if dst.eq_ignore_ascii_case("all") || dst.starts_with("M17-") {
-            pipeline::event::Party::group(dst)
-        } else if dst.is_empty() {
-            pipeline::event::Party::broadcast()
-        } else {
-            pipeline::event::Party::unit(dst)
-        };
-        pipeline::event::Link::between(pipeline::event::Party::unit(l.source().to_string()), to)
-    });
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4)
-        // Every link setup here passed the CRC over its 28 bytes and every
-        // packet the CRC over the whole of it; a transmission whose checks
-        // failed never became an event.
-        .with_crc(Some(true));
-    if let Some(t) = text {
-        // An M17 SMS packet: a person typed it into a radio.
-        d = d.written().with_text(t);
-    }
-    d.link = link;
-    d.identity = lsf.map(|l| common::Identity::new("m17", l.source().to_string()));
-    Some(d)
-}
-
-pub struct M17;
-
 impl Protocol for M17 {
     fn id(&self) -> &'static str {
-        "m17"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "m17"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Amateur, Usage::Utility, Usage::Ism])
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// Its frequency cannot identify it: it runs wherever an amateur puts it,
     /// which includes the 2 m channels APRS uses and the 70 cm ones near the
     /// pager bands. A tagged event of an exact length carrying a link setup
@@ -497,21 +385,11 @@ impl Protocol for M17 {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        m17_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// The M17 calling frequency in Region 1.
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets, PortKind::Voice]
     }
@@ -520,10 +398,25 @@ impl Protocol for M17 {
     }
 }
 
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "m17",
+    summary: "One M17 channel: narrowband FM, 4-FSK at 4800 baud, link setup and packets",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(M17Node::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use common::Hz;
+    use decode::m17;
     use decode::m17::Address;
     use dsp::m17::{BAUD, Kind, fec, frame_symbols, preamble_symbols};
 
@@ -625,7 +518,7 @@ mod tests {
         let iq = modulate(&symbols, rate, 1_000.0);
         let frames = run(&iq, rate, center);
         let all: Vec<Decoded> =
-            frames.iter().filter_map(|f| m17_decoded(f, Hz(center as u64))).collect();
+            frames.iter().filter_map(|f| decoded(f, Hz(center as u64))).collect();
         // Every frame is on the bus as evidence; these are the two rows that
         // describe the transmission as a whole.
         let rows: Vec<Decoded> =
@@ -794,7 +687,7 @@ mod tests {
 
         let frames = run(&modulate(&symbols, rate, 0.0), rate, center);
         let rows: Vec<Decoded> =
-            frames.iter().filter_map(|f| m17_decoded(f, Hz(center as u64))).collect();
+            frames.iter().filter_map(|f| decoded(f, Hz(center as u64))).collect();
         let packet = rows.iter().find(|r| r.protocol == "M17-Packet").expect("no packet row");
         assert_eq!(packet.text.as_deref(), Some("CQ CQ CQ de M0ABC, testing M17 packet mode"));
         assert_eq!(packet.media_type, pipeline::event::media::TEXT);
@@ -804,18 +697,4 @@ mod tests {
             Some(common::Value::Text("SMS".into()))
         );
     }
-}
-
-/// The carrier this stage is pointed at.
-const CHANNEL_HZ: &str = "channel_hz";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "m17",
-    summary: "One M17 channel: narrowband FM, 4-FSK at 4800 baud, link setup and packets",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(M17Node::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

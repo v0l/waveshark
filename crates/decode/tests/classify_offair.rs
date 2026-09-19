@@ -331,10 +331,10 @@ fn parse(text: &str) -> Vec<Capture> {
         } else if l.starts_with("burst_us") {
             let v = value(l);
             let mut p = v.trim_matches(['[', ']'].as_ref()).split(',');
-            if let (Some(a), Some(b)) = (p.next(), p.next()) {
-                if let (Ok(a), Ok(b)) = (a.trim().parse(), b.trim().parse()) {
-                    burst_us = Some((a, b));
-                }
+            if let (Some(a), Some(b)) = (p.next(), p.next())
+                && let (Ok(a), Ok(b)) = (a.trim().parse(), b.trim().parse())
+            {
+                burst_us = Some((a, b));
             }
         }
     }

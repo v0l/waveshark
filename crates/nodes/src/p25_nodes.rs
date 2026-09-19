@@ -19,332 +19,44 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use decode::p25::{self, Duid, Encryption, LinkControl};
+pub use decode::p25::CODEC;
+pub use decode::p25::FLAG_EMERGENCY;
+pub use decode::p25::FLAG_ENCRYPTED;
+pub use decode::p25::FLAG_GROUP;
+pub use decode::p25::FLAG_HAVE_ES;
+pub use decode::p25::FLAG_HAVE_LC;
+pub use decode::p25::HEAD_LEN;
+pub use decode::p25::P25_TAG;
+pub use decode::p25::VOICE_SECONDS;
+pub use decode::p25::decoded;
+pub use decode::p25::encode_frame;
+use decode::p25::{self, P25Frame};
+use decode::p25::{Duid, Encryption, LinkControl};
+pub use decode::p25::{SYNC_TOLERANCE, WINDOW};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
 use dsp::m17::rrc_taps;
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::p25::BAUD;
+pub use identify::p25::CHANNEL_WIDTH_HZ;
+pub use identify::p25::DEFAULT_HZ;
+pub use identify::p25::P25;
+pub use identify::p25::{AUDIO_HZ, DEVIATION_HZ, RRC_ALPHA};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
-/// The P25 national interoperability calling channel, VCALL10, and only the
-/// default before the scanner table says where to listen.
-pub const DEFAULT_HZ: f64 = 155_752_500.0;
-
-/// 12.5 kHz channel grid.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// Symbol rate.
-const BAUD: f64 = 4_800.0;
-
-/// Discriminator output rate: ten samples a symbol.
-const AUDIO_HZ: f64 = 48_000.0;
-
-/// Nominal outer-symbol deviation: C4FM keys +-1800 Hz and +-600 Hz. Nothing
-/// downstream depends on the exact value, since the slicer fits its own
-/// levels.
-const DEVIATION_HZ: f64 = 1_800.0;
-
 /// One-sided filter cutoff, wide enough for the outer symbols and the
 /// transmitter's drift.
 const FILTER_CUTOFF_HZ: f64 = 7_000.0;
-
-/// Roll-off of the raised cosine P25 shapes its symbols with, and so of the
-/// matched filter here (TIA-102.BAAA clause 6).
-const RRC_ALPHA: f64 = 0.2;
-
-/// Wrong dibits tolerated in a 48-bit sync word. Two of twenty-four: with
-/// three the false match rate off noise stops being negligible, and a frame
-/// needing more than two put back has a network identifier that will not
-/// pass its BCH either.
-const SYNC_TOLERANCE: usize = 2;
-
-/// Symbols held before the framer will slice: a whole voice frame, because
-/// the four levels are fitted over the window and a sync word carries only
-/// the outer two.
-const WINDOW: usize = p25::LDU_DIBITS;
 
 /// Channel samples kept behind the symbol clock, in seconds: the framer
 /// reads a frame once the one after it has arrived and keeps a frame of
 /// history behind the hunt, so a frame's own samples are up to three frames
 /// old by the time its packet is built.
 const KEEP_S: f64 = (4 * p25::LDU_DIBITS) as f64 / BAUD;
-
-/// Tag identifying a packet body this node wrote. "P1".
-///
-/// The body is what the frame said about itself: the network access code, the
-/// data unit id, and where the frame carried identities, those. The link
-/// control or encryption sync it was read from travels with it, so a reader
-/// later can take more out of the same bytes.
-const P25_TAG: [u8; 2] = *b"P1";
-
-/// Tag, NAC, data unit id, flags, destination, source.
-const HEAD_LEN: usize = 2 + 2 + 1 + 1 + 4 + 4;
-
-const FLAG_HAVE_LC: u8 = 0x01;
-const FLAG_GROUP: u8 = 0x02;
-const FLAG_ENCRYPTED: u8 = 0x04;
-const FLAG_EMERGENCY: u8 = 0x08;
-const FLAG_HAVE_ES: u8 = 0x10;
-
-/// Speech is IMBE at 4400 bit/s under 2800 of FEC, and P25 phase 1 has no
-/// other vocoder.
-const CODEC: &str = "IMBE 4400";
-
-/// One voice frame is nine IMBE frames of 20 ms.
-const VOICE_SECONDS: f64 = 0.18;
-
-/// What one frame turned out to be.
-pub struct P25Frame {
-    /// Absolute symbol index the sync word began at.
-    pub at: usize,
-    pub nac: u16,
-    pub duid: Duid,
-    pub lc: Option<LinkControl>,
-    pub es: Option<Encryption>,
-}
-
-/// Serialise a frame as the bytes that reach the bus.
-fn encode_frame(f: &P25Frame) -> Vec<u8> {
-    let mut v = P25_TAG.to_vec();
-    v.extend_from_slice(&f.nac.to_be_bytes());
-    v.push(f.duid.as_bits());
-    let mut flags = 0u8;
-    let (mut dst, mut src) = (0u32, 0u32);
-    if let Some(lc) = &f.lc {
-        flags |= FLAG_HAVE_LC;
-        if let Some(tg) = lc.talkgroup() {
-            flags |= FLAG_GROUP;
-            dst = u32::from(tg);
-        } else if let Some(t) = lc.target() {
-            dst = t;
-        }
-        src = lc.source().unwrap_or(0);
-        if lc.encrypted() {
-            flags |= FLAG_ENCRYPTED;
-        }
-        if lc.emergency() {
-            flags |= FLAG_EMERGENCY;
-        }
-    }
-    if let Some(es) = &f.es {
-        flags |= FLAG_HAVE_ES;
-        if !es.clear() {
-            flags |= FLAG_ENCRYPTED;
-        }
-    }
-    v.push(flags);
-    v.extend_from_slice(&dst.to_be_bytes());
-    v.extend_from_slice(&src.to_be_bytes());
-    if let Some(lc) = &f.lc {
-        v.extend_from_slice(&lc.bytes);
-    } else if let Some(es) = &f.es {
-        v.extend_from_slice(&es.mi);
-        v.push(es.algid);
-        v.extend_from_slice(&es.kid.to_be_bytes());
-    }
-    v
-}
-
-/// Recognise and describe a P25 row for the packet log. `None` for anything
-/// this node did not write, so it is safe to try on every frame.
-///
-/// A voice frame is 180 ms of the channel and says so; where it carried the
-/// link control it names the talkgroup and the radio, which is what puts the
-/// call in the call list rather than only in the log. Nothing here is written
-/// by a person, so nothing is marked as written.
-pub fn p25_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if bytes.len() < HEAD_LEN || bytes[..2] != P25_TAG {
-        return None;
-    }
-    let nac = u16::from_be_bytes([bytes[2], bytes[3]]);
-    let duid = Duid::from_bits(bytes[4]);
-    let flags = bytes[5];
-    let dst = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
-    let src = u32::from_be_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
-    let payload = &bytes[HEAD_LEN..];
-
-    let mut fields: Vec<(String, Value)> = vec![
-        ("nac".to_string(), Value::Text(format!("{nac:03X}"))),
-        ("frame".to_string(), Value::Text(duid.name().to_string())),
-    ];
-    if flags & FLAG_HAVE_LC != 0 {
-        fields.push(("to".to_string(), Value::Text(dst.to_string())));
-        fields.push(("from".to_string(), Value::Text(src.to_string())));
-        fields.push((
-            "call_type".to_string(),
-            Value::Text(if flags & FLAG_GROUP != 0 { "group" } else { "private" }.to_string()),
-        ));
-        if flags & FLAG_EMERGENCY != 0 {
-            fields.push(("emergency".to_string(), Value::Bool(true)));
-        }
-    }
-    if flags & FLAG_HAVE_ES != 0 && payload.len() == 12 {
-        let (algid, kid) = (payload[9], u16::from_be_bytes([payload[10], payload[11]]));
-        if algid != Encryption::CLEAR {
-            fields.push(("algorithm".to_string(), Value::Text(p25::algorithm(algid).to_string())));
-            fields.push(("key_id".to_string(), Value::Int(i64::from(kid))));
-        }
-    }
-    if flags & FLAG_ENCRYPTED != 0 {
-        fields.push(("encrypted".to_string(), Value::Bool(true)));
-    }
-    if duid.voice() {
-        fields.push(("voice".to_string(), Value::Bool(true)));
-        fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
-        fields.push(("seconds".to_string(), Value::Float(VOICE_SECONDS)));
-        fields.push(("live".to_string(), Value::Bool(true)));
-    }
-
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(duid.label(), center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4)
-        // The network identifier passed its BCH and, on a voice frame, the
-        // words passed Hamming and Reed-Solomon; nothing reaches here that
-        // did not.
-        .with_crc(Some(true));
-    if flags & FLAG_HAVE_LC != 0 {
-        use pipeline::event::Party;
-        let to = if flags & FLAG_GROUP != 0 {
-            Party::group(dst.to_string())
-        } else {
-            Party::unit(dst.to_string())
-        };
-        d.link = Some(pipeline::event::Link::between(Party::unit(src.to_string()), to));
-        d.identity = Some(common::Identity::new("p25", src.to_string()));
-    }
-    if duid.voice() {
-        d.airtime = Some(common::Airtime {
-            seconds: VOICE_SECONDS,
-            voice: true,
-            live: true,
-            secrecy: if flags & FLAG_ENCRYPTED != 0 {
-                common::Secrecy::Encrypted(None)
-            } else {
-                common::Secrecy::Clear
-            },
-            codec: Some(CODEC),
-        });
-    }
-    Some(d)
-}
-
-/// Finds frames in the symbol stream and reads what they carry.
-///
-/// A rolling window of symbol values with an absolute index, so a frame whose
-/// sync arrived in one block is read when the rest of it arrives in the next.
-/// Each frame is found by its own sync word rather than by a clock: P25 puts
-/// frames back to back with no gaps, and a hunt costs one comparison a symbol
-/// where a predicted boundary would need every frame length in the standard.
-struct Framer {
-    marks: Vec<f32>,
-    base: usize,
-    scan: usize,
-    /// Which way up the discriminator is, once a frame has settled it.
-    polarity: Option<bool>,
-}
-
-impl Framer {
-    fn new() -> Self {
-        Self { marks: Vec::new(), base: 0, scan: 0, polarity: None }
-    }
-
-    fn reset(&mut self) {
-        self.marks.clear();
-        self.base = 0;
-        self.scan = 0;
-        self.polarity = None;
-    }
-
-    /// Level index to dibit: P25 sends +3 as 01, +1 as 00, -1 as 10 and -3
-    /// as 11 (TIA-102.BAAA clause 6.2).
-    fn dibit(level: u8, flip: bool) -> u8 {
-        match if flip { 3 - level } else { level } {
-            3 => 1,
-            2 => 0,
-            1 => 2,
-            _ => 3,
-        }
-    }
-
-    /// Append recovered symbols and pull out the frames they complete.
-    fn push(&mut self, syms: &[f32], out: &mut Vec<P25Frame>) {
-        self.marks.extend_from_slice(syms);
-        if self.marks.len() < WINDOW {
-            return;
-        }
-        let Some(levels) = dsp::c4fm::slice(&self.marks) else {
-            return;
-        };
-        let mut i = self.scan.saturating_sub(self.base);
-        'hunt: while i + p25::HEAD_DIBITS + p25::SYNC_DIBITS.len() <= levels.len() {
-            let polarities: [bool; 2] = match self.polarity {
-                Some(p) => [p, p],
-                None => [false, true],
-            };
-            let mut read = None;
-            for flip in polarities {
-                let wrong = p25::SYNC_DIBITS
-                    .iter()
-                    .enumerate()
-                    .filter(|(k, d)| Self::dibit(levels[i + k], flip) != **d)
-                    .count();
-                if wrong > SYNC_TOLERANCE {
-                    continue;
-                }
-                // A voice frame is only read once all of it has arrived; the
-                // scan stays where it is until then.
-                let want = (i + p25::LDU_DIBITS).min(levels.len());
-                let dibits: Vec<u8> =
-                    levels[i..want].iter().map(|l| Self::dibit(*l, flip)).collect();
-                let data = p25::status_free(&dibits);
-                let Some(nid) = p25::nid(&data) else { continue };
-                if nid.duid.voice() && data.len() < p25::LDU_DATA_DIBITS {
-                    // The rest of the frame has not arrived. Stop here with
-                    // the hunt where it is, so the next block reads it once.
-                    break 'hunt;
-                }
-                let words = p25::words(&data);
-                let (lc, es) = match (nid.duid, words) {
-                    (Duid::Voice1, Some(w)) => (LinkControl::from_words(&w), None),
-                    (Duid::Voice2, Some(w)) => (None, Encryption::from_words(&w)),
-                    _ => (None, None),
-                };
-                // A link control that is itself enciphered describes nothing,
-                // so it is carried but not read for identities.
-                let lc = lc.filter(|lc| !lc.protected());
-                read = Some((
-                    flip,
-                    P25Frame { at: self.base + i, nac: nid.nac, duid: nid.duid, lc, es },
-                ));
-                break;
-            }
-            match read {
-                Some((flip, frame)) => {
-                    self.polarity = Some(flip);
-                    out.push(frame);
-                    i += p25::HEAD_DIBITS;
-                }
-                None => i += 1,
-            }
-        }
-        self.scan = self.base + i;
-        // Drain what is behind the hunt, keeping a frame of history so a sync
-        // straddling two blocks is still found.
-        let keep = self.scan.saturating_sub(p25::LDU_DIBITS);
-        if keep > self.base {
-            let drop = (keep - self.base).min(self.marks.len());
-            self.marks.drain(..drop);
-            self.base += drop;
-        }
-    }
-}
 
 pub struct P25Node {
     channel_hz: f64,
@@ -353,7 +65,7 @@ pub struct P25Node {
     fm: FmDemod,
     rrc: FirDecimReal,
     clock: SymbolClock,
-    framer: Framer,
+    framer: p25::Framer,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
@@ -379,7 +91,7 @@ impl P25Node {
             fm: FmDemod::new(AUDIO_HZ, DEVIATION_HZ),
             rrc: FirDecimReal::new(rrc_taps(AUDIO_HZ / BAUD, RRC_ALPHA, 8), 1),
             clock: SymbolClock::new(AUDIO_HZ, BAUD),
-            framer: Framer::new(),
+            framer: p25::Framer::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
@@ -437,7 +149,7 @@ impl Simple for P25Node {
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.rrc = FirDecimReal::new(rrc_taps(audio_rate / BAUD, RRC_ALPHA, 8), 1);
         self.clock = SymbolClock::new(audio_rate, BAUD);
-        self.framer = Framer::new();
+        self.framer = p25::Framer::new();
         self.audio_rate = audio_rate;
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S);
 
@@ -491,41 +203,36 @@ impl Simple for P25Node {
     }
 }
 
-pub struct P25;
-
 impl Protocol for P25 {
     fn id(&self) -> &'static str {
-        "p25"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "P25"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["apco25", "p25p1"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// A 12.5 kHz channel anywhere: P25 is on VHF, UHF, 700 and 800 MHz, and
     /// what makes one a P25 channel is what is keyed on it.
-    fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility])
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        p25_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets]
     }
@@ -616,7 +323,7 @@ mod tests {
                     if let common::PacketBody::Frame(f) = &p.body {
                         assert!(p.rssi_dbfs().is_finite() && p.snr_db().is_finite());
                         assert!(p.samples().is_some_and(|q| !q.samples.is_empty()));
-                        rows.extend(p25_decoded(&f.bytes, common::Hz(p.center_hz())));
+                        rows.extend(decoded(&f.bytes, common::Hz(p.center_hz())));
                     }
                 }
             }
@@ -670,7 +377,7 @@ mod tests {
             lc: Some(LinkControl { bytes: group_lc(), repaired: 0 }),
             es: None,
         });
-        let d = p25_decoded(&bytes, Hz(155_752_500)).expect("a P25 row");
+        let d = decoded(&bytes, Hz(155_752_500)).expect("a P25 row");
         assert_eq!(d.protocol, "P25-Voice");
         let get = |k: &str| {
             d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
@@ -686,8 +393,8 @@ mod tests {
         assert_eq!(air.secrecy, common::Secrecy::Clear);
         // Nobody wrote this, so it is not a message.
         assert!(!d.written);
-        assert!(p25_decoded(b"random", Hz(0)).is_none());
-        assert!(p25_decoded(b"P1", Hz(0)).is_none());
+        assert!(decoded(b"random", Hz(0)).is_none());
+        assert!(decoded(b"P1", Hz(0)).is_none());
     }
 
     /// A keyed call off the node's own front end: every frame of it read, the

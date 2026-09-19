@@ -1,5 +1,5 @@
 use common::C32;
-use nodes::dvbt_nodes::DvbtReceiver;
+use decode::dvbt::DvbtReceiver;
 
 fn main() {
     let raw = std::fs::read("testdata/dvbt_hd_429M_9142857.cs8").expect("fixture");

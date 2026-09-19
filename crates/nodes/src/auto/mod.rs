@@ -960,6 +960,35 @@ impl Node for AutoNode {
     }
 }
 
+/// The setting names this stage reads beyond the ones every watcher takes.
+const LABEL: &str = "label";
+
+/// What the box is called when a description does not name it.
+const DEFAULT_LABEL: &str = "Auto";
+const BANK_CHANNEL_HZ: &str = "bank_channel_hz";
+const BANK_MIN_CHANNELS: &str = "bank_min_channels";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "auto",
+    summary: "Find and decode everything in the span on its own: sources \
+              wherever something transmits, and the span-wide decoders \
+              where the span reaches them",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    let mut cfg = crate::source_nodes::watch_config(
+        s,
+        SourceConfig { open_db: AUTO_OPEN_DB, ..Default::default() },
+    );
+    cfg.bank_channel_hz = s.f64_or(BANK_CHANNEL_HZ, cfg.bank_channel_hz);
+    cfg.bank_min_channels = s.f64_or(BANK_MIN_CHANNELS, cfg.bank_min_channels as f64) as usize;
+    let mut n = AutoNode::new(s.str_or(LABEL, DEFAULT_LABEL), cfg);
+    Node::configure(&mut n, s);
+    Ok(Box::new(n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,7 +1169,7 @@ mod tests {
         let topo = m.graph.topology();
         let node = topo.nodes.iter().find(|x| x.kind == "mode_s").expect("the decoder");
         let fed = node.inputs[0].1.rate;
-        assert!(fed <= 5e6 && fed >= 2e6, "mode s was handed {fed} S/s");
+        assert!((2e6..=5e6).contains(&fed), "mode s was handed {fed} S/s");
 
         // BLE reads a span and cuts its three advertising channels out of
         // it, so it keeps the whole span.
@@ -1860,33 +1889,4 @@ mod tests {
             .expect("a gsm node");
         assert!(gsm.anchored(), "the beacon's timing never reached it");
     }
-}
-
-/// The setting names this stage reads beyond the ones every watcher takes.
-const LABEL: &str = "label";
-
-/// What the box is called when a description does not name it.
-const DEFAULT_LABEL: &str = "Auto";
-const BANK_CHANNEL_HZ: &str = "bank_channel_hz";
-const BANK_MIN_CHANNELS: &str = "bank_min_channels";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "auto",
-    summary: "Find and decode everything in the span on its own: sources \
-              wherever something transmits, and the span-wide decoders \
-              where the span reaches them",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
-    let mut cfg = crate::source_nodes::watch_config(
-        s,
-        SourceConfig { open_db: AUTO_OPEN_DB, ..Default::default() },
-    );
-    cfg.bank_channel_hz = s.f64_or(BANK_CHANNEL_HZ, cfg.bank_channel_hz);
-    cfg.bank_min_channels = s.f64_or(BANK_MIN_CHANNELS, cfg.bank_min_channels as f64) as usize;
-    let mut n = AutoNode::new(s.str_or(LABEL, DEFAULT_LABEL), cfg);
-    Node::configure(&mut n, s);
-    Ok(Box::new(n))
 }

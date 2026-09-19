@@ -580,7 +580,7 @@ fn convert_row(mode: &'static Mode, planes: &[Vec<Vec<u8>>], y: usize, out: &mut
                 // even ones, B-Y on the odd. So a line has half of what it
                 // needs and borrows the other half from the line after it,
                 // which is why conversion runs a line behind the scan.
-                let (cr, cb) = match y % 2 == 0 {
+                let (cr, cb) = match y.is_multiple_of(2) {
                     true => (planes[y][1][x], planes[(y + 1).min(mode.height - 1)][1][x]),
                     false => (planes[y - 1][1][x], planes[y][1][x]),
                 };

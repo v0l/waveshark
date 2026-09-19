@@ -14,40 +14,23 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::mrz;
+pub use decode::mrz::decoded;
 use dsp::fsk::BitSync;
+use identify::Signal;
+pub use identify::mrz::BAND;
+pub use identify::mrz::BAUD;
+pub use identify::mrz::CHANNEL_WIDTH_HZ;
+pub use identify::mrz::Mrz;
+pub use identify::mrz::OCCUPIED_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// Chips a second. Two to a bit.
-pub const BAUD: f64 = 2_400.0;
-
-/// The channel an MRZ is tuned to.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// What the signal occupies.
-pub const OCCUPIED_HZ: f64 = 12_000.0;
-
-/// The meteorological aids band.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// Chips in the longest frame.
-const FRAME_CHIPS: usize = mrz::FRAME_ECEF * 8 * 2;
-
-/// Chips held while looking for a frame: three of them.
-const MAX_CHIPS: usize = FRAME_CHIPS * 3;
-
-/// Chips of the three sync bytes allowed to be wrong. The CRC behind them
-/// refuses what a false sync would produce.
-const SYNC_SLACK: u32 = 4;
-
 pub struct MrzNode {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
-    gather: mrz::Gather,
-    chips: Vec<bool>,
-    scanned: usize,
+    framer: mrz::Framer,
     frames: u64,
 }
 
@@ -62,9 +45,7 @@ impl MrzNode {
         Self {
             sync: None,
             meter: crate::FrameMeter::new(1.0, 0, 0.6),
-            gather: mrz::Gather::new(),
-            chips: Vec::new(),
-            scanned: 0,
+            framer: mrz::Framer::new(),
             frames: 0,
         }
     }
@@ -73,66 +54,6 @@ impl MrzNode {
     pub fn frames(&self) -> u64 {
         self.frames
     }
-
-    fn search(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        let sync = sync_chips();
-        let mut at = self.scanned;
-        while at + sync[0].len() <= self.chips.len() {
-            let Some(inverted) = sync.iter().position(|s| matches(&self.chips, at, s)) else {
-                at += 1;
-                continue;
-            };
-            if at + FRAME_CHIPS > self.chips.len() {
-                self.scanned = at;
-                return out;
-            }
-            let frame = manchester(&self.chips[at..at + FRAME_CHIPS], inverted == 1);
-            match self.gather.take(&frame) {
-                Some(record) => {
-                    self.frames += 1;
-                    let used = at + record.len().saturating_sub(12) * 16;
-                    out.push(record);
-                    self.chips.drain(..used.min(self.chips.len()));
-                    at = 0;
-                    self.scanned = 0;
-                }
-                None => at += 1,
-            }
-        }
-        self.scanned = at;
-        out
-    }
-}
-
-/// The three sync bytes as chips, each way up. Manchester: a one is a fall
-/// and a zero a rise, or the other way about when the receiver has the
-/// signal over.
-fn sync_chips() -> [Vec<bool>; 2] {
-    let upright: Vec<bool> = mrz::SYNC
-        .iter()
-        .flat_map(|b| (0..8).rev().map(move |k| b >> k & 1 != 0))
-        .flat_map(|bit| [bit, !bit])
-        .collect();
-    let inverted = upright.iter().map(|c| !c).collect();
-    [upright, inverted]
-}
-
-fn matches(chips: &[bool], at: usize, want: &[bool]) -> bool {
-    let mut wrong = 0;
-    for (k, &w) in want.iter().enumerate() {
-        wrong += u32::from(chips[at + k] != w);
-        if wrong > SYNC_SLACK {
-            return false;
-        }
-    }
-    true
-}
-
-/// Manchester chips back to bytes, most significant bit first.
-fn manchester(chips: &[bool], inverted: bool) -> Vec<u8> {
-    let bits: Vec<bool> = chips.chunks(2).map(|c| (c[0] && !c[c.len() - 1]) != inverted).collect();
-    bits.chunks(8).map(|b| b.iter().fold(0u8, |v, bit| v << 1 | u8::from(*bit))).collect()
 }
 
 impl Simple for MrzNode {
@@ -163,110 +84,43 @@ impl Simple for MrzNode {
             return Ok(());
         };
         self.meter.feed(iq);
-        s.process(iq, &mut self.chips);
-        for record in self.search() {
+        s.process(iq, self.framer.sink());
+        for record in self.framer.take() {
             o.frames_mut().push(self.meter.frame(record));
         }
-        if self.chips.len() > MAX_CHIPS {
-            let drop = self.chips.len() - MAX_CHIPS;
-            self.chips.drain(..drop);
-            self.scanned = self.scanned.saturating_sub(drop);
-        }
+        self.framer.trim();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.meter.reset();
-        self.chips.clear();
-        self.scanned = 0;
-        self.gather = mrz::Gather::new();
+        self.framer.reset();
         if let Some(s) = &mut self.sync {
             s.reset();
         }
     }
 }
 
-/// What the protocols node makes of a gathered record.
-pub fn mrz_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = mrz::parse(bytes)?;
-    let (h, m, s) = r.utc;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text("MRZ".into())),
-        ("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:02}"))),
-        ("altitude_m".into(), common::Value::Float(r.altitude_m)),
-        ("climb_ms".into(), common::Value::Float(r.climb_ms)),
-        ("speed_kt".into(), common::Value::Float(r.speed_kt)),
-        ("course_deg".into(), common::Value::Float(r.course_deg)),
-    ];
-    if !r.serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
-    }
-    if r.satellites > 0 {
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if let Some((y, mo, d)) = r.date {
-        fields.push(("date".into(), common::Value::Text(format!("{y:04}-{mo:02}-{d:02}"))));
-    }
-
-    let mut d = Decoded::bytes("mrz", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("MRZ, {h:02}:{m:02}:{s:02} UTC"))
-        .with_fields(fields);
-    if !r.serial.is_empty() {
-        d = d.by(common::Identity::new("mrz", r.serial.clone()).made_by("Meteo-Radiy"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // The frame carries sensor counts rather than a battery
-                // voltage; not-a-number is how a track says unread.
-                battery_v: f32::NAN,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct Mrz;
-
 impl Protocol for Mrz {
     fn id(&self) -> &'static str {
-        "mrz"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "mrz"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["mp3h1", "meteo-radiy"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        403_000_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 4.0 * BAUD,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -277,7 +131,7 @@ impl Protocol for Mrz {
         {
             return None;
         }
-        Some(mrz_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -358,15 +212,13 @@ mod tests {
             n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
             let mut got = Vec::new();
             for block in iq.chunks(2048) {
-                let mut chips = Vec::new();
-                n.sync.as_mut().unwrap().process(block, &mut chips);
-                n.chips.extend(chips);
-                got.extend(n.search());
+                n.sync.as_mut().unwrap().process(block, n.framer.sink());
+                got.extend(n.framer.take());
             }
             assert_eq!(got.len(), 1, "{} records, inverted {inverted}", got.len());
             assert_eq!(got[0][..mrz::FRAME_ECEF], frame[..], "not the bytes that were keyed");
 
-            let d = mrz_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
             let p = d.position.expect("a position");
             assert!((p.lat - 53.35).abs() < 1e-6, "{}", p.lat);
             assert!((p.lon + 5.0).abs() < 1e-6, "{}", p.lon);
@@ -391,15 +243,9 @@ mod tests {
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
         let mut frames = 0;
         for block in iq.chunks(4096) {
-            let mut chips = Vec::new();
-            n.sync.as_mut().unwrap().process(block, &mut chips);
-            n.chips.extend(chips);
-            frames += n.search().len();
-            if n.chips.len() > MAX_CHIPS {
-                let drop = n.chips.len() - MAX_CHIPS;
-                n.chips.drain(..drop);
-                n.scanned = n.scanned.saturating_sub(drop);
-            }
+            n.sync.as_mut().unwrap().process(block, n.framer.sink());
+            frames += n.framer.take().len();
+            n.framer.trim();
         }
         assert_eq!(frames, 0, "{frames} frames out of twenty seconds of noise");
     }

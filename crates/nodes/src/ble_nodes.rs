@@ -41,15 +41,16 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::ble as pdu;
+pub use decode::ble::CHANNEL_WIDTH_HZ;
+pub use decode::ble::channel_of;
+pub use decode::ble::decoded;
 use dsp::ble::{ADV_CHANNELS, BleConfig, BleDetector, BleFrame};
+use identify::Signal;
+pub use identify::ble::Ble;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// The width one advertising channel occupies: 1 MHz of modulation with the
-/// guard that puts the neighbours 2 MHz away.
-pub const CHANNEL_WIDTH_HZ: f64 = 2_000_000.0;
 
 /// Where a receiver tunes when it cannot say which channel a frame came from.
 /// The middle of the 2.4 GHz ISM band, which is not an advertising channel.
@@ -60,11 +61,6 @@ pub const BAND_CENTER_HZ: f64 = 2_441_000_000.0;
 /// received is evidence it already carries.
 pub fn is_advertising_channel(center_hz: f64) -> bool {
     channel_of(center_hz).is_some()
-}
-
-/// The advertising channel index a centre names, if it names one.
-pub fn channel_of(center_hz: f64) -> Option<u8> {
-    ADV_CHANNELS.iter().find(|(_, hz)| (hz - center_hz).abs() < 500_000.0).map(|&(ch, _)| ch)
 }
 
 pub struct BleNode {
@@ -176,75 +172,6 @@ impl Simple for BleNode {
         self.det.reset();
     }
 }
-
-/// The decode an advertising PDU becomes.
-///
-/// `None` when the bytes are not a PDU this reads, which is how the packet bus
-/// tells a BLE frame from anything else that arrived on the same centre.
-pub fn ble_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let adv = pdu::parse(bytes)?;
-    let mut fields = adv.fields();
-    // An aircraft's broadcast is not a row about a Bluetooth device that
-    // happens to carry some bytes, so it is named for what it is and its own
-    // fields go in front of the link layer's.
-    let odid: Vec<decode::odid::Parsed> = adv
-        .data
-        .iter()
-        .filter(|s| s.kind == 0x16)
-        .filter_map(|s| decode::odid::from_service_data(&s.value))
-        .flatten()
-        .collect();
-    let protocol = if odid.is_empty() { "BLE-Adv" } else { "OpenDroneID" };
-    if !odid.is_empty() {
-        let mut f = decode::odid::fields(&odid);
-        f.append(&mut fields);
-        fields = f;
-    }
-    let channel = channel_of(center.as_f64());
-    if let Some(ch) = channel {
-        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = pipeline::event::Link {
-        from: Some(pipeline::event::Party::unit(adv.address.to_string())),
-        to: Some(match adv.target {
-            Some(t) => pipeline::event::Party::unit(t.to_string()),
-            None => pipeline::event::Party::broadcast(),
-        }),
-    };
-    let mut who = common::Identity::new("ble", adv.address.to_string());
-    who.name = adv.name.clone();
-    who.vendor = adv.company.and_then(pdu::company_name).map(str::to_string);
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec());
-    if let Some(p) = decode::odid::position(&odid) {
-        d = d.at_position(p);
-    }
-    if let Some(ch) = channel {
-        d = d.on_channel(common::ChannelUse::new(
-            common::ChannelPlan::Ble,
-            u16::from(ch),
-            CHANNEL_WIDTH_HZ as u32,
-        ));
-    }
-    Some(
-        d.with_link(link)
-            .by(who)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Gfsk)
-            // Everything that reaches here passed the link layer's CRC-24 in
-            // the demodulator, which is a real check and not an argument
-            // from plausibility.
-            .with_crc(Some(true)),
-    )
-}
-
-/// BLE advertising as the auto node and the tables know it: whichever of
-/// the three channels the span holds, read off the span because an
-/// advertisement is 80 us of a hopping device that may never be heard
-/// twice, which is not enough for a source to open around.
-pub struct Ble;
 
 /// An advertisement, keyed as pulse timings.
 ///
@@ -402,17 +329,24 @@ fn parse_address(text: &str) -> Option<pdu::Address> {
 
 impl Protocol for Ble {
     fn id(&self) -> &'static str {
-        "ble"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "ble"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["bluetooth"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(ADV_CHANNELS.iter().map(|(_, hz)| *hz).collect())
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 1_000_000 }
     }
@@ -422,7 +356,7 @@ impl Protocol for Ble {
         if !is_advertising_channel(p.center_hz() as f64) {
             return None;
         }
-        Some(ble_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     /// It cuts its three advertising channels out of the span itself, rather
     /// than taking them from the bank the extractor channelizes the span
@@ -437,20 +371,10 @@ impl Protocol for Ble {
     /// half the rate it needs, and a pair of them summed is one channel's
     /// worth of flat response, not two. Widening the bank to suit would
     /// widen it for every source cut from it.
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 4_000_000.0,
-            feed_rate_hz: 8_000_000.0,
-            span_wide: true,
-            families: &[],
-        }
-    }
+
     /// Advertising channel 38, which sits in the gap between the Wi-Fi
     /// channels and is the one of the three least often buried.
-    fn default_hz(&self) -> f64 {
-        2_426_000_000.0
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.0} BLE", hz / 1e6)
     }
@@ -475,6 +399,40 @@ impl Protocol for Ble {
                 .s("rest", "silence"),
         })
     }
+}
+
+/// What the transmit side is set with.
+const NAME: &str = "name";
+const ADDRESS: &str = "address";
+const CHANNEL: &str = "channel";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "ble",
+    summary: "One BLE advertising channel: GFSK at 1 Mbit/s, dewhitening and CRC-24",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub const BLE_TX: StageDesc = StageDesc {
+    name: "ble_tx",
+    summary: "Advertise a name and an address on a BLE advertising channel",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(BleNode::default()))
+}
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    use pipeline::registry::SettingsExt;
+    let mut n = BleTxNode::default();
+    if let Some(a) = parse_address(s.str_or(ADDRESS, "")) {
+        n.address = a;
+    }
+    n.name = s.str_or(NAME, "waveshark").to_string();
+    n.reload();
+    Ok(Box::new(n))
 }
 
 #[cfg(test)]
@@ -556,7 +514,7 @@ mod tests {
         assert_eq!(frames.len(), 3, "{} advertisements off the air", frames.len());
         assert_eq!(rx.accepted(), 3);
         assert_eq!(BleTxNode::default().pdu().len(), 22, "the PDU the stage builds");
-        let d = ble_decoded(&frames[0], Hz(center as u64)).expect("a decode");
+        let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
         assert_eq!(d.protocol, "BLE-Adv");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("waveshark"), "{detail}");
@@ -594,7 +552,7 @@ mod tests {
             0x4f, 0x64, 0x79, 0x73, 0x73, 0x65, 0x79, 0x20, 0x4f, 0x4c, 0x45, 0x44, 0x20, 0x47,
             0x39,
         ];
-        let d = ble_decoded(&pdu, Hz(2_426_000_000)).expect("a decode");
+        let d = decoded(&pdu, Hz(2_426_000_000)).expect("a decode");
         assert_eq!(d.protocol, "BLE-Adv");
         assert_eq!(d.crc_ok, Some(true));
         assert!(d.detail.as_deref().unwrap().contains("6C:70:CB:EF:72:4D"));
@@ -623,45 +581,11 @@ mod tests {
         pdu.extend_from_slice(&sd);
         pdu[1] = (pdu.len() - 2) as u8;
 
-        let d = ble_decoded(&pdu, Hz(2_402_000_000)).expect("a decode");
+        let d = decoded(&pdu, Hz(2_402_000_000)).expect("a decode");
         assert_eq!(d.protocol, "OpenDroneID");
         let detail = d.detail.as_deref().unwrap();
         assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
         assert!(detail.contains("ua_type=multirotor"), "{detail}");
         assert!(detail.contains("66:55:44:33:22:11"), "{detail}");
     }
-}
-
-/// What the transmit side is set with.
-const NAME: &str = "name";
-const ADDRESS: &str = "address";
-const CHANNEL: &str = "channel";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "ble",
-    summary: "One BLE advertising channel: GFSK at 1 Mbit/s, dewhitening and CRC-24",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub const BLE_TX: StageDesc = StageDesc {
-    name: "ble_tx",
-    summary: "Advertise a name and an address on a BLE advertising channel",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(BleNode::default()))
-}
-
-pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    use pipeline::registry::SettingsExt;
-    let mut n = BleTxNode::default();
-    if let Some(a) = parse_address(s.str_or(ADDRESS, "")) {
-        n.address = a;
-    }
-    n.name = s.str_or(NAME, "waveshark").to_string();
-    n.reload();
-    Ok(Box::new(n))
 }

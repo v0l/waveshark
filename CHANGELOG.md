@@ -14,6 +14,8 @@ the code is in the commit log.
 - Test recordings licensed CC BY 4.0, with each fixture's terms in
   `testdata/LICENSE.md`.
 - `set_capture_trigger`, so an agent can arm the raw capture on energy and read what it caught.
+- `identify`, a crate naming what a recording holds from its samples and its
+  tuning, reading every protocol the receiver does without the flow graph.
 - Tuner trim on a stitched receiver, in hertz per tuner, on the radio card.
 - Protocol descriptions read two more checksums: a sum that folds its own
   carry back in, and a nibble sum that starts or ends part way through a

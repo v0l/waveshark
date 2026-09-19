@@ -246,7 +246,7 @@ mod tests {
     /// move.
     fn signal(hz: f64, level: f32, seconds: f64, speech: bool) -> Vec<f32> {
         let n = (RATE * seconds) as usize;
-        let mut phase = vec![0.0f64; 9];
+        let mut phase = [0.0f64; 9];
         (0..n)
             .map(|i| {
                 let t = i as f64 / RATE;

@@ -14,10 +14,14 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
+pub use decode::pocsag::decoded;
 use decode::pocsag::{self, Body};
 use dsp::pocsag::{DEVIATION_HZ, PocsagConfig, PocsagDemod, Transmission};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::pocsag::AUDIO_HZ;
+pub use identify::pocsag::CHANNEL_WIDTH_HZ;
+pub use identify::pocsag::Pocsag;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -27,15 +31,6 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 /// A common UK and European paging channel, and only the default the node is
 /// built with before the scanner table tells it where to listen.
 pub const DEFAULT_HZ: f64 = 153_350_000.0;
-
-/// The channel a POCSAG transmitter occupies: 4.5 kHz deviation at up to 2400
-/// bits per second is about 12.5 kHz by Carson, and the allocations are
-/// 12.5 or 25 kHz.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// Audio rate the discriminator output is decimated to. A whole number of
-/// samples per bit at every rate POCSAG uses: 75, 32 and 16.
-const AUDIO_HZ: f64 = 38_400.0;
 
 pub struct PocsagNode {
     channel_hz: f64,
@@ -140,58 +135,6 @@ impl Simple for PocsagNode {
         self.fm.reset();
         self.demod.reset();
     }
-}
-
-/// The decodes a transmission's codewords become: one per page.
-///
-/// A transmission carries a transmitter's whole queue, so it is several pages
-/// to several pagers, and each is a row of its own. What they share is the
-/// bytes they came out of, which travel with each so that a log holds the
-/// evidence rather than a rendering of it.
-pub fn pocsag_decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    use common::Value;
-    let codewords = Transmission::codewords_from_bytes(bytes);
-    pocsag::parse(&codewords)
-        .into_iter()
-        .map(|m| {
-            let mut fields: Vec<(String, Value)> = vec![
-                ("address".into(), Value::Int(i64::from(m.address))),
-                ("function".into(), Value::Int(i64::from(m.function))),
-            ];
-            let (protocol, text) = match &m.body {
-                Body::Tone => ("POCSAG-Tone", None),
-                Body::Numeric(s) => ("POCSAG-Numeric", Some(s.clone())),
-                Body::Alpha(s) => ("POCSAG-Alpha", Some(s.clone())),
-            };
-            if let Some(t) = &text {
-                fields.push(("message".into(), Value::Text(t.clone())));
-            }
-            let detail = match &text {
-                Some(t) => format!("address={} {t}", m.address),
-                None => format!("address={} tone only", m.address),
-            };
-            let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-                .by(common::Identity::new("pocsag", m.address.to_string()))
-                .with_link(pipeline::event::Link {
-                    from: None,
-                    to: Some(pipeline::event::Party::unit(m.address.to_string())),
-                })
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(common::Modulation::Fsk2)
-                // Every codeword read here either verified against
-                // BCH(31,21) or was corrected by it, which is a real
-                // integrity check rather than a plausibility argument.
-                .with_crc(Some(true));
-            if let Some(t) = text {
-                // A page is written to somebody, whether a person typed it or
-                // an alarm system did: either way it is addressed to whoever
-                // carries the pager.
-                d = d.written().with_text(t);
-            }
-            d
-        })
-        .collect()
 }
 
 /// A page, keyed as the bits of a whole transmission.
@@ -327,18 +270,23 @@ impl Simple for PocsagTxNode {
     }
 }
 
-pub struct Pocsag;
-
 impl Protocol for Pocsag {
     fn id(&self) -> &'static str {
-        "pocsag"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "pager"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Utility, Usage::Ism])
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The widest of the paging allocations, so every narrower claim inside
     /// them is offered a frame first.
     fn frame_claim(&self) -> FrameClaim {
@@ -350,22 +298,12 @@ impl Protocol for Pocsag {
         if !dsp::pocsag::is_pager_band(p.center_hz() as f64) {
             return None;
         }
-        Some(pocsag_decoded(bytes, common::Hz(p.center_hz())))
+        Some(decoded(bytes, common::Hz(p.center_hz())))
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// The amateur DAPNET channel: amateur rather than commercial because
     /// it is the one paging frequency that is the same across Europe.
-    fn default_hz(&self) -> f64 {
-        439_987_500.0
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} pager", hz / 1e6)
     }
@@ -385,6 +323,42 @@ impl Protocol for Pocsag {
                 .f("offset_hz", 0.0),
         })
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "pocsag",
+    summary: "One pager channel: narrowband FM and POCSAG at 512 to 2400 baud",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(PocsagNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
+/// What the page says, and who it is for.
+const ADDRESS: &str = "address";
+const FUNCTION: &str = "function";
+const MESSAGE: &str = "message";
+const BAUD_PARAM: &str = "baud";
+
+pub const POCSAG_TX: StageDesc = StageDesc {
+    name: "pocsag_tx",
+    summary: "Key a page as POCSAG: preamble, batches and the address codeword",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(PocsagTxNode::new(
+        s.f64_or(ADDRESS, 1_234_567.0) as u32,
+        s.f64_or(FUNCTION, 3.0) as u8,
+        s.str_or(MESSAGE, ""),
+        s.f64_or(BAUD_PARAM, 1200.0),
+    )))
 }
 
 #[cfg(test)]
@@ -454,7 +428,7 @@ mod tests {
         }
 
         assert_eq!(frames.len(), 1, "expected one transmission off the air");
-        let decodes = pocsag_decoded(&frames[0], Hz(center as u64));
+        let decodes = decoded(&frames[0], Hz(center as u64));
         assert_eq!(decodes.len(), 1);
         assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
         assert_eq!(decodes[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
@@ -510,7 +484,7 @@ mod tests {
         }
 
         assert_eq!(frames.len(), 1, "one whole transmission in a second and a half");
-        let decodes = pocsag_decoded(&frames[0], Hz(DEFAULT_HZ as u64));
+        let decodes = decoded(&frames[0], Hz(DEFAULT_HZ as u64));
         assert_eq!(decodes.len(), 1);
         assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
         assert_eq!(decodes[0].text.as_deref(), Some("WAVESHARK"));
@@ -565,46 +539,10 @@ mod tests {
         let words: Vec<u32> = contents.into_iter().map(dsp::pocsag::encode_codeword).collect();
         let t = Transmission { codewords: words, baud: 1200, corrected: 0, lost: 0 };
 
-        let decodes = pocsag_decoded(&t.to_bytes(), Hz(DEFAULT_HZ as u64));
+        let decodes = decoded(&t.to_bytes(), Hz(DEFAULT_HZ as u64));
         assert_eq!(decodes.len(), 2);
         assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
         assert_eq!(decodes[1].protocol, "POCSAG-Numeric");
         assert_eq!(decodes[1].text.as_deref(), Some("112"));
     }
-}
-
-/// The carrier this stage is pointed at.
-const CHANNEL_HZ: &str = "channel_hz";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "pocsag",
-    summary: "One pager channel: narrowband FM and POCSAG at 512 to 2400 baud",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(PocsagNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
-}
-
-/// What the page says, and who it is for.
-const ADDRESS: &str = "address";
-const FUNCTION: &str = "function";
-const MESSAGE: &str = "message";
-const BAUD_PARAM: &str = "baud";
-
-pub const POCSAG_TX: StageDesc = StageDesc {
-    name: "pocsag_tx",
-    summary: "Key a page as POCSAG: preamble, batches and the address codeword",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(PocsagTxNode::new(
-        s.f64_or(ADDRESS, 1_234_567.0) as u32,
-        s.f64_or(FUNCTION, 3.0) as u8,
-        s.str_or(MESSAGE, ""),
-        s.f64_or(BAUD_PARAM, 1200.0),
-    )))
 }

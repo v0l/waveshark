@@ -130,7 +130,7 @@ fn a_meter_is_named_in_the_list() {
     }
     let got = frames(&p);
     let (hz, f) = got.first().expect("a frame");
-    let d = nodes::wmbus_nodes::wmbus_decoded(f, Hz(*hz)).expect("a decode");
+    let d = decode::wmbus::decoded(f, Hz(*hz)).expect("a decode");
     assert_eq!(d.protocol, "Wireless-MBus");
     assert!(d.text.as_deref().unwrap_or("").contains("DME Water 84850129"), "{:?}", d.text);
     assert_eq!(d.crc_ok, Some(true));

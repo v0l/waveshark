@@ -21,27 +21,22 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
-use decode::ieee802154 as mac;
+pub use decode::ieee802154::CHANNEL_WIDTH_HZ;
+pub use decode::ieee802154::channel_of;
+pub use decode::ieee802154::decoded;
 use dsp::oqpsk::{
     OQPSK_2450, OqpskConfig, OqpskDetector, OqpskFrame, channel_2450_hz, channels_2450,
 };
+use identify::Signal;
+pub use identify::ieee802154::Ieee802154;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// The width one channel occupies. The modulation is two megahertz wide
-/// between its first nulls and the neighbouring channel is five away.
-pub const CHANNEL_WIDTH_HZ: f64 = 2_000_000.0;
-
 /// Where a receiver tunes when it cannot say which channel a frame came from:
 /// the middle of the band the sixteen channels are spread across.
 pub const BAND_CENTER_HZ: f64 = 2_442_500_000.0;
-
-/// The channel a centre names, if it names one.
-pub fn channel_of(center_hz: f64) -> Option<u8> {
-    channels_2450().into_iter().find(|(_, hz)| (hz - center_hz).abs() < 500_000.0).map(|(c, _)| c)
-}
 
 pub struct Ieee802154Node {
     rate: f64,
@@ -145,87 +140,28 @@ impl Simple for Ieee802154Node {
     }
 }
 
-/// The decode a MAC frame becomes.
-///
-/// `None` when the bytes are not a frame this reads, which is how the packet
-/// bus tells one from anything else that arrived on the same centre.
-pub fn ieee802154_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let f = mac::parse(bytes)?;
-    let mut fields = f.fields();
-    let channel = channel_of(center.as_f64());
-    if let Some(ch) = channel {
-        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = pipeline::event::Link {
-        from: f.source_id().map(pipeline::event::Party::unit),
-        to: Some(if f.dst.is_broadcast() || f.dst == mac::Address::Absent {
-            pipeline::event::Party::broadcast()
-        } else {
-            pipeline::event::Party::unit(f.dst.to_string())
-        }),
-    };
-    let mut d = Decoded::bytes("802.15.4", center, 0.0, bytes.to_vec());
-    if let Some(id) = f.source_id() {
-        let mut who = common::Identity::new("ieee802154", id);
-        // The one durable name a listener gets: a short address is handed
-        // out afresh at every association, and the OUI is in the EUI-64.
-        who.vendor = f.src.oui();
-        d = d.by(who);
-    }
-    if let Some(ch) = channel {
-        // What protects the traffic is the MAC's own statement. A frame
-        // without the security bit is a clear MAC header, which is not a
-        // promise about the Zigbee or Thread payload above it, so an
-        // unsecured frame says nothing rather than saying the network is
-        // open.
-        let secrecy = if f.secured {
-            common::Secrecy::Encrypted(Some("802.15.4 MAC".into()))
-        } else {
-            common::Secrecy::Unsaid
-        };
-        d = d.on_channel(
-            common::ChannelUse::new(
-                common::ChannelPlan::Ieee802154,
-                u16::from(ch),
-                CHANNEL_WIDTH_HZ as u32,
-            )
-            .protected_by(secrecy),
-        );
-    }
-    Some(
-        d.with_link(link)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Oqpsk)
-            // Everything reaching here passed the MAC's CRC-16 in the
-            // demodulator, which is a real check and not an argument from
-            // plausibility.
-            .with_crc(Some(true)),
-    )
-}
-
-/// 802.15.4 as the auto node and the tables know it: whichever of the sixteen
-/// channels the span holds, read off the span because a frame is a
-/// millisecond of a device that may not transmit again for an hour, which is
-/// not enough for a source to open around.
-pub struct Ieee802154;
-
 impl Protocol for Ieee802154 {
     fn id(&self) -> &'static str {
-        "ieee802154"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "802.15.4"
+        Signal::label(self)
     }
-    /// The three things carried on it, because that is what a person types.
     fn aliases(&self) -> &'static [&'static str] {
-        &["zigbee", "thread", "matter"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Channels(channels_2450().into_iter().map(|(_, hz)| hz).collect())
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
+    /// The three things carried on it, because that is what a person types.
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: CHANNEL_WIDTH_HZ as u64 }
     }
@@ -235,20 +171,12 @@ impl Protocol for Ieee802154 {
     /// 2480 MHz too, so the claim is narrower than its own channel.
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
         channel_of(p.center_hz() as f64)?;
-        Some(ieee802154_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     /// It cuts its own channels out of the span, for the reason `ble` does:
     /// a bank channel is [`dsp::source::BANK_CHANNEL_HZ`] wide at twice that
     /// rate, and this needs two megahertz at six.
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 6_000_000.0,
-            feed_rate_hz: 8_000_000.0,
-            span_wide: true,
-            families: &[],
-        }
-    }
+
     /// Nothing kept, as the other 2.4 GHz span-wide fronts keep nothing.
     ///
     /// A latched span-wide front end closes its band to the detector from the
@@ -263,9 +191,7 @@ impl Protocol for Ieee802154 {
     }
     /// Channel 11, which is where a Zigbee coordinator starts unless it was
     /// told otherwise.
-    fn default_hz(&self) -> f64 {
-        channel_2450_hz(11).unwrap()
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.0} 802.15.4", hz / 1e6)
     }
@@ -336,7 +262,7 @@ mod tests {
     #[test]
     fn a_frame_becomes_a_row_naming_both_ends() {
         let mpdu = [0x61, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
-        let d = ieee802154_decoded(&mpdu, Hz(2_425_000_000)).expect("a decode");
+        let d = decoded(&mpdu, Hz(2_425_000_000)).expect("a decode");
         assert_eq!(d.protocol, "802.15.4");
         assert_eq!(d.crc_ok, Some(true));
         assert_eq!(d.modulation, Some(common::Modulation::Oqpsk));
@@ -358,7 +284,7 @@ mod tests {
     #[test]
     fn a_secured_frame_names_what_protects_it() {
         let mpdu = [0x69, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
-        let d = ieee802154_decoded(&mpdu, Hz(2_425_000_000)).expect("a decode");
+        let d = decoded(&mpdu, Hz(2_425_000_000)).expect("a decode");
         let ch = d.channel.expect("a channel");
         assert_eq!(ch.secrecy, common::Secrecy::Encrypted(Some("802.15.4 MAC".into())));
     }
@@ -369,7 +295,7 @@ mod tests {
     fn an_extended_source_carries_its_manufacturer() {
         let mut mpdu = vec![0x41, 0xc8, 0x07, 0x34, 0x12, 0x01, 0x00];
         mpdu.extend_from_slice(&[0x44, 0x33, 0x22, 0x11, 0x00, 0x4b, 0x12, 0x00]);
-        let d = ieee802154_decoded(&mpdu, Hz(2_405_000_000)).expect("a decode");
+        let d = decoded(&mpdu, Hz(2_405_000_000)).expect("a decode");
         let who = d.identity.expect("an identity");
         assert_eq!(who.id, "00:12:4B:00:11:22:33:44");
         assert_eq!(who.vendor.as_deref(), Some("00124B"));
@@ -379,7 +305,7 @@ mod tests {
     /// to whatever else claims the frequency.
     #[test]
     fn bytes_that_are_not_a_frame_produce_no_row() {
-        assert!(ieee802154_decoded(&[0x61], Hz(2_405_000_000)).is_none());
+        assert!(decoded(&[0x61], Hz(2_405_000_000)).is_none());
     }
 
     /// The whole path: a beacon request keyed on channel 15, through the

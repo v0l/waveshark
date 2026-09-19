@@ -16,35 +16,21 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
+pub use decode::inmarsat::aero_decoded;
 use decode::inmarsat::{BAND_HZ, aero};
-use dsp::msk::{MskConfig, MskDemod};
+pub use decode::inmarsat::{CARRIER_RATIO, config};
+use dsp::msk::MskDemod;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::{Decoded, media};
+use identify::Signal;
+pub use identify::aero::Aero;
+pub use identify::aero::CHANNEL_WIDTH_HZ;
+pub use identify::aero::DEFAULT_HZ;
+pub use identify::aero::FEED_HZ;
+pub use identify::aero::WORK_HZ;
+use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// One of the aeronautical P channels. Which ones a satellite keys depends
-/// on the beam, so this is only what the node is built with before the
-/// scanner table tells it otherwise.
-pub const DEFAULT_HZ: f64 = 1_545_025_000.0;
-
-/// What one low rate channel occupies: 1200 bits a second of MSK is about
-/// 1.8 kHz, and the channels are on a 5 kHz grid.
-pub const CHANNEL_WIDTH_HZ: f64 = 5_000.0;
-
-/// The audio rate the channel is read at: eight samples a bit at 1200,
-/// sixteen at 600.
-const WORK_HZ: f64 = 9_600.0;
-
-/// The rate to ask the receiver for, which decimates to [`WORK_HZ`] by four.
-const FEED_HZ: f64 = 38_400.0;
-
-/// Where the two tones are centred, as a fraction of the bit rate.
-///
-/// The demodulator counts its bit clock in turns of this carrier, and the
-/// one ratio it is known to read is ACARS's 1800 Hz against 2400 baud.
-const CARRIER_RATIO: f64 = 0.75;
 
 /// Bits a second, which is what tells one P channel from another.
 const RATE_BPS: &str = "rate_bps";
@@ -113,10 +99,6 @@ impl AeroNode {
     pub fn messages(&self) -> u64 {
         self.messages
     }
-}
-
-fn config(rate: aero::Rate) -> MskConfig {
-    MskConfig { baud: rate.baud(), carrier_hz: rate.baud() * CARRIER_RATIO }
 }
 
 impl Simple for AeroNode {
@@ -201,77 +183,30 @@ impl Simple for AeroNode {
     }
 }
 
-/// The row a signal unit or an assembled message becomes.
-///
-/// A signal unit is the satellite talking about itself: a channel
-/// assignment, a log on acknowledgement, a table of frequencies. An
-/// assembled message is ACARS, which is an aircraft's computer and a ground
-/// station's, so neither is `written` and both carry their fields.
-pub fn aero_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    if let Some(block) = aero::acars_block(bytes) {
-        let m = decode::acars::parse(block)?;
-        let mut d = crate::acars_nodes::acars_decoded(&m, block, center);
-        d.protocol = "Aero-ACARS";
-        return Some(d.with_modulation(common::Modulation::Msk));
-    }
-    if bytes.len() != aero::SU_BYTES {
-        return None;
-    }
-    let kind = aero::SuType::of(bytes[0]);
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("unit".into(), common::Value::Text(kind.label().into())),
-        ("type".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
-    ];
-    let mut who = common::Identity::new("aero", "ges");
-    // A user data unit names the aircraft and the ground station; the rest
-    // of the units are the network's own business.
-    if kind == aero::SuType::UserDataInitial {
-        let aes = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]);
-        fields.push(("aes".into(), common::Value::Text(format!("{aes:06X}"))));
-        fields.push(("ges".into(), common::Value::Int(i64::from(bytes[4]))));
-        who = common::Identity::new("icao", format!("{aes:06X}"));
-    }
-    Some(
-        Decoded::bytes("Aero", center, 0.0, bytes.to_vec())
-            .with_modulation(common::Modulation::Msk)
-            .with_crc(Some(aero::su_crc_ok(bytes)))
-            .with_detail(kind.label().to_string())
-            .with_media(media::BYTES)
-            .with_fields(fields)
-            .by(who),
-    )
-}
-
-pub struct Aero;
-
 impl Protocol for Aero {
     fn id(&self) -> &'static str {
-        "aero"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "aero"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["satcom", "aero-l", "satacars"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The L-band downlinks to mobiles. The aeronautical channels sit in the
     /// top of the band, but which ones are keyed depends on the beam, so the
     /// band is the claim.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![(1_545_000_000.0, BAND_HZ.1)])
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: WORK_HZ,
-            feed_rate_hz: FEED_HZ,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} AERO", hz / 1e6)
     }

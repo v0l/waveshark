@@ -32,142 +32,29 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
 use decode::nrf24;
-use dsp::fsk::BitSync;
+pub use decode::nrf24::BAND;
+pub use decode::nrf24::channel_of;
+pub use decode::nrf24::decoded;
+pub use decode::nrf24::{KEEP_BITS, MAX_FRAME_BITS, SPS};
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::nrf24::CHANNEL_WIDTH_HZ;
+pub use identify::nrf24::Nrf24;
+pub use identify::nrf24::WORK_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
-/// Where the chip can tune: a megahertz a step from 2400 MHz, 126 channels.
-pub const BAND: (f64, f64) = (2_400_000_000.0, 2_526_000_000.0);
-
-/// The channel one burst occupies. A 1 Mbit/s link keys about 320 kHz of
-/// deviation, which is a megahertz by Carson, and the channels are spaced a
-/// megahertz apart.
-pub const CHANNEL_WIDTH_HZ: f64 = 1_000_000.0;
-
-/// The two bit rates an XN297 keys. The chip supports no others.
-const BAUDS: [f64; 2] = [250_000.0, 1_000_000.0];
-
-/// Samples a symbol each bit clock is fed, which is where [`BitSync`] stops.
-const SPS: f64 = 4.0;
-
-/// Rate the channel is cut down to before the bit clocks read it: four
-/// samples a symbol at the faster rate, which is where [`BitSync`] stops.
-const WORK_HZ: f64 = 4_000_000.0;
-
-/// The longest frame the chip sends: five address bytes, thirty-two of
-/// payload and the check, behind the preamble.
-const MAX_FRAME_BITS: usize = nrf24::PREAMBLE_BITS + (5 + 32 + 2) * 8;
-
-/// Bits kept behind the search so a frame split across two blocks is still
-/// whole when the second arrives.
-const KEEP_BITS: usize = MAX_FRAME_BITS * 2;
-
 pub struct Nrf24Node {
     channel_hz: f64,
     mixer: Mixer,
     decim: FirDecim,
-    readers: Vec<Reader>,
+    readers: Vec<nrf24::Reader>,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     meter: crate::FrameMeter,
     accepted: u64,
-}
-
-/// One bit rate's clock and the bits it has produced but not yet read a
-/// frame out of.
-struct Reader {
-    /// Down to four samples a symbol for *this* bit rate.
-    ///
-    /// The stream both clocks are handed is four samples a symbol at the
-    /// faster one, which is sixteen at the slower, and a bit clock's channel
-    /// filter is designed against its own baud: at 4 MS/s the 250 kbit
-    /// filter is 119 taps where at 1 MS/s it is 31, and it runs over a
-    /// quarter as many samples. Fifteen times the arithmetic for the same
-    /// bits.
-    decim: Option<FirDecim>,
-    narrow: Vec<common::C32>,
-    sync: BitSync,
-    bits: Vec<bool>,
-    /// Bits dropped off the front, so a frame's position stays a position in
-    /// the stream rather than in what is left of it.
-    dropped: u64,
-    /// Where the search has reached, counted in the same stream positions.
-    /// The tail is kept for a frame that is still arriving, so without this
-    /// the frame at the end of one block is read again out of the next.
-    read_from: u64,
-}
-
-impl Reader {
-    fn new(rate: f64, baud: f64) -> Self {
-        // A GFSK link at modulation index 0.64 occupies about 1.6 times its
-        // baud, and the filter in the bit clock is what keeps the rest of
-        // the channel's noise out of the discriminator.
-        let occupied = 1.6 * baud;
-        let factor = (rate / (baud * SPS)).floor().max(1.0) as usize;
-        let work = rate / factor as f64;
-        Self {
-            decim: (factor > 1).then(|| FirDecim::design_hz(rate, factor, occupied / 2.0, 60.0)),
-            narrow: Vec::new(),
-            sync: BitSync::with_bandwidth(work, baud, occupied),
-            bits: Vec::new(),
-            dropped: 0,
-            read_from: 0,
-        }
-    }
-
-    /// Demodulate a block and hand back every frame that closed inside it,
-    /// each with the bit it started at.
-    fn read(&mut self, iq: &[common::C32], out: &mut Vec<(u64, nrf24::Packet)>) {
-        if !self.sync.usable() {
-            return;
-        }
-        match &mut self.decim {
-            Some(d) => {
-                self.narrow.clear();
-                d.process(iq, &mut self.narrow);
-                self.sync.process(&self.narrow, &mut self.bits);
-            }
-            None => self.sync.process(iq, &mut self.bits),
-        }
-        let mut from = (self.read_from - self.dropped) as usize;
-        while let Some(at) = nrf24::find_preamble(&self.bits, from) {
-            // A preamble too near the end may be a frame still arriving, so
-            // leave it for the next block rather than deciding on half of it.
-            if self.bits.len() - at < MAX_FRAME_BITS {
-                from = at;
-                break;
-            }
-            match nrf24::decode(&self.bits, at) {
-                Some(p) => {
-                    from = at + p.bits();
-                    out.push((self.dropped + at as u64, p));
-                }
-                None => from = at + 1,
-            }
-        }
-        self.read_from = self.dropped + from as u64;
-        let keep = self.bits.len().min(KEEP_BITS);
-        let cut = self.bits.len() - keep;
-        if cut > 0 {
-            self.bits.drain(..cut);
-            self.dropped += cut as u64;
-            self.read_from = self.read_from.max(self.dropped);
-        }
-    }
-
-    fn reset(&mut self) {
-        if let Some(d) = &mut self.decim {
-            d.reset();
-        }
-        self.narrow.clear();
-        self.sync.reset();
-        self.bits.clear();
-        self.dropped = 0;
-        self.read_from = 0;
-    }
 }
 
 impl Default for Nrf24Node {
@@ -183,7 +70,7 @@ impl Nrf24Node {
             // All replaced at negotiation, when the real rate is known.
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(WORK_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
-            readers: BAUDS.iter().map(|b| Reader::new(WORK_HZ, *b)).collect(),
+            readers: nrf24::BAUDS.iter().map(|b| nrf24::Reader::new(WORK_HZ, *b)).collect(),
             mixed: Vec::new(),
             narrow: Vec::new(),
             meter: crate::FrameMeter::new(WORK_HZ, 2_441_000_000, 0.01),
@@ -226,8 +113,8 @@ impl Simple for Nrf24Node {
         }
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.readers = BAUDS.iter().map(|b| Reader::new(work, *b)).collect();
-        if self.readers.iter().all(|r| !r.sync.usable()) {
+        self.readers = nrf24::BAUDS.iter().map(|b| nrf24::Reader::new(work, *b)).collect();
+        if self.readers.iter().all(|r| !r.usable()) {
             return Err(common::Error::other("nrf24 needs four samples a symbol"));
         }
         // Ten milliseconds: a burst is about 200 us and a remote sends one
@@ -274,68 +161,29 @@ impl Simple for Nrf24Node {
     }
 }
 
-/// The channel index a centre names, as the chip's own register value.
-pub fn channel_of(center_hz: f64) -> Option<u8> {
-    let ch = ((center_hz - BAND.0) / 1e6).round();
-    (0.0..=125.0).contains(&ch).then_some(ch as u8)
-}
-
-/// The row a frame off the bus becomes.
-pub fn nrf24_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let p = nrf24::from_on_air(bytes)?;
-    let mut fields = nrf24::fields(&p);
-    if let Some(ch) = channel_of(center.as_f64()) {
-        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
-    }
-    let address =
-        fields.iter().find(|(k, _)| k == "address").map(|(_, v)| v.to_string()).unwrap_or_default();
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    Some(
-        Decoded::bytes("XN297", center, 0.0, bytes.to_vec())
-            .by(common::Identity::new("nrf24", address.clone()))
-            .with_link(pipeline::event::Link {
-                from: Some(pipeline::event::Party::unit(address)),
-                to: None,
-            })
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Gfsk)
-            // The CRC-16 was checked again here, on the bytes in the row,
-            // rather than taken on trust from whatever put them on the bus.
-            .with_crc(Some(true)),
-    )
-}
-
-pub struct Nrf24;
-
 impl Protocol for Nrf24 {
     fn id(&self) -> &'static str {
-        "nrf24"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "nrf24"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["xn297", "shockburst"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    /// The middle of the band, which is where a remote's hop set is centred
-    /// even though no particular packet is sent there.
-    fn default_hz(&self) -> f64 {
-        2_441_000_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 1_000_000.0,
-            feed_rate_hz: WORK_HZ,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
+    /// The middle of the band, which is where a remote's hop set is centred
+    /// even though no particular packet is sent there.
+
     /// A remote hops on every packet, so the channel one was heard on says
     /// nothing about where the next one will be.
     fn stickiness(&self) -> Stickiness {
@@ -349,7 +197,7 @@ impl Protocol for Nrf24 {
         if !(BAND.0..BAND.1).contains(&hz) {
             return None;
         }
-        Some(nrf24_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         match channel_of(hz) {
@@ -441,7 +289,7 @@ mod tests {
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "{baud} baud: {} frames", frames.len());
 
-            let d = nrf24_decoded(&frames[0], Hz(channel as u64)).expect("a decode");
+            let d = decoded(&frames[0], Hz(channel as u64)).expect("a decode");
             assert_eq!(d.protocol, "XN297");
             assert_eq!(d.crc_ok, Some(true));
             assert!(!d.written, "a remote is a machine talking about itself");

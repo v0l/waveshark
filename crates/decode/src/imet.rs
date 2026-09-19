@@ -23,6 +23,7 @@
 //! `imet/imet1rs_dft.c`.
 
 use crate::bits::crc16;
+use common::Decoded;
 
 /// The byte every packet starts with.
 pub const SOH: u8 = 0x01;
@@ -224,6 +225,138 @@ fn read_packet(p: &[u8], r: &mut Report, seen_counter: &mut bool) {
             }
         }
         Kind::Xdata => {}
+    }
+}
+
+/// What the protocols node makes of a transmission.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes)?;
+    let serial = r.name(center.as_f64());
+    let mut fields: Vec<(String, common::Value)> =
+        vec![("packet".into(), common::Value::Int(r.counter as i64))];
+    if !serial.is_empty() {
+        fields.push(("serial".into(), common::Value::Text(serial.clone())));
+    }
+    if r.has_position() {
+        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
+        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
+    }
+    if r.speed_kt > 0.0 {
+        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
+        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
+    }
+    if let Some(v) = r.pressure_mbar {
+        fields.push(("pressure_mbar".into(), common::Value::Float(v)));
+    }
+    if let Some(v) = r.temperature_c {
+        fields.push(("temperature_c".into(), common::Value::Float(v)));
+    }
+    if let Some(v) = r.humidity_pct {
+        fields.push(("humidity_pct".into(), common::Value::Float(v)));
+    }
+    if let Some(v) = r.battery_v {
+        fields.push(("battery_v".into(), common::Value::Float(v)));
+    }
+    if let Some((h, m, s)) = r.utc {
+        fields.push(("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:02}"))));
+    }
+
+    let mut d = Decoded::bytes("imet", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Afsk)
+        .with_crc(Some(true))
+        .with_text(r.summary())
+        .with_detail(format!("{} packets, counter {}", r.packets, r.counter))
+        .with_fields(fields);
+    if !serial.is_empty() {
+        d = d.by(common::Identity::new("imet", serial.clone()).made_by("InterMet"));
+    }
+    if r.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: r.altitude_m,
+                climb_ms: r.climb_ms,
+                battery_v: r.battery_v.unwrap_or(f64::NAN) as f32,
+                satellites: r.satellites,
+                descending: r.climb_ms < -1.0,
+                sensors: None,
+            })
+            .at_position(common::Position {
+                lat: r.lat_deg,
+                lon: r.lon_deg,
+                altitude_m: Some(r.altitude_m),
+                speed_kt: Some(r.speed_kt),
+                course_deg: Some(r.course_deg),
+            });
+    }
+    Some(d)
+}
+
+/// Characters off an asynchronous line gathered into transmissions.
+///
+/// Above the waveform and below the payload: the symbols come from any AFSK
+/// slicer, and what leaves is the bytes of one transmission that [`parse`]
+/// read at least one packet out of.
+pub struct Framer {
+    line: dsp::slice::Uart,
+    run: Vec<u8>,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Idle symbols that end a transmission. A stop bit is one symbol of mark
+/// and the next character follows it immediately, so three in a row is the
+/// line resting rather than a gap inside a packet.
+pub const IDLE_SYMBOLS: usize = 3;
+
+/// The longest run worth holding: a second's packets with room to spare.
+pub const MAX_BYTES: usize = 256;
+
+impl Framer {
+    pub fn new() -> Self {
+        Self { line: dsp::slice::Uart::new(8, IDLE_SYMBOLS), run: Vec::new() }
+    }
+
+    /// Feed one symbol, and hand back the transmission where it ended one.
+    pub fn push(&mut self, sym: dsp::afsk::Symbol) -> Option<Vec<u8>> {
+        match self.line.push(sym) {
+            dsp::slice::Read::Byte(b) => {
+                // Bytes before the first `0x01` are the tail of something
+                // missed or noise the slicer clocked, and a packet cannot
+                // start anywhere else.
+                if self.run.is_empty() && b != SOH {
+                    return None;
+                }
+                self.run.push(b);
+                if self.run.len() > MAX_BYTES {
+                    self.run.clear();
+                }
+                None
+            }
+            dsp::slice::Read::Idle => self.take_run(),
+            dsp::slice::Read::Nothing => None,
+        }
+    }
+
+    fn take_run(&mut self) -> Option<Vec<u8>> {
+        if self.run.is_empty() {
+            return None;
+        }
+        let run = std::mem::take(&mut self.run);
+        // Held to what actually checked: a transmission is bytes off an
+        // asynchronous line, and everything after a failed check is framing
+        // that has slipped.
+        let report = parse(&run)?;
+        (report.packets > 0).then_some(run)
+    }
+
+    pub fn reset(&mut self) {
+        self.line.reset();
+        self.run.clear();
     }
 }
 

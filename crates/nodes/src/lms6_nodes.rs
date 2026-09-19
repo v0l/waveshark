@@ -20,53 +20,23 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::lms6;
-use dsp::conv::{Code, Ends, Viterbi};
+pub use decode::lms6::decoded;
 use dsp::fsk::BitSync;
+use identify::Signal;
+pub use identify::lms6::BAND;
+pub use identify::lms6::BAUD;
+pub use identify::lms6::CHANNEL_WIDTH_HZ;
+pub use identify::lms6::Lms6;
+pub use identify::lms6::OCCUPIED_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// Coded bits a second. Half of them survive the trellis, so the frame rate
-/// is one a second.
-pub const BAUD: f64 = 4_800.0;
-
-/// The channel an LMS6 is tuned to.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// What the signal occupies.
-pub const OCCUPIED_HZ: f64 = 12_000.0;
-
-/// The meteorological aids band.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// This sonde's own rate 1/2 code: constraint seven, and neither of the two
-/// polynomials every other standard here uses.
-const CODE: Code = Code { constraint: 7, polys: &[0x4F, 0x6D] };
-
-/// Bytes in a block: the sync and the Reed-Solomon codeword.
-const BLOCK: usize = lms6::BLOCK_SYNC.len() + lms6::CODEWORD;
-
-/// Bits in a block once the trellis has run, and coded bits on the air. One
-/// byte of tail is read with it, as the decoder it came from does, so the
-/// last bits of the block have something behind them in the trellis.
-const BLOCK_BITS: usize = (BLOCK + 1) * 8;
-const CODED_BITS: usize = BLOCK_BITS * 2;
-
-/// Coded bits held while looking for a block: two blocks and a bit.
-const MAX_BITS: usize = CODED_BITS * 2;
-
-/// Coded bits of the sync allowed to be wrong. The Reed-Solomon behind it
-/// refuses what a false sync produces, and a sonde at the edge of reception
-/// loses a few.
-const SYNC_SLACK: u32 = 8;
-
 pub struct Lms6Node {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
-    bits: Vec<bool>,
-    /// Coded bits already searched and known not to start a block.
-    scanned: usize,
+    framer: lms6::Framer,
     frames: u64,
 }
 
@@ -81,8 +51,7 @@ impl Lms6Node {
         Self {
             sync: None,
             meter: crate::FrameMeter::new(1.0, 0, 0.6),
-            bits: Vec::new(),
-            scanned: 0,
+            framer: lms6::Framer::new(),
             frames: 0,
         }
     }
@@ -90,91 +59,6 @@ impl Lms6Node {
     /// Frames whose own check held.
     pub fn frames(&self) -> u64 {
         self.frames
-    }
-
-    fn search(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        let sync = sync_bits();
-        let mut at = self.scanned;
-        while at + sync.len() <= self.bits.len() {
-            let Some(inverted) = matches(&self.bits, at, &sync) else {
-                at += 1;
-                continue;
-            };
-            if at + CODED_BITS > self.bits.len() {
-                self.scanned = at;
-                return out;
-            }
-            match self.read_block(at, inverted) {
-                Some(frame) => {
-                    self.frames += 1;
-                    out.push(frame);
-                    self.bits.drain(..at + CODED_BITS);
-                    at = 0;
-                    self.scanned = 0;
-                }
-                None => at += 1,
-            }
-        }
-        self.scanned = at;
-        out
-    }
-
-    /// The block starting at coded bit `at`: the trellis, the block code,
-    /// and the frame inside it.
-    fn read_block(&self, at: usize, inverted: bool) -> Option<Vec<u8>> {
-        // The trellis reads soft values, and what a hard slicer produces is
-        // the same thing with every value at full confidence.
-        let soft: Vec<f32> = self.bits[at..at + CODED_BITS]
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| {
-                // The second of each coded pair goes out inverted, and the
-                // whole stream may be over as well.
-                let bit = b != inverted && i % 2 == 0 || b == inverted && i % 2 == 1;
-                match bit {
-                    true => -1.0,
-                    false => 1.0,
-                }
-            })
-            .collect();
-        let decoded =
-            Viterbi::decode_block(CODE, &soft, dsp::conv::P_1_2, BLOCK_BITS, Ends::Anywhere);
-        let bytes: Vec<u8> =
-            decoded.chunks(8).map(|b| b.iter().fold(0u8, |v, bit| v << 1 | (*bit & 1))).collect();
-        if bytes.len() < BLOCK || bytes[..lms6::BLOCK_SYNC.len()] != lms6::BLOCK_SYNC {
-            return None;
-        }
-        let mut block = bytes[lms6::BLOCK_SYNC.len()..BLOCK].to_vec();
-        lms6::correct(&mut block)?;
-        let frame = block[..lms6::FRAME].to_vec();
-        lms6::parse(&frame).is_some().then_some(frame)
-    }
-}
-
-/// The block sync as it goes out: through the same code the data does, with
-/// the second of each pair inverted.
-fn sync_bits() -> Vec<bool> {
-    let mut enc = dsp::conv::Encoder::new(CODE);
-    let mut coded = Vec::new();
-    for byte in lms6::BLOCK_SYNC {
-        for k in (0..8).rev() {
-            enc.push(byte >> k & 1, &mut coded);
-        }
-    }
-    coded.iter().enumerate().map(|(i, b)| (*b == 1) != (i % 2 == 1)).collect()
-}
-
-/// Whether the sync sits at `at`, and which way up.
-fn matches(bits: &[bool], at: usize, sync: &[bool]) -> Option<bool> {
-    let mut wrong = [0u32; 2];
-    for (k, &want) in sync.iter().enumerate() {
-        wrong[usize::from(bits[at + k] == want)] += 1;
-    }
-    match (wrong[0] <= SYNC_SLACK, wrong[1] <= SYNC_SLACK) {
-        (true, _) => Some(false),
-        (_, true) => Some(true),
-        _ => None,
     }
 }
 
@@ -206,100 +90,43 @@ impl Simple for Lms6Node {
             return Ok(());
         };
         self.meter.feed(iq);
-        s.process(iq, &mut self.bits);
-        for frame in self.search() {
+        s.process(iq, self.framer.sink());
+        for frame in self.framer.take() {
             o.frames_mut().push(self.meter.frame(frame));
         }
-        if self.bits.len() > MAX_BITS {
-            let drop = self.bits.len() - MAX_BITS;
-            self.bits.drain(..drop);
-            self.scanned = self.scanned.saturating_sub(drop);
-        }
+        self.framer.trim();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.meter.reset();
-        self.bits.clear();
-        self.scanned = 0;
+        self.framer.reset();
         if let Some(s) = &mut self.sync {
             s.reset();
         }
     }
 }
 
-/// What the protocols node makes of an LMS6 frame.
-pub fn lms6_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = lms6::parse(bytes)?;
-    let (h, m, s) = r.utc;
-    let serial = format!("{}", r.serial);
-    let fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text("LMS6".into())),
-        ("serial".into(), common::Value::Text(serial.clone())),
-        ("frame".into(), common::Value::Int(r.frame_no as i64)),
-        ("altitude_m".into(), common::Value::Float(r.altitude_m)),
-        ("climb_ms".into(), common::Value::Float(r.climb_ms)),
-        ("speed_kt".into(), common::Value::Float(r.speed_kt)),
-        ("course_deg".into(), common::Value::Float(r.course_deg)),
-        ("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:06.3}"))),
-    ];
-
-    let mut d = Decoded::bytes("lms6", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("LMS6, frame {}", r.frame_no))
-        .with_fields(fields)
-        .by(common::Identity::new("lms6", serial).made_by("Lockheed Martin"));
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // The frame carries no battery voltage.
-                battery_v: f32::NAN,
-                satellites: 0,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct Lms6;
-
 impl Protocol for Lms6 {
     fn id(&self) -> &'static str {
-        "lms6"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "lms6"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["lms6-403", "lockheed"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        403_000_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 4.0 * BAUD,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -308,7 +135,7 @@ impl Protocol for Lms6 {
         if !(BAND.0..BAND.1).contains(&hz) || bytes.len() != lms6::FRAME {
             return None;
         }
-        Some(lms6_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -332,6 +159,7 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use decode::lms6::CODE;
 
     /// A block on the air: the sync and the codeword through the trellis,
     /// with the second of each coded pair inverted.
@@ -399,15 +227,13 @@ mod tests {
             n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
             let mut got = Vec::new();
             for chunk in iq.chunks(2048) {
-                let mut bits = Vec::new();
-                n.sync.as_mut().unwrap().process(chunk, &mut bits);
-                n.bits.extend(bits);
-                got.extend(n.search());
+                n.sync.as_mut().unwrap().process(chunk, n.framer.sink());
+                got.extend(n.framer.take());
             }
             assert_eq!(got.len(), 1, "{} frames, inverted {inverted}", got.len());
             assert_eq!(got[0][..], block[5..5 + lms6::FRAME], "not the bytes that were keyed");
 
-            let d = lms6_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
             assert_eq!(d.field("serial").map(|v| v.to_string()).as_deref(), Some("10597059"));
             let p = d.position.expect("a position");
             assert!((p.lat - 53.35).abs() < 1e-6, "{}", p.lat);
@@ -433,15 +259,9 @@ mod tests {
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
         let mut frames = 0;
         for chunk in iq.chunks(4096) {
-            let mut bits = Vec::new();
-            n.sync.as_mut().unwrap().process(chunk, &mut bits);
-            n.bits.extend(bits);
-            frames += n.search().len();
-            if n.bits.len() > MAX_BITS {
-                let drop = n.bits.len() - MAX_BITS;
-                n.bits.drain(..drop);
-                n.scanned = n.scanned.saturating_sub(drop);
-            }
+            n.sync.as_mut().unwrap().process(chunk, n.framer.sink());
+            frames += n.framer.take().len();
+            n.framer.trim();
         }
         assert_eq!(frames, 0, "{frames} frames out of twenty seconds of noise");
     }

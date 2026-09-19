@@ -51,10 +51,10 @@ pub fn repeated(pkg: &Package, n: usize, gap: Duration) -> Package {
     let mut out = Package::default();
     for r in 0..n {
         out.pulses.extend(pkg.pulses.iter().copied());
-        if r + 1 < n {
-            if let Some(last) = out.pulses.last_mut() {
-                last.gap = last.gap.max(gap.as_micros() as u32);
-            }
+        if r + 1 < n
+            && let Some(last) = out.pulses.last_mut()
+        {
+            last.gap = last.gap.max(gap.as_micros() as u32);
         }
     }
     out

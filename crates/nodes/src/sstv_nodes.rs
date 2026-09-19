@@ -15,37 +15,22 @@
 use crate::NodeSpec;
 use crate::RealFir;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
-use common::bands::Usage;
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::sstv;
 use dsp::resample::Rational;
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::sstv::AUDIO_HZ;
+pub use identify::sstv::CHANNEL_WIDTH_HZ;
+pub use identify::sstv::DEFAULT_HZ;
+pub use identify::sstv::DEVIATION_HZ;
+pub use identify::sstv::Sstv;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 /// What a transmission is called on the video bus, beside "analogue video".
 const SYSTEM: &str = "SSTV";
-
-/// The two metre calling frequency, which is where SSTV lives across Europe.
-/// The shortwave calling frequencies are 14.230 and 7.171, and those want a
-/// sideband demodulator in front rather than this node's own.
-pub const DEFAULT_HZ: f64 = 144_500_000.0;
-
-/// A 2 m FM channel.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// The rate the picture is read at.
-///
-/// Not a free choice: the analysis windows are counted in samples, so the
-/// same recording decoded at 22.05 kHz differs from its 44.1 kHz decode by a
-/// mean of 4.5 counts a channel, and at 11.025 kHz by 6.6.
-const AUDIO_HZ: f64 = 44_100.0;
-
-/// Deviation mapped to full scale on the discriminator. Only the tone scale
-/// depends on it, and the decoder reads frequencies rather than amplitudes,
-/// so this need only be in the right region.
-const DEVIATION_HZ: f64 = 3_000.0;
 
 /// The band an SSTV transmission lives in: 1200 Hz for the sync pulses, 1500
 /// to 2300 for the picture, and 1900 for the calibration leader.
@@ -209,8 +194,6 @@ impl Simple for SstvNode {
         self.rx.reset();
     }
 }
-
-pub struct Sstv;
 
 /// A picture, as the tones that send it.
 ///
@@ -467,34 +450,27 @@ impl Simple for SstvTxNode {
 
 impl Protocol for Sstv {
     fn id(&self) -> &'static str {
-        "sstv"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "sstv"
+        Signal::label(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Video]
     }
     /// Wherever a picture is sent: the two metre calling frequency is the one
     /// with a channel, and the shortwave ones are worked by hand.
-    fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Amateur])
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            // The picture is read off 44.1 kHz of audio and the stage only
-            // decimates, so a stream slower than that is one it cannot
-            // reach, whatever the channel in it is worth.
-            min_rate_hz: AUDIO_HZ,
-            feed_rate_hz: 100_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.3} SSTV", hz / 1e6)
     }

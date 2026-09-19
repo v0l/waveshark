@@ -355,6 +355,35 @@ impl Simple for BankNode {
     }
 }
 
+/// The width of one channel in the bank.
+const CHANNEL_HZ: &str = "channel_hz";
+
+/// The width a bank channelizes to when nothing has said otherwise: the
+/// narrowest ISM sensors are read at.
+const DEFAULT_CHANNEL_HZ: f64 = 31_250.0;
+
+pub const DESC: StageDesc = StageDesc {
+    name: "bank",
+    summary: "Channelize a band and run a burst front end in every \
+              channel of it at once",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let width = s.f64_or(CHANNEL_HZ, DEFAULT_CHANNEL_HZ).max(1.0);
+    // Every tier runs the same graph: what a channel holds is measured and
+    // then routed, rather than assumed from the width the tier was built at.
+    let label = if width >= 1e6 {
+        format!("{:.1} MHz bank", width / 1e6)
+    } else {
+        format!("{:.0} kHz bank", width / 1e3)
+    };
+    let mut n = BankNode::new(label, width, crate::ism_decode_graph);
+    Simple::configure(&mut n, s);
+    Ok(Box::new(n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,33 +445,4 @@ mod tests {
         Node::negotiate(&mut b, &[spec(1_024_000.0)]).unwrap();
         assert_eq!(b.channels(), 34, "1.024 MHz at 31.25 kHz");
     }
-}
-
-/// The width of one channel in the bank.
-const CHANNEL_HZ: &str = "channel_hz";
-
-/// The width a bank channelizes to when nothing has said otherwise: the
-/// narrowest ISM sensors are read at.
-const DEFAULT_CHANNEL_HZ: f64 = 31_250.0;
-
-pub const DESC: StageDesc = StageDesc {
-    name: "bank",
-    summary: "Channelize a band and run a burst front end in every \
-              channel of it at once",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let width = s.f64_or(CHANNEL_HZ, DEFAULT_CHANNEL_HZ).max(1.0);
-    // Every tier runs the same graph: what a channel holds is measured and
-    // then routed, rather than assumed from the width the tier was built at.
-    let label = if width >= 1e6 {
-        format!("{:.1} MHz bank", width / 1e6)
-    } else {
-        format!("{:.0} kHz bank", width / 1e3)
-    };
-    let mut n = BankNode::new(label, width, crate::ism_decode_graph);
-    Simple::configure(&mut n, s);
-    Ok(Box::new(n))
 }

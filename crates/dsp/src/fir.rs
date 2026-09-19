@@ -207,7 +207,7 @@ impl Cascade {
         fine: impl Fn(f64, usize) -> Vec<f32>,
     ) -> Self {
         let mut best: Option<(f64, usize, usize)> = None;
-        for f1 in (1..=factor).filter(|f| factor % f == 0) {
+        for f1 in (1..=factor).filter(|f| factor.is_multiple_of(*f)) {
             let f2 = factor / f1;
             let rate1 = rate / f1 as f64;
             let Some(t1) = coarse_taps(rate, f1, passband_hz, atten_db) else { continue };

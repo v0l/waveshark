@@ -27,35 +27,34 @@ use decode::voice::CallDecoder;
 use std::collections::HashMap;
 
 mod tetra_crypto;
+pub use decode::tetra::TB_BITS_AT;
+pub use decode::tetra::TB_BITS_AT_V1;
+pub use decode::tetra::TB_FLAG_CRC_OK;
+pub use decode::tetra::TB_FLAG_ENCRYPTED;
+pub use decode::tetra::TETRA_CODEC;
+pub use decode::tetra::TRAFFIC_BURST_TAG;
+pub use decode::tetra::traffic_burst_layout;
+pub use decode::tetra::{TRAFFIC_BURST_LEN, TRAFFIC_BURST_LEN_V1};
+pub use decode::tetra::{decoded, traffic_burst_decoded};
 use dsp::tetra::speech;
 use dsp::tetra::{
     BAUD, Block, Burst, BurstKind, NDB_BB1, NDB_BLK1, NDB_BLK2, OCCUPIED_HZ, SLOT_BITS,
     SLOT_SYMBOLS, TetraConfig, TetraDemod, TetraRx,
 };
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::tetra::CHANNEL_WIDTH_HZ;
+pub use identify::tetra::DEMOD_HZ;
+pub use identify::tetra::MIN_RATE_HZ;
+pub use identify::tetra::Tetra;
 use pipeline::event::{Decoded, Request};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use tetra_crypto::Crypto;
 
-/// The raster TETRA carriers sit on.
-pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
-
-/// The least stream rate worth building the demodulator for. The source
-/// extractor's floor of 25 kS/s clears it; the occupied signal only just
-/// fits there, and the demodulator's tests show it still reads.
-pub const MIN_RATE_HZ: f64 = OCCUPIED_HZ;
-
-/// Rate the demodulator likes to run at: four samples a symbol.
-const DEMOD_HZ: f64 = 72_000.0;
-
 /// The rate the TETRA vocoder speaks: 8 kHz.
 pub const VOICE_HZ: f64 = 8_000.0;
-
-/// The one vocoder TETRA speech uses: ACELP at 4.567 kbit/s (ETSI EN 300
-/// 395-2), named as such so a call row says what it is carrying.
-const TETRA_CODEC: &str = "ACELP 4.6k";
 
 /// Two outputs: the packet log, and the speech the traffic slots carry.
 const OUT_PACKETS: usize = 0;
@@ -155,25 +154,6 @@ struct Traffic {
     reported: bool,
 }
 
-/// Tag of a packet body this node writes for one traffic burst, distinct
-/// from the tags [`Event::to_bytes`] uses for signalling.
-///
-/// A call used to be one row saying traffic had started and one saying it
-/// had stopped, and the speech between them went to the bus and nowhere
-/// else. A packet per burst carries the 510 bits as sliced, the timeslot
-/// and marker the node read them under, its samples and its speech, so a
-/// logged call is decodable again by something written later.
-const TRAFFIC_BURST_TAG: u8 = 7;
-/// Body: tag, timeslot, marker, flags, frame, slot counter, the SSI the
-/// marker was given to or zero, the SSI granted transmission or zero, 510
-/// bits packed. Rows logged before the talker was carried are four bytes
-/// shorter and still read.
-const TRAFFIC_BURST_LEN_V1: usize = 1 + 1 + 1 + 1 + 1 + 8 + 4 + SLOT_BITS.div_ceil(8);
-const TRAFFIC_BURST_LEN: usize = TRAFFIC_BURST_LEN_V1 + 4;
-const TB_BITS_AT_V1: usize = 17;
-const TB_BITS_AT: usize = 21;
-const TB_FLAG_CRC_OK: u8 = 0x01;
-const TB_FLAG_ENCRYPTED: u8 = 0x02;
 /// Ring of channel samples behind the demodulator, in slots. A burst is
 /// reported once its whole slot is in the demodulator's buffer, which
 /// holds a slot of history, so a few slots is plenty.
@@ -1011,274 +991,23 @@ pub fn traffic_burst_bits(bytes: &[u8]) -> Option<[u8; SLOT_BITS]> {
     Some(bits)
 }
 
-/// Where the bits start and whether the row carries a talker, by length.
-fn traffic_burst_layout(bytes: &[u8]) -> Option<(usize, bool)> {
-    if bytes.first() != Some(&TRAFFIC_BURST_TAG) {
-        return None;
-    }
-    match bytes.len() {
-        TRAFFIC_BURST_LEN => Some((TB_BITS_AT, true)),
-        TRAFFIC_BURST_LEN_V1 => Some((TB_BITS_AT_V1, false)),
-        _ => None,
-    }
-}
-
-/// The row a traffic burst becomes.
-fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let (_, with_talker) = traffic_burst_layout(bytes)?;
-    let (tn, marker, flags, frame) = (bytes[1], bytes[2], bytes[3], bytes[4]);
-    let slot = u64::from_be_bytes(bytes[5..13].try_into().ok()?);
-    let to = u32::from_be_bytes(bytes[13..17].try_into().ok()?);
-    let from = if with_talker { u32::from_be_bytes(bytes[17..21].try_into().ok()?) } else { 0 };
-    let crc_ok = flags & TB_FLAG_CRC_OK != 0;
-    let mut fields: Vec<(String, Value)> = vec![
-        ("voice".into(), Value::Bool(true)),
-        ("codec".into(), Value::Text(TETRA_CODEC.into())),
-        ("live".into(), Value::Bool(true)),
-        (
-            "to".into(),
-            Value::Text(if to != 0 { to.to_string() } else { format!("marker {marker}") }),
-        ),
-        ("timeslot".into(), Value::Int(tn.into())),
-        ("marker".into(), Value::Int(marker.into())),
-        ("frame".into(), Value::Int(frame.into())),
-        ("slot".into(), Value::Int(slot as i64)),
-        ("crc".into(), Value::Bool(crc_ok)),
-    ];
-    if from != 0 {
-        fields.push(("from".into(), Value::Text(from.to_string())));
-    }
-    // No airtime here: the traffic end row carries the whole call's, and a
-    // list that added both would count it twice.
-    if flags & TB_FLAG_ENCRYPTED != 0 {
-        fields.push(("encrypted".into(), Value::Bool(true)));
-    }
-    Some(Decoded {
-        protocol: "TETRA-Voice",
-        media_type: "application/octet-stream",
-        center,
-        at: 0.0,
-        payload: bytes.to_vec(),
-        text: None,
-        written: false,
-        crc_ok: Some(crc_ok),
-        modulation: Some(common::Modulation::Dqpsk),
-        detail: Some(format!(
-            "traffic burst TS{tn} marker {marker}{}",
-            if flags & TB_FLAG_ENCRYPTED != 0 { ", enciphered" } else { "" }
-        )),
-        fields,
-        types: Vec::new(),
-        position: None,
-        report: common::ReportDetail::Bare,
-        identity: None,
-        channel: None,
-        // A traffic burst is 60 ms of one timeslot, and it says whether the
-        // network had granted the channel for speech. It says nothing about
-        // the cipher: the grant named that, and a burst reporting "clear"
-        // would flip the call back while it was still enciphered.
-        airtime: Some(common::Airtime {
-            seconds: 0.06,
-            voice: true,
-            live: true,
-            secrecy: if flags & TB_FLAG_ENCRYPTED != 0 {
-                common::Secrecy::Encrypted(None)
-            } else {
-                common::Secrecy::Unsaid
-            },
-            codec: Some(TETRA_CODEC),
-        }),
-        // A traffic burst says which usage marker it is on and, once the
-        // network has granted the channel, who was granted it. The party
-        // called is the marker's own until then, which is what the call list
-        // shows too.
-        link: Some(pipeline::event::Link {
-            from: (from != 0).then(|| pipeline::event::Party::unit(from.to_string())),
-            to: Some(if to != 0 {
-                pipeline::event::Party::group(to.to_string())
-            } else {
-                pipeline::event::Party::group(format!("marker {marker}"))
-            }),
-        }),
-    })
-}
-
-/// The row a TETRA broadcast becomes.
-pub fn tetra_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if let Some(d) = traffic_burst_decoded(bytes, center) {
-        return Some(d);
-    }
-    let event = Event::parse(bytes)?;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    // What the call list reads, filled in by the one PDU that knows: a call
-    // control PDU says whether this is a circuit mode call, what protects it
-    // and, at the end, how long it ran.
-    let mut airtime: Option<common::Airtime> = None;
-    let protocol = match &event {
-        Event::Sync(s) => {
-            fields.push(("mcc".into(), Value::Int(s.mcc.into())));
-            fields.push(("mnc".into(), Value::Int(s.mnc.into())));
-            fields.push(("colour".into(), Value::Int(s.colour.into())));
-            fields.push(("frame".into(), Value::Int(s.frame.into())));
-            fields.push(("multiframe".into(), Value::Int(s.multiframe.into())));
-            if s.sharing_mode != 0 {
-                fields.push(("sharing".into(), Value::Int(s.sharing_mode.into())));
-            }
-            "TETRA-Sync"
-        }
-        Event::Sysinfo(s) => {
-            fields.push(("carrier_hz".into(), Value::Float(s.downlink_hz())));
-            fields.push(("la".into(), Value::Int(s.la.into())));
-            fields.push(("subscriber_class".into(), Value::Int(s.subscriber_class.into())));
-            fields.push(("service_details".into(), Value::Int(s.bs_service_details.into())));
-            "TETRA-Sysinfo"
-        }
-        // Named the way the call list reads a decode: `to` and `from` are
-        // the parties, `call_type` says group or private where the PDU
-        // said, `encryption` is what protects the traffic, `seconds` is
-        // how long an over ran and `live` that it is still running.
-        Event::Call(c) => {
-            fields.push(("pdu".into(), Value::Text(c.name().into())));
-            // What the call list is filtered on: a row that is not about a
-            // circuit mode call still belongs in the packet log, but the
-            // list is for voice and a MAC header addressed to somebody is
-            // not evidence of any.
-            if c.is_call() {
-                fields.push(("voice".into(), Value::Bool(true)));
-                fields.push(("codec".into(), Value::Text(TETRA_CODEC.into())));
-                airtime = Some(common::Airtime {
-                    seconds: if c.pdu == TRAFFIC_END { f64::from(c.seconds) } else { 0.0 },
-                    voice: true,
-                    live: c.pdu == TRAFFIC,
-                    secrecy: match c.encryption() {
-                        name if name == "none" => common::Secrecy::Clear,
-                        name => common::Secrecy::Encrypted(Some(name)),
-                    },
-                    codec: Some(TETRA_CODEC),
-                });
-            }
-            match c.address {
-                Address::Ssi(s) | Address::Ussi(s) => {
-                    fields.push(("to".into(), Value::Text(s.to_string())));
-                }
-                Address::UsageMarker(m) => {
-                    fields.push(("to".into(), Value::Text(format!("marker {m}"))));
-                }
-                Address::Smi(s) => fields.push(("smi".into(), Value::Int(s.into()))),
-                Address::EventLabel(e) => fields.push(("event_label".into(), Value::Int(e.into()))),
-            }
-            if let Some(f) = c.from {
-                fields.push(("from".into(), Value::Text(f.to_string())));
-            }
-            if let Some(id) = c.call_id {
-                fields.push(("call_id".into(), Value::Int(id.into())));
-            }
-            if let Some(g) = c.group {
-                fields.push((
-                    "call_type".into(),
-                    Value::Text(if g { "group" } else { "private" }.into()),
-                ));
-            }
-            fields.push(("encryption".into(), Value::Text(c.encryption())));
-            if let Some(m) = c.marker {
-                fields.push(("marker".into(), Value::Int(m.into())));
-            }
-            if let Some(a) = c.alloc {
-                if let Some(band) = a.band {
-                    fields.push(("traffic_hz".into(), Value::Float(a.hz(band))));
-                }
-                fields.push(("timeslot".into(), Value::Int(a.timeslot.into())));
-            }
-            // Traffic is on the timeslot it was seen on; signalling names
-            // the timeslot it was heard on separately, below, since that
-            // is the control channel and not the call's.
-            if matches!(c.pdu, TRAFFIC | TRAFFIC_END) {
-                if let Some(t) = c.time {
-                    fields.push(("timeslot".into(), Value::Int(t.tn.into())));
-                }
-            }
-            if c.pdu == TRAFFIC {
-                fields.push(("live".into(), Value::Bool(true)));
-            }
-            if c.pdu == TRAFFIC_END {
-                fields.push(("seconds".into(), Value::Float(f64::from(c.seconds))));
-            }
-            if let Some(text) = &c.text {
-                fields.push(("text".into(), Value::Text(text.clone())));
-            }
-            if let Some(t) = c.time {
-                fields.push(("slot".into(), Value::Int(t.tn.into())));
-                fields.push(("frame".into(), Value::Int(t.frame.into())));
-            }
-            if c.text.is_some() { "TETRA-SDS" } else { "TETRA-Call" }
-        }
-        Event::Network(n) => {
-            fields.push(("neighbours".into(), Value::Int(n.neighbours.len() as i64)));
-            for nb in &n.neighbours {
-                let hz = nb.band.map(|b| nb.hz(b));
-                let mut s = match hz {
-                    Some(hz) => format!("cell {} at {:.4} MHz", nb.cell_id, hz / 1e6),
-                    None => format!("cell {} carrier {}", nb.cell_id, nb.carrier),
-                };
-                if let Some(la) = nb.la {
-                    s.push_str(&format!(" LA {la}"));
-                }
-                fields.push((format!("cell_{}", nb.cell_id), Value::Text(s)));
-            }
-            "TETRA-Network"
-        }
-        Event::Mm(m) => {
-            let kind = match m.pdu {
-                decode::tetra::D_AUTHENTICATION => "authentication".to_string(),
-                decode::tetra::D_LOCATION_UPDATE_ACCEPT => "location update".to_string(),
-                other => format!("type {other}"),
-            };
-            fields.push(("mm".into(), Value::Text(kind)));
-            if let Some(ssi) = m.address.ssi() {
-                fields.push(("ssi".into(), Value::Int(ssi.into())));
-            }
-            "TETRA-MM"
-        }
-        Event::Aach(_) => return None,
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Dqpsk)
-        // Every block behind an event passed the CRC the standard puts
-        // on it; a burst that failed never became a block.
-        .with_crc(Some(true));
-    // Short data is somebody writing to somebody, which is what puts it in
-    // the message view. Said here rather than left to a reader to guess from
-    // a field called `text`. Only the two text protocol identifiers reach
-    // this: a status message and a location report are not short data anybody
-    // wrote.
-    if protocol == "TETRA-SDS" {
-        d = d.written();
-    }
-    d.airtime = airtime;
-    Some(d)
-}
-
-/// TETRA as the auto node knows it: placed by band, not width. Unlike the
-/// amateur channels its carriers live in licensed downlink allocations, and
-/// its hunt correlates continuously, not worth paying on every 433 MHz
-/// burst.
-pub struct Tetra;
-
 impl Protocol for Tetra {
     fn id(&self) -> &'static str {
-        "tetra"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "tetra"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(dsp::tetra::DOWNLINK_BANDS.to_vec())
+        Signal::placement(self)
     }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// One downlink band, which is inside the UHF paging allocation.
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 10_000_000 }
@@ -1290,25 +1019,15 @@ impl Protocol for Tetra {
         if !dsp::tetra::is_downlink_band(p.center_hz() as f64) {
             return None;
         }
-        Some(tetra_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: MIN_RATE_HZ,
-            feed_rate_hz: 300_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// A carrier is on all day and measures however wide the tuner's
     /// splatter makes it; the band decides, not the width.
     fn accepts_width(&self, _hz: f64, _source_width_hz: f64) -> bool {
         true
     }
-    fn default_hz(&self) -> f64 {
-        390_000_000.0
-    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Packets, PortKind::Voice]
     }
@@ -1321,6 +1040,24 @@ impl Protocol for Tetra {
         };
         decode::tetra::Event::identity_key(&f.bytes)
     }
+}
+
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+/// The bottom of the lower downlink band, which is where a stage with no
+/// carrier of its own sits until something tunes it.
+pub const DEFAULT_HZ: f64 = dsp::tetra::DOWNLINK_BANDS[0].0;
+
+pub const DESC: StageDesc = StageDesc {
+    name: "tetra",
+    summary: "One TETRA downlink carrier: pi/4-DQPSK, sync and broadcast PDUs",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(TetraNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }
 
 #[cfg(test)]
@@ -1400,7 +1137,7 @@ mod tests {
             if let Payload::Packets(ps) = out {
                 for p in ps {
                     if let common::PacketBody::Frame(f) = p.body {
-                        rows.push(tetra_decoded(&f.bytes, Hz(hz as u64)).unwrap());
+                        rows.push(decoded(&f.bytes, Hz(hz as u64)).unwrap());
                     }
                 }
             }
@@ -1494,7 +1231,7 @@ mod tests {
                 for p in ps {
                     if let common::PacketBody::Frame(f) = &p.body {
                         let b = &f.bytes;
-                        let d = tetra_decoded(b, Hz(hz as u64)).unwrap();
+                        let d = decoded(b, Hz(hz as u64)).unwrap();
                         if d.protocol == "TETRA-Voice" {
                             // Every burst carries what it was heard at and
                             // the samples it was sliced from, a slot's worth
@@ -1626,7 +1363,7 @@ mod tests {
             if let Payload::Packets(ps) = out {
                 for p in ps {
                     if let common::PacketBody::Frame(f) = &p.body {
-                        rows.push(tetra_decoded(&f.bytes, Hz(hz as u64)).unwrap());
+                        rows.push(decoded(&f.bytes, Hz(hz as u64)).unwrap());
                     }
                 }
             }
@@ -1809,22 +1546,4 @@ mod tests {
         node.deanonymize(&mut c1);
         assert_eq!(c1.address, Address::Ssi(0x12_3456), "ESI de-anonymised to SSI");
     }
-}
-
-/// The carrier this stage is pointed at.
-const CHANNEL_HZ: &str = "channel_hz";
-
-/// The bottom of the lower downlink band, which is where a stage with no
-/// carrier of its own sits until something tunes it.
-pub const DEFAULT_HZ: f64 = dsp::tetra::DOWNLINK_BANDS[0].0;
-
-pub const DESC: StageDesc = StageDesc {
-    name: "tetra",
-    summary: "One TETRA downlink carrier: pi/4-DQPSK, sync and broadcast PDUs",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(TetraNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
 }

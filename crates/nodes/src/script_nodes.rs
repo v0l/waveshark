@@ -813,7 +813,7 @@ mod tx_tests {
     #[test]
     fn a_described_frame_is_keyed_and_read_back_off_the_air() {
         let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
-        let proto = Scripted::new(Desc::parse(TEST_LINK).unwrap());
+        let _proto = Scripted::new(Desc::parse(TEST_LINK).unwrap());
 
         // key it the way the transmit chain does: the source at the clock's
         // rate, the modulator after it

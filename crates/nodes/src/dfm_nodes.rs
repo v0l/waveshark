@@ -17,48 +17,23 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::dfm;
+pub use decode::dfm::decoded;
 use dsp::fsk::BitSync;
+use identify::Signal;
+pub use identify::dfm::BAND;
+pub use identify::dfm::BAUD;
+pub use identify::dfm::CHANNEL_WIDTH_HZ;
+pub use identify::dfm::Dfm;
+pub use identify::dfm::OCCUPIED_HZ;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 
-/// Chips a second. Two chips to a bit, so the sonde sends 1250 bits a
-/// second.
-pub const BAUD: f64 = 2_500.0;
-
-/// The channel a DFM is tuned to. The meteorological band is stepped in
-/// 10 kHz, and the sonde occupies most of a 12.5 kHz channel.
-pub const CHANNEL_WIDTH_HZ: f64 = 12_500.0;
-
-/// What the signal occupies, which is the intermediate filter zilog80's
-/// decoder defaults to.
-pub const OCCUPIED_HZ: f64 = 12_000.0;
-
-/// The meteorological aids band, the same one the RS41 is launched into.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// Chips in one frame.
-const FRAME_CHIPS: usize = dfm::FRAME_BITS * 2;
-
-/// Chips held while looking for a header: three frames, so a frame
-/// straddling two blocks is never lost and a quiet channel cannot grow.
-const MAX_CHIPS: usize = FRAME_CHIPS * 3;
-
-/// Chips of the header allowed to be wrong. The header is 32 chips and
-/// every nibble behind it is protected, so a false header costs one Hamming
-/// failure and nothing else.
-const HEADER_SLACK: u32 = 4;
-
 pub struct DfmNode {
     sync: Option<BitSync>,
     meter: crate::FrameMeter,
-    gather: dfm::Gather,
-    chips: Vec<bool>,
-    /// Chips already searched and known not to start a header.
-    scanned: usize,
-    frames: u64,
-    records: u64,
+    framer: dfm::Framer,
 }
 
 impl Default for DfmNode {
@@ -69,98 +44,18 @@ impl Default for DfmNode {
 
 impl DfmNode {
     pub fn new() -> Self {
-        Self {
-            sync: None,
-            meter: crate::FrameMeter::new(1.0, 0, 0.6),
-            gather: dfm::Gather::new(),
-            chips: Vec::new(),
-            scanned: 0,
-            frames: 0,
-            records: 0,
-        }
+        Self { sync: None, meter: crate::FrameMeter::new(1.0, 0, 0.6), framer: dfm::Framer::new() }
     }
 
     /// Frames whose every nibble came through the Hamming code.
     pub fn frames(&self) -> u64 {
-        self.frames
+        self.framer.frames()
     }
 
     /// Records gathered, which is what reaches the bus.
     pub fn records(&self) -> u64 {
-        self.records
+        self.framer.records()
     }
-
-    /// Look for headers in the chips held, returning every record a frame
-    /// behind one completed.
-    fn search(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        let header = header_chips();
-        let mut at = self.scanned;
-        while at + header.len() <= self.chips.len() {
-            let Some(inverted) = matches(&self.chips, at, &header) else {
-                at += 1;
-                continue;
-            };
-            if at + FRAME_CHIPS > self.chips.len() {
-                // Not enough of the frame has arrived. Waiting here rather
-                // than walking past it is what keeps a frame that straddles
-                // two blocks.
-                self.scanned = at;
-                return out;
-            }
-            let bits = manchester(&self.chips[at..at + FRAME_CHIPS], inverted);
-            match dfm::read(&bits) {
-                Some(frame) => {
-                    self.frames += 1;
-                    if let Some(record) = self.gather.take(&frame) {
-                        self.records += 1;
-                        out.push(record);
-                    }
-                    self.chips.drain(..at + FRAME_CHIPS);
-                    at = 0;
-                    self.scanned = 0;
-                }
-                None => at += 1,
-            }
-        }
-        self.scanned = at;
-        out
-    }
-}
-
-/// Whether the header sits at `at`, and which way up it is. `Some(true)`
-/// where the chips are inverted, which is how a DFM-06 and a DFM-09 differ.
-fn matches(chips: &[bool], at: usize, header: &[bool]) -> Option<bool> {
-    let mut wrong = [0u32; 2];
-    for (k, &want) in header.iter().enumerate() {
-        let got = chips[at + k];
-        wrong[(got == want) as usize] += 1;
-        if wrong[0] > HEADER_SLACK && wrong[1] > HEADER_SLACK {
-            return None;
-        }
-    }
-    match (wrong[0] <= HEADER_SLACK, wrong[1] <= HEADER_SLACK) {
-        (true, _) => Some(false),
-        (_, true) => Some(true),
-        _ => None,
-    }
-}
-
-/// The header as it arrives: every bit as two chips, `01` for a one.
-fn header_chips() -> Vec<bool> {
-    (0..16)
-        .flat_map(|k| {
-            let bit = dfm::HEADER >> (15 - k) & 1 != 0;
-            [!bit, bit]
-        })
-        .collect()
-}
-
-/// Manchester chips back to bits. The second chip of each pair is the bit,
-/// and a pair that is not a transition is left to the Hamming code: half a
-/// wrong pair is one wrong bit, which is what that code is for.
-fn manchester(chips: &[bool], inverted: bool) -> Vec<bool> {
-    chips.chunks(2).map(|c| c[c.len() - 1] != inverted).collect()
 }
 
 impl Simple for DfmNode {
@@ -191,121 +86,47 @@ impl Simple for DfmNode {
             return Ok(());
         };
         self.meter.feed(iq);
-        s.process(iq, &mut self.chips);
-        for record in self.search() {
+        s.process(iq, self.framer.sink());
+        for record in self.framer.take() {
             o.frames_mut().push(self.meter.frame(record));
         }
-        if self.chips.len() > MAX_CHIPS {
-            let drop = self.chips.len() - MAX_CHIPS;
-            self.chips.drain(..drop);
-            self.scanned = self.scanned.saturating_sub(drop);
-        }
+        self.framer.trim();
         Ok(())
     }
 
     fn reset(&mut self) {
         self.meter.reset();
-        self.chips.clear();
-        self.scanned = 0;
-        self.gather = dfm::Gather::new();
+        self.framer.reset();
         if let Some(s) = &mut self.sync {
             s.reset();
         }
     }
 }
 
-/// What the protocols node makes of a gathered record.
-pub fn dfm_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = dfm::parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text(r.model.label().into())),
-        ("frame".into(), common::Value::Int(r.frame_no as i64)),
-    ];
-    if !r.serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
-    }
-    if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
-    }
-    if r.satellites > 0 {
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if let Some((y, mo, d, h, mi)) = r.date {
-        fields.push((
-            "utc".into(),
-            common::Value::Text(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")),
-        ));
-    }
-
-    // The serial is what a chaser follows and what SondeHub files a flight
-    // under; a sonde that has not sent both halves of it yet is still a
-    // sonde, so it is reported without an identity rather than under a
-    // made-up one.
-    let mut d = Decoded::bytes("dfm", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("{}, frame {}", r.model.label(), r.frame_no))
-        .with_fields(fields);
-    if !r.serial.is_empty() {
-        d = d.by(common::Identity::new("graw", r.serial.clone()).made_by("Graw"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // A DFM sends no battery voltage; not-a-number is how a
-                // sonde track says a reading has not been read.
-                battery_v: f32::NAN,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct Dfm;
-
 impl Protocol for Dfm {
     fn id(&self) -> &'static str {
-        "dfm"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "dfm"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["graw", "dfm09", "dfm17"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The meteorological aids allocation, as for the RS41: 2500 baud FSK in
     /// a 12.5 kHz channel is a common enough shape, and outside this band
     /// none of it is a sonde.
-    fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        403_000_000.0
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 4.0 * BAUD,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -314,7 +135,7 @@ impl Protocol for Dfm {
         if !(BAND.0..BAND.1).contains(&hz) || bytes.len() != dfm::RECORD {
             return None;
         }
-        Some(dfm_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -437,15 +258,13 @@ mod tests {
             n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
             let mut got = Vec::new();
             for block in iq.chunks(2048) {
-                let mut chips = Vec::new();
-                n.sync.as_mut().unwrap().process(block, &mut chips);
-                n.chips.extend(chips);
-                got.extend(n.search());
+                n.sync.as_mut().unwrap().process(block, n.framer.sink());
+                got.extend(n.framer.take());
             }
             assert_eq!(got.len(), 1, "{} records, inverted {inverted}", got.len());
             assert_eq!(n.frames(), 5, "{} frames read", n.frames());
 
-            let d = dfm_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
             assert_eq!(d.field("model").map(|v| v.to_string()).as_deref(), Some("DFM-17"));
             assert_eq!(
                 d.field("serial").map(|v| v.to_string()),
@@ -477,15 +296,9 @@ mod tests {
         n.sync = Some(BitSync::with_bandwidth(rate, BAUD, OCCUPIED_HZ));
         let mut records = 0;
         for block in iq.chunks(4096) {
-            let mut chips = Vec::new();
-            n.sync.as_mut().unwrap().process(block, &mut chips);
-            n.chips.extend(chips);
-            records += n.search().len();
-            if n.chips.len() > MAX_CHIPS {
-                let drop = n.chips.len() - MAX_CHIPS;
-                n.chips.drain(..drop);
-                n.scanned = n.scanned.saturating_sub(drop);
-            }
+            n.sync.as_mut().unwrap().process(block, n.framer.sink());
+            records += n.framer.take().len();
+            n.framer.trim();
         }
         assert_eq!(records, 0, "{records} records out of twenty seconds of noise");
     }

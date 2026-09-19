@@ -14,30 +14,21 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use common::bands::Usage;
-use decode::{aprs, ax25};
+pub use decode::aprs::decoded;
+pub use decode::aprs::round;
+use decode::ax25;
 use dsp::afsk::{AfskConfig, AfskDemod};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::aprs::Aprs;
+pub use identify::aprs::CHANNEL_WIDTH_HZ;
+pub use identify::aprs::DEFAULT_HZ;
+pub use identify::aprs::{AUDIO_HZ, DEVIATION_HZ};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// Where APRS is across Europe. North America uses 144.390 and Japan 144.640;
-/// the scanner configuration decides which, and this is only the default the
-/// node is built with before it is told.
-pub const DEFAULT_HZ: f64 = 144_800_000.0;
-
-/// The channel a 2 m packet transmission occupies.
-pub const CHANNEL_WIDTH_HZ: f64 = 16_000.0;
-
-/// Audio rate the discriminator output is decimated to. Comfortably above the
-/// 2200 Hz upper tone and a rate the correlators are tested at.
-const AUDIO_HZ: f64 = 48_000.0;
-
-/// Peak deviation a 2 m packet channel uses.
-const DEVIATION_HZ: f64 = 3_000.0;
 
 pub struct AprsNode {
     /// The frequency this node is tuned to, which the scanner table sets.
@@ -148,125 +139,28 @@ impl Simple for AprsNode {
     }
 }
 
-/// The decode an AX.25 frame becomes.
-pub fn aprs_decoded(frame: &ax25::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    fields.push(("from".into(), Value::Text(frame.source.to_string())));
-    fields.push(("to".into(), Value::Text(frame.destination.to_string())));
-    if !frame.path.is_empty() {
-        let path: Vec<String> = frame.path.iter().map(|a| a.to_string()).collect();
-        fields.push(("path".into(), Value::Text(path.join(","))));
-    }
-
-    // The destination is not only an address: Mic-E hides half its latitude
-    // in there, so the payload cannot be read without it.
-    let aprs_report =
-        frame.is_ui().then(|| aprs::parse(&frame.info, &frame.destination.call)).flatten();
-
-    let mut fix = None;
-    let mut media = pipeline::event::media::BYTES;
-    let mut written = false;
-    let mut report = common::ReportDetail::Bare;
-    let protocol = match &aprs_report {
-        Some(aprs::Report::Position { position, comment }) => {
-            fix = Some(common::Position {
-                lat: position.lat,
-                lon: position.lon,
-                altitude_m: position.altitude_ft.map(|f| f64::from(f) * 0.3048),
-                speed_kt: position.speed_kt,
-                course_deg: position.course_deg,
-            });
-            report = common::ReportDetail::Aprs {
-                symbol_table: position.symbol_table,
-                symbol_code: position.symbol_code,
-                comment: comment.clone(),
-            };
-            fields.push(("lat".into(), Value::Float(round(position.lat, 5))));
-            fields.push(("lon".into(), Value::Float(round(position.lon, 5))));
-            if let Some(v) = position.course_deg {
-                fields.push(("track_deg".into(), Value::Float(v)));
-            }
-            if let Some(v) = position.speed_kt {
-                fields.push(("ground_speed_kt".into(), Value::Float(v)));
-            }
-            if let Some(v) = position.altitude_ft {
-                fields.push(("altitude_ft".into(), Value::Int(i64::from(v))));
-            }
-            if let Some(c) = comment {
-                fields.push(("comment".into(), Value::Text(c.clone())));
-            }
-            "APRS-Position"
-        }
-        Some(aprs::Report::Status(s)) => {
-            fields.push(("status".into(), Value::Text(s.clone())));
-            "APRS-Status"
-        }
-        Some(aprs::Report::Message { to, text }) => {
-            fields.push(("addressee".into(), Value::Text(to.clone())));
-            fields.push(("message".into(), Value::Text(text.clone())));
-            media = pipeline::event::media::TEXT;
-            // A message is addressed to a station and was typed by whoever
-            // sent it. A position, a status and a telemetry frame are the
-            // radio talking about itself.
-            written = true;
-            "APRS-Message"
-        }
-        Some(aprs::Report::Other(k)) => {
-            fields.push(("data_type".into(), Value::Text(k.to_string())));
-            "APRS-Other"
-        }
-        // Plenty of AX.25 is not APRS at all, and a frame that reached here
-        // passed its check sequence, so it is reported rather than dropped.
-        None => "AX25",
-    };
-
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        // A callsign is both the address and the name: there is nothing else
-        // to call an APRS station.
-        .by(common::Identity::new("aprs", frame.source.to_string()).named(frame.source.to_string()))
-        // The AX.25 addresses. A destination on APRS is usually a software
-        // identifier rather than a station, which is why it is a group: it
-        // is a label many senders share, not somebody listening.
-        .with_link(pipeline::event::Link::between(
-            pipeline::event::Party::unit(frame.source.to_string()),
-            pipeline::event::Party::group(frame.destination.to_string()),
-        ))
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Afsk)
-        // Every frame here passed the X.25 frame check sequence in the
-        // demodulator, which is a real integrity check.
-        .with_crc(Some(true));
-    d.position = fix;
-    d.report = report;
-    d.media_type = media;
-    d.written = written;
-    d
-}
-
-fn round(v: f64, places: i32) -> f64 {
-    let f = 10f64.powi(places);
-    (v * f).round() / f
-}
-
-pub struct Aprs;
-
 impl Protocol for Aprs {
     fn id(&self) -> &'static str {
-        "aprs"
+        Signal::id(self)
     }
+    fn label(&self) -> &'static str {
+        Signal::label(self)
+    }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// A station beacons where it is, which is what the network is for.
     fn reports_position(&self) -> bool {
         true
     }
-    fn label(&self) -> &'static str {
-        "aprs"
-    }
-    fn placement(&self) -> Placement {
-        Placement::Usage(&[Usage::Amateur])
-    }
+
     /// The 2 m packet segment, which is inside the VHF paging allocation:
     /// two protocols really do share that spectrum, and the narrower window
     /// is the better claim.
@@ -278,22 +172,12 @@ impl Protocol for Aprs {
             return None;
         }
         let center = common::Hz(p.center_hz());
-        Some(ax25::parse(bytes).map(|f| vec![aprs_decoded(&f, bytes, center)]).unwrap_or_default())
+        Some(ax25::parse(bytes).map(|f| vec![decoded(&f, bytes, center)]).unwrap_or_default())
     }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 192_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// Where APRS is across Europe. North America is 144.390 and Japan
     /// 144.640.
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.3} APRS", hz / 1e6)
     }
@@ -568,6 +452,42 @@ impl Simple for AprsTxNode {
     }
 }
 
+/// The carrier this stage is pointed at.
+const CHANNEL_HZ: &str = "channel_hz";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "aprs",
+    summary: "One APRS channel: narrowband FM, Bell 202 AFSK, AX.25",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AprsNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
+}
+
+/// Who is beaconing, to whom, by what path, and what they are saying.
+const SOURCE: &str = "source";
+const DESTINATION: &str = "destination";
+const PATH: &str = "path";
+const INFO: &str = "info";
+
+pub const APRS_TX: StageDesc = StageDesc {
+    name: "aprs_tx",
+    summary: "Beacon an AX.25 UI frame as Bell 202 audio, ready for an FM carrier",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AprsTxNode::new(
+        s.str_or(SOURCE, "N0CALL"),
+        s.str_or(DESTINATION, "APRS"),
+        s.str_or(PATH, "WIDE1-1"),
+        s.str_or(INFO, ""),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,7 +567,7 @@ mod tests {
 
         let parsed = ax25::parse(&frames[0]).expect("an AX.25 frame");
         assert_eq!(parsed.source.to_string(), "EI2ABC-9");
-        let d = aprs_decoded(&parsed, &frames[0], Hz(144_800_000));
+        let d = decoded(&parsed, &frames[0], Hz(144_800_000));
         assert_eq!(d.protocol, "APRS-Position");
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
@@ -702,7 +622,7 @@ mod tests {
         assert_eq!(parsed.path.len(), 1);
         assert_eq!(parsed.path[0].to_string(), "WIDE1-1");
         assert_eq!(parsed.info, report.as_bytes());
-        let d = aprs_decoded(&parsed, &frames[0], Hz(center as u64));
+        let d = decoded(&parsed, &frames[0], Hz(center as u64));
         assert_eq!(d.protocol, "APRS-Position");
         let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
@@ -742,44 +662,8 @@ mod tests {
         f[14] = 0x00;
         let parsed = ax25::parse(&f).unwrap();
         assert!(!parsed.is_ui());
-        let d = aprs_decoded(&parsed, &f, Hz(144_800_000));
+        let d = decoded(&parsed, &f, Hz(144_800_000));
         assert_eq!(d.protocol, "AX25");
         assert_eq!(d.crc_ok, Some(true));
     }
-}
-
-/// The carrier this stage is pointed at.
-const CHANNEL_HZ: &str = "channel_hz";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "aprs",
-    summary: "One APRS channel: narrowband FM, Bell 202 AFSK, AX.25",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(AprsNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ))))
-}
-
-/// Who is beaconing, to whom, by what path, and what they are saying.
-const SOURCE: &str = "source";
-const DESTINATION: &str = "destination";
-const PATH: &str = "path";
-const INFO: &str = "info";
-
-pub const APRS_TX: StageDesc = StageDesc {
-    name: "aprs_tx",
-    summary: "Beacon an AX.25 UI frame as Bell 202 audio, ready for an FM carrier",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_tx(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(AprsTxNode::new(
-        s.str_or(SOURCE, "N0CALL"),
-        s.str_or(DESTINATION, "APRS"),
-        s.str_or(PATH, "WIDE1-1"),
-        s.str_or(INFO, ""),
-    )))
 }

@@ -25,6 +25,11 @@ use decode::{ccsds, lrpt};
 use dsp::qpsk::{QpskConfig, QpskDemod};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
+use identify::Signal;
+pub use identify::lrpt::CHANNEL_WIDTH_HZ;
+pub use identify::lrpt::DEFAULT_HZ;
+pub use identify::lrpt::Lrpt;
+pub use identify::lrpt::SATELLITES;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -33,20 +38,6 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 /// channel: the bus tells pictures apart by what produced them and where
 /// they were received, and a pass carries three channels on one frequency.
 const SYSTEMS: [&str; 6] = ["LRPT 1", "LRPT 2", "LRPT 3", "LRPT 4", "LRPT 5", "LRPT 6"];
-
-/// The satellites sending LRPT, and what they send it on. Both operating
-/// satellites key offset QPSK; the first Meteor-M2 keyed plain QPSK on
-/// 137.100 and stopped in 2022, which is what [`Keying::Coherent`] is for.
-pub const SATELLITES: [(&str, f64); 2] =
-    [("Meteor-M2-4", 137_100_000.0), ("Meteor-M2-3", 137_900_000.0)];
-
-/// Meteor-M2-4, which is the newer of the two.
-pub const DEFAULT_HZ: f64 = 137_100_000.0;
-
-/// The channel a satellite occupies: 72 kilosymbols shaped at a roll-off of
-/// 0.6 occupies about 115 kHz, and the published figure for the downlink is
-/// 120.
-pub const CHANNEL_WIDTH_HZ: f64 = 150_000.0;
 
 /// Rows a picture is tall before another starts.
 ///
@@ -249,37 +240,31 @@ impl Simple for LrptNode {
     }
 }
 
-pub struct Lrpt;
-
 impl Protocol for Lrpt {
     fn id(&self) -> &'static str {
-        "lrpt"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "lrpt"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["meteor"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Video]
     }
     /// The two channels the satellites are on and nowhere else.
-    fn placement(&self) -> Placement {
-        Placement::Channels(SATELLITES.iter().map(|(_, hz)| *hz).collect())
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: QpskConfig::LRPT.rate(),
-            feed_rate_hz: QpskConfig::LRPT.rate(),
-            span_wide: false,
-            families: &[],
-        }
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
+
     fn stage_label(&self, hz: f64) -> String {
         match SATELLITES.iter().find(|(_, c)| (c - hz).abs() < CHANNEL_WIDTH_HZ / 2.0) {
             Some((name, _)) => format!("{name} LRPT"),

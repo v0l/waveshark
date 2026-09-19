@@ -20,39 +20,21 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-use decode::eas::{self, Header};
+pub use decode::eas::decoded;
+use decode::eas::{self};
 use dsp::afsk::{AfskBits, AfskConfig, SAME};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::eas::CHANNEL_WIDTH_HZ;
+pub use identify::eas::DEFAULT_HZ;
+pub use identify::eas::Eas;
+pub use identify::eas::WEATHER_CHANNELS_HZ;
+pub use identify::eas::{AUDIO_HZ, DEVIATION_HZ};
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The seven NOAA Weather Radio channels, which is where SAME is on the air
-/// every week whether or not anything is happening.
-pub const WEATHER_CHANNELS_HZ: &[f64] = &[
-    162_400_000.0,
-    162_425_000.0,
-    162_450_000.0,
-    162_475_000.0,
-    162_500_000.0,
-    162_525_000.0,
-    162_550_000.0,
-];
-
-pub const DEFAULT_HZ: f64 = 162_400_000.0;
-
-/// A weather radio channel is wideband FM at 25 kHz spacing.
-pub const CHANNEL_WIDTH_HZ: f64 = 25_000.0;
-
-/// Peak deviation of a weather radio transmitter.
-const DEVIATION_HZ: f64 = 5_000.0;
-
-/// Audio rate the discriminator output is decimated to. The mark tone is
-/// 2083.3 Hz, so this is ten times it and leaves 46 samples in the
-/// correlator's one-symbol window at 520.83 baud.
-const AUDIO_HZ: f64 = 24_000.0;
 
 const CHANNEL_HZ: &str = "channel_hz";
 
@@ -256,90 +238,30 @@ impl Simple for EasNode {
     }
 }
 
-/// One row: what the alert is, who sent it, where it applies and how long it
-/// runs.
-///
-/// A machine wrote it and addressed it to everybody, so it is not `written`:
-/// the fields and the summary are what a person reads, and the message view
-/// is for people writing to people.
-pub fn eas_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let alert = eas::parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = Vec::new();
-    let (detail, text, identity) = match &alert {
-        Header::EndOfMessage => {
-            fields.push(("event".into(), common::Value::Text("end of message".into())));
-            ("end of message".to_string(), "The alert is over.".to_string(), None)
-        }
-        Header::Alert(a) => {
-            fields.push(("event".into(), common::Value::Text(a.event().to_string())));
-            fields.push(("event_code".into(), common::Value::Text(a.event_code.clone())));
-            fields
-                .push(("originator".into(), common::Value::Text(a.originator.label().to_string())));
-            fields.push(("originator_code".into(), common::Value::Text(a.originator_code.clone())));
-            fields.push(("station".into(), common::Value::Text(a.station.clone())));
-            fields.push(("counties".into(), common::Value::Int(a.locations.len() as i64)));
-            fields.push(("area".into(), common::Value::Text(a.where_label())));
-            fields.push((
-                "fips".into(),
-                common::Value::Text(
-                    a.locations.iter().map(|l| l.code()).collect::<Vec<_>>().join(" "),
-                ),
-            ));
-            fields.push(("valid_minutes".into(), common::Value::Int(i64::from(a.valid_minutes))));
-            fields.push(("issued".into(), common::Value::Text(a.issued.label())));
-            (
-                format!("{} from {}", a.event(), a.station),
-                a.summary(),
-                Some(common::Identity::new("eas-station", a.station.clone())),
-            )
-        }
-    };
-    let mut d = Decoded::bytes("EAS", center, 0.0, bytes.to_vec())
-        .with_media(common::media::TEXT)
-        .with_detail(detail)
-        .with_text(text)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Afsk)
-        // SAME carries no check sequence at all. The three copies and the
-        // form of the header are what stand in for one, so there is nothing
-        // here to report as passed.
-        .with_crc(None);
-    if let Some(who) = identity {
-        d = d.by(who);
-    }
-    Some(d)
-}
-
-pub struct Eas;
-
 impl Protocol for Eas {
     fn id(&self) -> &'static str {
-        "eas"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "eas"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["same", "weather radio", "emergency alert"]
+        Signal::aliases(self)
     }
+    fn placement(&self) -> Placement {
+        Signal::placement(self)
+    }
+    fn shape(&self) -> Shape {
+        Signal::shape(self)
+    }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     /// The seven weather radio channels, which is where it can be found
     /// without anybody tuning anything. A station relaying an alert on its
     /// own channel is read by putting this stage on that channel's audio.
-    fn placement(&self) -> Placement {
-        Placement::Channels(WEATHER_CHANNELS_HZ.to_vec())
-    }
-    fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
-    }
-    fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: CHANNEL_WIDTH_HZ,
-            feed_rate_hz: 48_000.0,
-            span_wide: false,
-            families: &[],
-        }
-    }
+
     /// The header says what it is: `ZCZC` and a form nothing else on the bus
     /// has. That matters because an alert rides any FM channel anybody
     /// relays it on, so where it was heard says nothing about it.
@@ -347,7 +269,7 @@ impl Protocol for Eas {
         FrameClaim::Tagged
     }
     fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        eas_decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} EAS", hz / 1e6)
@@ -375,6 +297,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 mod tests {
     use super::*;
     use common::{C32, Hz};
+    use decode::eas::Header;
 
     const RATE: f64 = 48_000.0;
     const AUDIO: f64 = 24_000.0;
@@ -492,7 +415,7 @@ mod tests {
         assert_eq!(n.refused(), 0);
 
         assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
-        let d = eas_decoded(&frames[0].bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0].bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.protocol, "EAS");
         assert_eq!(d.field("event"), Some(&common::Value::Text("Tornado Warning".into())));
         assert_eq!(d.field("event_code"), Some(&common::Value::Text("TOR".into())));
@@ -512,7 +435,7 @@ mod tests {
         let mut n = iq_node(DEFAULT_HZ);
         let frames = run_iq(&mut n, &keyed("NNNN", 3, 0.0, 0.0));
         assert_eq!(frames.len(), 1);
-        let d = eas_decoded(&frames[0].bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
+        let d = decoded(&frames[0].bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
         assert_eq!(d.field("event"), Some(&common::Value::Text("end of message".into())));
         assert_eq!(d.identity, None, "the end of a message names nobody");
     }

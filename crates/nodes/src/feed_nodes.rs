@@ -483,6 +483,29 @@ pub fn beast_message(bytes: &[u8], level: u8, timestamp: u64) -> Result<Vec<u8>>
     Ok(out)
 }
 
+/// The setting names this stage reads.
+const FORMAT: &str = "format";
+const HOST: &str = "host";
+const PORT: &str = "port";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "feed",
+    summary: "Packets from another receiver, over the network",
+    category: Category::Decode,
+    feeds_bus: true,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
+    let kind = feed_kind(s.str_or(FORMAT, FEED_KINDS[0].name))
+        .ok_or_else(|| Error::other("no feed format of that name"))?;
+    let spec = FeedSpec::new(
+        s.str_or(HOST, "127.0.0.1"),
+        s.i64_or(PORT, kind.default_port as i64) as u16,
+        kind,
+    );
+    Ok(Box::new(FeedNode::new(spec)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,27 +661,4 @@ mod tests {
         assert_eq!(got[0].center_hz(), 1_090_000_000);
         assert_eq!(node.frames(), 3);
     }
-}
-
-/// The setting names this stage reads.
-const FORMAT: &str = "format";
-const HOST: &str = "host";
-const PORT: &str = "port";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "feed",
-    summary: "Packets from another receiver, over the network",
-    category: Category::Decode,
-    feeds_bus: true,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn Node>> {
-    let kind = feed_kind(s.str_or(FORMAT, FEED_KINDS[0].name))
-        .ok_or_else(|| Error::other("no feed format of that name"))?;
-    let spec = FeedSpec::new(
-        s.str_or(HOST, "127.0.0.1"),
-        s.i64_or(PORT, kind.default_port as i64) as u16,
-        kind,
-    );
-    Ok(Box::new(FeedNode::new(spec)))
 }

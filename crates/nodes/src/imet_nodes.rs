@@ -16,34 +16,19 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::imet;
+pub use decode::imet::decoded;
 use dsp::afsk::{AfskBits, AfskConfig, Symbol};
 use dsp::{FirDecim, FmDemod, Mixer};
+use identify::Signal;
+pub use identify::imet::AUDIO_HZ;
+pub use identify::imet::BAND;
+pub use identify::imet::CHANNEL_WIDTH_HZ;
+pub use identify::imet::DEVIATION_HZ;
+pub use identify::imet::Imet;
 use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
-
-/// The meteorological aids band, where every sonde is.
-pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
-
-/// The channel an iMet occupies. Wider than the other sondes' because this
-/// one is voice-bandwidth FM with tones in it rather than keyed data.
-pub const CHANNEL_WIDTH_HZ: f64 = 16_000.0;
-
-/// Audio rate the discriminator output is decimated to, as for APRS: well
-/// above the 2200 Hz upper tone.
-const AUDIO_HZ: f64 = 48_000.0;
-
-/// Peak deviation an iMet keys.
-const DEVIATION_HZ: f64 = 3_000.0;
-
-/// Idle symbols that end a transmission. A stop bit is one symbol of mark
-/// and the next character follows it immediately, so three in a row is the
-/// line resting rather than a gap inside a packet.
-const IDLE_SYMBOLS: usize = 3;
-
-/// The longest run worth holding: a second's packets with room to spare.
-const MAX_BYTES: usize = 256;
 
 pub struct ImetNode {
     channel_hz: f64,
@@ -51,13 +36,11 @@ pub struct ImetNode {
     decim: FirDecim,
     fm: FmDemod,
     bits: AfskBits,
-    line: Uart,
+    framer: imet::Framer,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
     symbols: Vec<Symbol>,
-    /// The characters of the transmission being assembled.
-    run: Vec<u8>,
     meter: crate::FrameMeter,
     frames: u64,
 }
@@ -76,12 +59,11 @@ impl ImetNode {
             decim: FirDecim::design_hz(AUDIO_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             fm: FmDemod::new(AUDIO_HZ, DEVIATION_HZ),
             bits: AfskBits::new(AUDIO_HZ, AfskConfig::default()),
-            line: Uart::default(),
+            framer: imet::Framer::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
             symbols: Vec::new(),
-            run: Vec::new(),
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
             frames: 0,
         }
@@ -90,108 +72,6 @@ impl ImetNode {
     /// Transmissions that held at least one packet.
     pub fn frames(&self) -> u64 {
         self.frames
-    }
-
-    /// Feed one symbol, and hand back the transmission where it ended one.
-    fn feed(&mut self, sym: Symbol) -> Option<Vec<u8>> {
-        match self.line.push(sym) {
-            Read::Byte(b) => {
-                // Bytes before the first `0x01` are the tail of something
-                // missed or noise the slicer clocked, and a packet cannot
-                // start anywhere else.
-                if self.run.is_empty() && b != imet::SOH {
-                    return None;
-                }
-                self.run.push(b);
-                if self.run.len() > MAX_BYTES {
-                    self.run.clear();
-                }
-                None
-            }
-            Read::Idle => self.take_run(),
-            Read::Nothing => None,
-        }
-    }
-
-    fn take_run(&mut self) -> Option<Vec<u8>> {
-        if self.run.is_empty() {
-            return None;
-        }
-        let run = std::mem::take(&mut self.run);
-        // Held to what actually checked: a transmission is bytes off an
-        // asynchronous line, and everything after a failed check is framing
-        // that has slipped.
-        let report = imet::parse(&run)?;
-        if report.packets == 0 {
-            return None;
-        }
-        self.frames += 1;
-        Some(run)
-    }
-}
-
-/// What reading one symbol produced.
-enum Read {
-    Byte(u8),
-    /// The line has been resting long enough to end a transmission.
-    Idle,
-    Nothing,
-}
-
-/// An asynchronous line: a start bit, eight data bits least significant
-/// first, and a stop bit.
-///
-/// Its own piece rather than part of the node because nothing about it is
-/// this sonde's: it is how a serial port has worked since teleprinters, and
-/// the next protocol that speaks one can take it.
-#[derive(Default)]
-struct Uart {
-    /// Bits of the character so far, or `None` between characters.
-    partial: Option<(u8, u32)>,
-    idle: usize,
-}
-
-impl Uart {
-    fn push(&mut self, sym: Symbol) -> Read {
-        if sym.quiet {
-            self.partial = None;
-            self.idle += 1;
-            return match self.idle == IDLE_SYMBOLS {
-                true => Read::Idle,
-                false => Read::Nothing,
-            };
-        }
-        match &mut self.partial {
-            // A mark between characters is the line resting.
-            None if sym.mark => {
-                self.idle += 1;
-                match self.idle == IDLE_SYMBOLS {
-                    true => Read::Idle,
-                    false => Read::Nothing,
-                }
-            }
-            // A space between characters is a start bit.
-            None => {
-                self.idle = 0;
-                self.partial = Some((0, 0));
-                Read::Nothing
-            }
-            Some((byte, have)) => {
-                if *have < 8 {
-                    *byte |= u8::from(sym.mark) << *have;
-                    *have += 1;
-                    return Read::Nothing;
-                }
-                // The stop bit. A space here is a framing slip, and the
-                // character it would have made is not a character.
-                let (byte, ok) = (*byte, sym.mark);
-                self.partial = None;
-                match ok {
-                    true => Read::Byte(byte),
-                    false => Read::Nothing,
-                }
-            }
-        }
     }
 }
 
@@ -237,7 +117,8 @@ impl Simple for ImetNode {
         symbols.clear();
         self.bits.process(&audio, &mut symbols);
         for sym in &symbols {
-            if let Some(run) = self.feed(*sym) {
+            if let Some(run) = self.framer.push(*sym) {
+                self.frames += 1;
                 o.frames_mut().push(self.meter.frame(run));
             }
         }
@@ -251,103 +132,31 @@ impl Simple for ImetNode {
         self.decim.reset();
         self.fm.reset();
         self.bits.reset();
-        self.line = Uart::default();
-        self.run.clear();
+        self.framer.reset();
         self.meter.reset();
     }
 }
 
-/// What the protocols node makes of a transmission.
-pub fn imet_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    let r = imet::parse(bytes)?;
-    let serial = r.name(center.as_f64());
-    let mut fields: Vec<(String, common::Value)> =
-        vec![("packet".into(), common::Value::Int(r.counter as i64))];
-    if !serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(serial.clone())));
-    }
-    if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if r.speed_kt > 0.0 {
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-    }
-    if let Some(v) = r.pressure_mbar {
-        fields.push(("pressure_mbar".into(), common::Value::Float(v)));
-    }
-    if let Some(v) = r.temperature_c {
-        fields.push(("temperature_c".into(), common::Value::Float(v)));
-    }
-    if let Some(v) = r.humidity_pct {
-        fields.push(("humidity_pct".into(), common::Value::Float(v)));
-    }
-    if let Some(v) = r.battery_v {
-        fields.push(("battery_v".into(), common::Value::Float(v)));
-    }
-    if let Some((h, m, s)) = r.utc {
-        fields.push(("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:02}"))));
-    }
-
-    let mut d = Decoded::bytes("imet", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Afsk)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("{} packets, counter {}", r.packets, r.counter))
-        .with_fields(fields);
-    if !serial.is_empty() {
-        d = d.by(common::Identity::new("imet", serial.clone()).made_by("InterMet"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                battery_v: r.battery_v.unwrap_or(f64::NAN) as f32,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
-}
-
-pub struct Imet;
-
 impl Protocol for Imet {
     fn id(&self) -> &'static str {
-        "imet"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "imet"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["imet4", "intermet"]
+        Signal::aliases(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND])
-    }
-    fn default_hz(&self) -> f64 {
-        403_000_000.0
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: AUDIO_HZ,
-            feed_rate_hz: AUDIO_HZ,
-            span_wide: false,
-            families: &[],
-        }
+        Signal::shape(self)
     }
+    fn default_hz(&self) -> f64 {
+        Signal::default_hz(self)
+    }
+
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
@@ -358,7 +167,7 @@ impl Protocol for Imet {
         if !(BAND.0..BAND.1).contains(&hz) || imet::packet_len(bytes).is_none() {
             return None;
         }
-        Some(imet_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -456,7 +265,7 @@ mod tests {
             let mut symbols = Vec::new();
             n.bits.process(block, &mut symbols);
             for sym in symbols {
-                if let Some(run) = n.feed(sym) {
+                if let Some(run) = n.framer.push(sym) {
                     got.push(run);
                 }
             }
@@ -464,7 +273,7 @@ mod tests {
         assert_eq!(got.len(), 1, "{} transmissions", got.len());
         assert_eq!(got[0], frame, "the bytes are not the ones that were keyed");
 
-        let d = imet_decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
+        let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
         assert_eq!(d.field("serial").map(|v| v.to_string()).as_deref(), Some("iMet-0513-4030"));
         assert_eq!(d.field("temperature_c").map(|v| v.to_string()).as_deref(), Some("-21.5"));
         let p = d.position.expect("a position");
@@ -494,7 +303,7 @@ mod tests {
             let mut symbols = Vec::new();
             n.bits.process(block, &mut symbols);
             for sym in symbols {
-                runs += n.feed(sym).is_some() as usize;
+                runs += n.framer.push(sym).is_some() as usize;
             }
         }
         assert_eq!(runs, 0, "{runs} transmissions out of twenty seconds of noise");

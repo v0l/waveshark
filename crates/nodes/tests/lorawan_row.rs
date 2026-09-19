@@ -1,8 +1,8 @@
 //! LoRaWAN frames through the real row path.
 
 use common::Hz;
+use decode::lora::decoded;
 use decode::lora::{Frame, Header};
-use nodes::lora_nodes::lora_decoded;
 
 fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
     let frame = Frame {
@@ -13,7 +13,7 @@ fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
     };
     // Sync 0x34, reserved for public LoRaWAN networks.
     let bytes = frame.to_bytes(7, 125_000.0, 0x34);
-    lora_decoded(&bytes, Hz(868_100_000)).expect("a row")
+    decode::lora::decoded(&bytes, Hz(868_100_000)).expect("a row")
 }
 
 fn field(d: &pipeline::event::Decoded, k: &str) -> Option<String> {

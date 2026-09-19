@@ -23,6 +23,7 @@
 
 use crate::bits::crc_bits;
 use crate::framing::{block_deinterleave, block_interleave};
+use common::Decoded;
 use common::Value;
 use dsp::conv::{self, Ends, Viterbi};
 
@@ -792,6 +793,364 @@ impl Frame {
         }
         f.push(("voice_slots".into(), Value::Int(self.voice_slots as i64)));
         f
+    }
+}
+
+/// Recognise and describe an NXDN row for the packet log. `None` for anything
+/// this node did not write, so it is safe to try on every frame.
+///
+/// A frame carrying speech is that much of the channel and says so; where it
+/// named the call it names the talkgroup and the radio, which is what puts it
+/// in the call list rather than only in the log. Nothing here is written by a
+/// person, so nothing is marked as written.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    if bytes.len() < HEAD_LEN || bytes[..2] != NXDN_TAG {
+        return None;
+    }
+    let lich = Lich::from_dibits(&Lich::dibits(bytes[2] >> 1))?;
+    let flags = bytes[3];
+    let ran = bytes[4];
+    let kind = MessageType::from_bits(bytes[5]);
+    let call_type = CallType::from_bits(bytes[6]);
+    let source = u16::from_be_bytes([bytes[7], bytes[8]]);
+    let dest = u16::from_be_bytes([bytes[9], bytes[10]]);
+    let cipher = Cipher::from_bits(bytes[11]);
+    let key_id = bytes[12];
+    let voice_slots = bytes[13];
+    let narrow = flags & FLAG_NARROW != 0;
+
+    let mut fields: Vec<(String, Value)> = vec![
+        ("channel".to_string(), Value::Text(lich.rf.label().to_string())),
+        (
+            "direction".to_string(),
+            Value::Text(if flags & FLAG_OUTBOUND != 0 { "out" } else { "in" }.to_string()),
+        ),
+        ("width".to_string(), Value::Text(if narrow { "6.25k" } else { "12.5k" }.to_string())),
+    ];
+    if flags & FLAG_HAVE_RAN != 0 {
+        fields.push(("ran".to_string(), Value::Int(i64::from(ran))));
+    }
+    if flags & FLAG_HAVE_MSG != 0 {
+        fields.push(("message".to_string(), Value::Text(kind.label())));
+    }
+    if flags & FLAG_HAVE_CALL != 0 {
+        fields.push(("from".to_string(), Value::Int(i64::from(source))));
+        fields.push(("to".to_string(), Value::Int(i64::from(dest))));
+        fields.push(("call_type".to_string(), Value::Text(call_type.label())));
+        if flags & FLAG_EMERGENCY != 0 {
+            fields.push(("emergency".to_string(), Value::Bool(true)));
+        }
+        if flags & FLAG_ENCRYPTED != 0 {
+            fields.push(("encrypted".to_string(), Value::Bool(true)));
+            fields.push(("algorithm".to_string(), Value::Text(cipher.label().to_string())));
+            fields.push(("key_id".to_string(), Value::Int(i64::from(key_id))));
+        }
+    }
+    // What the frame carried of speech, not how long it held the channel: a
+    // frame with a half stolen for signalling is half a frame of talking.
+    let seconds = frame_seconds(narrow) * f64::from(voice_slots) / 4.0;
+    if voice_slots > 0 {
+        fields.push(("voice".to_string(), Value::Bool(true)));
+        fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
+        fields.push(("seconds".to_string(), Value::Float(seconds)));
+        fields.push(("live".to_string(), Value::Bool(true)));
+    }
+
+    let label = row_label(flags & FLAG_HAVE_MSG != 0, kind, voice_slots > 0);
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let mut d = Decoded::bytes(label, center, 0.0, bytes.to_vec())
+        .with_detail(detail)
+        .with_fields(fields)
+        .with_modulation(common::Modulation::Fsk4)
+        // The LICH passed its parity and whatever else is here passed a CRC;
+        // nothing reaches this point that did not.
+        .with_crc(Some(true));
+    if flags & FLAG_HAVE_CALL != 0 {
+        use common::Party;
+        let to = match flags & FLAG_GROUP != 0 {
+            true => Party::group(dest.to_string()),
+            false => Party::unit(dest.to_string()),
+        };
+        d.link = Some(common::Link::between(Party::unit(source.to_string()), to));
+        d.identity = Some(common::Identity::new("nxdn", source.to_string()));
+    }
+    if voice_slots > 0 {
+        d.airtime = Some(common::Airtime {
+            seconds,
+            voice: true,
+            live: true,
+            secrecy: match flags & FLAG_ENCRYPTED != 0 {
+                true => common::Secrecy::Encrypted(None),
+                false => common::Secrecy::Clear,
+            },
+            codec: Some(CODEC),
+        });
+    }
+    Some(d)
+}
+
+/// How long one frame holds the channel, at a width: 384 bits at 9600 or
+/// 4800 bit/s.
+pub fn frame_seconds(narrow: bool) -> f64 {
+    FRAME_DIBITS as f64 / if narrow { NARROW_BAUD } else { WIDE_BAUD }
+}
+
+/// What the packet log calls the row: the message where the frame carried
+/// one, speech where it carried that, and NXDN alone where all that read was
+/// the slow channel.
+pub fn row_label(have_message: bool, kind: MessageType, voice: bool) -> &'static str {
+    if !have_message {
+        return if voice { "NXDN-Voice" } else { "NXDN" };
+    }
+    match kind {
+        MessageType::VCall => "NXDN-VCALL",
+        MessageType::VCallIv => "NXDN-VCALL_IV",
+        MessageType::VCallAssign => "NXDN-VCALL_ASSGN",
+        MessageType::VCallAssignDup => "NXDN-VCALL_ASSGN_DUP",
+        MessageType::TxRelease => "NXDN-TX_REL",
+        MessageType::TxReleaseExt => "NXDN-TX_REL_EXT",
+        MessageType::Disconnect => "NXDN-DISC",
+        MessageType::DCallHeader => "NXDN-DCALL_HDR",
+        MessageType::DCallData => "NXDN-DCALL_DATA",
+        MessageType::DCallAck => "NXDN-DCALL_ACK",
+        MessageType::HeadDelay => "NXDN-HEAD_DLY",
+        MessageType::Idle => "NXDN-IDLE",
+        MessageType::Other(_) => "NXDN-Message",
+    }
+}
+
+/// Speech is AMBE+2 at 3600 bit/s, which is what both channel widths carry.
+pub const CODEC: &str = "AMBE+2 3600";
+
+pub const FLAG_EMERGENCY: u8 = 0x20;
+
+pub const FLAG_ENCRYPTED: u8 = 0x40;
+
+pub const FLAG_GROUP: u8 = 0x10;
+
+pub const FLAG_HAVE_CALL: u8 = 0x08;
+
+pub const FLAG_HAVE_MSG: u8 = 0x04;
+
+pub const FLAG_HAVE_RAN: u8 = 0x02;
+
+pub const FLAG_NARROW: u8 = 0x80;
+
+pub const FLAG_OUTBOUND: u8 = 0x01;
+
+/// Tag, LICH, flags, RAN, message type, call type, source, destination,
+/// cipher, key, voice channels.
+pub const HEAD_LEN: usize = 2 + 1 + 1 + 1 + 1 + 1 + 2 + 2 + 1 + 1 + 1;
+
+/// Tag identifying a packet body this node wrote. "NX".
+pub const NXDN_TAG: [u8; 2] = *b"NX";
+
+pub const NARROW_BAUD: f64 = 2_400.0;
+
+pub const WIDE_BAUD: f64 = 4_800.0;
+
+pub fn encode_frame(f: &NxdnFrame, narrow: bool) -> Vec<u8> {
+    let mut v = NXDN_TAG.to_vec();
+    v.push(f.frame.lich.raw);
+    let mut flags = 0u8;
+    if f.frame.lich.outbound {
+        flags |= FLAG_OUTBOUND;
+    }
+    if narrow {
+        flags |= FLAG_NARROW;
+    }
+    let ran = f.frame.ran().inspect(|_| flags |= FLAG_HAVE_RAN).unwrap_or(0);
+    let call = f.message.as_ref().and_then(|m| m.call);
+    if let Some(c) = &call {
+        flags |= FLAG_HAVE_CALL;
+        if c.call_type.group() {
+            flags |= FLAG_GROUP;
+        }
+        if c.emergency {
+            flags |= FLAG_EMERGENCY;
+        }
+        if c.cipher != Cipher::Clear {
+            flags |= FLAG_ENCRYPTED;
+        }
+    }
+    if f.message.is_some() {
+        flags |= FLAG_HAVE_MSG;
+    }
+    v.push(flags);
+    v.push(ran);
+    v.push(match f.message.as_ref().map(|m| m.kind) {
+        Some(MessageType::Other(t)) => t,
+        Some(k) => message_code(k),
+        None => 0xff,
+    });
+    v.push(call.map(|c| call_code(c.call_type)).unwrap_or(0xff));
+    v.extend_from_slice(&call.map(|c| c.source).unwrap_or(0).to_be_bytes());
+    v.extend_from_slice(&call.map(|c| c.dest).unwrap_or(0).to_be_bytes());
+    v.push(call.map(|c| cipher_code(c.cipher)).unwrap_or(0));
+    v.push(call.map(|c| c.key_id).unwrap_or(0));
+    v.push(f.frame.voice_slots as u8);
+    if let Some(m) = &f.message {
+        v.extend_from_slice(&m.bytes);
+    }
+    v
+}
+
+pub fn message_code(k: MessageType) -> u8 {
+    match k {
+        MessageType::VCall => 0x01,
+        MessageType::VCallIv => 0x03,
+        MessageType::VCallAssign => 0x04,
+        MessageType::VCallAssignDup => 0x05,
+        MessageType::TxReleaseExt => 0x07,
+        MessageType::TxRelease => 0x08,
+        MessageType::DCallHeader => 0x09,
+        MessageType::DCallData => 0x0b,
+        MessageType::DCallAck => 0x0c,
+        MessageType::HeadDelay => 0x0f,
+        MessageType::Idle => 0x10,
+        MessageType::Disconnect => 0x11,
+        MessageType::Other(v) => v,
+    }
+}
+
+pub fn call_code(c: CallType) -> u8 {
+    match c {
+        CallType::Broadcast => 0,
+        CallType::Group => 1,
+        CallType::Idle => 2,
+        CallType::Session => 3,
+        CallType::Individual => 4,
+        CallType::Interconnect => 6,
+        CallType::SpeedDial => 7,
+        CallType::Other(v) => v,
+    }
+}
+
+/// What one frame turned out to be, and where the speech in it puts the call.
+pub struct NxdnFrame {
+    /// Absolute symbol index the sync word began at.
+    pub at: usize,
+    pub frame: Frame,
+    /// The message, off this frame's stolen half or off the superframe the
+    /// slow channel just completed.
+    pub message: Option<Message>,
+}
+
+/// Finds frames in the symbol stream and reads what they carry.
+///
+/// A rolling window of symbol values with an absolute index, so a frame whose
+/// sync arrived in one block is read when the rest of it arrives in the next.
+/// The slow channel's quarters are assembled here rather than in the decoder
+/// because only the framer sees consecutive frames.
+pub struct Framer {
+    marks: Vec<f32>,
+    base: usize,
+    scan: usize,
+    /// Which way up the discriminator is, once a frame has settled it.
+    polarity: Option<bool>,
+    superframe: Superframe,
+}
+
+impl Default for Framer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self {
+            marks: Vec::new(),
+            base: 0,
+            scan: 0,
+            polarity: None,
+            superframe: Superframe::default(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.marks.clear();
+        self.base = 0;
+        self.scan = 0;
+        self.polarity = None;
+        self.superframe.reset();
+    }
+
+    /// Level index to dibit: NXDN sends +3 as 01, +1 as 00, -1 as 10 and -3
+    /// as 11 (TS 1-A Table 3.3-1), and the slicer numbers levels up the band.
+    fn dibit(level: u8, flip: bool) -> u8 {
+        match if flip { 3 - level } else { level } {
+            3 => 1,
+            2 => 0,
+            1 => 2,
+            _ => 3,
+        }
+    }
+
+    /// Append recovered symbols and pull out the frames they complete.
+    pub fn push(&mut self, syms: &[f32], out: &mut Vec<NxdnFrame>) {
+        self.marks.extend_from_slice(syms);
+        if self.marks.len() < WINDOW {
+            return;
+        }
+        let Some(levels) = dsp::c4fm::slice(&self.marks) else {
+            return;
+        };
+        let polarities: [bool; 2] = match self.polarity {
+            Some(p) => [p, p],
+            None => [false, true],
+        };
+        let mut from = self.scan.saturating_sub(self.base);
+        for flip in polarities {
+            let dibits: Vec<u8> = levels.iter().map(|l| Self::dibit(*l, flip)).collect();
+            let mut at = from;
+            let mut found = false;
+            while let Some(f) = find(&dibits, at) {
+                at = f.at + FRAME_DIBITS;
+                found = true;
+                self.polarity = Some(flip);
+                // The quarter goes in whether or not this frame also stole a
+                // half for the same message: leaving it out on the frame
+                // that opens a call loses that whole superframe.
+                let whole =
+                    f.sacch.filter(|_| f.lich.superframe()).and_then(|s| self.superframe.push(&s));
+                let message = f
+                    .facch1
+                    .first()
+                    .cloned()
+                    .or_else(|| whole.as_deref().and_then(message))
+                    .filter(|m| m.kind != MessageType::Idle);
+                out.push(NxdnFrame { at: self.base + f.at, frame: f, message });
+            }
+            from = at;
+            if found || self.polarity.is_some() {
+                break;
+            }
+        }
+        // Where the hunt reached, less a frame of history so a sync word
+        // straddling two blocks is still found.
+        self.scan = self.base + from;
+        let keep = self.scan.saturating_sub(FRAME_DIBITS);
+        if keep > self.base {
+            let drop = (keep - self.base).min(self.marks.len());
+            self.marks.drain(..drop);
+            self.base += drop;
+        }
+    }
+}
+
+/// Symbols held before the framer will slice: two frames, because the four
+/// levels are fitted over the window and a sync word carries only three of
+/// them.
+pub const WINDOW: usize = 2 * FRAME_DIBITS;
+
+pub fn cipher_code(c: Cipher) -> u8 {
+    match c {
+        Cipher::Clear => 0,
+        Cipher::Scrambler => 1,
+        Cipher::Des => 2,
+        Cipher::Aes => 3,
     }
 }
 

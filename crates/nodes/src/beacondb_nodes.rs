@@ -105,10 +105,10 @@ impl Sender {
     }
 
     fn set_dir(&self, dir: &Path) {
-        if let Ok(mut d) = self.dir.lock() {
-            if d.as_path() != dir {
-                *d = dir.to_path_buf();
-            }
+        if let Ok(mut d) = self.dir.lock()
+            && d.as_path() != dir
+        {
+            *d = dir.to_path_buf();
         }
     }
 
@@ -386,6 +386,17 @@ fn now_s() -> u64 {
         .unwrap_or(0)
 }
 
+pub const DESC: StageDesc = StageDesc {
+    name: "beacondb",
+    summary: "Feed what was heard to beacondb.net: observations, spooled and submitted",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(BeaconDbNode::new(crate::spool_dir(s, default_spool_dir))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,15 +516,4 @@ mod tests {
         assert_eq!(spooled(&dir).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-pub const DESC: StageDesc = StageDesc {
-    name: "beacondb",
-    summary: "Feed what was heard to beacondb.net: observations, spooled and submitted",
-    category: Category::Sink,
-    feeds_bus: false,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(BeaconDbNode::new(crate::spool_dir(s, default_spool_dir))))
 }

@@ -16,94 +16,19 @@
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use common::{C32, Result};
-#[cfg(test)]
-use decode::dab::Audio;
-use decode::dab::{Ensemble, Fic, ProgrammeType};
-use dsp::dab::{self, Dab, Mode, Symbol};
+use decode::dab::{self, Audio, Ensemble, ProgrammeType};
+use dsp::dab::Mode;
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::Decoded;
+use identify::Signal;
+pub use identify::dab::BAND_HZ;
+pub use identify::dab::CHANNEL_WIDTH_HZ;
+pub use identify::dab::DEFAULT_HZ;
+pub use identify::dab::DabProtocol;
+pub use identify::dab::RATE_HZ;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The rate every transmission mode is defined at.
-pub const RATE_HZ: f64 = dab::RATE_HZ;
-/// What an ensemble occupies.
-pub const CHANNEL_WIDTH_HZ: f64 = dab::CHANNEL_WIDTH_HZ;
-/// Block 11D, which carries the British national ensemble and is as good a
-/// place as any to point a receiver that has been told nothing else.
-pub const DEFAULT_HZ: f64 = 222_064_000.0;
-
-/// Band III as Europe allocates it to DAB: blocks 5A at 174.928 MHz to 13F
-/// at 239.200 MHz.
-pub const BAND_HZ: (f64, f64) = (174_000_000.0, 240_000_000.0);
-
-/// A whole DAB receiver: samples in, an ensemble's tables out.
-pub struct DabReceiver {
-    front: Dab,
-    fic: Fic,
-    symbols: Vec<Symbol>,
-    snr_db: f32,
-}
-
-impl Default for DabReceiver {
-    fn default() -> Self {
-        Self::new(Mode::I)
-    }
-}
-
-impl DabReceiver {
-    pub fn new(mode: Mode) -> Self {
-        Self { front: Dab::new(mode), fic: Fic::new(), symbols: Vec::new(), snr_db: f32::NAN }
-    }
-
-    /// The ensemble as its tables describe it so far.
-    pub fn ensemble(&self) -> &Ensemble {
-        self.fic.ensemble()
-    }
-
-    pub fn stats(&self) -> decode::dab::Stats {
-        self.fic.stats
-    }
-
-    pub fn locked(&self) -> bool {
-        self.front.locked()
-    }
-
-    pub fn frames(&self) -> u64 {
-        self.front.frames()
-    }
-
-    /// Signal to noise off the last symbol read, or NaN before any was.
-    pub fn snr_db(&self) -> f32 {
-        self.snr_db
-    }
-
-    /// The frequency error the front end is correcting.
-    pub fn offset_hz(&self) -> f64 {
-        self.front.offset_hz()
-    }
-
-    /// Read what `iq` holds. Returns the blocks that passed their check.
-    pub fn push(&mut self, iq: &[C32]) -> usize {
-        let mut symbols = std::mem::take(&mut self.symbols);
-        symbols.clear();
-        self.front.push(iq, &mut symbols);
-        let fic_symbols = self.front.mode().fic_symbols();
-        let mut good = 0;
-        for symbol in &symbols {
-            self.snr_db = symbol.snr_db;
-            // The fast information channel is the first symbols of a frame;
-            // the rest is the main service channel, which nothing here reads.
-            if symbol.index <= fic_symbols {
-                good += self.fic.push(&symbol.soft);
-            }
-        }
-        self.symbols = symbols;
-        good
-    }
-}
 
 /// One ensemble as a stage: samples in, its fast information blocks out, and
 /// what it says about itself on the bus.
@@ -112,7 +37,7 @@ pub struct DabNode {
     mixer: Mixer,
     decim: FirDecim,
     resample: Rational,
-    rx: DabReceiver,
+    rx: dab::DabReceiver,
     mixed: Vec<C32>,
     narrow: Vec<C32>,
     at_rate: Vec<C32>,
@@ -136,7 +61,7 @@ impl DabNode {
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(RATE_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             resample: Rational::with_ratio(1, 1),
-            rx: DabReceiver::new(Mode::I),
+            rx: dab::DabReceiver::new(Mode::I),
             mixed: Vec::new(),
             narrow: Vec::new(),
             at_rate: Vec::new(),
@@ -153,77 +78,6 @@ impl DabNode {
 
     pub fn stats(&self) -> decode::dab::Stats {
         self.rx.stats()
-    }
-
-    /// The ensemble, once it has a name.
-    fn announce(&mut self, c: &mut NodeCtx<'_>) {
-        let e = self.rx.ensemble();
-        let Some(name) = e.name.clone() else { return };
-        let stats = self.rx.stats();
-        let mut fields = vec![
-            ("ensemble".into(), common::Value::Text(name.clone())),
-            ("mode".into(), common::Value::Text(self.rx.front.mode().label().into())),
-            ("services".into(), common::Value::Int(e.services.len() as i64)),
-            ("snr_db".into(), common::Value::Float(self.rx.snr_db() as f64)),
-        ];
-        if let Some(id) = e.id {
-            fields.push(("ensemble_id".into(), common::Value::Text(format!("{id:04X}"))));
-        }
-        if let Some(q) = stats.quality() {
-            fields.push(("blocks_ok".into(), common::Value::Float((100.0 * q) as f64)));
-        }
-        let detail = match e.id {
-            Some(id) => format!("{name} ({id:04X})"),
-            None => name.clone(),
-        };
-        self.told = Some(name);
-        c.emit(pipeline::event::Event::Decoded(
-            Decoded::bytes("DAB", common::Hz(self.channel_hz as u64), self.at, Vec::new())
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(common::Modulation::Ofdm)
-                .with_crc(Some(true)),
-        ));
-    }
-
-    /// A service, once the tables have named it.
-    fn announce_service(&mut self, id: u32, c: &mut NodeCtx<'_>) {
-        let e = self.rx.ensemble();
-        let Some(service) = e.service(id) else { return };
-        let Some(name) = service.name.clone() else { return };
-        let audio = service.audio();
-        let sub = audio.and_then(|(id, _)| e.sub_channel(id)).copied();
-        let mut fields = vec![
-            ("service".into(), common::Value::Text(name.clone())),
-            ("service_id".into(), common::Value::Text(format!("{id:04X}"))),
-        ];
-        if let Some((_, kind)) = audio {
-            fields.push(("audio".into(), common::Value::Text(kind.label())));
-        }
-        if let Some(pty) = service.programme_type.filter(|p| *p != ProgrammeType::None) {
-            fields.push(("programme".into(), common::Value::Text(pty.label().into())));
-        }
-        if let Some(sub) = sub {
-            fields.push(("subchannel".into(), common::Value::Int(sub.id as i64)));
-            fields.push(("bitrate".into(), common::Value::Int(sub.bitrate_kbps as i64)));
-            fields.push(("protection".into(), common::Value::Text(sub.protection.label())));
-        }
-        let detail = match (audio.map(|(_, k)| k.label()), sub.map(|s| s.bitrate_kbps)) {
-            (Some(kind), Some(rate)) => format!("{name} ({kind}, {rate} kbit/s)"),
-            (Some(kind), None) => format!("{name} ({kind})"),
-            _ => name.clone(),
-        };
-        // A service keeps its identifier across ensembles and retunes, which
-        // is what a station list rows on.
-        let who = common::Identity::new("dab-service", format!("{id:04X}")).named(name);
-        c.emit(pipeline::event::Event::Decoded(
-            Decoded::bytes("DAB", common::Hz(self.channel_hz as u64), self.at, Vec::new())
-                .by(who)
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(common::Modulation::Ofdm)
-                .with_crc(Some(true)),
-        ));
     }
 }
 
@@ -248,7 +102,7 @@ impl Simple for DabNode {
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.resample = resample.unwrap_or_else(|| Rational::with_ratio(1, 1));
-        self.rx = DabReceiver::new(Mode::I);
+        self.rx = dab::DabReceiver::new(Mode::I);
         self.told = None;
         self.named.clear();
 
@@ -273,8 +127,13 @@ impl Simple for DabNode {
         self.rx.push(&self.at_rate);
 
         let named = self.rx.ensemble().name.clone();
-        if named.is_some() && self.told != named {
-            self.announce(c);
+        if named.is_some()
+            && self.told != named
+            && let Some(d) =
+                dab::ensemble_decoded(&self.rx, common::Hz(self.channel_hz as u64), self.at)
+        {
+            self.told = named;
+            c.emit(pipeline::event::Event::Decoded(d));
         }
         let fresh: Vec<u32> = self
             .rx
@@ -285,7 +144,11 @@ impl Simple for DabNode {
             .collect();
         for id in fresh {
             self.named.push(id);
-            self.announce_service(id, c);
+            if let Some(d) =
+                dab::service_decoded(&self.rx, id, common::Hz(self.channel_hz as u64), self.at)
+            {
+                c.emit(pipeline::event::Event::Decoded(d));
+            }
         }
         let _ = o;
         Ok(())
@@ -294,43 +157,35 @@ impl Simple for DabNode {
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
-        self.rx = DabReceiver::new(Mode::I);
+        self.rx = dab::DabReceiver::new(Mode::I);
         self.told = None;
         self.named.clear();
     }
 }
 
-pub struct DabProtocol;
-
 impl Protocol for DabProtocol {
     fn id(&self) -> &'static str {
-        "dab"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "dab"
+        Signal::label(self)
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["dab+"]
+        Signal::aliases(self)
     }
-    /// Band III, which is where every European ensemble is. The L band was
-    /// allocated to it too and nothing is left transmitting there.
     fn placement(&self) -> Placement {
-        Placement::Bands(vec![BAND_HZ])
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: RATE_HZ,
-            feed_rate_hz: RATE_HZ,
-            span_wide: false,
-            // An ensemble is on the air without stopping, so there is no
-            // burst for the classifier to name and nothing to wait for.
-            families: &[],
-        }
+        Signal::shape(self)
     }
     fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
+        Signal::default_hz(self)
     }
+
+    /// Band III, which is where every European ensemble is. The L band was
+    /// allocated to it too and nothing is left transmitting there.
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.3} DAB", hz / 1e6)
     }
@@ -393,7 +248,7 @@ pub fn transmit(seconds: f64) -> Vec<C32> {
         coded
     };
 
-    let mut modulator = dab::tx::Modulator::new(mode);
+    let mut modulator = dsp::dab::tx::Modulator::new(mode);
     let mut out = Vec::new();
     let frames = (seconds / mode.frame_seconds()).ceil() as usize;
     let mut bits = vec![0u8; modulator.bits_per_frame()];
@@ -415,7 +270,7 @@ mod tests {
     #[test]
     fn an_ensemble_reads_its_own_station_list() {
         let air = transmit(2.0);
-        let mut rx = DabReceiver::new(Mode::I);
+        let mut rx = dab::DabReceiver::new(Mode::I);
         let good = rx.push(&air);
         // Twenty-one frames of 96 ms went out and twenty came back: a frame
         // is only read once the phase reference of the one after it has timed
@@ -467,7 +322,7 @@ mod tests {
                 };
                 *s += C32::new(next(), next());
             }
-            let mut rx = DabReceiver::new(Mode::I);
+            let mut rx = dab::DabReceiver::new(Mode::I);
             let good = rx.push(&air);
             assert_eq!(rx.frames(), 19);
             assert!(good >= floor, "{good} blocks of 228 at {snr_db} dB, wanted {floor}");
@@ -479,7 +334,7 @@ mod tests {
     /// Minutes of noise into the whole node: no lock, no block, no ensemble.
     #[test]
     fn noise_names_nothing() {
-        let mut rx = DabReceiver::new(Mode::I);
+        let mut rx = dab::DabReceiver::new(Mode::I);
         let mut state = 0xfeed_beefu32;
         for _ in 0..600 {
             let air: Vec<C32> = (0..Mode::I.frame())

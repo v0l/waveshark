@@ -5,6 +5,7 @@
 //! Nothing here demodulates; `dsp::wifi` does that and hands over a PSDU whose
 //! FCS it has already checked.
 
+use common::Decoded;
 use std::fmt;
 
 /// What the front end puts in front of a MAC frame on the bus: the tag, the
@@ -365,6 +366,150 @@ fn network(body: &[u8]) -> Network {
     }
     n
 }
+
+/// The row a MAC frame becomes.
+///
+/// `None` when the bytes are not a MAC frame, which is how the packet bus
+/// tells one from anything else arriving on the same centre.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    use common::Value;
+    let r = Received::parse(bytes)?;
+    if !dsp::wifi::fcs_ok(&r.mpdu) {
+        return None;
+    }
+    let f = parse(&r.mpdu)?;
+    let mut fields: Vec<(String, Value)> = vec![
+        ("type".into(), Value::Text(f.kind.name().into())),
+        ("phy".into(), Value::Text(r.phy())),
+    ];
+    if r.short_gi {
+        fields.push(("short_gi".into(), Value::Int(1)));
+    }
+    if r.aggregated {
+        fields.push(("aggregated".into(), Value::Int(1)));
+    }
+    let heard_channel = channel_of(center.as_f64());
+    if let Some(ch) = heard_channel {
+        fields.push(("channel".into(), Value::Int(i64::from(ch))));
+    }
+    if let Some(n) = &f.network {
+        if let Some(ssid) = &n.ssid {
+            fields.push(("ssid".into(), Value::Text(ssid.clone())));
+        } else if matches!(f.kind, Kind::Management(8)) {
+            fields.push(("ssid".into(), Value::Text("<hidden>".into())));
+        }
+        if let Some(ch) = n.channel {
+            fields.push(("claims_channel".into(), Value::Int(i64::from(ch))));
+        }
+        if n.beacon_interval > 0 {
+            fields
+                .push(("beacon_ms".into(), Value::Int(i64::from(n.beacon_interval) * 1024 / 1000)));
+        }
+        let security = match (n.rsn, n.privacy) {
+            (true, _) => "wpa2",
+            (false, true) => "wep",
+            (false, false) => "open",
+        };
+        fields.push(("security".into(), Value::Text(security.into())));
+    }
+    if f.protected {
+        fields.push(("protected".into(), Value::Int(1)));
+    }
+    if let Some(a) = f.source()
+        && a.is_local()
+    {
+        fields.push(("randomised".into(), Value::Int(1)));
+    }
+    if let Some(s) = f.seq {
+        fields.push(("seq".into(), Value::Int(i64::from(s))));
+    }
+    // An aircraft's broadcast is not a row about a network that happens to
+    // carry some bytes, so it is named for what it is and its own fields go
+    // in front of the link layer's, as they do on Bluetooth.
+    let mut odid: Vec<crate::odid::Parsed> = f
+        .vendor
+        .iter()
+        .filter_map(|v| crate::odid::from_vendor_element(v.oui, v.kind, &v.data))
+        .flatten()
+        .collect();
+    if let Some(a) = &f.action
+        && let Some(pack) = crate::odid::from_nan_action(a.category, a.code, &a.body)
+    {
+        odid.extend(pack);
+    }
+    let protocol = if odid.is_empty() { "802.11" } else { "OpenDroneID" };
+    if !odid.is_empty() {
+        let mut f = crate::odid::fields(&odid);
+        f.append(&mut fields);
+        fields = f;
+    }
+    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let link = common::Link {
+        from: f.source().map(|a| common::Party::unit(a.to_string())),
+        to: Some(if f.addr1.is_broadcast() {
+            common::Party::broadcast()
+        } else {
+            common::Party::unit(f.addr1.to_string())
+        }),
+    };
+    // The row is filed under whoever transmitted it. A control frame names
+    // nobody, so it is filed under the station it is addressed to, which is
+    // the only party it has.
+    let who_addr = f.source().unwrap_or(f.addr1);
+    let mut who = common::Identity::new("wifi", who_addr.to_string());
+    who.name = f.network.as_ref().and_then(|n| n.ssid.clone());
+    let mut d = Decoded::bytes(protocol, center, 0.0, r.mpdu.clone());
+    if let Some(p) = crate::odid::position(&odid) {
+        d = d.at_position(p);
+    }
+    if let Some(ch) = heard_channel {
+        // What a beacon says about its own security is a statement about the
+        // network, so it travels with the channel rather than being read
+        // back out of a field name. A frame that is not a beacon says
+        // nothing either way, which is what `Unsaid` is for.
+        let secrecy = match f.network.as_ref() {
+            Some(n) if n.rsn => common::Secrecy::Encrypted(Some("wpa2".into())),
+            Some(n) if n.privacy => common::Secrecy::Encrypted(Some("wep".into())),
+            Some(_) => common::Secrecy::Clear,
+            None => common::Secrecy::Unsaid,
+        };
+        d = d.on_channel(
+            common::ChannelUse::new(common::ChannelPlan::Wifi, ch, CHANNEL_WIDTH_HZ as u32)
+                .claiming(f.network.as_ref().and_then(|n| n.channel).map(u16::from))
+                .protected_by(secrecy),
+        );
+    }
+    Some(
+        d.with_link(link)
+            .by(who)
+            .with_detail(detail)
+            .with_fields(fields)
+            .with_modulation(common::Modulation::Ofdm)
+            // Nothing reaches here without the frame check sequence, which
+            // is a real CRC-32 over the whole frame.
+            .with_crc(Some(true)),
+    )
+}
+
+/// The channel number a centre names, if it names one.
+///
+/// Half a megahertz, which is tight because the bands are crowded: BLE's
+/// advertising channel 38 is at 2426 MHz and Wi-Fi channel 4 is at 2427, so
+/// a wider window would file every Bluetooth advertisement under a Wi-Fi
+/// channel and try to read it as a MAC frame.
+pub fn channel_of(center_hz: f64) -> Option<u16> {
+    for n in 1..=14u8 {
+        if let Some(hz) = dsp::wifi::channel_2ghz(n)
+            && (hz - center_hz).abs() <= 0.5e6
+        {
+            return Some(u16::from(n));
+        }
+    }
+    (1..=196u16).find(|&n| (dsp::wifi::channel_5ghz(n) - center_hz).abs() <= 0.5e6 && n >= 32)
+}
+
+/// One channel's width, which is the whole span this reads.
+pub const CHANNEL_WIDTH_HZ: f64 = dsp::wifi::ofdm::CHANNEL_WIDTH_HZ;
 
 #[cfg(test)]
 mod tests {

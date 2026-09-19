@@ -242,7 +242,7 @@ impl Spectrum {
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
 
         let half = self.size / 2;
-        let slot = (self.taken % self.step == 0).then(|| self.slots * self.size);
+        let slot = self.taken.is_multiple_of(self.step).then(|| self.slots * self.size);
         for i in 0..self.size {
             // Rotate so DC lands in the middle, matching how the span is drawn.
             let src_bin = (i + half) % self.size;
@@ -340,9 +340,7 @@ impl Spectrum {
         if n == 0 {
             return vec![-200.0; self.size];
         }
-        let rank = ((f32::from(p.clamp(1, 99)) / 100.0 * n as f32).ceil() as usize)
-            .clamp(1, n)
-            - 1;
+        let rank = ((f32::from(p.clamp(1, 99)) / 100.0 * n as f32).ceil() as usize).clamp(1, n) - 1;
         let mut col = vec![0.0f32; n];
         let mut out = vec![0.0f32; self.size];
         for i in 0..self.size {

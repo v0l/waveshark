@@ -18,136 +18,21 @@
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
 use common::{C32, Result};
-use decode::dvbt::{Outer, OuterTx, TsPacket};
+use decode::dvbt::{self as dvbtdec, OuterTx, TsPacket};
 use decode::mpegts::{self, Mux};
 use dsp::conv;
-use dsp::dvbt::{self, Inner, Mode, Params, Symbol};
+use dsp::dvbt::{self, Inner, Mode, Params};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::Decoded;
+use identify::Signal;
+pub use identify::dvbt::CHANNEL_WIDTH_HZ;
+pub use identify::dvbt::DEFAULT_HZ;
+pub use identify::dvbt::Dvbt;
+pub use identify::dvbt::RATE_HZ;
+pub use identify::dvbt::bands;
 use pipeline::node::{NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-
-/// The rate the receiver hands the front end, which is the standard's own.
-pub const RATE_HZ: f64 = dvbt::RATE_HZ;
-/// The channel a multiplex owns.
-pub const CHANNEL_WIDTH_HZ: f64 = dvbt::CHANNEL_WIDTH_HZ;
-
-/// A whole DVB-T receiver: samples in, transport packets out.
-pub struct DvbtReceiver {
-    front: dvbt::Dvbt,
-    inner: Option<Inner>,
-    viterbi: conv::Viterbi,
-    outer: Outer,
-    params: Option<Params>,
-    /// Whether the super frame boundary has been seen and the inner decoder
-    /// started on it.
-    started: bool,
-    symbols: Vec<Symbol>,
-    soft: Vec<f32>,
-    bits: Vec<u8>,
-    bytes: Vec<u8>,
-    /// Bits of a byte not yet whole.
-    partial: (u8, u8),
-}
-
-impl Default for DvbtReceiver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DvbtReceiver {
-    pub fn new() -> Self {
-        Self {
-            front: dvbt::Dvbt::new(),
-            inner: None,
-            viterbi: conv::Viterbi::new(conv::K7_X_FIRST),
-            outer: Outer::new(),
-            params: None,
-            started: false,
-            symbols: Vec::new(),
-            soft: Vec::new(),
-            bits: Vec::new(),
-            bytes: Vec::new(),
-            partial: (0, 0),
-        }
-    }
-
-    /// The multiplex's parameters, once the TPS has said what they are.
-    pub fn params(&self) -> Option<Params> {
-        self.params
-    }
-
-    /// The mode and guard, which are known before the parameters are.
-    pub fn mode_guard(&self) -> Option<(Mode, dvbt::Guard)> {
-        self.front.mode_guard()
-    }
-
-    /// How the outer code is faring.
-    pub fn stats(&self) -> decode::dvbt::Stats {
-        self.outer.stats
-    }
-
-    /// Signal to noise on the pilots of the last symbol read.
-    pub fn snr_db(&self) -> Option<f32> {
-        self.symbols.last().map(|s| s.snr_db)
-    }
-
-    /// Read what `iq` holds, appending every transport packet it completes.
-    pub fn push(&mut self, iq: &[C32], out: &mut Vec<TsPacket>) {
-        self.symbols.clear();
-        let mut symbols = std::mem::take(&mut self.symbols);
-        self.front.push(iq, &mut symbols);
-        for symbol in &symbols {
-            self.symbol(symbol, out);
-        }
-        self.symbols = symbols;
-    }
-
-    fn symbol(&mut self, symbol: &Symbol, out: &mut Vec<TsPacket>) {
-        let Some(params) = self.front.params() else { return };
-        if self.params != Some(params) {
-            // A different multiplex, or the first word read: everything below
-            // the carriers is about to change shape.
-            self.params = Some(params);
-            self.inner = Some(Inner::new(params.mode, params.constellation));
-            self.started = false;
-        }
-        let (Some(index), Some(frame)) = (symbol.index, symbol.frame) else { return };
-        if !self.started {
-            if frame != 0 || index != 0 {
-                return;
-            }
-            self.started = true;
-            self.viterbi.reset();
-            self.outer.reset();
-            self.partial = (0, 0);
-        }
-        let Some(inner) = &mut self.inner else { return };
-
-        self.soft.clear();
-        inner.demodulate(&symbol.cells, &symbol.csi, index, &mut self.soft);
-        self.bits.clear();
-        let rate = params.code_rate_hp;
-        self.viterbi.push(&self.soft, rate.mask(), &mut self.bits);
-
-        self.bytes.clear();
-        let (mut acc, mut have) = self.partial;
-        for &bit in &self.bits {
-            acc = (acc << 1) | bit;
-            have += 1;
-            if have == 8 {
-                self.bytes.push(acc);
-                acc = 0;
-                have = 0;
-            }
-        }
-        self.partial = (acc, have);
-        self.outer.push(&self.bytes, out);
-    }
-}
 
 /// The receiver on a thread of its own.
 ///
@@ -198,7 +83,7 @@ impl Offloaded {
         let thread = std::thread::Builder::new()
             .name("dvbt".into())
             .spawn(move || {
-                let mut rx = DvbtReceiver::new();
+                let mut rx = dvbtdec::DvbtReceiver::new();
                 let mut out = Vec::new();
                 while let Ok(block) = work.recv() {
                     out.clear();
@@ -320,12 +205,6 @@ impl DvbtModulator {
             self.coded.drain(..per_symbol);
         }
     }
-}
-
-/// The UHF television band as Europe allocates it now, and the remains of
-/// band III. What is in them is one 8 MHz multiplex per channel.
-fn bands() -> Vec<(f64, f64)> {
-    vec![(174_000_000.0, 230_000_000.0), (470_000_000.0, 694_000_000.0)]
 }
 
 /// One 8 MHz multiplex as a stage: samples in, its transport stream out, and
@@ -638,6 +517,7 @@ impl DvbtNode {
         }
         #[cfg(feature = "ffmpeg")]
         self.media.push(&bytes);
+        #[cfg_attr(not(feature = "ffmpeg"), allow(unused_mut))]
         let mut pcm = Vec::new();
         #[cfg(feature = "ffmpeg")]
         {
@@ -700,67 +580,6 @@ impl DvbtNode {
     /// wants to list what is on it.
     pub fn mux(&self) -> &Mux {
         &self.mux
-    }
-
-    /// The multiplex itself, once the TPS has said what it is.
-    fn announce(&mut self, params: Params, c: &mut NodeCtx<'_>) {
-        let snr = self.rx.heard().snr_db.unwrap_or(0.0);
-        let mut fields = vec![
-            ("mode".into(), common::Value::Text(params.mode.label().into())),
-            ("guard".into(), common::Value::Text(params.guard.label().into())),
-            ("constellation".into(), common::Value::Text(params.constellation.label().into())),
-            ("code_rate".into(), common::Value::Text(params.code_rate_hp.label().into())),
-            ("bitrate".into(), common::Value::Float(params.bitrate())),
-            ("snr_db".into(), common::Value::Float(snr as f64)),
-        ];
-        if let Some(cell) = params.cell_id {
-            fields.push(("cell_id".into(), common::Value::Text(format!("{cell:04X}"))));
-        }
-        let detail = format!("{} {:.1} Mbit/s", params.label(), params.bitrate() / 1e6);
-        c.emit(pipeline::event::Event::Decoded(
-            Decoded::bytes("DVB-T", common::Hz(self.channel_hz as u64), self.at, Vec::new())
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(common::Modulation::Ofdm)
-                .with_crc(Some(true)),
-        ));
-    }
-
-    /// A service, once the description table has named it.
-    fn announce_service(&mut self, id: u16, c: &mut NodeCtx<'_>) {
-        let Some(service) = self.mux.service(id) else { return };
-        let Some(name) = service.name.clone() else { return };
-        let mut fields = vec![
-            ("service".into(), common::Value::Text(name.clone())),
-            ("service_id".into(), common::Value::Int(id as i64)),
-        ];
-        if let Some(p) = &service.provider {
-            fields.push(("provider".into(), common::Value::Text(p.clone())));
-        }
-        if let Some(v) = service.video() {
-            fields.push(("video".into(), common::Value::Text(v.kind.label().into())));
-        }
-        if let Some(a) = service.audio() {
-            fields.push(("audio".into(), common::Value::Text(a.kind.label().into())));
-        }
-        if service.scrambled {
-            fields.push(("scrambled".into(), common::Value::Text("yes".into())));
-        }
-        let detail = match &service.provider {
-            Some(p) => format!("{name} ({p})"),
-            None => name.clone(),
-        };
-        // A service keeps its identity across multiplexes and retunes, which
-        // is what the device list rows on.
-        let who = common::Identity::new("dvb-service", format!("{id}")).named(name);
-        c.emit(pipeline::event::Event::Decoded(
-            Decoded::bytes("DVB-T", common::Hz(self.channel_hz as u64), self.at, Vec::new())
-                .by(who)
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(common::Modulation::Ofdm)
-                .with_crc(Some(true)),
-        ));
     }
 }
 
@@ -955,11 +774,17 @@ impl pipeline::node::Node for DvbtNode {
             outputs[2].real_mut().extend_from_slice(&pcm);
         }
 
-        if let Some(params) = self.rx.heard().params {
-            if self.told != Some(params) {
-                self.told = Some(params);
-                self.announce(params, c);
-            }
+        if let Some(params) = self.rx.heard().params
+            && self.told != Some(params)
+        {
+            self.told = Some(params);
+            let snr = self.rx.heard().snr_db.unwrap_or(0.0);
+            c.emit(pipeline::event::Event::Decoded(dvbtdec::multiplex_decoded(
+                params,
+                snr,
+                common::Hz(self.channel_hz as u64),
+                self.at,
+            )));
         }
         let fresh: Vec<u16> = self
             .mux
@@ -970,7 +795,11 @@ impl pipeline::node::Node for DvbtNode {
             .collect();
         for id in fresh {
             self.named.push(id);
-            self.announce_service(id, c);
+            if let Some(d) =
+                dvbtdec::service_decoded(&self.mux, id, common::Hz(self.channel_hz as u64), self.at)
+            {
+                c.emit(pipeline::event::Event::Decoded(d));
+            }
         }
         Ok(())
     }
@@ -1043,39 +872,26 @@ impl pipeline::node::Node for DvbtNode {
     }
 }
 
-/// The middle of the first UK multiplex channel, which is as good a place to
-/// start as any: channel 21, 474 MHz.
-pub const DEFAULT_HZ: f64 = 474_000_000.0;
-
 /// The carrier this stage is pointed at.
 const CHANNEL_HZ: &str = "channel_hz";
 
-pub struct Dvbt;
-
 impl Protocol for Dvbt {
     fn id(&self) -> &'static str {
-        "dvbt"
+        Signal::id(self)
     }
     fn label(&self) -> &'static str {
-        "dvbt"
+        Signal::label(self)
     }
     fn placement(&self) -> Placement {
-        Placement::Bands(bands())
+        Signal::placement(self)
     }
     fn shape(&self) -> Shape {
-        Shape {
-            widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: RATE_HZ,
-            feed_rate_hz: RATE_HZ,
-            span_wide: false,
-            // A multiplex is on the air without stopping, so there is no
-            // burst for the classifier to name and nothing to wait for.
-            families: &[],
-        }
+        Signal::shape(self)
     }
     fn default_hz(&self) -> f64 {
-        DEFAULT_HZ
+        Signal::default_hz(self)
     }
+
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.0} DVB-T", hz / 1e6)
     }
@@ -1882,7 +1698,7 @@ mod tests {
         let hiss = noise(0xA5A5, 10f32.powf(-30.0 / 20.0), air.len());
         let samples: Vec<C32> = air.iter().zip(&hiss).map(|(a, n)| a + n).collect();
 
-        let mut rx = DvbtReceiver::new();
+        let mut rx = dvbtdec::DvbtReceiver::new();
         let mut got = Vec::new();
         for block in samples.chunks(8192) {
             rx.push(block, &mut got);

@@ -34,6 +34,7 @@
 //! disk, and what is legal to receive or to keep depends on the country. That
 //! is the operator's call, but it should be a call rather than a surprise.
 
+use common::Decoded;
 use dsp::pocsag::{BATCH_WORDS, IDLE};
 
 /// The numeric character set, indexed by the four bits as transmitted, which
@@ -213,6 +214,58 @@ pub fn encode(address: u32, function: u8, body: &Body) -> Vec<u32> {
         out.push(idle);
     }
     out
+}
+
+/// The decodes a transmission's codewords become: one per page.
+///
+/// A transmission carries a transmitter's whole queue, so it is several pages
+/// to several pagers, and each is a row of its own. What they share is the
+/// bytes they came out of, which travel with each so that a log holds the
+/// evidence rather than a rendering of it.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
+    use common::Value;
+    let codewords = dsp::pocsag::Transmission::codewords_from_bytes(bytes);
+    parse(&codewords)
+        .into_iter()
+        .map(|m| {
+            let mut fields: Vec<(String, Value)> = vec![
+                ("address".into(), Value::Int(i64::from(m.address))),
+                ("function".into(), Value::Int(i64::from(m.function))),
+            ];
+            let (protocol, text) = match &m.body {
+                Body::Tone => ("POCSAG-Tone", None),
+                Body::Numeric(s) => ("POCSAG-Numeric", Some(s.clone())),
+                Body::Alpha(s) => ("POCSAG-Alpha", Some(s.clone())),
+            };
+            if let Some(t) = &text {
+                fields.push(("message".into(), Value::Text(t.clone())));
+            }
+            let detail = match &text {
+                Some(t) => format!("address={} {t}", m.address),
+                None => format!("address={} tone only", m.address),
+            };
+            let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
+                .by(common::Identity::new("pocsag", m.address.to_string()))
+                .with_link(common::Link {
+                    from: None,
+                    to: Some(common::Party::unit(m.address.to_string())),
+                })
+                .with_detail(detail)
+                .with_fields(fields)
+                .with_modulation(common::Modulation::Fsk2)
+                // Every codeword read here either verified against
+                // BCH(31,21) or was corrected by it, which is a real
+                // integrity check rather than a plausibility argument.
+                .with_crc(Some(true));
+            if let Some(t) = text {
+                // A page is written to somebody, whether a person typed it or
+                // an alarm system did: either way it is addressed to whoever
+                // carries the pager.
+                d = d.written().with_text(t);
+            }
+            d
+        })
+        .collect()
 }
 
 #[cfg(test)]

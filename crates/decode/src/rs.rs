@@ -98,7 +98,7 @@ impl ReedSolomon {
         // The inverse of prim in the exponent ring, which walks the Chien
         // search back to a symbol position.
         let mut iprim = 1usize;
-        while iprim % prim != 0 {
+        while !iprim.is_multiple_of(prim) {
             iprim += nn;
         }
 
@@ -283,7 +283,7 @@ impl ReedSolomon {
                     lambda[i + 1]
                 };
             }
-            if 2 * el <= r + no_eras - 1 {
+            if 2 * el < r + no_eras {
                 el = r + no_eras - el;
                 for i in 0..=nroots {
                     b[i] = if lambda[i] == 0 {

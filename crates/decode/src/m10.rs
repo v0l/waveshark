@@ -14,6 +14,7 @@
 //! them, the M10 counts degrees in 2^30ths of ninety and the M20 in
 //! millionths, and the serial numbers are printed differently.
 
+use common::Decoded;
 /// The shortest frame worth looking at: an M20's own length.
 pub const MIN_FRAME: usize = 0x45;
 
@@ -320,6 +321,225 @@ fn gps_to_utc(week: u16, sec: u32, frac: f64) -> (i32, u32, u32, u32, u32, f64) 
         in_day % 3600 / 60,
         f64::from(in_day % 60) + frac,
     )
+}
+
+/// What the protocols node makes of a Meteomodem frame.
+pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    let r = parse(bytes)?;
+    let mut fields: Vec<(String, common::Value)> = vec![
+        ("model".into(), common::Value::Text(r.model.label().into())),
+        ("serial".into(), common::Value::Text(r.serial.clone())),
+        ("counter".into(), common::Value::Int(r.counter as i64)),
+    ];
+    if r.has_position() {
+        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
+        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
+        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
+        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+    }
+    if r.satellites > 0 {
+        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
+    }
+    if r.gps_week > 0 {
+        fields.push(("gps_week".into(), common::Value::Int(r.gps_week as i64)));
+    }
+    if let Some((y, mo, d, h, mi, s)) = r.utc {
+        fields.push((
+            "utc".into(),
+            common::Value::Text(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:04.1}")),
+        ));
+    }
+
+    let mut d = Decoded::bytes("m10", center, 0.0, bytes.to_vec())
+        .with_modulation(common::Modulation::Fsk2)
+        .with_crc(Some(true))
+        .with_text(r.summary())
+        .with_detail(format!("{}, counter {}", r.model.label(), r.counter))
+        .with_fields(fields)
+        .by(common::Identity::new("meteomodem", r.serial.clone()).made_by("Meteomodem"));
+    if r.has_position() {
+        d = d
+            .reporting(common::ReportDetail::Sonde {
+                altitude_m: r.altitude_m,
+                climb_ms: r.climb_ms,
+                // Neither sonde sends its battery voltage in the standard
+                // part of the frame; not-a-number is how a sonde track says
+                // a reading has not been read.
+                battery_v: f32::NAN,
+                satellites: r.satellites,
+                descending: r.climb_ms < -1.0,
+                sensors: None,
+            })
+            .at_position(common::Position {
+                lat: r.lat_deg,
+                lon: r.lon_deg,
+                altitude_m: Some(r.altitude_m),
+                speed_kt: Some(r.speed_kt),
+                course_deg: Some(r.course_deg),
+            });
+    }
+    Some(d)
+}
+
+/// The sync header, as chips. Not a byte of the frame: the frame's own
+/// length and type follow it, and this is what says where they start.
+pub const SYNC: [bool; 32] = {
+    let raw = *b"10011001100110010100110010011001";
+    let mut out = [false; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = raw[i] == b'1';
+        i += 1;
+    }
+    out
+};
+
+/// Chips of the sync allowed to be wrong. There is no error correction in
+/// either sonde, so a false sync costs one checksum and nothing else.
+pub const SYNC_SLACK: u32 = 4;
+
+/// Chips held while looking for a sync: two of the longest frames and their
+/// headers.
+pub const MAX_CHIPS: usize = (MAX_FRAME + 2) * 8 * 2 * 2;
+
+/// Whether the sync sits at `at`, either way up. Which way is not worth
+/// keeping: the frame behind it is differentially coded, so it reads the
+/// same whichever way the receiver put it.
+pub fn synced(chips: &[bool], at: usize) -> bool {
+    let mut wrong = [0u32; 2];
+    for (k, &want) in SYNC.iter().enumerate() {
+        wrong[(chips[at + k] == want) as usize] += 1;
+    }
+    wrong[0] <= SYNC_SLACK || wrong[1] <= SYNC_SLACK
+}
+
+/// `count` bytes of frame from chip `at`, or `None` where the chips have not
+/// all arrived.
+///
+/// Two chips make a bit and the bit is whether the pair went the same way as
+/// the pair before it, the first pair being measured against a fall. Bits
+/// are most significant first within a byte.
+pub fn bytes(chips: &[bool], at: usize, count: usize, seed: bool) -> Option<Vec<u8>> {
+    if at + count * 16 > chips.len() {
+        return None;
+    }
+    let mut out = vec![0u8; count];
+    let mut last = seed;
+    for i in 0..count * 8 {
+        let pair = chips[at + 2 * i + 1];
+        out[i / 8] = out[i / 8] << 1 | u8::from(pair == last);
+        last = pair;
+    }
+    Some(out)
+}
+
+/// Frames cut out of a stream of chips.
+///
+/// Above the waveform and below the payload: the chips come from any 9600
+/// baud FSK demodulator, and what leaves is a frame whose checksum passed.
+#[derive(Default)]
+pub struct Framer {
+    chips: Vec<bool>,
+    /// Frames whose checksum passed.
+    frames: u64,
+    /// Chips already searched and known not to start a sync.
+    scanned: usize,
+}
+
+impl Framer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The buffer a bit clock appends into.
+    pub fn sink(&mut self) -> &mut Vec<bool> {
+        &mut self.chips
+    }
+
+    /// Frames whose checksum passed.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Look for syncs in the chips held, returning every frame behind one.
+    pub fn take(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut at = self.scanned;
+        while at + SYNC.len() <= self.chips.len() {
+            if !synced(&self.chips, at) {
+                at += 1;
+                continue;
+            }
+            match self.read_frame(at + SYNC.len(), self.chips[at + SYNC.len() - 1]) {
+                Some(Some(frame)) => {
+                    self.frames += 1;
+                    let used = at + SYNC.len() + frame.len() * 16;
+                    out.push(frame);
+                    self.chips.drain(..used.min(self.chips.len()));
+                    at = 0;
+                    self.scanned = 0;
+                }
+                // A sync whose frame has not all arrived: wait here, so a
+                // frame split across two blocks is not walked past.
+                Some(None) => {
+                    self.scanned = at;
+                    return out;
+                }
+                None => at += 1,
+            }
+        }
+        self.scanned = at;
+        out
+    }
+
+    /// The frame starting at chip `at`. `None` where those chips are not a
+    /// frame, `Some(None)` where not enough of them have arrived.
+    ///
+    /// The length is in the frame's first byte, so two bytes are read to
+    /// find out how many more to read.
+    ///
+    /// `seed` is the pair the first bit is measured against, which is the
+    /// last pair of the sync header: the sonde's differential encoder ran
+    /// through the header without stopping, and taking the reference from
+    /// there is what makes the whole frame read the same either way up.
+    /// Where that gives no frame the other reference is tried, since it can
+    /// only change the first bit of the length byte and trying it costs one
+    /// checksum.
+    fn read_frame(&self, at: usize, seed: bool) -> Option<Option<Vec<u8>>> {
+        let mut short = false;
+        for seed in [seed, !seed] {
+            let Some(head) = bytes(&self.chips, at, 2, seed) else {
+                short = true;
+                continue;
+            };
+            let Some(len) = declared_len(&head) else { continue };
+            let Some(frame) = bytes(&self.chips, at, len + 1, seed) else {
+                short = true;
+                continue;
+            };
+            if check_ok(&frame) {
+                return Some(Some(frame));
+            }
+        }
+        match short {
+            true => Some(None),
+            false => None,
+        }
+    }
+
+    /// Drop what has been searched and found wanting.
+    pub fn trim(&mut self) {
+        if self.chips.len() > MAX_CHIPS {
+            let drop = self.chips.len() - MAX_CHIPS;
+            self.chips.drain(..drop);
+            self.scanned = self.scanned.saturating_sub(drop);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.chips.clear();
+        self.scanned = 0;
+    }
 }
 
 #[cfg(test)]
