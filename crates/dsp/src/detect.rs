@@ -107,6 +107,86 @@ impl NoiseFloor {
     }
 }
 
+/// Mean power in one band of a span, measured a frame at a time.
+///
+/// A power measured over the whole span answers a question about the span: a
+/// 12.5 kHz signal 20 dB over the noise in its own channel carries
+/// 100 * (12.5 / 2400) = 0.52 times the noise power of a 2.4 MHz span and
+/// lifts the total by 1.8 dB, which no sensible threshold catches. Taking the
+/// transform of the frame and adding up the bins the band covers measures the
+/// transmitter instead, and the noise under it falls with the band, so the
+/// same signal reads its own 20 dB.
+///
+/// Normalised by Parseval, so a band as wide as the span returns the mean of
+/// `norm_sqr()` over the frame and a threshold set against the old whole-span
+/// measurement still means what it did.
+pub struct BandPower {
+    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    window: Vec<f32>,
+    /// 1 / (n * sum(w^2)), the factor that turns the summed bin powers back
+    /// into a mean power.
+    scale: f32,
+    buf: Vec<common::C32>,
+}
+
+impl BandPower {
+    /// A measurement over frames of `len` samples.
+    pub fn new(len: usize) -> Self {
+        let len = len.max(2);
+        let window = crate::window::hann(len);
+        let energy: f64 = window.iter().map(|w| (*w as f64) * (*w as f64)).sum();
+        Self {
+            fft: rustfft::FftPlanner::new().plan_fft_forward(len),
+            window,
+            scale: (1.0 / (len as f64 * energy)) as f32,
+            buf: Vec::with_capacity(len),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.window.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.window.is_empty()
+    }
+
+    /// Mean power in `width_hz` centred `offset_hz` from the middle of the
+    /// span, over a frame of exactly [`BandPower::len`] samples.
+    ///
+    /// A band narrower than one bin still measures the bin it falls in, so a
+    /// width set below the resolution reads high rather than reading nothing.
+    pub fn measure(&mut self, iq: &[common::C32], rate: f64, offset_hz: f64, width_hz: f64) -> f32 {
+        let n = self.window.len();
+        if iq.len() != n || rate <= 0.0 {
+            return iq.iter().map(|s| s.norm_sqr()).sum::<f32>() / iq.len().max(1) as f32;
+        }
+        self.buf.clear();
+        self.buf.extend(iq.iter().zip(&self.window).map(|(s, w)| s * *w));
+        self.fft.process(&mut self.buf);
+        let bin = rate / n as f64;
+        let (lo, hi) = (offset_hz - width_hz / 2.0, offset_hz + width_hz / 2.0);
+        let mut sum = 0.0f32;
+        let mut taken = 0usize;
+        let mut nearest = (f64::INFINITY, 0usize);
+        for (k, v) in self.buf.iter().enumerate() {
+            let f = if k <= n / 2 { k as f64 } else { k as f64 - n as f64 } * bin;
+            if f >= lo && f <= hi {
+                sum += v.norm_sqr();
+                taken += 1;
+            }
+            let d = (f - offset_hz).abs();
+            if d < nearest.0 {
+                nearest = (d, k);
+            }
+        }
+        if taken == 0 {
+            sum = self.buf[nearest.1].norm_sqr();
+        }
+        sum * self.scale
+    }
+}
+
 /// Expected value of the minimum of `n` exponential samples is `mean / n`, so
 /// the raw minimum must be scaled by roughly `n` to recover the mean. Real
 /// power is correlated between frames, so the full factor over-corrects; the
@@ -510,6 +590,70 @@ mod tests {
         fn noise(&mut self, amp: f32) -> C32 {
             C32::new(self.next_f32() * amp, self.next_f32() * amp)
         }
+    }
+
+    /// The whole span is the old measurement, exactly: a band wider than the
+    /// span must return the mean of `norm_sqr()`, or every threshold set
+    /// against the span moves the day a band is entered.
+    #[test]
+    fn a_band_as_wide_as_the_span_is_the_mean_power() {
+        let rate = 2_400_000.0;
+        let n = 4_800;
+        let mut rng = Lcg(3);
+        let iq: Vec<C32> = (0..n).map(|_| rng.noise(0.02)).collect();
+        let mean = iq.iter().map(|s| s.norm_sqr()).sum::<f32>() / n as f32;
+        let mut bp = BandPower::new(n);
+        let whole = bp.measure(&iq, rate, 0.0, rate);
+        assert!(
+            (10.0 * (whole / mean).log10()).abs() < 0.1,
+            "{whole} against {mean}, {:.2} dB apart",
+            10.0 * (whole / mean).log10()
+        );
+    }
+
+    /// The arithmetic in the comment on [`BandPower`], run: a 12.5 kHz signal
+    /// 20 dB over the noise in its own channel lifts a 2.4 MHz span by under
+    /// 2 dB and its own band by nearly the whole 20.
+    #[test]
+    fn a_narrow_signal_reads_its_own_level_in_its_own_band() {
+        let rate = 2_400_000.0;
+        let n = 4_800;
+        let width = 12_500.0;
+        let offset = 300_000.0;
+        let mut rng = Lcg(17);
+        let noise: Vec<C32> = (0..n).map(|_| rng.noise(0.02)).collect();
+        // Noise power per Hz times the channel, times 100, is the amplitude a
+        // carrier needs to sit 20 dB over the noise inside 12.5 kHz.
+        let np = noise.iter().map(|s| s.norm_sqr()).sum::<f32>() / n as f32;
+        let amp = (100.0 * np * width as f32 / rate as f32).sqrt();
+        let signal: Vec<C32> = noise
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                let p = std::f32::consts::TAU * (offset as f32 / rate as f32) * k as f32;
+                s + C32::new(p.cos(), p.sin()) * amp
+            })
+            .collect();
+
+        let mut bp = BandPower::new(n);
+        let span_rise = 10.0
+            * (bp.measure(&signal, rate, 0.0, rate) / bp.measure(&noise, rate, 0.0, rate)).log10();
+        let band_rise = 10.0
+            * (bp.measure(&signal, rate, offset, width) / bp.measure(&noise, rate, offset, width))
+                .log10();
+        assert!((1.0..2.5).contains(&span_rise), "the span rose {span_rise:.2} dB");
+        // 21.55 dB measured: the carrier falls on a bin centre and a Hann
+        // window spreads it over three, where the noise it is compared with
+        // is spread over all twenty-five.
+        assert!((20.0..23.0).contains(&band_rise), "the band rose {band_rise:.2} dB");
+
+        // And a band somewhere else in the span does not see it: 200 kHz away
+        // is 400 bins of a Hann window's skirt.
+        let elsewhere = 10.0
+            * (bp.measure(&signal, rate, offset - 200_000.0, width)
+                / bp.measure(&noise, rate, offset - 200_000.0, width))
+            .log10();
+        assert!(elsewhere.abs() < 1.0, "a band 200 kHz off moved {elsewhere:.2} dB");
     }
 
     #[test]

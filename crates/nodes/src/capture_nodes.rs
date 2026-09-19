@@ -159,11 +159,18 @@ pub struct IqCaptureNode {
     reference: Reference,
     /// dB above the tracked floor, or dBFS, depending on the reference.
     threshold_db: f32,
+    /// The band the trigger measures: how wide, and how far from the middle
+    /// of the span. Zero width is the whole span.
+    band_hz: f64,
+    band_offset_hz: f64,
+    /// The transform behind a band measurement, built for the frame length in
+    /// force. Absent while the whole span is measured, which costs nothing.
+    band: Option<dsp::detect::BandPower>,
     pre_ms: f64,
     hang_ms: f64,
-    /// The trigger's own floor tracker, fed the span's power a frame at a
-    /// time. Separate from the detector's: this one measures the whole span
-    /// rather than a channel, which is what the file holds.
+    /// The trigger's own floor tracker, fed a frame's power at a time.
+    /// Separate from the detector's: it follows whatever band the trigger was
+    /// set to, which is not a channel the detector opened.
     floor: dsp::detect::NoiseFloor,
     /// Samples held back so the head of a burst is in its file.
     pre_roll: VecDeque<C32>,
@@ -200,6 +207,9 @@ impl IqCaptureNode {
             trigger: Trigger::Switch,
             reference: Reference::Floor,
             threshold_db: 10.0,
+            band_hz: 0.0,
+            band_offset_hz: 0.0,
+            band: None,
             pre_ms: 500.0,
             hang_ms: 1_000.0,
             floor: dsp::detect::NoiseFloor::new(FLOOR_SUB_LEN, FLOOR_SUB_COUNT),
@@ -245,6 +255,31 @@ impl IqCaptureNode {
         self.reference = reference;
         self.threshold_db = db;
         self
+    }
+
+    /// Measure `width_hz` centred `offset_hz` from the middle of the span
+    /// rather than the span itself. Zero width is the span.
+    pub fn with_band(mut self, width_hz: f64, offset_hz: f64) -> Self {
+        self.set_band(width_hz, offset_hz);
+        self
+    }
+
+    fn set_band(&mut self, width_hz: f64, offset_hz: f64) {
+        if width_hz == self.band_hz && offset_hz == self.band_offset_hz {
+            return;
+        }
+        self.band_hz = width_hz.max(0.0);
+        self.band_offset_hz = offset_hz;
+        // The floor was learned from a different measurement, so it says
+        // nothing about this one.
+        self.floor.reset();
+        self.band = None;
+    }
+
+    /// The band the trigger measures, in Hz, and how far it sits from the
+    /// middle of the span. Zero width is the whole span.
+    pub fn band(&self) -> (f64, f64) {
+        (self.band_hz, self.band_offset_hz)
     }
 
     /// How much of the signal before the trigger goes in the file, and how
@@ -464,7 +499,7 @@ impl IqCaptureNode {
     /// One measured frame of the span: what it came to, whether that is a
     /// signal, and where the samples go.
     fn armed_frame(&mut self, iq: &[C32], c: &mut NodeCtx<'_>) {
-        let power = iq.iter().map(|s| s.norm_sqr()).sum::<f32>() / iq.len() as f32;
+        let power = self.frame_power(iq);
         let floor = self.floor.update(power.max(f32::MIN_POSITIVE));
         self.level_db = 10.0 * power.max(1e-20).log10();
         self.floor_db = 10.0 * floor.max(1e-20).log10();
@@ -510,6 +545,23 @@ impl IqCaptureNode {
             self.close();
             self.pre_roll.clear();
         }
+    }
+
+    /// What a frame came to, over the band the trigger was set to or over the
+    /// whole span when it was not.
+    ///
+    /// The transform costs a 2 ms frame's worth of work per 2 ms of signal,
+    /// which at 2.4 MS/s is 500 transforms of 4,800 points a second, and only
+    /// when a band is set on an armed capture.
+    fn frame_power(&mut self, iq: &[C32]) -> f32 {
+        if self.band_hz <= 0.0 || self.rate <= 0.0 {
+            return iq.iter().map(|s| s.norm_sqr()).sum::<f32>() / iq.len() as f32;
+        }
+        let band = match &mut self.band {
+            Some(b) if b.len() == iq.len() => b,
+            _ => self.band.insert(dsp::detect::BandPower::new(iq.len())),
+        };
+        band.measure(iq, self.rate, self.band_offset_hz, self.band_hz)
     }
 
     fn write_or_fail(&mut self, iq: &[C32], c: &mut NodeCtx<'_>) {
@@ -632,6 +684,10 @@ impl Simple for IqCaptureNode {
             Param::float(THRESHOLD_DB, self.threshold_db as f64, -120.0..=60.0)
                 .unit("dB")
                 .label("Trigger at"),
+            Param::float(BAND_HZ, self.band_hz, 0.0..=100e6).unit("Hz").label("Measure a band of"),
+            Param::float(BAND_OFFSET_HZ, self.band_offset_hz, -50e6..=50e6)
+                .unit("Hz")
+                .label("Band sits from centre"),
             Param::float(PRE_MS, self.pre_ms, 0.0..=MAX_PRE_MS).unit("ms").label("Keep before"),
             Param::float(HANG_MS, self.hang_ms, 0.0..=30_000.0).unit("ms").label("Hold after"),
         ]
@@ -675,6 +731,14 @@ impl Simple for IqCaptureNode {
                 self.threshold_db = v.as_f64().unwrap_or(self.threshold_db as f64) as f32;
                 Ok(())
             }
+            BAND_HZ => {
+                self.set_band(v.as_f64().unwrap_or(self.band_hz).max(0.0), self.band_offset_hz);
+                Ok(())
+            }
+            BAND_OFFSET_HZ => {
+                self.set_band(self.band_hz, v.as_f64().unwrap_or(self.band_offset_hz));
+                Ok(())
+            }
             PRE_MS => {
                 self.pre_ms = v.as_f64().unwrap_or(self.pre_ms).clamp(0.0, MAX_PRE_MS);
                 Ok(())
@@ -703,6 +767,7 @@ impl IqCaptureNode {
     /// Forget what the trigger measured, without touching what is on disk.
     fn rearm(&mut self) {
         self.floor.reset();
+        self.band = None;
         self.pre_roll.clear();
         self.pending.clear();
         self.quiet = 0;
@@ -1091,6 +1156,97 @@ mod tests {
         );
     }
 
+    /// An NFM transmission 20 dB over the noise in its own channel, sitting
+    /// 300 kHz up a 2.4 MS/s span.
+    fn nfm_burst(n: usize, rate: f64, offset_hz: f64, noise_power: f32) -> Vec<C32> {
+        // 12.5 kHz of a 2.4 MHz span carries 100 * (12.5 / 2400) = 0.52 times
+        // the span's noise power, so the whole span rises 1.8 dB.
+        let amp = (100.0 * noise_power * NARROW_HZ as f32 / rate as f32).sqrt();
+        let mut phase = 0.0f32;
+        (0..n)
+            .map(|k| {
+                // 2.5 kHz deviation at 1 kHz, which fills about 7 kHz.
+                let m = (std::f32::consts::TAU * 1_000.0 / rate as f32 * k as f32).sin();
+                phase += std::f32::consts::TAU * (offset_hz as f32 + 2_500.0 * m) / rate as f32;
+                C32::new(phase.cos(), phase.sin()) * amp
+            })
+            .collect()
+    }
+
+    const NARROW_HZ: f64 = 12_500.0;
+
+    /// The whole point of measuring a band: a narrow signal on a wide span
+    /// lifts the span by 1.8 dB and its own channel by 20, so the trigger has
+    /// to be looking at the channel or it never fires.
+    #[test]
+    fn a_narrow_burst_trips_a_band_and_not_the_span() {
+        let rate = 2_400_000.0;
+        let offset = 300_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let frame = (rate * FRAME_MS / 1e3) as usize;
+        let mut opened = Vec::new();
+        for (name, width) in [("armed-span", 0.0), ("armed-band", NARROW_HZ)] {
+            let d = dir(name);
+            let mut n = armed(&d, rate).with_band(width, offset).with_name(name);
+            Node::negotiate(&mut n, &ins).unwrap();
+            let mut seed = 2_024;
+            settle(&mut n, rate, &ins, &mut seed);
+            assert!(n.is_armed(), "{name}: the noise alone opened a file");
+            let noise_power = {
+                let b = noise(frame, &mut seed.clone());
+                b.iter().map(|s| s.norm_sqr()).sum::<f32>() / frame as f32
+            };
+            // 100 ms of it, which is a short over.
+            for _ in 0..50 {
+                let bg = noise(frame, &mut seed);
+                let sig = nfm_burst(frame, rate, offset, noise_power);
+                let block: Vec<C32> = bg.iter().zip(&sig).map(|(a, b)| a + b).collect();
+                feed(&mut n, &block, &ins);
+            }
+            opened.push((n.bursts(), files(&d).len()));
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        assert_eq!(opened[0], (0, 0), "the span measurement caught a 12.5 kHz signal");
+        assert_eq!(opened[1], (1, 1), "the band measurement missed the transmission");
+    }
+
+    /// A band as wide as the span is the span, so the threshold an operator
+    /// set before there were bands still means what it did.
+    #[test]
+    fn a_band_wider_than_the_span_triggers_like_the_span() {
+        let d = dir("armed-wide-band");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate).with_band(rate, 0.0).with_threshold(Reference::Absolute, -10.0);
+        Node::negotiate(&mut n, &ins).unwrap();
+        feed(&mut n, &tone((rate * 0.010) as usize), &ins);
+        assert_eq!(n.bursts(), 1);
+        // The same -6.02 dBFS the span measurement reads for this tone.
+        assert!((n.level_db() - -6.02).abs() < 0.3, "{} dBFS", n.level_db());
+        Simple::reset(&mut n);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Minutes of noise with a band set, and nothing written: a narrower
+    /// measurement is a lower floor, not a trigger that fires on its own.
+    #[test]
+    fn noise_in_a_band_writes_nothing() {
+        let d = dir("armed-band-noise");
+        let rate = 100_000.0;
+        let ins = [spec(rate, Hz(433_920_000))];
+        let mut n = armed(&d, rate).with_band(12_500.0, 20_000.0);
+        Node::negotiate(&mut n, &ins).unwrap();
+        let mut seed = 41;
+        // Five minutes at 100 kS/s.
+        for _ in 0..1_500 {
+            feed(&mut n, &noise((rate * 0.200) as usize, &mut seed), &ins);
+        }
+        assert_eq!(n.bursts(), 0);
+        assert_eq!(files(&d).len(), 0, "noise in a band triggered the capture");
+        assert!(n.is_armed());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_stamp_is_not_read_back_as_a_frequency() {
         // 2024-05-01 12:34:56 UTC.
@@ -1112,6 +1268,8 @@ const ENABLED: &str = "enabled";
 const TRIGGER: &str = "trigger";
 const REFERENCE: &str = "reference";
 const THRESHOLD_DB: &str = "threshold_db";
+pub const BAND_HZ: &str = "band_hz";
+pub const BAND_OFFSET_HZ: &str = "band_offset_hz";
 const PRE_MS: &str = "pre_ms";
 const HANG_MS: &str = "hang_ms";
 
@@ -1140,6 +1298,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
             .with_enabled(s.bool_or(ENABLED, true))
             .with_trigger(trigger)
             .with_threshold(reference, s.f64_or(THRESHOLD_DB, 10.0) as f32)
+            .with_band(s.f64_or(BAND_HZ, 0.0), s.f64_or(BAND_OFFSET_HZ, 0.0))
             .with_window(s.f64_or(PRE_MS, 500.0), s.f64_or(HANG_MS, 1_000.0)),
     ))
 }

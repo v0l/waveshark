@@ -105,7 +105,7 @@ the code is in the commit log.
 - Eight collections of `.sub` captures download in the data settings,
   UberGuidoZ and the Zero-Sploit DB among them.
 - Raw capture armed on energy: a file per burst, holding the signal from
-  before it triggered.
+  before it triggered, measured over the span or one band of it.
 - Memory bank imports of Chirp, CSV, Freqman and SDR# lists, and export as
   Chirp CSV.
 - A timeline under the call list: the recordings drawn as clips against the

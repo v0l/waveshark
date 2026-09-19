@@ -444,6 +444,11 @@ pub struct CapturePlan {
     pub reference: nodes::capture_nodes::Reference,
     /// dB over the tracked floor, or dBFS, depending on the reference.
     pub threshold_db: f32,
+    /// How wide a band the trigger measures, and how far it sits from the
+    /// middle of the span. Zero width measures the span itself, which only
+    /// catches a signal about as wide as it is.
+    pub band_hz: f32,
+    pub band_offset_hz: f32,
     pub pre_ms: f32,
     pub hang_ms: f32,
 }
@@ -457,6 +462,8 @@ impl Default for CapturePlan {
             // anything this misses is something no decoder was going to read
             // either.
             threshold_db: 10.0,
+            band_hz: 0.0,
+            band_offset_hz: 0.0,
             pre_ms: 500.0,
             hang_ms: 1_000.0,
         }
@@ -2052,6 +2059,8 @@ impl Receiver {
             ("trigger", Text(arm.trigger.as_str().into())),
             ("reference", Text(arm.reference.as_str().into())),
             ("threshold_db", Float(arm.threshold_db as f64)),
+            (nodes::capture_nodes::BAND_HZ, Float(arm.band_hz as f64)),
+            (nodes::capture_nodes::BAND_OFFSET_HZ, Float(arm.band_offset_hz as f64)),
             ("pre_ms", Float(arm.pre_ms as f64)),
             ("hang_ms", Float(arm.hang_ms as f64)),
         ] {
@@ -3304,6 +3313,14 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         s.insert("trigger".into(), pipeline::ParamValue::Text(arm.trigger.as_str().into()));
         s.insert("reference".into(), pipeline::ParamValue::Text(arm.reference.as_str().into()));
         s.insert("threshold_db".into(), pipeline::ParamValue::Float(arm.threshold_db as f64));
+        s.insert(
+            nodes::capture_nodes::BAND_HZ.into(),
+            pipeline::ParamValue::Float(arm.band_hz as f64),
+        );
+        s.insert(
+            nodes::capture_nodes::BAND_OFFSET_HZ.into(),
+            pipeline::ParamValue::Float(arm.band_offset_hz as f64),
+        );
         s.insert("pre_ms".into(), pipeline::ParamValue::Float(arm.pre_ms as f64));
         s.insert("hang_ms".into(), pipeline::ParamValue::Float(arm.hang_ms as f64));
         p.add_derived(derived::CAPTURE, "iq_capture", s);
@@ -5579,6 +5596,8 @@ pub(crate) mod tests {
             trigger: Trigger::Energy,
             reference: Reference::Absolute,
             threshold_db: -42.0,
+            band_hz: 12_500.0,
+            band_offset_hz: 300_000.0,
             pre_ms: 250.0,
             hang_ms: 750.0,
         };
@@ -5587,6 +5606,7 @@ pub(crate) mod tests {
         let cap = rx.capture().unwrap();
         assert_eq!(cap.trigger(), Trigger::Energy);
         assert_eq!(cap.threshold_dbfs(), Some(-42.0));
+        assert_eq!(cap.band(), (12_500.0, 300_000.0));
         assert!(cap.is_armed(), "switched on and armed is waiting, not writing");
         assert_eq!(cap.bursts(), 0);
 
@@ -5596,6 +5616,7 @@ pub(crate) mod tests {
         let cap = rx.capture().unwrap();
         assert_eq!(cap.trigger(), Trigger::Energy, "a retune disarmed the capture");
         assert_eq!(cap.threshold_dbfs(), Some(-42.0));
+        assert_eq!(cap.band(), (12_500.0, 300_000.0), "a rebuild lost the band it measures");
     }
 
     /// The server is drawn only where one was asked for, reads the head like

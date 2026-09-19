@@ -2895,6 +2895,41 @@ impl App {
                         arm.threshold_db = db as f32;
                     }
                 });
+                let band_help = "What the level is measured over. The whole span only \
+                                 trips on a signal about as wide as it is: a 12.5 kHz \
+                                 transmission 20 dB over the noise lifts a 2.4 MHz span \
+                                 by 1.8 dB and never opens a file. Set the width of the \
+                                 signal and where it sits from the middle of the span, \
+                                 and the trigger measures that instead.";
+                row_help(ui, "measure", band_help, |ui| {
+                    let (mut width, mut offset) =
+                        (arm.band_hz as f64 / 1e3, arm.band_offset_hz as f64 / 1e3);
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut width)
+                                .speed(1.0)
+                                .range(0.0..=100_000.0)
+                                .suffix(" kHz wide"),
+                        )
+                        .changed()
+                    {
+                        arm.band_hz = (width * 1e3) as f32;
+                    }
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut offset)
+                                .speed(1.0)
+                                .range(-50_000.0..=50_000.0)
+                                .suffix(" kHz off"),
+                        )
+                        .changed()
+                    {
+                        arm.band_offset_hz = (offset * 1e3) as f32;
+                    }
+                });
+                if arm.band_hz <= 0.0 {
+                    hint(ui, "zero is the whole span, which a narrow signal cannot lift");
+                }
                 let window_help = "How much of the signal before the trigger goes in the \
                                    file, and how long the span may stay quiet before it \
                                    is closed. A short pre-roll loses the head of the \
@@ -2979,7 +3014,11 @@ impl App {
                         ui,
                         true,
                         &format!(
-                            "armed at {threshold_db:.0} dBFS, span at {:.0} dBFS",
+                            "armed at {threshold_db:.0} dBFS, {} at {:.0} dBFS",
+                            match arm.band_hz > 0.0 {
+                                true => "band",
+                                false => "span",
+                            },
                             level_db.max(-199.0)
                         ),
                     ),

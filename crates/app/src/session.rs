@@ -801,6 +801,10 @@ impl Session {
                     .unwrap_or(d.capture_arm.reference),
                 threshold_db: f("capture_threshold_db", d.capture_arm.threshold_db as f64)
                     .clamp(-120.0, 60.0) as f32,
+                band_hz: f("capture_band_hz", d.capture_arm.band_hz as f64).clamp(0.0, 100e6)
+                    as f32,
+                band_offset_hz: f("capture_band_offset_hz", d.capture_arm.band_offset_hz as f64)
+                    .clamp(-50e6, 50e6) as f32,
                 pre_ms: f("capture_pre_ms", d.capture_arm.pre_ms as f64).clamp(0.0, 5_000.0) as f32,
                 hang_ms: f("capture_hang_ms", d.capture_arm.hang_ms as f64).clamp(0.0, 30_000.0)
                     as f32,
@@ -940,6 +944,8 @@ impl Session {
         s.push_str(&format!("capture_trigger = {}\n", arm.trigger.as_str()));
         s.push_str(&format!("capture_reference = {}\n", arm.reference.as_str()));
         s.push_str(&format!("capture_threshold_db = {}\n", arm.threshold_db));
+        s.push_str(&format!("capture_band_hz = {}\n", arm.band_hz));
+        s.push_str(&format!("capture_band_offset_hz = {}\n", arm.band_offset_hz));
         s.push_str(&format!("capture_pre_ms = {}\n", arm.pre_ms));
         s.push_str(&format!("capture_hang_ms = {}\n", arm.hang_ms));
         s.push_str(&format!("log_cap_mb = {}\n", render_cap(self.log_cap_mb)));
@@ -1127,6 +1133,8 @@ mod tests {
                 trigger: nodes::capture_nodes::Trigger::Energy,
                 reference: nodes::capture_nodes::Reference::Absolute,
                 threshold_db: -62.5,
+                band_hz: 12_500.0,
+                band_offset_hz: -300_000.0,
                 pre_ms: 250.0,
                 hang_ms: 2_500.0,
             },
