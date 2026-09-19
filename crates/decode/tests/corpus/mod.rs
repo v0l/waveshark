@@ -99,7 +99,12 @@ impl Fixture {
 
     /// Did rtl_433 report this device, under its own name for it?
     pub fn rtl_433_saw(&self, ours: &str) -> bool {
-        self.reference_models.iter().filter_map(|m| spec_for(m)).any(|s| s.ours == ours)
+        // A published description carries rtl_433's own name for the device,
+        // so it needs no line in the table below: SCMplus arrived as one and
+        // read as invented beside the built-in decoder of the same protocol,
+        // which the table calls ERT-SCM+.
+        self.reference_models.iter().any(|m| m == ours)
+            || self.reference_models.iter().filter_map(|m| spec_for(m)).any(|s| s.ours == ours)
     }
 
     /// Run the capture through both front ends and every protocol, exactly as

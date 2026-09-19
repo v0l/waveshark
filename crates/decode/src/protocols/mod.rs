@@ -45,7 +45,14 @@ use crate::bits::BitBuffer;
 /// gap between copies is usually long enough to end the package rather than
 /// only the row.
 pub(crate) fn rows_within(bits: &BitBuffer, row_bits: std::ops::RangeInclusive<usize>) -> bool {
-    let starts: Vec<usize> = if bits.rows().is_empty() { vec![0] } else { bits.rows().to_vec() };
+    // A boundary list need not begin at zero: a burst sliced as one row can
+    // come back with a single mark at its end, and taking those marks as row
+    // starts then measures the empty tail after the last one and misses the
+    // row itself. Every frame in such a package was refused on its length.
+    let mut starts: Vec<usize> = bits.rows().to_vec();
+    if starts.first() != Some(&0) {
+        starts.insert(0, 0);
+    }
     let starts = &starts[..];
     let ends = starts.iter().skip(1).copied().chain(std::iter::once(bits.len()));
     starts.iter().copied().zip(ends).any(|(start, end)| row_bits.contains(&(end - start)))

@@ -70,9 +70,7 @@ fn decode(cfg: ModeSConfig) -> Option<Vec<String>> {
         block.extend(bytes.chunks_exact(2).map(|c| {
             common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5)
         }));
-        d.process_valid(&block, &mut frames, &|f: &ModeSFrame| {
-            book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
-        });
+        d.process_valid(&block, &mut frames, &|f: &ModeSFrame| book.borrow_mut().accept(&f.bytes));
     }
     Some(
         frames

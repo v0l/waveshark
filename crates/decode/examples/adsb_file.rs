@@ -48,7 +48,7 @@ fn main() {
                 let hex: String = f.bytes.iter().map(|x| format!("{x:02x}")).collect();
                 eprintln!("cand {hex}");
             }
-            book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
+            book.borrow_mut().accept(&f.bytes)
         });
     }
 

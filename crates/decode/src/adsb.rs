@@ -249,11 +249,9 @@ impl AddressBook {
     /// Whether this frame is worth believing, and remember it if it proves
     /// itself. Suitable as the validator a demodulator drives its search with.
     ///
-    /// `confident` says the demodulator had no marginal bits in this frame.
-    /// Only a confident frame may propose a new address: a frame read out of
-    /// noise has bits that were a coin toss, and letting those vote is how a
-    /// receiver invents aircraft.
-    pub fn accept(&mut self, bytes: &[u8], confident: bool) -> bool {
+    /// Nothing here weighs how cleanly the bits were read: a frame either
+    /// proves itself by its CRC, or names an aircraft one already has.
+    pub fn accept(&mut self, bytes: &[u8]) -> bool {
         let Some(df) = bytes.first().map(|b| b >> 3) else {
             return false;
         };
@@ -594,25 +592,25 @@ mod tests {
         assert_eq!(syndrome(&hex(IID)), 88, "the interrogator's id");
         // Seven bits is a one in 128 chance for noise, so an aircraft nothing
         // has verified stays out however often it is proposed.
-        assert!(!book.accept(&hex(IID), true));
-        assert!(!book.accept(&hex(IID), true));
-        assert!(!book.accept(&hex(IID), true), "an unproved address got in by repetition");
+        assert!(!book.accept(&hex(IID)));
+        assert!(!book.accept(&hex(IID)));
+        assert!(!book.accept(&hex(IID)), "an unproved address got in by repetition");
 
         // A reply to nobody proves itself and names its aircraft.
         assert_eq!(syndrome(&hex(ZERO_IID)), 0);
-        assert!(book.accept(&hex(ZERO_IID), false));
+        assert!(book.accept(&hex(ZERO_IID)));
         assert!(book.contains(0x4c_a624));
 
         // And once an ADS-B frame has proved that aircraft, its interrogated
         // replies are believed too.
         book.insert(0x3c_66b6);
-        assert!(book.accept(&hex(IID), false));
+        assert!(book.accept(&hex(IID)));
 
         // A remainder too big to be an interrogator id is a frame read wrong.
         let mut damaged = hex(IID);
         damaged[4] ^= 0x40;
         assert!(syndrome(&damaged) >= 128);
-        assert!(!book.accept(&damaged, true));
+        assert!(!book.accept(&damaged));
     }
 
     const IDENT: &str = "8D4840D6202CC371C32CE0576098";

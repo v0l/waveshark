@@ -255,6 +255,15 @@ impl Scripted {
                 return Err(DecodeError::NotThisProtocol);
             }
         }
+        // Silence read as data. A parity bit over zeros is zero and a nibble
+        // sum of zeros is zero, so a description whose only checks are weak
+        // publishes a device every time a gap gets framed: the GT-TMBBQ05
+        // description, whose own comment calls both its checks weak, reported
+        // a thermometer at its lowest reading out of the Fineoffset capture.
+        // dump1090 rejects the same thing by name, as SR_ALL_ZEROS.
+        if (0..want).all(|i| !frame.get(i).unwrap_or(false)) {
+            return Err(DecodeError::NotThisProtocol);
+        }
         let n = self.desc.frame.not_constant;
         if n > 0
             && (0..n)
@@ -1327,6 +1336,41 @@ mod tests {
         for p in published {
             check(&p).unwrap();
         }
+    }
+
+    /// A frame of nothing is not a reading.
+    ///
+    /// Weak checks pass on zeros: a parity bit over zeros is zero, and so is a
+    /// nibble sum of them. The GT-TMBBQ05 description carries both and nothing
+    /// else, by its own account, and published a thermometer at the bottom of
+    /// its range out of the Fineoffset capture, where the real sensor is the
+    /// only transmitter. A phantom device in somebody's house is worse than a
+    /// reading missed.
+    #[test]
+    fn a_frame_of_all_zeros_is_silence_and_not_a_device() {
+        let weakly_checked = r#"
+name: Weak
+timing: {ppm: [2000, 4000], reset_us: 9100}
+frame: {bits: 32}
+check:
+  - {kind: parity, over: [0, 27], at: 27}
+fields:
+  - {name: id, bits: 16, data: int, id: true}
+  - {name: value, bits: 16, data: int}
+"#;
+        let p = Scripted::new(Desc::parse(weakly_checked).expect("a description"));
+
+        // The check holds over zeros, and that is the whole problem.
+        let zeros = BitBuffer::from_bytes(&[0, 0, 0, 0]);
+        assert!(p.desc.check.iter().all(|c| check_holds(c, &zeros)), "the check rejects zeros");
+        assert!(matches!(p.read(&zeros), Err(DecodeError::NotThisProtocol)), "read silence");
+
+        // Anything at all in the frame still reads, including one bit.
+        assert!(p.read(&BitBuffer::from_bytes(&[0x49, 0xb3, 0x79, 0x1c])).is_ok());
+        assert!(
+            p.read(&BitBuffer::from_bytes(&[0, 0, 0, 1])).is_ok(),
+            "one bit set is not silence"
+        );
     }
 
     #[test]

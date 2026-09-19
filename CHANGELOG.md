@@ -155,6 +155,11 @@ the code is in the commit log.
 
 ### Fixed
 
+- Comm-B and surveillance replies named an address that was not the
+  aircraft's, so an altitude or a squawk was filed under a hex code no
+  aircraft has.
+- Band ribbon labels overlapped where one allocation sits inside another,
+  as PMR446 does inside land mobile UHF.
 - Scanner blocks were placed across a radio's filter rolloff, decoding its
   own skirt.
 - The RTL-SDR is driven over USB by the receiver itself, with no librtlsdr

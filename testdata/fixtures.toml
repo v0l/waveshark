@@ -132,6 +132,56 @@ false_positives = 0
 icao = 0x4b1880
 
 [[capture]]
+name = "adsb_radarpi_1090M_2400k.cu8"
+sha256 = "f4b197f408b1f2173b044f92ac26ccba4c5ee3a73dd092758e097ddcf789feb4"
+url = "https://nostr.download/f4b197f408b1f2173b044f92ac26ccba4c5ee3a73dd092758e097ddcf789feb4.xz"
+compression = "xz"
+center_hz = 1_090_000_000
+rate_sps = 2_400_000
+format = "cu8"
+description = """
+Ten seconds of 1090 MHz off radarpi, a Nooelec FlyCatcher on an outdoor
+antenna at 49.6 dB, recorded by rtl_sdr straight to file at Dublin approach
+in daylight. Dense: 53 aircraft and 4091 frames by dump1090's count, against
+40 frames in the whole of adsb_1090M_2400k.cu8. Uncut, for the reason that
+file gives, and because an energy cut is meaningless on a band this busy.
+
+What this one is for is the clock. The reference beside it is not a list of
+frames but dump1090's own Beast timestamps, one frame a line as ticks and
+hex, which is what makes a timestamp checkable here at all: the older
+reference carries hex alone, so nothing in the corpus could say whether a
+frame was timed right. Matching frames by payload and removing the constant
+offset between the two receivers, the residual is 0.91 ticks RMS, 76 ns,
+spread over four buckets from -1 to +2. A decoder that quantises to a whole
+sample cannot reach that: a sample is five ticks at this rate.
+
+It is also the evidence for what the two decoders each read. dump1090-rb
+1.0.15 read 4091 frames to this receiver's 3722, ahead on DF17, 1013 to 1109,
+and behind on the replies that overlay their address on the parity, DF20 514
+to 341 and DF21 472 to 341, which is issue #159. Of the frames it read and
+this did not, 302 of 306 name an aircraft already proved here by a clean
+DF17 or DF11, so they were never demodulated rather than rejected.
+
+The all-call replies are why it is here at all: 825 of dump1090's 1181 DF11
+answer a ground station and leave that station's id over the parity rather
+than zero. Reading only the zero ones left this receiver with 411 of them and
+cost it mlat sync on radarpi.
+"""
+
+[capture.expect]
+reference = "adsb_radarpi_1090M_2400k.dump1090.ts"
+reference_frames = 4091
+# Per downlink format, as dump1090-rb 1.0.15 read them.
+reference_df11 = 1181
+reference_df17 = 1013
+frames_min = 3700
+df11_min = 1100
+df17_min = 1050
+# Ticks RMS against the reference, over frames matched by payload.
+jitter_ticks_max = 1.5
+false_aircraft = 0
+
+[[capture]]
 name = "m17_openrtx_434.02M_2400k.cu8"
 sha256 = "37e304fe3bb526c96c9a6148814c02350d346307d0722b88719701e5639daf6a"
 url = "https://nostr.download/37e304fe3bb526c96c9a6148814c02350d346307d0722b88719701e5639daf6a.xz"

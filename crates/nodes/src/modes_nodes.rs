@@ -130,7 +130,7 @@ impl Simple for ModeSNode {
         self.frames.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
         self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
-            book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
+            book.borrow_mut().accept(&f.bytes)
         });
         self.book = book.into_inner();
 

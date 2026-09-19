@@ -330,7 +330,7 @@ impl Reader {
         self.frames.clear();
         let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
         self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
-            book.borrow_mut().accept(&f.bytes, f.weak_bits == 0)
+            book.borrow_mut().accept(&f.bytes)
         });
         self.book = book.into_inner();
 
@@ -513,6 +513,9 @@ mod tests {
     use std::io::Read;
 
     const CAPTURE: &str = "../../testdata/adsb_1090M_2400k.cu8";
+    /// Ten seconds off radarpi, with dump1090's own Beast timestamps beside it
+    const BUSY: &str = "../../testdata/adsb_radarpi_1090M_2400k.cu8";
+    const BUSY_REFERENCE: &str = "../../testdata/adsb_radarpi_1090M_2400k.dump1090.ts";
     /// A block of the capture with no frame in it, so dropping it can be
     /// compared frame for frame against not dropping it.
     const HOLE: usize = 73;
@@ -679,6 +682,115 @@ mod tests {
         // on rather than ending the process it just fed.
         assert_eq!(heard.stalled(1), None);
         assert_eq!(heard.stalled(0), None);
+    }
+
+    /// The timestamps agree with dump1090's to a fraction of a sample.
+    ///
+    /// The one test in the corpus that can say so: every other reference is a
+    /// list of frames, where this one is dump1090-rb 1.0.15's Beast output
+    /// over the same file, ticks and all. Frames are matched by payload and
+    /// the constant offset between two receivers removed, since an mlat server
+    /// solves that away and only the spread is a fault.
+    ///
+    /// Measured: 0.91 ticks RMS, 76 ns, over 2158 matched frames. A decoder
+    /// timing to a whole sample cannot beat 5 ticks at this rate.
+    #[test]
+    fn the_clock_agrees_with_dump1090_to_a_fraction_of_a_sample() {
+        let Some(buf) = busy() else { return };
+        let (theirs, ours) = (reference(), beast_over_the_wire(&blocks(&buf), buf.rate.as_f64()));
+        assert!(ours.len() >= 3_700, "read only {} frames", ours.len());
+
+        let mut by_payload: std::collections::HashMap<Vec<u8>, Vec<u64>> = Default::default();
+        for (ts, f) in &theirs {
+            by_payload.entry(f.clone()).or_default().push(*ts);
+        }
+        // A payload sent twice seconds apart would match the wrong copy, so
+        // the nearest in time is taken and anything past a frame's length
+        // apart is not treated as the same transmission at all.
+        let mut gaps: Vec<i64> = Vec::new();
+        for (ts, f) in &ours {
+            let Some(cands) = by_payload.get(f) else { continue };
+            let Some(near) = cands.iter().min_by_key(|t| t.abs_diff(*ts)) else { continue };
+            gaps.push(*ts as i64 - *near as i64);
+        }
+        assert!(gaps.len() >= 2_000, "only {} frames matched the reference", gaps.len());
+        gaps.sort_unstable();
+        let offset = gaps[gaps.len() / 2];
+        let close: Vec<f64> =
+            gaps.iter().map(|g| (g - offset) as f64).filter(|r| r.abs() < 600.0).collect();
+        assert!(close.len() >= 2_000, "only {} frames timed against the reference", close.len());
+        let rms = (close.iter().map(|r| r * r).sum::<f64>() / close.len() as f64).sqrt();
+        assert!(rms <= 1.5, "{rms:.2} ticks RMS against dump1090, over {} frames", close.len());
+    }
+
+    /// What each receiver read of the same ten seconds.
+    ///
+    /// The counts are the ones in #159, and the point of pinning them is that
+    /// the shortfall is in the replies that overlay their address on the
+    /// parity, which no CRC can frame. dump1090-rb 1.0.15 read 4091 frames,
+    /// 1181 of them all-call replies, 825 of which answer a ground station.
+    #[test]
+    fn all_call_replies_keep_up_with_dump1090_where_the_comm_b_replies_do_not() {
+        let Some(buf) = busy() else { return };
+        let (theirs, ours) = (reference(), beast_over_the_wire(&blocks(&buf), buf.rate.as_f64()));
+        let count = |frames: &[(u64, Vec<u8>)], df: u8| {
+            frames.iter().filter(|(_, f)| f[0] >> 3 == df).count()
+        };
+        assert_eq!(theirs.len(), 4_091, "the reference decode");
+        assert_eq!((count(&theirs, 11), count(&theirs, 17)), (1_181, 1_013));
+
+        // Ahead on the squitters the parity search can frame.
+        assert!(count(&ours, 17) >= 1_050, "DF17: {} to their 1013", count(&ours, 17));
+        // Level on all-call replies, which needs the ones answering a ground
+        // station: reading only the ones answering nobody gave 411.
+        assert!(count(&ours, 11) >= 1_100, "DF11: {} to their 1181", count(&ours, 11));
+        // And behind on Comm-B, which is #159. A floor, so closing the gap
+        // does not fail the test, and a ceiling nowhere near theirs so that
+        // closing it is visible as a failure worth updating.
+        assert!((300..500).contains(&count(&ours, 20)), "DF20: {}", count(&ours, 20));
+
+        // No aircraft of our own invention: every frame names one the
+        // reference also saw.
+        let known: std::collections::HashSet<u32> =
+            theirs.iter().filter_map(|(_, f)| names(f)).collect();
+        let strangers: Vec<String> = ours
+            .iter()
+            .filter(|(_, f)| !names(f).is_some_and(|a| known.contains(&a)))
+            .map(|(_, f)| f.iter().map(|b| format!("{b:02x}")).collect())
+            .collect();
+        assert!(strangers.is_empty(), "aircraft nobody else saw: {strangers:?}");
+    }
+
+    /// The aircraft a frame names, from its address field or over its parity
+    fn names(f: &[u8]) -> Option<u32> {
+        match f.first()? >> 3 {
+            11 | 17 | 18 => Some(((f[1] as u32) << 16) | ((f[2] as u32) << 8) | f[3] as u32),
+            _ => adsb::overlaid_address(f),
+        }
+    }
+
+    fn busy() -> Option<common::IqBuf> {
+        let path = std::path::Path::new(BUSY);
+        if !path.exists() {
+            eprintln!("skipping: no {BUSY}, run testdata/fetch.sh");
+            return None;
+        }
+        Some(sources::FileSource::open(path).unwrap().read_all().unwrap())
+    }
+
+    /// dump1090's Beast output over the same file, as ticks and payload
+    fn reference() -> Vec<(u64, Vec<u8>)> {
+        std::fs::read_to_string(BUSY_REFERENCE)
+            .expect("the reference decode is committed, unlike the capture")
+            .lines()
+            .filter_map(|l| {
+                let (ts, hex) = l.split_once(' ')?;
+                let bytes = (0..hex.len() / 2)
+                    .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+                    .collect::<Option<Vec<u8>>>()?;
+                Some((ts.parse().ok()?, bytes))
+            })
+            .collect()
     }
 
     /// Samples the radio dropped are time that passed.
