@@ -552,7 +552,7 @@ mod tests {
     fn a_beast_timestamp_is_the_sample_index_at_twelve_megahertz() {
         let Some(buf) = capture() else { return };
         let frames = beast_over_the_wire(&blocks(&buf), buf.rate.as_f64());
-        assert_eq!(frames.len(), 70, "frames on 30005");
+        assert_eq!(frames.len(), 76, "frames on 30005");
         // Not merely that they are timed: a frame the clock cannot place is
         // kept off this port entirely, so the sentinel never reaches a client
         // that would fit a line through it.
@@ -572,7 +572,7 @@ mod tests {
         // sample grid, the rest being frames whose peak needed no moving.
         let between =
             frames.iter().filter(|(ts, _)| (ts - clock::BEAST_REPORTS_AT) % 5 != 0).count();
-        assert_eq!(between, 49, "timestamps quantised to whole samples");
+        assert_eq!(between, 54, "timestamps quantised to whole samples");
     }
 
     /// A frame with no time feeds the networks but not the clock.
@@ -627,8 +627,8 @@ mod tests {
             all.iter().enumerate().filter(|(n, _)| *n != HOLE).map(|(_, b)| b.clone()).collect();
         let gapped = beast_over_the_wire(&holed, rate);
 
-        assert_eq!(whole.len(), 70);
-        assert_eq!(gapped.len(), 70, "a frame went with the dropped block");
+        assert_eq!(whole.len(), 76);
+        assert_eq!(gapped.len(), 76, "a frame went with the dropped block");
         let past = (HOLE as u64 + 1) * 65_536 * 5;
         let mut checked = 0;
         for ((a, one), (b, other)) in whole.iter().zip(&gapped) {
@@ -636,6 +636,6 @@ mod tests {
             assert_eq!(a, b, "a frame moved by {} ticks", *b as i64 - *a as i64);
             checked += (*a > past) as usize;
         }
-        assert_eq!(checked, 42, "frames past the gap");
+        assert_eq!(checked, 44, "frames past the gap");
     }
 }

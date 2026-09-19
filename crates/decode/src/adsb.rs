@@ -191,9 +191,26 @@ fn syndromes(len: usize) -> Option<&'static std::collections::HashMap<u32, usize
 /// is for.
 pub fn overlaid_address(bytes: &[u8]) -> Option<u32> {
     match bytes.len() {
-        7 | 14 => Some(crc24(bytes)),
+        7 | 14 => Some(syndrome(bytes)),
         _ => None,
     }
+}
+
+/// What a frame leaves over its parity field: zero, an address or an
+/// interrogator's id.
+///
+/// The checksum of everything but the parity, exclusive-ored with the parity
+/// as transmitted, which is how the format defines it. Running the parity
+/// bytes through the register instead also comes to zero for a clean frame,
+/// so the two agree on whether a DF17 checks out, but they do not agree on
+/// anything else: feeding them through leaves the address multiplied by x^24,
+/// a different 24 bit number, which no ADS-B frame will ever match.
+pub fn syndrome(bytes: &[u8]) -> u32 {
+    let Some(split) = bytes.len().checked_sub(3) else {
+        return 0;
+    };
+    let parity = bytes[split..].iter().fold(0u32, |a, b| (a << 8) | *b as u32);
+    crc24(&bytes[..split]) ^ parity
 }
 
 /// Addresses seen in frames that carried their own CRC.
@@ -205,21 +222,7 @@ pub fn overlaid_address(bytes: &[u8]) -> Option<u32> {
 #[derive(Clone, Debug, Default)]
 pub struct AddressBook {
     seen: std::collections::HashSet<u32>,
-    /// Addresses proposed by frames that cannot prove themselves, and how many
-    /// times each has been proposed.
-    pending: std::collections::HashMap<u32, u32>,
 }
-
-/// Sightings before an address that never proved itself is believed.
-///
-/// A receiver hears aircraft that only ever answer interrogations, never
-/// broadcasting a position, so refusing every unprovable address loses them
-/// entirely. The way back in is repetition: noise proposes a uniformly random
-/// 24 bit address each time, so the chance of the same one arriving three
-/// times is negligible, while an aircraft answering a radar sends dozens a
-/// minute. Two would not do: across the hundreds of thousands of noise
-/// candidates a busy band produces, coincidental pairs are common.
-const SIGHTINGS: u32 = 3;
 
 impl AddressBook {
     pub fn new() -> Self {
@@ -266,40 +269,39 @@ impl AddressBook {
                 self.insert(icao);
                 true
             }
-            // An all-call reply: the remainder is the interrogator id, which
-            // is zero for the ones a receiver overhears.
+            // An all-call reply, whose remainder is the interrogator it is
+            // answering rather than a fault.
             11 if bytes.len() == 7 => {
-                // DF11 overlays the interrogator id, which is zero for the
-                // all-call replies a listener overhears.
-                if crc24(bytes) == 0 {
-                    let icao =
-                        ((bytes[1] as u32) << 16) | ((bytes[2] as u32) << 8) | bytes[3] as u32;
-                    self.insert(icao);
-                    return true;
+                let icao = ((bytes[1] as u32) << 16) | ((bytes[2] as u32) << 8) | bytes[3] as u32;
+                match syndrome(bytes) {
+                    // Nobody's interrogation: the frame proves itself, so it
+                    // may name a new aircraft.
+                    0 => {
+                        self.insert(icao);
+                        true
+                    }
+                    // A reply to a ground station, carrying that station's id
+                    // in the low seven bits of the remainder. Over 10 seconds
+                    // of Dublin approach, 825 of 1181 all-call replies were
+                    // these, so reading only the zero ones is a third of the
+                    // DF11 an mlat client has to synchronise on. Nothing here
+                    // is checked, though: an id is seven bits and noise lands
+                    // inside that once in 128, which is why this corroborates
+                    // rather than proves and cannot propose an address.
+                    iid if iid < 128 => self.contains(icao),
+                    _ => false,
                 }
-                false
             }
-            // Everything else is only as trustworthy as the address it names.
-            // An unknown one is held until it has been proposed enough times
-            // to be more than a coincidence.
+            // Everything else is only as trustworthy as the address it names,
+            // and an address nothing has proved is not an aircraft. Letting an
+            // unproved one in after three sightings was worth 5 frames in
+            // 3727 off radarpi, which does not buy the chance of inventing an
+            // aircraft out of a repeated misread.
             0 | 4 | 5 | 16 | 20 | 21 | 24 => {
                 let Some(a) = overlaid_address(bytes) else {
                     return false;
                 };
-                if self.contains(a) {
-                    return true;
-                }
-                if !confident {
-                    return false;
-                }
-                let n = self.pending.entry(a).or_insert(0);
-                *n += 1;
-                if *n >= SIGHTINGS {
-                    self.pending.remove(&a);
-                    self.insert(a);
-                    return true;
-                }
-                false
+                self.contains(a)
             }
             // A downlink format nothing transmits.
             _ => false,
@@ -572,6 +574,47 @@ mod tests {
     /// 24 bit CRC over the other thirteen bytes, so a decoder that gets the
     /// CRC wrong cannot accidentally agree with them: the check and the
     /// vectors corroborate each other.
+    /// All-call replies off radarpi, in the capture the DF11 counts come
+    /// from. `ZERO_IID` answers nobody and checks to zero; `IID` answers a
+    /// ground station and leaves 88 behind, which is that station's id.
+    const ZERO_IID: &str = "5d4ca624556ce7";
+    const IID: &str = "5d3c66b6c5cee1";
+
+    /// An all-call reply answering a ground station is still that aircraft.
+    ///
+    /// The remainder of a DF11 is the interrogator it replied to, not a
+    /// fault, and only a reply to nobody comes out zero. Reading the zero
+    /// ones alone threw away 825 of the 1181 all-call replies in ten seconds
+    /// off radarpi, and DF11 is half of what an mlat client synchronises on.
+    /// dump1090 ranks the same frame `SR_DF11_IID_KNOWN`, above its accept
+    /// threshold, and `SR_DF11_IID_UNKNOWN` below it.
+    #[test]
+    fn an_all_call_answering_a_ground_station_needs_the_aircraft_known_first() {
+        let mut book = AddressBook::new();
+        assert_eq!(syndrome(&hex(IID)), 88, "the interrogator's id");
+        // Seven bits is a one in 128 chance for noise, so an aircraft nothing
+        // has verified stays out however often it is proposed.
+        assert!(!book.accept(&hex(IID), true));
+        assert!(!book.accept(&hex(IID), true));
+        assert!(!book.accept(&hex(IID), true), "an unproved address got in by repetition");
+
+        // A reply to nobody proves itself and names its aircraft.
+        assert_eq!(syndrome(&hex(ZERO_IID)), 0);
+        assert!(book.accept(&hex(ZERO_IID), false));
+        assert!(book.contains(0x4c_a624));
+
+        // And once an ADS-B frame has proved that aircraft, its interrogated
+        // replies are believed too.
+        book.insert(0x3c_66b6);
+        assert!(book.accept(&hex(IID), false));
+
+        // A remainder too big to be an interrogator id is a frame read wrong.
+        let mut damaged = hex(IID);
+        damaged[4] ^= 0x40;
+        assert!(syndrome(&damaged) >= 128);
+        assert!(!book.accept(&damaged, true));
+    }
+
     const IDENT: &str = "8D4840D6202CC371C32CE0576098";
     const POS_EVEN: &str = "8D40621D58C382D690C8AC2863A7";
     const POS_ODD: &str = "8D40621D58C386435CC412692AD6";
@@ -685,9 +728,12 @@ mod tests {
         // register and the aircraft answered with EXS2MF.
         let f = parse(&hex("A0001838201584F23468207CDFA5")).unwrap();
         assert_eq!(f.df, 20);
-        // The address is the CRC remainder, believable only because something
-        // upstream matched it against an aircraft already seen.
-        assert_eq!(f.icao, Some(crc24(&hex("A0001838201584F23468207CDFA5"))));
+        // The address is what the frame leaves over its parity, believable
+        // only because something upstream matched it against an aircraft
+        // already seen. 40655A is in the United Kingdom's allocation, which a
+        // Jet2 flight should be; running the parity through the register
+        // instead gave FD0006, which is in nobody's.
+        assert_eq!(f.icao, Some(0x40_655a));
         let Message::CommB { altitude_ft, squawk, report } = f.kind else {
             panic!("not read as a Comm-B reply")
         };

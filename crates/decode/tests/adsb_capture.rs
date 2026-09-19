@@ -101,16 +101,39 @@ macro_rules! skip_without_fixture {
 }
 
 #[test]
-fn every_frame_we_report_is_one_dump1090_also_saw() {
+fn every_frame_we_report_belongs_to_an_aircraft_dump1090_also_saw() {
     let ours: HashSet<String> = skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
     let theirs = reference();
-    let invented: Vec<&String> = ours.difference(&theirs).collect();
+    // Reading more than the reference is the point, so the gate is not that
+    // every frame is one of its frames: it is that every frame names one of
+    // its aircraft. An invented frame carries an invented address, and this
+    // catches that where matching frame for frame only says we read more.
+    let known: HashSet<u32> = theirs.iter().filter_map(|f| aircraft(f)).collect();
+    let invented: Vec<&String> = ours
+        .difference(&theirs)
+        .filter(|f| !aircraft(f).is_some_and(|a| known.contains(&a)))
+        .collect();
     assert!(
         invented.is_empty(),
-        "{} frames nobody else saw: {:?}",
+        "{} frames naming an aircraft nobody else saw: {:?}",
         invented.len(),
         &invented[..invented.len().min(5)]
     );
+    // Two, and both corroborated: an all-call reply from 4B1880 answering a
+    // different interrogator than the reference caught, and an altitude reply
+    // from 0D08D1, whose all-call reply dump1090 read as well.
+    assert_eq!(ours.difference(&theirs).count(), 2, "frames beyond the reference decode");
+}
+
+/// The aircraft a frame names, from its address field or its parity
+fn aircraft(hex: &str) -> Option<u32> {
+    let b: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+        .collect::<Option<_>>()?;
+    match b.first()? >> 3 {
+        11 | 17 | 18 => Some(((b[1] as u32) << 16) | ((b[2] as u32) << 8) | b[3] as u32),
+        _ => adsb::overlaid_address(&b),
+    }
 }
 
 #[test]
@@ -132,17 +155,18 @@ fn framing_by_the_crc_reads_frames_the_preamble_search_never_sees() {
     // The whole claim of the second pass: a window whose parity comes to zero
     // is a frame wherever it sits, so a transmission whose preamble another
     // aircraft sat on is still readable. Both counts are of distinct frames
-    // dump1090 also saw, over the same four seconds.
+    // dump1090 also saw, over the same four seconds. They were 27 and 29
+    // until all-call replies answering a ground station were read as well.
     let theirs = reference();
     let with: HashSet<String> = skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
     let without: HashSet<String> =
         skip_without_fixture!(PREAMBLE_ONLY.as_ref()).iter().cloned().collect();
-    assert_eq!(without.intersection(&theirs).count(), 27, "preamble search alone");
-    assert_eq!(with.intersection(&theirs).count(), 29, "with CRC framing");
-    // Two of them: a DF17 velocity report and a DF11 all-call reply.
+    assert_eq!(without.intersection(&theirs).count(), 28, "preamble search alone");
+    assert_eq!(with.intersection(&theirs).count(), 32, "with CRC framing");
+    // Two all-call replies from 4B1880 answering different interrogators, its
+    // identity and velocity squitters, and a Comm-B reply.
     let extra: Vec<&String> = with.difference(&without).collect();
-    assert_eq!(extra.len(), 2, "extra frames: {extra:?}");
-    assert!(extra.iter().all(|f| theirs.contains(*f)), "invented {extra:?}");
+    assert_eq!(extra.len(), 5, "extra frames: {extra:?}");
     assert!(without.difference(&with).count() == 0, "the second pass lost a frame");
 }
 
