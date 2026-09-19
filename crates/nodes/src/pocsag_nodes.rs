@@ -288,10 +288,7 @@ impl Simple for PocsagTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        let pkg = self.keyer.take(i.len(), self.rate);
-        if !pkg.pulses.is_empty() {
-            o.pulses_mut().push(pkg);
-        }
+        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 

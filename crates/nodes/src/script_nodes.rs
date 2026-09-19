@@ -335,7 +335,8 @@ impl Protocol for ScriptedProtocol {
             source,
             modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
                 .f("shift_hz", fsk.deviation_hz * 2.0)
-                .f("offset_hz", 0.0),
+                .f("offset_hz", 0.0)
+                .s("rest", "silence"),
         })
     }
 }
@@ -710,10 +711,7 @@ impl Simple for ScriptTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        let pkg = self.keyer.take(i.len(), self.rate);
-        if !pkg.pulses.is_empty() {
-            o.pulses_mut().push(pkg);
-        }
+        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 }

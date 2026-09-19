@@ -131,6 +131,7 @@ the code is in the commit log.
 
 ### Changed
 
+- FSK transmit rests are keyed as no carrier, not as the lower tone held.
 - Mode S frames are also framed by their CRC, so a reply whose preamble
   another aircraft sat on is still read.
 - Mode S demodulation twice as fast on a Raspberry Pi 4, over three times on

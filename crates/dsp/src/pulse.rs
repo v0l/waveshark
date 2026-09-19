@@ -719,9 +719,47 @@ pub fn keyed(bits: &[bool], baud: f64) -> Package {
     pkg
 }
 
+/// Bits at a baud, with a trailing run of spaces held back.
+///
+/// Returns the package and how many bits at the end were not keyed, which a
+/// caller clocking a block at a time offers again with the next block. A
+/// package that ends on a gap cannot say whether that gap is a space in the
+/// data or the rest that follows the transmission, so a modulator told to key
+/// a rest as silence would punch a hole in a run of spaces that a block
+/// boundary happened to land in.
+pub fn keyed_data(bits: &[bool], baud: f64) -> (Package, usize) {
+    match bits.iter().rposition(|b| *b) {
+        Some(last) => (keyed(&bits[..=last], baud), bits.len() - 1 - last),
+        None => (Package::default(), bits.len()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package handed to a modulator that keys silence never ends on a
+    /// gap, and what was held back is exactly the spaces at the end.
+    #[test]
+    fn keying_data_holds_back_the_spaces_at_the_end() {
+        // 1101 0011 00 at 1200 baud: the last two bits are held.
+        let bits = [true, true, false, true, false, false, true, true, false, false];
+        let (pkg, held) = keyed_data(&bits, 1200.0);
+        assert_eq!(held, 2);
+        assert_eq!(pkg.pulses.len(), 3);
+        assert_eq!(pkg.pulses[2], Pulse { mark: 1667, gap: 0 });
+        // Offered again with the next block, the held spaces are keyed in
+        // front of it and no bit time is lost.
+        let next = [false, false, true];
+        let (pkg, held) = keyed_data(&next, 1200.0);
+        assert_eq!(held, 0);
+        assert_eq!(pkg.pulses, vec![Pulse { mark: 0, gap: 1667 }, Pulse { mark: 833, gap: 0 }]);
+
+        // A block with nothing keyed in it at all holds all of it.
+        let (pkg, held) = keyed_data(&[false, false, false], 1200.0);
+        assert_eq!(held, 3);
+        assert_eq!(pkg.pulses.len(), 0);
+    }
 
     /// The timings are the bits, and the last edge lands where the whole
     /// transmission's length says rather than where a rounded bit period

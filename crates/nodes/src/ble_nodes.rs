@@ -333,10 +333,7 @@ impl Simple for BleTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        let pkg = self.keyer.take(i.len(), self.rate);
-        if !pkg.pulses.is_empty() {
-            o.pulses_mut().push(pkg);
-        }
+        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 
@@ -473,7 +470,9 @@ impl Protocol for Ble {
     fn transmit(&self) -> Option<crate::protocol::TxChain> {
         Some(crate::protocol::TxChain {
             source: NodeSpec::new(BLE_TX.name),
-            modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name).f("shift_hz", 500_000.0),
+            modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
+                .f("shift_hz", 500_000.0)
+                .s("rest", "silence"),
         })
     }
 }
@@ -515,8 +514,11 @@ mod tests {
             &[(NAME, pipeline::param::ParamValue::Text("waveshark".into()))],
         );
         // The stage rests on no carrier, so most of this is silence: three
-        // packets of 240 us and the empty blocks of clock between them.
-        assert_eq!(air.len(), 394_880, "50 ms of samples at {rate}");
+        // packets of 240 us and the rest of the clock keyed as no carrier,
+        // which is every sample of it, 49 blocks of 8192.
+        assert_eq!(air.len(), 401_408, "50 ms of samples at {rate}");
+        let quiet = air.iter().filter(|s| s.norm() < 1e-6).count();
+        assert_eq!(quiet, 395_636, "the rests are silence, not a held tone");
 
         // The detector needs a floor to measure a burst against, so the
         // advertisements arrive between two stretches of quiet band.

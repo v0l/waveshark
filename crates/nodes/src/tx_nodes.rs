@@ -15,7 +15,7 @@
 //! table adds an encoder and reuses this carrier.
 
 use crate::mod_nodes::OokModNode;
-use common::pulse::Package;
+use common::pulse::{Package, Pulse};
 use common::{C32, Result};
 use pipeline::Graph;
 use pipeline::graph::Topology;
@@ -1294,6 +1294,12 @@ pub struct Keyer {
     /// detector that never sees the channel go quiet never cuts a burst out
     /// of it.
     silent_rest: bool,
+    /// Spaces held back from the last block, which a silent rest keyer keys
+    /// in front of the next one so a package never ends on a data gap.
+    held: usize,
+    /// Microseconds of rest left over by rounding, carried so a rest split
+    /// across blocks is still the length it was asked for.
+    rest_frac: f64,
     passes: u64,
 }
 
@@ -1307,6 +1313,8 @@ impl Keyer {
             rest: 0.0,
             gap_bits: gap_bits.max(0.0),
             silent_rest: false,
+            held: 0,
+            rest_frac: 0.0,
             passes: 0,
         }
     }
@@ -1323,6 +1331,8 @@ impl Keyer {
         self.at = 0;
         self.owed = 0.0;
         self.rest = 0.0;
+        self.held = 0;
+        self.rest_frac = 0.0;
     }
 
     pub fn set_baud(&mut self, baud: f64) {
@@ -1344,23 +1354,34 @@ impl Keyer {
     }
 
     /// The timings for one block: `samples` of clock at `rate`.
-    pub fn take(&mut self, samples: usize, rate: f64) -> Package {
+    ///
+    /// One package per keyed run. A silent rest ends the package it follows,
+    /// as the trailing gap that `mod_nodes::Rest::Silence` keys as no
+    /// carrier, so the rest still occupies the time it was asked for instead
+    /// of the chain handing the radio a short block.
+    pub fn take(&mut self, samples: usize, rate: f64) -> Vec<Package> {
         if self.bits.is_empty() || rate <= 0.0 {
-            return Package::default();
+            return Vec::new();
         }
         self.owed += samples as f64 / rate * self.baud;
-        let mut out: Vec<bool> = Vec::new();
+        let mut packages = Vec::new();
+        let mut out: Vec<bool> = vec![false; std::mem::take(&mut self.held)];
+        let mut rest_bits = 0usize;
         while self.owed >= 1.0 {
             self.owed -= 1.0;
             if self.rest > 0.0 {
                 self.rest -= 1.0;
-                // A silent rest is bit times that go by without being keyed
-                // at all, so the modulator produces nothing for them and the
-                // channel really is empty between bursts.
-                if !self.silent_rest {
-                    out.push(false);
+                match self.silent_rest {
+                    true => rest_bits += 1,
+                    false => out.push(false),
                 }
                 continue;
+            }
+            // A rest that ended inside this block closes the package it
+            // belongs to, and the transmission that follows it starts one.
+            if rest_bits > 0 {
+                packages.push(self.close(&mut out, rest_bits));
+                rest_bits = 0;
             }
             out.push(self.bits[self.at]);
             self.at += 1;
@@ -1370,7 +1391,35 @@ impl Keyer {
                 self.rest = self.gap_bits;
             }
         }
-        dsp::pulse::keyed(&out, self.baud)
+        match rest_bits > 0 {
+            true => packages.push(self.close(&mut out, rest_bits)),
+            false => {
+                // A tone keyer's trailing gap is the lower tone either way,
+                // so there is nothing to hold back from it.
+                let (pkg, held) = match self.silent_rest {
+                    true => dsp::pulse::keyed_data(&out, self.baud),
+                    false => (dsp::pulse::keyed(&out, self.baud), 0),
+                };
+                self.held = held;
+                packages.push(pkg);
+            }
+        }
+        packages.retain(|p| !p.pulses.is_empty());
+        packages
+    }
+
+    /// The bits so far, ending on a rest of `rest_bits` bit times.
+    fn close(&mut self, out: &mut Vec<bool>, rest_bits: usize) -> Package {
+        let mut pkg = dsp::pulse::keyed(out, self.baud);
+        out.clear();
+        let us = rest_bits as f64 * 1e6 / self.baud + self.rest_frac;
+        let gap = us.floor();
+        self.rest_frac = us - gap;
+        match pkg.pulses.last_mut() {
+            Some(p) if p.gap == 0 => p.gap = gap as u32,
+            _ => pkg.pulses.push(Pulse { mark: 0, gap: gap as u32 }),
+        }
+        pkg
     }
 }
 
@@ -1988,5 +2037,92 @@ mod monitor_tests {
         assert!(sent.lock().unwrap().is_empty(), "the queue outlived the over");
         let Payload::Iq(v) = out else { unreachable!() };
         assert!(v.iter().all(|s| s.norm() == 0.0), "a stale over was drawn on the span");
+    }
+}
+
+#[cfg(test)]
+mod keyer_tests {
+    use super::*;
+    use crate::mod_nodes::{FskModNode, Rest};
+
+    const RATE: f64 = 1_000_000.0;
+    const BAUD: f64 = 1_000.0;
+
+    /// Key the bits through a silent-rest keyer and a two-tone modulator,
+    /// block by block, and return the runs of no carrier in the result.
+    fn silences(bits: Vec<bool>, rest_bits: f64, block: usize, blocks: usize) -> Vec<usize> {
+        let mut k = Keyer::new(BAUD, rest_bits).resting_silent();
+        k.load(bits);
+        let mut m = FskModNode::new(0.0, 20_000.0, 0.5).resting(Rest::Silence);
+        let spec = StreamSpec {
+            kind: PortKind::Pulses,
+            rate: RATE,
+            flow: Flow::Tx,
+            bandwidth: RATE,
+            ..Default::default()
+        };
+        Simple::negotiate(&mut m, &PortSpec { spec, latency: 0 }).unwrap();
+        let mut iq: Vec<C32> = Vec::new();
+        for _ in 0..blocks {
+            let input = Payload::Pulses(k.take(block, RATE));
+            let mut out = Payload::Iq(Vec::new());
+            let (mut ev, mut tg) = (Vec::new(), Vec::new());
+            let ins = [PortSpec { spec, latency: 0 }];
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(&mut m, &input, &mut out, &mut ctx).unwrap();
+            let Payload::Iq(v) = out else { unreachable!() };
+            iq.extend(v);
+        }
+        let mut runs = Vec::new();
+        let mut n = 0usize;
+        for s in &iq {
+            match s.norm() < 1e-6 {
+                true => n += 1,
+                false => {
+                    if n > 0 {
+                        runs.push(n);
+                    }
+                    n = 0;
+                }
+            }
+        }
+        if n > 0 {
+            runs.push(n);
+        }
+        runs
+    }
+
+    /// The trap the trailing gap was held back for. A block of 2.5 bit times
+    /// lands inside the run of spaces in the middle of this transmission,
+    /// and a package that ended there would be keyed as the end of a burst:
+    /// a hole in the carrier where there should be a space.
+    #[test]
+    fn a_block_boundary_inside_a_run_of_spaces_is_not_a_rest() {
+        // 1 0 0 0 1 1, then 20 bit times of rest, at 1000 baud. The block is
+        // 2500 samples, which is two and a half bits.
+        let bits = vec![true, false, false, false, true, true];
+        let runs = silences(bits, 20.0, 2_500, 40);
+        // Four passes in 100 ms, so four rests and nothing else quiet. The
+        // rest is 20 ms less the 500 us edge the carrier fades over, and the
+        // last one is still running when the clock stops.
+        assert_eq!(runs.len(), 4, "silences of {runs:?}");
+        assert_eq!(&runs[..3], &[19_500, 19_500, 19_500], "a hole inside a transmission");
+        assert_eq!(runs[3], 15_500, "the rest the clock stopped in");
+    }
+
+    /// A keyer that idles on a tone never goes quiet, however the blocks fall.
+    #[test]
+    fn a_tone_rest_is_carrier_all_the_way_through() {
+        let mut k = Keyer::new(BAUD, 20.0);
+        k.load(vec![true, false, false, false, true, true]);
+        let mut total = 0u64;
+        for _ in 0..40 {
+            for pkg in k.take(2_500, RATE) {
+                total +=
+                    pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum::<u64>();
+            }
+        }
+        // 100 ms of clock, keyed as timings to the microsecond.
+        assert_eq!(total, 100_000, "the tone keyer dropped {} us", 100_000 - total as i64);
     }
 }

@@ -32,6 +32,7 @@ const SHIFT_HZ: &str = "shift_hz";
 const SPS: &str = "sps";
 const DEPTH: &str = "depth";
 const DEVIATION_HZ: &str = "deviation_hz";
+const REST: &str = "rest";
 
 /// How hard a modulator drives the output, as a fraction of full scale.
 ///
@@ -72,6 +73,52 @@ fn tx_spec(input: &PortSpec, rate: f64, bandwidth: f64) -> StreamSpec {
 /// Rise from 0 to 1 over `x` in [0, 1] with zero slope at both ends.
 fn raised_cosine(x: f32) -> f32 {
     0.5 - 0.5 * (std::f32::consts::PI * x.clamp(0.0, 1.0)).cos()
+}
+
+/// Half the shortest element of a package, in samples: the edge a two-tone
+/// burst starts and stops on.
+///
+/// The symbol length is not given to a modulator, so it is taken from the
+/// timings the way a detector takes it off the air, and half of one is the
+/// most that can be shaped without eating the symbol beside it. What the
+/// shape buys is measured in `a_shaped_edge_is_quieter_off_channel_than_a_cut`.
+fn edge_samples(pkg: &Package, per_us: f64, silent_last: bool) -> Option<usize> {
+    let last = pkg.pulses.len().saturating_sub(1);
+    let shortest = pkg
+        .pulses
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| match silent_last && i == last {
+            // The rest is not a symbol, and shaping half of a 20 ms one
+            // would be a fade rather than an edge.
+            true => [p.mark, 0],
+            false => [p.mark, p.gap],
+        })
+        .filter(|d| *d > 0)
+        .min()?;
+    Some((((shortest as f64 * per_us) / 2.0).floor() as usize).max(1))
+}
+
+/// Ramp a run down to nothing over its first `r` samples and hold it there.
+fn fade_out(run: &mut [C32], r: usize) {
+    for (i, s) in run.iter_mut().enumerate() {
+        let env = match i < r {
+            true => raised_cosine(1.0 - (i as f32 + 0.5) / r as f32),
+            false => 0.0,
+        };
+        *s *= env;
+    }
+}
+
+/// Ramp the first `ramp` samples up from nothing.
+fn fade_in(run: &mut [C32], ramp: usize, from_silence: bool) {
+    if !from_silence {
+        return;
+    }
+    let r = ramp.min(run.len());
+    for (i, s) in run.iter_mut().take(r).enumerate() {
+        *s *= raised_cosine((i as f32 + 0.5) / r as f32);
+    }
 }
 
 /// A carrier that keeps its phase across calls.
@@ -263,12 +310,42 @@ impl Simple for OokModNode {
     }
 }
 
+/// What a two-tone keyer sends for the gap that ends a package
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rest {
+    /// The lower tone held, which is how a pager and a teleprinter idle and
+    /// how a receiver times itself between transmissions
+    #[default]
+    Tone,
+    /// No carrier, which is what a protocol sending a short burst and then
+    /// stopping does between bursts
+    Silence,
+}
+
+impl Rest {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tone" => Some(Self::Tone),
+            "silence" => Some(Self::Silence),
+            _ => None,
+        }
+    }
+}
+
 /// Timings in, two tones out.
 ///
 /// The transmit side of `dsp::fsk`, and it inherits that side's convention: a
 /// mark is the upper tone and a gap the lower one, which is all
 /// [`PortKind::Pulses`] can say. Anything with more than two levels needs a
 /// port that carries symbols rather than durations.
+///
+/// The one gap that can mean something else is the last one in a package,
+/// which `Package` says "is the timeout that ended it and carries no
+/// information": [`Rest::Silence`] keys that as no carrier, so a burst
+/// protocol can put a measured pause between two transmissions. Every gap
+/// before it is data and stays a tone. `tx_nodes::Keyer` holds back a
+/// trailing run of spaces for the next block so that the gap a modulator
+/// silences is never one of them.
 ///
 /// Phase is continuous across the tone change, which is what makes this CPFSK
 /// rather than two oscillators switched between. Switching puts a step at
@@ -277,8 +354,16 @@ pub struct FskModNode {
     offset_hz: f64,
     shift_hz: f64,
     amplitude: f32,
+    rest: Rest,
     rate: f64,
+    /// Half the shortest element keyed since the rate was negotiated, in
+    /// samples.
+    edge: usize,
     carrier: Carrier,
+    /// Whether the last thing keyed was a rest, so the tone is ramped up
+    /// once where a burst begins rather than at every block boundary the
+    /// keyer cut it on.
+    resting: bool,
     produced: u64,
 }
 
@@ -288,8 +373,11 @@ impl Default for FskModNode {
             offset_hz: 0.0,
             shift_hz: DEFAULT_FSK_SHIFT_HZ,
             amplitude: DEFAULT_AMPLITUDE,
+            rest: Rest::default(),
             rate: 0.0,
+            edge: usize::MAX,
             carrier: Carrier::default(),
+            resting: true,
             produced: 0,
         }
     }
@@ -305,10 +393,26 @@ impl FskModNode {
         }
     }
 
+    /// What the gap that ends a package is keyed as
+    pub fn resting(mut self, rest: Rest) -> Self {
+        self.rest = rest;
+        self
+    }
+
     fn key(&mut self, pkg: &Package, out: &mut Vec<C32>) {
         let per_us = self.rate / 1e6;
         let (hi, lo) = (self.offset_hz + self.shift_hz / 2.0, self.offset_hz - self.shift_hz / 2.0);
-        for p in &pkg.pulses {
+        let silent = self.rest == Rest::Silence;
+        // The shortest element seen, not the shortest in this package: a
+        // block cuts a transmission wherever it falls, and a fragment
+        // holding none of the shortest symbol would shape an edge over one.
+        if let Some(e) = edge_samples(pkg, per_us, silent) {
+            self.edge = self.edge.min(e);
+        }
+        let ramp = self.edge;
+        let start = out.len();
+        let last = pkg.pulses.len().saturating_sub(1);
+        for (i, p) in pkg.pulses.iter().enumerate() {
             // A zero mark is a real thing here, where it is not for a keyed
             // carrier: both tones are carrier, so a pulse with no mark is a
             // run of the lower tone and nothing more. A BLE preamble starts
@@ -320,10 +424,41 @@ impl FskModNode {
                 let c = self.carrier.step(hi, self.rate);
                 out.push(c * self.amplitude);
             }
+            if silent && i == last && gap > 0 {
+                // The rest itself, which is where the carrier stops. The
+                // first samples of it are the lower tone fading out rather
+                // than a step, and the oscillator runs through the whole of
+                // it so the next burst starts where an unbroken carrier
+                // would have been.
+                let head = out.len();
+                // Nothing was keyed before this rest, so there is no carrier
+                // to take down: a long rest arrives as a package a block at
+                // a time, and an edge on each of them would chop the silence
+                // into pieces a detector would read as several bursts.
+                let r = match self.resting && head == start {
+                    true => 0,
+                    false => ramp.min(gap),
+                };
+                for _ in 0..gap {
+                    let c = self.carrier.step(lo, self.rate);
+                    out.push(c * self.amplitude);
+                }
+                let rest = out.len() - gap;
+                fade_out(&mut out[rest..], r);
+                fade_in(&mut out[start..head], ramp, self.resting);
+                self.resting = true;
+                return;
+            }
             for _ in 0..gap {
                 let c = self.carrier.step(lo, self.rate);
                 out.push(c * self.amplitude);
             }
+        }
+        if silent {
+            // The burst runs on into the next block, so what was keyed here
+            // ends on no edge at all.
+            fade_in(&mut out[start..], ramp, self.resting);
+            self.resting = false;
         }
     }
 }
@@ -347,6 +482,7 @@ impl Simple for FskModNode {
             )));
         }
         self.rate = input.spec.rate;
+        self.edge = usize::MAX;
         // Carson's rule with the symbol rate unknown: the tones plus a symbol
         // either side. The tone separation is the part that is known.
         Ok(tx_spec(input, self.rate, self.shift_hz * 2.0))
@@ -377,6 +513,8 @@ impl Simple for FskModNode {
     fn reset(&mut self) {
         self.carrier.reset();
         self.produced = 0;
+        self.resting = true;
+        self.edge = usize::MAX;
     }
 
     fn params(&self) -> Vec<Param> {
@@ -386,10 +524,27 @@ impl Simple for FskModNode {
                 .label("Tone separation")
                 .unit("Hz"),
             Param::float(AMPLITUDE, self.amplitude as f64, 0.0..=1.0).label("Amplitude").unit("FS"),
+            Param::choice(
+                REST,
+                match self.rest {
+                    Rest::Tone => 0,
+                    Rest::Silence => 1,
+                },
+                vec!["tone".into(), "silence".into()],
+            )
+            .label("Between bursts"),
         ]
     }
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        if name == REST {
+            self.rest = match &value {
+                ParamValue::Int(0) => Rest::Tone,
+                ParamValue::Int(_) => Rest::Silence,
+                _ => value.as_str().and_then(Rest::parse).unwrap_or(self.rest),
+            };
+            return Ok(());
+        }
         let v = value.as_f64().unwrap_or(0.0);
         match name {
             OFFSET_HZ => self.offset_hz = v,
@@ -936,6 +1091,83 @@ mod tests {
         assert!(jump < 1.0, "phase jumped {jump} rad at the tone change");
     }
 
+    /// The gap between two bursts is no carrier when the stage was told a
+    /// rest is silence, and the lower tone when it was not. Both bursts come
+    /// out the same length either way, so the pause costs the transmission
+    /// none of its time.
+    #[test]
+    fn a_rest_is_silence_when_the_stage_was_told_it_is() {
+        let rate = 1_000_000.0;
+        let spec = StreamSpec {
+            kind: PortKind::Pulses,
+            rate,
+            center: common::Hz(433_920_000),
+            bandwidth: rate,
+            flow: Flow::Tx,
+            ..Default::default()
+        };
+        // A burst of 400 us and then a 1 ms rest, sent twice.
+        let pkg = Package {
+            pulses: vec![
+                Pulse { mark: 100, gap: 100 },
+                Pulse { mark: 100, gap: 100 },
+                Pulse { mark: 0, gap: 1_000 },
+            ],
+            ..Default::default()
+        };
+        let key = |rest: Rest| -> Vec<C32> {
+            let mut n = FskModNode::new(0.0, 250_000.0, 0.5).resting(rest);
+            n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
+            run(&mut n, Payload::Pulses(vec![pkg.clone(), pkg.clone()]), spec)
+        };
+        let (tone, silent) = (key(Rest::Tone), key(Rest::Silence));
+        assert_eq!(tone.len(), 2_800, "1.4 ms of package twice at 1 MS/s");
+        assert_eq!(silent.len(), 2_800, "the rest still takes the time it asked for");
+
+        // The held tone is carrier for every sample of the rest; silence is
+        // carrier for none of it past the 50 us edge, which is half the
+        // shortest element of the package.
+        let quiet = |iq: &[C32]| iq[400..1_400].iter().filter(|s| s.norm() < 1e-3).count();
+        assert_eq!(quiet(&tone), 0, "a rest keyed as a tone went quiet");
+        assert_eq!(quiet(&silent), 951, "1 ms of rest, less the 50 us edge into it");
+        assert_eq!(quiet(&silent[1_400..]), 951, "the second rest");
+        // What is keyed is untouched apart from the edge the burst starts
+        // on, which is the same 50 us.
+        let on = silent[..400].iter().filter(|s| (s.norm() - 0.5).abs() < 1e-3).count();
+        assert_eq!(on, 351, "the burst itself, less the edge it starts on");
+    }
+
+    /// What the edge is for, and by how much. A carrier switched off in one
+    /// sample is a step, and the spectrum of a step is the whole band.
+    #[test]
+    fn a_shaped_edge_is_quieter_off_channel_than_a_cut() {
+        // A 20 kHz tone at 1 MS/s stopped after 500 us, which is what the
+        // last symbol of a keyed burst leaves behind. The edge is half a
+        // 100 us symbol, as `edge_samples` takes it off the timings.
+        let (rate, tone, n) = (1_000_000.0, 20_000.0, 1_000usize);
+        let ramp = 50;
+        let build = |r: usize| -> Vec<C32> {
+            let mut c = Carrier::default();
+            let mut v: Vec<C32> = (0..n).map(|_| c.step(tone, rate) * 0.5).collect();
+            fade_out(&mut v[n - r..], r);
+            v.resize(2 * n, C32::new(0.0, 0.0));
+            v
+        };
+        let (cut, shaped) = (build(0), build(ramp));
+        let far = |iq: &[C32], off: f64| -> f32 {
+            const N: usize = 1024;
+            let mut s = dsp::spectrum::Spectrum::new(N);
+            s.smoothing = 1.0;
+            s.process(iq);
+            s.take(&[]).mean[N / 2 + (off / rate * N as f64).round() as usize]
+        };
+        // 100 kHz off, five times the tone's own offset and well clear of
+        // the transform window's own skirt.
+        let (a, b) = (far(&cut, 100_000.0), far(&shaped, 100_000.0));
+        println!("cut {a:.1} dB, shaped {b:.1} dB, {:.1} dB bought", a - b);
+        assert!(b < a - 20.0, "the edge bought only {:.1} dB", a - b);
+    }
+
     #[test]
     fn a_shift_wider_than_the_stream_is_refused() {
         let mut n = FskModNode::new(0.0, 300_000.0, 0.5);
@@ -1088,11 +1320,14 @@ pub const FSK_MOD: StageDesc = StageDesc {
 };
 
 pub fn build_fsk_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(FskModNode::new(
-        s.f64_or(OFFSET_HZ, 0.0),
-        s.f64_or(SHIFT_HZ, DEFAULT_FSK_SHIFT_HZ),
-        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
-    )))
+    Ok(Box::new(
+        FskModNode::new(
+            s.f64_or(OFFSET_HZ, 0.0),
+            s.f64_or(SHIFT_HZ, DEFAULT_FSK_SHIFT_HZ),
+            s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+        )
+        .resting(Rest::parse(s.str_or(REST, "tone")).unwrap_or_default()),
+    ))
 }
 
 pub const ASK_MOD: StageDesc = StageDesc {
