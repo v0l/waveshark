@@ -23,7 +23,7 @@
 //! it is the output of a reed switch ring rather than a number.
 
 use crate::bits::{BitBuffer, crc8, xor8};
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing, differential_manchester_decode, slice_manchester_half};
 use dsp::pulse::Package;
 
@@ -123,7 +123,7 @@ fn read(bits: &BitBuffer) -> Result<Report, DecodeError> {
         channel -= 1;
     }
     let mut r = Report::new(kind.model());
-    r.crc_valid = Some(true);
+    r.proof = Proof::Checked(8);
     r.raw = b.clone();
     r = r.int("id", (b[0] & 0x0f) as i64).int("channel", channel);
 
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(25.1)));
         assert_eq!(r.get("humidity_pct"), Some(&Value::Int(69)));
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(true)));
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
     }
 
     #[test]

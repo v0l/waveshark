@@ -10,6 +10,60 @@ pub use common::Value;
 use dsp::pulse::Package;
 use std::collections::BTreeMap;
 
+/// What a decode has to show for itself
+///
+/// Not a yes or no. A 16 bit CRC lets a wrong frame through once in 65536; the
+/// two parity bits of an Interlogix alarm let one through once in four, and a
+/// keyfob has nothing at all. Read as a boolean, those three read the same,
+/// and the weakest of them then claims other makers' sensors with the same
+/// confidence as a checksummed one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proof {
+    /// The protocol carries no check. Best effort: the timings matched and the
+    /// fields parsed, and that is all anybody can say.
+    None,
+    /// A check of this many bits held
+    Checked(u8),
+    /// A check failed
+    Failed,
+}
+
+impl Proof {
+    /// Check bits from which a frame stands on its own.
+    ///
+    /// A byte: a wrong frame passes once in 256, where the corpus offers a few
+    /// thousand windows a capture. Below it a decode is a suggestion.
+    pub const SOUND: u8 = 8;
+
+    /// Whether this decode stands on its own
+    pub fn sound(self) -> bool {
+        matches!(self, Self::Checked(bits) if bits >= Self::SOUND)
+    }
+
+    /// Whether a check held, however narrow
+    pub fn passed(self) -> bool {
+        matches!(self, Self::Checked(_))
+    }
+
+    /// Bits of check that held, none for a failure or a protocol without one
+    pub fn bits(self) -> u8 {
+        match self {
+            Self::Checked(bits) => bits,
+            Self::None | Self::Failed => 0,
+        }
+    }
+
+    /// The same as a packet carries it, where a bus has room for no more than
+    /// whether a check held
+    pub fn as_flag(self) -> Option<bool> {
+        match self {
+            Self::None => None,
+            Self::Checked(_) => Some(true),
+            Self::Failed => Some(false),
+        }
+    }
+}
+
 /// A successful decode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
@@ -17,13 +71,8 @@ pub struct Report {
     /// Ordered so output is stable between runs, which matters for diffing
     /// against a reference implementation.
     pub fields: BTreeMap<String, Value>,
-    /// Whether an integrity check passed.
-    ///
-    /// `None` means the protocol has none, and that distinction must be kept:
-    /// an unchecked decode from a noisy band is frequently wrong, and
-    /// presenting it with the same confidence as a CRC-verified one is how
-    /// OSINT tools end up reporting phantom devices.
-    pub crc_valid: Option<bool>,
+    /// What proves this frame is the frame it says it is
+    pub proof: Proof,
     /// Raw frame, for logging and for reporting unknown variants.
     pub raw: Vec<u8>,
     /// What each field is, for a decoder that says: a description states
@@ -45,7 +94,7 @@ impl Report {
             model,
             fields: BTreeMap::new(),
             types: BTreeMap::new(),
-            crc_valid: None,
+            proof: Proof::None,
             raw: Vec::new(),
             device: None,
         }
@@ -105,10 +154,11 @@ impl std::fmt::Display for Report {
         for (k, v) in &self.fields {
             write!(f, " {k}={v}")?;
         }
-        match self.crc_valid {
-            Some(true) => write!(f, " [CRC ok]"),
-            Some(false) => write!(f, " [CRC BAD]"),
-            None => write!(f, " [no integrity check]"),
+        match self.proof {
+            Proof::Checked(bits) if bits >= Proof::SOUND => write!(f, " [CRC ok]"),
+            Proof::Checked(bits) => write!(f, " [{bits} bit check only]"),
+            Proof::Failed => write!(f, " [CRC BAD]"),
+            Proof::None => write!(f, " [no integrity check]"),
         }
     }
 }
@@ -230,10 +280,29 @@ impl Protocols {
             .filter_map(|p| p.decode_package(pkg).ok().map(|r| (&**p, r)))
             .collect();
         let models: Vec<&str> = read.iter().map(|(_, r)| r.model).collect();
-        read.into_iter()
+        let mut out: Vec<Report> = read
+            .into_iter()
             .filter(|(p, _)| !p.yields_to().iter().any(|m| models.contains(&m.as_str())))
             .map(|(_, r)| r)
-            .collect()
+            .collect();
+        // One burst is one transmission, so where something read it and proved
+        // it, everything that merely fitted is wrong. A description with a
+        // parity bit or none at all will frame a neighbour's sensor and pass
+        // its own check often enough to matter, and publishing that beside a
+        // checksummed reading is how a phantom device reaches somebody's
+        // house.
+        //
+        // Sound against unsound, rather than the widest check winning: a
+        // nibble sum is not better evidence than a parity bit by the ratio of
+        // their widths, and ranking them that way drops an Alecto sensor whose
+        // sum is four bits for a barbecue probe whose checks come to five.
+        // Where nothing proved itself the lot stands, as best effort: a keyfob
+        // carries no check at all and is still worth reporting, which is what
+        // `Proof::None` on the report says.
+        if out.iter().any(|r| r.proof.sound()) {
+            out.retain(|r| r.proof.sound());
+        }
+        out
     }
 
     /// Try every protocol, reporting failures too. For diagnosing an unknown

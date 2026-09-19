@@ -215,14 +215,14 @@ fn unverified_claims_in_the_corpus() {
             if f.rtl_433_saw(r.model) {
                 continue;
             }
-            match r.crc_valid {
-                Some(true) => {
+            match r.proof.sound() {
+                true => {
                     checked += 1;
-                    println!("{}: {} claims a passing check", f.name, r.model);
+                    println!("{}: {} claims a check it proved", f.name, r.model);
                 }
-                _ => {
+                false => {
                     unchecked += 1;
-                    println!("{}: {} claims no check", f.name, r.model);
+                    println!("{}: {} claims little or no check", f.name, r.model);
                 }
             }
         }
@@ -261,7 +261,7 @@ fn false_decodes_on_pure_noise() {
         for pkg in packages(&path) {
             for r in protocols.decode_all(&pkg) {
                 let e = by_model.entry(r.model.to_string()).or_default();
-                if r.crc_valid == Some(true) {
+                if r.proof.passed() {
                     e.0 += 1;
                 } else {
                     e.1 += 1;

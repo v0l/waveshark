@@ -149,7 +149,7 @@ fn every_transmitter_decodes_through_its_own_stream() {
         let t: Vec<String> = p.pulses.iter().map(|q| format!("{}/{}", q.mark, q.gap)).collect();
         eprintln!("  start {} pulses {}", p.start_sample, t.join(" "));
         for r in protocols.decode_all(p) {
-            if r.model.contains("WHx080") && r.crc_valid == Some(true) {
+            if r.model.contains("WHx080") && r.proof.passed() {
                 decoded.push((p.center_hz as f64 - CENTER.as_f64(), r.to_string()));
             }
         }

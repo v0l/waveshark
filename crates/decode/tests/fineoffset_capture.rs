@@ -108,7 +108,7 @@ fn decodes_and_agrees_with_rtl_433() {
     //   Wind avg speed: 0.00  Wind gust: 0.00  Total rainfall: 84.3
     //   Integrity: CRC
     assert_eq!(report.model, "Fineoffset-WHx080");
-    assert_eq!(report.crc_valid, Some(true), "CRC must verify on a real frame");
+    assert!(report.proof.sound(), "a real frame must prove itself");
     assert_eq!(report.get("station_id"), Some(&Value::Int(196)));
     assert_eq!(report.get("temperature_c"), Some(&Value::Float(16.2)));
     assert_eq!(report.get("humidity_pct"), Some(&Value::Int(89)));

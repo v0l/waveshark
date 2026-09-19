@@ -19,7 +19,7 @@
 //! and not whose it is. What is read is the framing; nothing inside is.
 
 use crate::bits::BitBuffer;
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 
 pub struct Ism868Link;
@@ -84,7 +84,7 @@ impl Protocol for Ism868Link {
             }
             let id = u16::from_be_bytes([body[0], body[1]]);
             let mut r = Report::new(self.name());
-            r.crc_valid = None;
+            r.proof = Proof::None;
             r.raw = body.clone();
             return Ok(r
                 .text("node", format!("{:04x}", id >> 2))
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(r.fields["node"], Value::Text("2efd".into()));
         assert_eq!(r.fields["slot"], Value::Int(3));
         assert_eq!(r.fields["length"], Value::Int(18));
-        assert_eq!(r.crc_valid, None);
+        assert_eq!(r.proof, Proof::None);
     }
 
     /// The sync inside random bits, with no preamble ahead of it, is not a

@@ -29,7 +29,7 @@
 //! image pushed down in the other direction.
 
 use crate::bits::BitBuffer;
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 
 /// Preamble `AA` then the sync word, as it reads with the inversion already
@@ -120,7 +120,7 @@ impl Protocol for Hanshow {
         r.raw = body.to_vec();
         // The CRC's polynomial and span are unknown, so it is reported rather
         // than checked, and the frame stays unverified.
-        r.crc_valid = None;
+        r.proof = Proof::None;
         let crc = u16::from_be_bytes([body[want - 2], body[want - 1]]);
         r = r.text("crc", format!("{crc:04x}"));
 
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(r.fields["battery"], Value::Int(3));
         assert_eq!(r.fields["encrypted"], Value::Bool(false));
         // Nothing here can be checked: the CRC's span is not known.
-        assert_eq!(r.crc_valid, None);
+        assert_eq!(r.proof, Proof::None);
     }
 
     /// Which tone the discriminator calls the mark depends on which side of

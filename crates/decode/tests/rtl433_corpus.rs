@@ -86,7 +86,7 @@ fn agrees_with_rtl_433() {
 /// not really decoded anything. The bar is set at protocols that report a
 /// passing integrity check, because those are the ones a user is entitled to
 /// believe. The checksum-free fixed-code remotes will claim almost anything by
-/// design, which is why they report `crc_valid: None` and why the packet list
+/// design, which is why they report `proof: Proof::None` and why the packet list
 /// shows that distinction rather than hiding it.
 #[test]
 fn invents_nothing() {
@@ -99,7 +99,12 @@ fn invents_nothing() {
     let mut failures = Vec::new();
     for f in &fixtures {
         for r in f.decode() {
-            if r.crc_valid != Some(true) || f.rtl_433_saw(r.model) {
+            // Only a decode that proved itself. A protocol carrying a parity
+            // bit or no check at all cannot be held to this: its frame is a
+            // best effort by construction, and where something did prove
+            // itself on the same burst the decoder has already dropped the
+            // guesses beside it.
+            if !r.proof.sound() || f.rtl_433_saw(r.model) {
                 continue;
             }
             failures.push(format!(

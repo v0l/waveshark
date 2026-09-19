@@ -22,7 +22,7 @@
 //! written by a person.
 
 use crate::bits::{BitBuffer, crc16};
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 
 /// What the meter measures, from the low nibble of the ERT type. The mapping
@@ -145,7 +145,7 @@ impl Protocol for ErtScm {
             let id =
                 (u32::from(f[2] & 0x06) << 23) | (u32::from(f[7]) << 16) | u32::from(be16(&f, 8));
             let mut r = Report::new(self.name());
-            r.crc_valid = Some(true);
+            r.proof = Proof::Checked(16);
             r.raw = f.clone();
             return Ok(r
                 .int("id", i64::from(id))
@@ -188,7 +188,7 @@ impl Protocol for ErtScmPlus {
             }
             let ert_type = f[3];
             let mut r = Report::new(self.name());
-            r.crc_valid = Some(true);
+            r.proof = Proof::Checked(16);
             r.raw = f.clone();
             return Ok(r
                 .int("id", i64::from(be32(&f, 4)))
@@ -234,7 +234,7 @@ impl Protocol for ErtIdm {
             }
             let ert_type = f[6];
             let mut r = Report::new(self.name());
-            r.crc_valid = Some(true);
+            r.proof = Proof::Checked(16);
             r.raw = f.clone();
             return Ok(r
                 .int("id", i64::from(be32(&f, 7)))
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(r.get("consumption"), Some(&Value::Int(562456)));
         assert_eq!(r.get("physical_tamper"), Some(&Value::Int(3)));
         assert_eq!(r.get("encoder_tamper"), Some(&Value::Int(0)));
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
         assert_eq!(r.device, Some("54585868".into()));
     }
 
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(r.get("commodity"), Some(&Value::Text("Water".into())));
         assert_eq!(r.get("consumption"), Some(&Value::Int(6883)));
         assert_eq!(r.get("tamper"), Some(&Value::Text("4900".into())));
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
     }
 
     #[test]

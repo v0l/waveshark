@@ -158,6 +158,9 @@ the code is in the commit log.
 - Comm-B and surveillance replies named an address that was not the
   aircraft's, so an altitude or a squawk was filed under a hex code no
   aircraft has.
+- Sensors invented out of a neighbour's burst: a reading that proved itself
+  by a checksum now stands alone, where a protocol with a parity bit used to
+  be published beside it.
 - Band ribbon labels overlapped where one allocation sits inside another,
   as PMR446 does inside land mobile UHF.
 - Scanner blocks were placed across a radio's filter rolloff, decoding its

@@ -261,7 +261,7 @@ impl ScriptedProtocol {
             .with_fields(r.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .with_types(r.types.iter().map(|(k, t)| (k.clone(), *t)).collect())
             .with_modulation(common::Modulation::Fsk2)
-            .with_crc(r.crc_valid);
+            .with_crc(r.proof.as_flag());
         if let Some(id) = &r.device {
             d = d.by(common::Identity::new(format!("ism:{}", r.model), id.clone()));
         }

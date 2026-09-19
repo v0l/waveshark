@@ -10,7 +10,7 @@
 //! behaviour is covered against real RF in `fineoffset_capture.rs`.
 
 use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
-use decode::protocol::Value;
+use decode::protocol::{Proof, Value};
 use decode::protocols::{GtWt02, SomfyRts};
 use decode::{Protocol, Protocols};
 use dsp::pulse::{Package, Pulse};
@@ -163,7 +163,7 @@ fn a_nexus_burst_decodes_from_its_timings() {
     assert_eq!(r.get("channel"), Some(&Value::Int(2)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(19.4)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(62)));
-    assert_eq!(r.crc_valid, None, "a constant nibble is not an integrity check");
+    assert_eq!(r.proof, Proof::None, "a constant nibble is not an integrity check");
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn an_ev1527_remote_press_decodes_from_its_timings() {
     let r = named("Generic-Remote").unwrap().decode_package(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0xa13f)));
     assert_eq!(r.get("cmd"), Some(&Value::Int(8)));
-    assert_eq!(r.crc_valid, None);
+    assert_eq!(r.proof, Proof::None);
 }
 
 #[test]
@@ -226,7 +226,15 @@ fn a_gt_wt_02_burst_decodes_from_its_millisecond_symbols() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x34)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.7)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(35)));
-    assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
+    // Two, and honestly so: the same burst frames as a GT-TMBBQ05 as well,
+    // and with six bits of nibble sum against five neither reading is proved.
+    // Nothing here may pick between them, so both go out and the packet list
+    // says what each is worth.
+    let all = Protocols::published().decode_all(&pkg);
+    let mut models: Vec<&str> = all.iter().map(|r| r.model).collect();
+    models.sort_unstable();
+    assert_eq!(models, ["GT-TMBBQ05", "GT-WT02"]);
+    assert!(all.iter().all(|r| !r.proof.sound()), "one of these proved itself");
 }
 
 #[test]
@@ -410,7 +418,7 @@ fn a_somfy_rts_burst_decodes_from_its_manchester_timings() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x123456)));
     assert_eq!(r.get("control"), Some(&Value::Text("Up".into())));
     assert_eq!(r.get("counter"), Some(&Value::Int(0x01fe)));
-    assert_eq!(r.crc_valid, Some(true));
+    assert!(r.proof.passed());
     assert_eq!(Protocols::published().decode_all(&pkg).len(), 1);
 }
 

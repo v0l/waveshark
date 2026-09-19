@@ -20,7 +20,7 @@
 //! - `X` checksum
 
 use crate::bits::BitBuffer;
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::protocols::find_frame_bits;
 use crate::slicer::Timing;
 
@@ -64,7 +64,7 @@ impl Protocol for GtWt02 {
         let humidity = humidity_pct(b[3] >> 1, 20..=90)?;
 
         let mut r = Report::new(self.name());
-        r.crc_valid = Some(true);
+        r.proof = Proof::Checked(6);
         r.raw = b.clone();
         r = r
             .int("id", b[0] as i64)
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.7)));
         assert_eq!(r.get("humidity_pct"), Some(&Value::Int(35)));
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(true)));
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
     }
 
     #[test]

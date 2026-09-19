@@ -83,7 +83,7 @@ fn decodes(pk: &[common::Packet], model: &str) -> Vec<(u64, String)> {
     for p in pk {
         let Some(pkg) = p.package() else { continue };
         for r in protocols.decode_all(&pkg) {
-            if r.model.contains(model) && r.crc_valid == Some(true) {
+            if r.model.contains(model) && r.proof.passed() {
                 out.push((p.center_hz(), r.to_string()));
             }
         }

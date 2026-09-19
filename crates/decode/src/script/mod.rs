@@ -23,7 +23,7 @@
 pub mod desc;
 
 use crate::bits::{self, BitBuffer};
-use crate::protocol::{DecodeError, Protocol, Report, Value};
+use crate::protocol::{DecodeError, Proof, Protocol, Report, Value};
 use crate::protocols::find_frame_bits;
 use crate::protocols::keyfob::shared::{find_and_parse, plausible};
 use crate::slicer::{Coding, Timing, differential_manchester_decode, manchester_decode, slice};
@@ -275,15 +275,19 @@ impl Scripted {
         let mut walk =
             Walk { bits: frame, cursor: 0, read: BTreeMap::new(), id: None, model: None };
         walk.items(&self.desc.fields)?;
-        let mut verified = None;
+        let mut proved = 0u8;
         for c in self.desc.check.iter().filter(|c| c.applies(|cond| walk.holds(cond))) {
             if !check_holds(c, frame) {
                 return Err(DecodeError::CrcFailed);
             }
-            verified = Some(true);
+            proved = proved.saturating_add(check_bits(c));
         }
+        let verified = match proved {
+            0 => Proof::None,
+            bits => Proof::Checked(bits),
+        };
         let mut r = Report::new(walk.model.map(|m| intern(&m)).unwrap_or(self.name));
-        r.crc_valid = verified;
+        r.proof = verified;
         r.raw = frame.slice(0, want).as_padded_bytes().to_vec();
         for (k, (v, reported)) in walk.read {
             if reported {
@@ -1108,6 +1112,29 @@ fn parity_over(c: &Check, frame: &BitBuffer) -> u64 {
         (c.over[0]..c.over[1]).step_by(step).filter(|&b| frame.get(b).unwrap_or(false)).count()
             as u64;
     (ones ^ u64::from(c.odd)) & 1
+}
+
+/// How many bits of proof a check that held is worth.
+///
+/// Its stored width, since that is what a wrong frame has to match by luck: a
+/// CRC16 is sixteen, a parity bit is one, and a nibble sum is however wide the
+/// description says it stored it. A check with nothing stored proves the
+/// covered bits against themselves and is worth its own width.
+fn check_bits(c: &Check) -> u8 {
+    let stored = match c.kind {
+        CheckKind::Crc16 | CheckKind::Crc16Le => 16,
+        CheckKind::Crc8
+        | CheckKind::Crc8Le
+        | CheckKind::Sum8
+        | CheckKind::Xor8
+        | CheckKind::Lfsr8
+        | CheckKind::Lfsr8Reflect
+        | CheckKind::Roll8
+        | CheckKind::Complement => 8,
+        CheckKind::NibbleSum | CheckKind::NibbleXor => 4,
+        CheckKind::EvenParity | CheckKind::Parity => 1,
+    };
+    c.width.unwrap_or(stored).min(u8::MAX as usize) as u8
 }
 
 fn check_holds(c: &Check, frame: &BitBuffer) -> bool {

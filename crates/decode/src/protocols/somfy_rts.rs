@@ -23,7 +23,7 @@
 //! frame descrambles to one whose folded nibble-sum is zero.
 
 use crate::bits::BitBuffer;
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing, manchester_decode, slice_manchester_half};
 use dsp::pulse::Package;
 
@@ -150,7 +150,7 @@ fn parse(dec: &BitBuffer, start: usize) -> Option<Report> {
     let address = ((b[6] as u32) << 16) | ((b[5] as u32) << 8) | b[4] as u32;
 
     let mut r = Report::new("Somfy-RTS");
-    r.crc_valid = Some(true);
+    r.proof = Proof::Checked(4);
     r.raw = b.to_vec();
     r = r
         .int("id", address as i64)
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(r.get("control"), Some(&crate::protocol::Value::Text("Up".into())));
         assert_eq!(r.get("counter"), Some(&crate::protocol::Value::Int(0x01fe)));
         assert_eq!(r.get("id"), Some(&crate::protocol::Value::Int(0x123456)));
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
     }
 
     #[test]

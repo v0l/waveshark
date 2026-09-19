@@ -31,7 +31,7 @@
 //! and the layout has to be read differently because of it.
 
 use crate::bits::{BitBuffer, reflect8};
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::protocols::rows_within;
 use crate::slicer::Timing;
 
@@ -105,7 +105,7 @@ fn report(name: &'static str, m: &[u8]) -> Report {
     let mut r = Report::new(name);
     // Two parity bits pass on one window in four. Whatever else that is, it is
     // not something to show beside a CRC.
-    r.crc_valid = None;
+    r.proof = Proof::None;
     r.raw = m.to_vec();
     r = r
         .text("subtype", device_type(kind))
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn a_reading_is_never_presented_as_verified() {
         let r = InterlogixSecurity.decode(&frame([0x46, 0x8d, 0x19], [0xe9, 0x15, 0x28])).unwrap();
-        assert_eq!(r.crc_valid, None);
+        assert_eq!(r.proof, Proof::None);
     }
 
     #[test]

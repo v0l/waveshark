@@ -29,7 +29,7 @@
 //! come back. The image blocks themselves are reported as their length only.
 
 use crate::bits::BitBuffer;
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 use crate::whiten::read_framed;
 
@@ -108,7 +108,7 @@ impl Protocol for Esl {
                         .text("body", hex(&frame.payload)),
                     None => continue,
                 };
-                r.crc_valid = Some(true);
+                r.proof = Proof::Checked(8);
                 r.raw = frame.payload.clone();
                 let sync = hex(&bytes[..frame.sync_len]);
                 return Ok(r.text("sync", sync).bool("whitened", frame.whitened));
@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(r.fields["fw"], Value::Int(0x21));
         assert_eq!(r.fields["channel"], Value::Int(103));
         assert_eq!(r.fields["checksum_ok"], Value::Bool(true));
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
     }
 
     /// The sync word is not a constant here, so a frame behind a different one
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(r.fields["length"], Value::Int(24));
         assert_eq!(r.fields["sync"], Value::Text("c70ac70a".into()));
         assert_eq!(r.raw, payload);
-        assert_eq!(r.crc_valid, Some(true));
+        assert!(r.proof.passed());
     }
 
     /// A payload too short to be a shelf label's is refused: at that length a

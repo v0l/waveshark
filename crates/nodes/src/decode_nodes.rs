@@ -417,7 +417,7 @@ pub fn decoded_event(
         .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .with_types(report.types.iter().map(|(k, t)| (k.clone(), *t)).collect())
         .with_modulation(modulation)
-        .with_crc(report.crc_valid);
+        .with_crc(report.proof.as_flag());
     if let Some(id) = &report.device {
         // The model is part of the space, not decoration. A sensor's id is a
         // handful of bits chosen at random, so two stations of different

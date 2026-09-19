@@ -36,7 +36,7 @@
 //! the BCD digits are digits.
 
 use crate::bits::BitBuffer;
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing};
 
 /// Timings shared by both versions: half a symbol at 1024 baud. Pulses run
@@ -112,7 +112,7 @@ fn humidity_pct(msg: &[u8]) -> Result<u8, DecodeError> {
 /// The fields every one of these frames carries in its first four bytes.
 fn common_fields(model: &'static str, msg: &[u8]) -> Report {
     let mut r = Report::new(model);
-    r.crc_valid = Some(true);
+    r.proof = Proof::Checked(8);
     r.raw = msg.to_vec();
     r.int("id", ((msg[2] & 0x0f) | (msg[3] & 0xf0)) as i64)
         .int("channel", (msg[2] >> 4) as i64)

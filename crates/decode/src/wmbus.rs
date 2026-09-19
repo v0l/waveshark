@@ -12,7 +12,7 @@
 //! holds. So what can be reported without the key is who transmitted, what
 //! it is, and the bytes as they arrived, which is what rtl_433 reports too.
 
-use crate::protocol::Report;
+use crate::protocol::{Proof, Report};
 
 /// Meter types of EN 13757-3, in the words rtl_433 uses for them.
 pub fn device_type(t: u8) -> &'static str {
@@ -81,7 +81,7 @@ pub fn parse(bytes: &[u8], mode: Option<&str>) -> Option<Report> {
     let version = bytes[8];
     let kind = bytes[9];
     let mut r = Report::new("Wireless-MBus");
-    r.crc_valid = Some(true);
+    r.proof = Proof::Checked(16);
     r.raw = bytes.to_vec();
     if let Some(mode) = mode {
         r = r.text("mode", mode);

@@ -19,7 +19,7 @@
 //! with no integrity field rather than none at all.
 
 use crate::bits::{BitBuffer, reflect8};
-use crate::protocol::{DecodeError, Protocol, Report};
+use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::Timing;
 
 pub struct KeeLoq;
@@ -76,7 +76,7 @@ impl Protocol for KeeLoq {
                 continue;
             }
             let mut r = Report::new("KeeLoq");
-            r.crc_valid = None;
+            r.proof = Proof::None;
             r.raw = bytes;
             return Ok(r
                 .int("serial", serial as i64)
@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(r.get("hop"), Some(&Value::Int(0x697b4d73)));
         assert_eq!(r.get("battery_ok"), Some(&Value::Bool(false)));
         assert_eq!(r.get("repeat"), Some(&Value::Bool(true)));
-        assert_eq!(r.crc_valid, None);
+        assert_eq!(r.proof, Proof::None);
     }
 
     /// Encode a frame the way the chip sends it.
