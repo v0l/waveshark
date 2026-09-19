@@ -2961,7 +2961,7 @@ impl App {
                 });
             }
             if arm != was {
-                self.settings.edit(|s| s.capture_arm = arm);
+                self.set_capture_arm(arm);
             }
             let cap_help = "What the whole folder may take. Nothing here is deleted: a \
                             capture is evidence of a signal that may not come again, so \

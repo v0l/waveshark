@@ -166,6 +166,7 @@ pub enum Action {
     View(args::View),
     Record(args::Record),
     CaptureIq(args::Switch),
+    ArmCapture(args::ArmCapture),
     PacketLog(args::PacketLog),
     NodeParam(args::NodeParam),
 
@@ -471,6 +472,61 @@ pub mod args {
         /// How much may be written before recording stops, in megabytes.
         pub budget_mb: Option<u64>,
         pub on: bool,
+    }
+
+    /// What opens a raw capture file.
+    #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    pub enum CaptureTrigger {
+        Switch,
+        Energy,
+    }
+
+    impl From<CaptureTrigger> for nodes::capture_nodes::Trigger {
+        fn from(t: CaptureTrigger) -> Self {
+            match t {
+                CaptureTrigger::Switch => Self::Switch,
+                CaptureTrigger::Energy => Self::Energy,
+            }
+        }
+    }
+
+    /// What an energy trigger's threshold is measured against.
+    #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    pub enum CaptureReference {
+        Floor,
+        Absolute,
+    }
+
+    impl From<CaptureReference> for nodes::capture_nodes::Reference {
+        fn from(r: CaptureReference) -> Self {
+            match r {
+                CaptureReference::Floor => Self::Floor,
+                CaptureReference::Absolute => Self::Absolute,
+            }
+        }
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    pub struct ArmCapture {
+        /// `switch` writes one file from the moment `set_capture_iq` goes on.
+        /// `energy` waits for the span to get loud and writes a file per
+        /// burst.
+        pub trigger: CaptureTrigger,
+        /// Whether the threshold is dB over the tracked noise floor or a
+        /// level in dBFS. Omit to keep what is set.
+        pub reference: Option<CaptureReference>,
+        /// How loud the span has to get, in dB. The detector opens a channel
+        /// at 8 dB over the floor, so much above 10 dB misses what the
+        /// receiver heard.
+        pub threshold_db: Option<f32>,
+        /// How much of the signal before the trigger goes in the file, in
+        /// milliseconds. A short pre-roll loses the sync word.
+        pub pre_ms: Option<f32>,
+        /// How long the span may stay quiet before the file is closed, in
+        /// milliseconds.
+        pub hang_ms: Option<f32>,
     }
 
     #[derive(Debug, Deserialize, JsonSchema)]

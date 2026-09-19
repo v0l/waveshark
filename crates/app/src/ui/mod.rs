@@ -1029,6 +1029,10 @@ impl App {
         self.settings.edit(|s| s.capture_on = on);
     }
 
+    pub fn set_capture_arm(&mut self, arm: crate::chain::CapturePlan) {
+        self.settings.edit(|s| s.capture_arm = arm);
+    }
+
     /// Ask the tuner for a total gain, distributed across whatever stages the
     /// radio has. Applied once the device reports its controls, the same way
     /// a saved setting is.

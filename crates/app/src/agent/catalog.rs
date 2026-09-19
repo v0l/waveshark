@@ -341,6 +341,14 @@ fn build() -> Vec<Tool> {
             Action::CaptureIq,
         ),
         takes(
+            "set_capture_trigger",
+            "Arm the raw capture on energy in the span, or put it back on the switch. Armed, the \
+             receiver waits and writes a file per burst with the pre-roll in front of it, which \
+             is how to catch something that happens twice a night without recording the night. \
+             `set_capture_iq` still has to be on.",
+            Action::ArmCapture,
+        ),
+        takes(
             "set_packet_log",
             "Write the binary packet log, one file a day, or stop.",
             Action::PacketLog,
@@ -532,7 +540,7 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(names.len(), before, "a tool name is used twice");
-        assert_eq!(before, 79, "the catalogue changed size");
+        assert_eq!(before, 80, "the catalogue changed size");
     }
 
     /// Every schema is an object, because that is what both the protocol and

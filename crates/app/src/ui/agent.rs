@@ -679,6 +679,31 @@ impl App {
                 self.set_capture(a.on);
                 Ok(ok())
             }
+            Action::ArmCapture(a) => {
+                let mut arm = self.setting(|s| s.capture_arm);
+                arm.trigger = a.trigger.into();
+                if let Some(r) = a.reference {
+                    arm.reference = r.into();
+                }
+                if let Some(db) = a.threshold_db {
+                    arm.threshold_db = db;
+                }
+                if let Some(ms) = a.pre_ms {
+                    arm.pre_ms = ms;
+                }
+                if let Some(ms) = a.hang_ms {
+                    arm.hang_ms = ms;
+                }
+                self.set_capture_arm(arm);
+                Ok(json!({
+                    "trigger": arm.trigger.as_str(),
+                    "reference": arm.reference.as_str(),
+                    "threshold_db": arm.threshold_db,
+                    "pre_ms": arm.pre_ms,
+                    "hang_ms": arm.hang_ms,
+                    "capture_iq": self.setting(|s| s.capture_on),
+                }))
+            }
             Action::PacketLog(a) => {
                 let dir = a.dir.map(std::path::PathBuf::from);
                 self.set_packet_log(!a.on, dir);
@@ -995,6 +1020,15 @@ impl App {
             "packet_log": self.setting(|s| s.log_path()).map(|p| p.display().to_string()),
             "recording": self.record_dir.as_ref().map(|(d, _)| d.display().to_string()),
             "capture_iq": self.setting(|s| s.capture_on),
+            "capture_trigger": self.setting(|s| s.capture_arm.trigger.as_str()),
+            "capture_armed": st.map(|s| s.capture_armed.load(std::sync::atomic::Ordering::Relaxed)),
+            "capture_bursts": st.map(|s| s.capture_bursts.load(std::sync::atomic::Ordering::Relaxed)),
+            "capture_level_db": st
+                .map(|s| f32::from_bits(s.capture_level_db.load(std::sync::atomic::Ordering::Relaxed)))
+                .filter(|db| db.is_finite()),
+            "capture_threshold_db": st
+                .map(|s| f32::from_bits(s.capture_threshold_db.load(std::sync::atomic::Ordering::Relaxed)))
+                .filter(|db| db.is_finite()),
             "can_transmit": st.map(|s| s.can_transmit.load(std::sync::atomic::Ordering::Relaxed)),
             "gains": controls.as_ref().map(|c| {
                 c.stages
@@ -2238,5 +2272,112 @@ mod tests {
         for k in kinds {
             assert!(!k["summary"].as_str().unwrap().is_empty(), "{k}");
         }
+    }
+
+    /// Arming the raw capture on energy writes the plan the settings card
+    /// writes, and the plan is what reaches the radio.
+    ///
+    /// Two halves, because either alone passes while the capture stays on
+    /// the switch: the session field an agent set, and the `Cmd` the applied
+    /// settings turn that field into.
+    #[test]
+    fn arming_the_capture_writes_the_plan_and_sends_it() {
+        let mut a = app();
+        assert_eq!(
+            a.setting(|s| s.capture_arm.trigger),
+            nodes::capture_nodes::Trigger::Switch,
+            "a new receiver is on the switch"
+        );
+        let was = a.setting(|s| s.capture_arm);
+        let out = call(
+            &mut a,
+            Action::ArmCapture(args::ArmCapture {
+                trigger: args::CaptureTrigger::Energy,
+                reference: Some(args::CaptureReference::Absolute),
+                threshold_db: Some(-42.5),
+                pre_ms: Some(250.0),
+                hang_ms: None,
+            }),
+        )
+        .unwrap();
+        let arm = a.setting(|s| s.capture_arm);
+        assert_eq!(arm.trigger, nodes::capture_nodes::Trigger::Energy);
+        assert_eq!(arm.reference, nodes::capture_nodes::Reference::Absolute);
+        assert_eq!(arm.threshold_db, -42.5);
+        assert_eq!(arm.pre_ms, 250.0);
+        assert_eq!(arm.hang_ms, was.hang_ms, "what was not asked for is left alone");
+        assert_eq!(out["trigger"], "energy");
+        assert_eq!(out["reference"], "absolute");
+        assert_eq!(out["threshold_db"], -42.5);
+        assert_eq!(out["capture_iq"], false, "arming does not switch the capture on");
+
+        let now = crate::session::Session { capture_arm: arm, ..Default::default() };
+        let cmds = super::super::settings_cmds(&now, Some(&crate::session::Session::default()));
+        let sent: Vec<&Cmd> = cmds.iter().filter(|c| matches!(c, Cmd::CaptureTrigger(_))).collect();
+        assert_eq!(sent.len(), 1, "one trigger command, not none and not two");
+        match sent[0] {
+            Cmd::CaptureTrigger(p) => assert_eq!(*p, arm),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Putting it back on the switch is a command of its own, so a capture
+    /// armed for the night can be taken off energy without a restart.
+    #[test]
+    fn the_trigger_goes_back_to_the_switch() {
+        let mut a = app();
+        call(
+            &mut a,
+            Action::ArmCapture(args::ArmCapture {
+                trigger: args::CaptureTrigger::Energy,
+                reference: None,
+                threshold_db: Some(6.0),
+                pre_ms: None,
+                hang_ms: Some(2_000.0),
+            }),
+        )
+        .unwrap();
+        assert_eq!(a.setting(|s| s.capture_arm.hang_ms), 2_000.0);
+        call(
+            &mut a,
+            Action::ArmCapture(args::ArmCapture {
+                trigger: args::CaptureTrigger::Switch,
+                reference: None,
+                threshold_db: None,
+                pre_ms: None,
+                hang_ms: None,
+            }),
+        )
+        .unwrap();
+        let arm = a.setting(|s| s.capture_arm);
+        assert_eq!(arm.trigger, nodes::capture_nodes::Trigger::Switch);
+        assert_eq!(arm.threshold_db, 6.0, "the terms survive the trigger going off");
+        assert_eq!(arm.hang_ms, 2_000.0);
+    }
+
+    /// The four readings the capture node publishes are in the state report,
+    /// and a receiver with no radio says so rather than reporting a level of
+    /// negative infinity, which is not a JSON number.
+    #[test]
+    fn the_state_report_says_whether_the_capture_is_armed() {
+        let mut a = app();
+        let st = a.agent_status();
+        assert_eq!(st["capture_iq"], false);
+        assert_eq!(st["capture_trigger"], "switch");
+        assert!(st["capture_armed"].is_null(), "no radio, so nothing is armed");
+        assert!(st["capture_level_db"].is_null());
+        assert!(st["capture_threshold_db"].is_null());
+        call(
+            &mut a,
+            Action::ArmCapture(args::ArmCapture {
+                trigger: args::CaptureTrigger::Energy,
+                reference: None,
+                threshold_db: None,
+                pre_ms: None,
+                hang_ms: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(a.agent_status()["capture_trigger"], "energy");
     }
 }
