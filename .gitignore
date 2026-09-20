@@ -46,3 +46,6 @@ testdata/survey/
 
 # Editor state, one per machine.
 .idea/
+
+# Rendered videos, one per run.
+brag-output/
