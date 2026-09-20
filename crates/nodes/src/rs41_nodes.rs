@@ -72,7 +72,7 @@ impl Rs41Node {
     pub fn new() -> Self {
         Self {
             sync: None,
-            meter: crate::FrameMeter::new(1.0, 0, 0.6),
+            meter: crate::FrameMeter::new(1.0, 0, 0.6).keyed_as(common::Modulation::Fsk2),
             framer: rs41::Framer::new(),
             frames: 0,
             cal: rs41::Calibration::new(),
@@ -153,7 +153,8 @@ impl Simple for Rs41Node {
         self.sync = Some(s);
         // A frame is 534 ms of air, so the ring has to be long enough to
         // give one back once it has decoded.
-        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.6);
+        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.6)
+            .keyed_as(common::Modulation::Fsk2);
         self.center_hz = i.spec.center.0 as f64;
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);

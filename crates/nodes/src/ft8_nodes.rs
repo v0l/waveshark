@@ -77,7 +77,8 @@ impl Ft8Node {
             audio: Vec::new(),
             skip: 0,
             buffer: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, dial_hz as u64, 1.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, dial_hz as u64, 1.0)
+                .keyed_as(common::Modulation::Fsk8),
             slots: 0,
             read: 0,
         };
@@ -103,7 +104,8 @@ impl Ft8Node {
         let audio = self.audio_rate();
         self.decim = FirDecim::design_hz(self.rate, self.factor, PASSBAND_HZ + 500.0, 60.0);
         self.slot = Slot::new(audio, self.mode.waveform());
-        self.meter = crate::FrameMeter::new(audio, self.dial_hz as u64, 1.0);
+        self.meter = crate::FrameMeter::new(audio, self.dial_hz as u64, 1.0)
+            .keyed_as(common::Modulation::Fsk8);
         self.buffer.clear();
         self.align_to_clock();
     }

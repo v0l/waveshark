@@ -63,7 +63,8 @@ impl PocsagNode {
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Fsk2),
             sends: Vec::new(),
             accepted: 0,
         }
@@ -97,7 +98,8 @@ impl Simple for PocsagNode {
         // nominal 38.4 kHz, since the decimation factor has to be an integer
         // and the span decides what that leaves.
         self.demod = PocsagDemod::new(audio_rate, PocsagConfig::default());
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Fsk2);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

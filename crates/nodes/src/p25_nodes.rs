@@ -107,7 +107,8 @@ impl P25Node {
             audio: Vec::new(),
             shaped: Vec::new(),
             syms: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S)
+                .keyed_as(common::Modulation::Fsk4),
             audio_rate: AUDIO_HZ,
             accepted: 0,
             talking: None,
@@ -207,7 +208,8 @@ impl Node for P25Node {
         self.clock = SymbolClock::new(audio_rate, BAUD);
         self.framer = p25::Framer::new();
         self.audio_rate = audio_rate;
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S)
+            .keyed_as(common::Modulation::Fsk4);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

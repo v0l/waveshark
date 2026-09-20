@@ -65,7 +65,8 @@ impl StdcNode {
             narrow: Vec::new(),
             soft: Vec::new(),
             frames: Vec::new(),
-            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 10.0),
+            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 10.0)
+                .keyed_as(common::Modulation::Psk2),
             packets: 0,
         }
     }
@@ -97,7 +98,8 @@ impl Simple for StdcNode {
         self.framer.reset();
         // On the channel, not on the span: a 6 kHz channel in a megahertz of
         // band is a thousandth of the power.
-        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0);
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0)
+            .keyed_as(common::Modulation::Psk2);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

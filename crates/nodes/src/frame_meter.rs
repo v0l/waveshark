@@ -107,6 +107,11 @@ pub struct FrameMeter {
     seen: u64,
     peak_pow: f32,
     floor_pow: f32,
+    /// How the front end feeding this keys, where it was built for one
+    /// waveform. Not a measurement: a demodulator is chosen in advance and
+    /// knows what it is reading, and a list saying `GFSK` for a Bluetooth
+    /// advertisement is saying something true that `unknown` is not
+    keying: Option<common::Modulation>,
 }
 
 impl FrameMeter {
@@ -121,7 +126,14 @@ impl FrameMeter {
             seen: 0,
             peak_pow: 0.0,
             floor_pow: f32::NAN,
+            keying: None,
         }
+    }
+
+    /// Say how the demodulator this feeds keys
+    pub fn keyed_as(mut self, m: common::Modulation) -> Self {
+        self.keying = Some(m);
+        self
     }
 
     /// Say which stream this is measuring
@@ -266,7 +278,7 @@ impl FrameMeter {
             Some(q) => carrier.with_iq(q),
             None => carrier,
         };
-        Packet::heard(carrier).framed(PacketFrame::of(bytes))
+        self.made(carrier, bytes)
     }
 
     /// The reception of a frame at what the channel measured, stamped now.
@@ -300,7 +312,15 @@ impl FrameMeter {
             None => carrier,
         };
         self.peak_pow = 0.0;
-        Packet::heard(carrier).framed(PacketFrame::of(bytes))
+        self.made(carrier, bytes)
+    }
+
+    fn made(&self, carrier: common::packet::Carrier, bytes: Vec<u8>) -> Packet {
+        let p = Packet::heard(carrier).framed(PacketFrame::of(bytes));
+        match self.keying {
+            Some(m) => p.keyed(common::packet::Keying::configured(m)),
+            None => p,
+        }
     }
 }
 

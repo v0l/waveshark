@@ -214,7 +214,7 @@ impl Simple for LoraNode {
                     // How it was keyed, which for LoRa is the spreading
                     // factor and the width the chirp sweeps: a row cannot
                     // say which channel plan a mesh is on without them.
-                    let keying = common::packet::Keying::configured(common::Modulation::Chirp).of(
+                    let keying = common::packet::Keying::configured(common::Modulation::Css).of(
                         common::packet::KeyingParams {
                             bandwidth_hz: bw as f32,
                             spreading: Some(packet.sf),

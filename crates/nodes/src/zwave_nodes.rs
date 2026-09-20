@@ -67,7 +67,8 @@ impl ZWaveNode {
                 .collect(),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            meter: crate::FrameMeter::new(WORK_HZ, 868_420_000, 0.05),
+            meter: crate::FrameMeter::new(WORK_HZ, 868_420_000, 0.05)
+                .keyed_as(common::Modulation::Fsk2),
             accepted: 0,
         }
     }
@@ -113,7 +114,8 @@ impl Simple for ZWaveNode {
         // Fifty milliseconds: the longest frame at 9.6 kbit/s is about
         // 60 ms of preamble and payload, and a shorter ring would hand a
         // slow frame samples that are not its own.
-        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.05);
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.05)
+            .keyed_as(common::Modulation::Fsk2);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

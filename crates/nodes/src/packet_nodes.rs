@@ -235,6 +235,9 @@ struct Heard {
     modulation: common::Modulation,
     /// Whether a protocol claimed it.
     known: bool,
+    /// Whether a detector found it rather than a front end being told to
+    /// read the channel.
+    detected: bool,
 }
 
 /// One reception as the dedupe reads it: where it was heard, how wide the
@@ -247,6 +250,7 @@ struct Seen {
     modulation: common::Modulation,
     rssi_dbfs: f32,
     known: bool,
+    detected: bool,
 }
 
 impl Seen {
@@ -263,6 +267,14 @@ impl Seen {
                 .unwrap_or(common::Modulation::Unknown),
             rssi_dbfs: p.carrier.rssi_dbfs,
             known: p.claimed(),
+            // A detector reaches its verdict by measuring, and says so in
+            // the timings it kept; a front end told to read a channel keys
+            // the way its protocol keys, and two of its frames in a row are
+            // two transmissions rather than one heard twice.
+            detected: p.keying.as_ref().is_some_and(|k| {
+                matches!(k.how, common::packet::Knowledge::Measured { .. })
+                    || !matches!(k.symbols, Symbols::None)
+            }),
         }
     }
 
@@ -273,6 +285,7 @@ impl Seen {
             channel_hz: self.channel_hz,
             modulation: self.modulation,
             known: self.known,
+            detected: self.detected,
         }
     }
 }
@@ -307,7 +320,12 @@ fn same_burst(kept: &Heard, new: &Seen) -> bool {
     }
     let d = (kept.freq - new.freq).abs();
     if d < 1.0 && (kept.channel_hz - new.channel_hz).abs() < 1.0 {
-        return kept.modulation != new.modulation;
+        // Two detectors reading one burst disagree about how it was keyed,
+        // and that is the only thing that makes a second report at exactly
+        // the same centre a copy. Front ends state their keying too, so
+        // without this a Wi-Fi channel carrying an OFDM frame and a direct
+        // sequence one threw the second away.
+        return kept.detected && new.detected && kept.modulation != new.modulation;
     }
     d <= 2.5 * kept.channel_hz.max(new.channel_hz)
 }
@@ -638,6 +656,12 @@ mod tests {
     /// One burst as it reaches the dedupe: a packet the protocols have
     /// already annotated, at the width the front end heard it through.
     fn heard(freq: f64, protocol: &'static str, rssi: f32) -> Packet {
+        detected(freq, protocol, rssi, common::Modulation::Fsk2)
+    }
+
+    /// A burst a detector found and a protocol may have read, keyed the way
+    /// the detector that found it says.
+    fn detected(freq: f64, protocol: &'static str, rssi: f32, m: common::Modulation) -> Packet {
         let carrier = common::packet::Carrier::heard(
             0,
             freq as u64,
@@ -646,8 +670,10 @@ mod tests {
             20.0,
             common::SourceId(0),
         );
-        let p = Packet::heard(carrier)
-            .keyed(common::packet::Keying::configured(common::Modulation::Fsk2));
+        let p = Packet::heard(carrier).keyed(
+            common::packet::Keying::configured(m)
+                .with(Symbols::Pulses(vec![common::Pulse { mark: 500, gap: 500 }])),
+        );
         match protocol == UNKNOWN {
             true => p,
             false => p.decoded(common::packet::Proto::new("ism", protocol)),
@@ -725,8 +751,7 @@ mod tests {
     fn one_burst_read_by_both_front_ends_is_logged_once() {
         // The OOK and FSK branches see the same channel, so a burst can be
         // decoded by one and guessed at by the other. That is one packet.
-        let mut ook = heard(868_100_000.0, "Fineoffset-WHx080", -44.0);
-        ook.keying = Some(common::packet::Keying::configured(common::Modulation::Ook));
+        let ook = detected(868_100_000.0, "Fineoffset-WHx080", -44.0, common::Modulation::Ook);
         let kept =
             deduped(&mut DedupeNode::default(), vec![heard(868_100_000.0, UNKNOWN, -30.0), ook]);
         assert_eq!(kept.len(), 1);
@@ -749,6 +774,8 @@ mod tests {
         assert_eq!(out.as_packets().unwrap_or(&[]).len(), 1);
     }
 
+    /// A burst an OOK detector found, which is what the dedupe was written
+    /// for: one transmission read by several channels of a bank.
     fn ook_at(freq: f64) -> Seen {
         Seen {
             freq,
@@ -756,6 +783,7 @@ mod tests {
             modulation: common::Modulation::Ook,
             rssi_dbfs: -30.0,
             known: false,
+            detected: true,
         }
     }
 

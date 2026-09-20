@@ -62,7 +62,8 @@ impl AprsNode {
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Afsk),
             frames: Vec::new(),
             accepted: 0,
         }
@@ -99,7 +100,8 @@ impl Simple for AprsNode {
         // Measured on the channel rather than on the span: a 16 kHz packet
         // channel inside 2.4 MS/s of band is 0.7% of the power, so a level
         // taken before the mixer is a level of everything else.
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Afsk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

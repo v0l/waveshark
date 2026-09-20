@@ -33,7 +33,11 @@ impl Default for WmbusNode {
 
 impl WmbusNode {
     pub fn new() -> Self {
-        Self { demod: None, meter: crate::FrameMeter::new(1.0, 0, 0.05), frames: 0 }
+        Self {
+            demod: None,
+            meter: crate::FrameMeter::new(1.0, 0, 0.05).keyed_as(common::Modulation::Fsk2),
+            frames: 0,
+        }
     }
 
     /// Frames that passed their CRCs since the node was made.
@@ -62,7 +66,8 @@ impl Simple for WmbusNode {
         self.demod = Some(d);
         // A meter frame is a few milliseconds; fifty gives the burst and the
         // quiet either side of it without keeping the band.
-        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.05);
+        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.05)
+            .keyed_as(common::Modulation::Fsk2);
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)

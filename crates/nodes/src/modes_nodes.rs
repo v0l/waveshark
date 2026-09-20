@@ -60,7 +60,8 @@ impl ModeSNode {
             // A Mode S frame is 120 us at most, so a millisecond holds one
             // whole with room either side, at any rate a receiver reads
             // 1090 MHz with.
-            meter: crate::FrameMeter::new(2_400_000.0, 1_090_000_000, 0.001),
+            meter: crate::FrameMeter::new(2_400_000.0, 1_090_000_000, 0.001)
+                .keyed_as(common::Modulation::Ppm),
             book: AddressBook::new(),
             frames: Vec::new(),
             accepted: 0,
@@ -94,7 +95,8 @@ impl Simple for ModeSNode {
         }
         self.det = ModeSDetector::new(rate, self.cfg);
         self.rate = rate;
-        self.meter = crate::FrameMeter::new(rate, i.spec.center.0, 0.001);
+        self.meter =
+            crate::FrameMeter::new(rate, i.spec.center.0, 0.001).keyed_as(common::Modulation::Ppm);
         // Frames rather than bytes: two short replies written into one
         // buffer are indistinguishable from one long frame, and a reply's
         // length is what says which kind of reply it is.
@@ -156,7 +158,8 @@ impl Simple for ModeSNode {
                 bytes.clone(),
                 f.rssi_dbfs,
                 self.meter.snr_db(),
-            );
+            )
+            .keyed(common::packet::Keying::configured(common::Modulation::Ppm));
             pkt.carrier.iq = self.meter.iq_at(f.at_sample, len);
             out.push(pkt);
             // Not emitted as a decode here. The frame goes on the bus and

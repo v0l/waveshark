@@ -46,7 +46,7 @@ impl MeiseiNode {
     pub fn new() -> Self {
         Self {
             sync: None,
-            meter: crate::FrameMeter::new(1.0, 0, 0.6),
+            meter: crate::FrameMeter::new(1.0, 0, 0.6).keyed_as(common::Modulation::Fsk2),
             framer: meisei::Framer::new(),
         }
     }
@@ -79,7 +79,8 @@ impl Simple for MeiseiNode {
             )));
         }
         self.sync = Some(s);
-        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 1.0);
+        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 1.0)
+            .keyed_as(common::Modulation::Fsk2);
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)

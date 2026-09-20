@@ -64,7 +64,8 @@ impl AcarsNode {
             audio: Vec::new(),
             bits: Vec::new(),
             blocks: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Msk),
             accepted: 0,
         }
     }
@@ -97,7 +98,8 @@ impl Simple for AcarsNode {
         self.framer.reset();
         // On the channel, not on the span: a 15 kHz channel inside a couple of
         // megahertz of band is a fraction of a percent of the power.
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Msk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

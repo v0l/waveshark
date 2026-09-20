@@ -120,7 +120,8 @@ impl Simple for DroneIdNode {
                 wrap(&b.frame),
                 b.rssi_dbfs,
                 b.snr_db,
-            );
+            )
+            .keyed(common::packet::Keying::configured(common::Modulation::Ofdm));
             // The whole burst is the frame's own samples, at the rate the
             // centre was read at rather than the span's.
             p.carrier.iq = Some(std::sync::Arc::new(common::IqBurst {

@@ -137,7 +137,9 @@ impl Simple for DrmNode {
                     self.rx.snr_db(),
                 );
                 c.emit(pipeline::event::Event::Decoded(
-                    common::packet::Packet::heard(carrier).decoded(d),
+                    common::packet::Packet::heard(carrier)
+                        .keyed(common::packet::Keying::configured(common::Modulation::Ofdm))
+                        .decoded(d),
                 ));
             }
         }

@@ -44,7 +44,8 @@ impl AisNode {
             cfg,
             // Replaced at negotiation, when the real rate and centre are known.
             det: AisDetector::new(2_400_000.0, BAND_CENTER_HZ, cfg),
-            meter: crate::FrameMeter::new(2_400_000.0, BAND_CENTER_HZ as u64, 0.25),
+            meter: crate::FrameMeter::new(2_400_000.0, BAND_CENTER_HZ as u64, 0.25)
+                .keyed_as(common::Modulation::Gmsk),
             frames: Vec::new(),
             accepted: 0,
         }
@@ -76,7 +77,8 @@ impl Simple for AisNode {
             ));
         }
         self.det = AisDetector::new(rate, center, self.cfg);
-        self.meter = crate::FrameMeter::new(rate, BAND_CENTER_HZ as u64, 0.25);
+        self.meter = crate::FrameMeter::new(rate, BAND_CENTER_HZ as u64, 0.25)
+            .keyed_as(common::Modulation::Gmsk);
         // Frames rather than bytes, for the same reason Mode S says so: two
         // messages written into one buffer cannot be told apart afterwards.
         //

@@ -44,7 +44,11 @@ impl Default for M10Node {
 
 impl M10Node {
     pub fn new() -> Self {
-        Self { sync: None, meter: crate::FrameMeter::new(1.0, 0, 0.6), framer: m10::Framer::new() }
+        Self {
+            sync: None,
+            meter: crate::FrameMeter::new(1.0, 0, 0.6).keyed_as(common::Modulation::Fsk2),
+            framer: m10::Framer::new(),
+        }
     }
 
     /// Frames whose checksum held.
@@ -70,7 +74,8 @@ impl Simple for M10Node {
             )));
         }
         self.sync = Some(s);
-        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.5);
+        self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.5)
+            .keyed_as(common::Modulation::Fsk2);
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)

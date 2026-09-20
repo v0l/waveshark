@@ -60,7 +60,8 @@ impl EpirbNode {
             demod: BiphaseDemod::new(WORK_HZ, BAUD),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Psk2),
             framer: epirb::Framer::new(),
             scratch: Vec::new(),
         }
@@ -88,7 +89,8 @@ impl Simple for EpirbNode {
         self.mixer = Mixer::new(0.0, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.demod = BiphaseDemod::new(work, BAUD);
-        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Psk2);
         self.framer.reset();
 
         let mut out = i.spec.with_kind(PortKind::Packets);

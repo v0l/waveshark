@@ -781,7 +781,9 @@ impl pipeline::node::Node for DvbtNode {
             let carrier =
                 crate::locked(self.channel_hz as u64, CHANNEL_WIDTH_HZ as u32, &self.narrow, snr);
             c.emit(pipeline::event::Event::Decoded(
-                common::packet::Packet::heard(carrier).decoded(dvbtdec::multiplex_read(params)),
+                common::packet::Packet::heard(carrier)
+                    .keyed(common::packet::Keying::configured(common::Modulation::Ofdm))
+                    .decoded(dvbtdec::multiplex_read(params)),
             ));
         }
         let fresh: Vec<u16> = self
@@ -801,7 +803,9 @@ impl pipeline::node::Node for DvbtNode {
                     self.rx.heard().snr_db.unwrap_or(0.0),
                 );
                 c.emit(pipeline::event::Event::Decoded(
-                    common::packet::Packet::heard(carrier).decoded(d),
+                    common::packet::Packet::heard(carrier)
+                        .keyed(common::packet::Keying::configured(common::Modulation::Ofdm))
+                        .decoded(d),
                 ));
             }
         }

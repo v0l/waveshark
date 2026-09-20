@@ -83,7 +83,8 @@ impl AeroNode {
             bits: Vec::new(),
             hard: Vec::new(),
             frames: Vec::new(),
-            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 10.0),
+            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 10.0)
+                .keyed_as(common::Modulation::Msk),
             units: 0,
             messages: 0,
         }
@@ -121,7 +122,8 @@ impl Simple for AeroNode {
         self.msk = MskDemod::new(work, config(self.rate));
         self.framer.reset();
         self.assembler.reset();
-        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0);
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0)
+            .keyed_as(common::Modulation::Msk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

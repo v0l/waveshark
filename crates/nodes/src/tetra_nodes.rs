@@ -316,7 +316,8 @@ impl TetraNode {
             rx: TetraRx::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            meter: crate::FrameMeter::new(DEMOD_HZ, channel_hz as u64, KEEP_S),
+            meter: crate::FrameMeter::new(DEMOD_HZ, channel_hz as u64, KEEP_S)
+                .keyed_as(common::Modulation::Dqpsk),
             demod_rate: DEMOD_HZ,
             bursts: Vec::new(),
             blocks: Vec::new(),
@@ -761,7 +762,8 @@ impl Node for TetraNode {
         let factor = (rate / DEMOD_HZ).round().max(1.0) as usize;
         let demod_rate = rate / factor as f64;
         self.demod_rate = demod_rate;
-        self.meter = crate::FrameMeter::new(demod_rate, self.channel_hz as u64, KEEP_S);
+        self.meter = crate::FrameMeter::new(demod_rate, self.channel_hz as u64, KEEP_S)
+            .keyed_as(common::Modulation::Dqpsk);
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, OCCUPIED_HZ / 2.0, 60.0);
         self.demod = TetraDemod::new(demod_rate, TetraConfig::default());

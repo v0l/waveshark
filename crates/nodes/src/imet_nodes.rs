@@ -63,7 +63,8 @@ impl ImetNode {
             narrow: Vec::new(),
             audio: Vec::new(),
             symbols: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Afsk),
             frames: 0,
         }
     }
@@ -94,7 +95,8 @@ impl Simple for ImetNode {
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.bits = AfskBits::new(audio_rate, AfskConfig::default());
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Afsk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);

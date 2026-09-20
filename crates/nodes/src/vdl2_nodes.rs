@@ -61,7 +61,8 @@ impl Vdl2Node {
             narrow: Vec::new(),
             at_rate: Vec::new(),
             bursts: Vec::new(),
-            meter: crate::FrameMeter::new(rate, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(rate, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::D8psk),
             accepted: 0,
         }
     }
@@ -97,7 +98,8 @@ impl Simple for Vdl2Node {
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.resample = resample.unwrap_or_else(|| Rational::with_ratio(1, 1));
         self.demod = D8pskDemod::new(D8pskConfig::VDL2);
-        self.meter = crate::FrameMeter::new(want, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(want, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::D8psk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

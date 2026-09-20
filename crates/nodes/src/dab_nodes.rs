@@ -64,7 +64,9 @@ impl DabNode {
             &self.at_rate,
             self.rx.snr_db(),
         );
-        common::packet::Packet::heard(carrier).decoded(said)
+        common::packet::Packet::heard(carrier)
+            .keyed(common::packet::Keying::configured(common::Modulation::Ofdm))
+            .decoded(said)
     }
 
     pub fn new(channel_hz: f64) -> Self {

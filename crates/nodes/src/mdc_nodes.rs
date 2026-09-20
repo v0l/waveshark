@@ -68,7 +68,8 @@ impl MdcNode {
             narrow: Vec::new(),
             audio: Vec::new(),
             symbols: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Msk),
             read: 0,
         }
     }
@@ -110,7 +111,8 @@ impl Simple for MdcNode {
         self.framer.reset();
         // Measured on the channel rather than on the span: a level taken
         // before the mixer is a level of the band.
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Msk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

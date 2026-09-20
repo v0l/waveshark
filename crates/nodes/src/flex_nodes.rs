@@ -59,7 +59,8 @@ impl FlexNode {
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Fsk2),
             frames: Vec::new(),
             accepted: 0,
         }
@@ -90,7 +91,8 @@ impl Simple for FlexNode {
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.demod = FlexDemod::new(audio_rate, FlexConfig::default());
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Fsk2);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
@@ -116,7 +118,13 @@ impl Simple for FlexNode {
         let out = o.packets_mut();
         for f in &self.frames {
             self.accepted += 1;
-            out.push(self.meter.packet_now(f.to_bytes()));
+            let mut p = self.meter.packet_now(f.to_bytes());
+            if f.mode.levels == 4
+                && let Some(k) = p.keying.as_mut()
+            {
+                k.modulation = common::Modulation::Fsk4;
+            }
+            out.push(p);
         }
         Ok(())
     }

@@ -94,7 +94,8 @@ impl WifiNode {
         Self {
             cfg,
             span: None,
-            meter: crate::FrameMeter::new(ofdm::RATE_HZ, DEFAULT_HZ as u64, KEEP_S),
+            meter: crate::FrameMeter::new(ofdm::RATE_HZ, DEFAULT_HZ as u64, KEEP_S)
+                .keyed_as(common::Modulation::Ofdm),
             frames: Vec::new(),
             accepted: 0,
             opened: 0,
@@ -137,7 +138,8 @@ impl Simple for WifiNode {
             _ => center,
         };
         self.span = Some(span);
-        self.meter = crate::FrameMeter::new(rate, center as u64, KEEP_S);
+        self.meter =
+            crate::FrameMeter::new(rate, center as u64, KEEP_S).keyed_as(common::Modulation::Ofdm);
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
@@ -178,13 +180,18 @@ impl Simple for WifiNode {
             }
             self.accepted += 1;
             let bytes = mac::wrap(&f.psdu, f.rate.mcs, f.rate.mbps, f.rate.short_gi, f.aggregated);
+            let keyed = match f.rate.mbps <= 2.0 {
+                true => common::Modulation::Dsss,
+                false => common::Modulation::Ofdm,
+            };
             let mut pkt = crate::measured(
                 f.center_hz as u64,
                 CHANNEL_WIDTH_HZ as u32,
                 bytes,
                 f.rssi_dbfs,
                 f.snr_db,
-            );
+            )
+            .keyed(common::packet::Keying::configured(keyed));
             // Preamble, headers and as much of the payload as the cap allows.
             let len =
                 (400 + (f.psdu.len() as f32 * 8.0 * 20.0 / f.rate.mbps) as usize).min(MAX_FRAME_IQ);

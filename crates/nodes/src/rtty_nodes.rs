@@ -82,7 +82,8 @@ impl RttyNode {
             narrow: Vec::new(),
             symbols: Vec::new(),
             line: rtty::Framer::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Fsk2),
             runs: 0,
         }
     }
@@ -103,7 +104,8 @@ impl RttyNode {
         let audio_rate = rate / factor as f64;
         self.decim = FirDecim::design_hz(rate, factor, self.passband_hz(), 60.0);
         self.tones = TonePair::new(audio_rate, self.speed.baud(), self.shift.hz());
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Fsk2);
     }
 }
 

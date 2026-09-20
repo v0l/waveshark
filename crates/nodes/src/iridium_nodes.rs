@@ -72,7 +72,8 @@ impl IridiumNode {
             demod: DqpskDemod::new(WORK_HZ, DqpskConfig::IRIDIUM),
             // Half a second at the work rate: a ring alert burst is 20 ms,
             // so a frame's own samples are there when the row is built.
-            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 0.5),
+            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 0.5)
+                .keyed_as(common::Modulation::Dqpsk),
             mixed: Vec::new(),
             narrow: Vec::new(),
             bursts: Vec::new(),
@@ -113,7 +114,8 @@ impl Simple for IridiumNode {
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, HALF_PASS_HZ, 60.0);
         self.demod = DqpskDemod::new(work, DqpskConfig::IRIDIUM);
-        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.5);
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.5)
+            .keyed_as(common::Modulation::Dqpsk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
@@ -149,7 +151,8 @@ impl Simple for IridiumNode {
                 bytes,
                 b.rssi_dbfs,
                 b.snr_db,
-            );
+            )
+            .keyed(common::packet::Keying::configured(common::Modulation::Dqpsk));
             let length = (b.bits.len() / 2) as f64 * self.demod.sps();
             pkt.carrier.iq = self.meter.iq_at(b.start_sample, length as usize);
             out.push(pkt);

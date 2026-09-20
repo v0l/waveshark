@@ -279,7 +279,8 @@ impl Simple for ElrsNode {
                     bus,
                     rssi_dbfs,
                     snr_db,
-                );
+                )
+                .keyed(common::packet::Keying::configured(common::Modulation::Css));
                 if let Some(samples) = samples {
                     p.carrier.iq = Some(std::sync::Arc::new(common::IqBurst {
                         rate: self.reader.sample_rate(),

@@ -184,7 +184,8 @@ impl DmrNode {
             idle_bursts: 0,
             silent_samples: 0,
             in_rate: AUDIO_HZ,
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S)
+                .keyed_as(common::Modulation::Fsk4),
             audio_rate: AUDIO_HZ,
             accepted: 0,
             vocoder: Vocoder::new(),
@@ -301,7 +302,8 @@ impl Node for DmrNode {
         self.framer = dmr::Framer::new();
         self.in_rate = rate;
         self.audio_rate = audio_rate;
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, KEEP_S)
+            .keyed_as(common::Modulation::Fsk4);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

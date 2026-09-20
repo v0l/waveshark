@@ -85,7 +85,8 @@ impl GsmNode {
             channel_hz,
             arfcn: gsm::arfcn(channel_hz).unwrap_or(u16::MAX),
             det: SchDetector::new(rate, channel_hz, channel_hz, cfg),
-            meter: crate::FrameMeter::new(rate, channel_hz as u64, 0.25),
+            meter: crate::FrameMeter::new(rate, channel_hz as u64, 0.25)
+                .keyed_as(common::Modulation::Gmsk),
             hits: Vec::new(),
             accepted: 0,
             origin: None,
@@ -185,7 +186,8 @@ impl Simple for GsmNode {
         }
         self.arfcn = gsm::arfcn(self.channel_hz).unwrap_or(u16::MAX);
         self.det = SchDetector::new(rate, center, self.channel_hz, self.cfg);
-        self.meter = crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25);
+        self.meter = crate::FrameMeter::new(self.det.channel_rate(), self.channel_hz as u64, 0.25)
+            .keyed_as(common::Modulation::Gmsk);
         for t in &self.follow {
             self.det.follow(*t);
         }

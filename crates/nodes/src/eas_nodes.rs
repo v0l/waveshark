@@ -80,7 +80,8 @@ impl EasNode {
             narrow: Vec::new(),
             audio: Vec::new(),
             symbols: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 6.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 6.0)
+                .keyed_as(common::Modulation::Afsk),
             read: 0,
         }
     }
@@ -164,7 +165,8 @@ impl Simple for EasNode {
         // Measured on the channel rather than on the span, and kept for six
         // seconds because an alert is three copies and a row carries the
         // samples the last of them was read from.
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 6.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 6.0)
+            .keyed_as(common::Modulation::Afsk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

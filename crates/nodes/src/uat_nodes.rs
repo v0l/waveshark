@@ -51,7 +51,8 @@ impl UatNode {
             det: SyncDetector::new(2_400_000.0, uat::BAUD, patterns()),
             // An uplink frame is 4.4 ms of air; ten milliseconds holds one
             // whole with room either side.
-            meter: crate::FrameMeter::new(2_400_000.0, uat::CHANNEL_HZ as u64, 0.01),
+            meter: crate::FrameMeter::new(2_400_000.0, uat::CHANNEL_HZ as u64, 0.01)
+                .keyed_as(common::Modulation::Fsk2),
             bursts: Vec::new(),
             accepted: 0,
         }
@@ -84,7 +85,8 @@ impl Simple for UatNode {
             return Err(common::Error::other("uat needs 978 MHz inside the span"));
         }
         self.det = SyncDetector::new(rate, uat::BAUD, patterns());
-        self.meter = crate::FrameMeter::new(rate, uat::CHANNEL_HZ as u64, 0.01);
+        self.meter = crate::FrameMeter::new(rate, uat::CHANNEL_HZ as u64, 0.01)
+            .keyed_as(common::Modulation::Fsk2);
         // Frames rather than bytes: an 18-byte basic message and a 34-byte
         // long one written into one buffer cannot be told apart afterwards,
         // and the length is what says which it was.

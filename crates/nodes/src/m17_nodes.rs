@@ -103,7 +103,8 @@ impl M17Node {
             narrow: Vec::new(),
             audio: Vec::new(),
             frames: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, IQ_KEEP_S),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, IQ_KEEP_S)
+                .keyed_as(common::Modulation::Fsk4),
             audio_rate: AUDIO_HZ,
             codec: Codec2::new(Codec2Mode::MODE_3200),
             voice_now: Vec::new(),
@@ -214,7 +215,8 @@ impl Node for M17Node {
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.demod = M17Demod::new(audio_rate, M17Config::default());
         self.assembler = Assembler::new(audio_rate);
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, IQ_KEEP_S);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, IQ_KEEP_S)
+            .keyed_as(common::Modulation::Fsk4);
         self.audio_rate = audio_rate;
         self.samples = 0;
 

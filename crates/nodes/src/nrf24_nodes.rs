@@ -72,7 +72,8 @@ impl Nrf24Node {
             readers: nrf24::BAUDS.iter().map(|b| nrf24::Reader::new(WORK_HZ, *b)).collect(),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            meter: crate::FrameMeter::new(WORK_HZ, 2_441_000_000, 0.01),
+            meter: crate::FrameMeter::new(WORK_HZ, 2_441_000_000, 0.01)
+                .keyed_as(common::Modulation::Gfsk),
             accepted: 0,
         }
     }
@@ -119,7 +120,8 @@ impl Simple for Nrf24Node {
         // Ten milliseconds: a burst is about 200 us and a remote sends one
         // every few, so a frame's own samples are still there when it is
         // read out.
-        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.01);
+        self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.01)
+            .keyed_as(common::Modulation::Gfsk);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

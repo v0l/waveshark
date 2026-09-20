@@ -63,7 +63,8 @@ impl Ieee802154Node {
             // Five milliseconds at 8 MS/s: the longest PPDU is 4.3 ms, so a
             // frame's own samples are in there without a ring the size of the
             // span.
-            meter: crate::FrameMeter::new(8_000_000.0, hz as u64, 0.005),
+            meter: crate::FrameMeter::new(8_000_000.0, hz as u64, 0.005)
+                .keyed_as(common::Modulation::Oqpsk),
             frames: Vec::new(),
             accepted: 0,
         }
@@ -102,7 +103,8 @@ impl Simple for Ieee802154Node {
             _ => BAND_CENTER_HZ,
         };
         self.det = det;
-        self.meter = crate::FrameMeter::new(rate, hz as u64, 0.005);
+        self.meter =
+            crate::FrameMeter::new(rate, hz as u64, 0.005).keyed_as(common::Modulation::Oqpsk);
         self.rate = rate;
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
@@ -123,7 +125,8 @@ impl Simple for Ieee802154Node {
             // span holding several cannot get from the port.
             let hz = channel_2450_hz(f.channel).unwrap_or(BAND_CENTER_HZ) as u64;
             let mut pkt =
-                crate::measured(hz, CHANNEL_WIDTH_HZ as u32, f.psdu.clone(), f.rssi_dbfs, f.snr_db);
+                crate::measured(hz, CHANNEL_WIDTH_HZ as u32, f.psdu.clone(), f.rssi_dbfs, f.snr_db)
+                    .keyed(common::packet::Keying::configured(common::Modulation::Oqpsk));
             // The header, the payload and both check bytes at 250 kbit/s,
             // with the synchronisation header and room either side for the
             // ramp.

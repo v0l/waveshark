@@ -79,7 +79,8 @@ impl MorseNode {
             narrow: Vec::new(),
             audio: Vec::new(),
             packages: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Ook),
             runs: 0,
         }
     }
@@ -124,7 +125,8 @@ impl Simple for MorseNode {
         // channel cannot key the envelope through the skirt.
         self.decim = FirDecim::design_band(rate, self.factor, PITCH_HZ + REACH_HZ, EDGE_HZ, 60.0);
         self.det = CwDetector::new(audio_rate, config(PITCH_HZ, REACH_HZ));
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Ook);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);

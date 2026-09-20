@@ -72,7 +72,8 @@ impl TwoToneNode {
             narrow: Vec::new(),
             audio: Vec::new(),
             runs: Vec::new(),
-            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0),
+            meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
+                .keyed_as(common::Modulation::Fm),
             read: 0,
         }
     }
@@ -112,7 +113,8 @@ impl Simple for TwoToneNode {
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
         self.tones = ToneRuns::new(audio_rate, RunConfig::default());
         self.pages.reset();
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
+        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
+            .keyed_as(common::Modulation::Fm);
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
