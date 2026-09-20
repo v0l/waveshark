@@ -383,6 +383,12 @@ pub fn read(bytes: &[u8], center: common::Hz) -> Option<Proto> {
     if adv.address.random {
         who = who.lasting(common::packet::Stability::Session);
     }
+    // An aircraft broadcasting Open Drone ID is the aircraft, not the radio
+    // in it: the serial is what a regulator resolves and what stays the same
+    // when the advertiser keys a fresh address mid-flight.
+    if let Some(serial) = crate::odid::serial(&odid) {
+        who = Entity::new("odid", Id::Text(serial));
+    }
     let mut p =
         Proto::new(if odid.is_empty() { "ble" } else { "opendroneid" }, adv.pdu_type.name())
             .by(who)

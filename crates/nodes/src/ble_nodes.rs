@@ -69,6 +69,15 @@ pub struct BleNode {
     meter: crate::FrameMeter,
     frames: Vec<BleFrame>,
     accepted: u64,
+    /// Addresses heard broadcasting Open Drone ID, and the aircraft each one
+    /// named itself as.
+    ///
+    /// A legacy advertisement holds one message, so an aircraft sends its
+    /// identity and its position in different packets seconds apart. Without
+    /// this the position lands under the radio's address and the flight is
+    /// two rows on the map: one that knows where it is and one that knows
+    /// what it is.
+    drones: std::collections::HashMap<String, common::packet::Entity>,
 }
 
 impl Default for BleNode {
@@ -87,9 +96,11 @@ impl BleNode {
             // Two milliseconds at 16 MS/s: an advertisement is 80 to 400 us,
             // so a frame's own samples are in there without keeping a ring
             // the size of the span.
-            meter: crate::FrameMeter::new(16_000_000.0, ADV_CHANNELS[1].1 as u64, 0.002),
+            meter: crate::FrameMeter::new(16_000_000.0, ADV_CHANNELS[1].1 as u64, 0.002)
+                .keyed_as(common::Modulation::Gfsk),
             frames: Vec::new(),
             accepted: 0,
+            drones: std::collections::HashMap::new(),
         }
     }
 
@@ -102,6 +113,40 @@ impl BleNode {
         self.accepted
     }
 }
+
+impl BleNode {
+    /// An advertisement from an aircraft, filed under the aircraft.
+    ///
+    /// `None` for everything else, which the registry reads as it reads any
+    /// other frame off the bus. What is done here and cannot be done there
+    /// is the join: an aircraft names itself in one advert and says where it
+    /// is in the next, and only something following this channel over time
+    /// knows the two came from the same transmitter.
+    fn drone_read(&mut self, pdu: &[u8], hz: common::Hz) -> Option<common::packet::Proto> {
+        let mut read = read(pdu, hz)?;
+        if read.id != "opendroneid" {
+            return None;
+        }
+        let address = read.link.from.as_ref()?.id.clone();
+        match read.subject.as_ref().filter(|e| e.space == "odid") {
+            // It named itself: remember which address this aircraft is on.
+            Some(aircraft) => {
+                if self.drones.len() >= DRONES_KEPT {
+                    self.drones.clear();
+                }
+                self.drones.insert(address, aircraft.clone());
+            }
+            // It only said where it is, so it is whichever aircraft was
+            // last heard naming itself on this address.
+            None => read.subject = self.drones.get(&address).cloned(),
+        }
+        Some(read)
+    }
+}
+
+/// Aircraft remembered at once. A field full of drones is a few; this is
+/// only here so a long watch on a busy band cannot grow without bound.
+const DRONES_KEPT: usize = 64;
 
 impl Simple for BleNode {
     fn name(&self) -> &str {
@@ -130,7 +175,8 @@ impl Simple for BleNode {
             _ => BAND_CENTER_HZ,
         };
         self.det = det;
-        self.meter = crate::FrameMeter::new(rate, hz as u64, 0.002);
+        self.meter =
+            crate::FrameMeter::new(rate, hz as u64, 0.002).keyed_as(common::Modulation::Gfsk);
         self.rate = rate;
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
@@ -143,8 +189,9 @@ impl Simple for BleNode {
         self.meter.feed(iq);
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
+        let frames = std::mem::take(&mut self.frames);
         let out = o.packets_mut();
-        for f in &self.frames {
+        for f in &frames {
             self.accepted += 1;
             // The detector measured this burst against the floor either side
             // of it, which is a better number than a block mean; what it
@@ -174,16 +221,21 @@ impl Simple for BleNode {
             };
             // The advertising CRC, checked against the channel's init word
             // before the PDU got here: a packet that failed it was dropped.
-            out.push(
-                common::packet::Packet::heard(carrier)
-                    .framed(common::packet::Frame::of(f.pdu.clone()))
-                    .checked(common::packet::Integrity::Passed),
-            );
+            let mut p = common::packet::Packet::heard(carrier)
+                .keyed(common::packet::Keying::configured(common::Modulation::Gfsk))
+                .framed(common::packet::Frame::of(f.pdu.clone()))
+                .checked(common::packet::Integrity::Passed);
+            if let Some(read) = self.drone_read(&f.pdu, common::Hz(hz)) {
+                p = p.decoded(read);
+            }
+            out.push(p);
         }
+        self.frames = frames;
         Ok(())
     }
 
     fn reset(&mut self) {
+        self.drones.clear();
         self.meter.reset();
         self.det.reset();
     }
@@ -582,34 +634,92 @@ mod tests {
         assert_eq!(ch.map(|c| c.heard), Some(38));
     }
 
-    /// An aircraft's broadcast is the same link layer carrying service data,
-    /// and what makes it another row is what is inside. The serial leads and
-    /// the Bluetooth address stays behind it, because a drone's address
-    /// rotates and the serial is the airframe.
-    #[test]
-    fn an_advertisement_carrying_open_drone_id_becomes_an_aircraft_row() {
-        let mut msg = vec![0x02, (1 << 4) | 2];
-        let mut id = b"1596F3AAAAAAAAAAAAAA".to_vec();
-        id.resize(20, 0);
-        msg.extend_from_slice(&id);
+    /// An advertisement carrying one Open Drone ID message, from one
+    /// address. Legacy advertising holds a single message, which is why an
+    /// aircraft's identity and its position arrive in different packets.
+    fn odid_advert(message: Vec<u8>, address: [u8; 6]) -> Vec<u8> {
+        let mut msg = message;
         msg.resize(25, 0);
-
         let mut sd = vec![0xfa, 0xff, 0x0d, 3];
         sd.extend_from_slice(&msg);
-
         let mut pdu = vec![0x02, 0];
-        pdu.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        pdu.extend_from_slice(&address);
         pdu.push((sd.len() + 1) as u8);
         pdu.push(0x16);
         pdu.extend_from_slice(&sd);
         pdu[1] = (pdu.len() - 2) as u8;
+        pdu
+    }
 
+    fn basic_id(serial: &str) -> Vec<u8> {
+        let mut msg = vec![0x02, (1 << 4) | 2];
+        let mut id = serial.as_bytes().to_vec();
+        id.resize(20, 0);
+        msg.extend_from_slice(&id);
+        msg
+    }
+
+    /// An aircraft's broadcast is the same link layer carrying service data,
+    /// and what makes it another row is what is inside.
+    #[test]
+    fn an_advertisement_carrying_open_drone_id_becomes_an_aircraft_row() {
+        let pdu =
+            odid_advert(basic_id("1596F3AAAAAAAAAAAAAA"), [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let d = read(&pdu, Hz(2_402_000_000)).expect("a decode");
-        // Named for what it is rather than for the link layer it rode on.
+        // Named for what it is rather than for the link layer it rode on,
+        // and filed under the airframe's own serial: an advertiser may key a
+        // fresh address mid-flight, and one aircraft is one track.
         assert_eq!(d.id, "opendroneid");
         assert_eq!(
-            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
-            Some("66:55:44:33:22:11")
+            d.subject.as_ref().map(|e| (e.space, e.id.to_string())),
+            Some(("odid", "1596F3AAAAAAAAAAAAAA".to_string()))
         );
+        // And it says it is an aircraft, so the map draws it as one rather
+        // than as the radio that carried it.
+        let named = d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Named(n) => Some(n),
+            _ => None,
+        });
+        assert_eq!(named.map(|n| n.thing), Some(common::packet::ThingKind::Aircraft));
+        assert_eq!(named.and_then(|n| n.role), Some("multirotor"));
+    }
+
+    /// The position an aircraft sends belongs to the aircraft that named
+    /// itself on that address a moment earlier.
+    ///
+    /// One advert holds one message, so a flight arrives as an identity and
+    /// then a stream of positions. Filing the positions under the radio's
+    /// address put the same aircraft on the map twice: a row that knew where
+    /// it was and a row that knew what it was.
+    #[test]
+    fn a_position_advert_is_filed_under_the_aircraft_that_named_itself() {
+        let address = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        // A location message: airborne, at 53.35 N 6.26 W.
+        let mut body = vec![(1 << 4) | 2, (2 << 4) | 0x01, 90, 20, 4u8];
+        body.extend_from_slice(&533_500_000i32.to_le_bytes());
+        body.extend_from_slice(&(-62_600_000i32).to_le_bytes());
+        body.extend_from_slice(&2100u16.to_le_bytes());
+        body.extend_from_slice(&2200u16.to_le_bytes());
+        body.extend_from_slice(&2100u16.to_le_bytes());
+
+        let mut n = BleNode::default();
+        // Before it has named itself, a position is a position and nothing
+        // the map can file: the address is all there is.
+        let hz = Hz(2_402_000_000);
+        let first = n.drone_read(&odid_advert(body.clone(), address), hz).expect("a decode");
+        assert_eq!(first.subject, None);
+
+        n.drone_read(&odid_advert(basic_id("1596F3AAAAAAAAAAAAAA"), address), hz);
+        let then = n.drone_read(&odid_advert(body.clone(), address), hz).expect("a decode");
+        assert_eq!(
+            then.subject.as_ref().map(|e| (e.space, e.id.to_string())),
+            Some(("odid", "1596F3AAAAAAAAAAAAAA".to_string())),
+            "the position did not join the aircraft"
+        );
+        assert!(then.placed().is_some(), "the position was lost");
+
+        // Another address is another aircraft, not this one.
+        let other = n.drone_read(&odid_advert(body, [0xaa; 6]), hz).expect("a decode");
+        assert_eq!(other.subject, None);
     }
 }

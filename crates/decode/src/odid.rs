@@ -483,8 +483,14 @@ pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
 /// height without a place is still a height, which is what an aircraft on a
 /// Bluetooth advert usually sends first.
 pub fn facts(messages: &[Parsed]) -> Vec<common::packet::Fact> {
-    use common::packet::{Fact, Fix, Motion, Quantity};
+    use common::packet::{Fact, Fix, Motion, Named, Quantity, ThingKind};
     let mut out = Vec::new();
+    // What it is, before where it is: an aircraft that says nothing but its
+    // serial still belongs on the map as an aircraft rather than as whatever
+    // radio carried the advertisement.
+    if let Some(n) = aircraft(messages) {
+        out.push(Fact::Named(n));
+    }
     for p in messages {
         let Message::Location(l) = &p.message else { continue };
         if let (Some(lat), Some(lon)) = (l.latitude, l.longitude) {
@@ -498,11 +504,69 @@ pub fn facts(messages: &[Parsed]) -> Vec<common::packet::Fact> {
             climb_ms: l.vertical_speed_ms,
             heading_deg: None,
         }));
-        if let Some(m) = l.geodetic_alt_m {
+        // The geodetic height where it has one, and the height above the
+        // take-off point where that is all it sends: an aircraft with no
+        // altitude at all cannot be separated from the ground on the map.
+        if let Some(m) = l.geodetic_alt_m.or(l.height_m) {
             out.push(Fact::sensed(Quantity::Altitude, m, common::Unit::Metre));
         }
     }
     out
+}
+
+/// The aircraft these messages describe: what it is called, what sort of
+/// airframe it is, and what it says it is doing.
+///
+/// Spread over several messages sent in turn, so this reads whichever have
+/// arrived: the basic id names it, the self id describes the flight, and the
+/// location message carries the flight status.
+fn aircraft(messages: &[Parsed]) -> Option<common::packet::Named> {
+    use common::packet::{Named, ThingKind};
+    let mut label = None;
+    let mut role = None;
+    let mut state = None;
+    for p in messages {
+        match &p.message {
+            Message::BasicId { ua_type, id, .. } if !id.trim().is_empty() => {
+                label.get_or_insert(id.trim().to_string());
+                role = Some(ua_type_name(*ua_type));
+            }
+            Message::SelfId { text, .. } if !text.trim().is_empty() => {
+                label = Some(text.trim().to_string());
+            }
+            Message::OperatorId { id, .. } if !id.trim().is_empty() => {
+                label.get_or_insert(id.trim().to_string());
+            }
+            Message::Location(l) => state = Some(status_name(l.status)),
+            _ => {}
+        }
+    }
+    let mut n = Named::new(label?, ThingKind::Aircraft);
+    n.role = role;
+    n.state = state;
+    Some(n)
+}
+
+/// The identifier the airframe broadcasts, which is what a track belongs
+/// under.
+///
+/// Not the radio's address: a Bluetooth advertiser may key a fresh one every
+/// few minutes, so filing the flight under it splits one aircraft into a row
+/// per address. The manufacturer's serial is preferred where it is sent, but
+/// an aircraft is free to broadcast its registration or a session identifier
+/// instead, and any of them names it better than the radio does.
+pub fn serial(messages: &[Parsed]) -> Option<String> {
+    let ids: Vec<(IdType, &str)> = messages
+        .iter()
+        .filter_map(|p| match &p.message {
+            Message::BasicId { id_type, id, .. } if !id.trim().is_empty() => {
+                Some((*id_type, id.trim()))
+            }
+            _ => None,
+        })
+        .collect();
+    let best = ids.iter().find(|(t, _)| *t == IdType::SerialNumber).or_else(|| ids.first())?;
+    Some(best.1.to_string())
 }
 
 #[cfg(test)]
