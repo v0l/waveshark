@@ -263,14 +263,15 @@ impl Log<'_> {
     /// Column headings and their widths in pixels. Fixed rather than sized to
     /// the content: a table whose columns resize as packets arrive is a table
     /// that moves under the pointer, and the last column absorbs the slack.
-    const COLS: [(&'static str, f32); 8] = [
+    const COLS: [(&'static str, f32); 9] = [
         ("no", 40.0),
         ("time", 64.0),
         ("frequency", 96.0),
         ("mod", 70.0),
         ("rssi", 48.0),
         ("snr", 44.0),
-        ("protocol", 140.0),
+        ("protocol", 110.0),
+        ("type", 150.0),
         ("len", 38.0),
     ];
 
@@ -373,6 +374,7 @@ impl Log<'_> {
                 (fmt_db(rec.rssi_dbfs()), level_color(rec.rssi_dbfs())),
                 (fmt_db(rec.snr_db()), theme::LEGEND),
                 (rec.protocol().to_string(), col),
+                (rec.kind().replace('_', " "), theme::LEGEND),
                 (format!("{:>4}", rec.bytes().len()), theme::LEGEND),
             ];
             let mut x = rect.left();

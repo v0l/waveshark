@@ -99,7 +99,9 @@ impl Reception {
             return said.join(", ");
         }
         match self.packet.claimed() {
-            true => self.kind().replace('_', " "),
+            // The kind is in the row's own label, so repeating it here would
+            // write the same word twice across one line.
+            true => String::new(),
             false => keying(&self.packet),
         }
     }
@@ -107,21 +109,22 @@ impl Reception {
     /// The column headings [`Self::line`] prints under.
     pub fn line_header() -> String {
         format!(
-            "{:>8}  {:>13}  {:<10} {:>6} {:>5}  {:<22} {:>3}  info",
-            "time", "frequency", "mod", "rssi", "snr", "protocol", "len"
+            "{:>8}  {:>13}  {:<10} {:>6} {:>5}  {:<12} {:<22} {:>3}  info",
+            "time", "frequency", "mod", "rssi", "snr", "protocol", "type", "len"
         )
     }
 
     /// One line in the packet list's columns, timed from `since`.
     pub fn line(&self, since: Instant) -> String {
         format!(
-            "{:>8.3}  {:>9.4} MHz  {:<10} {:>6.1} {:>5.1}  {:<22} {:>3}  {}",
+            "{:>8.3}  {:>9.4} MHz  {:<10} {:>6.1} {:>5.1}  {:<12} {:<22} {:>3}  {}",
             self.at.saturating_duration_since(since).as_secs_f64(),
             self.freq() / 1e6,
             self.modulation(),
             self.rssi_dbfs(),
             self.snr_db(),
             self.protocol(),
+            self.kind().replace('_', " "),
             self.bytes().len(),
             self.detail()
         )
