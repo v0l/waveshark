@@ -5,9 +5,12 @@ The code is the description of the receiver. There is no second one: start at
 `crates/app/src/chain.rs` for the graph the receiver builds. What a protocol
 reads is in its own module and in the tests beside it. The one page outside
 the code is [`docs/references.md`](docs/references.md), which holds the terms
-each data publisher requires; read it before adding a data source. A
-measurement or a trap that explains a shape goes in a comment next to that
-code.
+each data publisher requires; read it before adding a data source.
+
+Do not write comments. A measurement or a trap that explains a shape is
+pinned by the test that measured it, in its name and in what it asserts, and
+that is where a later reader finds it. Comments already in the tree stay as
+they are.
 
 ## A protocol is layers, and the layers are shared
 
@@ -251,14 +254,15 @@ Assert the number. `assert!(decoded >= 1)` and `assert!(!rows.is_empty())` pass
 when fourteen of fifteen packets were thrown away. Pin how many packets
 decoded, how many rows came out, how many carried a measurement, which
 callsigns and ids, and which channels they were read on. Where another
-implementation read the same file, assert what it said and put the provenance
-in the test's doc comment.
+implementation read the same file, assert what it said and name that
+implementation and its version in the test's own name, or in the message the
+assertion fails with.
 
 An optimisation may not change any of those numbers. Run the affected tests
 before and after and expect the same numbers, not merely a pass. Where the
-signal will not allow exactness, pin a floor and a ceiling with a comment
-saying which. A skip for an absent fixture prints the name and
-`run testdata/fetch.sh`.
+signal will not allow exactness, pin a floor and a ceiling, and say which is
+which in the failure message. A skip for an absent fixture prints the name
+and `run testdata/fetch.sh`.
 
 `tools/coverage.sh` says which lines no test reaches. It runs the tests under
 `cargo llvm-cov` once and reports three ways: a per-crate table, `gaps` for the
@@ -307,8 +311,8 @@ scanning to find out whether to upgrade. Name the protocol, the pane or the
 fault and stop. Never list the parts of a fix, never explain the mechanism,
 never write a second sentence justifying the first. The few headline features
 of a release may take two or three lines to say what the thing does; nothing
-else may. The reasoning belongs in a code comment where it is findable, and
-the measurements in the test that pins them.
+else may. The reasoning and the measurements belong in the test that pins
+them, where they are findable and cannot go stale.
 
 **Start with the word somebody would search for.** A line is read by eye down
 the left edge and by `grep` for a name, so the protocol, the pane, the flag or
