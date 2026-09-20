@@ -364,89 +364,25 @@ impl Map<'_> {
                         crate::tracks::Detail::Sonde { altitude_m, .. } => {
                             Some(format!("{altitude_m:.0} m"))
                         }
-                        _ => None,
+                        // Whatever the thing turns out to be, a height it
+                        // stated is a height: a drone's altitude arrives
+                        // before anything has said it is an aircraft.
+                        _ => a.altitude_m.map(|m| format!("{m:.0} m")),
                     }
                     .unwrap_or_else(|| dash.clone());
-                    let (state, state_col) = match &a.detail {
-                        crate::tracks::Detail::Aircraft { vertical_rate_fpm, .. } => (
-                            match vertical_rate_fpm {
-                                Some(v) if *v > 128 => format!("climbing {v} fpm"),
-                                Some(v) if *v < -128 => format!("descending {} fpm", -v),
-                                Some(_) => "level".to_string(),
-                                None => dash.clone(),
-                            },
-                            // Climb and descent are worth telling apart at a
-                            // glance; level flight is not worth colouring at all.
-                            match vertical_rate_fpm {
-                                Some(v) if *v > 128 => CRC_OK,
-                                Some(v) if *v < -128 => theme::READOUT,
-                                _ => theme::VALUE,
+                    let (state, state_col) = match &a.alert {
+                        // Anything that said something is wrong says it
+                        // here, whatever sort of thing it is: a beacon's
+                        // distress outranks how fast it is climbing.
+                        Some((severity, what)) => (
+                            what.clone(),
+                            match severity {
+                                common::packet::Severity::Immediate => theme::FAULT,
+                                common::packet::Severity::Warning => theme::READOUT,
+                                common::packet::Severity::Advisory => theme::VALUE,
                             },
                         ),
-                        crate::tracks::Detail::Vessel { nav_status, ship_type, .. } => (
-                            nav_status
-                                .or(*ship_type)
-                                .map(str::to_string)
-                                .unwrap_or_else(|| dash.clone()),
-                            theme::LEGEND,
-                        ),
-                        crate::tracks::Detail::Station { aid } => (
-                            if *aid { "navigation mark".into() } else { "shore station".into() },
-                            theme::LEGEND,
-                        ),
-                        // An APRS station says what it is in a comment more often
-                        // than in any field, so that is what the column shows.
-                        crate::tracks::Detail::Aprs { comment, .. } => {
-                            (comment.clone().unwrap_or_else(|| dash.clone()), theme::LEGEND)
-                        }
-                        // What a sonde watcher wants at a glance: whether it
-                        // is still going up, and how fast.
-                        crate::tracks::Detail::Sonde {
-                            climb_ms,
-                            descending,
-                            temperature_c,
-                            ..
-                        } => (
-                            match temperature_c {
-                                // The reading the balloon was sent up for,
-                                // beside the only other thing worth seeing at
-                                // a glance: which way it is going.
-                                Some(t) => format!(
-                                    "{} {:.1} m/s, {t:.1} C",
-                                    if *descending { "descending" } else { "climbing" },
-                                    climb_ms.abs()
-                                ),
-                                None => format!(
-                                    "{} {:.1} m/s",
-                                    if *descending { "descending" } else { "climbing" },
-                                    climb_ms.abs()
-                                ),
-                            },
-                            if *descending { theme::READOUT } else { CRC_OK },
-                        ),
-                        crate::tracks::Detail::Mesh { short_name, battery_pct, .. } => {
-                            let mut parts = Vec::new();
-                            if let Some(s) = short_name {
-                                parts.push(s.clone());
-                            }
-                            if let Some(b) = battery_pct {
-                                parts.push(if *b > 100 {
-                                    "on power".into()
-                                } else {
-                                    format!("{b}%")
-                                });
-                            }
-                            (
-                                if parts.is_empty() { dash.clone() } else { parts.join(", ") },
-                                theme::LEGEND,
-                            )
-                        }
-                        crate::tracks::Detail::MeshCore { role, .. } => {
-                            (role.to_string(), theme::LEGEND)
-                        }
-                        // The protocol said where it was and not what it is,
-                        // and the packet list is where its fields are.
-                        crate::tracks::Detail::Device => (dash.clone(), theme::LEGEND),
+                        None => state_of(a, &dash),
                     };
                     let kind = match a.kind() {
                         Kind::Aircraft => "air",
@@ -493,5 +429,80 @@ impl Map<'_> {
                 }
             });
         });
+    }
+}
+
+/// What a row says the thing is doing, and the colour it reads in.
+///
+/// One arm per kind of track, because what is worth knowing at a glance
+/// differs: an aircraft's climb, a vessel's navigation status, a mesh node's
+/// battery. An alert overrides all of it, and that is decided by the caller.
+fn state_of(a: &crate::tracks::Track, dash: &str) -> (String, Color32) {
+    let dash = dash.to_string();
+    match &a.detail {
+        crate::tracks::Detail::Aircraft { .. } => {
+            let vertical_rate_fpm = &a.vertical_rate_fpm();
+            (
+                match vertical_rate_fpm {
+                    Some(v) if *v > 128 => format!("climbing {v} fpm"),
+                    Some(v) if *v < -128 => format!("descending {} fpm", -v),
+                    Some(_) => "level".to_string(),
+                    None => dash.clone(),
+                },
+                // Climb and descent are worth telling apart at a
+                // glance; level flight is not worth colouring at all.
+                match vertical_rate_fpm {
+                    Some(v) if *v > 128 => CRC_OK,
+                    Some(v) if *v < -128 => theme::READOUT,
+                    _ => theme::VALUE,
+                },
+            )
+        }
+        crate::tracks::Detail::Vessel { nav_status, ship_type, .. } => (
+            nav_status.or(*ship_type).map(str::to_string).unwrap_or_else(|| dash.clone()),
+            theme::LEGEND,
+        ),
+        crate::tracks::Detail::Station { aid } => {
+            (if *aid { "navigation mark".into() } else { "shore station".into() }, theme::LEGEND)
+        }
+        // An APRS station says what it is in a comment more often
+        // than in any field, so that is what the column shows.
+        crate::tracks::Detail::Aprs { comment, .. } => {
+            (comment.clone().unwrap_or_else(|| dash.clone()), theme::LEGEND)
+        }
+        // What a sonde watcher wants at a glance: whether it
+        // is still going up, and how fast.
+        crate::tracks::Detail::Sonde { climb_ms, descending, temperature_c, .. } => (
+            match temperature_c {
+                // The reading the balloon was sent up for,
+                // beside the only other thing worth seeing at
+                // a glance: which way it is going.
+                Some(t) => format!(
+                    "{} {:.1} m/s, {t:.1} C",
+                    if *descending { "descending" } else { "climbing" },
+                    climb_ms.abs()
+                ),
+                None => format!(
+                    "{} {:.1} m/s",
+                    if *descending { "descending" } else { "climbing" },
+                    climb_ms.abs()
+                ),
+            },
+            if *descending { theme::READOUT } else { CRC_OK },
+        ),
+        crate::tracks::Detail::Mesh { short_name, battery_pct, .. } => {
+            let mut parts = Vec::new();
+            if let Some(s) = short_name {
+                parts.push(s.clone());
+            }
+            if let Some(b) = battery_pct {
+                parts.push(if *b > 100 { "on power".into() } else { format!("{b}%") });
+            }
+            (if parts.is_empty() { dash.clone() } else { parts.join(", ") }, theme::LEGEND)
+        }
+        crate::tracks::Detail::MeshCore { role, .. } => (role.to_string(), theme::LEGEND),
+        // The protocol said where it was and not what it is,
+        // and the packet list is where its fields are.
+        crate::tracks::Detail::Device => (dash.clone(), theme::LEGEND),
     }
 }

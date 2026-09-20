@@ -160,6 +160,11 @@ fn merge_detail(into: &mut Detail, from: Detail) {
                 *humidity_pct = humidity_pct.or(was_h);
             }
         }
+        // A transmitter that has said nothing about itself yet is whatever
+        // the first message that does says it is. An aircraft broadcasting
+        // Open Drone ID sends its position and its identity in separate
+        // adverts, so the track exists before anything knows it flies.
+        (into @ Detail::Device, from) if from != Detail::Device => *into = from,
         (into @ Detail::Station { .. }, from @ Detail::Station { .. }) => *into = from,
         (into @ Detail::Aprs { .. }, from @ Detail::Aprs { .. }) => *into = from,
         (into @ Detail::MeshCore { .. }, from @ Detail::MeshCore { .. }) => *into = from,
@@ -484,6 +489,23 @@ pub struct Track {
     pub trail: Vec<(f64, f64)>,
     pub messages: u64,
     pub last: std::time::Instant,
+    /// How high it said it was, in metres, whatever sort of thing it is.
+    ///
+    /// Beside the detail rather than inside it, because a height arrives
+    /// before anything has said what is carrying it: a drone broadcasts its
+    /// position and its identity in separate transmissions, and a reading
+    /// filed under a kind the track had not learned yet was thrown away.
+    pub altitude_m: Option<f64>,
+    /// How fast it is climbing, in metres a second, positive upward. Here
+    /// for the same reason the height is.
+    pub climb_ms: Option<f64>,
+    /// Where the bow is pointing, in degrees true, which is not where the
+    /// thing is going: a vessel crabbing across a tide reports both.
+    pub heading_deg: Option<f64>,
+    /// What it said was wrong, from the last transmission that said
+    /// anything: a beacon's distress, a drone's emergency, a hijack code.
+    /// The one thing on a row that is worth interrupting somebody for.
+    pub alert: Option<(common::packet::Severity, String)>,
     pub detail: Detail,
     /// When the confirmed position was established, which decides whether it
     /// can still resolve the next ADS-B frame. Bookkeeping rather than
@@ -503,6 +525,10 @@ impl Track {
             trail: Vec::new(),
             messages: 0,
             last: at,
+            altitude_m: None,
+            climb_ms: None,
+            heading_deg: None,
+            alert: None,
             detail,
             pos_at: None,
         }
@@ -522,6 +548,16 @@ impl Track {
             Detail::Aircraft { altitude_ft, .. } => altitude_ft,
             Detail::Aprs { altitude_ft, .. } => altitude_ft,
             _ => None,
+        }
+        .or_else(|| self.altitude_m.map(|m| (m / 0.3048) as i32))
+    }
+
+    /// How fast it is climbing, in feet a minute, which is the unit every
+    /// aircraft's operator reads.
+    pub fn vertical_rate_fpm(&self) -> Option<i32> {
+        match self.detail {
+            Detail::Aircraft { vertical_rate_fpm: Some(v), .. } => Some(v),
+            _ => self.climb_ms.map(|c| (c / FPM_TO_MS) as i32),
         }
     }
 
@@ -651,11 +687,18 @@ impl Tracks {
             return false;
         };
         let placed = p.carries().has(common::packet::FactKind::Position);
-        // A protocol the tracker knows nothing about is a track when it says
-        // where it was, and nothing at all when it does not. This is what
-        // keeps a pager, a meter or a tyre valve off the map: each names
-        // itself in every packet and none of them has ever said where it is.
-        if matches!(id, TrackId::Device { .. }) && !placed {
+        // A protocol the tracker knows nothing about earns a track by saying
+        // where it was, and nothing at all otherwise. This is what keeps a
+        // pager, a meter or a tyre valve off the map: each names itself in
+        // every packet and none of them has ever said where it is.
+        //
+        // Once it is on the map, everything else it says belongs to it. A
+        // drone broadcasts its position, its identity, its operator and its
+        // description in separate transmissions, and only the first of them
+        // carries a place: refusing the rest left a track that could not say
+        // what it was, how high it was or what it was called.
+        let known = self.seen.iter().any(|e| e.track.id == id);
+        if matches!(id, TrackId::Device { .. }) && !placed && !known {
             return false;
         }
         // Sticks are where a handset's controls are, not where anything is.
@@ -688,19 +731,14 @@ impl Tracks {
         merge_detail(&mut e.track.detail, detail);
         for (_, f) in p.facts() {
             match f {
+                // How it is moving belongs to the thing, not to what sort
+                // of thing it turned out to be: every one of these arrives
+                // in transmissions that say nothing else about it.
                 Fact::Motion(m) => {
                     e.track.speed_kt = m.speed_kt.or(e.track.speed_kt);
                     e.track.course_deg = m.course_deg.or(e.track.course_deg);
-                    if let (Detail::Aircraft { vertical_rate_fpm, .. }, Some(c)) =
-                        (&mut e.track.detail, m.climb_ms)
-                    {
-                        *vertical_rate_fpm = Some((c / FPM_TO_MS) as i32);
-                    }
-                    if let (Detail::Vessel { heading_deg, .. }, Some(h)) =
-                        (&mut e.track.detail, m.heading_deg)
-                    {
-                        *heading_deg = Some(h);
-                    }
+                    e.track.climb_ms = m.climb_ms.or(e.track.climb_ms);
+                    e.track.heading_deg = m.heading_deg.or(e.track.heading_deg);
                     if let Detail::Sonde { climb_ms, .. } = &mut e.track.detail
                         && let Some(c) = m.climb_ms
                     {
@@ -709,8 +747,23 @@ impl Tracks {
                 }
                 // Absolute coordinates behind the protocol's own check, so
                 // there is no reading of them that could be a zone out.
+                // Something is wrong with it, which outranks everything else
+                // a row can say: a beacon activated, a hijack code, a drone
+                // declaring an emergency.
+                Fact::Alert(a) => {
+                    let what = a.text.clone().unwrap_or_else(|| f.says());
+                    e.track.alert = Some((a.severity, what));
+                }
                 Fact::Position(fix) => e.track.set_position((fix.lat, fix.lon), at, true),
-                Fact::Sensed(r) => height_or_weather(&mut e.track.detail, r),
+                Fact::Sensed(r) => {
+                    // Every protocol that reports a height reports it in
+                    // metres; what differs is the unit each kind of operator
+                    // reads it in, which is the view's business.
+                    if r.quantity == Quantity::Altitude && r.unit == common::Unit::Metre {
+                        e.track.altitude_m = Some(r.value);
+                    }
+                    height_or_weather(&mut e.track.detail, r);
+                }
                 Fact::Destination(d) => {
                     if let Detail::Vessel { destination, .. } = &mut e.track.detail {
                         *destination = Some(d.clone());
@@ -1139,8 +1192,7 @@ mod tests {
         let a = &f.active(now)[0];
         assert_eq!(a.id, TrackId::Icao(0x485020));
         assert!((a.speed_kt.unwrap() - 159.2).abs() < 0.5);
-        let Detail::Aircraft { vertical_rate_fpm, .. } = a.detail else { panic!() };
-        assert_eq!(vertical_rate_fpm, Some(-832));
+        assert_eq!(a.vertical_rate_fpm(), Some(-832));
     }
 
     /// An AIS position needs no pairing and no reference: one message is a
@@ -1473,6 +1525,80 @@ mod tests {
         assert_eq!(list.len(), 1, "{} tracks", list.len());
         assert_eq!(list[0].messages, 2);
         assert_eq!(list[0].trail.len(), 2);
+    }
+
+    /// A drone says where it is, what it is and how high in separate
+    /// transmissions, and the map has to end up with one aircraft carrying
+    /// all three.
+    ///
+    /// Open Drone ID over Bluetooth sends one message per advertisement, so
+    /// the position arrives on its own and the identity a second later. A
+    /// track that only accepted the messages carrying a place showed an
+    /// aircraft as an unknown transmitter, with no height and no name.
+    #[test]
+    fn a_drone_gathers_what_its_separate_messages_said() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        let aircraft = || Entity::new("odid", Id::Text("1596F3".into()));
+        let placed = common::packet::Proto::new("opendroneid", "adv_nonconn_ind")
+            .by(aircraft())
+            .saying(Fact::Position(Fix { lat: 53.6369, lon: -6.6528, precision_bits: None }))
+            .saying(Fact::sensed(common::packet::Quantity::Altitude, 121.5, common::Unit::Metre))
+            .saying(Fact::Motion(common::packet::Motion {
+                speed_kt: Some(12.0),
+                course_deg: Some(91.0),
+                climb_ms: Some(2.5),
+                heading_deg: None,
+            }));
+        assert!(t.update(&heard(2_426_000_000, placed), now));
+
+        // The identity advert that follows carries no place at all, and
+        // everything it says belongs to the aircraft already on the map.
+        let named = common::packet::Proto::new("opendroneid", "adv_ind").by(aircraft()).saying(
+            Fact::Named(common::packet::Named {
+                label: "Skydio 2".into(),
+                thing: ThingKind::Aircraft,
+                state: Some("airborne"),
+                role: Some("multirotor"),
+                fixed: false,
+            }),
+        );
+        assert!(t.update(&heard(2_426_000_000, named), now), "the identity was thrown away");
+
+        let list = t.active(now);
+        assert_eq!(list.len(), 1, "one aircraft, not one row per message kind");
+        let a = &list[0];
+        assert_eq!(a.kind(), Kind::Aircraft, "read as {:?}", a.detail);
+        assert_eq!(a.label.as_deref(), Some("Skydio 2"));
+        assert_eq!(a.altitude_ft(), Some(398), "121.5 m is 398 ft");
+        assert_eq!(a.speed_kt, Some(12.0));
+        assert_eq!(a.course_deg, Some(91.0));
+        assert_eq!(a.vertical_rate_fpm(), Some(492), "2.5 m/s is 492 fpm");
+    }
+
+    /// A beacon that says it is in distress says so on its row.
+    ///
+    /// The one thing on a map worth interrupting somebody for, and it used
+    /// to reach the packet list and stop there: the track showed a
+    /// transmitter at a position with nothing to say what was wrong.
+    #[test]
+    fn a_beacon_in_distress_says_so_on_the_map() {
+        let now = std::time::Instant::now();
+        let mut t = Tracks::new();
+        let beacon = common::packet::Proto::new("epirb", "distress")
+            .by(Entity::new("epirb", Id::Text("1D043C4802FFBFF".into())))
+            .saying(Fact::Position(Fix { lat: 53.36, lon: -10.19, precision_bits: None }))
+            .saying(Fact::Alert(common::packet::Alert {
+                kind: common::packet::AlertKind::Distress,
+                severity: common::packet::Severity::Immediate,
+                text: Some("EPIRB, maritime, GPS position".into()),
+            }));
+        assert!(t.update(&heard(406_025_000, beacon), now));
+        let a = &t.active(now)[0];
+        assert_eq!(
+            a.alert.as_ref().map(|(s, w)| (*s, w.as_str())),
+            Some((common::packet::Severity::Immediate, "EPIRB, maritime, GPS position"))
+        );
     }
 
     /// A device that names itself in every packet and never says where it

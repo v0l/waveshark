@@ -11,6 +11,11 @@ the code is in the commit log.
 
 ### Added
 
+- Distress and emergency alerts on a map row, ahead of whatever else it says.
+- Open Drone ID aircraft on the map, gathered from the separate adverts that
+  carry a drone's identity, position and height.
+- Packet list: a type column beside the protocol, and the modulation a front
+  end read a frame with.
 - HF band plan: the amateur, broadcast, aeronautical, maritime and time
   signal allocations below 30 MHz, per region, with the sideband each uses.
 - Test recordings licensed CC BY 4.0, with each fixture's terms in

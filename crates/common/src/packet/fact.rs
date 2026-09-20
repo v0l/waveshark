@@ -39,8 +39,6 @@ pub enum Fact {
     Event(Event),
     /// A handset's sticks
     Control(Sticks),
-    /// A picture, or part of one being built
-    Picture(Arc<VideoFrame>),
     /// Which channel of a plan it was working
     Channel(Channel),
     /// The network the transmitter belongs to, for a base station
@@ -290,7 +288,6 @@ pub enum FactKind {
     Sensed,
     Event,
     Control,
-    Picture,
     Channel,
     Infrastructure,
     Alert,
@@ -358,7 +355,6 @@ impl Fact {
                     s.channels.iter().flatten().map(|c| c.to_string()).collect::<Vec<_>>();
                 format!("sticks {}", held.join(" "))
             }
-            Self::Picture(v) => format!("{}\u{d7}{} picture", v.width, v.height),
             Self::Channel(c) => format!("{} channel {}", c.plan.label(), c.working()),
             Self::Infrastructure(c) => {
                 let mut parts = Vec::new();
@@ -396,7 +392,6 @@ impl Fact {
             Self::Sensed(_) => FactKind::Sensed,
             Self::Event(_) => FactKind::Event,
             Self::Control(_) => FactKind::Control,
-            Self::Picture(_) => FactKind::Picture,
             Self::Channel(_) => FactKind::Channel,
             Self::Infrastructure(_) => FactKind::Infrastructure,
             Self::Alert(_) => FactKind::Alert,
@@ -406,7 +401,7 @@ impl Fact {
 }
 
 impl FactKind {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 14] = [
         Self::Position,
         Self::Motion,
         Self::Destination,
@@ -417,7 +412,6 @@ impl FactKind {
         Self::Sensed,
         Self::Event,
         Self::Control,
-        Self::Picture,
         Self::Channel,
         Self::Infrastructure,
         Self::Alert,
@@ -440,7 +434,6 @@ impl FactKind {
             Self::Sensed => "reading",
             Self::Event => "event",
             Self::Control => "control",
-            Self::Picture => "picture",
             Self::Channel => "channel",
             Self::Infrastructure => "network",
             Self::Alert => "alert",
@@ -631,13 +624,13 @@ mod tests {
 
     #[test]
     fn every_kind_has_its_own_bit() {
-        // Fifteen variants in sixteen bits. One more than the width would
+        // Fourteen variants in sixteen bits. One more than the width would
         // silently alias onto the first, so the count is asserted.
         let all = FactKind::ALL.iter().fold(Facts::NONE, |f, k| f.with(*k));
         for k in FactKind::ALL {
             assert!(all.has(k), "{} has no bit", k.label());
         }
-        assert_eq!(FactKind::ALL.len(), 15);
+        assert_eq!(FactKind::ALL.len(), 14);
         assert!(FactKind::ALL.len() <= 16, "a kind past the sixteenth has no bit of its own");
     }
 }
