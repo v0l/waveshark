@@ -1124,7 +1124,7 @@ mod tests {
     /// than a quieter ribbon.
     #[test]
     fn the_file_holds_every_plan_whole() {
-        assert_eq!(Plan::Europe.bands().len(), 104);
+        assert_eq!(Plan::Europe.bands().len(), 107);
         assert_eq!(Plan::Americas.bands().len(), 100);
         assert_eq!(Plan::AsiaPacific.bands().len(), 94);
     }

@@ -115,6 +115,12 @@ europe:
   - { name: "PMR446", hz: [446000000, 446200000], mode: nfm, use: utility, step_hz: 12500, origin_hz: 446006250 }
   - { name: "ISM 433", hz: [433050000, 434790000], mode: nfm, use: ism }
   - { name: "UHF TV", hz: [470000000, 694000000], mode: nfm, use: broadcast, step_hz: 8000000, origin_hz: 474000000 }
+  # The 700 MHz band, cleared of television in 2020 and now band 28: handsets
+  # transmit in the lower half and masts in the upper, with a supplemental
+  # downlink in the gap between them.
+  - { name: "LTE 700 up", hz: [703000000, 733000000], mode: nfm, use: cellular }
+  - { name: "SDL 700", hz: [738000000, 753000000], mode: nfm, use: cellular }
+  - { name: "LTE 700 down", hz: [758000000, 788000000], mode: nfm, use: cellular }
   - { name: "Satellite TV (Ku)", hz: [10700000000, 12750000000], mode: nfm, use: broadcast }
   - { name: "LTE 800 down", hz: [791000000, 821000000], mode: nfm, use: cellular }
   - { name: "LTE 800 up", hz: [832000000, 862000000], mode: nfm, use: cellular }
