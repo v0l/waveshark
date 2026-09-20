@@ -8,3 +8,4 @@ license.workspace = true
 num-complex.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+serde_yaml_ng.workspace = true

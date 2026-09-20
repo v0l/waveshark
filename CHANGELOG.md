@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- HF band plan: the amateur, broadcast, aeronautical, maritime and time
+  signal allocations below 30 MHz, per region, with the sideband each uses.
 - Test recordings licensed CC BY 4.0, with each fixture's terms in
   `testdata/LICENSE.md`.
 - `set_capture_trigger`, so an agent can arm the raw capture on energy and read what it caught.

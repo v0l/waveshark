@@ -5,10 +5,15 @@
 //! table picks a sensible demodulator when you click, and [`Usage`] is what a
 //! protocol names to say where it can be found: a pager decoder is placed on
 //! the utility allocations of whichever plan is in use and nowhere else.
+//!
+//! The allocations are in `bands.yaml` beside this file, built in at compile
+//! time. What is here is the parse of it and the lookups over it.
 
 use crate::Demod;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+#[derive(Clone, Debug)]
 pub struct Band {
     pub lo: f64,
     pub hi: f64,
@@ -71,6 +76,21 @@ pub enum Usage {
 }
 
 impl Usage {
+    pub const ALL: [Usage; 8] = [
+        Usage::Broadcast,
+        Usage::Aero,
+        Usage::Amateur,
+        Usage::Utility,
+        Usage::Ism,
+        Usage::Wlan,
+        Usage::Cellular,
+        Usage::Nav,
+    ];
+
+    pub fn from_id(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|u| u.id() == s)
+    }
+
     /// Stable identifier, for a settings file or a caption.
     pub const fn id(self) -> &'static str {
         match self {
@@ -162,11 +182,11 @@ impl Plan {
         }
     }
 
-    pub const fn bands(self) -> &'static [Band] {
+    pub fn bands(self) -> &'static [Band] {
         match self {
-            Plan::Europe => EUROPE,
-            Plan::Americas => AMERICAS,
-            Plan::AsiaPacific => ASIA_PACIFIC,
+            Plan::Europe => &BANDS[0],
+            Plan::Americas => &BANDS[1],
+            Plan::AsiaPacific => &BANDS[2],
         }
     }
 }
@@ -185,1084 +205,57 @@ pub fn set_plan(p: Plan) {
     PLAN.store(i as u8, Ordering::Relaxed);
 }
 
-/// Region 1 (Europe) allocations, coarse enough to stay readable.
-pub const EUROPE: &[Band] = &[
-    Band {
-        lo: 26.965e6,
-        hi: 27.405e6,
-        name: "CB",
-        demod: Demod::Am,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(26.965e6, 10_000.0)),
-    },
-    Band {
-        lo: 28.0e6,
-        hi: 29.7e6,
-        name: "10 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 50.0e6,
-        hi: 52.0e6,
-        name: "6 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 40.66e6,
-        hi: 40.7e6,
-        name: "ISM 40",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 76.0e6,
-        hi: 87.5e6,
-        name: "Band II low",
-        demod: Demod::Wfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::step(100_000.0)),
-    },
-    Band {
-        lo: 87.5e6,
-        hi: 108.0e6,
-        name: "FM broadcast",
-        demod: Demod::Wfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::step(100_000.0)),
-    },
-    Band {
-        lo: 108.0e6,
-        hi: 117.975e6,
-        name: "VOR / ILS",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(50_000.0)),
-    },
-    Band {
-        lo: 117.975e6,
-        hi: 137.0e6,
-        name: "Airband",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 137.0e6,
-        hi: 138.0e6,
-        name: "Weather sat",
-        demod: Demod::Wfm,
-        usage: Usage::Utility,
-        raster: None,
-    },
-    Band {
-        lo: 144.0e6,
-        hi: 146.0e6,
-        name: "2 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 146.0e6,
-        hi: 156.0e6,
-        name: "Land mobile",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 156.0e6,
-        hi: 162.05e6,
-        name: "Marine VHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 169.4e6,
-        hi: 169.475e6,
-        name: "ISM 169",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 174.0e6,
-        hi: 230.0e6,
-        name: "DAB / Band III",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    Band {
-        lo: 240.0e6,
-        hi: 270.0e6,
-        name: "Milair UHF",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 380.0e6,
-        hi: 400.0e6,
-        name: "TETRA",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 400.0e6,
-        hi: 406.0e6,
-        name: "Radiosonde",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        // Vaisala tunes a sonde in 10 kHz steps through the band, and the
-        // step is what stops a burst being measured afresh every second: the
-        // detector's centroid wanders a few kilohertz from one 534 ms
-        // transmission to the next, and without the raster each one opened a
-        // new channel with a cold bit clock. Measured on a 40 second
-        // recording, snapping took it from 1 frame read to 37.
-        raster: Some(Raster::step(10_000.0)),
-    },
-    // The CEPT land mobile allocations, which were missing: between the
-    // radiosonde band and UHF television the ribbon said UNALLOCATED, and
-    // nothing keyed on a business channel or a pager could be placed there.
-    Band {
-        lo: 410.0e6,
-        hi: 430.0e6,
-        name: "Land mobile UHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 440.0e6,
-        hi: 470.0e6,
-        name: "Land mobile UHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 162.05e6,
-        hi: 174.0e6,
-        name: "Land mobile VHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 430.0e6,
-        hi: 440.0e6,
-        name: "70 cm",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 446.0e6,
-        hi: 446.2e6,
-        name: "PMR446",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(446.00625e6, 12_500.0)),
-    },
-    Band {
-        lo: 433.05e6,
-        hi: 434.79e6,
-        name: "ISM 433",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    // Band IV and V, DVB-T on 8 MHz channels numbered from 21 at 474 MHz.
-    // The top of it was sold for mobile, so this is the 700 MHz plan rather
-    // than the 862 MHz one a pre-2020 receiver would show.
-    Band {
-        lo: 470.0e6,
-        hi: 694.0e6,
-        name: "UHF TV",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::from(474.0e6, 8.0e6)),
-    },
-    // What a satellite dish receives, which is what the dial reads once the
-    // LNB's oscillator is set as the tuner's offset. The band below that,
-    // the 950 to 2150 MHz the cable actually carries, is not here on purpose:
-    // as frequencies they are GNSS, DME and cellular, and naming them after
-    // whatever is on somebody's cable would be wrong for every receiver
-    // without a dish on it.
-    Band {
-        lo: 10.7e9,
-        hi: 12.75e9,
-        name: "Satellite TV (Ku)",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    // Cellular. Uplink and downlink are named separately because which one a
-    // receiver hears says where the transmitter is: downlink is a mast a
-    // kilometre away and always on, uplink is a handset in the same room.
-    Band {
-        lo: 791.0e6,
-        hi: 821.0e6,
-        name: "LTE 800 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 832.0e6,
-        hi: 862.0e6,
-        name: "LTE 800 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 862.0e6,
-        hi: 876.0e6,
-        name: "ISM 868",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 876.0e6,
-        hi: 880.0e6,
-        name: "GSM-R up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: Some(Raster::from(876.2e6, 200_000.0)),
-    },
-    Band {
-        lo: 880.0e6,
-        hi: 915.0e6,
-        name: "GSM 900 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: Some(Raster::from(880.2e6, 200_000.0)),
-    },
-    Band {
-        lo: 921.0e6,
-        hi: 925.0e6,
-        name: "GSM-R down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: Some(Raster::from(921.2e6, 200_000.0)),
-    },
-    Band {
-        lo: 925.0e6,
-        hi: 960.0e6,
-        name: "GSM 900 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: Some(Raster::from(925.2e6, 200_000.0)),
-    },
-    // Everything from here to 1164 is aeronautical navigation: DME and TACAN
-    // on a 1 MHz raster, with the transponder replies at 1090 inside it.
-    Band {
-        lo: 960.0e6,
-        hi: 1164.0e6,
-        name: "DME / TACAN",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::from(960.0e6, 1_000_000.0)),
-    },
-    Band {
-        lo: 1030.0e6,
-        hi: 1030.1e6,
-        name: "SSR interrogation",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: None,
-    },
-    Band {
-        lo: 1090.0e6,
-        hi: 1090.1e6,
-        name: "ADS-B",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: None,
-    },
-    Band {
-        lo: 1164.0e6,
-        hi: 1215.0e6,
-        name: "GNSS L5",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        raster: None,
-    },
-    Band {
-        lo: 1240.0e6,
-        hi: 1300.0e6,
-        name: "23 cm",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 1559.0e6,
-        hi: 1610.0e6,
-        name: "GNSS L1",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        raster: None,
-    },
-    Band {
-        lo: 1710.0e6,
-        hi: 1785.0e6,
-        name: "DCS 1800 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1805.0e6,
-        hi: 1880.0e6,
-        name: "DCS 1800 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1920.0e6,
-        hi: 1980.0e6,
-        name: "UMTS 2100 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2110.0e6,
-        hi: 2170.0e6,
-        name: "UMTS 2100 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2400.0e6,
-        hi: 2483.5e6,
-        name: "ISM 2.4",
-        demod: Demod::Nfm,
-        usage: Usage::Wlan,
-        raster: None,
-    },
-    Band {
-        lo: 2500.0e6,
-        hi: 2570.0e6,
-        name: "LTE 2600 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2620.0e6,
-        hi: 2690.0e6,
-        name: "LTE 2600 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 5725.0e6,
-        hi: 5875.0e6,
-        name: "ISM 5.8",
-        demod: Demod::Nfm,
-        usage: Usage::Wlan,
-        raster: None,
-    },
-];
-
-/// United States allocations as the FCC divides them.
+/// The table itself, read from `bands.yaml` beside this file.
 ///
-/// Not a translation of the European table. Several ranges mean the opposite
-/// thing here: 902-928 MHz is the licence-free band an American sees key fobs
-/// and weather sensors in, and the GSM uplink a European sees phones in.
-pub const AMERICAS: &[Band] = &[
-    Band {
-        lo: 26.965e6,
-        hi: 27.405e6,
-        name: "CB",
-        demod: Demod::Am,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(26.965e6, 10_000.0)),
-    },
-    Band {
-        lo: 28.0e6,
-        hi: 29.7e6,
-        name: "10 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 50.0e6,
-        hi: 54.0e6,
-        name: "6 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    // Television channels 2 to 6, either side of the FM band: almost nobody
-    // broadcasts there since the digital switch, and the space is full of
-    // wireless microphones and translators instead.
-    Band {
-        lo: 54.0e6,
-        hi: 72.0e6,
-        name: "VHF TV low",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    Band {
-        lo: 76.0e6,
-        hi: 88.0e6,
-        name: "VHF TV 5-6",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    // The American FM raster is the odd tenths, 88.1 upward, so a plan
-    // aligned to 100 kHz would snap every station onto a guard channel.
-    Band {
-        lo: 88.0e6,
-        hi: 108.0e6,
-        name: "FM broadcast",
-        demod: Demod::Wfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::from(88.1e6, 200_000.0)),
-    },
-    Band {
-        lo: 108.0e6,
-        hi: 117.975e6,
-        name: "VOR / ILS",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(50_000.0)),
-    },
-    Band {
-        lo: 117.975e6,
-        hi: 137.0e6,
-        name: "Airband",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 137.0e6,
-        hi: 138.0e6,
-        name: "Weather sat",
-        demod: Demod::Wfm,
-        usage: Usage::Utility,
-        raster: None,
-    },
-    Band {
-        lo: 144.0e6,
-        hi: 148.0e6,
-        name: "2 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: Some(Raster::step(15_000.0)),
-    },
-    Band {
-        lo: 148.0e6,
-        hi: 156.0e6,
-        name: "Land mobile VHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 156.0e6,
-        hi: 162.025e6,
-        name: "Marine VHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 162.4e6,
-        hi: 162.55e6,
-        name: "NOAA weather",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(162.4e6, 25_000.0)),
-    },
-    Band {
-        lo: 174.0e6,
-        hi: 216.0e6,
-        name: "VHF TV / wireless mics",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    // Part 15 devices: key fobs, tyre pressure sensors, garage doors. Narrow
-    // enough to sit inside the military UHF allocation below without hiding
-    // it, which is what it does in practice too.
-    Band {
-        lo: 314.9e6,
-        hi: 315.1e6,
-        name: "ISM 315",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 219.0e6,
-        hi: 225.0e6,
-        name: "1.25 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 225.0e6,
-        hi: 400.0e6,
-        name: "Milair UHF",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 400.0e6,
-        hi: 406.0e6,
-        name: "Radiosonde",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        // Vaisala tunes a sonde in 10 kHz steps through the band, and the
-        // step is what stops a burst being measured afresh every second: the
-        // detector's centroid wanders a few kilohertz from one 534 ms
-        // transmission to the next, and without the raster each one opened a
-        // new channel with a cold bit clock.
-        raster: Some(Raster::step(10_000.0)),
-    },
-    Band {
-        lo: 420.0e6,
-        hi: 450.0e6,
-        name: "70 cm",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 450.0e6,
-        hi: 470.0e6,
-        name: "Land mobile UHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 462.5e6,
-        hi: 462.75e6,
-        name: "FRS / GMRS",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(462.5625e6, 25_000.0)),
-    },
-    Band {
-        lo: 467.5e6,
-        hi: 467.75e6,
-        name: "FRS / GMRS up",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(467.5625e6, 25_000.0)),
-    },
-    Band {
-        lo: 470.0e6,
-        hi: 608.0e6,
-        name: "UHF TV",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        // ATSC on 6 MHz channels, numbered from 14 at 473 MHz. The repack
-        // took everything above channel 36 for mobile.
-        raster: Some(Raster::from(473.0e6, 6.0e6)),
-    },
-    Band {
-        lo: 10.7e9,
-        hi: 12.75e9,
-        name: "Satellite TV (Ku)",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    Band {
-        lo: 698.0e6,
-        hi: 758.0e6,
-        name: "LTE 700",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 758.0e6,
-        hi: 775.0e6,
-        name: "LTE 700 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 806.0e6,
-        hi: 824.0e6,
-        name: "SMR 800 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 824.0e6,
-        hi: 849.0e6,
-        name: "Cellular 850 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 851.0e6,
-        hi: 869.0e6,
-        name: "SMR 800 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 869.0e6,
-        hi: 894.0e6,
-        name: "Cellular 850 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 902.0e6,
-        hi: 928.0e6,
-        name: "ISM 915",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 960.0e6,
-        hi: 1164.0e6,
-        name: "DME / TACAN",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::from(960.0e6, 1_000_000.0)),
-    },
-    Band {
-        lo: 1030.0e6,
-        hi: 1030.1e6,
-        name: "SSR interrogation",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: None,
-    },
-    Band {
-        lo: 1090.0e6,
-        hi: 1090.1e6,
-        name: "ADS-B",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: None,
-    },
-    Band {
-        lo: 1164.0e6,
-        hi: 1215.0e6,
-        name: "GNSS L5",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        raster: None,
-    },
-    Band {
-        lo: 1240.0e6,
-        hi: 1300.0e6,
-        name: "23 cm",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 1559.0e6,
-        hi: 1610.0e6,
-        name: "GNSS L1",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        raster: None,
-    },
-    Band {
-        lo: 1710.0e6,
-        hi: 1755.0e6,
-        name: "AWS up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1850.0e6,
-        hi: 1910.0e6,
-        name: "PCS 1900 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1930.0e6,
-        hi: 1990.0e6,
-        name: "PCS 1900 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2110.0e6,
-        hi: 2155.0e6,
-        name: "AWS down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2400.0e6,
-        hi: 2483.5e6,
-        name: "ISM 2.4",
-        demod: Demod::Nfm,
-        usage: Usage::Wlan,
-        raster: None,
-    },
-    Band {
-        lo: 2496.0e6,
-        hi: 2690.0e6,
-        name: "BRS / EBS",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 5725.0e6,
-        hi: 5875.0e6,
-        name: "ISM 5.8",
-        demod: Demod::Nfm,
-        usage: Usage::Wlan,
-        raster: None,
-    },
-];
+/// A band plan is a list of facts about the world, and a list of facts is
+/// data: written where it can be read and corrected without a compiler, and
+/// parsed once here into the enums the rest of the program matches on.
+const TABLE: &str = include_str!("bands.yaml");
 
-/// ITU Region 3, with the Japanese allocations where they differ. Those are
-/// the ones worth having: FM broadcast starts at 76 MHz and the licence-free
-/// band is 920-928 rather than 868 or 902.
-pub const ASIA_PACIFIC: &[Band] = &[
-    Band {
-        lo: 26.965e6,
-        hi: 27.405e6,
-        name: "CB",
-        demod: Demod::Am,
-        usage: Usage::Utility,
-        raster: Some(Raster::from(26.965e6, 10_000.0)),
-    },
-    Band {
-        lo: 28.0e6,
-        hi: 29.7e6,
-        name: "10 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 50.0e6,
-        hi: 54.0e6,
-        name: "6 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 76.0e6,
-        hi: 95.0e6,
-        name: "FM broadcast (JP)",
-        demod: Demod::Wfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::step(100_000.0)),
-    },
-    Band {
-        lo: 95.0e6,
-        hi: 108.0e6,
-        name: "FM broadcast",
-        demod: Demod::Wfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::step(100_000.0)),
-    },
-    Band {
-        lo: 108.0e6,
-        hi: 117.975e6,
-        name: "VOR / ILS",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(50_000.0)),
-    },
-    Band {
-        lo: 117.975e6,
-        hi: 137.0e6,
-        name: "Airband",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 137.0e6,
-        hi: 138.0e6,
-        name: "Weather sat",
-        demod: Demod::Wfm,
-        usage: Usage::Utility,
-        raster: None,
-    },
-    Band {
-        lo: 144.0e6,
-        hi: 146.0e6,
-        name: "2 m",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 146.0e6,
-        hi: 156.0e6,
-        name: "Land mobile",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 156.0e6,
-        hi: 162.05e6,
-        name: "Marine VHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(25_000.0)),
-    },
-    Band {
-        lo: 170.0e6,
-        hi: 222.0e6,
-        name: "ISDB-T / Band III",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    // ISDB-T on 6 MHz channels, 13 to 62, the first centred a seventh of a
-    // megahertz above 473.
-    Band {
-        lo: 470.0e6,
-        hi: 710.0e6,
-        name: "UHF TV",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: Some(Raster::from(473.142857e6, 6.0e6)),
-    },
-    Band {
-        lo: 10.7e9,
-        hi: 12.75e9,
-        name: "Satellite TV (Ku)",
-        demod: Demod::Nfm,
-        usage: Usage::Broadcast,
-        raster: None,
-    },
-    Band {
-        lo: 314.9e6,
-        hi: 315.1e6,
-        name: "ISM 315",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 335.4e6,
-        hi: 470.0e6,
-        name: "Land mobile UHF",
-        demod: Demod::Nfm,
-        usage: Usage::Utility,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 400.0e6,
-        hi: 406.0e6,
-        name: "Radiosonde",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        // Vaisala tunes a sonde in 10 kHz steps through the band, and the
-        // step is what stops a burst being measured afresh every second: the
-        // detector's centroid wanders a few kilohertz from one 534 ms
-        // transmission to the next, and without the raster each one opened a
-        // new channel with a cold bit clock.
-        raster: Some(Raster::step(10_000.0)),
-    },
-    Band {
-        lo: 430.0e6,
-        hi: 440.0e6,
-        name: "70 cm",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: Some(Raster::step(12_500.0)),
-    },
-    Band {
-        lo: 426.0e6,
-        hi: 426.1e6,
-        name: "Specified low power",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 718.0e6,
-        hi: 748.0e6,
-        name: "LTE 700 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 773.0e6,
-        hi: 803.0e6,
-        name: "LTE 700 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 815.0e6,
-        hi: 845.0e6,
-        name: "Cellular 800 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 860.0e6,
-        hi: 890.0e6,
-        name: "Cellular 800 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 920.0e6,
-        hi: 928.0e6,
-        name: "ISM 920",
-        demod: Demod::Nfm,
-        usage: Usage::Ism,
-        raster: None,
-    },
-    Band {
-        lo: 960.0e6,
-        hi: 1164.0e6,
-        name: "DME / TACAN",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: Some(Raster::from(960.0e6, 1_000_000.0)),
-    },
-    Band {
-        lo: 1030.0e6,
-        hi: 1030.1e6,
-        name: "SSR interrogation",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: None,
-    },
-    Band {
-        lo: 1090.0e6,
-        hi: 1090.1e6,
-        name: "ADS-B",
-        demod: Demod::Am,
-        usage: Usage::Aero,
-        raster: None,
-    },
-    Band {
-        lo: 1164.0e6,
-        hi: 1215.0e6,
-        name: "GNSS L5",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        raster: None,
-    },
-    Band {
-        lo: 1240.0e6,
-        hi: 1300.0e6,
-        name: "23 cm",
-        demod: Demod::Nfm,
-        usage: Usage::Amateur,
-        raster: None,
-    },
-    Band {
-        lo: 1427.9e6,
-        hi: 1462.9e6,
-        name: "Cellular 1500 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1559.0e6,
-        hi: 1610.0e6,
-        name: "GNSS L1",
-        demod: Demod::Nfm,
-        usage: Usage::Nav,
-        raster: None,
-    },
-    Band {
-        lo: 1710.0e6,
-        hi: 1785.0e6,
-        name: "DCS 1800 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1805.0e6,
-        hi: 1880.0e6,
-        name: "DCS 1800 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 1920.0e6,
-        hi: 1980.0e6,
-        name: "UMTS 2100 up",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2110.0e6,
-        hi: 2170.0e6,
-        name: "UMTS 2100 down",
-        demod: Demod::Nfm,
-        usage: Usage::Cellular,
-        raster: None,
-    },
-    Band {
-        lo: 2400.0e6,
-        hi: 2483.5e6,
-        name: "ISM 2.4",
-        demod: Demod::Nfm,
-        usage: Usage::Wlan,
-        raster: None,
-    },
-    Band {
-        lo: 5725.0e6,
-        hi: 5875.0e6,
-        name: "ISM 5.8",
-        demod: Demod::Nfm,
-        usage: Usage::Wlan,
-        raster: None,
-    },
-];
+#[derive(serde::Deserialize)]
+struct Tables {
+    world: Vec<Row>,
+    europe: Vec<Row>,
+    americas: Vec<Row>,
+    asia_pacific: Vec<Row>,
+}
+
+#[derive(serde::Deserialize)]
+struct Row {
+    name: String,
+    hz: [f64; 2],
+    mode: String,
+    r#use: String,
+    step_hz: Option<f64>,
+    origin_hz: Option<f64>,
+}
+
+fn band(r: &Row) -> Result<Band, String> {
+    let demod =
+        Demod::from_id(&r.mode).ok_or_else(|| format!("{}: {} is not a mode", r.name, r.mode))?;
+    let usage = Usage::from_id(&r.r#use)
+        .ok_or_else(|| format!("{}: {} is not a service", r.name, r.r#use))?;
+    let [lo, hi] = r.hz;
+    if hi <= lo {
+        return Err(format!("{}: {hi} Hz is not above {lo} Hz", r.name));
+    }
+    let raster = r.step_hz.map(|step| Raster::from(r.origin_hz.unwrap_or(0.0), step));
+    Ok(Band { lo, hi, name: String::leak(r.name.clone()), demod, usage, raster })
+}
+
+static BANDS: LazyLock<[Vec<Band>; 3]> = LazyLock::new(|| {
+    let t: Tables = serde_yaml_ng::from_str(TABLE).unwrap_or_else(|e| panic!("bands.yaml: {e}"));
+    [&t.europe, &t.americas, &t.asia_pacific].map(|region| {
+        let mut out: Vec<Band> = t
+            .world
+            .iter()
+            .chain(region)
+            .map(|r| band(r).unwrap_or_else(|e| panic!("bands.yaml: {e}")))
+            .collect();
+        out.sort_by(|a, b| a.lo.total_cmp(&b.lo));
+        out
+    })
+});
 
 /// A service's own channel numbers, which is what an operator says out loud.
 ///
@@ -1981,6 +974,161 @@ mod tests {
         assert_eq!(dab, 225.648e6);
     }
 
+    /// Below 30 MHz the ribbon was empty above the citizens' band and nothing
+    /// else, so a listener on 40 m was told they were nowhere.
+    #[test]
+    fn the_shortwave_spectrum_is_named() {
+        use Plan::*;
+        let cases: &[(Plan, f64, &str)] = &[
+            (Europe, 198e3, "LW broadcast"),
+            (Europe, 693e3, "MW broadcast"),
+            (Americas, 1010e3, "MW broadcast"),
+            (Europe, 137.0e3, "2200 m"),
+            (Europe, 475e3, "630 m"),
+            (Europe, 518e3, "NAVTEX"),
+            (Europe, 1.9e6, "160 m"),
+            (Americas, 1.85e6, "160 m"),
+            (Europe, 2.182e6, "Marine MF"),
+            (Europe, 3.6e6, "80 m"),
+            (Americas, 3.95e6, "80 m"),
+            (Europe, 3.95e6, "SW 75 m"),
+            (Europe, 5.357e6, "60 m"),
+            (Americas, 5.3585e6, "60 m"),
+            (Europe, 7.1e6, "40 m"),
+            (Americas, 7.25e6, "40 m"),
+            (Europe, 7.25e6, "SW 41 m"),
+            (Europe, 6.075e6, "SW 49 m"),
+            (Europe, 9.75e6, "SW 31 m"),
+            (Europe, 10.136e6, "30 m"),
+            (Europe, 14.074e6, "20 m"),
+            (Europe, 18.1e6, "17 m"),
+            (Europe, 21.074e6, "15 m"),
+            (Europe, 24.915e6, "12 m"),
+            (Europe, 28.074e6, "10 m"),
+            (Europe, 8.992e6, "Aero HF"),
+            (Europe, 11.175e6, "Aero HF"),
+            (Europe, 8.414e6, "Marine HF"),
+            (Europe, 5.0e6, "Time signal"),
+            (Europe, 10.0e6, "Time signal"),
+            (Europe, 27.185e6, "CB"),
+        ];
+        for (plan, hz, want) in cases {
+            assert_eq!(name_at_in(*plan, *hz), *want, "{:.4} MHz in {}", hz / 1e6, plan.id());
+        }
+    }
+
+    /// A band's sideband is the first thing a listener sets and the one thing
+    /// a wrong table makes unintelligible.
+    #[test]
+    fn the_shortwave_bands_carry_their_own_sideband() {
+        let mode = |hz| at_in(Plan::Europe, hz).unwrap().demod;
+        assert_eq!(mode(3.6e6), Demod::Lsb, "80 m is lower sideband");
+        assert_eq!(mode(7.1e6), Demod::Lsb, "40 m is lower sideband");
+        assert_eq!(mode(14.2e6), Demod::Usb, "20 m is upper sideband");
+        assert_eq!(mode(21.3e6), Demod::Usb, "15 m is upper sideband");
+        assert_eq!(mode(10.13e6), Demod::Cw, "30 m has no voice on it");
+        assert_eq!(mode(137.0e3), Demod::Cw);
+        assert_eq!(mode(8.992e6), Demod::Usb, "aeronautical HF is upper sideband");
+        assert_eq!(mode(8.414e6), Demod::Usb, "maritime HF is upper sideband");
+        assert_eq!(mode(6.075e6), Demod::Am, "shortwave broadcasting is AM");
+        assert_eq!(mode(693e3), Demod::Am);
+    }
+
+    /// The regions disagree below 30 MHz more than above it, and the reason
+    /// the plan is a setting: 3.95 MHz is a broadcaster in Europe and an
+    /// amateur in the Americas, and 7.25 MHz the other way round.
+    #[test]
+    fn the_shortwave_plans_disagree_by_region() {
+        assert_eq!(name_at_in(Plan::Europe, 3.95e6), "SW 75 m");
+        assert_eq!(name_at_in(Plan::Americas, 3.95e6), "80 m");
+        assert_eq!(name_at_in(Plan::AsiaPacific, 3.95e6), "SW 75 m");
+        assert_eq!(name_at_in(Plan::Europe, 7.25e6), "SW 41 m");
+        assert_eq!(name_at_in(Plan::Americas, 7.25e6), "40 m");
+        assert_eq!(name_at_in(Plan::Europe, 1.805e6), "unallocated");
+        assert_eq!(name_at_in(Plan::Americas, 1.805e6), "160 m");
+        assert_eq!(name_at_in(Plan::Europe, 198e3), "LW broadcast");
+        assert_eq!(name_at_in(Plan::Americas, 198e3), "NDB");
+        assert_eq!(name_at_in(Plan::Americas, 1660e3), "MW broadcast");
+        assert_eq!(name_at_in(Plan::Europe, 1660e3), "unallocated");
+    }
+
+    /// Every plan carries the whole of HF, not the handful of bands the table
+    /// started with above the citizens' band.
+    #[test]
+    fn every_plan_has_the_whole_of_hf() {
+        for p in Plan::ALL {
+            let below: Vec<_> = p.bands().iter().filter(|b| b.hi <= 30e6).collect();
+            let amateur = below.iter().filter(|b| b.usage == Usage::Amateur).count();
+            assert_eq!(amateur, 12, "{} amateur bands below 30 MHz", p.id());
+            let broadcast = below.iter().filter(|b| b.usage == Usage::Broadcast).count();
+            let want = match p {
+                Plan::Europe => 16,
+                Plan::Americas => 14,
+                Plan::AsiaPacific => 15,
+            };
+            assert_eq!(broadcast, want, "{} broadcast bands below 30 MHz", p.id());
+        }
+    }
+
+    /// The file is the table, so a typo in it is a fault in the receiver and
+    /// the parser has to say which row it was.
+    #[test]
+    fn a_row_the_parser_cannot_read_names_itself() {
+        let row = |mode: &str, r#use: &str, hz: [f64; 2]| Row {
+            name: "Test".into(),
+            hz,
+            mode: mode.into(),
+            r#use: r#use.into(),
+            step_hz: None,
+            origin_hz: None,
+        };
+        assert!(band(&row("usb", "amateur", [1.0, 2.0])).is_ok());
+        let e = band(&row("ssb", "amateur", [1.0, 2.0])).unwrap_err();
+        assert_eq!(e, "Test: ssb is not a mode");
+        let e = band(&row("usb", "aviation", [1.0, 2.0])).unwrap_err();
+        assert_eq!(e, "Test: aviation is not a service");
+        let e = band(&row("usb", "amateur", [2.0, 1.0])).unwrap_err();
+        assert_eq!(e, "Test: 1 Hz is not above 2 Hz");
+    }
+
+    /// Allocations may nest, and the narrowest wins. Two that half overlap
+    /// have no answer: the ribbon would paint one across the other and which
+    /// band a frequency is in would depend on the order they were written.
+    #[test]
+    fn allocations_nest_or_stay_apart() {
+        for p in Plan::ALL {
+            let bands = p.bands();
+            for (i, x) in bands.iter().enumerate() {
+                for y in &bands[i + 1..] {
+                    if x.hi <= y.lo || y.hi <= x.lo {
+                        continue;
+                    }
+                    let nested = (x.lo <= y.lo && x.hi >= y.hi) || (y.lo <= x.lo && y.hi >= x.hi);
+                    assert!(
+                        nested,
+                        "{} {} {:.4}-{:.4} MHz half overlaps {} {:.4}-{:.4} MHz",
+                        p.id(),
+                        x.name,
+                        x.lo / 1e6,
+                        x.hi / 1e6,
+                        y.name,
+                        y.lo / 1e6,
+                        y.hi / 1e6,
+                    );
+                }
+            }
+        }
+    }
+
+    /// What the file holds, so a row deleted by accident is a failure rather
+    /// than a quieter ribbon.
+    #[test]
+    fn the_file_holds_every_plan_whole() {
+        assert_eq!(Plan::Europe.bands().len(), 104);
+        assert_eq!(Plan::Americas.bands().len(), 100);
+        assert_eq!(Plan::AsiaPacific.bands().len(), 94);
+    }
+
     #[test]
     fn every_table_is_sane() {
         for p in Plan::ALL {
@@ -2148,6 +1296,28 @@ mod raster_tests {
         // off the signal it was aimed at is worse than not snapping at all.
         for hz in [433_920_000.0, 144_312_500.0, 868_300_000.0] {
             assert_eq!(snap_in(Plan::Europe, hz), hz, "{hz} was moved by a band with no plan");
+        }
+    }
+
+    /// Medium wave is a grid, and the wrong one puts every station between
+    /// two channels: 9 kHz from 531 in Region 1, 10 kHz from 540 in Region 2.
+    #[test]
+    fn medium_wave_snaps_to_the_grid_its_region_uses() {
+        assert_eq!(snap_in(Plan::Europe, 692_000.0), 693_000.0);
+        assert_eq!(snap_in(Plan::Europe, 909_500.0), 909_000.0);
+        assert_eq!(snap_in(Plan::Americas, 1_012_000.0), 1_010_000.0);
+        assert_eq!(snap_in(Plan::Americas, 1_666_000.0), 1_670_000.0);
+        assert_eq!(snap_in(Plan::Europe, 197_000.0), 198_000.0, "long wave is the same 9 kHz");
+    }
+
+    /// Shortwave broadcasting is on 5 kHz, and the amateur bands are not on
+    /// anything: a net calling 14.300 is not a channel.
+    #[test]
+    fn shortwave_broadcast_snaps_and_the_amateur_bands_do_not() {
+        assert_eq!(snap_in(Plan::Europe, 6_076_200.0), 6_075_000.0);
+        assert_eq!(snap_in(Plan::Europe, 9_748_000.0), 9_750_000.0);
+        for hz in [14_074_000.0, 7_078_000.0, 3_573_000.0, 10_136_000.0] {
+            assert_eq!(snap_in(Plan::Europe, hz), hz, "{hz} was moved by an amateur band");
         }
     }
 

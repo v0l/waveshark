@@ -20,6 +20,14 @@ pub enum Demod {
 }
 
 impl Demod {
+    pub const ALL: [Demod; 6] =
+        [Demod::Wfm, Demod::Nfm, Demod::Am, Demod::Usb, Demod::Lsb, Demod::Cw];
+
+    /// The mode a band plan names, which is its label in lower case.
+    pub fn from_id(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|d| d.label().eq_ignore_ascii_case(s))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Demod::Wfm => "WFM",

@@ -1,0 +1,248 @@
+# The allocation table: what each stretch of spectrum is for.
+#
+# A band plan is knowledge about the world rather than about this program, so
+# it is written down rather than compiled in: the receiver reads this file at
+# startup and nothing else knows the numbers. `crates/common/src/bands.rs`
+# parses it and the tests beside that parser pin what has to stay true.
+#
+# Every edge is in hertz, and integers on purpose: a megahertz written as a
+# decimal does not survive the multiplication, and a band edge off by a
+# nanohertz puts a frequency in the wrong band.
+#
+#   name       what the ribbon paints and a reading is called
+#   hz         [lo, hi], half open: hi belongs to the next band
+#   mode       how the band is listened to: wfm nfm am usb lsb cw
+#   use        the service, which is how a decoder says where it can be:
+#              broadcast aero amateur utility ism wlan cellular nav
+#   step_hz    the legal channel spacing, where the band has one
+#   origin_hz  a frequency the spacing lands on, where it is not a multiple
+#              of the step itself
+#
+# Allocations nest. The narrowest band containing a frequency is the one that
+# names it, so ISM 433 wins over the 70 cm band it sits inside.
+
+# Below 30 MHz the ITU allocations are the same wherever the receiver is:
+# the broadcasting bands numbered in metres, the aeronautical and maritime
+# services, the standard frequency stations, and the amateur bands whose
+# edges no region argues about. Sideband follows the convention a listener
+# has to set rather than the regulation: lower below 10 MHz, upper above.
+world:
+  - { name: "2200 m", hz: [135700, 137800], mode: cw, use: amateur }
+  - { name: "630 m", hz: [472000, 479000], mode: cw, use: amateur }
+  - { name: "NAVTEX", hz: [517500, 518500], mode: usb, use: utility }
+  - { name: "SW 120 m", hz: [2300000, 2495000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Time signal", hz: [2495000, 2505000], mode: am, use: utility }
+  - { name: "Aero HF", hz: [2850000, 3155000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 90 m", hz: [3200000, 3400000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Aero HF", hz: [3400000, 3500000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "Marine HF", hz: [4000000, 4438000], mode: usb, use: utility }
+  - { name: "Aero HF", hz: [4650000, 4750000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 60 m", hz: [4750000, 5060000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Time signal", hz: [4995000, 5005000], mode: am, use: utility }
+  - { name: "Aero HF", hz: [5450000, 5730000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 49 m", hz: [5900000, 6200000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Marine HF", hz: [6200000, 6525000], mode: usb, use: utility }
+  - { name: "Aero HF", hz: [6525000, 6765000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "Marine HF", hz: [8100000, 8815000], mode: usb, use: utility }
+  - { name: "Aero HF", hz: [8815000, 9040000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 31 m", hz: [9400000, 9900000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Time signal", hz: [9995000, 10005000], mode: am, use: utility }
+  - { name: "Aero HF", hz: [10005000, 10100000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "30 m", hz: [10100000, 10150000], mode: cw, use: amateur }
+  - { name: "Aero HF", hz: [11175000, 11400000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 25 m", hz: [11600000, 12100000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Marine HF", hz: [12230000, 13200000], mode: usb, use: utility }
+  - { name: "Aero HF", hz: [13200000, 13360000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 22 m", hz: [13570000, 13870000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "20 m", hz: [14000000, 14350000], mode: usb, use: amateur }
+  - { name: "Time signal", hz: [14995000, 15005000], mode: am, use: utility }
+  - { name: "Aero HF", hz: [15010000, 15100000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "SW 19 m", hz: [15100000, 15800000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Marine HF", hz: [16360000, 17410000], mode: usb, use: utility }
+  - { name: "SW 16 m", hz: [17480000, 17900000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Aero HF", hz: [17900000, 17970000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "17 m", hz: [18068000, 18168000], mode: usb, use: amateur }
+  - { name: "Marine HF", hz: [18780000, 18900000], mode: usb, use: utility }
+  - { name: "SW 15 m", hz: [18900000, 19020000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Marine HF", hz: [19680000, 19800000], mode: usb, use: utility }
+  - { name: "Time signal", hz: [19995000, 20005000], mode: am, use: utility }
+  - { name: "15 m", hz: [21000000, 21450000], mode: usb, use: amateur }
+  - { name: "SW 13 m", hz: [21450000, 21850000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Aero HF", hz: [21924000, 22000000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "Marine HF", hz: [22000000, 22855000], mode: usb, use: utility }
+  - { name: "Aero HF", hz: [23200000, 23350000], mode: usb, use: aero, step_hz: 1000 }
+  - { name: "12 m", hz: [24890000, 24990000], mode: usb, use: amateur }
+  - { name: "Time signal", hz: [24995000, 25005000], mode: am, use: utility }
+  - { name: "Marine HF", hz: [25070000, 25210000], mode: usb, use: utility }
+  - { name: "SW 11 m", hz: [25670000, 26100000], mode: am, use: broadcast, step_hz: 5000 }
+
+# ITU Region 1. Long wave carries broadcasting nowhere else, the medium wave
+# carriers are 9 kHz apart from 531 kHz up, 40 m stops at 7.2 MHz with
+# broadcasting immediately above it, and 902-928 MHz is the GSM uplink an
+# American reads as licence free.
+europe:
+  - { name: "LW broadcast", hz: [148500, 283500], mode: am, use: broadcast, step_hz: 9000, origin_hz: 153000 }
+  - { name: "NDB", hz: [283500, 526500], mode: am, use: utility }
+  - { name: "MW broadcast", hz: [526500, 1606500], mode: am, use: broadcast, step_hz: 9000, origin_hz: 531000 }
+  - { name: "160 m", hz: [1810000, 2000000], mode: lsb, use: amateur }
+  - { name: "Marine MF", hz: [2000000, 2850000], mode: usb, use: utility }
+  - { name: "80 m", hz: [3500000, 3800000], mode: lsb, use: amateur }
+  - { name: "SW 75 m", hz: [3900000, 4000000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "60 m", hz: [5351500, 5366500], mode: usb, use: amateur }
+  - { name: "40 m", hz: [7000000, 7200000], mode: lsb, use: amateur }
+  - { name: "SW 41 m", hz: [7200000, 7450000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "CB", hz: [26965000, 27405000], mode: am, use: utility, step_hz: 10000, origin_hz: 26965000 }
+  - { name: "10 m", hz: [28000000, 29700000], mode: nfm, use: amateur }
+  - { name: "6 m", hz: [50000000, 52000000], mode: nfm, use: amateur }
+  - { name: "ISM 40", hz: [40660000, 40700000], mode: nfm, use: ism }
+  - { name: "Band II low", hz: [76000000, 87500000], mode: wfm, use: broadcast, step_hz: 100000 }
+  - { name: "FM broadcast", hz: [87500000, 108000000], mode: wfm, use: broadcast, step_hz: 100000 }
+  - { name: "VOR / ILS", hz: [108000000, 117975000], mode: am, use: aero, step_hz: 50000 }
+  - { name: "Airband", hz: [117975000, 137000000], mode: am, use: aero, step_hz: 25000 }
+  - { name: "Weather sat", hz: [137000000, 138000000], mode: wfm, use: utility }
+  - { name: "2 m", hz: [144000000, 146000000], mode: nfm, use: amateur, step_hz: 12500 }
+  - { name: "Land mobile", hz: [146000000, 156000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "Marine VHF", hz: [156000000, 162050000], mode: nfm, use: utility, step_hz: 25000 }
+  - { name: "ISM 169", hz: [169400000, 169475000], mode: nfm, use: ism }
+  - { name: "DAB / Band III", hz: [174000000, 230000000], mode: nfm, use: broadcast }
+  - { name: "Milair UHF", hz: [240000000, 270000000], mode: am, use: aero, step_hz: 25000 }
+  - { name: "TETRA", hz: [380000000, 400000000], mode: nfm, use: utility, step_hz: 25000 }
+  - { name: "Radiosonde", hz: [400000000, 406000000], mode: nfm, use: nav, step_hz: 10000 }
+  - { name: "Land mobile UHF", hz: [410000000, 430000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "Land mobile UHF", hz: [440000000, 470000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "Land mobile VHF", hz: [162050000, 174000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "70 cm", hz: [430000000, 440000000], mode: nfm, use: amateur, step_hz: 12500 }
+  - { name: "PMR446", hz: [446000000, 446200000], mode: nfm, use: utility, step_hz: 12500, origin_hz: 446006250 }
+  - { name: "ISM 433", hz: [433050000, 434790000], mode: nfm, use: ism }
+  - { name: "UHF TV", hz: [470000000, 694000000], mode: nfm, use: broadcast, step_hz: 8000000, origin_hz: 474000000 }
+  - { name: "Satellite TV (Ku)", hz: [10700000000, 12750000000], mode: nfm, use: broadcast }
+  - { name: "LTE 800 down", hz: [791000000, 821000000], mode: nfm, use: cellular }
+  - { name: "LTE 800 up", hz: [832000000, 862000000], mode: nfm, use: cellular }
+  - { name: "ISM 868", hz: [862000000, 876000000], mode: nfm, use: ism }
+  - { name: "GSM-R up", hz: [876000000, 880000000], mode: nfm, use: cellular, step_hz: 200000, origin_hz: 876200000 }
+  - { name: "GSM 900 up", hz: [880000000, 915000000], mode: nfm, use: cellular, step_hz: 200000, origin_hz: 880200000 }
+  - { name: "GSM-R down", hz: [921000000, 925000000], mode: nfm, use: cellular, step_hz: 200000, origin_hz: 921200000 }
+  - { name: "GSM 900 down", hz: [925000000, 960000000], mode: nfm, use: cellular, step_hz: 200000, origin_hz: 925200000 }
+  - { name: "DME / TACAN", hz: [960000000, 1164000000], mode: am, use: aero, step_hz: 1000000, origin_hz: 960000000 }
+  - { name: "SSR interrogation", hz: [1030000000, 1030100000], mode: am, use: aero }
+  - { name: "ADS-B", hz: [1090000000, 1090100000], mode: am, use: aero }
+  - { name: "GNSS L5", hz: [1164000000, 1215000000], mode: nfm, use: nav }
+  - { name: "23 cm", hz: [1240000000, 1300000000], mode: nfm, use: amateur }
+  - { name: "GNSS L1", hz: [1559000000, 1610000000], mode: nfm, use: nav }
+  - { name: "DCS 1800 up", hz: [1710000000, 1785000000], mode: nfm, use: cellular }
+  - { name: "DCS 1800 down", hz: [1805000000, 1880000000], mode: nfm, use: cellular }
+  - { name: "UMTS 2100 up", hz: [1920000000, 1980000000], mode: nfm, use: cellular }
+  - { name: "UMTS 2100 down", hz: [2110000000, 2170000000], mode: nfm, use: cellular }
+  - { name: "ISM 2.4", hz: [2400000000, 2483500000], mode: nfm, use: wlan }
+  - { name: "LTE 2600 up", hz: [2500000000, 2570000000], mode: nfm, use: cellular }
+  - { name: "LTE 2600 down", hz: [2620000000, 2690000000], mode: nfm, use: cellular }
+  - { name: "ISM 5.8", hz: [5725000000, 5875000000], mode: nfm, use: wlan }
+
+# ITU Region 2 as the FCC divides it. No long wave broadcasting, medium wave
+# 10 kHz apart from 540 kHz, and the amateur bands wider at 160, 80 and 40
+# metres. The 60 m allocation is five channels rather than a band, so it
+# carries no spacing and the operator tunes to the one they want.
+americas:
+  - { name: "NDB", hz: [190000, 530000], mode: am, use: utility }
+  - { name: "MW broadcast", hz: [530000, 1705000], mode: am, use: broadcast, step_hz: 10000, origin_hz: 540000 }
+  - { name: "160 m", hz: [1800000, 2000000], mode: lsb, use: amateur }
+  - { name: "Marine MF", hz: [2000000, 2850000], mode: usb, use: utility }
+  - { name: "80 m", hz: [3500000, 4000000], mode: lsb, use: amateur }
+  - { name: "60 m", hz: [5330500, 5406500], mode: usb, use: amateur }
+  - { name: "40 m", hz: [7000000, 7300000], mode: lsb, use: amateur }
+  - { name: "SW 41 m", hz: [7300000, 7450000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "CB", hz: [26965000, 27405000], mode: am, use: utility, step_hz: 10000, origin_hz: 26965000 }
+  - { name: "10 m", hz: [28000000, 29700000], mode: nfm, use: amateur }
+  - { name: "6 m", hz: [50000000, 54000000], mode: nfm, use: amateur }
+  - { name: "VHF TV low", hz: [54000000, 72000000], mode: nfm, use: broadcast }
+  - { name: "VHF TV 5-6", hz: [76000000, 88000000], mode: nfm, use: broadcast }
+  - { name: "FM broadcast", hz: [88000000, 108000000], mode: wfm, use: broadcast, step_hz: 200000, origin_hz: 88100000 }
+  - { name: "VOR / ILS", hz: [108000000, 117975000], mode: am, use: aero, step_hz: 50000 }
+  - { name: "Airband", hz: [117975000, 137000000], mode: am, use: aero, step_hz: 25000 }
+  - { name: "Weather sat", hz: [137000000, 138000000], mode: wfm, use: utility }
+  - { name: "2 m", hz: [144000000, 148000000], mode: nfm, use: amateur, step_hz: 15000 }
+  - { name: "Land mobile VHF", hz: [148000000, 156000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "Marine VHF", hz: [156000000, 162025000], mode: nfm, use: utility, step_hz: 25000 }
+  - { name: "NOAA weather", hz: [162400000, 162550000], mode: nfm, use: utility, step_hz: 25000, origin_hz: 162400000 }
+  - { name: "VHF TV / wireless mics", hz: [174000000, 216000000], mode: nfm, use: broadcast }
+  - { name: "ISM 315", hz: [314900000, 315100000], mode: nfm, use: ism }
+  - { name: "1.25 m", hz: [219000000, 225000000], mode: nfm, use: amateur }
+  - { name: "Milair UHF", hz: [225000000, 400000000], mode: am, use: aero, step_hz: 25000 }
+  - { name: "Radiosonde", hz: [400000000, 406000000], mode: nfm, use: nav, step_hz: 10000 }
+  - { name: "70 cm", hz: [420000000, 450000000], mode: nfm, use: amateur, step_hz: 12500 }
+  - { name: "Land mobile UHF", hz: [450000000, 470000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "FRS / GMRS", hz: [462500000, 462750000], mode: nfm, use: utility, step_hz: 25000, origin_hz: 462562500 }
+  - { name: "FRS / GMRS up", hz: [467500000, 467750000], mode: nfm, use: utility, step_hz: 25000, origin_hz: 467562500 }
+  - { name: "UHF TV", hz: [470000000, 608000000], mode: nfm, use: broadcast, step_hz: 6000000, origin_hz: 473000000 }
+  - { name: "Satellite TV (Ku)", hz: [10700000000, 12750000000], mode: nfm, use: broadcast }
+  - { name: "LTE 700", hz: [698000000, 758000000], mode: nfm, use: cellular }
+  - { name: "LTE 700 down", hz: [758000000, 775000000], mode: nfm, use: cellular }
+  - { name: "SMR 800 up", hz: [806000000, 824000000], mode: nfm, use: cellular }
+  - { name: "Cellular 850 up", hz: [824000000, 849000000], mode: nfm, use: cellular }
+  - { name: "SMR 800 down", hz: [851000000, 869000000], mode: nfm, use: cellular }
+  - { name: "Cellular 850 down", hz: [869000000, 894000000], mode: nfm, use: cellular }
+  - { name: "ISM 915", hz: [902000000, 928000000], mode: nfm, use: ism }
+  - { name: "DME / TACAN", hz: [960000000, 1164000000], mode: am, use: aero, step_hz: 1000000, origin_hz: 960000000 }
+  - { name: "SSR interrogation", hz: [1030000000, 1030100000], mode: am, use: aero }
+  - { name: "ADS-B", hz: [1090000000, 1090100000], mode: am, use: aero }
+  - { name: "GNSS L5", hz: [1164000000, 1215000000], mode: nfm, use: nav }
+  - { name: "23 cm", hz: [1240000000, 1300000000], mode: nfm, use: amateur }
+  - { name: "GNSS L1", hz: [1559000000, 1610000000], mode: nfm, use: nav }
+  - { name: "AWS up", hz: [1710000000, 1755000000], mode: nfm, use: cellular }
+  - { name: "PCS 1900 up", hz: [1850000000, 1910000000], mode: nfm, use: cellular }
+  - { name: "PCS 1900 down", hz: [1930000000, 1990000000], mode: nfm, use: cellular }
+  - { name: "AWS down", hz: [2110000000, 2155000000], mode: nfm, use: cellular }
+  - { name: "ISM 2.4", hz: [2400000000, 2483500000], mode: nfm, use: wlan }
+  - { name: "BRS / EBS", hz: [2496000000, 2690000000], mode: nfm, use: cellular }
+  - { name: "ISM 5.8", hz: [5725000000, 5875000000], mode: nfm, use: wlan }
+
+# ITU Region 3, with the Japanese allocations where they differ. Those are the
+# ones worth having: FM broadcast starts at 76 MHz and the licence-free band is
+# 920-928 rather than 868 or 902.
+asia_pacific:
+  - { name: "NDB", hz: [190000, 526500], mode: am, use: utility }
+  - { name: "MW broadcast", hz: [526500, 1606500], mode: am, use: broadcast, step_hz: 9000, origin_hz: 531000 }
+  - { name: "160 m", hz: [1800000, 2000000], mode: lsb, use: amateur }
+  - { name: "Marine MF", hz: [2000000, 2850000], mode: usb, use: utility }
+  - { name: "80 m", hz: [3500000, 3900000], mode: lsb, use: amateur }
+  - { name: "SW 75 m", hz: [3900000, 4000000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "60 m", hz: [5351500, 5366500], mode: usb, use: amateur }
+  - { name: "40 m", hz: [7000000, 7200000], mode: lsb, use: amateur }
+  - { name: "SW 41 m", hz: [7200000, 7450000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "CB", hz: [26965000, 27405000], mode: am, use: utility, step_hz: 10000, origin_hz: 26965000 }
+  - { name: "10 m", hz: [28000000, 29700000], mode: nfm, use: amateur }
+  - { name: "6 m", hz: [50000000, 54000000], mode: nfm, use: amateur }
+  - { name: "FM broadcast (JP)", hz: [76000000, 95000000], mode: wfm, use: broadcast, step_hz: 100000 }
+  - { name: "FM broadcast", hz: [95000000, 108000000], mode: wfm, use: broadcast, step_hz: 100000 }
+  - { name: "VOR / ILS", hz: [108000000, 117975000], mode: am, use: aero, step_hz: 50000 }
+  - { name: "Airband", hz: [117975000, 137000000], mode: am, use: aero, step_hz: 25000 }
+  - { name: "Weather sat", hz: [137000000, 138000000], mode: wfm, use: utility }
+  - { name: "2 m", hz: [144000000, 146000000], mode: nfm, use: amateur, step_hz: 12500 }
+  - { name: "Land mobile", hz: [146000000, 156000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "Marine VHF", hz: [156000000, 162050000], mode: nfm, use: utility, step_hz: 25000 }
+  - { name: "ISDB-T / Band III", hz: [170000000, 222000000], mode: nfm, use: broadcast }
+  - { name: "UHF TV", hz: [470000000, 710000000], mode: nfm, use: broadcast, step_hz: 6000000, origin_hz: 473142857 }
+  - { name: "Satellite TV (Ku)", hz: [10700000000, 12750000000], mode: nfm, use: broadcast }
+  - { name: "ISM 315", hz: [314900000, 315100000], mode: nfm, use: ism }
+  - { name: "Land mobile UHF", hz: [335400000, 470000000], mode: nfm, use: utility, step_hz: 12500 }
+  - { name: "Radiosonde", hz: [400000000, 406000000], mode: nfm, use: nav, step_hz: 10000 }
+  - { name: "70 cm", hz: [430000000, 440000000], mode: nfm, use: amateur, step_hz: 12500 }
+  - { name: "Specified low power", hz: [426000000, 426100000], mode: nfm, use: ism }
+  - { name: "LTE 700 up", hz: [718000000, 748000000], mode: nfm, use: cellular }
+  - { name: "LTE 700 down", hz: [773000000, 803000000], mode: nfm, use: cellular }
+  - { name: "Cellular 800 up", hz: [815000000, 845000000], mode: nfm, use: cellular }
+  - { name: "Cellular 800 down", hz: [860000000, 890000000], mode: nfm, use: cellular }
+  - { name: "ISM 920", hz: [920000000, 928000000], mode: nfm, use: ism }
+  - { name: "DME / TACAN", hz: [960000000, 1164000000], mode: am, use: aero, step_hz: 1000000, origin_hz: 960000000 }
+  - { name: "SSR interrogation", hz: [1030000000, 1030100000], mode: am, use: aero }
+  - { name: "ADS-B", hz: [1090000000, 1090100000], mode: am, use: aero }
+  - { name: "GNSS L5", hz: [1164000000, 1215000000], mode: nfm, use: nav }
+  - { name: "23 cm", hz: [1240000000, 1300000000], mode: nfm, use: amateur }
+  - { name: "Cellular 1500 down", hz: [1427900000, 1462900000], mode: nfm, use: cellular }
+  - { name: "GNSS L1", hz: [1559000000, 1610000000], mode: nfm, use: nav }
+  - { name: "DCS 1800 up", hz: [1710000000, 1785000000], mode: nfm, use: cellular }
+  - { name: "DCS 1800 down", hz: [1805000000, 1880000000], mode: nfm, use: cellular }
+  - { name: "UMTS 2100 up", hz: [1920000000, 1980000000], mode: nfm, use: cellular }
+  - { name: "UMTS 2100 down", hz: [2110000000, 2170000000], mode: nfm, use: cellular }
+  - { name: "ISM 2.4", hz: [2400000000, 2483500000], mode: nfm, use: wlan }
+  - { name: "ISM 5.8", hz: [5725000000, 5875000000], mode: nfm, use: wlan }
