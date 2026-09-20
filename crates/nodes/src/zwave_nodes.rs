@@ -25,7 +25,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::zwave;
-pub use decode::zwave::decoded;
+pub use decode::zwave::read;
 pub use decode::zwave::{KEEP_BITS, MAX_FRAME_BITS, RATES};
 use dsp::{FirDecim, Mixer};
 use identify::Signal;
@@ -33,7 +33,6 @@ pub use identify::zwave::CHANNEL_WIDTH_HZ;
 pub use identify::zwave::CHANNELS;
 pub use identify::zwave::WORK_HZ;
 pub use identify::zwave::ZWave;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -116,7 +115,7 @@ impl Simple for ZWaveNode {
         // slow frame samples that are not its own.
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.05);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -137,10 +136,10 @@ impl Simple for ZWaveNode {
         }
         self.narrow = narrow;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &found {
             self.accepted += 1;
-            out.push(self.meter.frame(f.bytes.clone()));
+            out.push(self.meter.packet_now(f.bytes.clone()));
         }
         Ok(())
     }
@@ -180,12 +179,13 @@ impl Protocol for ZWave {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: CHANNEL_WIDTH_HZ as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !CHANNELS.iter().any(|c| (c - hz).abs() <= CHANNEL_WIDTH_HZ / 2.0) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn marks(&self, hz: f64) -> Vec<Mark> {
         vec![Mark { hz, width_hz: CHANNEL_WIDTH_HZ, label: "Z-WAVE".into() }]
@@ -236,12 +236,12 @@ mod tests {
         let mut frames = Vec::new();
         for block in iq.chunks(8192) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         frames
@@ -283,15 +283,13 @@ mod tests {
             assert_eq!(frames.len(), 1, "{baud} baud: {} frames", frames.len());
             assert_eq!(frames[0], frame, "{baud} baud: the bytes came back changed");
 
-            let d = decoded(&frames[0], Hz(channel as u64)).expect("a decode");
-            assert_eq!(d.protocol, "Z-Wave");
-            assert_eq!(d.crc_ok, Some(true));
-            assert!(!d.written, "a plug being switched is a machine talking");
-            let detail = d.detail.as_deref().unwrap();
-            assert!(detail.contains("home_id=d6b26208"), "{detail}");
-            assert!(detail.contains("source=1 dest=7"), "{detail}");
-            assert!(detail.contains("command_class=SWITCH_BINARY"), "{detail}");
-            assert!(detail.contains(&format!("rate={}", fcs.rates())), "{detail}");
+            let d = read(&frames[0]).expect("a decode");
+            assert_eq!((d.id, d.kind), ("zwave", "singlecast"));
+            assert!(d.wrote().is_none(), "a plug being switched is a machine talking");
+            // The home identifier is part of who a node is: two networks
+            // in a street both have a node 1.
+            assert_eq!(d.parties(), (Some("d6b26208:1"), Some("d6b26208:7")));
+            assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("d6b26208:1"));
         }
     }
 
@@ -316,16 +314,19 @@ mod tests {
         node.negotiate(&spec(rate, center)).unwrap();
         let frames = run(&mut node, &iq, rate, center);
         assert_eq!(frames.len(), 2, "{} frames of two transmissions", frames.len());
-        let read: Vec<(u8, u8)> = frames
+        let pairs: Vec<(u8, u8)> = frames
             .iter()
             .map(|f| {
                 let p = zwave::parse(f).expect("a frame");
                 (p.source, p.dest)
             })
             .collect();
-        assert_eq!(read, vec![(1, 7), (7, 1)], "the exchange came back out of order");
-        let d = decoded(&frames[1], Hz(center as u64)).expect("a decode");
-        assert_eq!(d.text.as_deref(), Some("ack 7 -> 1"));
+        assert_eq!(pairs, vec![(1, 7), (7, 1)], "the exchange came back out of order");
+        let d = read(&frames[1]).expect("a decode");
+        assert_eq!(d.kind, "ack");
+        let (from, to) = d.parties();
+        assert!(from.is_some_and(|f| f.ends_with(":7")), "{from:?}");
+        assert!(to.is_some_and(|t| t.ends_with(":1")), "{to:?}");
     }
 
     /// Ten seconds of noise produces nothing at any of the three rates.

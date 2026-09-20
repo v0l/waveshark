@@ -7,7 +7,7 @@
 //! protocol is usually a table entry plus a payload parser, not new DSP.
 
 use crate::bits::BitBuffer;
-use dsp::pulse::Package;
+use common::Pulse;
 
 /// How a pulse train encodes bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,27 +119,27 @@ impl std::fmt::Display for SliceError {
 }
 
 /// Slice a package into bits according to `t`.
-pub fn slice(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
+pub fn slice(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
     match t.coding {
-        Coding::Pwm => slice_pwm(pkg, t),
-        Coding::Ppm => slice_ppm(pkg, t),
-        Coding::Manchester => slice_manchester(pkg, t),
-        Coding::Nrz => slice_nrz(pkg, t),
+        Coding::Pwm => slice_pwm(pulses, t),
+        Coding::Ppm => slice_ppm(pulses, t),
+        Coding::Manchester => slice_manchester(pulses, t),
+        Coding::Nrz => slice_nrz(pulses, t),
     }
 }
 
-fn slice_pwm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
-    if pkg.pulses.len() < 8 {
-        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 8 });
+fn slice_pwm(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
+    if pulses.len() < 8 {
+        return Err(SliceError::TooFewPulses { got: pulses.len(), need: 8 });
     }
     let mid = t.midpoint();
     // In PWM the gap is fixed, so one much longer than the symbol it should be
     // is the space between repeats. Fine Offset sends its gaps at 1 ms and
     // leaves 8 ms between copies.
     let row_break = t.long_us * 2 + t.tol();
-    let mut b = BitBuffer::with_capacity(pkg.pulses.len());
-    for (i, p) in pkg.pulses.iter().enumerate() {
-        if i > 0 && pkg.pulses[i - 1].gap > row_break {
+    let mut b = BitBuffer::with_capacity(pulses.len());
+    for (i, p) in pulses.iter().enumerate() {
+        if i > 0 && pulses[i - 1].gap > row_break {
             b.mark_row();
         }
         // Reject anything shorter than both symbols rather than forcing it to
@@ -178,9 +178,9 @@ fn slice_pwm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     Ok(b)
 }
 
-fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
-    if pkg.pulses.len() < 8 {
-        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 8 });
+fn slice_ppm(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
+    if pulses.len() < 8 {
+        return Err(SliceError::TooFewPulses { got: pulses.len(), need: 8 });
     }
     let mid = t.midpoint();
     // A gap well past the long symbol is the space between repeats, not a bit.
@@ -193,9 +193,9 @@ fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
     // frame length and a burst of twelve identical frames corroborated none of
     // them.
     let row_break = t.long_us + t.tol() * 2;
-    let mut b = BitBuffer::with_capacity(pkg.pulses.len());
+    let mut b = BitBuffer::with_capacity(pulses.len());
     // The final gap is the terminating timeout and carries no bit.
-    for p in &pkg.pulses[..pkg.pulses.len() - 1] {
+    for p in &pulses[..pulses.len() - 1] {
         if p.gap <= row_break {
             b.push(p.gap >= mid);
         } else {
@@ -219,9 +219,9 @@ fn slice_ppm(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
 /// rising edge a 0. The first rising edge is counted as a zero, as rtl_433
 /// does, because the transmitter's first half symbol is the one the detector
 /// triggered on and is not in the pulse list.
-fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
-    if pkg.pulses.len() < 4 {
-        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
+fn slice_manchester(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
+    if pulses.len() < 4 {
+        return Err(SliceError::TooFewPulses { got: pulses.len(), need: 4 });
     }
     let half = t.short_us.max(1);
     // One and a half half-symbols: past this, the edge is a data edge rather
@@ -233,9 +233,9 @@ fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> 
     // Zero means the protocol named no reset gap, so nothing short of the end
     // of the package breaks a row.
     let reset = if t.reset_us == 0 { u32::MAX } else { t.reset_us };
-    let last = pkg.pulses.len() - 1;
+    let last = pulses.len() - 1;
 
-    let mut b = BitBuffer::with_capacity(pkg.pulses.len());
+    let mut b = BitBuffer::with_capacity(pulses.len());
     // Each row opens with the zero standing for the edge that started it, and
     // it is written only once the row turns out to have content, so a package
     // ending on a row break does not end with an invented bit.
@@ -248,7 +248,7 @@ fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> 
         }
         b.push(bit);
     };
-    for (n, p) in pkg.pulses.iter().enumerate() {
+    for (n, p) in pulses.iter().enumerate() {
         let out_of_range = |w: u32| w + tolerance < half || w > half * 2 + tolerance;
         if tolerance > 0 && (out_of_range(p.mark) || out_of_range(p.gap)) {
             // A mark of nearly two half-symbols ends on a data edge even
@@ -289,15 +289,15 @@ fn slice_manchester(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> 
 /// across the half-symbol stream whose length does not align the data with
 /// bit 0, so the decoder must find the frame in this raw stream and pair from
 /// an explicit offset with [`manchester_decode`].
-pub fn slice_manchester_half(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
-    if pkg.pulses.len() < 4 {
-        return Err(SliceError::TooFewPulses { got: pkg.pulses.len(), need: 4 });
+pub fn slice_manchester_half(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
+    if pulses.len() < 4 {
+        return Err(SliceError::TooFewPulses { got: pulses.len(), need: 4 });
     }
     let half = t.short_us.max(1);
-    let mut b = BitBuffer::with_capacity(pkg.pulses.len());
-    for (i, p) in pkg.pulses.iter().enumerate() {
+    let mut b = BitBuffer::with_capacity(pulses.len());
+    for (i, p) in pulses.iter().enumerate() {
         b.extend(true, manchester_halves(p.mark, half));
-        if i + 1 < pkg.pulses.len() {
+        if i + 1 < pulses.len() {
             b.extend(false, manchester_halves(p.gap, half));
         }
     }
@@ -389,11 +389,11 @@ fn manchester_halves(width_us: u32, half: u32) -> usize {
     (width_us as f32 / half as f32).round() as usize
 }
 
-fn slice_nrz(pkg: &Package, t: &Timing) -> Result<BitBuffer, SliceError> {
+fn slice_nrz(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
     let sym = t.short_us.max(1);
     let max_zeros = (t.reset_us / sym).max(1) as usize;
     let mut b = BitBuffer::with_capacity(64);
-    for p in pkg.pulses.iter() {
+    for p in pulses.iter() {
         let m = (p.mark as f32 / sym as f32).round() as usize;
         for _ in 0..m {
             b.push(true);
@@ -418,15 +418,8 @@ mod tests {
     use super::*;
     use dsp::pulse::Pulse;
 
-    fn pkg(pulses: &[(u32, u32)]) -> Package {
-        Package {
-            pulses: pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect(),
-            snr_db: 20.0,
-            rssi_dbfs: -12.0,
-            start_sample: 0,
-            center_hz: 0,
-            modulation: None,
-        }
+    fn pkg(pulses: &[(u32, u32)]) -> Vec<Pulse> {
+        pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect()
     }
 
     #[test]
@@ -472,7 +465,7 @@ mod tests {
     fn pwm_rejects_a_width_belonging_to_no_symbol() {
         let t = Timing::pwm(544, 1524, 2800);
         let mut p = pkg(&[(544, 1000); 8]);
-        p.pulses[3].mark = 9000;
+        p[3].mark = 9000;
         match slice(&p, &t) {
             Err(SliceError::BadWidth { index, width_us }) => {
                 assert_eq!(index, 3);
@@ -523,11 +516,11 @@ mod tests {
         assert_eq!(slice(&p, &t), Err(SliceError::TooFewPulses { got: 3, need: 8 }));
     }
 
-    // Build a Package from a bit stream in the convention the slicer uses,
+    // Build a burst from a bit stream in the convention the slicer uses,
     // which is rtl_433's: the bit is carried by the mid-symbol edge, falling
     // for a 1 and rising for a 0. Consecutive halves alternate as on the wire;
     // a same-level boundary (a long run) appears where equal bits meet.
-    fn manchester_wave(bits: &[bool], half: u32) -> Package {
+    fn manchester_wave(bits: &[bool], half: u32) -> Vec<Pulse> {
         let mut lv: Vec<bool> = Vec::new();
         for &b in bits {
             lv.push(b); // first half
@@ -575,14 +568,7 @@ mod tests {
         if *runs.last().map(|(l, _)| l).unwrap_or(&false) {
             pulses.push((0, half));
         }
-        Package {
-            pulses: pulses.into_iter().map(|(m, g)| Pulse { mark: m, gap: g }).collect(),
-            snr_db: 20.0,
-            rssi_dbfs: -12.0,
-            center_hz: 0,
-            start_sample: 0,
-            modulation: None,
-        }
+        pulses.into_iter().map(|(m, g)| Pulse { mark: m, gap: g }).collect()
     }
 
     #[test]
@@ -623,7 +609,7 @@ mod tests {
         assert_eq!(clean.len(), 8);
         // Prepend a degenerate pulse (zero mark and zero gap): it must
         // contribute no level and therefore no bit.
-        p.pulses.insert(0, Pulse { mark: 0, gap: 0 });
+        p.insert(0, Pulse { mark: 0, gap: 0 });
         let out = slice(&p, &t).unwrap();
         assert_eq!(out.len(), 8, "zero-width edge became a bit");
     }

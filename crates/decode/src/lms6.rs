@@ -11,7 +11,7 @@
 
 use crate::bits::crc16;
 use crate::rs::ReedSolomon;
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 use dsp::conv::{Code, Ends, Viterbi};
 
 /// The bytes a frame starts with.
@@ -148,49 +148,25 @@ pub fn parse(frame: &[u8]) -> Option<Report> {
     Some(r)
 }
 
-/// What the protocols node makes of an LMS6 frame.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a Lockheed Martin LMS6 frame says.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let r = parse(bytes)?;
-    let (h, m, s) = r.utc;
-    let serial = format!("{}", r.serial);
-    let fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text("LMS6".into())),
-        ("serial".into(), common::Value::Text(serial.clone())),
-        ("frame".into(), common::Value::Int(r.frame_no as i64)),
-        ("altitude_m".into(), common::Value::Float(r.altitude_m)),
-        ("climb_ms".into(), common::Value::Float(r.climb_ms)),
-        ("speed_kt".into(), common::Value::Float(r.speed_kt)),
-        ("course_deg".into(), common::Value::Float(r.course_deg)),
-        ("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:06.3}"))),
-    ];
-
-    let mut d = Decoded::bytes("lms6", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("LMS6, frame {}", r.frame_no))
-        .with_fields(fields)
-        .by(common::Identity::new("lms6", serial).made_by("Lockheed Martin"));
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // The frame carries no battery voltage.
-                battery_v: f32::NAN,
-                satellites: 0,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
+    let serial = r.serial.to_string();
+    let mut p = Proto::new("lms6", "frame")
+        .by(Entity::new("lms6", Id::Text(serial.clone())).made_by("Lockheed Martin"))
+        .saying(Fact::Named(Named::new(serial, ThingKind::Sonde)));
+    for fact in crate::facts::of_flight(
+        r.lat_deg,
+        r.lon_deg,
+        r.altitude_m,
+        r.climb_ms,
+        r.speed_kt,
+        r.course_deg,
+        None,
+    ) {
+        p = p.saying(fact);
     }
-    Some(d)
+    Some(p)
 }
 
 /// This sonde's own rate 1/2 code: constraint seven, and neither of the two

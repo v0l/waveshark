@@ -18,7 +18,8 @@
 //! sources themselves, and the decoder can be swapped for another without
 //! touching detection.
 
-use common::{Hz, Package, Result, SourceId, SourceState};
+use common::packet::Detection;
+use common::{Hz, Result, SourceId, SourceState};
 use dsp::{SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::event::Event;
 use pipeline::graph::Topology;
@@ -318,7 +319,7 @@ impl Simple for SourceDecodeNode {
         }
         let nominal = StreamSpec::iq(SourceConfig::default().min_rate_hz, i.spec.center);
         self.template = Some((self.make)(nominal)?);
-        let mut out = i.spec.with_kind(PortKind::Pulses);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.rate = 0.0;
         // Every burst carries its own frequency, and its width was decided
         // per source; the port cannot claim one for all of them.
@@ -343,7 +344,7 @@ impl Simple for SourceDecodeNode {
 
         // One block per source per call, so each graph runs at most once,
         // and they share nothing: the pool takes them all at once.
-        let results: Vec<(usize, Vec<Event>, Vec<Package>, bool)> = self
+        let results: Vec<(usize, Vec<Event>, Vec<Detection>, bool)> = self
             .graphs
             .par_iter_mut()
             .enumerate()
@@ -356,7 +357,7 @@ impl Simple for SourceDecodeNode {
                     Ok(ev) => ev.iter().map(|e| e.event.clone()).collect(),
                     Err(e) => vec![Event::Warning { message: format!("source {}: {e}", id.0) }],
                 };
-                let pkgs: Vec<Package> = taps
+                let pkgs: Vec<Detection> = taps
                     .iter()
                     .filter_map(|t| g.buf(*t))
                     .filter_map(|p| p.as_pulses())
@@ -386,7 +387,23 @@ impl Simple for SourceDecodeNode {
                     c.emit(e);
                 }
             }
-            o.pulses_mut().extend(pkgs);
+            // Assembled here, where the source's own centre is known: a
+            // detection is timings and a level, and the stream it was read on
+            // is what places it.
+            let bandwidth_hz = c.inputs[0].spec.bandwidth as u32;
+            let at_us = common::packet::now_us();
+            o.packets_mut().extend(pkgs.into_iter().map(|d| {
+                let carrier = common::packet::Carrier::heard(
+                    at_us,
+                    center.0,
+                    bandwidth_hz,
+                    d.rssi_dbfs,
+                    d.snr_db,
+                    common::SourceId(0),
+                )
+                .lasting(d.duration_us);
+                common::packet::Packet::heard(carrier).keyed(d.keying)
+            }));
             if done {
                 closed.push(self.graphs[k].0);
             }
@@ -531,7 +548,7 @@ mod tests {
         s.spec.kind = PortKind::Sources;
         s.spec.rate = 0.0;
         let out = Node::negotiate(&mut n, &[s]).unwrap();
-        assert_eq!(out[0].kind, PortKind::Pulses);
+        assert_eq!(out[0].kind, PortKind::Packets);
         let inner = Node::subgraphs(&n).pop().expect("template graph");
         assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
         assert!(!Node::params(&n).is_empty(), "the decoder's knobs are the node's");

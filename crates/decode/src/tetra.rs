@@ -11,7 +11,7 @@
 //! the call list wants: who is talking to whom, and whether there is any
 //! point listening. Traffic is not read here.
 
-use common::Decoded;
+use common::packet::{Cell, Entity, Fact, Id, Link, Party, Proto};
 use dsp::tetra::SLOT_BITS;
 use dsp::tetra::{Block, Lchan, TdmaTime};
 
@@ -1058,244 +1058,110 @@ impl Event {
     }
 }
 
-/// The row a TETRA broadcast becomes.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if let Some(d) = traffic_burst_decoded(bytes, center) {
-        return Some(d);
+/// What a TETRA event says: whose network it is, who is calling whom, and
+/// anything a person sent.
+///
+/// The over, which is how long the channel was held, the vocoder and what
+/// protects the traffic, is stated once on the voice port. Short data is
+/// somebody writing to somebody; a status message and a location report are
+/// not.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
+    if let Some(p) = traffic_burst_read(bytes) {
+        return Some(p);
     }
     let event = Event::parse(bytes)?;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    // What the call list reads, filled in by the one PDU that knows: a call
-    // control PDU says whether this is a circuit mode call, what protects it
-    // and, at the end, how long it ran.
-    let mut airtime: Option<common::Airtime> = None;
-    let protocol = match &event {
-        Event::Sync(s) => {
-            fields.push(("mcc".into(), Value::Int(s.mcc.into())));
-            fields.push(("mnc".into(), Value::Int(s.mnc.into())));
-            fields.push(("colour".into(), Value::Int(s.colour.into())));
-            fields.push(("frame".into(), Value::Int(s.frame.into())));
-            fields.push(("multiframe".into(), Value::Int(s.multiframe.into())));
-            if s.sharing_mode != 0 {
-                fields.push(("sharing".into(), Value::Int(s.sharing_mode.into())));
-            }
-            "TETRA-Sync"
-        }
-        Event::Sysinfo(s) => {
-            fields.push(("carrier_hz".into(), Value::Float(s.downlink_hz())));
-            fields.push(("la".into(), Value::Int(s.la.into())));
-            fields.push(("subscriber_class".into(), Value::Int(s.subscriber_class.into())));
-            fields.push(("service_details".into(), Value::Int(s.bs_service_details.into())));
-            "TETRA-Sysinfo"
-        }
-        // Named the way the call list reads a decode: `to` and `from` are
-        // the parties, `call_type` says group or private where the PDU
-        // said, `encryption` is what protects the traffic, `seconds` is
-        // how long an over ran and `live` that it is still running.
+    Some(match &event {
+        Event::Sync(s) => Proto::new("tetra", "sync").saying(Fact::Infrastructure(Cell {
+            mcc: Some(s.mcc),
+            mnc: Some(s.mnc),
+            site_code: Some(u16::from(s.colour)),
+            ..Cell::default()
+        })),
+        Event::Sysinfo(s) => Proto::new("tetra", "sysinfo")
+            .saying(Fact::Infrastructure(Cell { area: Some(u32::from(s.la)), ..Cell::default() })),
         Event::Call(c) => {
-            fields.push(("pdu".into(), Value::Text(c.name().into())));
-            // What the call list is filtered on: a row that is not about a
-            // circuit mode call still belongs in the packet log, but the
-            // list is for voice and a MAC header addressed to somebody is
-            // not evidence of any.
-            if c.is_call() {
-                fields.push(("voice".into(), Value::Bool(true)));
-                fields.push(("codec".into(), Value::Text(TETRA_CODEC.into())));
-                airtime = Some(common::Airtime {
-                    seconds: if c.pdu == TRAFFIC_END { f64::from(c.seconds) } else { 0.0 },
-                    voice: true,
-                    live: c.pdu == TRAFFIC,
-                    secrecy: match c.encryption() {
-                        name if name == "none" => common::Secrecy::Clear,
-                        name => common::Secrecy::Encrypted(Some(name)),
-                    },
-                    codec: Some(TETRA_CODEC),
-                });
-            }
-            match c.address {
-                Address::Ssi(s) | Address::Ussi(s) => {
-                    fields.push(("to".into(), Value::Text(s.to_string())));
-                }
-                Address::UsageMarker(m) => {
-                    fields.push(("to".into(), Value::Text(format!("marker {m}"))));
-                }
-                Address::Smi(s) => fields.push(("smi".into(), Value::Int(s.into()))),
-                Address::EventLabel(e) => fields.push(("event_label".into(), Value::Int(e.into()))),
-            }
+            let mut p = Proto::new("tetra", if c.text.is_some() { "sds" } else { "call" });
+            let to = match c.address {
+                Address::Ssi(s) | Address::Ussi(s) => match c.group {
+                    Some(false) => Some(Party::unit(s.to_string())),
+                    _ => Some(Party::group(s.to_string())),
+                },
+                Address::UsageMarker(m) => Some(Party::group(format!("marker {m}"))),
+                Address::Smi(_) | Address::EventLabel(_) => None,
+            };
+            let from = c.from.map(|f| Party::unit(f.to_string()));
             if let Some(f) = c.from {
-                fields.push(("from".into(), Value::Text(f.to_string())));
+                p = p.by(Entity::new("tetra", Id::Num(u64::from(f))));
             }
-            if let Some(id) = c.call_id {
-                fields.push(("call_id".into(), Value::Int(id.into())));
+            p = p.between(Link { from, to });
+            // What protects the traffic is the network's own statement, and
+            // it is made whether or not the speech is readable here: a key
+            // that undoes it later has a row to change.
+            if c.aie != 0 || c.e2e == Some(true) {
+                p = p.saying(Fact::Protected(common::Secrecy::Encrypted(Some(c.encryption()))));
             }
-            if let Some(g) = c.group {
-                fields.push((
-                    "call_type".into(),
-                    Value::Text(if g { "group" } else { "private" }.into()),
-                ));
+            match &c.text {
+                Some(t) => p.saying(Fact::message(t.clone())),
+                None => p,
             }
-            fields.push(("encryption".into(), Value::Text(c.encryption())));
-            if let Some(m) = c.marker {
-                fields.push(("marker".into(), Value::Int(m.into())));
-            }
-            if let Some(a) = c.alloc {
-                if let Some(band) = a.band {
-                    fields.push(("traffic_hz".into(), Value::Float(a.hz(band))));
-                }
-                fields.push(("timeslot".into(), Value::Int(a.timeslot.into())));
-            }
-            // Traffic is on the timeslot it was seen on; signalling names
-            // the timeslot it was heard on separately, below, since that
-            // is the control channel and not the call's.
-            if matches!(c.pdu, TRAFFIC | TRAFFIC_END)
-                && let Some(t) = c.time
-            {
-                fields.push(("timeslot".into(), Value::Int(t.tn.into())));
-            }
-            if c.pdu == TRAFFIC {
-                fields.push(("live".into(), Value::Bool(true)));
-            }
-            if c.pdu == TRAFFIC_END {
-                fields.push(("seconds".into(), Value::Float(f64::from(c.seconds))));
-            }
-            if let Some(text) = &c.text {
-                fields.push(("text".into(), Value::Text(text.clone())));
-            }
-            if let Some(t) = c.time {
-                fields.push(("slot".into(), Value::Int(t.tn.into())));
-                fields.push(("frame".into(), Value::Int(t.frame.into())));
-            }
-            if c.text.is_some() { "TETRA-SDS" } else { "TETRA-Call" }
         }
+        // The cell's own map of its neighbours: one statement per cell it
+        // names, with the carrier to go and look on. A receiver that has
+        // heard one carrier of a network knows where the rest of it is.
         Event::Network(n) => {
-            fields.push(("neighbours".into(), Value::Int(n.neighbours.len() as i64)));
+            let mut p = Proto::new("tetra", "network");
             for nb in &n.neighbours {
                 let hz = nb.band.map(|b| nb.hz(b));
-                let mut s = match hz {
-                    Some(hz) => format!("cell {} at {:.4} MHz", nb.cell_id, hz / 1e6),
-                    None => format!("cell {} carrier {}", nb.cell_id, nb.carrier),
-                };
-                if let Some(la) = nb.la {
-                    s.push_str(&format!(" LA {la}"));
-                }
-                fields.push((format!("cell_{}", nb.cell_id), Value::Text(s)));
+                p = p.saying(Fact::Infrastructure(Cell {
+                    mcc: nb.mcc,
+                    mnc: nb.mnc,
+                    area: nb.la.map(u32::from),
+                    cell: Some(u64::from(nb.cell_id)),
+                    site_code: None,
+                    carrier_hz: hz.map(|h| h as u64),
+                }));
             }
-            "TETRA-Network"
+            p
         }
         Event::Mm(m) => {
-            let kind = match m.pdu {
-                D_AUTHENTICATION => "authentication".to_string(),
-                D_LOCATION_UPDATE_ACCEPT => "location update".to_string(),
-                other => format!("type {other}"),
-            };
-            fields.push(("mm".into(), Value::Text(kind)));
-            if let Some(ssi) = m.address.ssi() {
-                fields.push(("ssi".into(), Value::Int(ssi.into())));
+            let p = Proto::new("tetra", "mobility");
+            match m.address.ssi() {
+                // A subscriber identity the network hands out and takes back:
+                // two sightings of one are not evidence of one radio.
+                Some(ssi) => p.by(Entity::new("tetra", Id::Num(u64::from(ssi)))
+                    .lasting(common::packet::Stability::Temporary)),
+                None => p,
             }
-            "TETRA-MM"
         }
         Event::Aach(_) => return None,
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Dqpsk)
-        // Every block behind an event passed the CRC the standard puts
-        // on it; a burst that failed never became a block.
-        .with_crc(Some(true));
-    // Short data is somebody writing to somebody, which is what puts it in
-    // the message view. Said here rather than left to a reader to guess from
-    // a field called `text`. Only the two text protocol identifiers reach
-    // this: a status message and a location report are not short data anybody
-    // wrote.
-    if protocol == "TETRA-SDS" {
-        d = d.written();
-    }
-    d.airtime = airtime;
-    Some(d)
+    })
 }
 
-/// The row a traffic burst becomes.
-pub fn traffic_burst_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// What a traffic burst says: which usage marker it is on and, once the
+/// network has granted the channel, who was granted it.
+///
+/// It says nothing about the cipher: the grant named that, and a burst
+/// reporting "clear" would flip the call back while it was still enciphered.
+pub fn traffic_burst_read(bytes: &[u8]) -> Option<Proto> {
     let (_, with_talker) = traffic_burst_layout(bytes)?;
-    let (tn, marker, flags, frame) = (bytes[1], bytes[2], bytes[3], bytes[4]);
-    let slot = u64::from_be_bytes(bytes[5..13].try_into().ok()?);
+    let marker = bytes[2];
     let to = u32::from_be_bytes(bytes[13..17].try_into().ok()?);
-    let from = if with_talker { u32::from_be_bytes(bytes[17..21].try_into().ok()?) } else { 0 };
-    let crc_ok = flags & TB_FLAG_CRC_OK != 0;
-    let mut fields: Vec<(String, Value)> = vec![
-        ("voice".into(), Value::Bool(true)),
-        ("codec".into(), Value::Text(TETRA_CODEC.into())),
-        ("live".into(), Value::Bool(true)),
-        (
-            "to".into(),
-            Value::Text(if to != 0 { to.to_string() } else { format!("marker {marker}") }),
-        ),
-        ("timeslot".into(), Value::Int(tn.into())),
-        ("marker".into(), Value::Int(marker.into())),
-        ("frame".into(), Value::Int(frame.into())),
-        ("slot".into(), Value::Int(slot as i64)),
-        ("crc".into(), Value::Bool(crc_ok)),
-    ];
+    let from = match with_talker {
+        true => u32::from_be_bytes(bytes[17..21].try_into().ok()?),
+        false => 0,
+    };
+    let called = match to != 0 {
+        true => Party::group(to.to_string()),
+        false => Party::group(format!("marker {marker}")),
+    };
+    let mut p = Proto::new("tetra", "voice");
     if from != 0 {
-        fields.push(("from".into(), Value::Text(from.to_string())));
+        p = p.by(Entity::new("tetra", Id::Num(u64::from(from))));
     }
-    // No airtime here: the traffic end row carries the whole call's, and a
-    // list that added both would count it twice.
-    if flags & TB_FLAG_ENCRYPTED != 0 {
-        fields.push(("encrypted".into(), Value::Bool(true)));
-    }
-    Some(Decoded {
-        protocol: "TETRA-Voice",
-        media_type: "application/octet-stream",
-        center,
-        at: 0.0,
-        payload: bytes.to_vec(),
-        text: None,
-        written: false,
-        crc_ok: Some(crc_ok),
-        modulation: Some(common::Modulation::Dqpsk),
-        detail: Some(format!(
-            "traffic burst TS{tn} marker {marker}{}",
-            if flags & TB_FLAG_ENCRYPTED != 0 { ", enciphered" } else { "" }
-        )),
-        fields,
-        types: Vec::new(),
-        position: None,
-        report: common::ReportDetail::Bare,
-        identity: None,
-        channel: None,
-        // A traffic burst is 60 ms of one timeslot, and it says whether the
-        // network had granted the channel for speech. It says nothing about
-        // the cipher: the grant named that, and a burst reporting "clear"
-        // would flip the call back while it was still enciphered.
-        airtime: Some(common::Airtime {
-            seconds: 0.06,
-            voice: true,
-            live: true,
-            secrecy: if flags & TB_FLAG_ENCRYPTED != 0 {
-                common::Secrecy::Encrypted(None)
-            } else {
-                common::Secrecy::Unsaid
-            },
-            codec: Some(TETRA_CODEC),
-        }),
-        // A traffic burst says which usage marker it is on and, once the
-        // network has granted the channel, who was granted it. The party
-        // called is the marker's own until then, which is what the call list
-        // shows too.
-        link: Some(common::Link {
-            from: (from != 0).then(|| common::Party::unit(from.to_string())),
-            to: Some(if to != 0 {
-                common::Party::group(to.to_string())
-            } else {
-                common::Party::group(format!("marker {marker}"))
-            }),
-        }),
-    })
+    Some(p.between(Link {
+        from: (from != 0).then(|| Party::unit(from.to_string())),
+        to: Some(called),
+    }))
 }
 
 /// Where the bits start and whether the row carries a talker, by length.

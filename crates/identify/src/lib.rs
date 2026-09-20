@@ -64,7 +64,8 @@ pub mod wifi;
 pub mod wmbus;
 pub mod zwave;
 
-use common::{C32, Decoded};
+use common::C32;
+use common::packet::Proto;
 pub use place::{CHANNEL_WIDTH_TOLERANCE, Placement, Shape};
 
 /// What reading a recording as one protocol found.
@@ -82,21 +83,21 @@ pub struct Ident {
     /// Where in the span it was read, which for a protocol on a channel is
     /// the channel and not the middle of the recording.
     pub center_hz: f64,
-    /// Everything it read, for a caller that wants the fields rather than
-    /// the verdict.
-    pub rows: Vec<Decoded>,
+    /// Everything it read, for a caller that wants the statements rather
+    /// than the verdict.
+    pub rows: Vec<Proto>,
 }
 
 impl Ident {
     fn of(s: &dyn Signal, read: Reading, center_hz: f64) -> Self {
-        let Reading { rows, pictures: _, voice_s: _ } = read;
+        let Reading { rows, pictures: _, voice_s: _, center_hz: _ } = read;
         // The id rather than the name a transmitter gives itself: one
         // aircraft sends both, and two spellings of one transmitter read as
         // two transmitters.
         let mut identities: Vec<String> = Vec::new();
-        for id in rows.iter().filter_map(|r| r.identity.as_ref()) {
-            if !identities.contains(&id.id) {
-                identities.push(id.id.clone());
+        for id in rows.iter().filter_map(|r| r.subject.as_ref()).map(|e| e.id.to_string()) {
+            if !identities.contains(&id) {
+                identities.push(id);
             }
         }
         Self { protocol: s.id(), label: s.label(), frames: rows.len(), identities, center_hz, rows }
@@ -111,16 +112,28 @@ impl Ident {
 /// exactly the way a row is evidence of a pager.
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Reading {
-    pub rows: Vec<Decoded>,
+    pub rows: Vec<Proto>,
+    /// Where in the span it was read, for a protocol that cut a channel out
+    /// of it. A statement says nothing about where it was heard, so the
+    /// reader that opened the channel says.
+    pub center_hz: Option<f64>,
     /// Whole pictures completed.
     pub pictures: usize,
     /// Seconds of speech decoded.
     pub voice_s: f64,
 }
 
-impl From<Vec<Decoded>> for Reading {
-    fn from(rows: Vec<Decoded>) -> Self {
+impl From<Vec<Proto>> for Reading {
+    fn from(rows: Vec<Proto>) -> Self {
         Self { rows, ..Self::default() }
+    }
+}
+
+impl Reading {
+    /// Where the channel this was read on sat
+    pub fn at(mut self, center_hz: f64) -> Self {
+        self.center_hz = Some(center_hz);
+        self
     }
 }
 
@@ -268,7 +281,7 @@ pub fn identify_all(iq: &[C32], rate_hz: f64, center_hz: f64) -> Vec<Ident> {
         .into_iter()
         .map(|s| {
             let read = s.read(iq, rate_hz, center_hz);
-            let at = read.rows.first().map(|r| r.center.as_f64()).unwrap_or(center_hz);
+            let at = read.center_hz.unwrap_or(center_hz);
             Ident::of(s, read, at)
         })
         .filter(|i| i.frames >= MIN_FRAMES)

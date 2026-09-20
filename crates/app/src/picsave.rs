@@ -28,7 +28,7 @@ const ABANDON_S: f64 = 5.0;
 
 /// Where pictures are written, beside the packet log and the captures.
 pub fn pictures_dir() -> PathBuf {
-    crate::packetlog::PacketLog::default_dir()
+    crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("pictures"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-pictures"))
 }

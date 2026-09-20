@@ -90,12 +90,12 @@ impl Nxdn {
                     continue;
                 }
                 let bytes = nxdn::encode_frame(f, baud < WIDE_BAUD);
-                if let Some(d) = nxdn::decoded(&bytes, chan.hz()) {
+                if let Some(d) = nxdn::read(&bytes) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

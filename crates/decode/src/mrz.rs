@@ -16,7 +16,7 @@
 
 use crate::bits::crc16le;
 use crate::geo::{ecef_to_geodetic, ecef_velocity_to_enu};
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 
 /// The bytes every frame starts with: a marker, a subtype and a length.
 pub const SYNC: [u8; 3] = [0xAA, 0xBF, 0x35];
@@ -256,58 +256,29 @@ pub fn parse(record: &[u8]) -> Option<Report> {
     Some(r)
 }
 
-/// What the protocols node makes of a gathered record.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a Meteo-Radiy MRZ frame says.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let r = parse(bytes)?;
-    let (h, m, s) = r.utc;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text("MRZ".into())),
-        ("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:02}"))),
-        ("altitude_m".into(), common::Value::Float(r.altitude_m)),
-        ("climb_ms".into(), common::Value::Float(r.climb_ms)),
-        ("speed_kt".into(), common::Value::Float(r.speed_kt)),
-        ("course_deg".into(), common::Value::Float(r.course_deg)),
-    ];
+    let mut p = Proto::new("mrz", "frame");
     if !r.serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
-    }
-    if r.satellites > 0 {
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if let Some((y, mo, d)) = r.date {
-        fields.push(("date".into(), common::Value::Text(format!("{y:04}-{mo:02}-{d:02}"))));
-    }
-
-    let mut d = Decoded::bytes("mrz", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("MRZ, {h:02}:{m:02}:{s:02} UTC"))
-        .with_fields(fields);
-    if !r.serial.is_empty() {
-        d = d.by(common::Identity::new("mrz", r.serial.clone()).made_by("Meteo-Radiy"));
+        p = p
+            .by(Entity::new("mrz", Id::Text(r.serial.clone())).made_by("Meteo-Radiy"))
+            .saying(Fact::Named(Named::new(r.serial.clone(), ThingKind::Sonde)));
     }
     if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // The frame carries sensor counts rather than a battery
-                // voltage; not-a-number is how a track says unread.
-                battery_v: f32::NAN,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
+        for fact in crate::facts::of_flight(
+            r.lat_deg,
+            r.lon_deg,
+            r.altitude_m,
+            r.climb_ms,
+            r.speed_kt,
+            r.course_deg,
+            None,
+        ) {
+            p = p.saying(fact);
+        }
     }
-    Some(d)
+    Some(p)
 }
 
 /// Chips in the longest frame.

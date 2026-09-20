@@ -15,7 +15,7 @@
 //! whose own number says which model it is.
 
 use crate::bits::hamming84;
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 
 /// The frame header, 16 bits, once the Manchester coding is off.
 pub const HEADER: u16 = 0x45CF;
@@ -81,7 +81,7 @@ impl Frame {
 /// `None` where the header is not there or a codeword was too broken to
 /// repair. Every nibble is protected, so a frame either comes out whole or
 /// is not a frame: there is no checksum to fall back on.
-pub fn read(bits: &[bool]) -> Option<Frame> {
+pub fn frame(bits: &[bool]) -> Option<Frame> {
     if bits.len() < FRAME_BITS || value(bits, 0, 16) as u16 != HEADER {
         return None;
     }
@@ -445,66 +445,33 @@ fn identity(conf: &[[u8; CONF_NIBBLES]]) -> (Model, String) {
     }
 }
 
-/// What the protocols node makes of a gathered record.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a Graw DFM frame says.
+///
+/// The serial is what a chaser follows and what SondeHub files a flight
+/// under; a sonde that has not sent both halves of it yet is still a sonde,
+/// so it is reported without an identity rather than under a made-up one.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let r = parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text(r.model.label().into())),
-        ("frame".into(), common::Value::Int(r.frame_no as i64)),
-    ];
+    let mut p = Proto::new("dfm", "frame");
     if !r.serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
+        p = p
+            .by(Entity::new("graw", Id::Text(r.serial.clone())).made_by("Graw"))
+            .saying(Fact::Named(Named::new(r.serial.clone(), ThingKind::Sonde)));
     }
     if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+        for fact in crate::facts::of_flight(
+            r.lat_deg,
+            r.lon_deg,
+            r.altitude_m,
+            r.climb_ms,
+            r.speed_kt,
+            r.course_deg,
+            None,
+        ) {
+            p = p.saying(fact);
+        }
     }
-    if r.satellites > 0 {
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if let Some((y, mo, d, h, mi)) = r.date {
-        fields.push((
-            "utc".into(),
-            common::Value::Text(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")),
-        ));
-    }
-
-    // The serial is what a chaser follows and what SondeHub files a flight
-    // under; a sonde that has not sent both halves of it yet is still a
-    // sonde, so it is reported without an identity rather than under a
-    // made-up one.
-    let mut d = Decoded::bytes("dfm", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("{}, frame {}", r.model.label(), r.frame_no))
-        .with_fields(fields);
-    if !r.serial.is_empty() {
-        d = d.by(common::Identity::new("graw", r.serial.clone()).made_by("Graw"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // A DFM sends no battery voltage; not-a-number is how a
-                // sonde track says a reading has not been read.
-                battery_v: f32::NAN,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
+    Some(p)
 }
 
 /// Chips in one frame.
@@ -615,7 +582,7 @@ impl Framer {
                 return out;
             }
             let bits = manchester(&self.chips[at..at + FRAME_CHIPS], inverted);
-            match read(&bits) {
+            match frame(&bits) {
                 Some(frame) => {
                     self.frames += 1;
                     if let Some(record) = self.gather.take(&frame) {
@@ -749,7 +716,7 @@ mod tests {
         for (i, pair) in blocks.chunks(2).enumerate() {
             let b = pair.get(1).copied().unwrap_or(pair[0]);
             let bits = frame_bits(conf[i.min(1)], pair[0], b);
-            let f = read(&bits).expect("a frame");
+            let f = frame(&bits).expect("a frame");
             assert_eq!(f.corrected, 0, "a frame built here needed correcting");
             record = g.take(&f).or(record);
         }
@@ -782,7 +749,7 @@ mod tests {
         let mut g = Gather::new();
         for id in [6u8, 7, 8] {
             let bits = frame_bits([0; CONF_NIBBLES], dat(id, 0), dat(id, 0));
-            let f = read(&bits).expect("a frame");
+            let f = frame(&bits).expect("a frame");
             assert_eq!(g.take(&f), None, "block {id} closed a record on its own");
         }
     }
@@ -803,7 +770,7 @@ mod tests {
         let mut bits =
             frame_bits(serial_channel(0xA, 0, 0x1234), dat(2, 0x1234_5678_9ABC), dat(3, 0));
         bits[100] = !bits[100];
-        let f = read(&bits).expect("a frame");
+        let f = frame(&bits).expect("a frame");
         assert_eq!(f.corrected, 1);
         assert_eq!(Frame::block_id(&f.dat[0]), 2);
         assert_eq!(f.dat[0][..12], nibbles(0x1234_5678_9ABC, 12)[..]);

@@ -14,7 +14,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::pocsag::decoded;
+pub use decode::pocsag::read;
 use decode::pocsag::{self, Body};
 use dsp::pocsag::{DEVIATION_HZ, PocsagConfig, PocsagDemod, Transmission};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -22,7 +22,6 @@ use identify::Signal;
 pub use identify::pocsag::AUDIO_HZ;
 pub use identify::pocsag::CHANNEL_WIDTH_HZ;
 pub use identify::pocsag::Pocsag;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -100,7 +99,7 @@ impl Simple for PocsagNode {
         self.demod = PocsagDemod::new(audio_rate, PocsagConfig::default());
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -121,10 +120,10 @@ impl Simple for PocsagNode {
         self.demod.process(&audio, &mut self.sends);
         self.audio = audio;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for t in &self.sends {
             self.accepted += 1;
-            out.push(self.meter.frame(t.to_bytes()));
+            out.push(self.meter.packet_now(t.to_bytes()));
         }
         Ok(())
     }
@@ -214,7 +213,7 @@ impl Simple for PocsagTxNode {
         }
         self.rate = i.spec.rate;
         Ok(StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             // The timings are microseconds and the port has no rate of its
             // own; the clock is passed on for the modulator behind. See
             // `MorseKeyNode`.
@@ -231,7 +230,7 @@ impl Simple for PocsagTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
+        o.timings_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 
@@ -294,11 +293,12 @@ impl Protocol for Pocsag {
     }
     /// A transmitter empties its queue in one go, so a transmission is a row
     /// per page rather than one row.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::pocsag::is_pager_band(p.center_hz() as f64) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())))
+        Some(read(bytes))
     }
 
     /// The amateur DAPNET channel: amateur rather than commercial because
@@ -418,25 +418,24 @@ mod tests {
         let quiet = vec![common::C32::new(0.0, 0.0); 400_000];
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
 
         assert_eq!(frames.len(), 1, "expected one transmission off the air");
-        let decodes = decoded(&frames[0], Hz(center as u64));
+        let decodes = read(&frames[0]);
         assert_eq!(decodes.len(), 1);
-        assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
-        assert_eq!(decodes[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
-        assert_eq!(decodes[0].media_type, pipeline::event::media::TEXT);
-        assert!(decodes[0].written, "a page is written to whoever carries the pager");
-        assert_eq!(decodes[0].crc_ok, Some(true));
-        let get = |k: &str| decodes[0].fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("address"), Some(common::Value::Int(1_234_568)));
+        assert_eq!((decodes[0].id, decodes[0].kind), ("pocsag", "alpha"));
+        // A page is written to whoever carries the pager, and the pager is
+        // the party called: the network transmitted it.
+        assert_eq!(decodes[0].facts, vec![common::packet::Fact::message("MOVE TO CHANNEL 2")]);
+        assert_eq!(decodes[0].link.to.as_ref().map(|p| p.id.as_str()), Some("1234568"));
+        assert!(decodes[0].subject.is_none());
     }
 
     /// The transmitter into the receiver: a page keyed by the chain the
@@ -473,24 +472,22 @@ mod tests {
         for block in [&air[..], &quiet[..]] {
             for chunk in block.chunks(8_192) {
                 let input = Payload::Iq(chunk.to_vec());
-                let mut out = Payload::Frames(Vec::new());
+                let mut out = Payload::Packets(Vec::new());
                 let (mut events, mut new_tags) = (Vec::new(), Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
                 node.process(&input, &mut out, &mut ctx).unwrap();
-                if let Payload::Frames(f) = out {
-                    frames.extend(f.into_iter().map(|x| x.bytes));
+                if let Payload::Packets(f) = out {
+                    frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
                 }
             }
         }
 
         assert_eq!(frames.len(), 1, "one whole transmission in a second and a half");
-        let decodes = decoded(&frames[0], Hz(DEFAULT_HZ as u64));
+        let decodes = read(&frames[0]);
         assert_eq!(decodes.len(), 1);
-        assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
-        assert_eq!(decodes[0].text.as_deref(), Some("WAVESHARK"));
-        let get = |k: &str| decodes[0].fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("address"), Some(common::Value::Int(1_234_567)));
-        assert_eq!(get("function"), Some(common::Value::Int(3)));
+        assert_eq!((decodes[0].id, decodes[0].kind), ("pocsag", "alpha"));
+        assert_eq!(decodes[0].facts, vec![common::packet::Fact::message("WAVESHARK")]);
+        assert_eq!(decodes[0].link.to.as_ref().map(|p| p.id.as_str()), Some("1234567"));
     }
 
     /// Every speed the receiver searches is a speed it can be keyed at, and
@@ -510,14 +507,13 @@ mod tests {
             let tags = Vec::new();
             let mut us = 0u64;
             for _ in 0..(rate as usize / 4_096) {
-                let mut out = Payload::empty_of(PortKind::Pulses);
+                let mut out = Payload::empty_of(PortKind::Timings);
                 let (mut events, mut new_tags) = (Vec::new(), Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
                 Simple::process(&mut n, &Payload::Real(vec![0.0; 4_096]), &mut out, &mut ctx)
                     .unwrap();
-                for p in out.as_pulses().unwrap_or(&[]) {
-                    us +=
-                        p.pulses.iter().map(|x| u64::from(x.mark) + u64::from(x.gap)).sum::<u64>();
+                for p in out.as_timings().unwrap_or(&[]) {
+                    us += p.iter().map(|x| u64::from(x.mark) + u64::from(x.gap)).sum::<u64>();
                 }
             }
             // 58 blocks of 4096 is 0.9899 s, and the last partial bit is
@@ -539,10 +535,10 @@ mod tests {
         let words: Vec<u32> = contents.into_iter().map(dsp::pocsag::encode_codeword).collect();
         let t = Transmission { codewords: words, baud: 1200, corrected: 0, lost: 0 };
 
-        let decodes = decoded(&t.to_bytes(), Hz(DEFAULT_HZ as u64));
+        let decodes = read(&t.to_bytes());
         assert_eq!(decodes.len(), 2);
-        assert_eq!(decodes[0].protocol, "POCSAG-Alpha");
-        assert_eq!(decodes[1].protocol, "POCSAG-Numeric");
-        assert_eq!(decodes[1].text.as_deref(), Some("112"));
+        assert_eq!((decodes[0].id, decodes[0].kind), ("pocsag", "alpha"));
+        assert_eq!((decodes[1].id, decodes[1].kind), ("pocsag", "numeric"));
+        assert_eq!(decodes[1].facts, vec![common::packet::Fact::message("112")]);
     }
 }

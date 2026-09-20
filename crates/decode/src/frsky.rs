@@ -106,7 +106,7 @@ impl Packet {
     /// carries the other. The eight it did not carry are absent, which is
     /// what lets a view merge the two frames instead of watching half the
     /// channels drop to zero every other frame.
-    pub fn control(&self) -> common::ReportDetail {
+    pub fn control(&self) -> common::packet::Sticks {
         let mut channels = [None; common::CONTROL_CHANNELS];
         let base = if self.upper_bank() { 8 } else { 0 };
         for i in 0..8 {
@@ -114,7 +114,7 @@ impl Packet {
                 *slot = Some(us.round() as u16);
             }
         }
-        common::ReportDetail::Control { channels, armed: None, uplink_power_mw: None }
+        common::packet::Sticks { channels, armed: None, uplink_power_mw: None }
     }
 }
 
@@ -360,9 +360,7 @@ mod tests {
     #[test]
     fn a_frame_reports_the_bank_it_carried_and_no_more() {
         let mut p = parse(&PACKET).expect("a packet");
-        let common::ReportDetail::Control { channels, .. } = p.control() else {
-            panic!("not a control report")
-        };
+        let common::packet::Sticks { channels, .. } = p.control();
         assert!(channels[..8].iter().all(Option::is_some), "{channels:?}");
         assert!(channels[8..].iter().all(Option::is_none), "{channels:?}");
         // Every channel of this packet is centred, which is 1500 us.
@@ -371,9 +369,7 @@ mod tests {
         for c in &mut p.channels {
             *c |= 0x800;
         }
-        let common::ReportDetail::Control { channels, .. } = p.control() else {
-            panic!("not a control report")
-        };
+        let common::packet::Sticks { channels, .. } = p.control();
         assert!(channels[..8].iter().all(Option::is_none), "{channels:?}");
         assert_eq!(channels[8], Some(1500));
     }

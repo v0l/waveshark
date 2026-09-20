@@ -27,7 +27,8 @@
 //! dial settles belongs to the step before. Mayhem's Recon draws the same
 //! distinction and offers the same two ways of counting.
 
-use common::{Packet, Result};
+use common::Result;
+use common::packet::Packet;
 use pipeline::event::{Event, Request};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -384,21 +385,19 @@ impl BandScanNode {
 
     /// File one packet under whatever names it, and say what it was worth.
     fn hit(&mut self, p: &Packet) -> Heard {
-        let named = p.decodes.iter().find_map(|d| {
-            d.identity
-                .as_ref()
-                .map(|who| Key::Identity { space: who.space.clone(), id: who.id.clone() })
-        });
+        let named = p
+            .subject()
+            .map(|who| Key::Identity { space: who.space.to_string(), id: who.id.to_string() });
         let key = named.unwrap_or(Key::Frequency(p.center_hz()));
         if self.ignored_key(&key) {
             return Heard::Ignored;
         }
-        let protocol = p.decodes.first().map(|d| d.protocol.to_string());
+        let protocol = p.innermost().map(|l| l.id.to_string());
         if let Some(f) = self.found.iter_mut().find(|f| f.key.covers(&key)) {
             f.heard += 1;
-            f.at_us = p.at_us;
-            f.snr_db = p.snr_db();
-            f.rssi_dbfs = p.rssi_dbfs();
+            f.at_us = p.carrier.at_us;
+            f.snr_db = p.carrier.snr_db;
+            f.rssi_dbfs = p.carrier.rssi_dbfs;
             if f.protocol.is_none() {
                 f.protocol = protocol;
             }
@@ -411,11 +410,11 @@ impl BandScanNode {
         self.found.push(Found {
             key,
             center_hz: p.center_hz(),
-            bandwidth_hz: p.bandwidth_hz,
-            snr_db: p.snr_db(),
-            rssi_dbfs: p.rssi_dbfs(),
+            bandwidth_hz: p.carrier.bandwidth_hz,
+            snr_db: p.carrier.snr_db,
+            rssi_dbfs: p.carrier.rssi_dbfs,
             protocol,
-            at_us: p.at_us,
+            at_us: p.carrier.at_us,
             heard: 1,
             step_hz: self.center_hz as u64,
         });
@@ -702,7 +701,6 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 mod tests {
     use super::*;
     use common::{Frame, Hz, Identity};
-    use pipeline::event::Decoded;
 
     /// One block through the node, a tenth of a second of run time, with the
     /// packets that arrived during it.
@@ -741,19 +739,16 @@ mod tests {
     }
 
     fn burst(center_hz: u64) -> Packet {
-        Packet::of_frame(
-            1_000_000,
-            25_000,
-            Frame::measured(vec![0x01, 0x02, 0x03], -60.0, 14.0).at(center_hz),
-        )
+        let mut p = crate::measured(center_hz, 25_000, vec![0x01, 0x02, 0x03], -60.0, 14.0);
+        p.carrier.at_us = 1_000_000;
+        p
     }
 
-    fn named(center_hz: u64, space: &str, id: &str) -> Packet {
-        let mut p = burst(center_hz);
-        p.decodes = vec![
-            Decoded::bytes("BLE-Adv", Hz(center_hz), 0.0, vec![]).by(Identity::new(space, id)),
-        ];
-        p
+    fn named(center_hz: u64, space: &'static str, id: &str) -> Packet {
+        burst(center_hz).decoded(
+            common::packet::Proto::new("ble", "adv")
+                .by(common::packet::Entity::new(space, common::packet::Id::Text(id.to_string()))),
+        )
     }
 
     /// An empty band is walked end to end and starts again, at the centres a
@@ -1013,7 +1008,7 @@ mod tests {
         assert_eq!(keys[1], "433.1000M");
         assert_eq!(keys[2], "433.1250M");
         assert_eq!(n.found()[0].heard, 2);
-        assert_eq!(n.found()[0].protocol.as_deref(), Some("BLE-Adv"));
+        assert_eq!(n.found()[0].protocol.as_deref(), Some("ble"));
     }
 
     /// What the operator has told it to ignore neither holds the walk nor

@@ -72,16 +72,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!(
                 "--- package {total} [{how}]: {} pulses, {:.1} ms, SNR {:.1} dB",
-                p.pulses.len(),
-                p.duration_us() as f64 / 1000.0,
+                p.pulses().len(),
+                common::pulse::duration_us(p.pulses()) as f64 / 1000.0,
                 p.snr_db
             );
-            let mh = p.mark_histogram(40);
-            let gh = p.gap_histogram(40);
+            let mh = common::pulse::mark_histogram(p.pulses(), 40);
+            let gh = common::pulse::gap_histogram(p.pulses(), 40);
             println!("  mark clusters: {:?}", &mh[..mh.len().min(6)]);
             println!("  gap  clusters: {:?}", &gh[..gh.len().min(6)]);
             let show: Vec<String> =
-                p.pulses.iter().take(16).map(|x| format!("{}/{}", x.mark, x.gap)).collect();
+                p.pulses().iter().take(16).map(|x| format!("{}/{}", x.mark, x.gap)).collect();
             println!("  first pulses:  {}", show.join(" "));
         }
     }

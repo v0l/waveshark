@@ -24,7 +24,7 @@ use common::Result;
 use decode::ft8;
 pub use decode::ft8::Mode;
 pub use decode::ft8::PASSBAND_HZ;
-pub use decode::ft8::decoded;
+pub use decode::ft8::read;
 pub use decode::ft8::unpack_bits;
 use dsp::mfsk::Slot;
 use dsp::{FirDecim, Mixer};
@@ -33,7 +33,6 @@ pub use identify::ft8::Ft8;
 pub use identify::ft8::{
     AUDIO_HZ, CHANNEL_WIDTH_HZ, DEFAULT_HZ, FT4_DEFAULT_HZ, FT4_DIALS, FT8_DIALS, Ft4, shape,
 };
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -150,7 +149,7 @@ impl Simple for Ft8Node {
         self.mixer = Mixer::new(center - self.dial_hz, rate);
         self.rebuild();
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.dial_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -182,8 +181,12 @@ impl Simple for Ft8Node {
             self.read += heard.len() as u64;
             for (bytes, freq_hz, snr_db) in heard {
                 let center = (self.dial_hz + freq_hz).round().max(0.0) as u64;
-                let frame = self.meter.frame(bytes);
-                o.frames_mut().push(common::Frame { snr_db, ..frame }.at(center));
+                // The decoder measured this signal against the slot's own
+                // noise, which is a better number than the channel's mean,
+                // and the tone it was found on is where it was heard.
+                let mut p = self.meter.packet_now(bytes).at_center(center);
+                p.carrier.snr_db = snr_db;
+                o.packets_mut().push(p);
             }
         }
         Ok(())
@@ -254,11 +257,12 @@ impl Protocol for Ft8 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !is_ftx(bytes) || bytes[0] != Mode::Ft8.tag() {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} FT8", hz / 1e6)
@@ -297,11 +301,12 @@ impl Protocol for Ft4 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !is_ftx(bytes) || bytes[0] != Mode::Ft4.tag() {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} FT4", hz / 1e6)
@@ -401,17 +406,17 @@ mod tests {
 
     /// Feed a stream through the node, from the slot boundary, and collect
     /// what reached the bus.
-    fn run(node: &mut Ft8Node, iq: &[C32], rate: f64, center: f64) -> Vec<common::Frame> {
+    fn run(node: &mut Ft8Node, iq: &[C32], rate: f64, center: f64) -> Vec<common::packet::Packet> {
         let ins = [spec(rate, center)];
         let tags = Vec::new();
         let mut frames = Vec::new();
         for block in iq.chunks(4096) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames.extend(f);
             }
         }
@@ -441,18 +446,20 @@ mod tests {
         let f = &frames[0];
         // The frame is heard where the station was: the dial plus where it
         // sat in the passband, to within a tone.
-        assert!(f.center_hz.abs_diff((DEFAULT_HZ + 1_000.0) as u64) <= 7, "{}", f.center_hz);
-        assert!(f.snr_db.is_finite() && f.rssi_dbfs.is_finite());
-        assert!(f.iq.is_some(), "the samples it was read from");
+        assert!(
+            f.carrier.center_hz.abs_diff((DEFAULT_HZ + 1_000.0) as u64) <= 7,
+            "{}",
+            f.carrier.center_hz
+        );
+        assert!(f.carrier.snr_db.is_finite() && f.carrier.rssi_dbfs.is_finite());
+        assert!(f.carrier.iq.is_some(), "the samples it was read from");
 
-        let d = decoded(&f.bytes, Hz(f.center_hz)).expect("a decode");
-        assert_eq!(d.protocol, "FT8");
-        assert_eq!(d.text.as_deref(), Some("CQ MI0ABC IO74"));
-        assert_eq!(d.crc_ok, Some(true));
-        assert!(d.written, "an operator's station called another");
-        assert_eq!(d.field("from").map(|v| v.to_string()).as_deref(), Some("MI0ABC"));
-        assert_eq!(d.field("grid").map(|v| v.to_string()).as_deref(), Some("IO74"));
-        let p = d.position.expect("the square it sent");
+        let d = read(f.bytes()).expect("a decode");
+        assert_eq!((d.id, d.kind), ("ft8", "message"));
+        // An operator's station called another, which is somebody writing.
+        assert_eq!(d.wrote(), Some("CQ MI0ABC IO74"));
+        assert_eq!(d.parties(), (Some("MI0ABC"), Some("CQ")));
+        let p = d.placed().expect("the square it sent");
         assert!((p.lat - 54.5).abs() < 1e-6 && (p.lon - -5.0).abs() < 1e-6);
     }
 
@@ -488,7 +495,7 @@ mod tests {
 
         let mut read: Vec<String> = frames
             .iter()
-            .map(|f| decoded(&f.bytes, Hz(f.center_hz)).expect("a decode").text.unwrap())
+            .map(|f| read(f.bytes()).expect("a decode").wrote().unwrap().to_string())
             .collect();
         read.sort();
         let mut want: Vec<String> = sent.iter().map(|(a, b, c)| format!("{a} {b} {c}")).collect();
@@ -505,11 +512,12 @@ mod tests {
         let mut node = at_slot_start(FT4_DEFAULT_HZ, Mode::Ft4);
         let frames = run(&mut node, &iq, AUDIO_HZ, FT4_DEFAULT_HZ);
         assert_eq!(frames.len(), 1, "{} transmissions", frames.len());
-        let d = decoded(&frames[0].bytes, Hz(frames[0].center_hz)).expect("a decode");
-        assert_eq!(d.protocol, "FT4");
-        assert_eq!(d.text.as_deref(), Some("G4XYZ MI0ABC R+05"));
-        assert_eq!(d.field("report_db").and_then(|v| v.as_i64()), Some(5));
-        assert_eq!(d.position, None, "a report says nothing about where");
+        let d = read(&frames[0].bytes()).expect("a decode");
+        assert_eq!((d.id, d.kind), ("ft4", "message"));
+        assert_eq!(d.wrote(), Some("G4XYZ MI0ABC R+05"));
+        // A report is a signal report, and says nothing about where either
+        // station is: only a grid square does that.
+        assert_eq!(d.placed(), None, "a report says nothing about where");
     }
 
     /// A station keyed into noise 10 dB below it, which is what a quiet
@@ -539,11 +547,15 @@ mod tests {
             let frames = run(&mut node, &iq, AUDIO_HZ, DEFAULT_HZ);
             assert_eq!(frames.len(), want, "at an amplitude of {amplitude}");
             if let Some(f) = frames.first() {
-                assert!((f.snr_db - snr).abs() < 1.0, "{} dB at {amplitude}", f.snr_db);
+                assert!(
+                    (f.carrier.snr_db - snr).abs() < 1.0,
+                    "{} dB at {amplitude}",
+                    f.carrier.snr_db
+                );
             }
             for f in &frames {
-                let d = decoded(&f.bytes, Hz(f.center_hz)).expect("a decode");
-                assert_eq!(d.text.as_deref(), Some("CQ MI0ABC IO74"), "wrong text at {amplitude}");
+                let d = read(f.bytes()).expect("a decode");
+                assert_eq!(d.wrote(), Some("CQ MI0ABC IO74"), "wrong text at {amplitude}");
             }
         }
     }
@@ -578,17 +590,14 @@ mod tests {
         let mut bytes = vec![8u8];
         bytes.extend(ft8::pack(&message));
         assert!(is_ftx(&bytes));
-        let p = common::Packet::of_frame(
-            0,
-            PASSBAND_HZ as u32,
-            common::Frame::measured(bytes.clone(), -40.0, 12.0).at(DEFAULT_HZ as u64),
-        );
-        assert_eq!(Ft8.read_frame(&p, &bytes).map(|r| r.len()), Some(1));
-        assert_eq!(Ft4.read_frame(&p, &bytes), None, "the tag says FT8");
+        let p = crate::measured(DEFAULT_HZ as u64, PASSBAND_HZ as u32, bytes.clone(), -40.0, 12.0);
+        assert_eq!(Ft8.stated(&p).map(|r| r.len()), Some(1));
+        assert_eq!(Ft4.stated(&p), None, "the tag says FT8");
 
         bytes[0] = 4;
         assert!(is_ftx(&bytes), "the same message keyed as FT4 checks too");
-        assert_eq!(Ft8.read_frame(&p, &bytes), None);
+        let p = crate::measured(DEFAULT_HZ as u64, PASSBAND_HZ as u32, bytes.clone(), -40.0, 12.0);
+        assert_eq!(Ft8.stated(&p), None);
 
         bytes[0] = 2;
         assert!(!is_ftx(&bytes), "no mode keys that");

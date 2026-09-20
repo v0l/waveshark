@@ -47,13 +47,13 @@ mod messagelog;
 mod messages;
 mod mix;
 mod oggopus;
-mod packetlog;
 mod patch;
 mod picsave;
 mod prof;
 mod protocols;
 mod radio;
 mod record;
+mod row;
 mod sats;
 mod scanners;
 mod segments;
@@ -74,6 +74,7 @@ mod update;
 mod videobus;
 mod waterfall;
 mod wheel;
+mod wspkt;
 
 /// `--probe <mhz>` runs the radio thread without a window and reports what the
 /// waterfall would be drawing, so the signal path can be checked over ssh.
@@ -430,7 +431,7 @@ fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
             for (i, (_, us)) in now.iter().enumerate() {
                 prev[i] = *us;
             }
-            let _ = rx.decodes(std::time::Instant::now());
+            let _ = rx.rows(std::time::Instant::now());
             blocks.push(Blk { us, top });
         }
     }
@@ -660,17 +661,21 @@ fn bench_pan() {
 /// after the log was written gets its chance at every burst in it, and a
 /// decoder that has since been fixed shows what it used to get wrong.
 fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
-    let bursts = packetlog::read(path)?;
+    let bursts = wspkt::read(path)?;
     if bursts.is_empty() {
         anyhow::bail!("{} holds no bursts", path.display());
     }
     let protocols = decode::Protocols::all();
     let (mut decoded, mut silent) = (0, 0);
     for p in &bursts {
-        let when = crate::segments::when(p.at_us).format("%H:%M:%S").to_string();
+        let when = crate::segments::when(p.carrier.at_us).format("%H:%M:%S").to_string();
         let mhz = p.center_hz() as f64 / 1e6;
-        let Some(pkg) = p.package() else {
-            let bytes = p.frame().unwrap_or_default();
+        let pulses = match p.keying.as_ref().map(|k| &k.symbols) {
+            Some(common::packet::Symbols::Pulses(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        if pulses.is_empty() {
+            let bytes = p.bytes();
             println!(
                 "{when}  {mhz:10.4} MHz  {:>4} B  {}",
                 bytes.len(),
@@ -678,22 +683,22 @@ fn replay_log(path: &std::path::Path) -> anyhow::Result<()> {
             );
             decoded += 1;
             continue;
-        };
-        let reports = protocols.decode_all(&pkg);
+        }
+        let reports = protocols.decode_all(&pulses);
         if reports.is_empty() {
             silent += 1;
             println!(
                 "{when}  {mhz:10.4} MHz  {:>4} pulses  {:>5.1} dB  unclaimed",
-                pkg.pulses.len(),
-                p.snr_db(),
+                pulses.len(),
+                p.carrier.snr_db,
             );
         }
         for r in reports {
             decoded += 1;
             println!(
                 "{when}  {mhz:10.4} MHz  {:>4} pulses  {:>5.1} dB  {:<22} {}",
-                pkg.pulses.len(),
-                p.snr_db(),
+                pulses.len(),
+                p.carrier.snr_db,
                 r.model,
                 r.fields_line(),
             );
@@ -769,7 +774,7 @@ fn scan(
         packet_log.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "off".into())
     );
     if print {
-        println!("{}", radio::DecodeRecord::line_header());
+        println!("{}", row::Reception::line_header());
     }
     let start = std::time::Instant::now();
     let mut n = 0u64;
@@ -875,13 +880,13 @@ fn replay(path: &str) -> anyhow::Result<()> {
                     }
                     println!(
                         "{name}: {:.4} MHz {} {:>6.1} dBFS {:>5.1} dB  {:<22} {:>3} B  {}",
-                        r.freq / 1e6,
-                        r.modulation,
-                        r.rssi_dbfs,
-                        r.snr_db,
+                        r.freq() / 1e6,
+                        r.modulation(),
+                        r.rssi_dbfs(),
+                        r.snr_db(),
                         r.protocol(),
-                        r.bytes.len(),
-                        r.detail,
+                        r.bytes().len(),
+                        r.detail(),
                     );
                 }
             }
@@ -1359,7 +1364,7 @@ impl From<Mode> for radio::Demod {
 /// payloads are anything but zero, and what level the speech comes out at.
 fn m17_dump(path: &std::path::Path) {
     use decode::m17::Event;
-    let packets = match packetlog::read(path) {
+    let packets = match wspkt::read(path) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("cannot read {}: {e}", path.display());
@@ -1369,10 +1374,10 @@ fn m17_dump(path: &std::path::Path) {
     let mut runs: Vec<Vec<(u16, [u8; 16])>> = Vec::new();
     let mut setups = 0usize;
     for p in &packets {
-        let common::PacketBody::Frame(fr) = &p.body else {
+        let b = p.bytes();
+        if b.is_empty() {
             continue;
-        };
-        let b = &fr.bytes;
+        }
         match Event::parse(b) {
             Some(Event::LinkSetup { lsf, .. }) => {
                 setups += 1;
@@ -1525,14 +1530,14 @@ fn main() -> eframe::Result<()> {
             .clone()
             .filter(|_| !args.no_packet_log)
             .map(|d| if d.as_os_str().is_empty() { None } else { Some(d) })
-            .map(|d| d.or_else(packetlog::PacketLog::default_dir))
+            .map(|d| d.or_else(wspkt::PacketLog::default_dir))
             .unwrap_or(None);
         let survey = args
             .survey
             .clone()
             .filter(|_| !args.no_survey)
             .map(|f| if f.as_os_str().is_empty() { None } else { Some(f) })
-            .map(|f| f.or_else(packetlog::PacketLog::default_survey_path))
+            .map(|f| f.or_else(wspkt::PacketLog::default_survey_path))
             .unwrap_or(None);
         scan(
             args.tune.first().copied().unwrap_or(433.92),

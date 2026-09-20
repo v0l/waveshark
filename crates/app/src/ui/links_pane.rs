@@ -17,13 +17,13 @@
 use super::state::LinksState;
 use super::*;
 use crate::links::Link;
-use crate::radio::DecodeRecord;
+use crate::row::Reception;
 
 pub(super) struct LinksView<'a> {
     pub st: &'a mut LinksState,
     /// The packet log, oldest first, which is where a followed link's
     /// packets come from.
-    pub packets: &'a [DecodeRecord],
+    pub packets: &'a [Reception],
 }
 
 pub(super) enum Action {
@@ -151,7 +151,7 @@ impl LinksView<'_> {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-                        let held: Vec<&DecodeRecord> =
+                        let held: Vec<&Reception> =
                             self.packets.iter().filter(|r| l.holds(r)).collect();
                         let first = held.first().map(|r| r.at);
                         if held.is_empty() {
@@ -223,17 +223,17 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
 
 /// One packet inside a followed link.
 /// One packet of a followed link, timed from the first one shown.
-fn packet_row(ui: &mut egui::Ui, r: &DecodeRecord, first: Option<std::time::Instant>) {
+fn packet_row(ui: &mut egui::Ui, r: &Reception, first: Option<std::time::Instant>) {
     let t = first.map(|f| r.at.saturating_duration_since(f).as_secs_f64()).unwrap_or(0.0);
     ui.horizontal_wrapped(|ui| {
         theme::Line::new().legend(&format!("{t:>8.3}")).value(r.protocol()).size(11.0).show(ui);
-        if r.rssi_dbfs.is_finite() {
-            theme::Line::new().legend(&format!("{:.0} dBFS", r.rssi_dbfs)).size(11.0).show(ui);
+        if r.rssi_dbfs().is_finite() {
+            theme::Line::new().legend(&format!("{:.0} dBFS", r.rssi_dbfs())).size(11.0).show(ui);
         }
-        if r.crc == Some(false) {
+        if r.integrity() == common::packet::Integrity::Failed {
             theme::Line::new().legend("crc failed").tint(theme::FAULT).size(11.0).show(ui);
         }
-        theme::Line::new().legend(&format!("{} B", r.bytes.len())).size(11.0).show(ui);
+        theme::Line::new().legend(&format!("{} B", r.bytes().len())).size(11.0).show(ui);
     });
     // What it said, where it said anything: this is the point of following a
     // link, so it gets a line of its own at full width rather than a column.
@@ -243,10 +243,10 @@ fn packet_row(ui: &mut egui::Ui, r: &DecodeRecord, first: Option<std::time::Inst
             ui.add_space(16.0);
             theme::Line::new().words(&t).wrapped(ui);
         });
-    } else if !r.detail.is_empty() {
+    } else if !r.detail().is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            theme::Line::new().legend(&r.detail).size(10.0).show(ui);
+            theme::Line::new().legend(&r.detail()).size(10.0).show(ui);
         });
     }
 }

@@ -25,7 +25,7 @@
 //! heard.
 
 use common::Result;
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Event;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -71,6 +71,9 @@ pub struct IdentNode {
     channels: usize,
     /// Identities read since the graph was built, for a readout.
     reads: u64,
+    /// The block the last sequence was read from, so a statement made here
+    /// can say how loud the audio it came off was.
+    heard: Vec<f32>,
 }
 
 impl Default for IdentNode {
@@ -94,6 +97,7 @@ impl IdentNode {
             rate: 1.0,
             channels: 1,
             reads: 0,
+            heard: Vec::new(),
         }
     }
 
@@ -134,13 +138,12 @@ impl IdentNode {
     /// The group, said once where the chain view and the log can see it.
     fn said_group(&mut self, c: &mut NodeCtx<'_>) {
         let Some(group) = self.group.clone() else { return };
+        let carrier = crate::off_audio(self.channel_hz as u64, 0, &self.heard);
         c.emit(Event::Decoded(
-            Decoded::bytes("Coded squelch", common::Hz(self.channel_hz as u64), 0.0, Vec::new())
-                .with_detail(format!("group {group}"))
-                .with_fields(vec![
-                    ("group".into(), common::Value::Text(group)),
-                    ("channel".into(), common::Value::Text(self.label.clone())),
-                ]),
+            common::packet::Packet::heard(carrier).decoded(
+                common::packet::Proto::new("ident", "coded_squelch")
+                    .between(common::packet::Link::from(common::packet::Party::group(group))),
+            ),
         ));
     }
 
@@ -154,18 +157,17 @@ impl IdentNode {
             return;
         }
         // An identity is a fact about the channel, so it is said once, where
-        // the chain view and the log can see it. Read off audio, so it
-        // carries no level: how strongly the transmitter was heard is a
-        // measurement of the air, and this stage is past the demodulator.
+        // the chain view and the log can see it.
+        let carrier = crate::off_audio(self.channel_hz as u64, 0, &self.heard);
         c.emit(Event::Decoded(
-            Decoded::bytes("PTT-ID", common::Hz(self.channel_hz as u64), seq.first_s, Vec::new())
-                .by(common::Identity::new("radio-unit", id))
-                .with_detail(format!("unit {id}"))
-                .with_fields(vec![
-                    ("unit".into(), common::Value::Text(id.to_string())),
-                    ("digits".into(), common::Value::Text(seq.digits.clone())),
-                    ("channel".into(), common::Value::Text(self.label.clone())),
-                ]),
+            common::packet::Packet::heard(carrier).decoded(
+                common::packet::Proto::new("ident", "ptt_id")
+                    .by(common::packet::Entity::new(
+                        "radio-unit",
+                        common::packet::Id::Text(id.to_string()),
+                    ))
+                    .between(common::packet::Link::from(common::packet::Party::unit(id))),
+            ),
         ));
     }
 }
@@ -246,6 +248,8 @@ impl Simple for IdentNode {
         if pcm.is_empty() {
             return Ok(());
         }
+        self.heard.clear();
+        self.heard.extend_from_slice(pcm);
         let frames = pcm.len() / self.channels.max(1);
         let block_s = frames as f64 / self.rate;
         self.fed_s += block_s;
@@ -314,6 +318,7 @@ impl Simple for IdentNode {
             to: Some(self.called()),
             from: self.caller.clone(),
             code: self.group.clone(),
+            over: None,
             rate: self.rate,
             channels: self.channels,
             pcm: pcm.to_vec(),

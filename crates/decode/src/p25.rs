@@ -18,7 +18,7 @@
 
 use crate::bits::{bch63_16, hamming10_6};
 use crate::rs::ReedSolomon;
-use common::Decoded;
+use common::packet::{Alert, AlertKind, Entity, Fact, Id, Link, Party, Proto, Severity};
 
 /// The frame synchronisation word, 48 bits, most significant first. It keys
 /// only the outer two levels, so it survives a badly closed eye.
@@ -435,90 +435,41 @@ pub fn hex_words(bytes: &[u8]) -> Vec<u8> {
     bits.chunks(6).map(|c| c.iter().fold(0u8, |v, &b| v << 1 | b)).collect()
 }
 
-/// Recognise and describe a P25 row for the packet log. `None` for anything
-/// this node did not write, so it is safe to try on every frame.
+/// What a frame this node wrote says: who is talking to whom.
 ///
-/// A voice frame is 180 ms of the channel and says so; where it carried the
-/// link control it names the talkgroup and the radio, which is what puts the
-/// call in the call list rather than only in the log. Nothing here is written
-/// by a person, so nothing is marked as written.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// The over, which is how long the channel was held, the vocoder and what
+/// protects it, is stated once on the voice port. `None` for anything this
+/// node did not write, so it is safe to try on every frame.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     if bytes.len() < HEAD_LEN || bytes[..2] != P25_TAG {
         return None;
     }
-    let nac = u16::from_be_bytes([bytes[2], bytes[3]]);
     let duid = Duid::from_bits(bytes[4]);
     let flags = bytes[5];
     let dst = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
     let src = u32::from_be_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
-    let payload = &bytes[HEAD_LEN..];
-
-    let mut fields: Vec<(String, Value)> = vec![
-        ("nac".to_string(), Value::Text(format!("{nac:03X}"))),
-        ("frame".to_string(), Value::Text(duid.name().to_string())),
-    ];
+    let nac = u16::from_be_bytes([bytes[2], bytes[3]]);
+    let mut p = Proto::new("p25", duid.name()).saying(Fact::Infrastructure(common::packet::Cell {
+        site_code: Some(nac),
+        ..Default::default()
+    }));
     if flags & FLAG_HAVE_LC != 0 {
-        fields.push(("to".to_string(), Value::Text(dst.to_string())));
-        fields.push(("from".to_string(), Value::Text(src.to_string())));
-        fields.push((
-            "call_type".to_string(),
-            Value::Text(if flags & FLAG_GROUP != 0 { "group" } else { "private" }.to_string()),
+        p = p.by(Entity::new("p25", Id::Num(u64::from(src)))).between(Link::between(
+            Party::unit(src.to_string()),
+            match flags & FLAG_GROUP != 0 {
+                true => Party::group(dst.to_string()),
+                false => Party::unit(dst.to_string()),
+            },
         ));
         if flags & FLAG_EMERGENCY != 0 {
-            fields.push(("emergency".to_string(), Value::Bool(true)));
+            p = p.saying(Fact::Alert(Alert {
+                kind: AlertKind::Emergency,
+                severity: Severity::Immediate,
+                text: None,
+            }));
         }
     }
-    if flags & FLAG_HAVE_ES != 0 && payload.len() == 12 {
-        let (algid, kid) = (payload[9], u16::from_be_bytes([payload[10], payload[11]]));
-        if algid != Encryption::CLEAR {
-            fields.push(("algorithm".to_string(), Value::Text(algorithm(algid).to_string())));
-            fields.push(("key_id".to_string(), Value::Int(i64::from(kid))));
-        }
-    }
-    if flags & FLAG_ENCRYPTED != 0 {
-        fields.push(("encrypted".to_string(), Value::Bool(true)));
-    }
-    if duid.voice() {
-        fields.push(("voice".to_string(), Value::Bool(true)));
-        fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
-        fields.push(("seconds".to_string(), Value::Float(VOICE_SECONDS)));
-        fields.push(("live".to_string(), Value::Bool(true)));
-    }
-
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(duid.label(), center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4)
-        // The network identifier passed its BCH and, on a voice frame, the
-        // words passed Hamming and Reed-Solomon; nothing reaches here that
-        // did not.
-        .with_crc(Some(true));
-    if flags & FLAG_HAVE_LC != 0 {
-        use common::Party;
-        let to = if flags & FLAG_GROUP != 0 {
-            Party::group(dst.to_string())
-        } else {
-            Party::unit(dst.to_string())
-        };
-        d.link = Some(common::Link::between(Party::unit(src.to_string()), to));
-        d.identity = Some(common::Identity::new("p25", src.to_string()));
-    }
-    if duid.voice() {
-        d.airtime = Some(common::Airtime {
-            seconds: VOICE_SECONDS,
-            voice: true,
-            live: true,
-            secrecy: if flags & FLAG_ENCRYPTED != 0 {
-                common::Secrecy::Encrypted(None)
-            } else {
-                common::Secrecy::Clear
-            },
-            codec: Some(CODEC),
-        });
-    }
-    Some(d)
+    Some(p)
 }
 
 /// Speech is IMBE at 4400 bit/s under 2800 of FEC, and P25 phase 1 has no

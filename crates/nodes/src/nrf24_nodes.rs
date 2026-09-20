@@ -34,14 +34,13 @@ use common::Result;
 use decode::nrf24;
 pub use decode::nrf24::BAND;
 pub use decode::nrf24::channel_of;
-pub use decode::nrf24::decoded;
+pub use decode::nrf24::read;
 pub use decode::nrf24::{KEEP_BITS, MAX_FRAME_BITS, SPS};
 use dsp::{FirDecim, Mixer};
 use identify::Signal;
 pub use identify::nrf24::CHANNEL_WIDTH_HZ;
 pub use identify::nrf24::Nrf24;
 pub use identify::nrf24::WORK_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -122,7 +121,7 @@ impl Simple for Nrf24Node {
         // read out.
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.01);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -143,10 +142,10 @@ impl Simple for Nrf24Node {
         }
         self.narrow = narrow;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for (_at, p) in &found {
             self.accepted += 1;
-            out.push(self.meter.frame(p.on_air()));
+            out.push(self.meter.packet_now(p.on_air()));
         }
         Ok(())
     }
@@ -192,12 +191,13 @@ impl Protocol for Nrf24 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         match channel_of(hz) {
@@ -253,12 +253,12 @@ mod tests {
         let mut frames = Vec::new();
         for block in iq.chunks(8192) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         frames
@@ -289,14 +289,10 @@ mod tests {
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "{baud} baud: {} frames", frames.len());
 
-            let d = decoded(&frames[0], Hz(channel as u64)).expect("a decode");
-            assert_eq!(d.protocol, "XN297");
-            assert_eq!(d.crc_ok, Some(true));
-            assert!(!d.written, "a remote is a machine talking about itself");
-            let detail = d.detail.as_deref().unwrap();
-            assert!(detail.contains("address=a403551122"), "{detail}");
-            assert!(detail.contains("payload_len=15"), "{detail}");
-            assert!(detail.contains("channel=42"), "{detail}");
+            let d = read(&frames[0]).expect("a decode");
+            assert_eq!((d.id, d.kind), ("nrf24", "packet"));
+            assert!(d.wrote().is_none(), "a remote is a machine talking about itself");
+            assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("a403551122"));
         }
     }
 

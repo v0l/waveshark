@@ -15,7 +15,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::acars;
-pub use decode::acars::decoded;
+pub use decode::acars::read;
 use dsp::msk::{MskConfig, MskDemod};
 use dsp::{AmDemod, FirDecim, Mixer};
 use identify::Signal;
@@ -23,7 +23,6 @@ pub use identify::acars::Acars;
 pub use identify::acars::CHANNEL_WIDTH_HZ;
 pub use identify::acars::DEFAULT_HZ;
 pub use identify::acars::{AUDIO_HZ, CARRIER_TRACK_HZ};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -100,7 +99,7 @@ impl Simple for AcarsNode {
         // megahertz of band is a fraction of a percent of the power.
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -123,10 +122,10 @@ impl Simple for AcarsNode {
         self.framer.process(&bits, &mut self.blocks);
         self.bits = bits;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for b in &self.blocks {
             self.accepted += 1;
-            out.push(self.meter.frame(b.clone()));
+            out.push(self.meter.packet_now(b.clone()));
         }
         Ok(())
     }
@@ -164,12 +163,13 @@ impl Protocol for Acars {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 8_000_000 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !(129e6..137e6).contains(&(p.center_hz() as f64)) {
             return None;
         }
         let m = acars::parse(bytes)?;
-        Some(vec![decoded(&m, bytes, common::Hz(p.center_hz()))])
+        Some(vec![read(&m)])
     }
 
     fn stage_label(&self, hz: f64) -> String {
@@ -206,7 +206,7 @@ mod tests {
         assert!(n.negotiate(&far).is_err());
         let near = PortSpec { spec: StreamSpec::iq(250_000.0, Hz(131_700_000)), latency: 0 };
         let out = n.negotiate(&near).expect("a channel in the span");
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(131_725_000));
     }
 
@@ -214,11 +214,14 @@ mod tests {
     fn a_block_becomes_a_row_naming_the_aircraft() {
         let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
         let m = acars::parse(block).expect("a message");
-        let d = decoded(&m, block, Hz(131_725_000));
-        assert_eq!(d.protocol, "ACARS-Downlink");
-        assert_eq!(d.crc_ok, Some(true));
-        let detail = d.detail.clone().unwrap_or_default();
-        assert!(detail.contains("registration=EI-DEO"), "{detail}");
-        assert!(detail.contains("flight=EIN123"), "{detail}");
+        let d = read(&m);
+        assert_eq!((d.id, d.kind), ("acars", "downlink"));
+        // The aircraft, by the registration the block carries and the flight
+        // it was operating.
+        let who = d.subject.as_ref().expect("the aircraft");
+        assert_eq!(who.id.to_string(), "EI-DEO");
+        assert_eq!(who.name.as_deref(), Some("EIN123"));
+        // The box sent it, not the crew, so nobody wrote anything.
+        assert!(d.wrote().is_none());
     }
 }

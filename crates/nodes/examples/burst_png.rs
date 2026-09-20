@@ -24,12 +24,11 @@ fn main() {
     for b in iq.chunks(16_384) {
         g.feed_iq(b).unwrap();
         for p in g.output().as_packets().unwrap_or(&[]) {
-            if let (common::PacketBody::Frame(f), Some(q)) = (&p.body, &p.iq) {
-                if decode::lora::decoded(&f.bytes, common::Hz(p.center_hz())).is_some()
-                    && burst.is_none()
-                {
-                    burst = Some(q.clone());
-                }
+            if let Some(q) = &p.carrier.iq
+                && decode::lora::read(p.bytes()).is_some()
+                && burst.is_none()
+            {
+                burst = Some(q.clone());
             }
         }
     }

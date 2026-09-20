@@ -160,6 +160,23 @@ impl Package {
     }
 }
 
+/// Histogram of mark widths in a burst, bucketed to `tol_us`
+pub fn mark_histogram(pulses: &[Pulse], tol_us: u32) -> Vec<(u32, usize)> {
+    histogram(pulses.iter().map(|p| p.mark), tol_us)
+}
+
+/// The same for gaps, less the trailing timeout that ended the burst
+pub fn gap_histogram(pulses: &[Pulse], tol_us: u32) -> Vec<(u32, usize)> {
+    let n = pulses.len().saturating_sub(1);
+    histogram(pulses[..n].iter().map(|p| p.gap), tol_us)
+}
+
+/// On-air duration of a burst in microseconds, less the trailing timeout
+pub fn duration_us(pulses: &[Pulse]) -> u64 {
+    pulses.iter().map(|p| p.mark as u64 + p.gap as u64).sum::<u64>()
+        - pulses.last().map(|p| p.gap as u64).unwrap_or(0)
+}
+
 fn histogram(vals: impl Iterator<Item = u32>, tol_us: u32) -> Vec<(u32, usize)> {
     let mut buckets: Vec<(u32, usize, u64)> = Vec::new();
     for v in vals {
@@ -452,6 +469,13 @@ pub struct Voice {
     /// ways. It says which group is using the channel, which for most
     /// analogue traffic is the only identity there is.
     pub code: Option<String>,
+    /// What the system says about the transmission itself, where it says
+    /// anything: the vocoder it is in, what protects it, and whether it is
+    /// still running. Stated once, here, because this is where the audio it
+    /// is about already travels; a copy on the packet was a second place to
+    /// look for who was talking, and the two disagreed the moment either was
+    /// filled in by a fallback.
+    pub over: Option<Over>,
     pub rate: f64,
     /// How many channels `pcm` interleaves. One for every codec; a
     /// broadcast in stereo keeps its sides through the bus.
@@ -459,6 +483,67 @@ pub struct Voice {
     /// Decoded in the last block. Empty when the channel is idle, which is
     /// still worth reporting: it says the front end is there and listening.
     pub pcm: Vec<f32>,
+}
+
+/// What the system says about a transmission in progress.
+///
+/// Only a decoder can say any of it: a destination alone is not a call, or
+/// every short data message would be one. `seconds` is what this block adds
+/// to the over rather than the whole of it, so anything counting airtime adds
+/// blocks up and nothing has to wait for the end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Over {
+    /// The vocoder the speech is in, as the front end names it: "AMBE+2
+    /// 2450", "Codec 2 3200", "ACELP 4.6k"
+    pub codec: Option<&'static str>,
+    pub secrecy: crate::Secrecy,
+    pub phase: Phase,
+    /// Seconds of the channel this block accounts for, where the system
+    /// counts them rather than the audio: a P25 voice frame is 180 ms of the
+    /// channel whether or not anything here can decode the speech in it, and
+    /// a call list that waited for audio would show nothing at all on a
+    /// network whose vocoder is not built in.
+    pub seconds: f64,
+}
+
+/// Where a transmission is in its life, as the system said.
+///
+/// The end is the terminator the transmitter sent, which is the only end that
+/// is not a guess: a call list that closed a row on silence closed it every
+/// time the talker drew breath.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Phase {
+    Started,
+    #[default]
+    Running,
+    Ended,
+}
+
+impl Over {
+    pub fn new(codec: Option<&'static str>) -> Self {
+        Self { codec, secrecy: crate::Secrecy::Unsaid, phase: Phase::Running, seconds: 0.0 }
+    }
+
+    pub fn protected_by(mut self, secrecy: crate::Secrecy) -> Self {
+        self.secrecy = secrecy;
+        self
+    }
+
+    /// How much of the channel this block is, where the system counts it
+    pub fn lasting(mut self, seconds: f64) -> Self {
+        self.seconds = seconds;
+        self
+    }
+
+    pub fn at(mut self, phase: Phase) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    /// Whether there is any point listening to it
+    pub fn encrypted(&self) -> bool {
+        self.secrecy.encrypted()
+    }
 }
 
 impl Voice {

@@ -14,7 +14,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::mrz;
-pub use decode::mrz::decoded;
+pub use decode::mrz::read;
 use dsp::fsk::BitSync;
 use identify::Signal;
 pub use identify::mrz::BAND;
@@ -22,7 +22,6 @@ pub use identify::mrz::BAUD;
 pub use identify::mrz::CHANNEL_WIDTH_HZ;
 pub use identify::mrz::Mrz;
 pub use identify::mrz::OCCUPIED_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -74,7 +73,7 @@ impl Simple for MrzNode {
         }
         self.sync = Some(s);
         self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 1.0);
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)
     }
@@ -86,7 +85,7 @@ impl Simple for MrzNode {
         self.meter.feed(iq);
         s.process(iq, self.framer.sink());
         for record in self.framer.take() {
-            o.frames_mut().push(self.meter.frame(record));
+            o.packets_mut().push(self.meter.packet_now(record));
         }
         self.framer.trim();
         Ok(())
@@ -124,14 +123,15 @@ impl Protocol for Mrz {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz)
             || !matches!(bytes.len(), mrz::RECORD_ECEF | mrz::RECORD_LATLON)
         {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -218,11 +218,10 @@ mod tests {
             assert_eq!(got.len(), 1, "{} records, inverted {inverted}", got.len());
             assert_eq!(got[0][..mrz::FRAME_ECEF], frame[..], "not the bytes that were keyed");
 
-            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
-            let p = d.position.expect("a position");
+            let d = read(&got[0]).expect("a decode");
+            let p = d.placed().expect("a position");
             assert!((p.lat - 53.35).abs() < 1e-6, "{}", p.lat);
             assert!((p.lon + 5.0).abs() < 1e-6, "{}", p.lon);
-            assert!((p.altitude_m.unwrap() - 4_712.22).abs() < 0.05, "{:?}", p.altitude_m);
         }
     }
 

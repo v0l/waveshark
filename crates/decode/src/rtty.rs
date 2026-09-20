@@ -13,7 +13,7 @@
 //! national use. A station keying international ITA2 differs in those eight
 //! positions alone.
 
-use common::Decoded;
+use common::packet::{Fact, Proto};
 use std::fmt;
 use std::str::FromStr;
 
@@ -273,28 +273,16 @@ pub fn line(codes: &[u8], stop: Stop, per_bit: usize) -> Vec<bool> {
     out
 }
 
-/// What a run of codes off the bus becomes: one row, the text a teleprinter
-/// would have printed.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What was typed.
+///
+/// An operator typed it and sent it to whoever was listening, so it belongs
+/// beside anything else somebody wrote rather than with the machines.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let text = text(bytes);
     if text.trim().is_empty() {
         return None;
     }
-    let fields = vec![
-        ("characters".into(), common::Value::Int(bytes.len() as i64)),
-        ("message".into(), common::Value::Text(text.clone())),
-    ];
-    Some(
-        Decoded::bytes("RTTY", center, 0.0, bytes.to_vec())
-            .with_modulation(common::Modulation::Fsk2)
-            .with_detail(format!("{} characters", bytes.len()))
-            .with_fields(fields)
-            // An operator typed it and sent it to whoever was listening, so
-            // it belongs in the message view beside anything else somebody
-            // wrote, rather than in the packet list with the machines.
-            .written()
-            .with_text(text),
-    )
+    Some(Proto::new("rtty", "text").saying(Fact::message(text)))
 }
 
 /// Symbol times with no character framed either way up before a run is

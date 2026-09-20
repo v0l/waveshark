@@ -30,11 +30,12 @@
 //! margin of the samples either side, which is also what the pulse layer needs
 //! to place the gap that ends a package.
 
-use crate::c4fm::{C4fmConfig, C4fmDetector, SymbolBurst};
+use crate::c4fm::{C4fmConfig, C4fmDetector};
 use crate::classify::{BurstClass, Classifier, ClassifyConfig, Modulation};
-use crate::pulse::{LevelGate, Package};
+use crate::pulse::LevelGate;
 use crate::{AskConfig, AskDetector, FskConfig, FskDetector, OokDetector, PulseConfig};
 use common::C32;
+use common::packet::Detection;
 use std::collections::VecDeque;
 
 /// The widest channel the pulse front ends inside the router read.
@@ -123,11 +124,9 @@ pub struct RoutedBurst {
     /// Which front ends ran. Two of them means the classifier refused and the
     /// burst was tried both ways.
     pub routed_to: common::FrontEnd,
-    /// Mark and gap timings, for the bursts that went to an amplitude or
-    /// two-level front end.
-    pub packages: Vec<Package>,
-    /// Four-level symbols, for the bursts that went to [`C4fmDetector`].
-    pub symbols: Vec<SymbolBurst>,
+    /// What a front end read off the burst, for the ones that went to an
+    /// amplitude or two-level detector.
+    pub detections: Vec<Detection>,
     pub start_sample: u64,
     /// The burst as it was read: the margin before it, the burst, and the
     /// margin after, at the router's rate.
@@ -182,7 +181,7 @@ impl BurstRouter {
         let margin = ((cfg.margin_us as f64 * rate / 1e6) as usize).max(1);
         // The burst is the package. Whatever gap the gate held across is the
         // gap the front end must hold across too: letting it end a package
-        // earlier splits a transmission's repeats into separate packages, and
+        // earlier splits a transmission's repeats into separate bursts, and
         // nothing downstream can tell those from separate transmissions. The
         // Fine Offset stations make the point, sending the same frame three
         // times with 8 ms between repeats.
@@ -303,8 +302,8 @@ impl BurstRouter {
         let class = self.classifier.classify(&burst);
         self.stats.bursts += 1;
 
-        let mut packages = Vec::new();
-        let mut symbols = Vec::new();
+        let mut detections = Vec::new();
+
         let readable = burst.len() <= self.cfg.max_pulse_samples;
         let routed_to = match class.modulation {
             _ if !readable => {
@@ -313,17 +312,17 @@ impl BurstRouter {
             }
             Modulation::Ook => {
                 self.stats.to_ook += 1;
-                self.run_ook(&burst, class.features.baud, &mut packages);
+                self.run_ook(&burst, class.features.baud, &mut detections);
                 common::FrontEnd::Ook
             }
             Modulation::Ask => {
                 self.stats.to_ask += 1;
-                self.run_ask(&burst, &mut packages);
+                self.run_ask(&burst, &mut detections);
                 common::FrontEnd::Ask
             }
             Modulation::Fsk2 | Modulation::Msk => {
                 self.stats.to_fsk += 1;
-                self.run_fsk(&burst, &mut packages);
+                self.run_fsk(&burst, &mut detections);
                 common::FrontEnd::Fsk
             }
             Modulation::Fsk4 => {
@@ -336,14 +335,14 @@ impl BurstRouter {
                     cfg.baud = class.features.baud as f64;
                 }
                 let mut det = C4fmDetector::new(self.rate, cfg);
-                det.process(&burst, &mut symbols);
-                det.flush(&mut symbols);
+                det.process(&burst, &mut detections);
+                det.flush(&mut detections);
                 common::FrontEnd::C4fm
             }
             Modulation::Unknown => {
                 self.stats.refused += 1;
-                self.run_ook(&burst, class.features.baud, &mut packages);
-                self.run_fsk(&burst, &mut packages);
+                self.run_ook(&burst, class.features.baud, &mut detections);
+                self.run_fsk(&burst, &mut detections);
                 common::FrontEnd::OokFsk
             }
             _ => {
@@ -355,15 +354,14 @@ impl BurstRouter {
         out.push(RoutedBurst {
             class,
             routed_to,
-            packages,
-            symbols,
+            detections,
             start_sample: self.burst_start,
             iq: burst,
             continuous,
         });
     }
 
-    fn run_ook(&mut self, burst: &[C32], baud: f32, out: &mut Vec<Package>) {
+    fn run_ook(&mut self, burst: &[C32], baud: f32, out: &mut Vec<Detection>) {
         self.env.clear();
         self.env.extend(burst.iter().map(|c| c.norm()));
         let mut det = OokDetector::new(self.rate, self.ook_config(baud));
@@ -373,7 +371,7 @@ impl BurstRouter {
         Self::stamp(&mut out[from..], self.burst_start, common::Modulation::Ook);
     }
 
-    fn run_ask(&mut self, burst: &[C32], out: &mut Vec<Package>) {
+    fn run_ask(&mut self, burst: &[C32], out: &mut Vec<Detection>) {
         self.env.clear();
         self.env.extend(burst.iter().map(|c| c.norm()));
         let mut det = AskDetector::new(self.rate, self.cfg.ask);
@@ -383,7 +381,7 @@ impl BurstRouter {
         Self::stamp(&mut out[from..], self.burst_start, common::Modulation::Ask);
     }
 
-    fn run_fsk(&mut self, burst: &[C32], out: &mut Vec<Package>) {
+    fn run_fsk(&mut self, burst: &[C32], out: &mut Vec<Detection>) {
         let mut det = FskDetector::new(self.rate, self.cfg.fsk);
         let from = out.len();
         det.process(burst, out);
@@ -413,18 +411,18 @@ impl BurstRouter {
         cfg
     }
 
-    /// Put the package back on the stream's own timeline, and record which
+    /// Put a detection back on the stream's own timeline, and record which
     /// front end read it.
     ///
     /// Each front end sees one burst starting at sample zero, so its idea of
     /// when the burst happened is an offset into a buffer nothing downstream
     /// has ever seen. The modulation is stamped per front end rather than from
     /// the classification, so that a refused burst tried both ways still says
-    /// which of the two produced the package.
-    fn stamp(pkgs: &mut [Package], start: u64, modulation: common::Modulation) {
-        for p in pkgs.iter_mut() {
-            p.start_sample += start;
-            p.modulation = Some(modulation);
+    /// which of the two read it.
+    fn stamp(found: &mut [Detection], start: u64, modulation: common::Modulation) {
+        for d in found.iter_mut() {
+            d.at_sample += start;
+            d.keying.modulation = modulation;
         }
     }
 }
@@ -518,7 +516,7 @@ mod tests {
             "class was {:?}",
             bursts[0].class.modulation
         );
-        assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
+        assert!(!bursts[0].detections.is_empty(), "the front end produced no packages");
         assert_eq!(r.take_stats().to_ook, 1);
     }
 
@@ -532,7 +530,7 @@ mod tests {
         let (bursts, _) = route(&ook_burst(&pattern(400), 30));
         assert_eq!(bursts.len(), 1);
         let marks: Vec<u32> =
-            bursts[0].packages.iter().flat_map(|p| p.pulses.iter()).map(|p| p.mark).collect();
+            bursts[0].detections.iter().flat_map(|p| p.pulses().iter()).map(|p| p.mark).collect();
         assert!(marks.len() >= 80, "only {} pulses, marks {marks:?}", marks.len());
         assert!(
             marks.iter().all(|m| *m <= 200),
@@ -565,7 +563,7 @@ mod tests {
             "class was {:?}",
             bursts[0].class.modulation
         );
-        assert!(!bursts[0].packages.is_empty(), "the front end produced no packages");
+        assert!(!bursts[0].detections.is_empty(), "the front end produced no packages");
         let s = r.take_stats();
         assert_eq!((s.to_fsk, s.to_ook), (1, 0));
     }
@@ -599,9 +597,9 @@ mod tests {
     fn the_package_lands_where_the_burst_did() {
         let lead = samples(20_000) as u64;
         let (bursts, _) = route(&ook_burst(&pattern(120), 500));
-        let p = &bursts[0].packages[0];
+        let p = &bursts[0].detections[0];
         // Within the margin of the leading silence, not at sample zero.
-        let from_start = p.start_sample as i64 - lead as i64;
+        let from_start = p.at_sample as i64 - lead as i64;
         assert!(
             from_start.abs() < samples(4_000) as i64,
             "package placed {from_start} samples from the burst"
@@ -640,6 +638,6 @@ mod tests {
         }
         split.flush(&mut got);
         assert_eq!(whole.len(), got.len());
-        assert_eq!(whole[0].packages, got[0].packages, "block splitting changed the packages");
+        assert_eq!(whole[0].detections, got[0].detections, "block splitting changed the packages");
     }
 }

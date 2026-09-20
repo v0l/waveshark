@@ -37,7 +37,8 @@
 //! memory bandwidth is wasted. Doing it once, in tiles, then handing each graph
 //! a contiguous run, is far cheaper than doing it lazily per channel.
 
-use common::{C32, Error, Hz, Package, Result};
+use common::packet::Detection;
+use common::{C32, Error, Hz, Result};
 use dsp::{Channelizer, Detector, DetectorConfig};
 use pipeline::event::Event;
 use pipeline::registry::Registry;
@@ -103,8 +104,11 @@ pub struct ChannelBank {
     ///
     /// The undecoded ones are the point: a burst nothing claimed is exactly
     /// what a log is for, and it is gone the moment the block is overwritten.
-    packages: Vec<Package>,
-    /// Which outputs of a channel's graph carry packages, discovered from the
+    /// What each channel read, with the channel it was read on: a bank
+    /// merges every channel onto one list, and a detection carries no
+    /// frequency of its own
+    detections: Vec<(Hz, Detection)>,
+    /// Which outputs of a channel's graph carry detections, discovered from the
     /// built chain rather than assumed, since a chain is free to be shaped
     /// however it likes as long as something in it detects bursts.
     ///
@@ -133,7 +137,7 @@ impl ChannelBank {
             gating: Gating::Always,
             idle_blocks: vec![u32::MAX; channels],
             out: Vec::new(),
-            packages: Vec::new(),
+            detections: Vec::new(),
             pulse_taps: Vec::new(),
         }
     }
@@ -337,7 +341,7 @@ impl ChannelBank {
         let idle_blocks = &self.idle_blocks;
         let lanes = &self.lanes;
         let taps = self.pulse_taps.clone();
-        let results: Vec<(usize, Vec<Event>, Vec<Package>)> = self
+        let results: Vec<(usize, Vec<Event>, Vec<Detection>)> = self
             .graphs
             .par_iter_mut()
             .enumerate()
@@ -358,7 +362,7 @@ impl ChannelBank {
                 // Read back what the front end detected, before the protocols
                 // had their say. A burst nothing recognised leaves no event at
                 // all, and it is the one worth keeping.
-                let pkgs: Vec<Package> = taps
+                let pkgs: Vec<Detection> = taps
                     .iter()
                     .filter_map(|t| g.buf(*t))
                     .filter_map(|p| p.as_pulses())
@@ -374,7 +378,7 @@ impl ChannelBank {
         // 5. Flatten, in channel order so output is deterministic regardless
         //    of how rayon happened to schedule the work.
         self.out.clear();
-        self.packages.clear();
+        self.detections.clear();
         let mut results = results;
         results.sort_by_key(|(c, _, _)| *c);
         for (c, evs, pkgs) in results {
@@ -382,14 +386,14 @@ impl ChannelBank {
             for e in evs {
                 self.out.push(ChannelEvent { channel: c, center, event: e });
             }
-            self.packages.extend(pkgs);
+            self.detections.extend(pkgs.into_iter().map(|d| (center, d)));
         }
         Ok(&self.out)
     }
 
     /// Every burst the last block detected, decoded or not.
-    pub fn packages(&self) -> &[Package] {
-        &self.packages
+    pub fn detections(&self) -> &[(Hz, Detection)] {
+        &self.detections
     }
 
     /// Channels with a burst in progress.
@@ -403,7 +407,7 @@ impl ChannelBank {
     }
 }
 
-/// Every output in a chain that carries packages.
+/// Every output in a chain that carries detections.
 fn pulse_taps(g: &Graph) -> Vec<Out> {
     g.order()
         .filter_map(|(id, _)| {

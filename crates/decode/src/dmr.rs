@@ -23,7 +23,7 @@
 //! The parity equations and the interleave constants are the ones in the
 //! standard; MMDVMHost implements the same ones and was used to check these.
 
-use common::Decoded;
+use common::packet::{Alert, AlertKind, Entity, Fact, Id, Link, Party, Proto, Severity};
 /// One link control message: who called whom.
 ///
 /// 72 bits, the same nine bytes whether it arrived in a header, a terminator
@@ -481,160 +481,71 @@ fn hamming_16_11(d: &mut [u8; 16]) -> bool {
     true
 }
 
-/// Recognise and describe a DMR row for the packet log. Returns `None` for
-/// anything this node did not write, so it is safe to try on every frame the
-/// way `m17_decoded` is.
+/// What a burst this node wrote says: who is talking to whom, and whether
+/// anything about it has to be told to somebody.
 ///
-/// A voice burst is `DMR-Voice`, 60 ms of the channel, `live` while the
-/// transmission runs; a header is the same with the over starting, and a
-/// terminator ends it. A row with a link control names its talkgroup and
-/// radio and says `voice`, which is what puts it in the call list rather
-/// than only in the log.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    if bytes.len() == OVER_LEN && bytes[..2] == OVER_TAG {
-        return over_decoded(bytes, center);
+/// How long the channel was held, which vocoder it is in and what protects it
+/// are the over, and the over is stated once on the voice port where the
+/// audio it is about already travels. `None` for anything this node did not
+/// write, so it is safe to try on every frame.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
+    let (kind, flags, dst, src) = match () {
+        _ if bytes.len() == OVER_LEN && bytes[..2] == OVER_TAG => (
+            "over",
+            bytes[6],
+            u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]),
+            u32::from_be_bytes([bytes[11], bytes[12], bytes[13], bytes[14]]),
+        ),
+        _ if bytes.len() == BODY_LEN && bytes[..2] == DMR_TAG => (
+            burst_kind(bytes),
+            bytes[4],
+            u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+            u32::from_be_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]),
+        ),
+        _ => return None,
+    };
+    let mut p = Proto::new("dmr", kind);
+    // The colour code tells two cells sharing a channel apart, which is the
+    // same statement a network access code and a radio access number make.
+    if bytes[..2] == DMR_TAG && bytes[3] != 0xff {
+        p = p.saying(Fact::Infrastructure(common::packet::Cell {
+            site_code: Some(u16::from(bytes[3])),
+            ..Default::default()
+        }));
     }
-    if bytes.len() != BODY_LEN || bytes[..2] != DMR_TAG {
-        return None;
-    }
-    let pos = bytes[2];
-    let colour = bytes[3];
-    let flags = bytes[4];
-    let dst = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
-    let src = u32::from_be_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]);
-    let bits = unpack_bits(&bytes[13..]);
-    let mut fields = Vec::new();
-    if colour != 0xff {
-        fields.push(("colour_code".to_string(), Value::Int(i64::from(colour))));
-    }
-    // Seconds of the channel this row is worth, and whether the over is
-    // still running: a header opens one, a burst is 60 ms of it, and a
-    // terminator is the over ending.
-    let mut airtime = (0.0, false);
-    let model = if pos == POS_DATA {
-        let mut slot = bits[98..108].to_vec();
-        slot.extend_from_slice(&bits[156..166]);
-        let dt = slot_type(&slot).map(|(_, dt)| dt);
-        match dt {
-            Some(DT_VOICE_LC_HEADER) => {
-                lc_fields(flags, dst, src, &mut fields);
-                fields.push(("live".to_string(), Value::Bool(true)));
-                airtime = (0.0, true);
-                "DMR-Header"
-            }
-            Some(DT_TERMINATOR_LC) => {
-                lc_fields(flags, dst, src, &mut fields);
-                "DMR-Terminator"
-            }
-            Some(dt) => {
-                fields.push(("data_type".to_string(), Value::Int(i64::from(dt))));
-                "DMR-Data"
-            }
-            None => "DMR-Data",
+    if flags & FLAG_HAVE_LC != 0 {
+        p = p.by(Entity::new("dmr", Id::Num(u64::from(src)))).between(Link::between(
+            Party::unit(src.to_string()),
+            match flags & FLAG_GROUP != 0 {
+                true => Party::group(dst.to_string()),
+                false => Party::unit(dst.to_string()),
+            },
+        ));
+        if flags & FLAG_EMERGENCY != 0 {
+            p = p.saying(Fact::Alert(Alert {
+                kind: AlertKind::Emergency,
+                severity: Severity::Immediate,
+                text: None,
+            }));
         }
-    } else {
-        // One burst is one 60 ms slot on this logical channel.
-        fields.push(("seconds".to_string(), Value::Float(0.06)));
-        fields.push(("burst".to_string(), Value::Text(((b'A' + pos.min(5)) as char).to_string())));
-        lc_fields(flags, dst, src, &mut fields);
-        fields.push(("live".to_string(), Value::Bool(true)));
-        airtime = (0.06, true);
-        "DMR-Voice"
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(model, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4);
-    d.link = lc_link(flags, dst, src);
-    if flags & FLAG_HAVE_LC != 0 {
-        d.identity = Some(common::Identity::new("dmr", src.to_string()));
     }
-    d.airtime = lc_airtime(flags, airtime.0, airtime.1);
-    Some(d)
+    Some(p)
 }
 
-/// The old one-row-per-over body, for logs written before bursts were logged.
-pub fn over_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
-    let bursts = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
-    let flags = bytes[6];
-    let dst = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
-    let src = u32::from_be_bytes([bytes[11], bytes[12], bytes[13], bytes[14]]);
-    let mut fields = vec![
-        ("seconds".to_string(), Value::Float(f64::from(bursts) * 0.06)),
-        ("bursts".to_string(), Value::Int(i64::from(bursts))),
-    ];
-    lc_fields(flags, dst, src, &mut fields);
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes("DMR-Voice", center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4);
-    d.link = lc_link(flags, dst, src);
-    if flags & FLAG_HAVE_LC != 0 {
-        d.identity = Some(common::Identity::new("dmr", src.to_string()));
+/// Which burst it is: a voice slot, or the data slot's own type.
+fn burst_kind(bytes: &[u8]) -> &'static str {
+    if bytes[2] != POS_DATA {
+        return "voice";
     }
-    d.airtime = lc_airtime(flags, f64::from(bursts) * 0.06, false);
-    Some(d)
-}
-
-/// What the link control says about the call itself: that it is speech, in
-/// which vocoder, and what protects it. The call list reads this rather than
-/// the fields beside it.
-pub fn lc_airtime(flags: u8, seconds: f64, live: bool) -> Option<common::Airtime> {
-    if flags & FLAG_HAVE_LC == 0 {
-        return None;
+    let bits = unpack_bits(&bytes[13..]);
+    let mut slot = bits[98..108].to_vec();
+    slot.extend_from_slice(&bits[156..166]);
+    match slot_type(&slot).map(|(_, dt)| dt) {
+        Some(DT_VOICE_LC_HEADER) => "voice_header",
+        Some(DT_TERMINATOR_LC) => "terminator",
+        Some(DT_CSBK) => "csbk",
+        _ => "data",
     }
-    Some(common::Airtime {
-        seconds,
-        voice: true,
-        live,
-        secrecy: if flags & FLAG_ENCRYPTED != 0 {
-            common::Secrecy::Encrypted(Some(PRIVACY.into()))
-        } else {
-            common::Secrecy::Clear
-        },
-        codec: Some(CODEC),
-    })
-}
-
-pub fn lc_fields(flags: u8, dst: u32, src: u32, fields: &mut Vec<(String, common::Value)>) {
-    use common::Value;
-    if flags & FLAG_HAVE_LC == 0 {
-        return;
-    }
-    let group = flags & FLAG_GROUP != 0;
-    fields.push(("voice".to_string(), Value::Bool(true)));
-    fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
-    fields.push(("to".to_string(), Value::Text(dst.to_string())));
-    fields.push(("from".to_string(), Value::Text(src.to_string())));
-    fields.push((
-        "call_type".to_string(),
-        Value::Text(if group { "group" } else { "private" }.to_string()),
-    ));
-    if flags & FLAG_ENCRYPTED != 0 {
-        fields.push(("encrypted".to_string(), Value::Bool(true)));
-        fields.push(("encryption".to_string(), Value::Text(PRIVACY.to_string())));
-    }
-    if flags & FLAG_EMERGENCY != 0 {
-        fields.push(("emergency".to_string(), Value::Bool(true)));
-    }
-}
-
-/// Who an over was between, from the same link control the fields come from.
-pub fn lc_link(flags: u8, dst: u32, src: u32) -> Option<common::Link> {
-    use common::Party;
-    if flags & FLAG_HAVE_LC == 0 {
-        return None;
-    }
-    let to = if flags & FLAG_GROUP != 0 {
-        Party::group(dst.to_string())
-    } else {
-        Party::unit(dst.to_string())
-    };
-    Some(common::Link::between(Party::unit(src.to_string()), to))
 }
 
 pub fn unpack_bits(bytes: &[u8]) -> Vec<u8> {

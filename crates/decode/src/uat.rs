@@ -10,7 +10,10 @@
 //! implementation every published UAT decode agrees with.
 
 use crate::rs::ReedSolomon;
-use common::Decoded;
+use common::packet::{
+    Alert, AlertKind, Entity, Fact, Fix, Id, Link, Motion, Named, Party, Proto, Quantity, Severity,
+    ThingKind,
+};
 use dsp::fsk::{SyncBurst, SyncPattern};
 
 /// 978 MHz, the one channel.
@@ -861,193 +864,107 @@ pub fn dlac(data: &[u8]) -> String {
     out
 }
 
-/// The rows a corrected UAT payload becomes: one for an aircraft, and for a
-/// ground station one for the station and one per product it sent.
-pub fn decoded(frame: &Frame, bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
+/// What a UAT frame says.
+pub fn read(frame: &Frame) -> Vec<Proto> {
     match frame {
-        Frame::Adsb(a) => vec![adsb_decoded(a, bytes, center)],
-        Frame::Uplink(u) => uplink_decoded(u, bytes, center),
+        Frame::Adsb(a) => vec![adsb_read(a)],
+        Frame::Uplink(u) => uplink_read(u),
     }
 }
 
-pub fn adsb_decoded(a: &Adsb, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
+/// What an aircraft on 978 MHz says about itself.
+///
+/// UAT sends the position outright, so there is nothing to pair up across
+/// frames the way 1090 MHz needs.
+pub fn adsb_read(a: &Adsb) -> Proto {
     let address = format!("{:06x}", a.address);
-    fields.push(("address".into(), Value::Text(address.clone())));
-    fields.push(("address_type".into(), Value::Text(a.qualifier.name().into())));
-
-    let mut position = None;
-    let mut altitude_ft = None;
-    let mut ground_speed_kt = None;
-    let mut track_deg = None;
-    let mut vertical_rate_fpm = None;
-    if let Some(sv) = &a.state {
-        if let Some((lat, lon)) = sv.position {
-            fields.push(("lat".into(), Value::Float(round5(lat))));
-            fields.push(("lon".into(), Value::Float(round5(lon))));
-        }
-        if let Some(alt) = sv.altitude_ft {
-            altitude_ft = Some(alt);
-            fields.push(("altitude_ft".into(), Value::Int(i64::from(alt))));
-        }
-        if let Some(src) = sv.altitude_source {
-            fields.push(("altitude_source".into(), Value::Text(src.name().into())));
-        }
-        if let Some(v) = sv.ground_speed_kt {
-            ground_speed_kt = Some(v);
-            fields.push(("ground_speed_kt".into(), Value::Float(round1(v))));
-        }
-        if let (Some(d), Some(k)) = (sv.track_deg, sv.track_kind) {
-            track_deg = Some(d);
-            fields.push((k.name().replace(' ', "_"), Value::Float(round1(d))));
-        }
-        if let Some(v) = sv.vertical_rate_fpm {
-            vertical_rate_fpm = Some(v);
-            fields.push(("vertical_rate_fpm".into(), Value::Int(i64::from(v))));
-        }
-        fields.push(("nic".into(), Value::Int(i64::from(sv.nic))));
-        position = sv.position.map(|(lat, lon)| common::Position {
-            lat,
-            lon,
-            altitude_m: sv.altitude_ft.map(|ft| f64::from(ft) * 0.3048),
-            speed_kt: sv.ground_speed_kt,
-            course_deg: sv.track_deg,
-        });
-    }
-
-    let mut name = None;
-    if let Some(ms) = &a.status {
-        if let Some(cs) = &ms.callsign {
-            let key = if ms.callsign_is_squawk { "squawk" } else { "callsign" };
-            if !ms.callsign_is_squawk {
-                name = Some(cs.clone());
-            }
-            fields.push((key.into(), Value::Text(cs.clone())));
-        }
-        fields.push(("emitter".into(), Value::Text(ms.emitter.name().into())));
-        if ms.emergency != Emergency::None {
-            fields.push(("emergency".into(), Value::Text(ms.emergency.name().into())));
-        }
-        if ms.ident_active {
-            fields.push(("ident".into(), Value::Bool(true)));
-        }
-    }
-    if let Some(alt) = a.secondary_altitude_ft {
-        fields.push(("secondary_altitude_ft".into(), Value::Int(i64::from(alt))));
-    }
-
-    // Named for what the frame says, not for its type code: a frame with a
-    // position is a position report whichever of the eleven forms carried it.
-    let protocol = match (position.is_some(), a.qualifier) {
-        (_, AddressQualifier::IcaoTisb | AddressQualifier::TisbTrackFile) => "UAT-TISB",
-        (true, _) => "UAT-Position",
-        (false, _) => "UAT-Status",
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk2)
-        // Every frame here corrected under its Reed-Solomon code, which is a
-        // real integrity check.
-        .with_crc(Some(true))
-        .reporting(common::ReportDetail::Aircraft {
-            altitude_ft,
-            ground_speed_kt,
-            track_deg,
-            vertical_rate_fpm,
-            squawk: None,
-            wind: None,
-            temp_c: None,
-            // UAT sends the position itself: nothing to pair up across
-            // frames the way 1090 MHz needs.
-            cpr: None,
-        });
-    d.position = position;
+    let mut p = Proto::new("uat", kind_of(a));
     // A track file number is the ground station's bookkeeping and not an
     // address, so it names nobody.
     if a.qualifier.is_icao() || a.qualifier == AddressQualifier::Vehicle {
-        d.link = Some(common::Link::beacon(common::Party::unit(address.clone())));
-        let mut who = common::Identity::new("uat", address);
-        who.name = name;
-        d.identity = Some(who);
+        p = p
+            .by(Entity::new("uat", Id::Hex(u64::from(a.address))))
+            .between(Link::beacon(Party::unit(address)));
     }
-    d
+    if let Some(sv) = &a.state {
+        if let Some((lat, lon)) = sv.position {
+            p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: None }));
+        }
+        p = p.saying(Fact::Motion(Motion {
+            speed_kt: sv.ground_speed_kt,
+            course_deg: sv.track_deg,
+            climb_ms: sv.vertical_rate_fpm.map(|v| f64::from(v) * 0.00508),
+            heading_deg: None,
+        }));
+        if let Some(ft) = sv.altitude_ft {
+            p = p.saying(Fact::sensed(
+                Quantity::Altitude,
+                f64::from(ft) * 0.3048,
+                common::Unit::Metre,
+            ));
+        }
+    }
+    if let Some(ms) = &a.status {
+        if let Some(cs) = ms.callsign.clone().filter(|_| !ms.callsign_is_squawk) {
+            p = p.saying(Fact::Named(Named::new(cs.clone(), ThingKind::Aircraft)));
+            if let Some(e) = p.subject.as_mut() {
+                e.name = Some(cs);
+            }
+        }
+        if ms.emergency != Emergency::None {
+            p = p.saying(Fact::Alert(Alert {
+                kind: AlertKind::Emergency,
+                severity: Severity::Immediate,
+                text: Some(ms.emergency.name().into()),
+            }));
+        }
+    }
+    p
 }
 
-pub fn uplink_decoded(u: &Uplink, bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    if let Some((lat, lon)) = u.position {
-        fields.push(("lat".into(), Value::Float(round5(lat))));
-        fields.push(("lon".into(), Value::Float(round5(lon))));
+/// Named for what the frame says, not for its type code: a frame with a
+/// position is a position report whichever of the eleven forms carried it.
+fn kind_of(a: &Adsb) -> &'static str {
+    let placed = a.state.as_ref().is_some_and(|s| s.position.is_some());
+    match (placed, a.qualifier) {
+        (_, AddressQualifier::IcaoTisb | AddressQualifier::TisbTrackFile) => "tisb",
+        (true, _) => "position",
+        (false, _) => "status",
     }
-    fields.push(("position_valid".into(), Value::Bool(u.position_valid)));
-    fields.push(("slot".into(), Value::Int(i64::from(u.slot_id))));
-    fields.push(("tisb_site".into(), Value::Int(i64::from(u.tisb_site_id))));
-    fields.push(("frames".into(), Value::Int(u.frames.len() as i64)));
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+}
+
+/// What a ground station's uplink says: where the station is, and the weather
+/// products it is broadcasting.
+pub fn uplink_read(u: &Uplink) -> Vec<Proto> {
     let station = format!("gs{:02}", u.tisb_site_id);
-    let mut d = Decoded::bytes("UAT-Uplink", center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .reporting(common::ReportDetail::Station { aid: false });
+    let mut p = Proto::new("uat", "uplink")
+        .by(Entity::new("uat-gs", Id::Text(station.clone())))
+        .saying(Fact::Named(Named::new(station, ThingKind::Station).fixed()));
     // The station vouches for its own position, so a doubtful one is not
     // plotted.
-    if u.position_valid {
-        d.position =
-            u.position.map(|(lat, lon)| common::Position { lat, lon, ..Default::default() });
+    if u.position_valid
+        && let Some((lat, lon)) = u.position
+    {
+        p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: None }));
     }
-    d.identity = Some(common::Identity::new("uat-gs", station));
-    let mut out = vec![d];
-    out.extend(u.frames.iter().filter_map(|f| product_decoded(f, center)));
+    let mut out = vec![p];
+    out.extend(u.frames.iter().filter_map(product_read));
     out
 }
 
-pub fn product_decoded(f: &InfoFrame, center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// What a broadcast product says.
+///
+/// A weather report a machine composed and broadcast to everybody in range:
+/// nobody wrote it and it is addressed to nobody, so it is a warning and
+/// never a message.
+pub fn product_read(f: &InfoFrame) -> Option<Proto> {
     let fisb = f.fisb.as_ref()?;
-    let mut fields: Vec<(String, Value)> = vec![
-        ("product".into(), Value::Text(product_name(fisb.product_id).into())),
-        ("product_id".into(), Value::Int(i64::from(fisb.product_id))),
-        ("format".into(), Value::Text(fisb.format.name().into())),
-        (
-            "issued".into(),
-            Value::Text(match (fisb.month_day, fisb.seconds) {
-                (Some((m, day)), Some(s)) => {
-                    format!("{m:02}-{day:02} {:02}:{:02}:{s:02}", fisb.hours, fisb.minutes)
-                }
-                (Some((m, day)), None) => {
-                    format!("{m:02}-{day:02} {:02}:{:02}", fisb.hours, fisb.minutes)
-                }
-                (None, Some(s)) => format!("{:02}:{:02}:{s:02}", fisb.hours, fisb.minutes),
-                (None, None) => format!("{:02}:{:02}", fisb.hours, fisb.minutes),
-            }),
-        ),
-        ("bytes".into(), Value::Int(fisb.data.len() as i64)),
-    ];
     let text = fisb.text.as_ref().map(|t| t.trim_end().to_string()).filter(|t| !t.is_empty());
-    if let Some(t) = &text {
-        fields.push(("text".into(), Value::Text(t.clone())));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes("FISB", center, 0.0, fisb.data.clone())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true));
-    if let Some(t) = text {
-        d.media_type = common::media::TEXT;
-        d.text = Some(t);
-        // A weather report a machine composed and broadcast to everybody in
-        // range. Nobody wrote it and it is addressed to nobody, so it
-        // belongs in the packet list and not in the messages.
-        d.written = false;
-    }
-    Some(d)
+    Some(Proto::new("fisb", "product").saying(Fact::Alert(Alert {
+        kind: AlertKind::Weather,
+        severity: Severity::Advisory,
+        text,
+    })))
 }
 
 pub fn round1(v: f64) -> f64 {

@@ -43,11 +43,10 @@ use common::Result;
 use decode::ble as pdu;
 pub use decode::ble::CHANNEL_WIDTH_HZ;
 pub use decode::ble::channel_of;
-pub use decode::ble::decoded;
+pub use decode::ble::read;
 use dsp::ble::{ADV_CHANNELS, BleConfig, BleDetector, BleFrame};
 use identify::Signal;
 pub use identify::ble::Ble;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -133,7 +132,7 @@ impl Simple for BleNode {
         self.det = det;
         self.meter = crate::FrameMeter::new(rate, hz as u64, 0.002);
         self.rate = rate;
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -144,7 +143,7 @@ impl Simple for BleNode {
         self.meter.feed(iq);
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             self.accepted += 1;
             // The detector measured this burst against the floor either side
@@ -156,13 +155,30 @@ impl Simple for BleNode {
                 .find(|(c, _)| *c == f.channel)
                 .map(|(_, hz)| *hz as u64)
                 .unwrap_or(BAND_CENTER_HZ as u64);
-            let mut out_frame =
-                common::Frame::measured(f.pdu.clone(), f.rssi_dbfs, f.snr_db).at(hz);
             // A frame is 8 preamble bits plus the PDU at one bit a
             // microsecond, with room either side for the ramp.
             let len = ((f.pdu.len() + 12) * 8) as f64 * 1e-6 * self.meter_rate();
-            out_frame.iq = self.meter.iq_at(f.start_sample, len as usize);
-            out.push(out_frame);
+            let held = (len / self.meter_rate() * 1e6) as u32;
+            let carrier = common::packet::Carrier::heard(
+                common::packet::now_us(),
+                hz,
+                CHANNEL_WIDTH_HZ as u32,
+                f.rssi_dbfs,
+                f.snr_db,
+                common::SourceId(0),
+            )
+            .lasting(held);
+            let carrier = match self.meter.iq_at(f.start_sample, len as usize) {
+                Some(iq) => carrier.with_iq(iq),
+                None => carrier,
+            };
+            // The advertising CRC, checked against the channel's init word
+            // before the PDU got here: a packet that failed it was dropped.
+            out.push(
+                common::packet::Packet::heard(carrier)
+                    .framed(common::packet::Frame::of(f.pdu.clone()))
+                    .checked(common::packet::Integrity::Passed),
+            );
         }
         Ok(())
     }
@@ -250,7 +266,7 @@ impl Simple for BleTxNode {
             return Err(common::Error::other("ble_tx needs a clock to key against"));
         }
         self.rate = i.spec.rate;
-        let mut out = i.spec.with_kind(PortKind::Pulses);
+        let mut out = i.spec.with_kind(PortKind::Timings);
         out.flow = pipeline::port::Flow::Tx;
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -260,7 +276,7 @@ impl Simple for BleTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
+        o.timings_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 
@@ -352,11 +368,12 @@ impl Protocol for Ble {
     }
     /// An advertising channel is a frequency nothing else here transmits a
     /// frame from.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !is_advertising_channel(p.center_hz() as f64) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     /// It cuts its three advertising channels out of the span itself, rather
     /// than taking them from the bank the extractor channelizes the span
@@ -501,11 +518,11 @@ mod tests {
         let mut frames: Vec<Vec<u8>> = Vec::new();
         for block in [noise(20_000), air, noise(20_000)] {
             for chunk in block.chunks(8_192) {
-                let mut out = Payload::Frames(Vec::new());
+                let mut out = Payload::Packets(Vec::new());
                 let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
                 Simple::process(&mut rx, &Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).unwrap();
-                if let Payload::Frames(f) = out {
-                    frames.extend(f.into_iter().map(|x| x.bytes));
+                if let Payload::Packets(f) = out {
+                    frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
                 }
             }
         }
@@ -514,11 +531,11 @@ mod tests {
         assert_eq!(frames.len(), 3, "{} advertisements off the air", frames.len());
         assert_eq!(rx.accepted(), 3);
         assert_eq!(BleTxNode::default().pdu().len(), 22, "the PDU the stage builds");
-        let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
-        assert_eq!(d.protocol, "BLE-Adv");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("waveshark"), "{detail}");
-        assert!(detail.contains("C0:05:04:03:02:01"), "{detail}");
+        let d = read(&frames[0], Hz(center as u64)).expect("a decode");
+        assert_eq!(d.id, "ble");
+        let who = d.subject.as_ref().expect("the device that advertised");
+        assert_eq!(who.id.to_string(), "C0:05:04:03:02:01");
+        assert_eq!(who.name.as_deref(), Some("waveshark"));
     }
 
     /// An address is written most significant byte first and goes on the air
@@ -540,7 +557,7 @@ mod tests {
     fn frames_are_tagged_with_the_advertising_channel() {
         let mut n = BleNode::default();
         let out = n.negotiate(&spec(16_000_000.0, 2_430_000_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(2_426_000_000));
         assert_eq!(channel_of(out.center.as_f64()), Some(38));
     }
@@ -552,11 +569,17 @@ mod tests {
             0x4f, 0x64, 0x79, 0x73, 0x73, 0x65, 0x79, 0x20, 0x4f, 0x4c, 0x45, 0x44, 0x20, 0x47,
             0x39,
         ];
-        let d = decoded(&pdu, Hz(2_426_000_000)).expect("a decode");
-        assert_eq!(d.protocol, "BLE-Adv");
-        assert_eq!(d.crc_ok, Some(true));
-        assert!(d.detail.as_deref().unwrap().contains("6C:70:CB:EF:72:4D"));
-        assert!(d.detail.as_deref().unwrap().contains("channel=38"));
+        let d = read(&pdu, Hz(2_426_000_000)).expect("a decode");
+        assert_eq!(d.id, "ble");
+        assert_eq!(
+            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+            Some("6C:70:CB:EF:72:4D")
+        );
+        let ch = d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Channel(c) => Some(c.clone()),
+            _ => None,
+        });
+        assert_eq!(ch.map(|c| c.heard), Some(38));
     }
 
     /// An aircraft's broadcast is the same link layer carrying service data,
@@ -581,11 +604,12 @@ mod tests {
         pdu.extend_from_slice(&sd);
         pdu[1] = (pdu.len() - 2) as u8;
 
-        let d = decoded(&pdu, Hz(2_402_000_000)).expect("a decode");
-        assert_eq!(d.protocol, "OpenDroneID");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
-        assert!(detail.contains("ua_type=multirotor"), "{detail}");
-        assert!(detail.contains("66:55:44:33:22:11"), "{detail}");
+        let d = read(&pdu, Hz(2_402_000_000)).expect("a decode");
+        // Named for what it is rather than for the link layer it rode on.
+        assert_eq!(d.id, "opendroneid");
+        assert_eq!(
+            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+            Some("66:55:44:33:22:11")
+        );
     }
 }

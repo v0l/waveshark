@@ -18,7 +18,6 @@ use decode::bits::BitBuffer;
 use decode::script::{self, Scripted};
 use dsp::fsk::BitSync;
 use dsp::{FirDecim, Mixer};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -164,7 +163,7 @@ impl Simple for ScriptNode {
         self.bits.clear();
         self.dropped = 0;
         self.read_from = 0;
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = r.width_hz.min(rate);
         Ok(out)
@@ -185,11 +184,11 @@ impl Simple for ScriptNode {
             buf.push(*b);
         }
         let found = proto.frames(&buf);
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         let mut consumed = from;
         for (_at, end, r) in &found {
             self.accepted += 1;
-            out.push(self.meter.frame(r.raw.clone()));
+            out.push(self.meter.packet_now(r.raw.clone()));
             consumed = consumed.max(from + end);
         }
         self.read_from = self.dropped + consumed as u64;
@@ -251,21 +250,11 @@ impl ScriptedProtocol {
         Self { proto, id, widths }
     }
 
-    /// The row a frame off the bus becomes
-    fn decoded(&self, bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+    /// What a frame off the bus says, under this description
+    fn from_bytes(&self, bytes: &[u8]) -> Option<common::packet::Proto> {
         let frame = BitBuffer::from_bytes(bytes).slice(0, self.proto.desc().frame.bits);
         let r = self.proto.read(&frame).ok()?;
-        let mut d = Decoded::bytes(self.proto.name(), center, 0.0, bytes.to_vec())
-            .with_text(r.to_string())
-            .with_detail(r.fields_line())
-            .with_fields(r.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .with_types(r.types.iter().map(|(k, t)| (k.clone(), *t)).collect())
-            .with_modulation(common::Modulation::Fsk2)
-            .with_crc(r.proof.as_flag());
-        if let Some(id) = &r.device {
-            d = d.by(common::Identity::new(format!("ism:{}", r.model), id.clone()));
-        }
-        Some(d)
+        Some(decode::facts::proto_of(&r))
     }
 }
 
@@ -298,14 +287,15 @@ impl Protocol for ScriptedProtocol {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: self.widths[0] as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !self.placement().covers(hz, self.widths[0]) {
             return None;
         }
         // reading the bytes again is the claim: a frame of another
         // protocol in the same band fails the checks and is handed on
-        self.decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        self.from_bytes(bytes).map(|d| vec![d])
     }
     fn marks(&self, hz: f64) -> Vec<Mark> {
         vec![Mark { hz, width_hz: self.widths[0], label: self.proto.name().to_uppercase() }]
@@ -408,33 +398,36 @@ vectors:
         let mut node = ScriptNode::new(proto, 433_920_000.0);
         let ins = [PortSpec { spec: StreamSpec::iq(rate, Hz(center as u64)), latency: 0 }];
         let out = node.negotiate(&ins[0]).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         let tags = Vec::new();
         let mut frames = Vec::new();
         for block in air.chunks(8192) {
-            let mut o = Payload::Frames(Vec::new());
+            let mut o = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&Payload::Iq(block.to_vec()), &mut o, &mut ctx).unwrap();
-            if let Payload::Frames(f) = o {
+            if let Payload::Packets(f) = o {
                 frames.extend(f);
             }
         }
         assert_eq!(frames.len(), 1, "one frame off the air");
         assert_eq!(node.accepted(), 1);
-        assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
+        assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());
 
         let p = ScriptedProtocol::new(Scripted::new(script::Desc::parse(TEST_LINK).unwrap()));
-        let row = p.decoded(&frames[0].bytes, Hz(433_920_000)).expect("the frame reads back");
-        assert_eq!(row.field("temperature_c"), Some(&common::Value::Float(111.18)));
-        assert_eq!(row.field("battery_mv"), Some(&common::Value::Int(2906)));
-        assert_eq!(
-            row.field_type("temperature_c"),
-            Some(common::FieldType {
-                data: common::Data::Float,
-                unit: Some(common::Unit::Celsius)
-            })
-        );
+        let row = p.from_bytes(frames[0].bytes()).expect("the frame reads back");
+        // A description earns a reading by spelling its field the way the
+        // family spells it, which is what the table in `decode::facts` reads.
+        assert!(row.facts.contains(&common::packet::Fact::sensed(
+            common::packet::Quantity::Temperature,
+            111.18,
+            common::Unit::Celsius
+        )));
+        assert!(row.facts.contains(&common::packet::Fact::sensed(
+            common::packet::Quantity::Battery,
+            2906.0,
+            common::Unit::Millivolt
+        )));
     }
 
     /// The transmit chain, built from the protocol's own declaration and
@@ -494,26 +487,24 @@ vectors:
         let mut frames = Vec::new();
         for block in air.chunks(8192) {
             r.feed_iq(block).expect("the receive chain runs");
-            frames.extend(r.output().as_frames().unwrap_or(&[]).iter().cloned());
+            frames.extend(r.output().as_packets().unwrap_or(&[]).iter().cloned());
         }
         // the keyer sends the frame again and again while the key is down,
         // and every copy has to read as the same reading
         assert!(!frames.is_empty(), "nothing came back off the air");
         for f in &frames {
-            let packet = common::Packet::of_frame(0, 100_000, f.clone());
-            let row = p.read_frame(&packet, &f.bytes).expect("the frame claims itself");
+            let row = p.stated(f).expect("the frame claims itself");
             assert_eq!(row.len(), 1);
-            assert_eq!(row[0].field("id"), Some(&Value::Int(0xa5c3)));
-            assert_eq!(row[0].field("temperature_c"), Some(&Value::Float(111.18)));
-            assert_eq!(row[0].field("battery_mv"), Some(&Value::Int(2906)));
-            assert_eq!(row[0].field("seq"), Some(&Value::Int(53)));
+            // The device it names, and the reading it took.
             assert_eq!(
-                row[0].field_type("temperature_c"),
-                Some(common::FieldType {
-                    data: common::Data::Float,
-                    unit: Some(common::Unit::Celsius)
-                })
+                row[0].subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+                Some("Tx-Test-Link/42435")
             );
+            assert!(row[0].facts.contains(&common::packet::Fact::sensed(
+                common::packet::Quantity::Temperature,
+                111.18,
+                common::Unit::Celsius
+            )));
         }
 
         script::install(&[]);
@@ -697,7 +688,7 @@ impl Simple for ScriptTxNode {
             .and_then(|p| p.desc().radio.as_ref())
             .map_or(100_000.0, |r| r.width_hz);
         Ok(StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate: i.spec.rate,
             center: i.spec.center,
             bandwidth: width,
@@ -711,7 +702,7 @@ impl Simple for ScriptTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
+        o.timings_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 }
@@ -833,16 +824,16 @@ mod tx_tests {
         let mut tx =
             ScriptTxNode::with_fields(Scripted::new(Desc::parse(TEST_LINK).unwrap()), &tx_fields());
         let spec = tx.negotiate(&clock).unwrap();
-        assert_eq!(spec.kind, PortKind::Pulses);
+        assert_eq!(spec.kind, PortKind::Timings);
         let ins = [clock];
         let tags = Vec::new();
         let mut pulses = Vec::new();
         for _ in 0..40 {
-            let mut o = Payload::Pulses(Vec::new());
+            let mut o = Payload::Timings(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             tx.process(&Payload::Real(vec![0.0; 16_384]), &mut o, &mut ctx).unwrap();
-            if let Payload::Pulses(p) = o {
+            if let Payload::Timings(p) = o {
                 pulses.extend(p);
             }
         }
@@ -851,7 +842,7 @@ mod tx_tests {
         // one pass of the frame, whole: the keyer's silent stop between
         // passes is the burst detector's package boundary, and the gap it
         // leaves is ten bit times of 26 us each
-        let all = pulses.iter().flat_map(|pkg| pkg.pulses.iter()).collect::<Vec<_>>();
+        let all = pulses.iter().flat_map(|burst| burst.iter()).collect::<Vec<_>>();
         // one pass is 88 air bits at 26 us, so 88 pulses of one bit each
         // once the keyer's runs are broken; take one pass plus slack
         let pass = &all[..all.len().min(88)];
@@ -876,32 +867,35 @@ mod tx_tests {
             ScriptNode::new(Scripted::new(Desc::parse(TEST_LINK).unwrap()), 433_920_000.0);
         let ins = [PortSpec { spec: StreamSpec::iq(rate, Hz(433_900_000)), latency: 0 }];
         let out = node.negotiate(&ins[0]).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         let tags = Vec::new();
         let mut frames = Vec::new();
         for block in air.chunks(8192) {
-            let mut o = Payload::Frames(Vec::new());
+            let mut o = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&Payload::Iq(block.to_vec()), &mut o, &mut ctx).unwrap();
-            if let Payload::Frames(f) = o {
+            if let Payload::Packets(f) = o {
                 frames.extend(f);
             }
         }
         assert!((1..=2).contains(&frames.len()), "the frame came back, {}", frames.len());
-        assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
+        assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());
 
         let p = ScriptedProtocol::new(Scripted::new(Desc::parse(TEST_LINK).unwrap()));
-        let row = p.decoded(&frames[0].bytes, Hz(433_920_000)).expect("the frame reads back");
-        assert_eq!(row.field("temperature_c"), Some(&common::Value::Float(111.18)));
-        assert_eq!(row.field("battery_mv"), Some(&common::Value::Int(2906)));
-        assert_eq!(
-            row.field_type("temperature_c"),
-            Some(common::FieldType {
-                data: common::Data::Float,
-                unit: Some(common::Unit::Celsius)
-            })
-        );
+        let row = p.from_bytes(frames[0].bytes()).expect("the frame reads back");
+        // A description earns a reading by spelling its field the way the
+        // family spells it, which is what the table in `decode::facts` reads.
+        assert!(row.facts.contains(&common::packet::Fact::sensed(
+            common::packet::Quantity::Temperature,
+            111.18,
+            common::Unit::Celsius
+        )));
+        assert!(row.facts.contains(&common::packet::Fact::sensed(
+            common::packet::Quantity::Battery,
+            2906.0,
+            common::Unit::Millivolt
+        )));
     }
 
     #[test]

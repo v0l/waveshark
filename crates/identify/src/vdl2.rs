@@ -70,12 +70,12 @@ impl Signal for Vdl2 {
             for burst in &bursts {
                 for bytes in vdl2::frame_bytes(&burst.bits) {
                     if let Some(f) = vdl2::parse_frame(&bytes) {
-                        rows.push(vdl2::decoded(&f, &bytes, chan.hz()));
+                        rows.push(vdl2::read(&f));
                     }
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

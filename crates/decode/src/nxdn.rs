@@ -23,8 +23,8 @@
 
 use crate::bits::crc_bits;
 use crate::framing::{block_deinterleave, block_interleave};
-use common::Decoded;
 use common::Value;
+use common::packet::{Alert, AlertKind, Entity, Fact, Id, Link, Party, Proto, Severity};
 use dsp::conv::{self, Ends, Viterbi};
 
 /// The ten sync symbols as dibits, which is `0xCDF59` over 20 bits.
@@ -689,7 +689,7 @@ pub fn find(dibits: &[u8], from: usize) -> Option<Frame> {
         if wrong > MAX_SYNC_ERRORS {
             continue;
         }
-        if let Some(mut f) = read(&dibits[at + FSW_DIBITS.len()..]) {
+        if let Some(mut f) = frame(&dibits[at + FSW_DIBITS.len()..]) {
             f.at = at;
             return Some(f);
         }
@@ -704,7 +704,7 @@ pub fn find(dibits: &[u8], from: usize) -> Option<Frame> {
 /// a frame at all. A frame whose SACCH or FACCH1 fails its CRC still comes
 /// back, with that part missing: a receiver that heard the LICH heard a
 /// transmitter, and the channel is occupied whatever the payload said.
-pub fn read(payload: &[u8]) -> Option<Frame> {
+pub fn frame(payload: &[u8]) -> Option<Frame> {
     if payload.len() < PAYLOAD_DIBITS {
         return None;
     }
@@ -796,98 +796,45 @@ impl Frame {
     }
 }
 
-/// Recognise and describe an NXDN row for the packet log. `None` for anything
-/// this node did not write, so it is safe to try on every frame.
+/// What a frame this node wrote says: who is talking to whom.
 ///
-/// A frame carrying speech is that much of the channel and says so; where it
-/// named the call it names the talkgroup and the radio, which is what puts it
-/// in the call list rather than only in the log. Nothing here is written by a
-/// person, so nothing is marked as written.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// The over, which is how much of the channel was speech, in which vocoder
+/// and under what cipher, is stated once on the voice port. `None` for
+/// anything this node did not write.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     if bytes.len() < HEAD_LEN || bytes[..2] != NXDN_TAG {
         return None;
     }
-    let lich = Lich::from_dibits(&Lich::dibits(bytes[2] >> 1))?;
     let flags = bytes[3];
-    let ran = bytes[4];
     let kind = MessageType::from_bits(bytes[5]);
-    let call_type = CallType::from_bits(bytes[6]);
     let source = u16::from_be_bytes([bytes[7], bytes[8]]);
     let dest = u16::from_be_bytes([bytes[9], bytes[10]]);
-    let cipher = Cipher::from_bits(bytes[11]);
-    let key_id = bytes[12];
     let voice_slots = bytes[13];
-    let narrow = flags & FLAG_NARROW != 0;
-
-    let mut fields: Vec<(String, Value)> = vec![
-        ("channel".to_string(), Value::Text(lich.rf.label().to_string())),
-        (
-            "direction".to_string(),
-            Value::Text(if flags & FLAG_OUTBOUND != 0 { "out" } else { "in" }.to_string()),
-        ),
-        ("width".to_string(), Value::Text(if narrow { "6.25k" } else { "12.5k" }.to_string())),
-    ];
+    let ran = bytes[4];
+    let mut p = Proto::new("nxdn", frame_kind(flags & FLAG_HAVE_MSG != 0, kind, voice_slots > 0));
     if flags & FLAG_HAVE_RAN != 0 {
-        fields.push(("ran".to_string(), Value::Int(i64::from(ran))));
-    }
-    if flags & FLAG_HAVE_MSG != 0 {
-        fields.push(("message".to_string(), Value::Text(kind.label())));
+        p = p.saying(Fact::Infrastructure(common::packet::Cell {
+            site_code: Some(u16::from(ran)),
+            ..Default::default()
+        }));
     }
     if flags & FLAG_HAVE_CALL != 0 {
-        fields.push(("from".to_string(), Value::Int(i64::from(source))));
-        fields.push(("to".to_string(), Value::Int(i64::from(dest))));
-        fields.push(("call_type".to_string(), Value::Text(call_type.label())));
-        if flags & FLAG_EMERGENCY != 0 {
-            fields.push(("emergency".to_string(), Value::Bool(true)));
-        }
-        if flags & FLAG_ENCRYPTED != 0 {
-            fields.push(("encrypted".to_string(), Value::Bool(true)));
-            fields.push(("algorithm".to_string(), Value::Text(cipher.label().to_string())));
-            fields.push(("key_id".to_string(), Value::Int(i64::from(key_id))));
-        }
-    }
-    // What the frame carried of speech, not how long it held the channel: a
-    // frame with a half stolen for signalling is half a frame of talking.
-    let seconds = frame_seconds(narrow) * f64::from(voice_slots) / 4.0;
-    if voice_slots > 0 {
-        fields.push(("voice".to_string(), Value::Bool(true)));
-        fields.push(("codec".to_string(), Value::Text(CODEC.to_string())));
-        fields.push(("seconds".to_string(), Value::Float(seconds)));
-        fields.push(("live".to_string(), Value::Bool(true)));
-    }
-
-    let label = row_label(flags & FLAG_HAVE_MSG != 0, kind, voice_slots > 0);
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(label, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4)
-        // The LICH passed its parity and whatever else is here passed a CRC;
-        // nothing reaches this point that did not.
-        .with_crc(Some(true));
-    if flags & FLAG_HAVE_CALL != 0 {
-        use common::Party;
-        let to = match flags & FLAG_GROUP != 0 {
-            true => Party::group(dest.to_string()),
-            false => Party::unit(dest.to_string()),
-        };
-        d.link = Some(common::Link::between(Party::unit(source.to_string()), to));
-        d.identity = Some(common::Identity::new("nxdn", source.to_string()));
-    }
-    if voice_slots > 0 {
-        d.airtime = Some(common::Airtime {
-            seconds,
-            voice: true,
-            live: true,
-            secrecy: match flags & FLAG_ENCRYPTED != 0 {
-                true => common::Secrecy::Encrypted(None),
-                false => common::Secrecy::Clear,
+        p = p.by(Entity::new("nxdn", Id::Num(u64::from(source)))).between(Link::between(
+            Party::unit(source.to_string()),
+            match flags & FLAG_GROUP != 0 {
+                true => Party::group(dest.to_string()),
+                false => Party::unit(dest.to_string()),
             },
-            codec: Some(CODEC),
-        });
+        ));
+        if flags & FLAG_EMERGENCY != 0 {
+            p = p.saying(Fact::Alert(Alert {
+                kind: AlertKind::Emergency,
+                severity: Severity::Immediate,
+                text: None,
+            }));
+        }
     }
-    Some(d)
+    Some(p)
 }
 
 /// How long one frame holds the channel, at a width: 384 bits at 9600 or
@@ -896,27 +843,25 @@ pub fn frame_seconds(narrow: bool) -> f64 {
     FRAME_DIBITS as f64 / if narrow { NARROW_BAUD } else { WIDE_BAUD }
 }
 
-/// What the packet log calls the row: the message where the frame carried
-/// one, speech where it carried that, and NXDN alone where all that read was
-/// the slow channel.
-pub fn row_label(have_message: bool, kind: MessageType, voice: bool) -> &'static str {
+/// Which frame it is, as the name a row matches on
+pub fn frame_kind(have_message: bool, kind: MessageType, voice: bool) -> &'static str {
     if !have_message {
-        return if voice { "NXDN-Voice" } else { "NXDN" };
+        return if voice { "voice" } else { "frame" };
     }
     match kind {
-        MessageType::VCall => "NXDN-VCALL",
-        MessageType::VCallIv => "NXDN-VCALL_IV",
-        MessageType::VCallAssign => "NXDN-VCALL_ASSGN",
-        MessageType::VCallAssignDup => "NXDN-VCALL_ASSGN_DUP",
-        MessageType::TxRelease => "NXDN-TX_REL",
-        MessageType::TxReleaseExt => "NXDN-TX_REL_EXT",
-        MessageType::Disconnect => "NXDN-DISC",
-        MessageType::DCallHeader => "NXDN-DCALL_HDR",
-        MessageType::DCallData => "NXDN-DCALL_DATA",
-        MessageType::DCallAck => "NXDN-DCALL_ACK",
-        MessageType::HeadDelay => "NXDN-HEAD_DLY",
-        MessageType::Idle => "NXDN-IDLE",
-        MessageType::Other(_) => "NXDN-Message",
+        MessageType::VCall => "vcall",
+        MessageType::VCallIv => "vcall_iv",
+        MessageType::VCallAssign => "vcall_assign",
+        MessageType::VCallAssignDup => "vcall_assign_dup",
+        MessageType::TxRelease => "tx_release",
+        MessageType::TxReleaseExt => "tx_release_ext",
+        MessageType::Disconnect => "disconnect",
+        MessageType::DCallHeader => "dcall_header",
+        MessageType::DCallData => "dcall_data",
+        MessageType::DCallAck => "dcall_ack",
+        MessageType::HeadDelay => "head_delay",
+        MessageType::Idle => "idle",
+        MessageType::Other(_) => "message",
     }
 }
 
@@ -1339,7 +1284,7 @@ mod tests {
         let frame = voice_frame(Steal::First, MessageType::VCall, &group_call());
         assert_eq!(frame.len(), FRAME_DIBITS);
         assert_eq!(&frame[..10], &FSW_DIBITS);
-        let f = read(&frame[10..]).expect("a frame");
+        let f = super::frame(&frame[10..]).expect("a frame");
         assert_eq!(f.lich.rf, RfChannel::Rdch);
         assert_eq!(f.lich.steal, Steal::First);
         assert!(f.lich.outbound);
@@ -1363,7 +1308,8 @@ mod tests {
             dest: 40002,
             duplex: false,
         };
-        let f = read(&voice_frame(Steal::Both, MessageType::VCall, &call)[10..]).expect("a frame");
+        let f = super::frame(&voice_frame(Steal::Both, MessageType::VCall, &call)[10..])
+            .expect("a frame");
         assert_eq!(f.voice_slots, 0, "both halves stolen leaves no speech");
         assert_eq!(f.facch1.len(), 2, "the same message in both halves");
         let c = f.facch1[0].call.expect("a call");
@@ -1374,8 +1320,8 @@ mod tests {
         assert!(!c.call_type.group(), "an individual call is not a talkgroup");
         assert_eq!((c.source, c.dest), (40001, 40002));
 
-        let f =
-            read(&voice_frame(Steal::Both, MessageType::TxRelease, &call)[10..]).expect("a frame");
+        let f = super::frame(&voice_frame(Steal::Both, MessageType::TxRelease, &call)[10..])
+            .expect("a frame");
         assert_eq!(f.facch1[0].kind, MessageType::TxRelease);
         assert_eq!(f.facch1[0].call.map(|c| c.source), Some(40001));
     }
@@ -1387,7 +1333,7 @@ mod tests {
         // RCCH, CAC, normal data, outbound.
         let payload = vec![false; 348];
         let frame = keyed(0b00_00_00_1, &payload);
-        let f = read(&frame[10..]).expect("a frame");
+        let f = super::frame(&frame[10..]).expect("a frame");
         assert_eq!(f.lich.rf, RfChannel::Rcch);
         assert!(!f.read_anything());
         assert_eq!(f.voice_slots, 0);
@@ -1443,7 +1389,7 @@ mod tests {
             .collect();
         let (mut lich, mut sacch, mut messages) = (0usize, 0usize, 0usize);
         for at in 0..dibits.len() - FRAME_DIBITS {
-            if let Some(f) = read(&dibits[at..]) {
+            if let Some(f) = super::frame(&dibits[at..]) {
                 lich += 1;
                 sacch += usize::from(f.sacch.is_some());
                 messages += f.facch1.len();

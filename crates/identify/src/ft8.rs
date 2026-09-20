@@ -1,7 +1,7 @@
 //! Where Ft8 can be and what stream it reads.
 
 use crate::{Placement, Reading, Shape, Signal};
-use common::{C32, Decoded};
+use common::C32;
 use decode::ft8::PASSBAND_HZ;
 
 pub struct Ft8;
@@ -144,7 +144,7 @@ fn read_ftx(mode: decode::ft8::Mode, iq: &[C32], rate_hz: f64, center_hz: f64) -
         return Reading::default();
     }
     let center = common::Hz(center_hz as u64);
-    let mut rows: Vec<Decoded> = Vec::new();
+    let mut rows: Vec<common::packet::Proto> = Vec::new();
     let mut seen: Vec<Vec<u8>> = Vec::new();
     // Four offsets through a slot: a transmission split across two windows
     // is read by neither, and a quarter slot is 3.75 seconds of the 12.6 a
@@ -152,15 +152,14 @@ fn read_ftx(mode: decode::ft8::Mode, iq: &[C32], rate_hz: f64, center_hz: f64) -
     for start in (0..4).map(|k| k * want / 4) {
         let mut at = start;
         while at + want <= audio.len() {
-            for (bytes, freq_hz, _snr) in
+            for (bytes, _freq_hz, _snr) in
                 decode::ft8::read_slot(&mut slot, &audio[at..at + want], mode)
             {
                 if seen.contains(&bytes) {
                     continue;
                 }
                 seen.push(bytes.clone());
-                let hz = common::Hz((center.as_f64() + freq_hz).max(0.0) as u64);
-                if let Some(d) = decode::ft8::decoded(&bytes, hz) {
+                if let Some(d) = decode::ft8::read(&bytes) {
                     rows.push(d);
                 }
             }

@@ -38,14 +38,11 @@ fn main() {
         }
         if let Payload::Packets(p) = o {
             for p in p {
-                if let common::PacketBody::Frame(f) = &p.body {
-                    eprintln!(
-                        "{:?}",
-                        decode::elrs::decoded(&f.bytes, Hz(f.center_hz)).map(|d| d.detail)
-                    );
+                if !p.bytes().is_empty() {
+                    eprintln!("{:?}", decode::elrs::read(p.bytes()).map(|d| (d.id, d.kind)));
                 }
             }
         }
     }
-    eprintln!("decoded {} refused {} uid {:?}", n.decoded(), n.refused(), n.uid());
+    eprintln!("refused {} uid {:?}", n.refused(), n.uid());
 }

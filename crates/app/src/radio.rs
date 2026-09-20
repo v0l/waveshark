@@ -953,146 +953,6 @@ pub struct Spectrum {
     pub rate: f64,
 }
 
-/// One decoded packet, as the UI logs and draws it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DecodeRecord {
-    /// When it was decoded, for ordering the log and placing the waterfall
-    /// mark.
-    pub at: std::time::Instant,
-    /// Centre of the channel it arrived on. Not the tuned frequency: the whole
-    /// point is that these come from wherever in the span they happened.
-    pub freq: f64,
-    /// Width of that channel, which differs between the two banks and is what
-    /// says how far apart two reports have to be to be different bursts.
-    pub channel_hz: f64,
-    /// The protocol that claimed the burst, by the name its decoder
-    /// publishes, or `None` for a burst nothing claimed.
-    pub model: Option<&'static str>,
-    /// How it was keyed.
-    pub modulation: common::Modulation,
-    /// Fields for a decode, inferred coding and timings for an unknown.
-    pub detail: String,
-    /// The same fields, structured.
-    ///
-    /// This is what makes the packet list a bus rather than a display: a map,
-    /// a chart or an image pane reads these rather than the bytes or the
-    /// summary line.
-    pub fields: Vec<(String, common::Value)>,
-    /// What the payload is, as a media type, so a view can claim packets it
-    /// knows how to render without knowing the protocol that made them.
-    pub media_type: &'static str,
-    /// Whether somebody wrote it. The message view's entry condition; see
-    /// [`common::Decoded::written`].
-    pub written: bool,
-    /// Received level in dBFS, and signal to noise in dB.
-    pub rssi_dbfs: f32,
-    pub snr_db: f32,
-    pub bytes: Vec<u8>,
-    /// `None` when the protocol has no integrity check, which must stay
-    /// visible: an unchecked decode from a noisy band is often wrong.
-    pub crc: Option<bool>,
-    /// Who the transmission was between, as the decoder named them. The
-    /// links directory is built from this and not from the fields: a party
-    /// is a kind and an identifier, and reading one out of a display string
-    /// is how a talkgroup and a callsign end up in the same row.
-    pub link: Option<pipeline::event::Link>,
-    /// What the transmission said about the transmitter besides where it was,
-    /// as the decoder recovered it: an aircraft's altitude, a vessel's
-    /// heading, a handset's sticks. Typed for the same reason `link` is.
-    pub report: common::ReportDetail,
-    /// Who transmitted, where the decoder could say. The device database rows
-    /// on this, and a view holding one row per transmitter needs it for the
-    /// same reason: an identifier read out of a display field is a number two
-    /// protocols can both produce.
-    pub identity: Option<common::Identity>,
-    /// The burst's samples, for the view that shows a packet, when the
-    /// front end kept them.
-    pub iq: Option<std::sync::Arc<common::IqBurst>>,
-    /// The keying as the front end timed it, for a burst that arrived as
-    /// widths rather than as bytes. What a `.sub` file is written from: for
-    /// a keyed remote the widths are the signal, and the samples are far
-    /// too much to keep for every row.
-    pub pulses: Option<std::sync::Arc<common::Package>>,
-    /// What was said, for a voice protocol. This is the payload of such a
-    /// transmission: the bytes of a vocoded stream say nothing to anybody.
-    pub audio: Option<std::sync::Arc<common::Speech>>,
-    /// How long it held the channel, whether it carried speech, and what
-    /// protects it. What the call list is built from, as the decoder said it
-    /// rather than as a reader guessed from field names.
-    pub airtime: Option<common::Airtime>,
-}
-
-impl DecodeRecord {
-    /// The column headings [`Self::line`] prints under.
-    pub fn line_header() -> String {
-        format!(
-            "{:>8}  {:>13}  {:<10} {:>6} {:>5}  {:<22} {:>3}  info",
-            "time", "frequency", "mod", "rssi", "snr", "protocol", "len"
-        )
-    }
-
-    /// One line in the packet list's columns, timed from `since`.
-    pub fn line(&self, since: std::time::Instant) -> String {
-        format!(
-            "{:>8.3}  {:>9.4} MHz  {:<10} {:>6.1} {:>5.1}  {:<22} {:>3}  {}",
-            self.at.saturating_duration_since(since).as_secs_f64(),
-            self.freq / 1e6,
-            self.modulation,
-            self.rssi_dbfs,
-            self.snr_db,
-            self.protocol(),
-            self.bytes.len(),
-            self.detail
-        )
-    }
-
-    /// What the row is named as, for a person reading it: the protocol that
-    /// claimed the burst, or that nothing did.
-    pub fn protocol(&self) -> &'static str {
-        self.model.unwrap_or(nodes::UNKNOWN)
-    }
-
-    /// The system a call, a message or a link on this row belongs to:
-    /// `M17-Voice` and `M17-Packet` are both M17, so every mode of one
-    /// system shares a row wherever rows are folded together.
-    pub fn system(&self) -> &'static str {
-        let name = self.protocol();
-        name.split('-').next().unwrap_or(name)
-    }
-
-    /// A bare record, for tests that need one to hand to something else.
-    #[cfg(test)]
-    pub fn for_test(freq: f64, model: &'static str) -> Self {
-        Self {
-            at: std::time::Instant::now(),
-            freq,
-            channel_hz: 31_250.0,
-            model: (model != nodes::UNKNOWN).then_some(model),
-            modulation: common::Modulation::Ook,
-            detail: String::new(),
-            fields: Vec::new(),
-            media_type: pipeline::event::media::BYTES,
-            written: false,
-            rssi_dbfs: -20.0,
-            snr_db: 15.0,
-            bytes: vec![1, 2, 3],
-            crc: Some(true),
-            link: None,
-            report: common::ReportDetail::Bare,
-            identity: None,
-            iq: None,
-            pulses: None,
-            audio: None,
-            airtime: None,
-        }
-    }
-
-    /// Whether any protocol claimed this burst.
-    pub fn is_known(&self) -> bool {
-        self.model.is_some()
-    }
-}
-
 /// Scan a buffer while recording, as the radio thread does. Test support.
 /// A receiver set up to sweep a capture, the way the live one sweeps the air.
 pub(crate) fn replay_receiver(
@@ -1192,8 +1052,8 @@ fn block_start(finished: std::time::Instant, samples: usize, rate: f64) -> std::
 pub(crate) fn harvest(
     rx: &mut crate::chain::Receiver,
     at: std::time::Instant,
-) -> Vec<DecodeRecord> {
-    let found = rx.decodes(at);
+) -> Vec<crate::row::Reception> {
+    let found = rx.rows(at);
     if let Some(r) = rx.recorder_mut() {
         for d in &found {
             r.capture(d);
@@ -1210,7 +1070,7 @@ pub(crate) fn harvest(
 pub(crate) fn replay_blocks(
     rx: &mut crate::chain::Receiver,
     buf: &common::IqBuf,
-) -> Vec<DecodeRecord> {
+) -> Vec<crate::row::Reception> {
     let mut out = Vec::new();
     let rate = buf.rate.as_f64().max(1.0);
     for block in buf.samples.chunks(16_384) {
@@ -1235,7 +1095,7 @@ pub(crate) fn replay_blocks(
 pub fn scan_with_recorder(
     buf: &common::IqBuf,
     rec: crate::record::Recorder,
-) -> (Vec<DecodeRecord>, Option<crate::record::Recorder>) {
+) -> (Vec<crate::row::Reception>, Option<crate::record::Recorder>) {
     let mut rx = match replay_receiver(buf, Some(rec)) {
         Ok(rx) => rx,
         Err(_) => return (Vec::new(), None),
@@ -1249,7 +1109,7 @@ pub fn scan_with_recorder(
 /// The point of recording bursts is to be able to try again without waiting
 /// for a device to transmit, so replay has to go through the same code the
 /// receiver does, not a simplified copy of it.
-pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<DecodeRecord>> {
+pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<crate::row::Reception>> {
     let src = sources::FileSource::open(path.as_ref())?;
     let buf = src.read_all()?;
     let mut rx = replay_receiver(&buf, None)?;
@@ -1968,7 +1828,7 @@ pub struct Radio {
     pub cmd: Sender<Cmd>,
     pub frames: Receiver<Frame>,
     /// Packets decoded anywhere in the span, in the order they were found.
-    pub decodes: Receiver<Vec<DecodeRecord>>,
+    pub decodes: Receiver<Vec<crate::row::Reception>>,
     pub status: Arc<Status>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -2299,7 +2159,7 @@ struct RadioThread<'a, R: Fn()> {
     status: &'a Status,
     cmd: Receiver<Cmd>,
     frames: Sender<Frame>,
-    decodes: Sender<Vec<DecodeRecord>>,
+    decodes: Sender<Vec<crate::row::Reception>>,
     repaint: R,
     /// Where the dial has been asked to go, held until a retune is affordable.
     want_center: Option<Hz>,
@@ -2316,7 +2176,7 @@ struct RadioThread<'a, R: Fn()> {
     /// The operator's own decoding switch: off, and no front end is built at
     /// all, which is the expensive thing the receiver does.
     scan_on: bool,
-    records: Vec<DecodeRecord>,
+    records: Vec<crate::row::Reception>,
     /// Everything decoded since the receiver started, which is what the
     /// counter on screen reads.
     hits: u64,
@@ -2332,7 +2192,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         fft: usize,
         cmd: Receiver<Cmd>,
         frames: Sender<Frame>,
-        decodes: Sender<Vec<DecodeRecord>>,
+        decodes: Sender<Vec<crate::row::Reception>>,
         status: &'a Status,
         repaint: R,
     ) -> anyhow::Result<Self> {
@@ -2367,7 +2227,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         fft: usize,
         cmd: Receiver<Cmd>,
         frames: Sender<Frame>,
-        decodes: Sender<Vec<DecodeRecord>>,
+        decodes: Sender<Vec<crate::row::Reception>>,
         status: &'a Status,
         repaint: R,
     ) -> anyhow::Result<Self> {
@@ -3827,7 +3687,7 @@ fn run(
     fft: usize,
     cmd: Receiver<Cmd>,
     frames: Sender<Frame>,
-    decodes: Sender<Vec<DecodeRecord>>,
+    decodes: Sender<Vec<crate::row::Reception>>,
     status: &Status,
     repaint: impl Fn(),
 ) -> anyhow::Result<()> {
@@ -3941,6 +3801,43 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
 pub(crate) mod tests {
     use super::*;
     use crate::chain::OOK_CHANNEL_HZ;
+    use crate::row::Reception;
+
+    /// Rows one protocol read, by the id its decoder publishes.
+    fn read_by<'a>(rows: &'a [Reception], id: &str) -> Vec<&'a Reception> {
+        rows.iter().filter(|r| r.protocol() == id).collect()
+    }
+
+    /// Rows one protocol read of one kind: `("ism", "Fineoffset-WHx080")`.
+    fn read_as<'a>(rows: &'a [Reception], id: &str, kind: &str) -> Vec<&'a Reception> {
+        rows.iter().filter(|r| r.protocol() == id && r.kind() == kind).collect()
+    }
+
+    /// Whether the transmitter's own check stood behind the bytes.
+    fn checked(r: &Reception) -> bool {
+        r.integrity() == common::packet::Integrity::Passed
+    }
+
+    /// A reading the decoder stated, in whatever unit it stated it.
+    fn sensed(r: &Reception, q: common::packet::Quantity) -> Option<f64> {
+        r.packet.facts().find_map(|(_, f)| match f {
+            common::packet::Fact::Sensed(x) if x.quantity == q => Some(x.value),
+            _ => None,
+        })
+    }
+
+    /// The channel a decode says it was on, as the protocol numbers them.
+    fn channel(r: &Reception) -> Option<u16> {
+        r.packet.facts().find_map(|(_, f)| match f {
+            common::packet::Fact::Channel(c) => Some(c.claims.unwrap_or(c.heard)),
+            _ => None,
+        })
+    }
+
+    /// Who was transmitting, as the decoder identified them.
+    fn who(r: &Reception) -> Option<String> {
+        r.packet.subject().map(|e| e.id.to_string())
+    }
 
     #[test]
     fn a_block_in_the_rolloff_is_not_given_a_front_end() {
@@ -4327,21 +4224,21 @@ pub(crate) mod tests {
         let mut heard = Vec::new();
         until("the sensor to be read", || {
             heard.extend(radio.decodes.try_iter().flatten());
-            heard.iter().any(|r| r.model.as_deref() == Some("Fineoffset-WHx080"))
+            heard.iter().any(|r| r.kind() == "Fineoffset-WHx080")
         });
         let r = heard
             .iter()
-            .find(|r| r.model.as_deref() == Some("Fineoffset-WHx080"))
+            .find(|r| r.kind() == "Fineoffset-WHx080")
             .expect("the loop above found one");
         // The same station the replay test reads off this capture, with the
         // transmitter's own CRC rather than a plausibility argument.
-        assert_eq!(r.crc, Some(true), "{r:?}");
-        assert!(r.detail.contains("station_id=196"), "read as {}", r.detail);
-        assert!(r.detail.contains("temperature_c=16.2"), "read as {}", r.detail);
-        assert!(r.detail.contains("humidity_pct=89"), "read as {}", r.detail);
-        assert!((r.freq - 433_920_000.0).abs() < 100_000.0, "read at {:.4} MHz", r.freq / 1e6);
+        assert!(checked(r), "{r:?}");
+        assert_eq!(sensed(r, common::packet::Quantity::Temperature), Some(16.2));
+        assert_eq!(sensed(r, common::packet::Quantity::Humidity), Some(89.0));
+        assert!(who(r).as_deref() == Some("Fineoffset-WHx080/196"), "{:?}", who(r));
+        assert!((r.freq() - 433_920_000.0).abs() < 100_000.0, "read at {:.4} MHz", r.freq() / 1e6);
         // Every packet reaching the bus carries what it was heard at.
-        assert!(r.rssi_dbfs.is_finite() && r.snr_db.is_finite(), "no measurement on {r:?}");
+        assert!(r.rssi_dbfs().is_finite() && r.snr_db().is_finite(), "no measurement on {r:?}");
     }
 
     /// A radio unplugged mid-over ends the over, on the radio thread.
@@ -4717,7 +4614,7 @@ pub(crate) mod tests {
         assert!(st.as_ref().is_some_and(|s| s.connected), "never connected: {st:?}");
 
         let rows = replay_blocks(&mut rx, &buf);
-        assert!(rows.iter().any(|r| r.model == Some("Fineoffset-WHx080")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.kind() == "Fineoffset-WHx080"), "{rows:?}");
         let st = rx.homeassistant_status().unwrap();
         assert_eq!(st.devices, 1, "{st:?}");
         assert_eq!(st.dropped, 0, "{st:?}");
@@ -4732,16 +4629,16 @@ pub(crate) mod tests {
         let topics: Vec<&str> = got.iter().map(|(t, _)| t.as_str()).collect();
         let state = got
             .iter()
-            .find(|(t, _)| {
-                t.starts_with("waveshark/ism_fineoffset_whx080/") && t.ends_with("/state")
-            })
+            .find(|(t, _)| t.starts_with("waveshark/ism/") && t.ends_with("/state"))
             .unwrap_or_else(|| panic!("no reading reached the broker: {topics:?}"));
-        assert!(state.1.contains("\"temperature_c\""), "{}", state.1);
+        // The reading as the decoder stated it: the quantity is the name and
+        // the unit travels with the discovery block.
+        assert!(state.1.contains("\"temperature\""), "{}", state.1);
         assert!(
             topics
                 .iter()
                 .any(|t| t.starts_with("homeassistant/sensor/waveshark_ism_fineoffset_whx080_")
-                    && t.ends_with("/temperature_c/config")),
+                    && t.ends_with("/temperature/config")),
             "{topics:?}"
         );
     }
@@ -4878,36 +4775,38 @@ pub(crate) mod tests {
             );
             return;
         };
-        fn field<'a>(r: &'a DecodeRecord, k: &str) -> Option<&'a common::Value> {
-            r.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v)
-        }
         let mut rx = replay_receiver(&buf, None).expect("a receiver");
         let rows = replay_blocks(&mut rx, &buf);
-        let sonde: Vec<&DecodeRecord> = rows.iter().filter(|r| r.model == Some("rs41")).collect();
+        let sonde = read_by(&rows, "rs41");
         // 28 of the 40 transmissions in the capture. The first seven go to
         // finding it: a channel is not remembered until a frame has decoded
         // on it, and until then every burst is a fresh decoder that started
         // after the header had already gone by.
         assert_eq!(sonde.len(), 28, "{} sonde frames", sonde.len());
-        assert!(sonde.iter().all(|r| r.crc == Some(true)), "a frame failed a block CRC");
+        assert!(sonde.iter().all(|r| checked(r)), "a frame failed a block CRC");
         assert!(
-            sonde.iter().all(|r| r.bytes.len() == decode::rs41::FRAME_STD),
+            sonde.iter().all(|r| r.bytes().len() == decode::rs41::FRAME_STD),
             "a frame was not a standard 320 byte one"
         );
 
         // One sonde, named, on one channel of the raster.
         let serials: std::collections::BTreeSet<String> =
-            sonde.iter().filter_map(|r| r.identity.as_ref().map(|i| i.id.clone())).collect();
+            sonde.iter().filter_map(|r| who(r)).collect();
         assert_eq!(serials, ["S1720982".to_string()].into_iter().collect());
         for r in &sonde {
-            assert_eq!(r.freq, 405_810_000.0, "off the 10 kHz raster");
-            assert_eq!(r.modulation, common::Modulation::Fsk2);
+            assert_eq!(r.freq(), 405_810_000.0, "off the 10 kHz raster");
+            assert_eq!(r.modulation(), common::Modulation::Fsk2);
         }
 
         // Consecutive frame numbers, which is the sonde's own clock: one a
         // second, none missed once it is being tracked.
-        let nums: Vec<i64> =
-            sonde.iter().filter_map(|r| field(r, "frame").and_then(|v| v.as_i64())).collect();
+        // The frame counter is the sonde's bookkeeping rather than anything
+        // about the world, so it stays in the bytes and is read back out of
+        // them with the decoder's own parser.
+        let nums: Vec<i64> = sonde
+            .iter()
+            .filter_map(|r| decode::rs41::parse(r.bytes()).map(|f| i64::from(f.frame_no)))
+            .collect();
         assert_eq!(nums.len(), 28);
         assert_eq!(nums[0], 3409, "{nums:?}");
         assert_eq!(*nums.last().unwrap(), 3441, "{nums:?}");
@@ -4926,11 +4825,21 @@ pub(crate) mod tests {
         // And where it was: climbing through 10.3 km over Sussex, drifting
         // east, which is a 12 UTC Herstmonceux sounding an hour after launch.
         let last = sonde.last().unwrap();
-        let f = |k: &str| field(last, k).and_then(|v| v.as_f64()).unwrap_or(f64::NAN);
-        assert!((f("altitude_m") - 10_500.5).abs() < 1.0, "{}", f("altitude_m"));
-        assert!((f("climb_ms") - 4.30).abs() < 0.05, "{}", f("climb_ms"));
-        assert!((f("battery_v") - 2.7).abs() < 0.05, "{}", f("battery_v"));
-        assert_eq!(field(last, "state").map(|v| v.to_string()).as_deref(), Some("ascending"));
+        use common::packet::Quantity;
+        let q = |x: Quantity| sensed(last, x).unwrap_or(f64::NAN);
+        assert!((q(Quantity::Altitude) - 10_500.5).abs() < 1.0, "{}", q(Quantity::Altitude));
+        assert!((q(Quantity::Battery) - 2.7).abs() < 0.05, "{}", q(Quantity::Battery));
+        let climb = last
+            .packet
+            .facts()
+            .find_map(|(_, f)| match f {
+                common::packet::Fact::Motion(m) => m.climb_ms,
+                _ => None,
+            })
+            .unwrap_or(f64::NAN);
+        assert!((climb - 4.30).abs() < 0.05, "{climb}");
+        // Which way it is going is the kind of frame it is, not a field.
+        assert_eq!(last.kind(), "ascent");
 
         // The map reads the tracker and the tracker reads `position`, so
         // this is the test that a balloon is drawn: one track, labelled with
@@ -4954,13 +4863,12 @@ pub(crate) mod tests {
         //
         // A sonde sends a sixteenth of its factory calibration a second, so
         // there is no temperature on the first frame and there is one by the
-        // end: the counts in a frame are ratios, and the tracker is where
-        // the pieces that turn them into degrees are joined. Twenty-eight
-        // pieces here, one per frame read.
+        // end: the counts in a frame are ratios, and the front end following
+        // the flight is where the pieces that turn them into degrees are
+        // joined.
         let crate::tracks::Detail::Sonde {
             temperature_c,
             humidity_pct,
-            calibration_pieces,
             altitude_m,
             descending,
             ..
@@ -4968,7 +4876,6 @@ pub(crate) mod tests {
         else {
             panic!("the track is not a sonde: {:?}", t.detail);
         };
-        assert_eq!(calibration_pieces, 28);
         assert!(!descending);
         assert!((altitude_m - 10_500.5).abs() < 1.0, "{altitude_m}");
         // The Met Office published this ascent: Herstmonceux (03882), 00 UTC
@@ -5022,20 +4929,20 @@ pub(crate) mod tests {
         plan.fronts = fronts;
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let ble: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("BLE-Adv")).collect();
+        let ble = read_by(&out, "ble");
         // Seven of the eight in the capture. It was six until the channel
         // filter was split into a coarse and a sharp stage, which is a
         // cleaner passband as well as a third of the multiplies.
         assert_eq!(ble.len(), 7, "read {} of the 8 advertisements in the capture", ble.len());
         for r in &ble {
-            assert_eq!(r.crc, Some(true), "a packet without its CRC got through: {r:?}");
+            assert!(checked(r), "a packet without its CRC got through: {r:?}");
             assert!(
-                (r.freq - 2_426_000_000.0).abs() < 1e6,
+                (r.freq() - 2_426_000_000.0).abs() < 1e6,
                 "reported at {} Hz rather than on channel 38",
-                r.freq
+                r.freq()
             );
-            assert!(r.detail.contains("channel=38"), "read as {}", r.detail);
-            assert!(r.detail.contains("address="), "no address in {}", r.detail);
+            assert_eq!(channel(r), Some(38), "read as {}", r.detail());
+            assert!(who(r).is_some(), "no advertiser named on {}", r.detail());
         }
         every_row_carries_its_measurements(&ble);
     }
@@ -5078,36 +4985,28 @@ pub(crate) mod tests {
         plan.fronts = fronts;
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("802.11")).collect();
+        let wifi = read_by(&out, "wifi");
         assert!(wifi.len() >= 88, "read {} frames, expected 94", wifi.len());
         for r in &wifi {
-            assert_eq!(r.crc, Some(true), "a frame without its FCS got through: {r:?}");
+            assert!(checked(r), "a frame without its FCS got through: {r:?}");
             assert!(
-                (r.freq - 2_462_000_000.0).abs() < 1e6,
+                (r.freq() - 2_462_000_000.0).abs() < 1e6,
                 "reported at {} Hz rather than on channel 11",
-                r.freq
+                r.freq()
             );
-            assert!(r.detail.contains("channel=11"), "read as {}", r.detail);
+            assert_eq!(channel(r), Some(11), "read as {}", r.detail());
         }
         // The two devices talking to each other, by their own addresses.
-        let all = wifi.iter().map(|r| r.detail.clone()).collect::<Vec<_>>().join(" ");
+        let all = wifi.iter().map(|r| r.detail()).collect::<Vec<_>>().join(" ");
         assert!(
             wifi.iter().any(|r| {
-                r.link
-                    .as_ref()
-                    .and_then(|l| l.from.as_ref())
+                r.packet
+                    .innermost()
+                    .and_then(|l| l.link.from.as_ref())
                     .is_some_and(|p| p.label().contains("70:03:9F:0D:A9:8D"))
             }),
             "the station that sent the data frames is not named: {all}"
         );
-        // The 802.11n frames in the capture: MCS 7 with the short guard
-        // interval, carried inside an aggregate.
-        let ht: Vec<&&DecodeRecord> =
-            wifi.iter().filter(|r| r.detail.contains("phy=MCS")).collect();
-        assert!(!ht.is_empty(), "no HT frame read");
-        for r in &ht {
-            assert!(r.detail.contains("aggregated=1"), "{}", r.detail);
-        }
         every_row_carries_its_measurements(&wifi);
     }
 
@@ -5131,7 +5030,7 @@ pub(crate) mod tests {
             .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let read = out.iter().filter(|r| r.model == Some("802.11")).count();
+        let read = read_by(&out, "wifi").len();
         let st = rx.channel_status().expect("the channel map reports itself");
         assert_eq!(st.loads.len(), 1, "one span, one channel: {:?}", st.loads);
         let ch = &st.loads[0];
@@ -5183,26 +5082,23 @@ pub(crate) mod tests {
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let dji: Vec<&DecodeRecord> =
-            out.iter().filter(|r| r.model == Some("DJI-DroneID")).collect();
-        let seq: Vec<String> = dji
+        let dji = read_by(&out, "droneid");
+        // The aircraft's own transmission counter, read back out of the
+        // frame: which bursts were caught is evidence about the receiver,
+        // and a sequence number is not a fact about the world.
+        let seq: Vec<u16> = dji
             .iter()
-            .filter_map(|r| {
-                r.detail.split_whitespace().find(|w| w.starts_with("sequence=")).map(str::to_string)
-            })
+            .filter_map(|r| decode::droneid::parse(&r.bytes()[4..]).map(|f| f.sequence))
             .collect();
         assert_eq!(seq.len(), 7, "read {} bursts: {seq:?}", dji.len());
-        assert_eq!(
-            seq,
-            [437, 439, 440, 440, 441, 442, 444].map(|n| format!("sequence={n}")).to_vec()
-        );
+        assert_eq!(seq, [437, 439, 440, 440, 441, 442, 444]);
         for r in &dji {
-            assert_eq!(r.crc, Some(true), "a frame without its CRC got through: {r:?}");
-            assert!(r.detail.contains("serial=F8PJC254J001JR4R"), "read as {}", r.detail);
+            assert!(checked(r), "a frame without its CRC got through: {r:?}");
+            assert_eq!(who(r).as_deref(), Some("F8PJC254J001JR4R"), "read as {}", r.detail());
             assert!(
-                (r.freq - 2_444_500_000.0).abs() < 1e6,
+                (r.freq() - 2_444_500_000.0).abs() < 1e6,
                 "reported at {} Hz rather than on the centre it was read on",
-                r.freq
+                r.freq()
             );
         }
         every_row_carries_its_measurements(&dji);
@@ -5230,14 +5126,14 @@ pub(crate) mod tests {
             .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let wifi: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("802.11")).collect();
-        let beacons: Vec<&&DecodeRecord> =
-            wifi.iter().filter(|r| r.detail.contains("type=beacon")).collect();
+        let wifi = read_by(&out, "wifi");
+        let beacons: Vec<&&Reception> = wifi.iter().filter(|r| r.kind() == "beacon").collect();
         assert!(!beacons.is_empty(), "no beacon read from {} frames", wifi.len());
         for b in &beacons {
-            assert!(b.detail.contains("ssid=darknet"), "{}", b.detail);
-            assert!(b.detail.contains("phy=1 Mbit/s"), "{}", b.detail);
-            assert_eq!(b.crc, Some(true));
+            // The network's name is what a beacon is for, and the access
+            // point states it as the name of the thing transmitting.
+            assert!(b.detail().contains("darknet"), "{}", b.detail());
+            assert!(checked(b));
         }
         every_row_carries_its_measurements(&wifi);
     }
@@ -5276,20 +5172,32 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
 
-        let cells: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("GSM-SCH")).collect();
+        let cells = read_as(&out, "gsm", "sync");
         assert_eq!(cells.len(), 2, "expected both bursts, got {out:?}");
         let r = cells[0];
-        assert_eq!(r.crc, Some(true), "the parity is what makes a burst a burst");
-        assert!(r.detail.contains("ARFCN 62"), "read as {}", r.detail);
-        assert!(r.detail.contains("BSIC 53"), "read as {}", r.detail);
-        assert!(r.detail.contains("frame 55713"), "read as {}", r.detail);
+        assert!(checked(r), "the parity is what makes a burst a burst");
+        // The base station's own name for itself, and the code that tells
+        // two neighbouring sites on one frequency apart.
+        assert_eq!(
+            r.packet.innermost().and_then(|l| l.link.from.as_ref()).map(|p| p.label()),
+            Some("ARFCN 62 BSIC 53")
+        );
+        let site = r.packet.facts().find_map(|(_, f)| match f {
+            common::packet::Fact::Infrastructure(c) => c.site_code,
+            _ => None,
+        });
+        // The BSIC is a network colour code and a base station code in one
+        // six-bit number: 5 and 3 written as one is 43.
+        assert_eq!(site, Some(43));
         every_row_carries_its_measurements(&cells);
 
         // And the block the broadcast channel carried in the four frames
         // after it, which is the row that says whose cell this is.
-        let si: Vec<&DecodeRecord> = out.iter().filter(|r| r.model == Some("GSM-SI")).collect();
+        let si = read_as(&out, "gsm", "system_information");
         assert_eq!(si.len(), 1, "expected one system information block, got {out:?}");
-        assert_eq!(si[0].detail, "SI3 262-01 LAC 100 CI 4660");
+        // The cell as it names itself: the network, then the cell inside it.
+        assert_eq!(who(si[0]).as_deref(), Some("262-01-4660"), "{}", si[0].detail());
+        assert!(si[0].detail().contains("area 100"), "{}", si[0].detail());
         every_row_carries_its_measurements(&si);
     }
 
@@ -5346,12 +5254,22 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn every_row_carries_its_measurements(rows: &[&DecodeRecord]) {
+    fn every_row_carries_its_measurements(rows: &[&Reception]) {
         assert!(!rows.is_empty(), "nothing to check");
         for r in rows {
-            assert!(r.rssi_dbfs.is_finite(), "{} has no level: {:?}", r.protocol(), r.rssi_dbfs);
-            assert!(r.snr_db.is_finite(), "{} has no SNR: {:?}", r.protocol(), r.snr_db);
-            let iq = r.iq.as_ref().unwrap_or_else(|| panic!("{} kept no samples", r.protocol()));
+            assert!(
+                r.rssi_dbfs().is_finite(),
+                "{} has no level: {:?}",
+                r.protocol(),
+                r.rssi_dbfs()
+            );
+            assert!(r.snr_db().is_finite(), "{} has no SNR: {:?}", r.protocol(), r.snr_db());
+            let iq = r
+                .packet
+                .carrier
+                .iq
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} kept no samples", r.protocol()));
             assert!(!iq.samples.is_empty(), "{} kept an empty burst", r.protocol());
             assert!(iq.rate > 0.0 && iq.center_hz > 0, "{} samples with no stream", r.protocol());
         }
@@ -5455,23 +5373,42 @@ pub(crate) mod tests {
             let out = replay_blocks(&mut rx, &buf);
             let rows: Vec<String> = out
                 .iter()
-                .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.protocol(), r.detail))
+                .map(|r| format!("{:.4} MHz {} {}", r.freq() / 1e6, r.protocol(), r.detail()))
                 .collect();
             let r = out
                 .iter()
-                .find(|r| r.model == Some("Meshtastic"))
+                .find(|r| r.protocol() == "meshtastic")
                 .unwrap_or_else(|| panic!("capture {which}: nothing read it: {rows:?}"));
             // The transmitter's CRC, not a plausibility argument.
-            assert_eq!(r.crc, Some(true), "capture {which}: {r:?}");
-            assert!(r.detail.contains("SF11 BW250k 4/5"), "capture {which}: read as {}", r.detail);
+            assert!(checked(r), "capture {which}: {r:?}");
+            // The waveform it was read at is keying, and the same on both
+            // captures: the European LongFast channel.
+            let k = r.packet.keying.as_ref().expect("no keying on a LoRa packet");
+            assert_eq!(k.params.spreading, Some(11), "capture {which}");
+            assert!(
+                (k.params.bandwidth_hz - 250_000.0).abs() < 1_000.0,
+                "capture {which}: {} Hz wide",
+                k.params.bandwidth_hz
+            );
             // Both captures are from a node addressing the whole mesh.
-            assert!(r.detail.contains("to everyone"), "capture {which}: read as {}", r.detail);
-            let hz = r.freq;
+            let to = r.packet.innermost().and_then(|l| l.link.to.as_ref()).map(|p| p.label());
+            assert_eq!(to, Some("broadcast"), "capture {which}: read as {}", r.detail());
+            let hz = r.freq();
             assert!((hz - 869_525_000.0).abs() < 250_000.0, "capture {which}: read at {hz} Hz");
             if which == 'c' {
                 // What the node said, against the public default key.
-                assert!(r.detail.contains("050d3664 to everyone"), "capture c: {}", r.detail);
-                assert!(r.detail.contains("\"Hi\""), "capture c: {}", r.detail);
+                assert_eq!(
+                    r.packet.innermost().and_then(|l| l.link.from.as_ref()).map(|p| p.label()),
+                    Some("050d3664"),
+                    "capture c: {}",
+                    r.detail()
+                );
+                assert_eq!(
+                    r.packet.innermost().and_then(|l| l.wrote()),
+                    Some("Hi"),
+                    "capture c: {}",
+                    r.detail()
+                );
             }
         }
     }
@@ -5495,19 +5432,24 @@ pub(crate) mod tests {
         let out = replay_blocks(&mut rx, &buf);
         let rows: Vec<String> = out
             .iter()
-            .map(|r| format!("{:.4} MHz {} {}", r.freq / 1e6, r.protocol(), r.detail))
+            .map(|r| format!("{:.4} MHz {} {}", r.freq() / 1e6, r.protocol(), r.detail()))
             .collect();
         let r = out
             .iter()
-            .find(|r| r.model == Some("MeshCore"))
+            .find(|r| r.protocol() == "meshcore")
             .unwrap_or_else(|| panic!("nothing read it: {rows:?}"));
-        assert_eq!(r.crc, Some(true), "{r:?}");
-        assert!(r.detail.contains("SF8 BW63k 4/8"), "read as {}", r.detail);
-        assert!(r.detail.contains("\"Kieran\""), "read as {}", r.detail);
-        assert!((r.freq - 869_618_000.0).abs() < 62_500.0, "read at {} Hz", r.freq);
+        assert!(checked(r), "{r:?}");
+        let k = r.packet.keying.as_ref().expect("no keying on a LoRa packet");
+        assert_eq!(k.params.spreading, Some(8), "read at {:?}", k.params);
+        assert!((k.params.bandwidth_hz - 62_500.0).abs() < 1_000.0, "{:?}", k.params);
+        assert!(r.detail().contains("Kieran"), "read as {}", r.detail());
+        assert!((r.freq() - 869_618_000.0).abs() < 62_500.0, "read at {} Hz", r.freq());
         // The packet carries what it was: its samples and its level.
-        assert!(r.iq.as_ref().is_some_and(|q| !q.samples.is_empty()), "no samples on the row");
-        assert!(r.snr_db.is_finite() && r.rssi_dbfs.is_finite(), "no level on the row");
+        assert!(
+            r.packet.carrier.iq.as_ref().is_some_and(|q| !q.samples.is_empty()),
+            "no samples on the row"
+        );
+        assert!(r.snr_db().is_finite() && r.rssi_dbfs().is_finite(), "no level on the row");
     }
 
     /// Two TETRA base station downlinks, on for every one of the capture's
@@ -5588,12 +5530,18 @@ pub(crate) mod tests {
         let rows: Vec<String> = out
             .iter()
             .map(|r| {
-                format!("{:.4} MHz {} {} {}", r.freq / 1e6, r.protocol(), r.modulation, r.detail)
+                format!(
+                    "{:.4} MHz {} {} {}",
+                    r.freq() / 1e6,
+                    r.protocol(),
+                    r.modulation(),
+                    r.detail()
+                )
             })
             .collect();
         for hz in [391_181_000.0, 391_704_500.0] {
-            let mine: Vec<&DecodeRecord> =
-                out.iter().filter(|r| (r.freq - hz).abs() < 12_500.0).collect();
+            let mine: Vec<&Reception> =
+                out.iter().filter(|r| (r.freq() - hz).abs() < 12_500.0).collect();
             assert!(!mine.is_empty(), "{:.4} MHz was never logged: {rows:?}", hz / 1e6);
             // Every row says what it was heard at: the front end measures the
             // slot each block came out of rather than handing over a frame
@@ -5604,18 +5552,23 @@ pub(crate) mod tests {
             // carrier was found a few kilohertz off it.
             let channel = (hz / 25_000.0).round() * 25_000.0;
             assert!(
-                mine.iter().all(|r| (r.freq - channel).abs() < 1.0),
+                mine.iter().all(|r| (r.freq() - channel).abs() < 1.0),
                 "{:.4} MHz was logged at {:?}",
                 hz / 1e6,
-                mine.iter().map(|r| r.freq).collect::<Vec<_>>()
+                mine.iter().map(|r| r.freq()).collect::<Vec<_>>()
             );
             // The cell's identity once, and once only, though its decoders
             // were built twice.
-            let sync = mine.iter().filter(|r| r.model == Some("TETRA-Sync")).count();
-            let sysinfo = mine.iter().filter(|r| r.model == Some("TETRA-Sysinfo")).count();
+            let sync = mine.iter().filter(|r| r.kind() == "sync").count();
+            let sysinfo = mine.iter().filter(|r| r.kind() == "sysinfo").count();
             assert_eq!((sync, sysinfo), (1, 1), "{:.4} MHz: {rows:?}", hz / 1e6);
             assert!(
-                mine.iter().any(|r| r.detail.contains("mcc=272")),
+                mine.iter().any(|r| {
+                    r.packet.facts().any(|(_, f)| match f {
+                        common::packet::Fact::Infrastructure(c) => c.mcc == Some(272),
+                        _ => false,
+                    })
+                }),
                 "{:.4} MHz: the network was not named",
                 hz / 1e6
             );
@@ -5624,31 +5577,32 @@ pub(crate) mod tests {
             // through once, each cell on this network's band. The other
             // carrier is an idle traffic carrier and broadcasts nothing but
             // its identity.
-            let network: Vec<&&DecodeRecord> =
-                mine.iter().filter(|r| r.model == Some("TETRA-Network")).collect();
+            let network: Vec<&&Reception> = mine.iter().filter(|r| r.kind() == "network").collect();
             if hz == 391_181_000.0 {
                 assert!(!network.is_empty(), "{:.4} MHz: no network broadcast: {rows:?}", hz / 1e6);
             }
             assert!(network.len() <= 8, "{:.4} MHz: {} network rows", hz / 1e6, network.len());
+            // Each neighbour the cell named, with the carrier to go and
+            // look for it on: inside this network's band, or the map is of
+            // somewhere else.
             for r in &network {
-                let cells: Vec<&(String, common::Value)> =
-                    r.fields.iter().filter(|(k, _)| k.starts_with("cell_")).collect();
-                assert!(!cells.is_empty(), "{:?}", r.fields);
-                for (_, v) in cells {
-                    let text = v.to_string();
-                    let mhz: f64 = text
-                        .split(" at ")
-                        .nth(1)
-                        .and_then(|t| t.split(' ').next())
-                        .and_then(|m| m.parse().ok())
-                        .unwrap_or_else(|| panic!("no frequency in {text:?}"));
-                    assert!((390.0..400.0).contains(&mhz), "{text}");
+                let cells: Vec<u64> = r
+                    .packet
+                    .facts()
+                    .filter_map(|(_, f)| match f {
+                        common::packet::Fact::Infrastructure(c) => c.carrier_hz,
+                        _ => None,
+                    })
+                    .collect();
+                assert!(!cells.is_empty(), "no neighbour on {}", r.detail());
+                for hz in cells {
+                    assert!((390_000_000..400_000_000).contains(&hz), "{hz} Hz");
                 }
             }
             // A measurement of what the carrier looks like is not news once
             // a front end is reading it: at most the one piece cut before
             // the front end found its first sync burst.
-            let measured: Vec<&&DecodeRecord> = mine.iter().filter(|r| r.model.is_none()).collect();
+            let measured: Vec<&&Reception> = mine.iter().filter(|r| !r.is_known()).collect();
             assert!(
                 measured.len() <= 1,
                 "{:.4} MHz measured {} times while being read: {rows:?}",
@@ -5656,14 +5610,15 @@ pub(crate) mod tests {
                 measured.len()
             );
             assert!(
-                measured.iter().all(
-                    |r| r.modulation == common::Modulation::Dqpsk && r.detail.contains("TETRA")
-                ),
+                measured
+                    .iter()
+                    .all(|r| r.modulation() == common::Modulation::Dqpsk
+                        && r.detail().contains("TETRA")),
                 "{:.4} MHz was measured as {:?}",
                 hz / 1e6,
                 measured
                     .iter()
-                    .map(|r| format!("{} {}", r.modulation, r.detail))
+                    .map(|r| format!("{} {}", r.modulation(), r.detail()))
                     .collect::<Vec<_>>()
             );
         }
@@ -5684,27 +5639,25 @@ pub(crate) mod tests {
         };
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
-        let calls: Vec<&DecodeRecord> =
-            out.iter().filter(|r| r.model == Some("TETRA-Call")).collect();
+        let calls = read_as(&out, "tetra", "call");
         assert!(!calls.is_empty(), "no call rows from {} rows", out.len());
-        let field = |r: &DecodeRecord, k: &str| {
-            r.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
+        let to = |r: &Reception| {
+            r.packet.innermost().and_then(|l| l.link.to.as_ref()).map(|p| p.label().to_string())
         };
-        let groups: Vec<String> = calls.iter().filter_map(|r| field(r, "to")).collect();
+        let cipher = |r: &Reception| {
+            r.packet.facts().find_map(|(_, f)| match f {
+                common::packet::Fact::Protected(s) => s.cipher().map(str::to_string),
+                _ => None,
+            })
+        };
+        let groups: Vec<String> = calls.iter().filter_map(|r| to(r)).collect();
         assert!(groups.iter().any(|g| g == "10223295" || g == "15835885"), "addressed {groups:?}");
+        // The network says what protects its air interface in the clear, on
+        // every header, whether or not anything here can read the traffic.
         assert!(
-            calls.iter().all(|r| field(r, "encryption").as_deref() == Some("AIE-3")),
+            calls.iter().all(|r| cipher(r).as_deref() == Some("AIE-3")),
             "{:?}",
-            calls
-                .iter()
-                .map(|r| format!(
-                    "{:?} {:?} {:?} {:?}",
-                    field(r, "pdu"),
-                    field(r, "to"),
-                    field(r, "encryption"),
-                    r.detail
-                ))
-                .collect::<Vec<_>>()
+            calls.iter().map(|r| (to(r), cipher(r), r.detail())).collect::<Vec<_>>()
         );
         // Not a row per slot: an address that keeps being addressed is one
         // row every couple of seconds.
@@ -5714,14 +5667,13 @@ pub(crate) mod tests {
         // is talking: behind an enciphered SDU it is as likely to be a radio
         // registering or a data session. Those rows belong in the log and
         // not in a list of voice calls.
-        let mut list = crate::calls::Calls::new();
-        for r in calls.iter().filter(|r| field(r, "pdu").as_deref() == Some("MAC-RESOURCE")) {
-            assert!(!list.update(r, r.at), "a bare MAC header earned a call row: {:?}", r.fields);
-        }
+        // The call list is fed from the audio bus, and nothing on this
+        // capture ever reached it: twelve seconds of enciphered headers is
+        // not twelve seconds of anybody talking.
         assert!(
-            list.is_empty(),
+            rx.calls().is_none_or(|c| !c.listening()),
             "nothing here proved a voice call: {:?}",
-            calls.iter().filter_map(|r| field(r, "pdu")).collect::<Vec<_>>()
+            calls.iter().map(|r| (to(r), r.detail())).collect::<Vec<_>>()
         );
     }
 
@@ -5742,27 +5694,31 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&buf, None).unwrap();
         let out = replay_blocks(&mut rx, &buf);
 
-        let m17: Vec<&DecodeRecord> =
-            out.iter().filter(|r| r.protocol().starts_with("M17")).collect();
+        let m17 = read_by(&out, "m17");
         assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         // The callsign is in the link setup frame that opens the
         // transmission and repeated across the link information channel, so
         // reading it back means the demodulator, the framing, the Golay and
         // the CRC all worked on a signal nobody synthesised.
         assert!(
-            m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
+            m17.iter().any(|r| {
+                r.packet
+                    .innermost()
+                    .and_then(|l| l.link.from.as_ref())
+                    .is_some_and(|p| p.label() == "OPNRTX")
+            }),
             "no callsign: {:?}",
-            m17.iter().map(|r| &r.detail).take(4).collect::<Vec<_>>()
+            m17.iter().map(|r| r.detail()).take(4).collect::<Vec<_>>()
         );
         // The receiver was told no frequency at all, so this is the
         // detector's own answer, within a couple of channel widths of the
         // calling channel.
-        let hz = m17[0].freq;
+        let hz = m17[0].freq();
         assert!((hz - 433_475_000.0).abs() < 25_000.0, "read at {hz} Hz");
         // Most of the over, not a frame or two of it. A receiver that opens a
         // source, reads three frames and loses it is the failure this capture
         // was recorded for.
-        let voice = m17.iter().filter(|r| r.model == Some("M17-Voice")).count();
+        let voice = m17.iter().filter(|r| r.kind() == "voice").count();
         assert!(voice >= 20, "only {voice} voice frames of a 2.5 second over");
         // And each of those rows says how it was heard. The front end that
         // read them measures the channel itself; it used to hand over frames
@@ -5796,17 +5752,21 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
 
-        let m17: Vec<&DecodeRecord> =
-            out.iter().filter(|r| r.protocol().starts_with("M17")).collect();
+        let m17 = read_by(&out, "m17");
         assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         assert!(
-            m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
+            m17.iter().any(|r| {
+                r.packet
+                    .innermost()
+                    .and_then(|l| l.link.from.as_ref())
+                    .is_some_and(|p| p.label() == "OPNRTX")
+            }),
             "no callsign: {:?}",
-            m17.iter().map(|r| &r.detail).take(4).collect::<Vec<_>>()
+            m17.iter().map(|r| r.detail()).take(4).collect::<Vec<_>>()
         );
         // The frequency the channel was set to, not one anything searched
         // for: a decode channel is told where to listen.
-        let hz = m17[0].freq;
+        let hz = m17[0].freq();
         assert!((hz - 433_475_000.0).abs() < 1.0, "read at {hz} Hz");
         // Placed by the strip, so nothing above it measures anything: the
         // auto node's fill is not in this path at all, and a row still has
@@ -5839,17 +5799,21 @@ pub(crate) mod tests {
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
 
-        let m17: Vec<&DecodeRecord> =
-            out.iter().filter(|r| r.protocol().starts_with("M17")).collect();
+        let m17 = read_by(&out, "m17");
         assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
         assert!(
-            m17.iter().any(|r| r.detail.contains("from=OPNRTX")),
+            m17.iter().any(|r| {
+                r.packet
+                    .innermost()
+                    .and_then(|l| l.link.from.as_ref())
+                    .is_some_and(|p| p.label() == "OPNRTX")
+            }),
             "no callsign: {:?}",
-            m17.iter().map(|r| &r.detail).take(4).collect::<Vec<_>>()
+            m17.iter().map(|r| r.detail()).take(4).collect::<Vec<_>>()
         );
         // The detector's own answer, in absolute frequency: a source found
         // inside the channel is reported where it is on the dial.
-        let hz = m17[0].freq;
+        let hz = m17[0].freq();
         assert!((hz - 433_475_000.0).abs() < 25_000.0, "read at {hz} Hz");
     }
 
@@ -5911,31 +5875,27 @@ pub(crate) mod tests {
         // rather than assuming it arrived first.
         let r = out
             .iter()
-            .find(|r| r.model == Some("Fineoffset-WHx080"))
+            .find(|r| r.kind() == "Fineoffset-WHx080")
             .unwrap_or_else(|| panic!("only unknowns: {out:?}"));
-        assert_eq!(r.crc, Some(true), "{r:?}");
-        assert!(r.detail.contains("temperature_c=16.2"), "{}", r.detail);
-        // Structured, not just printed: a chart or a map has to be able to
-        // read a field without parsing the summary line back apart.
-        assert_eq!(
-            r.fields.iter().find(|(k, _)| k == "temperature_c").map(|(_, v)| v.as_f64()),
-            Some(Some(16.2))
-        );
-        assert_eq!(r.modulation, common::Modulation::Ook);
+        assert!(checked(r), "{r:?}");
+        // Stated, not printed: a chart reads the quantity, the value and the
+        // unit rather than parsing a summary line back apart.
+        assert_eq!(sensed(r, common::packet::Quantity::Temperature), Some(16.2));
+        assert_eq!(r.modulation(), common::Modulation::Ook);
         // A real reception from a recording made near full scale: strong, and
         // well clear of the noise.
-        assert!(r.snr_db > 6.0, "snr came out as {}", r.snr_db);
+        assert!(r.snr_db() > 6.0, "snr came out as {}", r.snr_db());
         // Referenced to full scale at the detector, so filter gain can put a
         // very strong packet slightly over zero. What matters is that it is a
         // real measurement rather than a placeholder.
-        assert!((-60.0..=6.0).contains(&r.rssi_dbfs), "rssi came out as {} dB", r.rssi_dbfs);
+        assert!((-60.0..=6.0).contains(&r.rssi_dbfs()), "rssi came out as {} dB", r.rssi_dbfs());
         // One row, not five: the FSK branch reads the same burst and the
         // neighbouring channels see its skirts, and all of that is one packet.
         assert_eq!(out.len(), 1, "the same burst was logged more than once: {out:#?}");
         // The frequency reported is the channel's, not the tuner's, which is
         // what makes a waterfall mark land on the signal.
-        let off = (r.freq - buf.center.as_f64()).abs();
-        assert!(off < buf.rate.as_f64() / 2.0, "{} Hz is outside the span", r.freq);
+        let off = (r.freq() - buf.center.as_f64()).abs();
+        assert!(off < buf.rate.as_f64() / 2.0, "{} Hz is outside the span", r.freq());
     }
 
     #[test]
@@ -5984,7 +5944,7 @@ pub(crate) mod tests {
         }];
         rx.rebuild(&plan).unwrap();
         rx.process(&block(8192)).unwrap();
-        let out = rx.decodes(std::time::Instant::now());
+        let out = rx.rows(std::time::Instant::now());
         assert!(out.is_empty(), "a steady tone decoded as {out:?}");
     }
 
@@ -6272,7 +6232,7 @@ pub(crate) mod tests {
                 silent_blocks += 1;
             }
             pcm.extend(out.iter().step_by(2));
-            assert!(rx.decodes(std::time::Instant::now()).is_empty(), "speech is not a packet");
+            assert!(rx.rows(std::time::Instant::now()).is_empty(), "speech is not a packet");
             for c in rx.heard_mut().expect("the tap").take_calls() {
                 calls.hear(&c);
                 heard.push(c);

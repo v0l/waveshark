@@ -13,13 +13,12 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::flex::decoded;
+pub use decode::flex::read;
 use dsp::flex::{CHANNEL_WIDTH_HZ, DEVIATION_HZ, FlexConfig, FlexDemod, Frame};
 use dsp::{FirDecim, FmDemod, Mixer};
 use identify::Signal;
 pub use identify::flex::AUDIO_HZ;
 pub use identify::flex::Flex;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -93,7 +92,7 @@ impl Simple for FlexNode {
         self.demod = FlexDemod::new(audio_rate, FlexConfig::default());
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -114,10 +113,10 @@ impl Simple for FlexNode {
         self.demod.process(&audio, &mut self.frames);
         self.audio = audio;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             self.accepted += 1;
-            out.push(self.meter.frame(f.to_bytes()));
+            out.push(self.meter.packet_now(f.to_bytes()));
         }
         Ok(())
     }
@@ -154,11 +153,12 @@ impl Protocol for Flex {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 64_999_999 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::pocsag::is_pager_band(p.center_hz() as f64) {
             return None;
         }
-        let decoded = decoded(bytes, common::Hz(p.center_hz()));
+        let decoded = read(bytes);
         (!decoded.is_empty()).then_some(decoded)
     }
 
@@ -199,18 +199,8 @@ mod tests {
     use dsp::flex::{Mode, encode_symbols};
 
     /// One frame as it reaches the packet bus, off a VHF pager channel.
-    fn packet(bytes: Vec<u8>) -> common::Packet {
-        common::Packet::of_frame(
-            0,
-            CHANNEL_WIDTH_HZ as u32,
-            common::Frame {
-                bytes,
-                center_hz: 153_350_000,
-                rssi_dbfs: -40.0,
-                snr_db: 20.0,
-                iq: None,
-            },
-        )
+    fn packet(bytes: Vec<u8>) -> common::packet::Packet {
+        crate::measured(153_350_000, CHANNEL_WIDTH_HZ as u32, bytes, -40.0, 20.0)
     }
 
     fn spec(rate: f64, center: f64) -> PortSpec {
@@ -233,7 +223,7 @@ mod tests {
     /// recovers are the words `decode::flex` reads, in the interleave the
     /// addresses depend on. Each layer is tested alone and each could be
     /// self-consistently wrong.
-    fn a_frame_through_the_node(mode: Mode) -> Vec<Decoded> {
+    fn a_frame_through_the_node(mode: Mode) -> Vec<common::packet::Proto> {
         let (rate, center) = (2_400_000.0, DEFAULT_HZ);
         let pages: Vec<Vec<(u32, Body)>> = vec![
             vec![
@@ -273,36 +263,30 @@ mod tests {
         let quiet = vec![common::C32::new(0.0, 0.0); 200_000];
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         assert_eq!(frames.len(), 1, "expected one frame off the air");
-        decoded(&frames[0], Hz(center as u64))
+        read(&frames[0])
     }
 
     #[test]
     fn a_modulated_frame_becomes_pages() {
         let decodes = a_frame_through_the_node(Mode { baud: 1600, levels: 2 });
         assert_eq!(decodes.len(), 2, "one phase carries two pages");
-        assert_eq!(decodes[0].protocol, "FLEX-Alpha");
-        assert_eq!(decodes[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
-        assert_eq!(decodes[0].media_type, pipeline::event::media::TEXT);
-        assert!(decodes[0].written, "a page is written to whoever carries the pager");
-        assert_eq!(decodes[0].crc_ok, Some(true));
-        let get =
-            |d: &Decoded, k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get(&decodes[0], "capcode"), Some(common::Value::Int(1_234_567)));
-        assert_eq!(get(&decodes[0], "baud"), Some(common::Value::Int(1600)));
-        assert_eq!(get(&decodes[0], "cycle"), Some(common::Value::Int(3)));
-        assert_eq!(get(&decodes[0], "frame"), Some(common::Value::Int(42)));
-        assert_eq!(get(&decodes[0], "phase"), Some(common::Value::Text("A".into())));
-        assert_eq!(decodes[1].protocol, "FLEX-Numeric");
-        assert_eq!(decodes[1].text.as_deref(), Some("0123456789"));
+        // A page is written to whoever carries the pager, and the capcode is
+        // the pager called: the network transmitted it.
+        assert_eq!(decodes[0].kind, "FLEX-Alpha");
+        assert_eq!(decodes[0].wrote(), Some("MOVE TO CHANNEL 2"));
+        assert_eq!(decodes[0].parties(), (None, Some("1234567")));
+        assert!(decodes[0].subject.is_none());
+        assert_eq!(decodes[1].kind, "FLEX-Numeric");
+        assert_eq!(decodes[1].wrote(), Some("0123456789"));
     }
 
     /// The fastest mode carries four phases at once, and all four are read.
@@ -310,25 +294,14 @@ mod tests {
     fn four_phases_are_read_from_one_frame() {
         let decodes = a_frame_through_the_node(dsp::flex::Mode { baud: 3200, levels: 4 });
         assert_eq!(decodes.len(), 5, "four phases, five pages");
-        let capcodes: Vec<i64> = decodes
-            .iter()
-            .filter_map(|d| d.fields.iter().find(|(n, _)| n == "capcode").map(|(_, v)| v.clone()))
-            .map(|v| match v {
-                common::Value::Int(i) => i,
-                _ => 0,
-            })
-            .collect();
-        assert_eq!(capcodes, [1_234_567, 98_765, 4_242, 7, 1_000_000]);
-        let phases: Vec<common::Value> = decodes
-            .iter()
-            .filter_map(|d| d.fields.iter().find(|(n, _)| n == "phase").map(|(_, v)| v.clone()))
-            .collect();
-        let want: Vec<common::Value> =
-            ["A", "A", "B", "C", "D"].iter().map(|s| common::Value::Text((*s).into())).collect();
-        assert_eq!(phases, want);
-        assert_eq!(decodes[3].protocol, "FLEX-Tone");
-        assert_eq!(decodes[3].text, None);
-        assert_eq!(decodes[4].text.as_deref(), Some("FOURTH PHASE"));
+        let capcodes: Vec<String> =
+            decodes.iter().filter_map(|d| d.parties().1.map(str::to_string)).collect();
+        assert_eq!(capcodes, ["1234567", "98765", "4242", "7", "1000000"]);
+        // A tone page is the beep and nothing else; the phases it came off
+        // are in the frame.
+        assert_eq!(decodes[3].kind, "FLEX-Tone");
+        assert_eq!(decodes[3].wrote(), None);
+        assert_eq!(decodes[4].wrote(), Some("FOURTH PHASE"));
     }
 
     /// FLEX is offered a pager-band frame before POCSAG is, so it has to
@@ -342,9 +315,9 @@ mod tests {
         let t = dsp::pocsag::Transmission { codewords: words, baud: 1200, corrected: 0, lost: 0 };
         let bytes = t.to_bytes();
         let p = packet(bytes.clone());
-        assert_eq!(Flex.read_frame(&p, &bytes), None, "a pager frame was claimed as FLEX");
+        assert_eq!(Flex.stated(&p), None, "a pager frame was claimed as FLEX");
         assert_eq!(
-            crate::pocsag_nodes::Pocsag.read_frame(&p, &bytes).map(|r| r.len()),
+            crate::pocsag_nodes::Pocsag.stated(&p).map(|r| r.len()),
             Some(1),
             "POCSAG should still read its own"
         );
@@ -357,7 +330,7 @@ mod tests {
         };
         let bytes = frame.to_bytes();
         let p = packet(bytes.clone());
-        assert_eq!(Flex.read_frame(&p, &bytes).map(|r| r.len()), Some(1));
+        assert_eq!(Flex.stated(&p).map(|r| r.len()), Some(1));
     }
 
     /// Minutes of noise on the channel produce no rows.
@@ -381,13 +354,13 @@ mod tests {
             let block: Vec<common::C32> =
                 (0..rate as usize).map(|_| common::C32::new(next(), next())).collect();
             let input = Payload::Iq(block);
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 for frame in f {
-                    rows += decoded(&frame.bytes, Hz(center as u64)).len();
+                    rows += read(frame.bytes()).len();
                 }
             }
         }

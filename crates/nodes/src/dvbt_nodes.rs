@@ -62,7 +62,6 @@ struct Offloaded {
 struct Heard {
     params: Option<Params>,
     snr_db: Option<f32>,
-    stats: decode::dvbt::Stats,
 }
 
 /// Blocks of samples waiting to be read. About a tenth of a second at the
@@ -90,7 +89,7 @@ impl Offloaded {
                     rx.push(&block, &mut out);
                     let _ = back.try_send(block);
                     *mine.lock().expect("the reading") =
-                        Heard { params: rx.params(), snr_db: rx.snr_db(), stats: rx.stats() };
+                        Heard { params: rx.params(), snr_db: rx.snr_db() };
                     if send.send(std::mem::take(&mut out)).is_err() {
                         return;
                     }
@@ -779,12 +778,11 @@ impl pipeline::node::Node for DvbtNode {
         {
             self.told = Some(params);
             let snr = self.rx.heard().snr_db.unwrap_or(0.0);
-            c.emit(pipeline::event::Event::Decoded(dvbtdec::multiplex_decoded(
-                params,
-                snr,
-                common::Hz(self.channel_hz as u64),
-                self.at,
-            )));
+            let carrier =
+                crate::locked(self.channel_hz as u64, CHANNEL_WIDTH_HZ as u32, &self.narrow, snr);
+            c.emit(pipeline::event::Event::Decoded(
+                common::packet::Packet::heard(carrier).decoded(dvbtdec::multiplex_read(params)),
+            ));
         }
         let fresh: Vec<u16> = self
             .mux
@@ -795,10 +793,16 @@ impl pipeline::node::Node for DvbtNode {
             .collect();
         for id in fresh {
             self.named.push(id);
-            if let Some(d) =
-                dvbtdec::service_decoded(&self.mux, id, common::Hz(self.channel_hz as u64), self.at)
-            {
-                c.emit(pipeline::event::Event::Decoded(d));
+            if let Some(d) = dvbtdec::service_read(&self.mux, id) {
+                let carrier = crate::locked(
+                    self.channel_hz as u64,
+                    CHANNEL_WIDTH_HZ as u32,
+                    &self.narrow,
+                    self.rx.heard().snr_db.unwrap_or(0.0),
+                );
+                c.emit(pipeline::event::Event::Decoded(
+                    common::packet::Packet::heard(carrier).decoded(d),
+                ));
             }
         }
         Ok(())
@@ -1940,7 +1944,10 @@ mod node_tests {
         // nothing names a service.
         let announcements = events
             .iter()
-            .filter(|e| matches!(e, pipeline::event::Event::Decoded(d) if d.protocol == "DVB-T"))
+            .filter(|e| matches!(
+                e,
+                pipeline::event::Event::Decoded(p) if p.innermost().is_some_and(|l| l.id == "dvbt")
+            ))
             .count();
         assert_eq!(announcements, 2, "the multiplex is announced on what changed, not per symbol");
     }

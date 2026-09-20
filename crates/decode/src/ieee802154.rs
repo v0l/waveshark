@@ -21,8 +21,8 @@
 //! OUI in its top three bytes. A short address only means anything inside its
 //! PAN, so it is reported with the PAN it was used in.
 
-use common::Decoded;
 use common::Value;
+use common::packet::{Channel, Entity, Fact, Id, Link, Party, Proto};
 
 /// What a frame is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,65 +351,47 @@ impl Frame {
     }
 }
 
-/// The decode a MAC frame becomes.
+/// What a MAC frame says.
 ///
 /// `None` when the bytes are not a frame this reads, which is how the packet
 /// bus tells one from anything else that arrived on the same centre.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+pub fn read(bytes: &[u8], center: common::Hz) -> Option<Proto> {
     let f = parse(bytes)?;
-    let mut fields = f.fields();
-    let channel = channel_of(center.as_f64());
-    if let Some(ch) = channel {
-        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = common::Link {
-        from: f.source_id().map(common::Party::unit),
-        to: Some(if f.dst.is_broadcast() || f.dst == Address::Absent {
-            common::Party::broadcast()
-        } else {
-            common::Party::unit(f.dst.to_string())
+    let mut p = Proto::new("ieee802154", f.frame_type.name()).between(Link {
+        from: f.source_id().map(Party::unit),
+        to: Some(match f.dst.is_broadcast() || f.dst == Address::Absent {
+            true => Party::broadcast(),
+            false => Party::unit(f.dst.to_string()),
         }),
-    };
-    let mut d = Decoded::bytes("802.15.4", center, 0.0, bytes.to_vec());
+    });
     if let Some(id) = f.source_id() {
-        let mut who = common::Identity::new("ieee802154", id);
+        let mut who = Entity::new("ieee802154", Id::Text(id));
         // The one durable name a listener gets: a short address is handed
         // out afresh at every association, and the OUI is in the EUI-64.
         who.vendor = f.src.oui();
-        d = d.by(who);
+        // A short address is handed out at association and taken back, so
+        // two sightings of one are not evidence of one device.
+        if matches!(f.src, Address::Short(_)) {
+            who = who.lasting(common::packet::Stability::Session);
+        }
+        p = p.by(who);
     }
-    if let Some(ch) = channel {
+    if let Some(ch) = channel_of(center.as_f64()) {
         // What protects the traffic is the MAC's own statement. A frame
         // without the security bit is a clear MAC header, which is not a
         // promise about the Zigbee or Thread payload above it, so an
         // unsecured frame says nothing rather than saying the network is
         // open.
-        let secrecy = if f.secured {
-            common::Secrecy::Encrypted(Some("802.15.4 MAC".into()))
-        } else {
-            common::Secrecy::Unsaid
+        let secrecy = match f.secured {
+            true => common::Secrecy::Encrypted(Some("802.15.4 MAC".into())),
+            false => common::Secrecy::Unsaid,
         };
-        d = d.on_channel(
-            common::ChannelUse::new(
-                common::ChannelPlan::Ieee802154,
-                u16::from(ch),
-                CHANNEL_WIDTH_HZ as u32,
-            )
-            .protected_by(secrecy),
-        );
+        p = p.saying(Fact::Channel(
+            Channel::new(common::ChannelPlan::Ieee802154, u16::from(ch), CHANNEL_WIDTH_HZ as u32)
+                .protected_by(secrecy),
+        ));
     }
-    Some(
-        d.with_link(link)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Oqpsk)
-            // Everything reaching here passed the MAC's CRC-16 in the
-            // demodulator, which is a real check and not an argument from
-            // plausibility.
-            .with_crc(Some(true)),
-    )
+    Some(p)
 }
 
 /// The channel a centre names, if it names one.

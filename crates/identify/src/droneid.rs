@@ -49,12 +49,7 @@ impl Signal for DroneId {
         }
         bursts
             .iter()
-            .filter_map(|b| {
-                decode::droneid::decoded(
-                    &decode::droneid::wrap(&b.frame),
-                    common::Hz(b.center_hz as u64),
-                )
-            })
+            .filter_map(|b| decode::droneid::read(&decode::droneid::wrap(&b.frame)))
             .collect::<Vec<_>>()
             .into()
     }

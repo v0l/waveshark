@@ -6,8 +6,8 @@
 //! a dash is three dots, elements inside a character are separated by one
 //! dot, characters by three, and words by seven.
 
-use common::Decoded;
-use common::{Package, Pulse};
+use common::Pulse;
+use common::packet::Proto;
 use dsp::cw::CwConfig;
 
 /// Dot length in microseconds at a given speed.
@@ -77,7 +77,7 @@ fn letter(pat: &str) -> Option<char> {
 /// sending something other than what was asked for is worse than sending
 /// less. Every mark carries the gap that follows it, so the last pulse's gap
 /// is the word gap that ends the transmission.
-pub fn encode(text: &str, wpm: f32) -> Package {
+pub fn encode(text: &str, wpm: f32) -> Vec<Pulse> {
     let dot = dot_us(wpm);
     let mut pulses: Vec<Pulse> = Vec::new();
     let mut words = 0usize;
@@ -106,7 +106,7 @@ pub fn encode(text: &str, wpm: f32) -> Package {
     if let Some(p) = pulses.last_mut() {
         p.gap = dot * 7;
     }
-    Package { pulses, ..Default::default() }
+    pulses
 }
 
 /// The dot length a burst was sent at, in microseconds.
@@ -116,8 +116,8 @@ pub fn encode(text: &str, wpm: f32) -> Package {
 /// is rarely the speed the receiver expected. The shortest mark is the dot:
 /// dashes are three times longer, and a burst with no dots at all (an
 /// unbroken run of dashes) is rare enough to be worth getting wrong.
-pub fn dot_of(pkg: &Package) -> u32 {
-    pkg.pulses.iter().map(|p| p.mark).min().unwrap_or(0).max(1)
+pub fn dot_of(pulses: &[Pulse]) -> u32 {
+    pulses.iter().map(|p| p.mark).min().unwrap_or(0).max(1)
 }
 
 /// The speed a dot length is, in words a minute. The inverse of [`dot_us`].
@@ -134,11 +134,11 @@ pub fn wpm(dot_us: u32) -> f32 {
 /// measures, was not keyed by a person.
 ///
 /// The last gap is the silence that ended the burst and says nothing.
-pub fn fits(pkg: &Package) -> f32 {
-    if pkg.pulses.len() < 2 {
+pub fn fits(pulses: &[Pulse]) -> f32 {
+    if pulses.len() < 2 {
         return 0.0;
     }
-    let dot = dot_of(pkg) as f32;
+    let dot = dot_of(pulses) as f32;
     // Measured on a synthetic 18 wpm over: a station in the channel scores
     // 1.0 even with a fist skewed 15% each way, and a strong station a
     // kilohertz outside it, heard as blips through the filter skirt, scores
@@ -146,10 +146,10 @@ pub fn fits(pkg: &Package) -> f32 {
     let near = |v: f32, of: &[f32]| of.iter().any(|g| (v - g).abs() / g <= 0.4);
     let mut good = 0usize;
     let mut total = 0usize;
-    for (i, p) in pkg.pulses.iter().enumerate() {
+    for (i, p) in pulses.iter().enumerate() {
         total += 1;
         good += usize::from(near(p.mark as f32 / dot, &[1.0, 3.0]));
-        if i + 1 < pkg.pulses.len() {
+        if i + 1 < pulses.len() {
             total += 1;
             good += usize::from(near(p.gap as f32 / dot, &[1.0, 3.0, 7.0]));
         }
@@ -158,20 +158,20 @@ pub fn fits(pkg: &Package) -> f32 {
 }
 
 /// Read timings back as text.
-pub fn decode(pkg: &Package) -> String {
-    if pkg.pulses.is_empty() {
+pub fn decode(pulses: &[Pulse]) -> String {
+    if pulses.is_empty() {
         return String::new();
     }
-    let dot = dot_of(pkg) as f32;
+    let dot = dot_of(pulses) as f32;
     let mut out = String::new();
     let mut pat = String::new();
 
-    for (i, p) in pkg.pulses.iter().enumerate() {
+    for (i, p) in pulses.iter().enumerate() {
         // Halfway between a dot and a dash separates them, which tolerates
         // the roughly 10% error a detector's threshold adds at each edge.
         pat.push(if p.mark as f32 / dot >= 2.0 { '-' } else { '.' });
 
-        let last = i + 1 == pkg.pulses.len();
+        let last = i + 1 == pulses.len();
         let gaps = p.gap as f32 / dot;
         // Midway between one dot and three, and between three and seven.
         if last || gaps >= 2.0 {
@@ -185,29 +185,29 @@ pub fn decode(pkg: &Package) -> String {
     out
 }
 
-/// One row: what was sent, and how fast.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// How fast it was keyed, in words a minute, off the frame's own envelope.
+///
+/// The speed is the keying and not a statement about the world, so it stays
+/// in the frame rather than travelling as a fact; this reads it back for a
+/// pane or a test that wants the number.
+pub fn speed(bytes: &[u8]) -> Option<f32> {
     if bytes.len() <= ENVELOPE || bytes[..TAG.len()] != TAG {
         return None;
     }
     let dot_us = u32::from_le_bytes(bytes[TAG.len()..ENVELOPE].try_into().ok()?);
+    Some(wpm(dot_us))
+}
+
+/// What was sent: somebody keyed it to somebody.
+///
+/// The speed is not among the statements. How fast a person sends is the
+/// keying, and the frame still carries the dot length it was read at.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
+    if bytes.len() <= ENVELOPE || bytes[..TAG.len()] != TAG {
+        return None;
+    }
     let text = String::from_utf8_lossy(&bytes[ENVELOPE..]).to_string();
-    let wpm = wpm(dot_us);
-    let fields = vec![
-        ("speed".into(), common::Value::Float(wpm as f64)),
-        ("dot_ms".into(), common::Value::Float(dot_us as f64 / 1000.0)),
-        ("message".into(), common::Value::Text(text.clone())),
-    ];
-    Some(
-        Decoded::bytes("Morse", center, 0.0, bytes.to_vec())
-            .with_modulation(common::Modulation::Ook)
-            .with_detail(format!("{wpm:.0} wpm"))
-            .with_fields(fields)
-            // A person sent it to another person, so it belongs beside
-            // anything else somebody wrote rather than in the packet list.
-            .written()
-            .with_text(text),
-    )
+    Some(Proto::new("morse", "text").saying(common::packet::Fact::message(text)))
 }
 
 pub const ENVELOPE: usize = TAG.len() + 4;
@@ -222,11 +222,11 @@ pub const TAG: [u8; 4] = *b"MORS";
 /// The check is the timing and the text, because Morse has no other: the
 /// elements either sit on the grid a hand produces or they do not, and a
 /// pattern of them either is a letter or is not.
-pub fn framed(pkg: &common::Package) -> Option<Vec<u8>> {
-    if fits(pkg) < MIN_FIT {
+pub fn framed(pulses: &[Pulse]) -> Option<Vec<u8>> {
+    if fits(pulses) < MIN_FIT {
         return None;
     }
-    let text = decode(pkg);
+    let text = decode(pulses);
     let letters = text.chars().filter(|c| !c.is_whitespace()).count();
     if letters < MIN_CHARS {
         return None;
@@ -237,7 +237,7 @@ pub fn framed(pkg: &common::Package) -> Option<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(ENVELOPE + text.len());
     out.extend_from_slice(&TAG);
-    out.extend_from_slice(&dot_of(pkg).to_le_bytes());
+    out.extend_from_slice(&dot_of(pulses).to_le_bytes());
     out.extend_from_slice(text.as_bytes());
     Some(out)
 }
@@ -285,7 +285,7 @@ mod tests {
         // dots, so at 1 wpm it takes 60 seconds. A timing table that gets
         // this wrong is wrong at every speed.
         let pkg = encode("PARIS", 1.0);
-        let total: u64 = pkg.pulses.iter().map(|p| p.mark as u64 + p.gap as u64).sum();
+        let total: u64 = pkg.iter().map(|p| p.mark as u64 + p.gap as u64).sum();
         assert_eq!(total, 60_000_000, "PARIS at 1 wpm is not a minute long");
         // And the speed is read back off the timings, which is how a
         // receiver reports what it heard.
@@ -297,8 +297,8 @@ mod tests {
     fn speed_scales_the_timings_and_nothing_else() {
         let slow = encode("SOS", 10.0);
         let fast = encode("SOS", 20.0);
-        assert_eq!(slow.pulses.len(), fast.pulses.len());
-        for (a, b) in slow.pulses.iter().zip(&fast.pulses) {
+        assert_eq!(slow.len(), fast.len());
+        for (a, b) in slow.iter().zip(&fast) {
             assert_eq!(a.mark, b.mark * 2);
             assert_eq!(a.gap, b.gap * 2);
         }
@@ -316,7 +316,7 @@ mod tests {
     fn only_timings_on_the_grid_look_like_a_person_sending() {
         assert_eq!(fits(&encode("CQ DE MI0ABC", 18.0)), 1.0);
         let mut fist = encode("CQ DE MI0ABC", 18.0);
-        for (i, p) in fist.pulses.iter_mut().enumerate() {
+        for (i, p) in fist.iter_mut().enumerate() {
             let skew = if i % 2 == 0 { 1.15 } else { 0.85 };
             p.mark = (p.mark as f32 * skew) as u32;
             p.gap = (p.gap as f32 * skew) as u32;
@@ -325,12 +325,8 @@ mod tests {
 
         // Blips of random length separated by silences, which is what a
         // strong station outside the channel looks like through the skirt.
-        let junk = Package {
-            pulses: (0..8)
-                .map(|i| Pulse { mark: 12_000 + i * 9_000, gap: 200_000 + i * 40_000 })
-                .collect(),
-            ..Default::default()
-        };
+        let junk: Vec<Pulse> =
+            (0..8).map(|i| Pulse { mark: 12_000 + i * 9_000, gap: 200_000 + i * 40_000 }).collect();
         assert!(fits(&junk) < 0.5, "noise scored {}", fits(&junk));
     }
 
@@ -339,7 +335,7 @@ mod tests {
         // What comes back off the air is not exact: each edge moves by a few
         // percent as the envelope crosses the threshold.
         let mut pkg = encode("CQ", 20.0);
-        for (i, p) in pkg.pulses.iter_mut().enumerate() {
+        for (i, p) in pkg.iter_mut().enumerate() {
             let skew = if i % 2 == 0 { 1.08 } else { 0.93 };
             p.mark = (p.mark as f32 * skew) as u32;
             p.gap = (p.gap as f32 * skew) as u32;

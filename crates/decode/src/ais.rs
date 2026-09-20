@@ -27,7 +27,7 @@
 //! minute. A tracker therefore has far less to do with AIS than with ADS-B,
 //! and none of the zone ambiguity that makes a single Mode S frame dangerous.
 
-use common::Decoded;
+use common::packet::{Entity, Fact, Fix, Id, Link, Motion, Named, Party, Proto, ThingKind};
 /// Longitude and latitude arrive as ten-thousandths of a minute, so a degree
 /// is sixty minutes of ten thousand units.
 const COORD_SCALE: f64 = 600_000.0;
@@ -320,130 +320,85 @@ pub fn ship_type_name(v: u8) -> &'static str {
     }
 }
 
-/// The decode an AIS payload becomes.
+/// What an AIS message says.
 ///
-/// Takes the bytes rather than a parsed message for the same reason the Mode S
-/// one does: what travels on the bus is the payload, and a consumer draws its
-/// own conclusions from it.
-pub fn decoded(frame: &Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    // The identity every message carries, and the field that turns a stream of
-    // them into tracks.
-    fields.push(("mmsi".into(), Value::Int(i64::from(frame.mmsi))));
-
-    let mut position = None;
-    let mut name = None;
-    let mut report = common::ReportDetail::Bare;
-    let protocol = match &frame.kind {
-        Message::Position(p) => {
-            if let Some((lat, lon)) = p.position {
-                position = Some(common::Position {
-                    lat,
-                    lon,
-                    altitude_m: None,
-                    speed_kt: p.sog_kt,
-                    course_deg: p.cog_deg,
-                });
+/// Every message names the ship, so the MMSI is the subject and the layer's
+/// statements are what this one carried: where it is, how it is moving, what
+/// it is, where it is going.
+pub fn read(frame: &Frame) -> Proto {
+    let mmsi = frame.mmsi.to_string();
+    let mut p = Proto::new("ais", kind_of(&frame.kind))
+        .by(Entity::new("ais", Id::Num(u64::from(frame.mmsi))))
+        .between(Link::beacon(Party::unit(mmsi)));
+    match &frame.kind {
+        Message::Position(m) => {
+            if let Some((lat, lon)) = m.position {
+                p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: None }));
             }
-            report = common::ReportDetail::Vessel {
-                heading_deg: p.heading_deg,
-                nav_status: p.nav_status.map(nav_status_name),
-                ship_type: None,
-                destination: None,
-                class_b: p.class_b,
-            };
-            {}
-            if let Some((lat, lon)) = p.position {
-                fields.push(("lat".into(), Value::Float(round(lat, 5))));
-                fields.push(("lon".into(), Value::Float(round(lon, 5))));
+            p = p.saying(Fact::Motion(Motion {
+                speed_kt: m.sog_kt,
+                course_deg: m.cog_deg,
+                climb_ms: None,
+                heading_deg: m.heading_deg,
+            }));
+            let mut named = Named::new(frame.mmsi.to_string(), ThingKind::Vessel);
+            named.state = m.nav_status.map(nav_status_name);
+            if named.state.is_some() {
+                p = p.saying(Fact::Named(named));
             }
-            if let Some(v) = p.sog_kt {
-                fields.push(("ground_speed_kt".into(), Value::Float(v)));
-            }
-            if let Some(v) = p.cog_deg {
-                fields.push(("track_deg".into(), Value::Float(v)));
-            }
-            if let Some(v) = p.heading_deg {
-                fields.push(("heading_deg".into(), Value::Float(v)));
-            }
-            if let Some(v) = p.nav_status {
-                fields.push(("nav_status".into(), Value::Text(nav_status_name(v).into())));
-            }
-            if p.class_b { "AIS-PositionB" } else { "AIS-Position" }
         }
         Message::Static(s) => {
             // No coordinates in a static message: what it carries is what the
             // ship is and where it is going.
-            report = common::ReportDetail::Vessel {
-                heading_deg: None,
-                nav_status: None,
-                ship_type: s.ship_type.map(ship_type_name),
-                destination: s.destination.clone(),
-                class_b: false,
-            };
-            if let Some(n) = &s.name {
-                name = Some(n.clone());
-                fields.push(("name".into(), Value::Text(n.clone())));
-            }
-            if let Some(c) = &s.callsign {
-                fields.push(("callsign".into(), Value::Text(c.clone())));
-            }
-            if let Some(t) = s.ship_type {
-                fields.push(("ship_type".into(), Value::Text(ship_type_name(t).into())));
-            }
-            if let Some(d) = &s.destination {
-                fields.push(("destination".into(), Value::Text(d.clone())));
+            let mut named = Named::new(
+                s.name.clone().unwrap_or_else(|| frame.mmsi.to_string()),
+                ThingKind::Vessel,
+            );
+            named.role = s.ship_type.map(ship_type_name);
+            p = p.saying(Fact::Named(named));
+            if let Some(d) = s.destination.clone().filter(|d| !d.trim().is_empty()) {
+                p = p.saying(Fact::Destination(d));
             }
             if let Some(d) = s.draught_m {
-                fields.push(("draught_m".into(), Value::Float(d)));
+                p = p.saying(Fact::sensed(
+                    common::packet::Quantity::Depth,
+                    f64::from(d),
+                    common::Unit::Metre,
+                ));
             }
-            "AIS-Static"
         }
-        Message::BaseStation { position: p, .. } => {
-            if let Some((lat, lon)) = p {
-                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
-                report = common::ReportDetail::Station { aid: false };
-                fields.push(("lat".into(), Value::Float(round(*lat, 5))));
-                fields.push(("lon".into(), Value::Float(round(*lon, 5))));
+        Message::BaseStation { position, .. } => {
+            p = p.saying(Fact::Named(
+                Named::new(frame.mmsi.to_string(), ThingKind::Station).fixed(),
+            ));
+            if let Some((lat, lon)) = position {
+                p = p.saying(Fact::Position(Fix { lat: *lat, lon: *lon, precision_bits: None }));
             }
-            "AIS-BaseStation"
         }
-        Message::AidToNavigation { name: n, position: p, .. } => {
-            if let Some(n) = n {
-                name = Some(n.clone());
-                fields.push(("name".into(), Value::Text(n.clone())));
+        Message::AidToNavigation { name, position, .. } => {
+            p = p.saying(Fact::Named(
+                Named::new(name.clone().unwrap_or_else(|| frame.mmsi.to_string()), ThingKind::Mark)
+                    .fixed(),
+            ));
+            if let Some((lat, lon)) = position {
+                p = p.saying(Fact::Position(Fix { lat: *lat, lon: *lon, precision_bits: None }));
             }
-            if let Some((lat, lon)) = p {
-                position = Some(common::Position { lat: *lat, lon: *lon, ..Default::default() });
-                report = common::ReportDetail::Station { aid: true };
-                fields.push(("lat".into(), Value::Float(round(*lat, 5))));
-                fields.push(("lon".into(), Value::Float(round(*lon, 5))));
-            }
-            "AIS-AidToNav"
         }
-        Message::Unsupported { msg_type } => {
-            fields.push(("msg_type".into(), Value::Int(i64::from(*msg_type))));
-            "AIS-Other"
-        }
-    };
+        Message::Unsupported { .. } => {}
+    }
+    p
+}
 
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut who = common::Identity::new("ais", frame.mmsi.to_string());
-    who.name = name;
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_link(common::Link::beacon(common::Party::unit(frame.mmsi.to_string())))
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Gmsk)
-        // Every frame that reaches here passed the X.25 frame check sequence
-        // in the demodulator, which is a real integrity check and not a
-        // plausibility argument.
-        .with_crc(Some(true));
-    d.position = position;
-    d.report = report;
-    d
+/// Which message it is, as the name a row matches on
+fn kind_of(m: &Message) -> &'static str {
+    match m {
+        Message::Position(p) if p.class_b => "position_b",
+        Message::Position(_) => "position",
+        Message::Static(_) => "static",
+        Message::BaseStation { .. } => "base_station",
+        Message::AidToNavigation { .. } => "aid_to_navigation",
+        Message::Unsupported { .. } => "other",
+    }
 }
 
 pub fn round(v: f64, places: i32) -> f64 {

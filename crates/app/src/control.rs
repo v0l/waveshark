@@ -22,7 +22,7 @@
 //! where it knew the scale, so a link added later appears here the day its
 //! decoder fills the report in.
 
-use crate::radio::DecodeRecord;
+use crate::row::Reception;
 use std::time::{Duration, Instant};
 
 /// How long after its last frame a link is still counted as live. A control
@@ -68,7 +68,7 @@ pub struct Control {
     /// without dropping it.
     pub channel_at: [Option<Instant>; common::CONTROL_CHANNELS],
     pub armed: Option<bool>,
-    pub uplink_power_mw: Option<u16>,
+    pub uplink_power_mw: Option<u32>,
     pub last_rssi_dbfs: f32,
     pub best_rssi_dbfs: f32,
 }
@@ -107,13 +107,18 @@ pub struct Controls {
 
 impl Controls {
     /// Fold one decode in, and say whether it carried sticks at all.
-    pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let common::ReportDetail::Control { channels, armed, uplink_power_mw } = &rec.report else {
+    pub fn update(&mut self, rec: &Reception, at: Instant) -> bool {
+        let Some(sticks) = rec.packet.facts().find_map(|(_, f)| match f {
+            common::packet::Fact::Control(s) => Some(*s),
+            _ => None,
+        }) else {
             return false;
         };
+        let common::packet::Sticks { channels, armed, uplink_power_mw } = &sticks;
         // Who sent it, or there is no row to put it in: a control report with
         // nobody attached would merge two handsets into one set of sticks.
-        let Some(id) = rec.identity.as_ref().map(|i| i.id.clone()).filter(|i| !i.is_empty()) else {
+        let Some(id) = rec.packet.subject().map(|e| e.id.to_string()).filter(|i| !i.is_empty())
+        else {
             return false;
         };
         let system = rec.system().to_string();
@@ -124,7 +129,7 @@ impl Controls {
                 self.seen.push(Control {
                     system,
                     id,
-                    channel_hz: rec.freq,
+                    channel_hz: rec.freq(),
                     first: at,
                     last: at,
                     frames: 0,
@@ -132,18 +137,18 @@ impl Controls {
                     channel_at: [None; common::CONTROL_CHANNELS],
                     armed: None,
                     uplink_power_mw: None,
-                    last_rssi_dbfs: rec.rssi_dbfs,
-                    best_rssi_dbfs: rec.rssi_dbfs,
+                    last_rssi_dbfs: rec.rssi_dbfs(),
+                    best_rssi_dbfs: rec.rssi_dbfs(),
                 });
                 self.seen.last_mut().expect("just pushed")
             }
         };
         c.last = at;
-        c.channel_hz = rec.freq;
+        c.channel_hz = rec.freq();
         c.frames += 1;
-        c.last_rssi_dbfs = rec.rssi_dbfs;
-        if rec.rssi_dbfs > c.best_rssi_dbfs || c.best_rssi_dbfs.is_nan() {
-            c.best_rssi_dbfs = rec.rssi_dbfs;
+        c.last_rssi_dbfs = rec.rssi_dbfs();
+        if rec.rssi_dbfs() > c.best_rssi_dbfs || c.best_rssi_dbfs.is_nan() {
+            c.best_rssi_dbfs = rec.rssi_dbfs();
         }
         // Merged, not replaced: a frame that did not carry a channel says
         // nothing about it, and taking the absence as a position would put
@@ -187,17 +192,16 @@ impl Controls {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::ReportDetail;
+    use common::packet::{Entity, Fact, Id, Sticks};
 
     fn rec(
         model: &'static str,
         id: &str,
         channels: [Option<u16>; common::CONTROL_CHANNELS],
-    ) -> DecodeRecord {
-        let mut r = DecodeRecord::for_test(2_415e6, model);
-        r.report = ReportDetail::Control { channels, armed: Some(false), uplink_power_mw: None };
-        r.identity = Some(common::Identity::new("elrs", id));
-        r
+    ) -> Reception {
+        Reception::for_test(2_415e6, model)
+            .stating(Fact::Control(Sticks { channels, armed: Some(false), uplink_power_mw: None }))
+            .by(Entity::new("elrs", Id::Text(id.into())))
     }
 
     fn bank(base: usize, values: [u16; 8]) -> [Option<u16>; common::CONTROL_CHANNELS] {
@@ -253,14 +257,16 @@ mod tests {
         c.update(&rec("ExpressLRS", "aa01", bank(0, [1500; 8])), now);
         assert_eq!(c.len(), 2);
 
-        let mut sync = DecodeRecord::for_test(2_415e6, "ExpressLRS");
-        sync.identity = Some(common::Identity::new("elrs", "6f37"));
+        let sync = Reception::for_test(2_415e6, "ExpressLRS")
+            .by(Entity::new("elrs", Id::Text("6f37".into())));
         assert!(!c.update(&sync, now), "a sync packet is not a set of sticks");
 
         // Nor is a control report from nobody in particular: two handsets
         // would merge into one row of sticks that were never sent together.
         let mut nameless = rec("ExpressLRS", "6f37", bank(0, [1500; 8]));
-        nameless.identity = None;
+        if let Some(l) = nameless.packet.stack.last_mut() {
+            l.subject = None;
+        }
         assert!(!c.update(&nameless, now));
         assert_eq!(c.len(), 2);
     }

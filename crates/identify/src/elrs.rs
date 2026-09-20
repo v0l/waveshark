@@ -63,12 +63,11 @@ impl Signal for Elrs {
         let Some(uid) = link_uid(&heard, ota) else {
             return Reading::default();
         };
-        let center = common::Hz(center_hz as u64);
         heard
             .iter()
             .filter_map(|(sf, packet)| {
                 let bytes = elrs::to_bytes(*sf, CHANNEL_WIDTH_HZ, ota, &uid, None, packet);
-                elrs::decoded(&bytes, center)
+                elrs::read(&bytes)
             })
             .collect::<Vec<_>>()
             .into()

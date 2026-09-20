@@ -26,16 +26,16 @@ fn main() {
     let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
     let mut rows = 0usize;
     for block in buf.samples.chunks(65_536) {
-        let mut output = Payload::Frames(Vec::new());
+        let mut output = Payload::Packets(Vec::new());
         node.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx).unwrap();
-        for f in output.as_frames().unwrap_or(&Vec::new()) {
+        for f in output.as_packets().unwrap_or(&[]) {
             rows += 1;
-            let d = decode::droneid::decoded(&f.bytes, common::Hz(f.center_hz)).expect("a row");
+            let d = decode::droneid::read(f.bytes()).expect("a row");
             println!(
                 "{rows:>3}  {:>6.1} dBFS  {:>5.1} dB  {}",
-                f.rssi_dbfs,
-                f.snr_db,
-                d.detail.as_deref().unwrap_or("")
+                f.carrier.rssi_dbfs,
+                f.carrier.snr_db,
+                format!("{} {}", d.id, d.kind)
             );
         }
     }

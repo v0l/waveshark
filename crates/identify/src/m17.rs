@@ -61,10 +61,14 @@ impl Signal for M17 {
             demod.process(&audio, &mut frames);
             for f in &frames {
                 for e in assembler.push(f) {
-                    if let Some(d) = m17::decoded(&e.to_bytes(), chan.hz()) {
-                        if let Some(a) = d.airtime.as_ref().filter(|a| a.voice) {
-                            voice_s += a.seconds;
-                        }
+                    // 40 ms a frame, the one duration in M17 that needs no
+                    // clock, counted off the stream rather than off a row:
+                    // how long a transmission held the channel is the over,
+                    // and an over is stated on the voice port.
+                    if let m17::Event::Stream { frames, .. } = &e {
+                        voice_s += f64::from(*frames) * 0.04;
+                    }
+                    if let Some(d) = m17::read(&e.to_bytes()) {
                         rows.push(d);
                     }
                 }
@@ -73,7 +77,7 @@ impl Signal for M17 {
         // A transmission that stopped mid-stream ends when nothing more is
         // heard, so the assembler is told the time even where no frame came.
         for e in assembler.poll(samples) {
-            if let Some(d) = m17::decoded(&e.to_bytes(), chan.hz()) {
+            if let Some(d) = m17::read(&e.to_bytes()) {
                 rows.push(d);
             }
         }

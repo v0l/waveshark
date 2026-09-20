@@ -21,8 +21,8 @@
 //! fix sends zeros: a position of exactly zero is absent, not the Gulf of
 //! Guinea, and is reported as absent.
 
-use common::Decoded;
 use common::Value;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 
 /// The frame, CRC included.
 pub const FRAME_LEN: usize = 91;
@@ -244,41 +244,31 @@ pub fn fields(f: &Frame) -> Vec<(String, Value)> {
     v
 }
 
-/// The row a frame becomes.
+/// What a DJI DroneID frame says.
 ///
-/// `None` when the bytes are not a DroneID frame, which is how the packet bus
-/// tells one from anything else arriving on the same centre.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// Filed under the airframe's serial, which is the identity this protocol
+/// exists to broadcast and is printed on the aircraft.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     if bytes.len() < TAG.len() + FRAME_LEN || bytes[..4] != TAG {
         return None;
     }
     let f = parse(&bytes[4..])?;
-    let mut fields = fields(&f);
-    fields.push(("protocol".into(), Value::Text("DJI DroneID".into())));
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-
-    // The row is filed under the airframe's serial, which is the identity
-    // this protocol exists to broadcast and is printed on the aircraft.
-    let mut who = common::Identity::new("dji", f.serial.clone());
+    let mut who = Entity::new("dji", Id::Text(f.serial.clone())).made_by("DJI");
     who.name = device_name(f.device_type).map(str::to_string);
-    who.vendor = Some("DJI".into());
-    let mut d = Decoded::bytes("DJI-DroneID", center, 0.0, bytes[4..].to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Ofdm)
-        // A CRC-16 over the frame and a CRC-24 over the block it rode in.
-        .with_crc(Some(true));
+    let mut p = Proto::new("droneid", "frame").by(who).saying(Fact::Named(Named::new(
+        device_name(f.device_type).unwrap_or("drone"),
+        ThingKind::Aircraft,
+    )));
     if let (Some(lat), Some(lon)) = (f.latitude, f.longitude) {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: Some(f.altitude_m),
-            ..Default::default()
-        });
+        p = p
+            .saying(Fact::Position(common::packet::Fix { lat, lon, precision_bits: None }))
+            .saying(Fact::sensed(
+                common::packet::Quantity::Altitude,
+                f.altitude_m,
+                common::Unit::Metre,
+            ));
     }
-    Some(d)
+    Some(p)
 }
 
 /// The tag in front of a frame on the bus, so a row can be told from any

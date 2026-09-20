@@ -34,9 +34,10 @@
 
 use crate::fir::FirDecim;
 use crate::mixer::Mixer;
-use crate::pulse::{OokDetector, Package, PulseConfig};
+use crate::pulse::{OokDetector, PulseConfig};
 use crate::tone::ToneMeter;
 use common::C32;
+use common::packet::Detection;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CwConfig {
@@ -226,7 +227,7 @@ impl CwDetector {
     }
 
     /// Feed a block of audio, appending completed transmissions to `out`.
-    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Package>) {
+    pub fn process(&mut self, audio: &[f32], out: &mut Vec<Detection>) {
         let want = self.window_len();
         let mut rest = audio;
         while !rest.is_empty() {
@@ -249,7 +250,7 @@ impl CwDetector {
     }
 
     /// Publish whatever is still open, for the end of a stream.
-    pub fn flush(&mut self, out: &mut Vec<Package>) {
+    pub fn flush(&mut self, out: &mut Vec<Detection>) {
         while let Some(due) = self.pending.pop_front() {
             self.read(&due, out);
         }
@@ -350,7 +351,7 @@ impl CwDetector {
 
     /// Mix the window down by the tracked pitch, narrow it, and hand the
     /// magnitude to the pulse detector.
-    fn read(&mut self, window: &[f32], out: &mut Vec<Package>) {
+    fn read(&mut self, window: &[f32], out: &mut Vec<Detection>) {
         if !self.tuned {
             return;
         }
@@ -423,7 +424,7 @@ mod tests {
         p
     }
 
-    fn run(det: &mut CwDetector, audio: &[f32]) -> Vec<Package> {
+    fn run(det: &mut CwDetector, audio: &[f32]) -> Vec<Detection> {
         let mut out = Vec::new();
         for block in audio.chunks(1_024) {
             det.process(block, &mut out);
@@ -440,8 +441,8 @@ mod tests {
         let mut det = CwDetector::new(RATE, CwConfig::default());
         let out = run(&mut det, &audio);
         assert_eq!(out.len(), 1, "{} transmissions", out.len());
-        assert_eq!(out[0].pulses.len(), 9, "{} elements", out[0].pulses.len());
-        for (got, want) in out[0].pulses.iter().zip(sos()) {
+        assert_eq!(out[0].pulses().len(), 9, "{} elements", out[0].pulses().len());
+        for (got, want) in out[0].pulses().iter().zip(sos()) {
             let err = got.mark as i64 - want.mark as i64;
             assert!(err.abs() < 6_000, "a {} us mark read as {} us", want.mark, got.mark);
         }
@@ -459,7 +460,7 @@ mod tests {
             let mut det = CwDetector::new(RATE, CwConfig::default());
             let out = run(&mut det, &audio);
             assert_eq!(out.len(), 1, "{hz} Hz: {} transmissions", out.len());
-            assert_eq!(out[0].pulses.len(), 9, "{hz} Hz: {} elements", out[0].pulses.len());
+            assert_eq!(out[0].pulses().len(), 9, "{hz} Hz: {} elements", out[0].pulses().len());
             assert!((det.tone_hz() - hz).abs() < 25.0, "{hz} Hz read as {:.0}", det.tone_hz());
         }
         let audio = keyed(&sos(), 2_400.0, 0.5, 0.02);
@@ -483,7 +484,7 @@ mod tests {
         let mut det = CwDetector::new(RATE, CwConfig::default());
         let out = run(&mut det, &mixed);
         assert_eq!(out.len(), 1, "{} transmissions beside a carrier", out.len());
-        assert_eq!(out[0].pulses.len(), 9, "{} elements", out[0].pulses.len());
+        assert_eq!(out[0].pulses().len(), 9, "{} elements", out[0].pulses().len());
     }
 
     /// The numbers behind the pitch test, measured on the same synthetic

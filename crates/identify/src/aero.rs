@@ -86,18 +86,18 @@ impl Aero {
                     if !su.crc_ok || su.kind() == aero::SuType::Fill {
                         continue;
                     }
-                    if let Some(d) = decode::inmarsat::decoded(&su.bytes, chan.hz()) {
+                    if let Some(d) = decode::inmarsat::read(&su.bytes) {
                         rows.push(d);
                     }
                     if let Some(user) = assembler.update(su.data())
-                        && let Some(d) = decode::inmarsat::decoded(&user.bytes, chan.hz())
+                        && let Some(d) = decode::inmarsat::read(&user.bytes)
                     {
                         rows.push(d);
                     }
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

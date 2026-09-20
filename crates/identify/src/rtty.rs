@@ -82,7 +82,7 @@ impl Rtty {
             tones.process(&narrow, &mut symbols);
             for sym in &symbols {
                 if let Some(run) = framer.push(*sym)
-                    && let Some(d) = rtty::decoded(&run, chan.hz())
+                    && let Some(d) = rtty::read(&run)
                 {
                     rows.push(d);
                 }
@@ -91,11 +91,11 @@ impl Rtty {
         // A run still open at the end of a file is a run: the station did
         // not stop, the recording did.
         if let Some(run) = framer.take()
-            && let Some(d) = rtty::decoded(&run, chan.hz())
+            && let Some(d) = rtty::read(&run)
         {
             rows.push(d);
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

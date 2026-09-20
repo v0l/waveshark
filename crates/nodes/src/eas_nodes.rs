@@ -20,7 +20,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::eas::decoded;
+pub use decode::eas::read;
 use decode::eas::{self};
 use dsp::afsk::{AfskBits, AfskConfig, SAME};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -30,7 +30,6 @@ pub use identify::eas::DEFAULT_HZ;
 pub use identify::eas::Eas;
 pub use identify::eas::WEATHER_CHANNELS_HZ;
 pub use identify::eas::{AUDIO_HZ, DEVIATION_HZ};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -167,7 +166,7 @@ impl Simple for EasNode {
         // samples the last of them was read from.
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 6.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -222,7 +221,7 @@ impl Simple for EasNode {
         self.read_audio(&mut headers);
         for header in headers {
             self.read += 1;
-            o.frames_mut().push(self.meter.frame(header));
+            o.packets_mut().push(self.meter.packet_now(header));
         }
         Ok(())
     }
@@ -268,8 +267,9 @@ impl Protocol for Eas {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} EAS", hz / 1e6)
@@ -355,28 +355,28 @@ mod tests {
         node: &mut EasNode,
         input: impl Fn(usize) -> Payload,
         blocks: usize,
-    ) -> Vec<common::Frame> {
+    ) -> Vec<common::packet::Packet> {
         let ins = [spec(RATE, DEFAULT_HZ)];
         let tags = Vec::new();
         let mut frames = Vec::new();
         for b in 0..blocks {
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input(b), &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames.extend(f);
             }
         }
         frames
     }
 
-    fn run_iq(node: &mut EasNode, iq: &[C32]) -> Vec<common::Frame> {
+    fn run_iq(node: &mut EasNode, iq: &[C32]) -> Vec<common::packet::Packet> {
         let chunks: Vec<&[C32]> = iq.chunks(4096).collect();
         run(node, |b| Payload::Iq(chunks[b].to_vec()), chunks.len())
     }
 
-    fn run_audio(node: &mut EasNode, audio: &[f32]) -> Vec<common::Frame> {
+    fn run_audio(node: &mut EasNode, audio: &[f32]) -> Vec<common::packet::Packet> {
         let chunks: Vec<&[f32]> = audio.chunks(2048).collect();
         run(node, |b| Payload::Real(chunks[b].to_vec()), chunks.len())
     }
@@ -414,19 +414,21 @@ mod tests {
         assert_eq!(n.read(), 1);
         assert_eq!(n.refused(), 0);
 
-        assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
-        let d = decoded(&frames[0].bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.protocol, "EAS");
-        assert_eq!(d.field("event"), Some(&common::Value::Text("Tornado Warning".into())));
-        assert_eq!(d.field("event_code"), Some(&common::Value::Text("TOR".into())));
-        assert_eq!(d.field("station"), Some(&common::Value::Text("KEAX/NWS".into())));
-        assert_eq!(d.field("counties"), Some(&common::Value::Int(2)));
-        assert_eq!(d.field("fips"), Some(&common::Value::Text("029095 029183".into())));
-        assert_eq!(d.field("valid_minutes"), Some(&common::Value::Int(30)));
-        assert_eq!(d.field("issued"), Some(&common::Value::Text("day 125 01:00 UTC".into())));
-        assert_eq!(d.media_type, "text/plain");
-        assert!(!d.written, "a machine emitted it, nobody wrote it");
-        assert_eq!(d.crc_ok, None, "SAME has no check sequence to report");
+        assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());
+        let d = read(frames[0].bytes()).expect("a decode");
+        assert_eq!((d.id, d.kind), ("eas", "alert"));
+        // A machine emitted it and it interrupts somebody, so it is an alert
+        // and never a message. The whole of what the station sent is its
+        // text; the counties and the times are in the frame.
+        let common::packet::Fact::Alert(a) = &d.facts[0] else {
+            panic!("an alert, got {:?}", d.facts);
+        };
+        assert_eq!(a.kind, common::packet::AlertKind::Weather);
+        assert_eq!(a.severity, common::packet::Severity::Immediate);
+        let said = a.text.clone().unwrap_or_default();
+        assert!(said.contains("Tornado Warning"), "{said}");
+        assert!(said.contains("KEAX/NWS"), "{said}");
+        assert!(d.wrote().is_none(), "a machine emitted it, nobody wrote it");
     }
 
     /// The end of message burst closes the alert and reads as itself.
@@ -435,9 +437,9 @@ mod tests {
         let mut n = iq_node(DEFAULT_HZ);
         let frames = run_iq(&mut n, &keyed("NNNN", 3, 0.0, 0.0));
         assert_eq!(frames.len(), 1);
-        let d = decoded(&frames[0].bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.field("event"), Some(&common::Value::Text("end of message".into())));
-        assert_eq!(d.identity, None, "the end of a message names nobody");
+        let d = read(frames[0].bytes()).expect("a decode");
+        assert_eq!(d.kind, "end_of_message");
+        assert!(d.subject.is_none(), "the end of a message names nobody");
     }
 
     /// The other input: audio a listening channel already discriminated,
@@ -447,7 +449,10 @@ mod tests {
         let mut n = audio_node();
         let frames = run_audio(&mut n, &keyed_audio(TOR, 3));
         assert_eq!(frames.len(), 1, "{} alerts off the audio", frames.len());
-        assert_eq!(eas::parse(&frames[0].bytes), eas::parse(TOR.trim_end_matches('-').as_bytes()));
+        assert_eq!(
+            eas::parse(&frames[0].bytes()),
+            eas::parse(TOR.trim_end_matches('-').as_bytes())
+        );
     }
 
     /// Two copies and then silence still publish: an alert held back for a
@@ -488,7 +493,7 @@ mod tests {
         let read = |level| {
             let mut n = iq_node(DEFAULT_HZ);
             let frames = run_iq(&mut n, &keyed(TOR, 3, 0.0, level));
-            (frames.len(), n.refused(), frames.first().and_then(|f| eas::parse(&f.bytes)))
+            (frames.len(), n.refused(), frames.first().and_then(|f| eas::parse(f.bytes())))
         };
         let (count, refused, alert) = read(1.2);
         assert_eq!((count, refused), (1, 0));

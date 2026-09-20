@@ -2,7 +2,8 @@
 //! every decoder on that stream shares, and the level every packet leaves
 //! with.
 
-use common::{C32, Packet, Result};
+use common::packet::Packet;
+use common::{C32, Result};
 use pipeline::event::Event;
 use pipeline::port::{PortKind, StreamSpec};
 use pipeline::registry::{Registry, Settings};
@@ -11,13 +12,6 @@ use std::collections::VecDeque;
 
 use crate::protocol::{Placed, Protocol};
 use crate::{NodeSpec, build_chain};
-
-/// What a packet leaves a member measured at, where the front end that read
-/// it measured nothing itself.
-struct Level {
-    rssi_dbfs: f32,
-    snr_db: f32,
-}
 
 /// The samples behind one stream, kept once however many front ends read it.
 ///
@@ -127,7 +121,6 @@ pub(super) struct Member {
     pub(super) protocol: Option<&'static dyn Protocol>,
     pub(super) graph: Graph,
     pub(super) pulses: Vec<Out>,
-    pub(super) frames: Vec<Out>,
     /// Front ends that build their own packets, because what they produce is
     /// more than bytes: an M17 voice stream carries speech beside them.
     pub(super) packets: Vec<Out>,
@@ -297,7 +290,6 @@ impl Member {
     ) -> Result<Self> {
         let graph = build_chain(spec, &chain, reg)?;
         let pulses = reading_taps(&graph, PortKind::Pulses);
-        let frames = reading_taps(&graph, PortKind::Frames);
         let packets = taps(&graph, PortKind::Packets);
         let voice = taps(&graph, PortKind::Voice);
         let video = taps(&graph, PortKind::Video);
@@ -306,14 +298,12 @@ impl Member {
             .order()
             .filter_map(|(id, _)| graph.node(id).map(|n| n.flush_s()))
             .fold(0.25, f64::max);
-        let (pulses_empty, frames_empty, packets_empty) =
-            (pulses.is_empty(), frames.is_empty(), packets.is_empty());
+        let (pulses_empty, packets_empty) = (pulses.is_empty(), packets.is_empty());
         Ok(Self {
             name,
             protocol,
             graph,
             pulses,
-            frames,
             packets,
             voice,
             video,
@@ -333,7 +323,7 @@ impl Member {
             since_read: f64::INFINITY,
             since_detected_s: f64::INFINITY,
             sleeping: true,
-            keeps_samples: !pulses_empty || !frames_empty || !packets_empty || router.is_some(),
+            keeps_samples: !pulses_empty || !packets_empty || router.is_some(),
         })
     }
 
@@ -434,29 +424,6 @@ impl Member {
         self.backlog.extend(ring.samples()[to - held..to].iter().copied());
     }
 
-    /// What everything this member produces is measured at, unless the front
-    /// end measured it itself.
-    ///
-    /// One rule for every kind of packet, since a level that depends on which
-    /// tap a packet came out of is a level of something else. The front end's
-    /// own measurement stands wherever it made one: it read the channel the
-    /// packet came off, and nothing here knows the channel better. Failing
-    /// that, what the detector measured for this source, which is this
-    /// transmitter against the span's floor. Failing that, the extracted
-    /// stream's own: the loudest block since the last packet left, over the
-    /// quietest block seen, which is all there is for a channel kept open
-    /// that the detector never measured.
-    fn level(&self) -> Level {
-        let snr_db = if self.source_snr_db.is_finite() {
-            self.source_snr_db
-        } else if self.noise_pow > 0.0 {
-            10.0 * (self.peak_pow / self.noise_pow).max(1.0).log10()
-        } else {
-            f32::NAN
-        };
-        Level { rssi_dbfs: 10.0 * self.peak_pow.max(1e-20).log10(), snr_db }
-    }
-
     /// Say that this front end read something, which puts it back on the
     /// whole stream for its hold.
     pub(super) fn read_something(&mut self) {
@@ -532,15 +499,15 @@ impl Member {
         let first = out.len();
         let events = self.run_graph(iq, at_us, out);
         // What the front end did not cut out for itself is given the stream
-        // since the last packet, and the level it stood at.
-        let level = self.level();
+        // since the last packet. The level is the front end's own: it read
+        // the channel the packet came off, and nothing here knows that
+        // channel better.
         let mut attached = false;
         for p in &mut out[first..] {
-            if p.iq.is_none() {
-                p.iq = ring.burst(self.since, self.read);
-                attached |= p.iq.is_some();
+            if p.carrier.iq.is_none() {
+                p.carrier.iq = ring.burst(self.since, self.read);
+                attached |= p.carrier.iq.is_some();
             }
-            p.fill_level(level.rssi_dbfs, level.snr_db);
         }
         if out.len() > first {
             // Everything read this far has left carrying the loudest block it
@@ -589,19 +556,27 @@ impl Member {
             // The classifier's own report of a burst nothing reads is the
             // packet it just published, which carries the measurement and
             // the samples; a second row would say less about the same thing.
-            events.retain(|e| !matches!(e, Event::Decoded(d) if d.protocol == "unidentified"));
+            events.retain(|e| !matches!(e, Event::Decoded(d) if !d.claimed()));
         }
         for t in &self.pulses {
             let spec = self.graph.spec_of(*t);
-            let Some(pkgs) = self.graph.buf(*t).and_then(|p| p.as_pulses()) else {
+            let Some(found) = self.graph.buf(*t).and_then(|p| p.as_pulses()) else {
                 continue;
             };
-            for p in pkgs {
-                out.push(Packet::of_pulses(
+            for d in found {
+                // Assembled here, where the stream this detector was reading
+                // is known: a detection is timings and a level, and the
+                // stream is what places it.
+                let carrier = common::packet::Carrier::heard(
                     at_us,
+                    spec.map(|s| s.center.0).unwrap_or(0),
                     spec.map(|s| s.bandwidth as u32).unwrap_or(0),
-                    p.clone(),
-                ));
+                    d.rssi_dbfs,
+                    d.snr_db,
+                    common::SourceId(0),
+                )
+                .lasting(d.duration_us);
+                out.push(Packet::heard(carrier).keyed(d.keying.clone()));
             }
         }
         for t in &self.packets {
@@ -611,19 +586,6 @@ impl Member {
             // Taken as they are; whatever level the front end left unmeasured
             // is filled once, in [`Member::run_now`], from [`Member::level`].
             out.extend(pk.iter().cloned());
-        }
-        for t in &self.frames {
-            let spec = self.graph.spec_of(*t);
-            let Some(frames) = self.graph.buf(*t).and_then(|p| p.as_frames()) else {
-                continue;
-            };
-            for f in frames {
-                let mut f = f.clone();
-                if f.center_hz == 0 {
-                    f.center_hz = spec.map(|s| s.center.0).unwrap_or(0);
-                }
-                out.push(Packet::of_frame(at_us, spec.map(|s| s.bandwidth as u32).unwrap_or(0), f));
-            }
         }
         events
     }

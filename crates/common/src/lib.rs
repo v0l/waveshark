@@ -11,6 +11,7 @@ pub mod device;
 pub mod error;
 pub mod iq;
 pub mod modulation;
+pub mod packet;
 pub mod pulse;
 pub mod rtl;
 pub mod source;
@@ -30,8 +31,9 @@ pub use error::{Error, Result};
 pub use iq::{C32, IqBuf, SampleFormat};
 pub use modulation::Modulation;
 pub use pulse::{
-    ANALOGUE, CHANNEL_MATCH_HZ, Cadence, ConversationKey, Frame, FrontEnd, IqBurst, Measure,
-    Package, Packet, PacketBody, Pixels, Pulse, SpectrumFrame, Speech, Update, VideoFrame, Voice,
+    ANALOGUE, CHANNEL_MATCH_HZ, Cadence, ConversationKey, Frame, FrontEnd, IqBurst, Measure, Over,
+    Package, Packet, PacketBody, Phase, Pixels, Pulse, SpectrumFrame, Speech, Update, VideoFrame,
+    Voice,
 };
 pub use source::{SourceBlock, SourceId, SourceState};
 pub use units::{Hz, Sps};

@@ -40,6 +40,7 @@
 use crate::fourlevel;
 use crate::pulse::{LevelGate, dbfs};
 use common::C32;
+use common::packet::{Detection, Keying, KeyingParams, Symbols};
 
 #[derive(Clone, Copy, Debug)]
 pub struct C4fmConfig {
@@ -98,27 +99,6 @@ impl Default for C4fmConfig {
             max_burst_us: 2_000_000,
         }
     }
-}
-
-/// One burst of recovered symbols.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SymbolBurst {
-    /// Level indices, 0 (lowest frequency) to 3, one per symbol.
-    pub symbols: Vec<u8>,
-    /// Estimated SNR of the burst, in dB.
-    pub snr_db: f32,
-    /// Received level in dB relative to a full scale sample at the detector's
-    /// input. Same reference as [`common::pulse::Package::rssi_dbfs`].
-    pub rssi_dbfs: f32,
-    /// Peak deviation measured from the burst, in hertz: three steps.
-    pub deviation_hz: f32,
-    /// RMS distance from the fitted levels, in steps.
-    pub evm: f32,
-    /// Sample index where the burst started, for correlating with a waterfall.
-    pub start_sample: u64,
-    /// Where the burst was received, in Hz. Stamped by the owning node, which
-    /// is where the stream's centre frequency is known.
-    pub center_hz: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -265,7 +245,7 @@ impl C4fmDetector {
     }
 
     /// Feed a block of complex baseband, appending completed bursts to `out`.
-    pub fn process(&mut self, input: &[C32], out: &mut Vec<SymbolBurst>) {
+    pub fn process(&mut self, input: &[C32], out: &mut Vec<Detection>) {
         let reset_samples = (self.cfg.reset_us as f64 / self.us_per_sample) as usize;
         let max_samples = (self.cfg.max_burst_us as f64 / self.us_per_sample) as usize;
         let hz_per_rad = (self.rate / std::f64::consts::TAU) as f32;
@@ -303,13 +283,13 @@ impl C4fmDetector {
 
     /// Force out any burst still being collected. Needed at the end of a file,
     /// where there is no trailing silence to close the last packet.
-    pub fn flush(&mut self, out: &mut Vec<SymbolBurst>) {
+    pub fn flush(&mut self, out: &mut Vec<Detection>) {
         if self.in_burst {
             self.finish(out);
         }
     }
 
-    fn finish(&mut self, out: &mut Vec<SymbolBurst>) {
+    fn finish(&mut self, out: &mut Vec<Detection>) {
         self.in_burst = false;
         while self.burst.last().is_some_and(|v| v.is_nan()) {
             self.burst.pop();
@@ -354,15 +334,27 @@ impl C4fmDetector {
             return;
         }
 
-        out.push(SymbolBurst {
-            symbols: self.marks.iter().map(|&v| fit.index(v)).collect(),
-            snr_db: snr,
-            rssi_dbfs: dbfs(self.gate.signal_level()),
-            deviation_hz: self.last_deviation_hz,
-            evm: self.last_evm,
-            start_sample: self.burst_start,
-            center_hz: 0,
-        });
+        let symbols: Vec<u8> = self.marks.iter().map(|&v| fit.index(v)).collect();
+        let held = (symbols.len() as f64 / self.cfg.baud.max(1.0) * 1e6) as u32;
+        out.push(
+            Detection::new(
+                Keying::measured(
+                    common::Modulation::Fsk4,
+                    1.0,
+                    KeyingParams {
+                        baud: self.cfg.baud as f32,
+                        separation_hz: self.last_deviation_hz,
+                        evm: self.last_evm,
+                        ..KeyingParams::default()
+                    },
+                )
+                .with(Symbols::Hard(symbols)),
+                dbfs(self.gate.signal_level()),
+                snr,
+            )
+            .at(self.burst_start)
+            .lasting(held),
+        );
         self.stats.accepted += 1;
         self.burst.clear();
     }
@@ -651,7 +643,7 @@ mod tests {
             .collect()
     }
 
-    fn detect(iq: &[C32], cfg: C4fmConfig) -> (Vec<SymbolBurst>, C4fmDetector) {
+    fn detect(iq: &[C32], cfg: C4fmConfig) -> (Vec<Detection>, C4fmDetector) {
         let mut d = C4fmDetector::new(RATE, cfg);
         let mut out = Vec::new();
         d.process(iq, &mut out);
@@ -693,7 +685,7 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 0.0, 0.0, 1.0, 0.02);
         let (bursts, _) = detect(&iq, cfg());
         assert_eq!(bursts.len(), 1, "expected one burst, got {}", bursts.len());
-        let got = &bursts[0].symbols;
+        let got = &bursts[0].hard();
         assert!(
             agreement(&sent, got) > 0.95,
             "only {:.0}% of the sequence came back: {:?}",
@@ -710,7 +702,7 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 2_000.0, 0.0, 1.0, 0.02);
         let (bursts, _) = detect(&iq, cfg());
         assert_eq!(bursts.len(), 1);
-        assert!(agreement(&sent, &bursts[0].symbols) > 0.95, "the offset moved the fit");
+        assert!(agreement(&sent, &bursts[0].hard()) > 0.95, "the offset moved the fit");
     }
 
     #[test]
@@ -723,11 +715,11 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 0.0, 2_000.0, 1.0, 0.02);
         let (tracked, _) = detect(&iq, cfg());
         assert_eq!(tracked.len(), 1);
-        let got = agreement(&sent, &tracked[0].symbols);
+        let got = agreement(&sent, &tracked[0].hard());
         assert!(got > 0.99, "the clock error was not tracked: {:.0}%", got * 100.0);
 
         let (fixed, _) = detect(&iq, C4fmConfig { loop_gain: 0.0, ..cfg() });
-        let without = fixed.first().map(|b| agreement(&sent, &b.symbols)).unwrap_or(0.0);
+        let without = fixed.first().map(|b| agreement(&sent, &b.hard())).unwrap_or(0.0);
         assert!(without < 0.8, "a fixed phase read {without:.0}%, so the loop is untested here");
     }
 
@@ -739,7 +731,7 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 0.0, 0.0, 1.0, 0.02);
         let (bursts, _) = detect(&iq, cfg());
         assert_eq!(bursts.len(), 1);
-        assert!(agreement(&sent, &bursts[0].symbols) > 0.95);
+        assert!(agreement(&sent, &bursts[0].hard()) > 0.95);
     }
 
     #[test]
@@ -804,7 +796,12 @@ mod tests {
         let (b, _) = detect(&noisy, cfg());
         assert_eq!(a.len(), 1);
         if let Some(b) = b.first() {
-            assert!(b.evm > a[0].evm, "the noisy burst read as clean: {} vs {}", b.evm, a[0].evm);
+            assert!(
+                b.keying.params.evm > a[0].keying.params.evm,
+                "the noisy burst read as clean: {} vs {}",
+                b.keying.params.evm,
+                a[0].keying.params.evm
+            );
         }
     }
 }

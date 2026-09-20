@@ -1,7 +1,7 @@
 //! Transmit stages: text to timings, timings to IQ.
 //!
 //! The same shape as the receive side read backwards. A keyer turns bytes
-//! into a [`PortKind::Pulses`] burst the way a slicer turns a burst into
+//! into a [`PortKind::Timings`] burst the way a slicer turns a burst into
 //! bytes, and a modulator turns that burst into [`PortKind::Iq`] the way a
 //! detector turns IQ into a burst. Both are nodes, so a transmission is
 //! visible in the chain view, tappable, and parameterised like everything
@@ -15,7 +15,7 @@
 //! table adds an encoder and reuses this carrier.
 
 use crate::mod_nodes::OokModNode;
-use common::pulse::{Package, Pulse};
+use common::pulse::Pulse;
 use common::{C32, Result};
 use pipeline::Graph;
 use pipeline::graph::Topology;
@@ -51,7 +51,7 @@ impl Simple for MorseKeyNode {
             return Err(common::Error::other("morse_key takes text as bytes"));
         }
         Ok(StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             // Timings are microseconds, so the port has no sample rate of its
             // own; the rate it carries is the one the modulator will key at,
             // passed through so a chain stays rate-consistent.
@@ -77,9 +77,9 @@ impl Simple for MorseKeyNode {
             return Ok(());
         }
         let text = String::from_utf8_lossy(bytes);
-        let pkg = decode::morse::encode(&text, self.wpm);
-        if !pkg.pulses.is_empty() {
-            output.pulses_mut().push(pkg);
+        let burst = decode::morse::encode(&text, self.wpm);
+        if !burst.is_empty() {
+            output.timings_mut().push(burst);
         }
         Ok(())
     }
@@ -1355,16 +1355,16 @@ impl Keyer {
 
     /// The timings for one block: `samples` of clock at `rate`.
     ///
-    /// One package per keyed run. A silent rest ends the package it follows,
-    /// as the trailing gap that `mod_nodes::Rest::Silence` keys as no
-    /// carrier, so the rest still occupies the time it was asked for instead
-    /// of the chain handing the radio a short block.
-    pub fn take(&mut self, samples: usize, rate: f64) -> Vec<Package> {
+    /// One burst per keyed run. A silent rest ends the burst it follows, as
+    /// the trailing gap that `mod_nodes::Rest::Silence` keys as no carrier,
+    /// so the rest still occupies the time it was asked for instead of the
+    /// chain handing the radio a short block.
+    pub fn take(&mut self, samples: usize, rate: f64) -> Vec<Vec<Pulse>> {
         if self.bits.is_empty() || rate <= 0.0 {
             return Vec::new();
         }
         self.owed += samples as f64 / rate * self.baud;
-        let mut packages = Vec::new();
+        let mut bursts: Vec<Vec<Pulse>> = Vec::new();
         let mut out: Vec<bool> = vec![false; std::mem::take(&mut self.held)];
         let mut rest_bits = 0usize;
         while self.owed >= 1.0 {
@@ -1377,10 +1377,10 @@ impl Keyer {
                 }
                 continue;
             }
-            // A rest that ended inside this block closes the package it
+            // A rest that ended inside this block closes the burst it
             // belongs to, and the transmission that follows it starts one.
             if rest_bits > 0 {
-                packages.push(self.close(&mut out, rest_bits));
+                bursts.push(self.close(&mut out, rest_bits));
                 rest_bits = 0;
             }
             out.push(self.bits[self.at]);
@@ -1392,34 +1392,34 @@ impl Keyer {
             }
         }
         match rest_bits > 0 {
-            true => packages.push(self.close(&mut out, rest_bits)),
+            true => bursts.push(self.close(&mut out, rest_bits)),
             false => {
                 // A tone keyer's trailing gap is the lower tone either way,
                 // so there is nothing to hold back from it.
-                let (pkg, held) = match self.silent_rest {
+                let (burst, held) = match self.silent_rest {
                     true => dsp::pulse::keyed_data(&out, self.baud),
                     false => (dsp::pulse::keyed(&out, self.baud), 0),
                 };
                 self.held = held;
-                packages.push(pkg);
+                bursts.push(burst);
             }
         }
-        packages.retain(|p| !p.pulses.is_empty());
-        packages
+        bursts.retain(|b| !b.is_empty());
+        bursts
     }
 
     /// The bits so far, ending on a rest of `rest_bits` bit times.
-    fn close(&mut self, out: &mut Vec<bool>, rest_bits: usize) -> Package {
-        let mut pkg = dsp::pulse::keyed(out, self.baud);
+    fn close(&mut self, out: &mut Vec<bool>, rest_bits: usize) -> Vec<Pulse> {
+        let mut burst = dsp::pulse::keyed(out, self.baud);
         out.clear();
         let us = rest_bits as f64 * 1e6 / self.baud + self.rest_frac;
         let gap = us.floor();
         self.rest_frac = us - gap;
-        match pkg.pulses.last_mut() {
+        match burst.last_mut() {
             Some(p) if p.gap == 0 => p.gap = gap as u32,
-            _ => pkg.pulses.push(Pulse { mark: 0, gap: gap as u32 }),
+            _ => burst.push(Pulse { mark: 0, gap: gap as u32 }),
         }
-        pkg
+        burst
     }
 }
 
@@ -2055,7 +2055,7 @@ mod keyer_tests {
         k.load(bits);
         let mut m = FskModNode::new(0.0, 20_000.0, 0.5).resting(Rest::Silence);
         let spec = StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate: RATE,
             flow: Flow::Tx,
             bandwidth: RATE,
@@ -2064,7 +2064,7 @@ mod keyer_tests {
         Simple::negotiate(&mut m, &PortSpec { spec, latency: 0 }).unwrap();
         let mut iq: Vec<C32> = Vec::new();
         for _ in 0..blocks {
-            let input = Payload::Pulses(k.take(block, RATE));
+            let input = Payload::Timings(k.take(block, RATE));
             let mut out = Payload::Iq(Vec::new());
             let (mut ev, mut tg) = (Vec::new(), Vec::new());
             let ins = [PortSpec { spec, latency: 0 }];
@@ -2118,8 +2118,7 @@ mod keyer_tests {
         let mut total = 0u64;
         for _ in 0..40 {
             for pkg in k.take(2_500, RATE) {
-                total +=
-                    pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum::<u64>();
+                total += pkg.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum::<u64>();
             }
         }
         // 100 ms of clock, keyed as timings to the microsecond.

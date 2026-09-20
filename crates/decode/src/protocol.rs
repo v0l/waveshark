@@ -5,9 +5,9 @@
 
 use crate::bits::BitBuffer;
 use crate::slicer::{Timing, slice};
+use common::Pulse;
 pub use common::Value;
 
-use dsp::pulse::Package;
 use std::collections::BTreeMap;
 
 /// What a decode has to show for itself
@@ -113,7 +113,9 @@ impl Report {
     /// `station_id`. Without this the report names no device, so it is
     /// never a row in the device database and never a device in the house.
     pub fn identified_by(mut self, k: &str) -> Self {
-        if let Some(v) = self.fields.get(k) {
+        if self.device.is_none()
+            && let Some(v) = self.fields.get(k)
+        {
             self.device = Some(v.to_string());
         }
         self
@@ -193,16 +195,16 @@ pub trait Protocol: Send + Sync {
     /// Interpret sliced bits.
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError>;
 
-    /// Protocols whose decode of the same package outranks this one: a
+    /// Protocols whose decode of the same burst outranks this one: a
     /// near-identical layout whose last byte is a real check where this
     /// one's is a reading.
     fn yields_to(&self) -> &[String] {
         &[]
     }
 
-    /// Try a whole package: slice with this protocol's timings, then decode.
-    fn decode_package(&self, pkg: &Package) -> Result<Report, DecodeError> {
-        let bits = slice(pkg, &self.timing()).map_err(|_| DecodeError::NotThisProtocol)?;
+    /// Try a whole burst: slice with this protocol's timings, then decode.
+    fn decode_burst(&self, pulses: &[Pulse]) -> Result<Report, DecodeError> {
+        let bits = slice(pulses, &self.timing()).map_err(|_| DecodeError::NotThisProtocol)?;
         self.decode(&bits)
     }
 }
@@ -273,11 +275,11 @@ impl Protocols {
     /// and a package that decodes under two of them is a real ambiguity the
     /// operator should see, not something to be silently resolved by
     /// registration order.
-    pub fn decode_all(&self, pkg: &Package) -> Vec<Report> {
+    pub fn decode_all(&self, pulses: &[Pulse]) -> Vec<Report> {
         let read: Vec<(&dyn Protocol, Report)> = self
             .list
             .iter()
-            .filter_map(|p| p.decode_package(pkg).ok().map(|r| (&**p, r)))
+            .filter_map(|p| p.decode_burst(pulses).ok().map(|r| (&**p, r)))
             .collect();
         let models: Vec<&str> = read.iter().map(|(_, r)| r.model).collect();
         let mut out: Vec<Report> = read
@@ -308,7 +310,7 @@ impl Protocols {
     /// Try every protocol, reporting failures too. For diagnosing an unknown
     /// signal: knowing that six protocols matched the timing but failed CRC is
     /// far more useful than an empty result.
-    pub fn diagnose(&self, pkg: &Package) -> Vec<(&'static str, Result<Report, DecodeError>)> {
-        self.list.iter().map(|p| (p.name(), p.decode_package(pkg))).collect()
+    pub fn diagnose(&self, pulses: &[Pulse]) -> Vec<(&'static str, Result<Report, DecodeError>)> {
+        self.list.iter().map(|p| (p.name(), p.decode_burst(pulses))).collect()
     }
 }

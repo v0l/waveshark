@@ -109,7 +109,7 @@ pub use elrs_nodes::ElrsNode;
 pub use feed_nodes::{FEED_KINDS, FeedKind, FeedNode, FeedSpec, feed_kind};
 pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use flex_nodes::FlexNode;
-pub use frame_meter::FrameMeter;
+pub use frame_meter::{FrameMeter, locked, measured, off_audio};
 pub use homeassistant_nodes::{
     Broker, HomeAssistantNode, HomeAssistantStatus, Publish, Publisher as HomeAssistantPublisher,
     mqtt_packet,

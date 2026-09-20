@@ -5,7 +5,7 @@
 use common::{C32, Hz};
 use dsp::rds::block::{Offset, encode};
 use nodes::wfm::WfmDemodNode;
-use pipeline::event::{Event, media};
+use pipeline::event::Event;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag};
 use std::f64::consts::TAU;
@@ -150,12 +150,18 @@ fn rds_arrives_as_a_decoded_text_event() {
         })
         .collect();
     assert!(!decoded.is_empty(), "no RDS decoded");
-    let d = decoded.last().unwrap();
-    assert_eq!(d.protocol, "rds");
-    assert_eq!(d.media_type, media::TEXT);
-    assert!(d.matches_media("text/*"));
-    let text = d.text.as_deref().unwrap_or("");
-    assert!(text.contains("SUPERRAD"), "got {text:?}");
+    let p = decoded.last().unwrap();
+    let l = p.innermost().expect("what the station said");
+    assert_eq!((l.id, l.kind), ("rds", "station"));
+    // The station names itself; what it is playing is a statement of its
+    // own, and neither is a message anybody wrote.
+    assert!(l.facts.iter().any(|f| matches!(
+        f,
+        common::packet::Fact::Named(n) if n.label == "SUPERRAD"
+    )));
+    assert!(l.wrote().is_none());
+    // The programme identifier is in the frame, where it was read.
+    let text = String::from_utf8_lossy(p.bytes()).to_string();
     assert!(text.contains("C479"), "PI missing from {text:?}");
     assert_eq!(n.station().name.as_deref(), Some("SUPERRAD"));
 }

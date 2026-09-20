@@ -55,10 +55,10 @@ impl Signal for Flex {
             frames.clear();
             demod.process(&audio, &mut frames);
             for f in &frames {
-                rows.extend(decode::flex::decoded(&f.to_bytes(), chan.hz()));
+                rows.extend(decode::flex::read(&f.to_bytes()));
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

@@ -16,9 +16,8 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-use decode::epirb::Mode;
-pub use decode::epirb::decoded;
 pub use decode::epirb::detail;
+pub use decode::epirb::read;
 use decode::epirb::{self};
 use dsp::biphase::BiphaseDemod;
 use dsp::{FirDecim, Mixer};
@@ -30,7 +29,6 @@ pub use identify::epirb::DEFAULT_HZ;
 pub use identify::epirb::Epirb;
 pub use identify::epirb::FEED_HZ;
 pub use identify::epirb::WORK_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -93,7 +91,7 @@ impl Simple for EpirbNode {
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 2.0);
         self.framer.reset();
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
     }
@@ -111,7 +109,7 @@ impl Simple for EpirbNode {
         self.demod.process(&self.narrow, &mut chips);
         for chip in &chips {
             if let Some(message) = self.framer.push(*chip) {
-                o.frames_mut().push(self.meter.frame(message));
+                o.packets_mut().push(self.meter.packet_now(message));
             }
         }
         self.scratch = chips;
@@ -154,12 +152,13 @@ impl Protocol for Epirb {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -184,6 +183,7 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 mod tests {
     use super::*;
     use common::C32;
+    use decode::epirb::Mode;
 
     /// The message an EPIRB with an MMSI transmits, as bytes off the air.
     fn a_message() -> Vec<u8> {
@@ -255,7 +255,7 @@ mod tests {
         iq.iter().map(|x| x + C32::new(next() * amplitude, next() * amplitude)).collect()
     }
 
-    fn read(stream: &[C32], rate: f64) -> Vec<Vec<u8>> {
+    fn heard(stream: &[C32], rate: f64) -> Vec<Vec<u8>> {
         let mut n = EpirbNode::new(DEFAULT_HZ);
         n.demod = BiphaseDemod::new(rate, BAUD);
         let mut got = Vec::new();
@@ -277,16 +277,23 @@ mod tests {
     fn a_keyed_burst_is_read_off_the_carrier() {
         let rate = 9_600.0;
         let air = a_message();
-        let got = read(&a_burst(&air, rate, 700.0, 0.1), rate);
+        let got = heard(&a_burst(&air, rate, 700.0, 0.1), rate);
         assert_eq!(got.len(), 1, "{} messages", got.len());
         assert_eq!(got[0], air, "the bytes are not the ones that were keyed");
 
-        let d = decoded(&got[0], common::Hz(406_025_000)).expect("a decode");
-        assert_eq!(d.field("hex_id").map(|v| v.to_string()).as_deref(), Some("1D043C4802FFBFF"));
-        assert_eq!(d.field("mmsi_last_six").map(|v| v.to_string()).as_deref(), Some("123456"));
-        assert_eq!(d.field("beacon").map(|v| v.to_string()).as_deref(), Some("EPIRB"));
-        assert_eq!(d.field("country").map(|v| v.to_string()).as_deref(), Some("232"));
-        let p = d.position.expect("a position");
+        let d = read(&got[0]).expect("a decode");
+        assert_eq!((d.id, d.kind), ("epirb", "distress"));
+        assert_eq!(
+            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+            Some("1D043C4802FFBFF")
+        );
+        // Somebody is in trouble, which is the whole point of one of these.
+        let common::packet::Fact::Alert(a) = &d.facts[1] else {
+            panic!("an alert, got {:?}", d.facts);
+        };
+        assert_eq!(a.kind, common::packet::AlertKind::Distress);
+        assert!(a.text.clone().unwrap_or_default().contains("EPIRB"), "{a:?}");
+        let p = d.placed().expect("a position");
         assert!((p.lat - 53.36).abs() < 1e-6, "{}", p.lat);
         assert!((p.lon + 10.192_222).abs() < 1e-5, "{}", p.lon);
     }
@@ -302,11 +309,20 @@ mod tests {
         // complemented, which is bits 17 to 24 of the message.
         // Bits 17 to 24 are the whole of the third byte.
         air[2] ^= 0xff;
-        let got = read(&a_burst(&air, rate, 0.0, 0.1), rate);
+        let got = heard(&a_burst(&air, rate, 0.0, 0.1), rate);
         assert_eq!(got.len(), 1, "{} messages", got.len());
-        let d = decoded(&got[0], common::Hz(406_025_000)).expect("a decode");
-        assert_eq!(d.field("mode").map(|v| v.to_string()).as_deref(), Some("self test"));
-        assert_eq!(d.field("hex_id").map(|v| v.to_string()).as_deref(), Some("1D043C4802FFBFF"));
+        let d = read(&got[0]).expect("a decode");
+        // A drill is an alert of its own kind, so a listener can tell it
+        // from the real thing.
+        assert_eq!(d.kind, "self_test");
+        assert!(d.facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Alert(a) if a.kind == common::packet::AlertKind::Test
+        )));
+        assert_eq!(
+            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+            Some("1D043C4802FFBFF")
+        );
     }
 
     /// How many of `n` bursts come back unchanged with noise of `amp` added
@@ -319,7 +335,7 @@ mod tests {
             stream.extend(a_burst(&air, rate, 300.0, 0.05));
         }
         let stream = noisy(&stream, amp, seed);
-        read(&stream, rate).iter().filter(|m| **m == air).count()
+        heard(&stream, rate).iter().filter(|m| **m == air).count()
     }
 
     /// Twenty bursts in noise, which is the whole of this file twenty times
@@ -341,7 +357,7 @@ mod tests {
         let rate = 9_600.0;
         let quiet: Vec<C32> = vec![C32::new(0.0, 0.0); (rate * 600.0) as usize];
         let stream = noisy(&quiet, 1.0, 0xdead_beef_cafe_f00d);
-        let got = read(&stream, rate);
+        let got = heard(&stream, rate);
         assert_eq!(got.len(), 0, "{} beacons out of ten minutes of noise", got.len());
     }
 }

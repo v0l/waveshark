@@ -10,12 +10,11 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::wmbus::decoded;
+pub use decode::wmbus::read;
 use dsp::wmbus::{CHIP_RATE, Demod};
 use identify::Signal;
 pub use identify::wmbus::CHANNEL_WIDTH_HZ;
 pub use identify::wmbus::Wmbus;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -64,7 +63,7 @@ impl Simple for WmbusNode {
         // A meter frame is a few milliseconds; fifty gives the burst and the
         // quiet either side of it without keeping the band.
         self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.05);
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)
     }
@@ -76,7 +75,7 @@ impl Simple for WmbusNode {
         self.meter.feed(iq);
         for f in d.process(iq) {
             self.frames += 1;
-            o.frames_mut().push(self.meter.frame(f.bytes.clone()));
+            o.packets_mut().push(self.meter.packet_now(f.bytes.clone()));
         }
         Ok(())
     }
@@ -120,11 +119,12 @@ impl Protocol for Wmbus {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 500_000 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::wmbus::is_wmbus_band(p.center_hz() as f64) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
 
     fn accepts_width(&self, _hz: f64, source_width_hz: f64) -> bool {

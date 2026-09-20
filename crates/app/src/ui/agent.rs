@@ -1221,24 +1221,30 @@ impl App {
                 let r = &l.rec;
                 let mut row = json!({
                     "at_seconds_ago": secs(r.at, now),
-                    "hz": r.freq,
-                    "channel_hz": r.channel_hz,
+                    "hz": r.freq(),
+                    "channel_hz": r.channel_hz(),
                     "protocol": r.protocol(),
-                    "modulation": r.modulation.to_string(),
-                    "rssi_dbfs": r.rssi_dbfs,
-                    "snr_db": r.snr_db,
-                    "crc": r.crc,
-                    "length": r.bytes.len(),
-                    "detail": r.detail,
-                    "fields": r
-                        .fields
-                        .iter()
-                        .map(|(k, v)| json!({ "name": k, "value": v.to_string() }))
+                    "modulation": r.modulation().to_string(),
+                    "rssi_dbfs": r.rssi_dbfs(),
+                    "snr_db": r.snr_db(),
+                    "integrity": r.integrity().label(),
+                    "length": r.bytes().len(),
+                    "detail": r.detail(),
+                    "said": r
+                        .packet
+                        .facts()
+                        .map(|(l, f)| {
+                            json!({
+                                "layer": l.id,
+                                "kind": f.kind().label(),
+                                "said": f.says(),
+                            })
+                        })
                         .collect::<Vec<_>>(),
                 });
                 if a.bytes.unwrap_or(false) {
                     let hex: String =
-                        r.bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("");
+                        r.bytes().iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("");
                     row["bytes_hex"] = json!(hex);
                 }
                 row
@@ -1699,27 +1705,9 @@ mod tests {
         a.log.next_packet += 1;
         a.log.decodes.push(Logged {
             id,
-            rec: DecodeRecord {
+            rec: Reception {
                 at: std::time::Instant::now() - std::time::Duration::from_secs_f64(ago_s),
-                freq,
-                model: Some(model),
-                channel_hz: 12_500.0,
-                modulation: common::Modulation::Fsk2,
-                detail: "test".into(),
-                fields: vec![("k".into(), common::Value::Int(1))],
-                media_type: pipeline::event::media::BYTES,
-                written: false,
-                rssi_dbfs: -40.0,
-                snr_db: 12.0,
-                bytes: vec![0xde, 0xad],
-                crc: Some(true),
-                link: None,
-                report: common::ReportDetail::Bare,
-                identity: None,
-                iq: None,
-                pulses: None,
-                audio: None,
-                airtime: None,
+                ..Reception::for_test(freq, model).of_bytes(vec![0xde, 0xad])
             },
         });
     }

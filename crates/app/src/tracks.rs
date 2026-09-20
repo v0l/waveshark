@@ -47,24 +47,28 @@ use decode::adsb;
 /// from. A device only reaches the map if a position comes with it, which is
 /// what keeps the pagers and the meters off it without the tracker having to
 /// hold a list of protocols it likes.
-fn track_id(who: &common::Identity) -> Option<TrackId> {
-    match who.space.as_str() {
-        "adsb" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Icao),
-        "ais" => who.id.parse().ok().map(TrackId::Mmsi),
-        "aprs" => Some(TrackId::Call(who.id.clone())),
-        "meshtastic" => u32::from_str_radix(&who.id, 16).ok().map(TrackId::Mesh),
-        "vaisala" => Some(TrackId::Sonde(who.id.clone())),
-        "meshcore" => {
+fn track_id(who: &common::packet::Entity) -> Option<TrackId> {
+    use common::packet::Id;
+    let text = who.id.to_string();
+    match (who.space, &who.id) {
+        ("adsb", Id::Hex(v)) | ("uat", Id::Hex(v)) | ("icao", Id::Hex(v)) => {
+            Some(TrackId::Icao(*v as u32))
+        }
+        ("ais", Id::Num(v)) => Some(TrackId::Mmsi(*v as u32)),
+        ("aprs", _) => Some(TrackId::Call(text)),
+        ("meshtastic", Id::Hex(v)) => Some(TrackId::Mesh(*v as u32)),
+        ("vaisala" | "graw" | "meteomodem" | "meisei" | "imet" | "lms6" | "mrz", _) => {
+            Some(TrackId::Sonde(text))
+        }
+        ("meshcore", Id::Key(k)) => {
             let mut key = [0u8; 32];
-            if who.id.len() != 64 {
+            if k.len() != key.len() {
                 return None;
             }
-            for (k, b) in key.iter_mut().enumerate() {
-                *b = u8::from_str_radix(&who.id[k * 2..k * 2 + 2], 16).ok()?;
-            }
+            key.copy_from_slice(k);
             Some(TrackId::MeshCore(key))
         }
-        space => Some(TrackId::Device { space: space.to_string(), id: who.id.clone() }),
+        (space, _) => Some(TrackId::Device { space: space.to_string(), id: text }),
     }
 }
 
@@ -386,9 +390,6 @@ pub enum Detail {
         /// there at all.
         temperature_c: Option<f32>,
         humidity_pct: Option<f32>,
-        /// How much of the 51 piece calibration has been collected, so a
-        /// view can say why there is no temperature yet.
-        calibration_pieces: usize,
     },
 }
 
@@ -403,7 +404,6 @@ impl Detail {
             descending: false,
             temperature_c: None,
             humidity_pct: None,
-            calibration_pieces: 0,
         }
     }
 
@@ -456,11 +456,6 @@ fn aprs_kind(_table: char, code: char, fixed: bool) -> Kind {
         _ if fixed => Kind::Station,
         _ => Kind::Vehicle,
     }
-}
-
-/// Symbols that mean a thing which does not move.
-fn aprs_is_fixed(code: char) -> bool {
-    matches!(code, '-' | '_' | '#' | '&' | 'r' | 'l' | 'I' | ';' | '=')
 }
 
 #[derive(Clone, Debug)]
@@ -588,10 +583,6 @@ struct Entry {
     track: Track,
     /// Empty for every protocol whose positions are absolute.
     cpr: Cpr,
-    /// A radiosonde's factory calibration, collected sixteen bytes a frame.
-    /// Here for the same reason `cpr` is: it is what this transmitter has
-    /// said so far, which no single frame knows.
-    calibration: Option<Box<decode::rs41::Calibration>>,
 }
 
 #[derive(Default)]
@@ -629,11 +620,7 @@ impl Tracks {
         if let Some(i) = self.seen.iter().position(|e| e.track.id == id) {
             return i;
         }
-        self.seen.push(Entry {
-            track: Track::new(id, detail, at),
-            cpr: Cpr::default(),
-            calibration: None,
-        });
+        self.seen.push(Entry { track: Track::new(id, detail, at), cpr: Cpr::default() });
         // Something heard an hour ago is not worth remembering, and a
         // receiver left running for a week would otherwise accumulate every
         // vessel and aircraft in the country.
@@ -643,203 +630,207 @@ impl Tracks {
         self.seen.len() - 1
     }
 
-    /// Fold in what a decode said, whatever protocol said it.
+    /// Fold in what a packet said, whatever protocol said it.
     ///
     /// The tracker used to parse AIS, APRS and the two meshes for itself off
     /// the raw bytes, which meant the map and the packet list could disagree
-    /// about the same frame. Now the protocols run once, on the bus, and this
-    /// reads their conclusions: an identity says which track, a position says
-    /// where it is, and the position's detail says what sort of thing it is.
+    /// about the same frame. Then it read a report enum with a variant per
+    /// protocol family, which meant a new protocol reached the map only once
+    /// this file knew about it. Now it reads statements: a subject says which
+    /// track, a position says where it is, and what the thing is comes from
+    /// what named it.
     ///
     /// Mode S is the same road with one extra step: it sends half a position
-    /// per frame, so the decode carries the compact halves and the pairing
+    /// per frame, so the packet carries the compact halves and the pairing
     /// happens here, where what this aircraft was doing a second ago is
     /// known.
-    pub fn update_decoded(&mut self, d: &common::Decoded, at: std::time::Instant) -> bool {
-        let Some(who) = &d.identity else { return false };
+    pub fn update(&mut self, p: &common::packet::Packet, at: std::time::Instant) -> bool {
+        use common::packet::{Fact, Quantity};
+        let Some(who) = p.subject().filter(|e| e.identifies()) else { return false };
         let Some(id) = track_id(who) else {
             return false;
         };
+        let placed = p.carries().has(common::packet::FactKind::Position);
         // A protocol the tracker knows nothing about is a track when it says
         // where it was, and nothing at all when it does not. This is what
         // keeps a pager, a meter or a tyre valve off the map: each names
         // itself in every packet and none of them has ever said where it is.
-        if matches!(id, TrackId::Device { .. }) && d.position.is_none() {
+        if matches!(id, TrackId::Device { .. }) && !placed {
             return false;
         }
-        let detail = match &d.report {
-            common::ReportDetail::Vessel {
-                heading_deg,
-                nav_status,
-                ship_type,
-                destination,
-                class_b,
-            } => Detail::Vessel {
-                heading_deg: *heading_deg,
-                nav_status: *nav_status,
-                ship_type: *ship_type,
-                destination: destination.clone(),
-                class_b: *class_b,
-            },
-            common::ReportDetail::Station { aid } => Detail::Station { aid: *aid },
-            common::ReportDetail::Aprs { symbol_table, symbol_code, comment } => Detail::Aprs {
-                symbol_table: *symbol_table,
-                symbol_code: *symbol_code,
-                altitude_ft: None,
-                comment: comment.clone(),
-                fixed: aprs_is_fixed(*symbol_code),
-            },
-            common::ReportDetail::MeshCore { role, fixed } => {
-                Detail::MeshCore { role, fixed: *fixed }
-            }
-            common::ReportDetail::Sonde {
-                altitude_m,
-                climb_ms,
-                battery_v,
-                satellites,
-                descending,
-                sensors,
-            } => {
-                // The sonde's calibration belongs to the sonde and arrives a
-                // sixteenth at a time, so it is folded in here before the
-                // reading is taken, and the reading is whatever the pieces
-                // collected so far allow: nothing, then temperature, then
-                // humidity with it.
-                let i = self.entry(id.clone(), Detail::new_sonde(), at);
-                let cal = self.seen[i]
-                    .calibration
-                    .get_or_insert_with(|| Box::new(decode::rs41::Calibration::new()));
-                let mut ptu = decode::rs41::Ptu::default();
-                if let Some(s) = sensors {
-                    if let Some((n, piece)) = &s.calibration {
-                        cal.feed(*n, piece);
-                    }
-                    let t = cal.air_temperature_c(&s.meas);
-                    ptu = decode::rs41::Ptu {
-                        temperature_c: t,
-                        humidity_pct: t.and_then(|t| cal.humidity_pct(&s.meas, t)),
-                        sensor_temp_c: None,
-                    };
-                }
-                Detail::Sonde {
-                    altitude_m: *altitude_m,
-                    climb_ms: *climb_ms,
-                    battery_v: *battery_v,
-                    satellites: *satellites,
-                    descending: *descending,
-                    temperature_c: ptu.temperature_c,
-                    humidity_pct: ptu.humidity_pct,
-                    calibration_pieces: cal.pieces(),
-                }
-            }
-            common::ReportDetail::Mesh {
-                long_name,
-                short_name,
-                battery_pct,
-                precision_bits,
-                temperature_c,
-                humidity_pct,
-                pressure_hpa,
-            } => Detail::Mesh {
-                long_name: long_name.clone(),
-                short_name: short_name.clone(),
-                altitude_m: None,
-                battery_pct: *battery_pct,
-                precision_bits: *precision_bits,
-                temperature_c: *temperature_c,
-                humidity_pct: *humidity_pct,
-                pressure_hpa: *pressure_hpa,
-            },
-            // A control link reports where the sticks are, not where
-            // anything is, so it is not a moving thing on a map.
-            common::ReportDetail::Control { .. } => return false,
-            common::ReportDetail::Bare => match id {
-                TrackId::Icao(_) => Detail::new_aircraft(),
-                TrackId::Mesh(_) => Detail::Mesh {
-                    long_name: None,
-                    short_name: None,
-                    altitude_m: None,
-                    battery_pct: None,
-                    precision_bits: None,
-                    temperature_c: None,
-                    humidity_pct: None,
-                    pressure_hpa: None,
-                },
-                TrackId::Mmsi(_) => Detail::Vessel {
-                    heading_deg: None,
-                    nav_status: None,
-                    ship_type: None,
-                    destination: None,
-                    class_b: false,
-                },
-                // A place and nothing else, from something the map knows
-                // how to draw only because of what named it.
-                TrackId::Call(_) => Detail::Aprs {
-                    symbol_table: '/',
-                    symbol_code: '>',
-                    altitude_ft: None,
-                    comment: None,
-                    fixed: false,
-                },
-                TrackId::Device { .. } => Detail::Device,
-                TrackId::Sonde(_) | TrackId::MeshCore(_) => return false,
-            },
-            common::ReportDetail::Aircraft {
-                altitude_ft,
-                vertical_rate_fpm,
-                squawk,
-                wind,
-                temp_c,
-                ..
-            } => Detail::Aircraft {
-                altitude_ft: *altitude_ft,
-                vertical_rate_fpm: *vertical_rate_fpm,
-                squawk: *squawk,
-                wind: *wind,
-                temp_c: *temp_c,
-            },
-        };
+        // Sticks are where a handset's controls are, not where anything is.
+        if p.carries().has(common::packet::FactKind::Control) {
+            return false;
+        }
+        let detail = detail_of(&id, p);
         let i = self.entry(id, detail.clone(), at);
         let e = &mut self.seen[i];
         e.track.messages += 1;
         e.track.last = at;
-        if let Some(name) = &who.name {
-            if !name.is_empty() {
-                e.track.label = Some(name.clone());
-            }
+        if let Some(name) = who.name.as_ref().filter(|n| !n.is_empty()) {
+            e.track.label = Some(name.clone());
+        }
+        // What the transmitter says it is called. A vessel's name arrives in
+        // its static message and never in a position report, so the label is
+        // taken from whichever statement carries one and a report that only
+        // repeats the identity leaves it alone.
+        if let Some(label) = p.facts().find_map(|(_, f)| match f {
+            Fact::Named(n) if !n.label.trim().is_empty() => Some(n.label.clone()),
+            _ => None,
+        }) && label != e.track.id.text()
+        {
+            e.track.label = Some(label);
         }
         // A report that says what sort of thing it is replaces what was known
         // before it; one that does not leaves it alone, which is how a
         // vessel's static message keeps the ship type its position report
         // never carried.
         merge_detail(&mut e.track.detail, detail);
-        if let common::ReportDetail::Aircraft { ground_speed_kt, track_deg, .. } = &d.report {
-            e.track.speed_kt = ground_speed_kt.or(e.track.speed_kt);
-            e.track.course_deg = track_deg.or(e.track.course_deg);
-        }
-        if let Some(p) = &d.position {
-            e.track.speed_kt = p.speed_kt.or(e.track.speed_kt);
-            e.track.course_deg = p.course_deg.or(e.track.course_deg);
-            if let (Detail::Aprs { altitude_ft, .. }, Some(m)) = (&mut e.track.detail, p.altitude_m)
-            {
-                *altitude_ft = Some((m / 0.3048) as i32);
+        for (_, f) in p.facts() {
+            match f {
+                Fact::Motion(m) => {
+                    e.track.speed_kt = m.speed_kt.or(e.track.speed_kt);
+                    e.track.course_deg = m.course_deg.or(e.track.course_deg);
+                    if let (Detail::Aircraft { vertical_rate_fpm, .. }, Some(c)) =
+                        (&mut e.track.detail, m.climb_ms)
+                    {
+                        *vertical_rate_fpm = Some((c / FPM_TO_MS) as i32);
+                    }
+                    if let (Detail::Vessel { heading_deg, .. }, Some(h)) =
+                        (&mut e.track.detail, m.heading_deg)
+                    {
+                        *heading_deg = Some(h);
+                    }
+                    if let Detail::Sonde { climb_ms, .. } = &mut e.track.detail
+                        && let Some(c) = m.climb_ms
+                    {
+                        *climb_ms = c;
+                    }
+                }
+                // Absolute coordinates behind the protocol's own check, so
+                // there is no reading of them that could be a zone out.
+                Fact::Position(fix) => e.track.set_position((fix.lat, fix.lon), at, true),
+                Fact::Sensed(r) => height_or_weather(&mut e.track.detail, r),
+                Fact::Destination(d) => {
+                    if let Detail::Vessel { destination, .. } = &mut e.track.detail {
+                        *destination = Some(d.clone());
+                    }
+                }
+                _ => {}
             }
-            if let (Detail::Mesh { altitude_m, .. }, Some(m)) = (&mut e.track.detail, p.altitude_m)
-            {
-                *altitude_m = Some(m as i32);
-            }
-            // Absolute coordinates behind the protocol's own check, so there
-            // is no reading of them that could be a zone out.
-            e.track.set_position((p.lat, p.lon), at, true);
+            let _ = Quantity::Altitude;
         }
         // Half a position, which is all Mode S sends: pairing the halves, or
         // resolving one against what this aircraft was doing a second ago,
         // is the map's own state and needs the whole entry.
-        if let common::ReportDetail::Aircraft { cpr: Some(half), .. } = &d.report {
-            let reference = self.reference;
-            place_aircraft(&mut self.seen[i], *half, reference, at);
+        for (_, f) in p.facts() {
+            if let Fact::PartialPosition(half) = f {
+                let reference = self.reference;
+                place_aircraft(&mut self.seen[i], *half, reference, at);
+            }
         }
         true
+    }
+}
+
+/// Feet a minute as metres a second, which is the unit a climb is stated in.
+const FPM_TO_MS: f64 = 0.00508;
+
+/// What sort of thing a packet is about, from what named it and what it was
+/// filed under.
+///
+/// The identifier space decides where two sightings are the same thing; what
+/// it is drawn as comes from the decoder's own statement about it, so a
+/// protocol reaches the map by saying what it is rather than by being added
+/// to a table here.
+fn detail_of(id: &TrackId, p: &common::packet::Packet) -> Detail {
+    use common::packet::{Fact, ThingKind};
+    let named = p.facts().find_map(|(_, f)| match f {
+        Fact::Named(n) => Some(n.clone()),
+        _ => None,
+    });
+    let thing = named.as_ref().map(|n| n.thing);
+    match (thing, id) {
+        (Some(ThingKind::Vessel), _) | (None, TrackId::Mmsi(_)) => Detail::Vessel {
+            heading_deg: None,
+            nav_status: named.as_ref().and_then(|n| n.state),
+            ship_type: named.as_ref().and_then(|n| n.role),
+            destination: None,
+            class_b: p.innermost().is_some_and(|l| l.kind == "position_b"),
+        },
+        (Some(ThingKind::Aircraft), _) | (None, TrackId::Icao(_)) => Detail::new_aircraft(),
+        (Some(ThingKind::Sonde), _) | (None, TrackId::Sonde(_)) => Detail::new_sonde(),
+        (Some(ThingKind::Mark), _) => Detail::Station { aid: true },
+        (Some(ThingKind::Station), _) => Detail::Station { aid: false },
+        (_, TrackId::MeshCore(_)) => Detail::MeshCore {
+            role: named.as_ref().and_then(|n| n.role).unwrap_or("chat"),
+            fixed: named.as_ref().is_some_and(|n| n.fixed),
+        },
+        (_, TrackId::Mesh(_)) => Detail::Mesh {
+            long_name: named.as_ref().map(|n| n.label.clone()),
+            short_name: None,
+            altitude_m: None,
+            battery_pct: None,
+            precision_bits: p.position().and_then(|f| f.precision_bits),
+            temperature_c: None,
+            humidity_pct: None,
+            pressure_hpa: None,
+        },
+        // A callsign with a symbol behind it: APRS says what a station is by
+        // how it draws itself, and the decoder turned that into a kind and
+        // whether it is installed somewhere.
+        (_, TrackId::Call(_)) => Detail::Aprs {
+            symbol_table: '/',
+            symbol_code: match named.as_ref().is_some_and(|n| n.fixed) {
+                true => '-',
+                false => '>',
+            },
+            altitude_ft: None,
+            comment: None,
+            fixed: named.as_ref().is_some_and(|n| n.fixed),
+        },
+        _ => Detail::Device,
+    }
+}
+
+/// A reading the thing took, put where the map shows it.
+///
+/// Height first, because every flying thing reports one and each kind of
+/// track shows it in the unit its own operators use; the weather readings
+/// after it are what a mesh node and a sonde carry.
+fn height_or_weather(detail: &mut Detail, r: &common::packet::Reading) {
+    use common::packet::Quantity as Q;
+    match (detail, r.quantity) {
+        (Detail::Aircraft { altitude_ft, .. }, Q::Altitude) => {
+            *altitude_ft = Some((r.value / 0.3048) as i32);
+        }
+        (Detail::Aprs { altitude_ft, .. }, Q::Altitude) => {
+            *altitude_ft = Some((r.value / 0.3048) as i32);
+        }
+        (Detail::Mesh { altitude_m, .. }, Q::Altitude) => *altitude_m = Some(r.value as i32),
+        (Detail::Sonde { altitude_m, .. }, Q::Altitude) => *altitude_m = r.value,
+        (Detail::Aircraft { temp_c, .. }, Q::Temperature) => *temp_c = Some(r.value),
+        // The wind an airliner reports to a radar is a speed and a bearing
+        // in two statements, and the track carries the pair, so each half
+        // keeps whatever the other one already said.
+        (Detail::Aircraft { wind, .. }, Q::WindSpeed) => {
+            *wind = Some((r.value, wind.map_or(0.0, |(_, deg)| deg)));
+        }
+        (Detail::Aircraft { wind, .. }, Q::WindDirection) => {
+            *wind = Some((wind.map_or(0.0, |(kt, _)| kt), r.value));
+        }
+        (Detail::Mesh { temperature_c, .. }, Q::Temperature) => {
+            *temperature_c = Some(r.value as f32);
+        }
+        (Detail::Mesh { humidity_pct, .. }, Q::Humidity) => *humidity_pct = Some(r.value as f32),
+        (Detail::Mesh { pressure_hpa, .. }, Q::Pressure) => *pressure_hpa = Some(r.value as f32),
+        (Detail::Mesh { battery_pct, .. }, Q::Battery) => *battery_pct = Some(r.value as u32),
+        (Detail::Sonde { temperature_c, .. }, Q::Temperature) => {
+            *temperature_c = Some(r.value as f32);
+        }
+        (Detail::Sonde { humidity_pct, .. }, Q::Humidity) => *humidity_pct = Some(r.value as f32),
+        (Detail::Sonde { battery_v, .. }, Q::Battery) => *battery_v = r.value as f32,
+        _ => {}
     }
 }
 
@@ -967,9 +958,7 @@ impl pipeline::node::Simple for TracksNode {
             // to be five parsers here, run on a guess from the frequency, so
             // the map could disagree with the packet list about a frame they
             // had both seen.
-            for d in &packet.decodes {
-                self.tracks.update_decoded(d, at);
-            }
+            self.tracks.update(packet, at);
         }
         Ok(())
     }
@@ -987,6 +976,7 @@ mod tests {
     // The tests build frames with the protocol parsers and then feed the
     // tracker what the decoders make of them, which is the path the receiver
     // uses.
+    use common::packet::{Entity, Fact, Fix, Id, ThingKind};
     use decode::{ais, ax25};
 
     /// Real frames, from an hour of traffic over Ireland and the Irish Sea,
@@ -1058,8 +1048,20 @@ mod tests {
 
     /// Through the Mode S decoder, the way the bus feeds the map.
     fn feed_adsb(t: &mut Tracks, f: &adsb::Frame, at: std::time::Instant) {
-        let d = decode::adsb::decoded(f, &f.raw, common::Hz(1_090_000_000));
-        t.update_decoded(&d, at);
+        t.update(&heard(1_090_000_000, decode::adsb::read(f)), at);
+    }
+
+    /// A reception carrying one decode, as the bus delivers it to the map.
+    fn heard(hz: u64, layer: common::packet::Proto) -> common::packet::Packet {
+        let carrier = common::packet::Carrier::heard(
+            common::packet::now_us(),
+            hz,
+            25_000,
+            -40.0,
+            18.0,
+            common::SourceId(0),
+        );
+        common::packet::Packet::heard(carrier).decoded(layer)
     }
 
     fn ident() -> adsb::Frame {
@@ -1086,13 +1088,14 @@ mod tests {
     /// tracker now: the map reads what the protocols concluded.
     fn feed_ais(t: &mut Tracks, payload: &[u8], at: std::time::Instant) {
         let f = ais_frame(payload);
-        let d = decode::ais::decoded(&f, payload, common::Hz(162_025_000));
-        assert!(t.update_decoded(&d, at), "the tracker refused an AIS decode");
+        assert!(
+            t.update(&heard(162_025_000, decode::ais::read(&f)), at),
+            "the tracker refused an AIS decode"
+        );
     }
 
     fn feed_aprs(t: &mut Tracks, frame: &ax25::Frame, at: std::time::Instant) -> bool {
-        let d = decode::aprs::decoded(frame, &[], common::Hz(144_800_000));
-        t.update_decoded(&d, at)
+        t.update(&heard(144_800_000, decode::aprs::read(frame)), at)
     }
 
     /// The Le Havre position report, the payload every layer is tested on.
@@ -1314,7 +1317,9 @@ mod tests {
         let now = std::time::Instant::now();
         for (sym, want) in [
             ('>', Kind::Vehicle),
-            ('O', Kind::Aircraft),
+            // A balloon, which the map draws as what it is rather than as
+            // an aeroplane.
+            ('O', Kind::Sonde),
             ('^', Kind::Aircraft),
             ('s', Kind::Vessel),
             ('-', Kind::Station),
@@ -1415,11 +1420,14 @@ mod tests {
         };
         let mut t = Tracks::new();
         let hex: String = a.public_key.iter().map(|b| format!("{b:02x}")).collect();
-        let d = common::Decoded::bytes("MeshCore", common::Hz(869_618_000), 0.0, vec![])
-            .by(common::Identity::new("meshcore", hex).named("Balbriggan Repeater"))
-            .at_position(common::Position { lat: 53.608448, lon: -6.684672, ..Default::default() })
-            .reporting(common::ReportDetail::MeshCore { role: "repeater", fixed: true });
-        assert!(t.update_decoded(&d, now));
+        let _ = &hex;
+        let d = common::packet::Proto::new("meshcore", "advert")
+            .by(Entity::new("meshcore", Id::Key(key.to_vec().into())).named("Balbriggan Repeater"))
+            .saying(Fact::Position(Fix { lat: 53.608448, lon: -6.684672, precision_bits: None }))
+            .saying(Fact::Named(
+                common::packet::Named::new("Balbriggan Repeater", ThingKind::Station).fixed(),
+            ));
+        assert!(t.update(&heard(869_618_000, d), now));
         let list = t.active(now);
         let n = list.iter().find(|x| x.id == TrackId::MeshCore(key)).expect("a node");
         assert_eq!(n.id.text(), "22:7aa88f");
@@ -1437,11 +1445,11 @@ mod tests {
     fn a_protocol_the_tracker_has_never_heard_of_is_still_a_track() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        let beacon = || common::Identity::new("epirb", "1D043C4802FFBFF").named("EPIRB");
-        let placed = common::Decoded::bytes("epirb", common::Hz(406_025_000), 0.0, vec![])
+        let beacon = || Entity::new("epirb", Id::Text("1D043C4802FFBFF".into())).named("EPIRB");
+        let placed = common::packet::Proto::new("epirb", "distress")
             .by(beacon())
-            .at_position(common::Position { lat: 53.36, lon: -10.19, ..Default::default() });
-        assert!(t.update_decoded(&placed, now));
+            .saying(Fact::Position(Fix { lat: 53.36, lon: -10.19, precision_bits: None }));
+        assert!(t.update(&heard(406_025_000, placed), now));
 
         let list = t.active(now);
         assert_eq!(list.len(), 1, "{} tracks", list.len());
@@ -1457,10 +1465,10 @@ mod tests {
         // The same beacon again, two minutes later and a mile away: one
         // track with a trail, not two marks.
         let later = now + std::time::Duration::from_secs(120);
-        let moved = common::Decoded::bytes("epirb", common::Hz(406_025_000), 0.0, vec![])
+        let moved = common::packet::Proto::new("epirb", "distress")
             .by(beacon())
-            .at_position(common::Position { lat: 53.38, lon: -10.19, ..Default::default() });
-        assert!(t.update_decoded(&moved, later));
+            .saying(Fact::Position(Fix { lat: 53.38, lon: -10.19, precision_bits: None }));
+        assert!(t.update(&heard(406_025_000, moved), later));
         let list = t.active(later);
         assert_eq!(list.len(), 1, "{} tracks", list.len());
         assert_eq!(list[0].messages, 2);
@@ -1473,9 +1481,9 @@ mod tests {
     fn a_device_that_reports_no_position_is_not_a_track() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        let d = common::Decoded::bytes("pocsag", common::Hz(153_350_000), 0.0, vec![])
-            .by(common::Identity::new("pocsag", "1234567"));
-        assert!(!t.update_decoded(&d, now));
+        let d = common::packet::Proto::new("pocsag", "alpha")
+            .by(Entity::new("pocsag", Id::Text("1234567".into())));
+        assert!(!t.update(&heard(153_350_000, d), now));
         assert_eq!(t.active(now).len(), 0);
     }
 
@@ -1491,37 +1499,18 @@ mod tests {
     fn a_meshtastic_node_is_placed_and_named() {
         let now = std::time::Instant::now();
         let mut t = Tracks::new();
-        let node = || common::Identity::new("meshtastic", "050d3664");
-        let position = common::Decoded::bytes("Meshtastic", common::Hz(869_525_000), 0.0, vec![])
+        let node = || Entity::new("meshtastic", Id::Hex(0x050d_3664));
+        let position = common::packet::Proto::new("meshtastic", "position")
             .by(node())
-            .at_position(common::Position {
-                lat: 53.64,
-                lon: -6.65,
-                altitude_m: Some(80.0),
-                ..Default::default()
-            })
-            .reporting(common::ReportDetail::Mesh {
-                long_name: None,
-                short_name: None,
-                battery_pct: None,
-                precision_bits: Some(32),
-                temperature_c: None,
-                humidity_pct: None,
-                pressure_hpa: None,
-            });
-        let info = common::Decoded::bytes("Meshtastic", common::Hz(869_525_000), 0.0, vec![])
+            .saying(Fact::Position(Fix { lat: 53.64, lon: -6.65, precision_bits: Some(32) }))
+            .saying(Fact::sensed(common::packet::Quantity::Altitude, 80.0, common::Unit::Metre));
+        // The name arrives in its own packet, as a mesh node's does: the
+        // node info is not sent with every position.
+        let info = common::packet::Proto::new("meshtastic", "node info")
             .by(node().named("Kitchen"))
-            .reporting(common::ReportDetail::Mesh {
-                long_name: Some("Kitchen".into()),
-                short_name: Some("KTCH".into()),
-                battery_pct: None,
-                precision_bits: None,
-                temperature_c: None,
-                humidity_pct: None,
-                pressure_hpa: None,
-            });
-        assert!(t.update_decoded(&position, now));
-        assert!(t.update_decoded(&info, now));
+            .saying(Fact::Named(common::packet::Named::new("Kitchen", ThingKind::Vehicle)));
+        assert!(t.update(&heard(869_525_000, position), now));
+        assert!(t.update(&heard(869_525_000, info), now));
         let n =
             t.active(now).into_iter().find(|x| x.id == TrackId::Mesh(0x050d_3664)).expect("a node");
         assert_eq!(n.id.text(), "!050d3664");

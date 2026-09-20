@@ -13,8 +13,7 @@
 //! names and says how to wire them; it is the layer above.
 
 use crate::NodeSpec;
-use common::Packet;
-use pipeline::event::Decoded;
+use common::packet::{Packet, Proto};
 use pipeline::port::PortKind;
 
 /// Where a protocol can be and what stream it reads live below this crate,
@@ -297,7 +296,7 @@ pub trait Protocol: Send + Sync {
     /// from a description, before any node exists to negotiate with; the
     /// test beside the registry checks it against what the chain says.
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Frames]
+        &[PortKind::Packets]
     }
 
     /// What a stage placed at `hz` is called in the chain view.
@@ -403,7 +402,7 @@ pub trait Protocol: Send + Sync {
     /// Several rows where one transmission carries several messages: a pager
     /// empties its queue in one go, and a GSM paging request names up to four
     /// handsets.
-    fn read_frame(&self, _p: &Packet, _bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, _p: &Packet) -> Option<Vec<Proto>> {
         None
     }
 
@@ -558,7 +557,7 @@ mod tests {
     /// Every narrow source a busy 2.4 GHz band opens used to get M17, DMR,
     /// P25, POCSAG, FLEX, MDC-1200, two-tone, APRS and SSTV built on it,
     /// about 4 ms of processor time in a 2.13 ms block, and every row they
-    /// produced was thrown away again by the band test in `read_frame`.
+    /// produced was thrown away again by the band test in `read`.
     #[test]
     fn the_24_ghz_band_gets_none_of_the_land_mobile_decoders() {
         for id in [
@@ -740,7 +739,7 @@ mod tests {
         for p in all() {
             let desc = reg.desc(p.id()).unwrap_or_else(|| panic!("{} has no stage", p.id()));
             let produces =
-                matches!(p.outputs().first(), Some(PortKind::Frames | PortKind::Packets));
+                matches!(p.outputs().first(), Some(PortKind::Packets | PortKind::Packets));
             assert_eq!(desc.feeds_bus, produces, "{}", p.id());
         }
     }

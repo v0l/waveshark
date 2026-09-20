@@ -320,7 +320,7 @@ impl Simple for SpectrumNode {
         self.fresh = true;
         if let Some(out) = o.spectrum_mut() {
             out.push(common::SpectrumFrame {
-                at_us: now_us(),
+                at_us: common::packet::now_us(),
                 center_hz: self.center.as_f64(),
                 span_hz: self.rate,
                 db: std::sync::Arc::new(frame.peak),
@@ -462,7 +462,7 @@ impl<T: Ring> Simple for RingNode<T> {
 /// A trait rather than a file, so `nodes` does not have to know where the
 /// data goes or what it is written as, which is an application's business.
 pub trait PacketSink: Send + 'static {
-    fn write(&mut self, p: &common::Packet);
+    fn write(&mut self, p: &common::packet::Packet);
     /// How many have been written, for a status line.
     fn written(&self) -> u64 {
         0
@@ -557,8 +557,8 @@ impl PacketBusNode {
     /// column in the list and a row nobody can sort, judge or compare. A feed
     /// from another receiver is the honest exception: the far end reports
     /// what it measured, and the AVR format reports nothing.
-    fn check_measured(&mut self, k: usize, p: &common::Packet, ctx: &mut NodeCtx<'_>) {
-        if p.rssi_dbfs().is_finite() && p.snr_db().is_finite() {
+    fn check_measured(&mut self, k: usize, p: &common::packet::Packet, ctx: &mut NodeCtx<'_>) {
+        if p.carrier.rssi_dbfs.is_finite() && p.carrier.snr_db.is_finite() {
             return;
         }
         if !self.unmeasured.insert(k) {
@@ -567,9 +567,9 @@ impl PacketBusNode {
         ctx.warn(format!(
             "input {k} put a packet on the bus at {:.4} MHz with no level: \
              rssi {}, snr {}",
-            p.center_hz() as f64 / 1e6,
-            p.rssi_dbfs(),
-            p.snr_db()
+            p.carrier.center_hz as f64 / 1e6,
+            p.carrier.rssi_dbfs,
+            p.carrier.snr_db
         ));
     }
 
@@ -595,13 +595,6 @@ impl PacketBusNode {
 /// list has always shown. Replaying a file stamps the packets with the time
 /// of the replay, because that is when the receiver heard them; the file's
 /// own timeline belongs to the file.
-fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
-}
-
 impl pipeline::node::Node for PacketBusNode {
     fn name(&self) -> &str {
         "packet_bus"
@@ -620,10 +613,8 @@ impl pipeline::node::Node for PacketBusNode {
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
         for i in inputs {
-            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Frames | PortKind::Packets) {
-                return Err(Error::other(
-                    "the packet bus takes detected bursts, demodulated frames or packets",
-                ));
+            if !matches!(i.spec.kind, PortKind::Pulses | PortKind::Packets) {
+                return Err(Error::other("the packet bus takes detected bursts or packets"));
             }
         }
         let first = inputs.first().map(|i| i.spec).unwrap_or(StreamSpec::iq(0.0, common::Hz(0)));
@@ -639,29 +630,29 @@ impl pipeline::node::Node for PacketBusNode {
         outputs: &mut [Payload],
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let at_us = now_us();
+        let at_us = common::packet::now_us();
         let out = outputs[0].packets_mut();
         for (k, payload) in inputs.iter().enumerate() {
             let spec = ctx.inputs.get(k).map(|p| p.spec);
             let from = out.len();
             match payload {
-                Payload::Pulses(pkgs) => {
+                Payload::Pulses(found) => {
                     let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
-                    for p in pkgs.iter() {
-                        out.push(common::Packet::of_pulses(at_us, bandwidth_hz, p.clone()));
-                    }
-                }
-                Payload::Frames(frames) => {
                     let center_hz = spec.map(|s| s.center.0).unwrap_or(0);
-                    let bandwidth_hz = spec.map(|s| s.bandwidth as u32).unwrap_or(0);
-                    for f in frames.iter() {
-                        // A front end that read one channel out of a span
-                        // says which; the rest take the port's centre.
-                        let mut f = f.clone();
-                        if f.center_hz == 0 {
-                            f.center_hz = center_hz;
-                        }
-                        out.push(common::Packet::of_frame(at_us, bandwidth_hz, f));
+                    for d in found.iter() {
+                        // Assembled here, where the stream the detector was
+                        // reading is known: a detection is timings and a
+                        // level, and the stream is what places it.
+                        let carrier = common::packet::Carrier::heard(
+                            at_us,
+                            center_hz,
+                            bandwidth_hz,
+                            d.rssi_dbfs,
+                            d.snr_db,
+                            common::SourceId(0),
+                        )
+                        .lasting(d.duration_us);
+                        out.push(common::packet::Packet::heard(carrier).keyed(d.keying.clone()));
                     }
                 }
                 // A feed from another receiver arrives already stamped: it
@@ -672,8 +663,9 @@ impl pipeline::node::Node for PacketBusNode {
             }
             // Checked as it goes on, so what is judged is what the bus will
             // carry: a packet built here from pulses or from a frame.
-            if let Some(p) =
-                out[from..].iter().find(|p| !(p.rssi_dbfs().is_finite() && p.snr_db().is_finite()))
+            if let Some(p) = out[from..]
+                .iter()
+                .find(|p| !(p.carrier.rssi_dbfs.is_finite() && p.carrier.snr_db.is_finite()))
             {
                 self.check_measured(k, p, ctx);
             }

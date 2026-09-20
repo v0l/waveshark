@@ -10,7 +10,7 @@
 
 use crate::bits::BitBuffer;
 use crate::slicer::{Coding, Timing};
-use common::pulse::{Package, Pulse};
+use common::pulse::Pulse;
 use std::time::Duration;
 
 /// Inter-frame silence, so a burst of repeats splits into packages the way
@@ -20,11 +20,11 @@ pub const INTER_FRAME_GAP_US: u32 = 10_000;
 
 /// A PWM table to encode with. The decoders take a `Timing` with a coding;
 /// an encoder wants the widths and the reset only.
-pub fn frame(t: Timing, bits: &BitBuffer, repeats: usize) -> Package {
+pub fn frame(t: Timing, bits: &BitBuffer, repeats: usize) -> Vec<Pulse> {
     let Coding::Pwm = t.coding else {
         panic!("keyfob encoders encode PWM tables only");
     };
-    let mut pkg = Package::default();
+    let mut pulses: Vec<Pulse> = Vec::new();
     for r in 0..repeats {
         for i in 0..bits.len() {
             // Short mark is a 1, long mark a 0: the on-air convention the
@@ -33,12 +33,12 @@ pub fn frame(t: Timing, bits: &BitBuffer, repeats: usize) -> Package {
             let one = bits.get(i) == Some(true);
             let mark = if one { t.short_us } else { t.long_us };
             let gap = if one { t.long_us } else { t.short_us };
-            pkg.pulses.push(Pulse { mark, gap });
+            pulses.push(Pulse { mark, gap });
         }
-        let last = pkg.pulses.last_mut().expect("a frame has bits");
+        let last = pulses.last_mut().expect("a frame has bits");
         last.gap = if r + 1 == repeats { t.reset_us } else { INTER_FRAME_GAP_US };
     }
-    pkg
+    pulses
 }
 
 /// Silence a `Duration` long, as one pulse with no carrier.
@@ -46,13 +46,13 @@ pub fn silence(d: Duration) -> Pulse {
     Pulse { mark: 0, gap: d.as_micros().min(u32::MAX as u128) as u32 }
 }
 
-/// Repeat a package `n` times, separated by `gap`.
-pub fn repeated(pkg: &Package, n: usize, gap: Duration) -> Package {
-    let mut out = Package::default();
+/// Repeat a burst `n` times, separated by `gap`.
+pub fn repeated(burst: &[Pulse], n: usize, gap: Duration) -> Vec<Pulse> {
+    let mut out: Vec<Pulse> = Vec::with_capacity(burst.len() * n);
     for r in 0..n {
-        out.pulses.extend(pkg.pulses.iter().copied());
+        out.extend(burst.iter().copied());
         if r + 1 < n
-            && let Some(last) = out.pulses.last_mut()
+            && let Some(last) = out.last_mut()
         {
             last.gap = last.gap.max(gap.as_micros() as u32);
         }
@@ -78,9 +78,9 @@ mod tests {
     fn a_frame_round_trips_through_the_slicer() {
         let t = Timing::pwm(320, 640, 2500);
         let pkg = frame(t, &bits_of("101100101111"), 3);
-        assert_eq!(pkg.pulses.len(), 36, "twelve bits, three repeats");
+        assert_eq!(pkg.len(), 36, "twelve bits, three repeats");
         // Last gap is the reset, middle ones the inter-frame gap.
-        assert_eq!(pkg.pulses.last().unwrap().gap, 2500);
+        assert_eq!(pkg.last().unwrap().gap, 2500);
         let sliced = slice(&pkg, &t).expect("our own frame must slice");
         // Three identical frames tile the buffer end to end, which is what
         // `find_and_parse` corroborates a checksum-free protocol with.
@@ -94,8 +94,8 @@ mod tests {
     fn repeat_joins_are_gap_not_carrier() {
         let t = Timing::pwm(500, 1500, 2500);
         let pkg = frame(t, &bits_of("10"), 2);
-        assert_eq!(pkg.pulses[1].gap, INTER_FRAME_GAP_US);
-        assert_eq!(pkg.pulses[3].gap, t.reset_us);
+        assert_eq!(pkg[1].gap, INTER_FRAME_GAP_US);
+        assert_eq!(pkg[3].gap, t.reset_us);
     }
 
     #[test]
@@ -104,10 +104,10 @@ mod tests {
         // mark, per the convention every Flipper corpus recording confirms.
         let t = Timing::pwm(400, 1200, 3000);
         let pkg = frame(t, &bits_of("10"), 1);
-        assert_eq!(pkg.pulses[0].mark, 400);
-        assert_eq!(pkg.pulses[0].gap, 1200);
-        assert_eq!(pkg.pulses[1].mark, 1200);
-        assert_eq!(pkg.pulses[1].gap, 3000);
+        assert_eq!(pkg[0].mark, 400);
+        assert_eq!(pkg[0].gap, 1200);
+        assert_eq!(pkg[1].mark, 1200);
+        assert_eq!(pkg[1].gap, 3000);
     }
 
     /// The princeton key from the Flipper's own unit tests
@@ -126,7 +126,7 @@ mod tests {
             bits.push(0x95_d5_d4 & (1 << (23 - i)) != 0);
         }
         let pkg = frame(p.timing(), &bits, 3);
-        let r = p.decode_package(&pkg).expect("the corpus key round-trips");
+        let r = p.decode_burst(&pkg).expect("the corpus key round-trips");
         // The decoder inverts the buffer before parsing (short mark 0 on
         // the air), so the code it reports is the key's complement.
         assert_eq!(r.get("code"), Some(&Value::Int(0x6a_2a_2b)));

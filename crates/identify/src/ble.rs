@@ -64,7 +64,7 @@ impl Signal for Ble {
                     .find(|(c, _)| *c == f.channel)
                     .map(|(_, hz)| *hz)
                     .unwrap_or(center_hz);
-                decode::ble::decoded(&f.pdu, common::Hz(hz as u64))
+                decode::ble::read(&f.pdu, common::Hz(hz as u64))
             })
             .collect::<Vec<_>>()
             .into()

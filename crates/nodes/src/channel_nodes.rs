@@ -2,7 +2,7 @@
 //!
 //! A consumer of the packet bus like the survey and the band walk, and for
 //! the same reason: which channels are busy is a question about everything
-//! heard rather than about one decoder. It reads [`common::ChannelUse`] and
+//! heard rather than about one decoder. It reads [`common::packet::Channel`] and
 //! nothing else, so a protocol joins this view by saying which channel of
 //! which plan it was on rather than by being named here.
 //!
@@ -14,7 +14,8 @@
 //! either side of its own, which is what makes 1, 6 and 11 the only three
 //! that do not overlap.
 
-use common::{ChannelPlan, ChannelUse, Packet, Result, Secrecy};
+use common::packet::{Channel, Packet};
+use common::{ChannelPlan, Result, Secrecy};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -179,17 +180,17 @@ impl ChannelMapNode {
         id: &str,
         name: Option<String>,
         vendor: Option<String>,
-        use_: &ChannelUse,
+        use_: &Channel,
     ) {
         self.packets += 1;
         if let Some(s) = self.stations.iter_mut().find(|s| s.plan == use_.plan && s.id == id) {
             s.packets += 1;
             s.channel = use_.working();
             s.heard_on = use_.heard;
-            s.rssi_dbfs = p.rssi_dbfs();
-            s.best_rssi_dbfs = s.best_rssi_dbfs.max(p.rssi_dbfs());
-            s.snr_db = p.snr_db();
-            s.last_us = p.at_us;
+            s.rssi_dbfs = p.carrier.rssi_dbfs;
+            s.best_rssi_dbfs = s.best_rssi_dbfs.max(p.carrier.rssi_dbfs);
+            s.snr_db = p.carrier.snr_db;
+            s.last_us = p.carrier.at_us;
             if name.is_some() {
                 s.name = name;
             }
@@ -219,10 +220,10 @@ impl ChannelMapNode {
             width_hz: use_.width_hz,
             secrecy: use_.secrecy.clone(),
             packets: 1,
-            best_rssi_dbfs: p.rssi_dbfs(),
-            rssi_dbfs: p.rssi_dbfs(),
-            snr_db: p.snr_db(),
-            last_us: p.at_us,
+            best_rssi_dbfs: p.carrier.rssi_dbfs,
+            rssi_dbfs: p.carrier.rssi_dbfs,
+            snr_db: p.carrier.snr_db,
+            last_us: p.carrier.at_us,
         });
     }
 }
@@ -271,11 +272,17 @@ impl Simple for ChannelMapNode {
 
     fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         for p in i.as_packets().unwrap_or(&[]) {
-            for d in &p.decodes {
-                let Some(use_) = d.channel.clone() else { continue };
-                let Some(who) = d.identity.as_ref() else { continue };
-                self.file(p, &who.id.clone(), who.name.clone(), who.vendor.clone(), &use_);
-            }
+            // The channel a transmitter is working and who it is are both
+            // statements a decoder made; a packet carrying neither is traffic
+            // on some other plan.
+            let Some(use_) = p.facts().find_map(|(_, f)| match f {
+                common::packet::Fact::Channel(c) => Some(c.clone()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let Some(who) = p.subject() else { continue };
+            self.file(p, &who.id.to_string(), who.name.clone(), who.vendor.clone(), &use_);
         }
         Ok(())
     }
@@ -295,25 +302,19 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Frame, Hz, Identity};
-    use pipeline::event::Decoded;
+    use common::Hz;
+    use common::packet::{Entity, Fact, Id, Proto};
 
     fn wifi(id: &str, ssid: Option<&str>, heard: u16, claims: Option<u16>, rssi: f32) -> Packet {
-        let mut p = Packet::of_frame(
-            1_000_000,
-            20_000_000,
-            Frame::measured(vec![0x80, 0x00], rssi, 20.0).at(2_437_000_000),
-        );
-        let mut who = Identity::new("wifi", id);
+        let mut who = Entity::new("wifi", Id::Text(id.to_string()));
         who.name = ssid.map(str::to_string);
-        p.decodes = vec![
-            Decoded::bytes("802.11", Hz(2_437_000_000), 0.0, vec![]).by(who).on_channel(
-                ChannelUse::new(ChannelPlan::Wifi, heard, 20_000_000)
+        crate::measured(2_437_000_000, 20_000_000, vec![0x80, 0x00], rssi, 20.0).decoded(
+            Proto::new("wifi", "beacon").by(who).saying(Fact::Channel(
+                Channel::new(ChannelPlan::Wifi, heard, 20_000_000)
                     .claiming(claims)
                     .protected_by(Secrecy::Encrypted(Some("wpa2".into()))),
-            ),
-        ];
-        p
+            )),
+        )
     }
 
     fn feed(node: &mut ChannelMapNode, packets: Vec<Packet>) {
@@ -390,10 +391,10 @@ mod tests {
     fn channels_of_different_plans_are_kept_apart() {
         let mut n = ChannelMapNode::new();
         let mut ble = wifi("AA:BB:CC:00:00:09", Some("beacon"), 38, None, -66.0);
-        ble.decodes = vec![
-            Decoded::bytes("BLE-Adv", Hz(2_426_000_000), 0.0, vec![])
-                .by(Identity::new("ble", "AA:BB:CC:00:00:09"))
-                .on_channel(ChannelUse::new(ChannelPlan::Ble, 38, 2_000_000)),
+        ble.stack = vec![
+            Proto::new("ble", "adv")
+                .by(Entity::new("ble", Id::Text("AA:BB:CC:00:00:09".into())))
+                .saying(Fact::Channel(Channel::new(ChannelPlan::Ble, 38, 2_000_000))),
         ];
         feed(&mut n, vec![wifi("AA:BB:CC:00:00:01", Some("home"), 6, Some(6), -50.0), ble]);
         let loads = n.loads();
@@ -412,7 +413,7 @@ mod tests {
     fn packets_without_a_channel_are_not_counted() {
         let mut n = ChannelMapNode::new();
         let mut p = wifi("AA:BB:CC:00:00:01", Some("home"), 6, Some(6), -50.0);
-        p.decodes = vec![Decoded::bytes("pocsag", Hz(153_350_000), 0.0, vec![1, 2, 3])];
+        p.stack = vec![Proto::new("pocsag", "alpha")];
         for _ in 0..200 {
             feed(&mut n, vec![p.clone()]);
         }

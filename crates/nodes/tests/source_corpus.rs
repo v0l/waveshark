@@ -31,11 +31,11 @@ fn load(f: &Fixture) -> common::IqBuf {
 
 /// Distinct reports from a run of packages, the way the corpus harness
 /// deduplicates them.
-fn reports(pkgs: &[Package]) -> Vec<Report> {
+fn reports(pkgs: &[common::packet::Detection]) -> Vec<Report> {
     let protocols = Protocols::published();
     let mut out: Vec<Report> = Vec::new();
     for p in pkgs {
-        for r in protocols.decode_all(p) {
+        for r in protocols.decode_all(p.pulses()) {
             if !out.iter().any(|q| q.model == r.model && q.fields == r.fields) {
                 out.push(r);
             }
@@ -44,11 +44,11 @@ fn reports(pkgs: &[Package]) -> Vec<Report> {
     out
 }
 
-fn through_auto(buf: &common::IqBuf) -> Vec<Package> {
+fn through_auto(buf: &common::IqBuf) -> Vec<common::packet::Detection> {
     through_auto_with(buf, NodeSpec::new("auto"))
 }
 
-fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<Package> {
+fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<common::packet::Detection> {
     let spec = StreamSpec::iq(buf.rate.as_f64(), buf.center);
     let mut g = build_chain(spec, &[auto], &registry()).expect("build");
     let mut out = Vec::new();
@@ -57,12 +57,18 @@ fn through_auto_with(buf: &common::IqBuf, auto: NodeSpec) -> Vec<Package> {
     for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
         g.feed_iq(block).expect("run");
         let pk = g.output().as_packets().unwrap_or(&[]);
-        out.extend(pk.iter().filter_map(|p| p.package().cloned()));
+        out.extend(pk.iter().filter_map(|p| {
+            let k = p.keying.clone()?;
+            Some(
+                common::packet::Detection::new(k, p.carrier.rssi_dbfs, p.carrier.snr_db)
+                    .lasting(p.carrier.duration_us),
+            )
+        }));
     }
     out
 }
 
-fn through_banks(buf: &common::IqBuf) -> Vec<Package> {
+fn through_banks(buf: &common::IqBuf) -> Vec<common::packet::Detection> {
     let rate = buf.rate.as_f64();
     let mut out = Vec::new();
     let mut built: Vec<usize> = Vec::new();
@@ -78,12 +84,12 @@ fn through_banks(buf: &common::IqBuf) -> Vec<Package> {
         bank.set_all_graphs(ism_decode_graph).expect("bank graphs");
         for block in buf.samples.chunks(16_384) {
             bank.process(block).expect("bank");
-            out.extend_from_slice(bank.packages());
+            out.extend(bank.detections().iter().map(|(_, d)| d.clone()));
         }
         let silence = vec![C32::new(0.0, 0.0); 16_384];
         for _ in 0..4 {
             bank.process(&silence).expect("bank");
-            out.extend_from_slice(bank.packages());
+            out.extend(bank.detections().iter().map(|(_, d)| d.clone()));
         }
     }
     out

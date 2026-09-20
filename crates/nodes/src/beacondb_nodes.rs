@@ -342,25 +342,22 @@ impl Simple for BeaconDbNode {
             return Ok(());
         }
         for p in i.as_packets().unwrap_or(&[]) {
-            for d in p.decodes.iter() {
-                let Some((protocol, ident)) = crate::survey_nodes::identity(d) else { continue };
-                if survey::beacondb::kind(&protocol).is_none() {
-                    break;
-                }
-                let s = crate::survey_nodes::sighting(p, d, self.station);
-                let key = (protocol.clone(), ident.clone());
-                let fresh = match self.last.get(&key) {
-                    None => true,
-                    Some(prev) => survey::worth_keeping(prev, &s),
-                };
-                if !fresh {
-                    break;
-                }
-                if let Some(item) = survey::beacondb::item_json(&protocol, &ident, &s) {
-                    self.last.insert(key, s);
-                    self.pending.push(item);
-                }
-                break;
+            let Some((protocol, ident)) = crate::survey_nodes::identity(p) else { continue };
+            if survey::beacondb::kind(&protocol).is_none() {
+                continue;
+            }
+            let s = crate::survey_nodes::sighting(p, self.station);
+            let key = (protocol.clone(), ident.clone());
+            let fresh = match self.last.get(&key) {
+                None => true,
+                Some(prev) => survey::worth_keeping(prev, &s),
+            };
+            if !fresh {
+                continue;
+            }
+            if let Some(item) = survey::beacondb::item_json(&protocol, &ident, &s) {
+                self.last.insert(key, s);
+                self.pending.push(item);
             }
         }
         if self.pending.len() >= ITEMS_PER_FILE || self.opened.elapsed() >= MAX_AGE {
@@ -400,14 +397,13 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Hz, Packet};
+    use common::Hz;
+    use common::packet::Packet;
 
     fn packet(bytes: Vec<u8>, center_hz: u64) -> Packet {
-        Packet::of_frame(
-            1_000_000,
-            2_000_000,
-            common::Frame::measured(bytes, -46.0, 20.0).at(center_hz),
-        )
+        let mut p = crate::measured(center_hz, 2_000_000, bytes, -46.0, 20.0);
+        p.carrier.at_us = 1_000_000;
+        p
     }
 
     fn run(node: &mut BeaconDbNode, packets: Vec<Packet>) {

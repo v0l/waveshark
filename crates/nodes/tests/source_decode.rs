@@ -75,21 +75,29 @@ fn chain() -> Vec<NodeSpec> {
 
 /// Run the stream through in blocks the size a radio delivers, so sources
 /// open, run and close across block boundaries.
-fn run(wide: &[C32]) -> (Vec<Event>, Vec<common::Package>) {
+/// The timings a packet was read at, where it carries any.
+fn timings(p: &common::packet::Packet) -> Vec<common::Pulse> {
+    match p.keying.as_ref().map(|k| &k.symbols) {
+        Some(common::packet::Symbols::Pulses(v)) => v.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn run(wide: &[C32]) -> (Vec<Event>, Vec<common::packet::Packet>) {
     let spec = pipeline::StreamSpec::iq(RATE, CENTER);
     let mut g = build_chain(spec, &chain(), &registry()).expect("build chain");
     let mut events = Vec::new();
     let mut packages = Vec::new();
     for block in wide.chunks(16_384) {
         events.extend(g.feed_iq(block).expect("run").iter().map(|e| e.event.clone()));
-        packages.extend_from_slice(g.output().as_pulses().unwrap_or(&[]));
+        packages.extend_from_slice(g.output().as_packets().unwrap_or(&[]));
     }
     // The last source's tail may still be draining: a stretch of silence
     // lets it close.
     let silence = vec![C32::new(0.0, 0.0); 16_384];
     for _ in 0..4 {
         events.extend(g.feed_iq(&silence).expect("run").iter().map(|e| e.event.clone()));
-        packages.extend_from_slice(g.output().as_pulses().unwrap_or(&[]));
+        packages.extend_from_slice(g.output().as_packets().unwrap_or(&[]));
     }
     (events, packages)
 }
@@ -134,23 +142,24 @@ fn every_transmitter_decodes_through_its_own_stream() {
             );
         }
     }
-    assert!(!packages.is_empty(), "no bursts reached the pulse port");
+    assert!(!packages.is_empty(), "no bursts reached the packet port");
 
     let protocols = decode::Protocols::published();
     let mut decoded: Vec<(f64, String)> = Vec::new();
     for p in &packages {
         eprintln!(
             "package at {:+.0} Hz: {} pulses, {:.1} dB, {:?}",
-            p.center_hz as f64 - CENTER.as_f64(),
-            p.pulses.len(),
-            p.snr_db,
-            p.modulation
+            p.center_hz() as f64 - CENTER.as_f64(),
+            timings(p).len(),
+            p.carrier.snr_db,
+            p.keying.as_ref().map(|k| k.modulation)
         );
-        let t: Vec<String> = p.pulses.iter().map(|q| format!("{}/{}", q.mark, q.gap)).collect();
-        eprintln!("  start {} pulses {}", p.start_sample, t.join(" "));
-        for r in protocols.decode_all(p) {
+        let pulses = timings(p);
+        let t: Vec<String> = pulses.iter().map(|q| format!("{}/{}", q.mark, q.gap)).collect();
+        eprintln!("  pulses {}", t.join(" "));
+        for r in protocols.decode_all(&pulses) {
             if r.model.contains("WHx080") && r.proof.passed() {
-                decoded.push((p.center_hz as f64 - CENTER.as_f64(), r.to_string()));
+                decoded.push((p.center_hz() as f64 - CENTER.as_f64(), r.to_string()));
             }
         }
     }

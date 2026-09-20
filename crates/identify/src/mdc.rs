@@ -65,13 +65,13 @@ impl Signal for Mdc {
                     continue;
                 }
                 if let Some(info) = framer.push(!sym.mark)
-                    && let Some(d) = mdc1200::decoded(&info, chan.hz())
+                    && let Some(d) = mdc1200::read(&info)
                 {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

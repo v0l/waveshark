@@ -320,12 +320,14 @@ impl Simple for BankNode {
             return Err(common::Error::other(format!("{}: needs IQ", self.label)));
         }
         self.configure(i.spec.rate, i.spec.center)?;
-        // Every burst the channels detected leaves as a package, so a log or
+        // Every burst the channels detected leaves as a packet, so a log or
         // an analyser can be attached to the bank the same way anything else
-        // is attached to anything else. Packages are events in time rather
-        // than a sampled stream, so the rate is zero; the bandwidth is one
-        // channel's, since that is what each burst was heard through.
-        let mut out = i.spec.with_kind(PortKind::Pulses);
+        // is attached to anything else. A bank merges its channels onto one
+        // port, so the reception is assembled here, where which channel heard
+        // it is still known. Packets are events in time rather than a sampled
+        // stream, so the rate is zero; the bandwidth is one channel's, since
+        // that is what each burst was heard through.
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.rate = 0.0;
         out.bandwidth = self.channel_hz();
         Ok(out)
@@ -345,7 +347,20 @@ impl Simple for BankNode {
                 ctx.emit(ev.event.clone());
             }
         }
-        o.pulses_mut().extend_from_slice(self.bank.packages());
+        let bandwidth_hz = self.channel_hz() as u32;
+        let at_us = common::packet::now_us();
+        o.packets_mut().extend(self.bank.detections().iter().map(|(center, d)| {
+            let carrier = common::packet::Carrier::heard(
+                at_us,
+                center.0,
+                bandwidth_hz,
+                d.rssi_dbfs,
+                d.snr_db,
+                common::SourceId(0),
+            )
+            .lasting(d.duration_us);
+            common::packet::Packet::heard(carrier).keyed(d.keying.clone())
+        }));
         Ok(())
     }
 

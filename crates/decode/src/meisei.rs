@@ -19,7 +19,7 @@
 //! `demod/mod/meisei100mod.c`.
 
 use crate::bits::bch63_51;
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 
 /// The two half-frame headers, 24 bits each. Which one arrived says which
 /// half it is; one is the other's complement bar two bits.
@@ -70,7 +70,7 @@ pub struct Frame {
 /// repaired, or a repaired codeword fails the parity bit each word carries:
 /// a BCH word that decodes to the wrong codeword is exactly what that parity
 /// is there to catch.
-pub fn read(bits: &[bool]) -> Option<Frame> {
+pub fn frame(bits: &[bool]) -> Option<Frame> {
     if bits.len() < HALF_BITS {
         return None;
     }
@@ -277,61 +277,29 @@ pub fn parse(record: &[u8]) -> Option<Report> {
     })
 }
 
-/// What the protocols node makes of a gathered record.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a Meisei iMS-100 frame says.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let r = parse(bytes)?;
-    let year = year_near(r.year_digit, this_year());
-    let (h, m, s) = r.utc;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text("iMS-100".into())),
-        ("frame".into(), common::Value::Int(r.counter as i64)),
-        (
-            "utc".into(),
-            common::Value::Text(format!(
-                "{year:04}-{:02}-{:02} {h:02}:{m:02}:{s:06.3}",
-                r.month, r.day
-            )),
-        ),
-    ];
+    let mut p = Proto::new("meisei", "frame");
     if !r.serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(r.serial.clone())));
+        p = p
+            .by(Entity::new("meisei", Id::Text(r.serial.clone())).made_by("Meisei"))
+            .saying(Fact::Named(Named::new(r.serial.clone(), ThingKind::Sonde)));
     }
     if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+        for fact in crate::facts::of_flight(
+            r.lat_deg,
+            r.lon_deg,
+            r.altitude_m,
+            r.climb_ms,
+            r.speed_kt,
+            r.course_deg,
+            None,
+        ) {
+            p = p.saying(fact);
+        }
     }
-
-    let mut d = Decoded::bytes("ims100", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("iMS-100, frame {}", r.counter))
-        .with_fields(fields);
-    if !r.serial.is_empty() {
-        d = d.by(common::Identity::new("meisei", r.serial.clone()).made_by("Meisei"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // The standard frame carries no battery voltage.
-                battery_v: f32::NAN,
-                satellites: 0,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
+    Some(p)
 }
 
 /// The year the receiver is running in, for the decade the sonde leaves off.
@@ -450,7 +418,7 @@ impl Framer {
                 return out;
             }
             let bits = biphase(&self.chips[at..at + HALF_CHIPS]);
-            match read(&bits) {
+            match frame(&bits) {
                 Some(half) => {
                     self.halves += 1;
                     if let Some(record) = self.gather.take(&half) {
@@ -570,11 +538,11 @@ mod tests {
         let bits = f32::to_bits(12_345.0);
         serial_frame[2] = bits as u16;
         serial_frame[3] = (bits >> 16) as u16;
-        assert_eq!(g.take(&read(&keyed(Half::First, &serial_frame)).expect("a half")), None);
+        assert_eq!(g.take(&frame(&keyed(Half::First, &serial_frame)).expect("a half")), None);
 
-        assert_eq!(g.take(&read(&keyed(Half::First, &a)).expect("a half")), None);
+        assert_eq!(g.take(&frame(&keyed(Half::First, &a)).expect("a half")), None);
         let record =
-            g.take(&read(&keyed(Half::Second, &b)).expect("a half")).expect("a record closes");
+            g.take(&frame(&keyed(Half::Second, &b)).expect("a half")).expect("a record closes");
         assert_eq!(record.len(), RECORD);
 
         let r = parse(&record).expect("a report");
@@ -603,7 +571,7 @@ mod tests {
         let mut bits = keyed(Half::First, &a);
         bits[30] = !bits[30];
         bits[41] = !bits[41];
-        let f = read(&bits).expect("a half");
+        let f = frame(&bits).expect("a half");
         assert_eq!(f.corrected, 2);
         assert_eq!(f.words, a);
     }
@@ -614,9 +582,9 @@ mod tests {
     fn the_sum_is_what_recognises_a_record() {
         let (a, b) = a_flight();
         let mut g = Gather::new();
-        g.take(&read(&keyed(Half::First, &a)).expect("a half"));
+        g.take(&frame(&keyed(Half::First, &a)).expect("a half"));
         let mut record =
-            g.take(&read(&keyed(Half::Second, &b)).expect("a half")).expect("a record");
+            g.take(&frame(&keyed(Half::Second, &b)).expect("a half")).expect("a record");
         assert!(parse(&record).is_some());
         // A byte the sum covers: the first word of the second half.
         record[24] ^= 0x01;

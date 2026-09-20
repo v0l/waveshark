@@ -101,7 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for e in &events {
         let stage = g.label(e.node).unwrap_or("?");
         match &e.event {
-            Event::Decoded(d) => println!("DECODE  {}", d.text.as_deref().unwrap_or(d.protocol)),
+            Event::Decoded(p) => {
+                let said: Vec<String> = p.facts().map(|(_, f)| f.says()).collect();
+                let name = p.innermost().map(|l| format!("{} {}", l.id, l.kind));
+                println!("DECODE  {} {}", name.unwrap_or("unclaimed".into()), said.join(", "))
+            }
             Event::Warning { message } => println!("warn    [{stage}] {message}"),
             Event::Detection { center, snr_db, .. } => {
                 println!("detect  {center} {snr_db:.1} dB")

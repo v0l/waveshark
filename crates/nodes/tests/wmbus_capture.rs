@@ -44,8 +44,8 @@ fn frames(path: &Path) -> Vec<(u64, Vec<u8>)> {
     for block in buf.samples.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 8)) {
         g.feed_iq(block).expect("run");
         for p in g.output().as_packets().unwrap_or(&[]) {
-            if let PacketBody::Frame(f) = &p.body {
-                out.push((p.center_hz(), f.bytes.clone()));
+            if !p.bytes().is_empty() {
+                out.push((p.carrier.center_hz, p.bytes().to_vec()));
             }
         }
     }
@@ -130,8 +130,8 @@ fn a_meter_is_named_in_the_list() {
     }
     let got = frames(&p);
     let (hz, f) = got.first().expect("a frame");
-    let d = decode::wmbus::decoded(f, Hz(*hz)).expect("a decode");
-    assert_eq!(d.protocol, "Wireless-MBus");
-    assert!(d.text.as_deref().unwrap_or("").contains("DME Water 84850129"), "{:?}", d.text);
-    assert_eq!(d.crc_ok, Some(true));
+    let d = decode::wmbus::read(f).expect("a decode");
+    assert_eq!(d.id, "wmbus");
+    // The meter names itself by its maker and the number on its face.
+    assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("DME-84850129"));
 }

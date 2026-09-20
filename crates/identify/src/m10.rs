@@ -47,18 +47,17 @@ impl Signal for M10 {
             return Reading::default();
         }
         let mut framer = m10::Framer::new();
-        let center = common::Hz(center_hz as u64);
         let mut rows = Vec::new();
         for b in iq.chunks(crate::BLOCK) {
             sync.process(b, framer.sink());
             for bytes in framer.take() {
-                if let Some(d) = m10::decoded(&bytes, center) {
+                if let Some(d) = m10::read(&bytes) {
                     rows.push(d);
                 }
             }
             framer.trim();
         }
-        rows.into()
+        Reading::from(rows).at(center_hz)
     }
 }
 

@@ -61,12 +61,12 @@ impl Signal for Iridium {
                 // never becomes a row: an access word comes up in noise
                 // eventually, and its blocks do not.
                 let Some(bytes) = iridium::pack(&burst.bits) else { continue };
-                if let Some(d) = iridium::decoded(&bytes, chan.hz()) {
+                if let Some(d) = iridium::read(&bytes, chan.hz()) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

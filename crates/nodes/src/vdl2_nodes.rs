@@ -15,7 +15,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::vdl2;
-pub use decode::vdl2::decoded;
+pub use decode::vdl2::read;
 use dsp::d8psk::{Burst, D8pskConfig, D8pskDemod};
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
@@ -24,7 +24,6 @@ pub use identify::vdl2::BAND_HZ;
 pub use identify::vdl2::CHANNEL_WIDTH_HZ;
 pub use identify::vdl2::DEFAULT_HZ;
 pub use identify::vdl2::Vdl2;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -100,7 +99,7 @@ impl Simple for Vdl2Node {
         self.demod = D8pskDemod::new(D8pskConfig::VDL2);
         self.meter = crate::FrameMeter::new(want, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -122,11 +121,11 @@ impl Simple for Vdl2Node {
         let mut done = |bits: &[bool]| vdl2::wanted_bits(bits).is_some_and(|n| bits.len() >= n);
         self.demod.process(&self.at_rate, &mut done, &mut self.bursts);
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for b in &self.bursts {
             for f in vdl2::frame_bytes(&b.bits) {
                 self.accepted += 1;
-                out.push(self.meter.frame(f));
+                out.push(self.meter.packet_now(f));
             }
         }
         Ok(())
@@ -162,12 +161,13 @@ impl Protocol for Vdl2 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 400_000 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !(BAND_HZ.0..BAND_HZ.1).contains(&(p.center_hz() as f64)) {
             return None;
         }
         let f = vdl2::parse_frame(bytes)?;
-        Some(vec![decoded(&f, bytes, common::Hz(p.center_hz()))])
+        Some(vec![read(&f)])
     }
 
     fn stage_label(&self, hz: f64) -> String {
@@ -224,7 +224,7 @@ mod tests {
         assert!(n.negotiate(&thin).is_err());
         let ok = PortSpec { spec: StreamSpec::iq(250_000.0, Hz(136_950_000)), latency: 0 };
         let out = n.negotiate(&ok).expect("a channel in the span");
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(136_975_000));
     }
 }

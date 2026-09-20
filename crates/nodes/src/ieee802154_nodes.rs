@@ -23,13 +23,12 @@ use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stic
 use common::Result;
 pub use decode::ieee802154::CHANNEL_WIDTH_HZ;
 pub use decode::ieee802154::channel_of;
-pub use decode::ieee802154::decoded;
+pub use decode::ieee802154::read;
 use dsp::oqpsk::{
     OQPSK_2450, OqpskConfig, OqpskDetector, OqpskFrame, channel_2450_hz, channels_2450,
 };
 use identify::Signal;
 pub use identify::ieee802154::Ieee802154;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -105,7 +104,7 @@ impl Simple for Ieee802154Node {
         self.det = det;
         self.meter = crate::FrameMeter::new(rate, hz as u64, 0.005);
         self.rate = rate;
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -116,20 +115,21 @@ impl Simple for Ieee802154Node {
         self.meter.feed(iq);
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             self.accepted += 1;
             // The detector measured this burst against the floor either side
             // of it; what it does not keep is the samples, and the channel a
             // span holding several cannot get from the port.
             let hz = channel_2450_hz(f.channel).unwrap_or(BAND_CENTER_HZ) as u64;
-            let mut frame = common::Frame::measured(f.psdu.clone(), f.rssi_dbfs, f.snr_db).at(hz);
+            let mut pkt =
+                crate::measured(hz, CHANNEL_WIDTH_HZ as u32, f.psdu.clone(), f.rssi_dbfs, f.snr_db);
             // The header, the payload and both check bytes at 250 kbit/s,
             // with the synchronisation header and room either side for the
             // ramp.
             let len = ((f.psdu.len() + 14) * 8) as f64 * 4e-6 * self.rate;
-            frame.iq = self.meter.iq_at(f.start_sample, len as usize);
-            out.push(frame);
+            pkt.carrier.iq = self.meter.iq_at(f.start_sample, len as usize);
+            out.push(pkt);
         }
         Ok(())
     }
@@ -169,9 +169,10 @@ impl Protocol for Ieee802154 {
     /// transmits a frame from. Channel 26 is 2480 MHz, where nothing else
     /// sits either; the Bluetooth advertising channel of that name is at
     /// 2480 MHz too, so the claim is narrower than its own channel.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         channel_of(p.center_hz() as f64)?;
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     /// It cuts its own channels out of the span, for the reason `ble` does:
     /// a bank channel is [`dsp::source::BANK_CHANNEL_HZ`] wide at twice that
@@ -221,6 +222,15 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The channel a layer states it was working.
+    fn channel(d: &common::packet::Proto) -> Option<common::packet::Channel> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Channel(c) => Some(c.clone()),
+            _ => None,
+        })
+    }
+
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
@@ -248,7 +258,7 @@ mod tests {
     fn frames_are_tagged_with_the_channel_they_arrived_on() {
         let mut n = Ieee802154Node::default();
         let out = n.negotiate(&spec(8_000_000.0, 2_426_000_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(2_425_000_000));
         assert_eq!(channel_of(out.center.as_f64()), Some(15));
         // A span reaching several cannot place a frame by its port, so it
@@ -262,16 +272,12 @@ mod tests {
     #[test]
     fn a_frame_becomes_a_row_naming_both_ends() {
         let mpdu = [0x61, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
-        let d = decoded(&mpdu, Hz(2_425_000_000)).expect("a decode");
-        assert_eq!(d.protocol, "802.15.4");
-        assert_eq!(d.crc_ok, Some(true));
-        assert_eq!(d.modulation, Some(common::Modulation::Oqpsk));
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("channel=15"), "{detail}");
-        assert!(detail.contains("pan=0x1234"), "{detail}");
-        assert!(detail.contains("src=0x0000"), "{detail}");
-        assert!(detail.contains("dst=0x0001"), "{detail}");
-        let ch = d.channel.expect("a channel");
+        let d = read(&mpdu, Hz(2_425_000_000)).expect("a decode");
+        assert_eq!((d.id, d.kind), ("ieee802154", "data"));
+        // The network is part of who the source is, since a short address
+        // means nothing outside its own PAN.
+        assert_eq!(d.parties(), (Some("0x1234/0x0000"), Some("0x0001")));
+        let ch = channel(&d).expect("a channel");
         assert_eq!(ch.plan, common::ChannelPlan::Ieee802154);
         assert_eq!(ch.heard, 15);
         // Nothing said: a clear MAC header is not a promise about the
@@ -284,8 +290,8 @@ mod tests {
     #[test]
     fn a_secured_frame_names_what_protects_it() {
         let mpdu = [0x69, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
-        let d = decoded(&mpdu, Hz(2_425_000_000)).expect("a decode");
-        let ch = d.channel.expect("a channel");
+        let d = read(&mpdu, Hz(2_425_000_000)).expect("a decode");
+        let ch = channel(&d).expect("a channel");
         assert_eq!(ch.secrecy, common::Secrecy::Encrypted(Some("802.15.4 MAC".into())));
     }
 
@@ -295,9 +301,9 @@ mod tests {
     fn an_extended_source_carries_its_manufacturer() {
         let mut mpdu = vec![0x41, 0xc8, 0x07, 0x34, 0x12, 0x01, 0x00];
         mpdu.extend_from_slice(&[0x44, 0x33, 0x22, 0x11, 0x00, 0x4b, 0x12, 0x00]);
-        let d = decoded(&mpdu, Hz(2_405_000_000)).expect("a decode");
-        let who = d.identity.expect("an identity");
-        assert_eq!(who.id, "00:12:4B:00:11:22:33:44");
+        let d = read(&mpdu, Hz(2_405_000_000)).expect("a decode");
+        let who = d.subject.expect("an identity");
+        assert_eq!(who.id.to_string(), "00:12:4B:00:11:22:33:44");
         assert_eq!(who.vendor.as_deref(), Some("00124B"));
     }
 
@@ -305,7 +311,7 @@ mod tests {
     /// to whatever else claims the frequency.
     #[test]
     fn bytes_that_are_not_a_frame_produce_no_row() {
-        assert!(decoded(&[0x61], Hz(2_405_000_000)).is_none());
+        assert!(read(&[0x61], Hz(2_405_000_000)).is_none());
     }
 
     /// The whole path: a beacon request keyed on channel 15, through the
@@ -356,35 +362,32 @@ mod tests {
         let ins = [port];
         let tags = Vec::new();
         let quiet = vec![common::C32::new(0.0, 0.0); 40_000];
-        let mut frames: Vec<common::Frame> = Vec::new();
+        let mut frames: Vec<common::packet::Packet> = Vec::new();
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             let input = Payload::Iq(block.to_vec());
-            let mut got = Payload::Frames(Vec::new());
+            let mut got = Payload::Packets(Vec::new());
             let mut events = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut got, &mut ctx).unwrap();
-            if let Payload::Frames(f) = got {
+            if let Payload::Packets(f) = got {
                 frames.extend(f);
             }
         }
         assert_eq!(frames.len(), 1, "expected one frame off the air");
-        assert_eq!(frames[0].bytes, mpdu[..mpdu.len() - 2]);
-        assert_eq!(frames[0].center_hz, 2_425_000_000);
-        assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
+        assert_eq!(frames[0].bytes(), &mpdu[..mpdu.len() - 2]);
+        assert_eq!(frames[0].carrier.center_hz, 2_425_000_000);
+        assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());
         assert_eq!(node.accepted(), 1);
 
         // And the registry's walk gives it to this protocol rather than to
         // whatever else claims the frequency.
-        let packet = common::Packet::of_frame(0, CHANNEL_WIDTH_HZ as u32, frames[0].clone());
-        let rows: Vec<Decoded> = crate::protocol::frame_readers()
+        let rows = crate::protocol::frame_readers()
             .iter()
-            .find_map(|p| p.read_frame(&packet, &frames[0].bytes))
+            .find_map(|p| p.stated(&frames[0]))
             .expect("a protocol claimed it");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].protocol, "802.15.4");
-        let detail = rows[0].detail.as_deref().unwrap();
-        assert!(detail.contains("command=beacon request"), "{detail}");
-        assert!(detail.contains("channel=15"), "{detail}");
+        assert_eq!((rows[0].id, rows[0].kind), ("ieee802154", "command"));
+        assert_eq!(channel(&rows[0]).map(|c| c.heard), Some(15));
     }
 }

@@ -82,7 +82,6 @@ fn read_at(bw: f64, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
     if reader.design(rate_hz, center_hz, bw, sfs, is_2g4(center_hz)).is_err() {
         return Reading::default();
     }
-    let center = common::Hz(center_hz as u64);
     let mut rows = Vec::new();
     for b in iq.chunks(crate::BLOCK) {
         reader.feed(b);
@@ -102,7 +101,7 @@ fn read_at(bw: f64, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
                 continue;
             }
             let bytes = frame.to_bytes(found.packet.sf, bw, found.packet.sync_word);
-            if let Some(d) = decode::lora::decoded(&bytes, center) {
+            if let Some(d) = decode::lora::read(&bytes) {
                 rows.push(d);
             }
         }

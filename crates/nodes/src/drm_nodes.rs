@@ -14,8 +14,8 @@
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use common::{C32, Result};
-use decode::drm::{self as drmdec, DrmReceiver, Fac, Multiplex, SdcMode, Service, Stats};
-use dsp::drm::{Mode, Occupancy};
+use decode::drm::{self as drmdec, DrmReceiver, Multiplex, Service, Stats};
+use dsp::drm::Mode;
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
 use identify::Signal;
@@ -129,14 +129,16 @@ impl Simple for DrmNode {
         for (service, label) in fresh {
             self.told.retain(|(id, _)| *id != service.id);
             self.told.push((service.id, label.clone()));
-            if let Some(d) = drmdec::service_decoded(
-                &self.rx,
-                service,
-                label,
-                common::Hz(self.channel_hz as u64),
-                self.at,
-            ) {
-                c.emit(pipeline::event::Event::Decoded(d));
+            if let Some(d) = drmdec::service_read(service, label) {
+                let carrier = crate::locked(
+                    self.channel_hz as u64,
+                    CHANNEL_WIDTH_HZ as u32,
+                    &self.narrow,
+                    self.rx.snr_db(),
+                );
+                c.emit(pipeline::event::Event::Decoded(
+                    common::packet::Packet::heard(carrier).decoded(d),
+                ));
             }
         }
         let _ = o;
@@ -210,9 +212,9 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 /// services, named, described one per frame the way a real transmitter
 /// rotates them.
 #[cfg(test)]
-pub fn transmit(mode: Mode, occ: Occupancy, frames: usize) -> Vec<C32> {
+pub fn transmit(mode: Mode, occ: dsp::drm::Occupancy, frames: usize) -> Vec<C32> {
     use decode::dab::ProgrammeType;
-    use decode::drm::{Language, MscMode, SdcMode};
+    use decode::drm::{Fac, Language, MscMode, SdcMode};
 
     let services = [
         Service {
@@ -258,6 +260,8 @@ mod tests {
     use common::Hz;
     use decode::dab::ProgrammeType;
     use decode::drm::Language;
+    use decode::drm::{Fac, SdcMode};
+    use dsp::drm::Occupancy;
 
     /// Four seconds of a synthesised multiplex, read the whole way through:
     /// both services, their identifiers, languages, programme types and the

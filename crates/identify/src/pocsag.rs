@@ -54,10 +54,10 @@ impl Signal for Pocsag {
             sends.clear();
             demod.process(&audio, &mut sends);
             for t in &sends {
-                rows.extend(decode::pocsag::decoded(&t.to_bytes(), chan.hz()));
+                rows.extend(decode::pocsag::read(&t.to_bytes()));
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

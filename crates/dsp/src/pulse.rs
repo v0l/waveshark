@@ -19,6 +19,7 @@
 //! signals ranging from a meter away to the edge of sensitivity, and the AGC
 //! moves the floor underneath everything.
 
+pub use common::packet::{Detection, Keying, Symbols};
 pub use common::pulse::{Package, Pulse};
 
 /// Amplitude to dB relative to a full scale sample.
@@ -480,7 +481,9 @@ pub struct OokDetector {
     /// Currently above threshold.
     high: bool,
     run: u64,
-    current: Package,
+    /// Where the burst being collected began, for placing it in the stream
+    burst_start: u64,
+    current: Vec<Pulse>,
     /// Mark awaiting its gap. Held back because a mark's gap is only known
     /// once the next valid mark begins.
     pending_mark: u32,
@@ -547,7 +550,8 @@ impl OokDetector {
             },
             high: false,
             run: 0,
-            current: Package::default(),
+            burst_start: 0,
+            current: Vec::new(),
             pending_mark: 0,
             gap_accum: 0,
             sample: 0,
@@ -583,7 +587,7 @@ impl OokDetector {
     pub fn reset(&mut self) {
         self.high = false;
         self.run = 0;
-        self.current = Package::default();
+        self.current.clear();
         self.pending_mark = 0;
         self.gap_accum = 0;
         self.gate.reset();
@@ -594,7 +598,7 @@ impl OokDetector {
     }
 
     /// Feed an envelope block, appending any completed packages to `out`.
-    pub fn process(&mut self, env: &[f32], out: &mut Vec<Package>) {
+    pub fn process(&mut self, env: &[f32], out: &mut Vec<Detection>) {
         let reset_samples = (self.cfg.reset_us as f64 / self.us_per_sample) as u64;
 
         for &v in env {
@@ -608,10 +612,9 @@ impl OokDetector {
                         // Emit the *previous* pulse, whose gap is now complete.
                         if self.pending_mark > 0 {
                             self.current
-                                .pulses
                                 .push(Pulse { mark: self.pending_mark, gap: self.gap_accum });
-                        } else if self.current.pulses.is_empty() {
-                            self.current.start_sample = self.sample.saturating_sub(self.run);
+                        } else if self.current.is_empty() {
+                            self.burst_start = self.sample.saturating_sub(self.run);
                         }
                         self.pending_mark = dur;
                         self.gap_accum = 0;
@@ -649,35 +652,68 @@ impl OokDetector {
     /// [`crate::route::BurstRouter`], which trims the silence off before
     /// passing it on precisely because that silence is what makes a
     /// measurement of the burst read as a measurement of an empty channel.
-    pub fn flush(&mut self, out: &mut Vec<Package>) {
+    pub fn flush(&mut self, out: &mut Vec<Detection>) {
         self.close(out);
     }
 
-    fn close(&mut self, out: &mut Vec<Package>) {
+    fn close(&mut self, out: &mut Vec<Detection>) {
         if self.pending_mark >= self.cfg.min_mark_us {
-            self.current.pulses.push(Pulse { mark: self.pending_mark, gap: self.cfg.reset_us });
+            self.current.push(Pulse { mark: self.pending_mark, gap: self.cfg.reset_us });
         }
         self.pending_mark = 0;
         self.gap_accum = 0;
-        if self.current.pulses.len() >= self.cfg.min_pulses {
+        if self.current.len() >= self.cfg.min_pulses {
             let snr = self.snr_db();
             if snr >= self.cfg.min_snr_db {
-                let mut p = std::mem::take(&mut self.current);
-                p.snr_db = snr;
-                p.rssi_dbfs = dbfs(self.gate.signal_level());
+                let mut pulses = std::mem::take(&mut self.current);
                 if self.cfg.merge_dropouts {
-                    self.stats.rejoined_marks += p.merge_dropouts() as u64;
+                    self.stats.rejoined_marks += merge_dropouts(&mut pulses) as u64;
                 }
-                out.push(p);
+                out.push(detected(
+                    pulses,
+                    common::Modulation::Ook,
+                    dbfs(self.gate.signal_level()),
+                    snr,
+                    self.burst_start,
+                ));
                 self.stats.accepted += 1;
             } else {
                 self.stats.rejected_low_snr += 1;
             }
-        } else if !self.current.pulses.is_empty() {
+        } else if !self.current.is_empty() {
             self.stats.rejected_too_few_pulses += 1;
         }
-        self.current.pulses.clear();
+        self.current.clear();
     }
+}
+
+/// Rejoin marks split by a dropout too short to be a symbol
+///
+/// Returns how many joins were made. See `common::Package::merge_dropouts`
+/// for why the tolerance comes from the burst rather than from a constant.
+pub fn merge_dropouts(pulses: &mut Vec<Pulse>) -> usize {
+    let mut pkg = Package { pulses: std::mem::take(pulses), ..Default::default() };
+    let joins = pkg.merge_dropouts();
+    *pulses = pkg.pulses;
+    joins
+}
+
+/// The timings a detector read, as a detection on whatever stream it was fed
+///
+/// A detector knows the shape and the strength; the frequency and the clock
+/// belong to the stream, so `common::packet::Heard` joins the two.
+pub fn detected(
+    pulses: Vec<Pulse>,
+    modulation: common::Modulation,
+    rssi_dbfs: f32,
+    snr_db: f32,
+    at_sample: u64,
+) -> Detection {
+    let us: u64 = pulses.iter().map(|p| p.mark as u64 + p.gap as u64).sum();
+    let held = us.saturating_sub(pulses.last().map(|p| p.gap as u64).unwrap_or(0));
+    Detection::new(Keying::configured(modulation).with(Symbols::Pulses(pulses)), rssi_dbfs, snr_db)
+        .at(at_sample)
+        .lasting(held.min(u32::MAX as u64) as u32)
 }
 
 /// Bits at a baud as mark and gap timings: the inverse of what a detector
@@ -691,10 +727,10 @@ impl OokDetector {
 /// bit length, because a rounded one drifts: 1200 baud is 833.33 us, and a
 /// POCSAG transmission is 1120 bits, so rounding each bit to 833 us loses
 /// most of a bit period by the end of one batch.
-pub fn keyed(bits: &[bool], baud: f64) -> Package {
-    let mut pkg = Package::default();
+pub fn keyed(bits: &[bool], baud: f64) -> Vec<Pulse> {
+    let mut pulses = Vec::new();
     if bits.is_empty() || baud <= 0.0 {
-        return pkg;
+        return pulses;
     }
     let at = |i: usize| (i as f64 * 1e6 / baud).round() as u64;
     let mut i = 0;
@@ -714,23 +750,23 @@ pub fn keyed(bits: &[bool], baud: f64) -> Package {
         if mark == 0 && gap == 0 {
             break;
         }
-        pkg.pulses.push(Pulse { mark, gap });
+        pulses.push(Pulse { mark, gap });
     }
-    pkg
+    pulses
 }
 
 /// Bits at a baud, with a trailing run of spaces held back.
 ///
-/// Returns the package and how many bits at the end were not keyed, which a
+/// Returns the timings and how many bits at the end were not keyed, which a
 /// caller clocking a block at a time offers again with the next block. A
-/// package that ends on a gap cannot say whether that gap is a space in the
+/// burst that ends on a gap cannot say whether that gap is a space in the
 /// data or the rest that follows the transmission, so a modulator told to key
 /// a rest as silence would punch a hole in a run of spaces that a block
 /// boundary happened to land in.
-pub fn keyed_data(bits: &[bool], baud: f64) -> (Package, usize) {
+pub fn keyed_data(bits: &[bool], baud: f64) -> (Vec<Pulse>, usize) {
     match bits.iter().rposition(|b| *b) {
         Some(last) => (keyed(&bits[..=last], baud), bits.len() - 1 - last),
-        None => (Package::default(), bits.len()),
+        None => (Vec::new(), bits.len()),
     }
 }
 
@@ -746,19 +782,19 @@ mod tests {
         let bits = [true, true, false, true, false, false, true, true, false, false];
         let (pkg, held) = keyed_data(&bits, 1200.0);
         assert_eq!(held, 2);
-        assert_eq!(pkg.pulses.len(), 3);
-        assert_eq!(pkg.pulses[2], Pulse { mark: 1667, gap: 0 });
+        assert_eq!(pkg.len(), 3);
+        assert_eq!(pkg[2], Pulse { mark: 1667, gap: 0 });
         // Offered again with the next block, the held spaces are keyed in
         // front of it and no bit time is lost.
         let next = [false, false, true];
         let (pkg, held) = keyed_data(&next, 1200.0);
         assert_eq!(held, 0);
-        assert_eq!(pkg.pulses, vec![Pulse { mark: 0, gap: 1667 }, Pulse { mark: 833, gap: 0 }]);
+        assert_eq!(pkg, vec![Pulse { mark: 0, gap: 1667 }, Pulse { mark: 833, gap: 0 }]);
 
         // A block with nothing keyed in it at all holds all of it.
         let (pkg, held) = keyed_data(&[false, false, false], 1200.0);
         assert_eq!(held, 3);
-        assert_eq!(pkg.pulses.len(), 0);
+        assert_eq!(pkg.len(), 0);
     }
 
     /// The timings are the bits, and the last edge lands where the whole
@@ -769,11 +805,11 @@ mod tests {
         // 1101 0011 at 1200 baud: two marks, two gaps.
         let bits = [true, true, false, true, false, false, true, true];
         let pkg = keyed(&bits, 1200.0);
-        assert_eq!(pkg.pulses.len(), 3);
-        assert_eq!(pkg.pulses[0], Pulse { mark: 1667, gap: 833 });
-        assert_eq!(pkg.pulses[1], Pulse { mark: 833, gap: 1667 });
-        assert_eq!(pkg.pulses[2], Pulse { mark: 1667, gap: 0 });
-        let total: u64 = pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
+        assert_eq!(pkg.len(), 3);
+        assert_eq!(pkg[0], Pulse { mark: 1667, gap: 833 });
+        assert_eq!(pkg[1], Pulse { mark: 833, gap: 1667 });
+        assert_eq!(pkg[2], Pulse { mark: 1667, gap: 0 });
+        let total: u64 = pkg.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
         // Eight bits at 833.33 us is 6667 us, which a rounded 833 us bit
         // would have made 6664.
         assert_eq!(total, 6667);
@@ -785,8 +821,8 @@ mod tests {
     fn a_preamble_does_not_drift() {
         let bits: Vec<bool> = (0..576).map(|i| i % 2 == 0).collect();
         let pkg = keyed(&bits, 512.0);
-        assert_eq!(pkg.pulses.len(), 288);
-        let total: u64 = pkg.pulses.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
+        assert_eq!(pkg.len(), 288);
+        let total: u64 = pkg.iter().map(|p| u64::from(p.mark) + u64::from(p.gap)).sum();
         assert_eq!(total, 1_125_000);
     }
 
@@ -868,12 +904,12 @@ mod tests {
 
         assert_eq!(out.len(), 1, "expected one package, got {}", out.len());
         let p = &out[0];
-        assert_eq!(p.pulses.len(), want.len(), "pulses: {:?}", p.pulses);
-        for (got, exp) in p.pulses.iter().zip(&want) {
+        assert_eq!(p.pulses().len(), want.len(), "pulses: {:?}", p.pulses());
+        for (got, exp) in p.pulses().iter().zip(&want) {
             assert!(approx(got.mark, exp.0, 30), "mark {} vs {}", got.mark, exp.0);
         }
         // Every gap but the last, which is the terminating timeout.
-        for (got, exp) in p.pulses[..want.len() - 1].iter().zip(&want) {
+        for (got, exp) in p.pulses()[..want.len() - 1].iter().zip(&want) {
             assert!(approx(got.gap, exp.1, 30), "gap {} vs {}", got.gap, exp.1);
         }
     }
@@ -886,7 +922,7 @@ mod tests {
         let mut out = Vec::new();
         d.process(&env, &mut out);
 
-        let h = out[0].mark_histogram(100);
+        let h = common::pulse::mark_histogram(out[0].pulses(), 100);
         assert_eq!(h.len(), 2, "expected two clusters, got {h:?}");
         assert!(approx(h[0].0, 500, 40) && h[0].1 == 3, "{h:?}");
         assert!(approx(h[1].0, 1000, 40) && h[1].1 == 2, "{h:?}");
@@ -937,7 +973,7 @@ mod tests {
         let mut d = OokDetector::new(RATE, PulseConfig::default());
         let mut out = Vec::new();
         d.process(&env, &mut out);
-        let n = out.first().map(|p| p.pulses.len()).unwrap_or(0);
+        let n = out.first().map(|p| p.pulses().len()).unwrap_or(0);
         assert!(n <= 2, "wobbling pulse shredded into {n} pulses");
     }
 
@@ -965,7 +1001,7 @@ mod tests {
         let mut d = OokDetector::new(RATE, PulseConfig::default());
         let mut out = Vec::new();
         d.process(&env, &mut out);
-        let dur = out[0].duration_us();
+        let dur = common::pulse::duration_us(out[0].pulses());
         let expect: u64 = want.iter().map(|(m, g)| *m as u64 + *g as u64).sum::<u64>() - 500;
         assert!(dur.abs_diff(expect) < 200, "duration {dur} vs expected {expect}");
     }

@@ -59,12 +59,12 @@ impl Signal for ZWave {
                 r.read(&narrow, &mut found);
             }
             for f in &found {
-                if let Some(d) = zwave::decoded(&f.bytes, chan.hz()) {
+                if let Some(d) = zwave::read(&f.bytes) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

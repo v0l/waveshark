@@ -27,7 +27,7 @@ use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::morse::ENVELOPE;
 pub use decode::morse::TAG;
-pub use decode::morse::decoded;
+pub use decode::morse::read;
 pub use decode::morse::{MIN_CHARS, MIN_FIT, MIN_KNOWN};
 pub use decode::morse::{config, framed};
 use dsp::cw::CwDetector;
@@ -39,7 +39,6 @@ pub use identify::morse::DEFAULT_HZ;
 pub use identify::morse::Morse;
 pub use identify::morse::REACH_HZ;
 pub use identify::morse::{EDGE_HZ, PITCH_HZ};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -55,7 +54,7 @@ pub struct MorseNode {
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
-    packages: Vec<common::Package>,
+    packages: Vec<common::packet::Detection>,
     meter: crate::FrameMeter,
     runs: u64,
 }
@@ -127,7 +126,7 @@ impl Simple for MorseNode {
         self.det = CwDetector::new(audio_rate, config(PITCH_HZ, REACH_HZ));
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -147,9 +146,9 @@ impl Simple for MorseNode {
         packages.clear();
         self.det.process(&self.audio, &mut packages);
         for pkg in &packages {
-            if let Some(bytes) = framed(pkg) {
+            if let Some(bytes) = framed(pkg.pulses()) {
                 self.runs += 1;
-                o.frames_mut().push(self.meter.frame(bytes));
+                o.packets_mut().push(self.meter.packet_now(bytes));
             }
         }
         self.packages = packages;
@@ -208,8 +207,9 @@ impl Protocol for Morse {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} MORSE", hz / 1e6)
@@ -239,6 +239,14 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text a layer states, where it states one.
+    fn wrote(d: &common::packet::Proto) -> Option<String> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Message(w) => Some(w.text.clone()),
+            _ => None,
+        })
+    }
     use common::{C32, Hz};
 
     const OVER: &str = "CQ CQ DE MI0ABC K";
@@ -287,7 +295,7 @@ mod tests {
             }
         };
         key(&mut out, samples(500_000.0), false, &mut phase, &mut rng);
-        for (i, p) in pkg.pulses.iter().enumerate() {
+        for (i, p) in pkg.iter().enumerate() {
             // Alternating, so a hand that runs its elements together on one
             // letter drags them out on the next.
             let skew = 1.0 + if i % 2 == 0 { jitter } else { -jitter };
@@ -306,12 +314,12 @@ mod tests {
         let mut frames = Vec::new();
         for block in iq.chunks(4096) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         frames
@@ -328,15 +336,14 @@ mod tests {
         let frames = run(&mut node, &iq, rate, center);
 
         assert_eq!(frames.len(), 1, "{} transmissions off the air", frames.len());
-        let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
-        assert_eq!(d.text.as_deref(), Some(OVER));
-        assert_eq!(d.protocol, "Morse");
-        assert!(d.written, "an operator sent it");
+        let d = read(&frames[0]).expect("a decode");
+        assert_eq!(wrote(&d).as_deref(), Some(OVER));
+        assert_eq!((d.id, d.kind), ("morse", "text"));
+
         // 18 wpm is a 66.7 ms dot, and the detector's thresholds cost a few
         // percent of it at each edge.
-        let wpm = d.field("speed").and_then(|v| v.as_f64()).expect("a speed");
+        let wpm = decode::morse::speed(&frames[0]).expect("a speed") as f64;
         assert!((wpm - 18.0).abs() < 1.5, "{wpm:.1} wpm");
-        assert_eq!(d.crc_ok, None, "nothing in Morse checks");
     }
 
     /// Speed is measured off the burst, not configured: the same node reads
@@ -350,9 +357,9 @@ mod tests {
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "{want} wpm: {} transmissions", frames.len());
-            let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
-            assert_eq!(d.text.as_deref(), Some("SOS DE EI2ABC"), "at {want} wpm");
-            let got = d.field("speed").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let d = read(&frames[0]).expect("a decode");
+            assert_eq!(wrote(&d).as_deref(), Some("SOS DE EI2ABC"), "at {want} wpm");
+            let got = decode::morse::speed(&frames[0]).unwrap_or(0.0);
             assert!((got - want).abs() < want * 0.1, "{want} wpm read as {got:.1}");
         }
     }
@@ -370,7 +377,7 @@ mod tests {
             let mut node = MorseNode::default();
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
-            frames.first().and_then(|b| decoded(b, Hz(center as u64))).and_then(|d| d.text.clone())
+            frames.first().and_then(|b| read(b)).and_then(|d| wrote(&d))
         };
         assert_eq!(read(0.10).as_deref(), Some(OVER), "a 10% fist");
         assert_eq!(read(0.15).as_deref(), Some(OVER), "a 15% fist");
@@ -394,8 +401,8 @@ mod tests {
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "{offset} Hz off: {} transmissions", frames.len());
-            let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
-            assert_eq!(d.text.as_deref(), Some("SOS DE EI2ABC"), "{offset} Hz off");
+            let d = read(&frames[0]).expect("a decode");
+            assert_eq!(wrote(&d).as_deref(), Some("SOS DE EI2ABC"), "{offset} Hz off");
             let pitch = node.pitch_hz();
             assert!((pitch - (PITCH_HZ + offset)).abs() < 30.0, "pitch {pitch:.0} at {offset} Hz");
         }
@@ -433,14 +440,14 @@ mod tests {
     /// the text of one that is comes back whole.
     #[test]
     fn only_a_tagged_frame_is_claimed() {
-        assert!(decoded(b"CQ CQ DE MI0ABC", Hz(0)).is_none());
-        assert!(decoded(&TAG, Hz(0)).is_none(), "a tag with no text");
+        assert!(read(b"CQ CQ DE MI0ABC").is_none());
+        assert!(read(&TAG).is_none(), "a tag with no text");
         let mut bytes = TAG.to_vec();
         bytes.extend_from_slice(&66_667u32.to_le_bytes());
         bytes.extend_from_slice(b"SOS");
-        let d = decoded(&bytes, Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.text.as_deref(), Some("SOS"));
-        assert_eq!(d.detail.as_deref(), Some("18 wpm"));
+        let d = read(&bytes).expect("a decode");
+        assert_eq!(wrote(&d).as_deref(), Some("SOS"));
+        assert_eq!(decode::morse::speed(&bytes).map(|w| w.round()), Some(18.0));
     }
 
     #[test]

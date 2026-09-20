@@ -21,7 +21,7 @@
 //! description, the note is beside the constant.
 
 use crate::bits::crc16le;
-use common::Decoded;
+use common::packet::{Alert, AlertKind, Entity, Fact, Id, Proto, Severity};
 use dsp::conv::{self, Viterbi};
 use dsp::msk::MskConfig;
 
@@ -234,6 +234,34 @@ pub mod stdc {
     }
 
     impl Descriptor {
+        /// Which packet this is, as the name a row matches on
+        pub fn kind(self) -> &'static str {
+            use Descriptor::*;
+            match self {
+                AcknowledgementRequest => "ack_request",
+                LogicalChannelClear => "channel_clear",
+                InboundMessageAck => "inbound_ack",
+                SignallingChannel => "signalling",
+                BulletinBoard => "bulletin_board",
+                Announcement => "announcement",
+                LogicalChannelAssignment => "channel_assignment",
+                DistressAlertAck => "distress_ack",
+                LoginAck => "login_ack",
+                EnhancedDataReportAck => "data_report_ack",
+                DistressTestRequest => "distress_test",
+                IndividualPoll => "poll",
+                Confirmation => "confirmation",
+                Message => "message",
+                LesList => "les_list",
+                RequestStatus => "request_status",
+                TestResult => "test_result",
+                EgcHeader1 | EgcHeader2 => "egc",
+                MultiframeStart => "multiframe_start",
+                MultiframeContinue => "multiframe_continue",
+                Other(_) => "other",
+            }
+        }
+
         pub fn of(byte: u8) -> Self {
             use Descriptor::*;
             match byte {
@@ -651,6 +679,28 @@ pub mod aero {
     }
 
     impl SuType {
+        /// Which unit this is, as the name a row matches on
+        pub fn kind(self) -> &'static str {
+            use SuType::*;
+            match self {
+                Fill => "fill",
+                SystemTable => "system_table",
+                LogOnRequest => "log_on_request",
+                LogOnConfirm => "log_on_confirm",
+                LogOff => "log_off",
+                LogOnReject => "log_on_reject",
+                LogOnAcknowledge => "log_on_ack",
+                CallAnnouncement => "call_announcement",
+                CallProgress => "call_progress",
+                ChannelAssignment => "channel_assignment",
+                ChannelControl => "channel_control",
+                Acknowledge => "ack",
+                UserDataInitial => "user_data",
+                UserDataSubsequent => "user_data_continued",
+                Other(_) => "other",
+            }
+        }
+
         pub fn of(byte: u8) -> Self {
             use SuType::*;
             // A subsequent unit is named by its top two bits, not by a
@@ -979,79 +1029,77 @@ pub mod aero {
     }
 }
 
-/// The row a packet becomes.
+/// What a packet says.
 ///
-/// An EGC broadcast carries text, and no person wrote it: a coast station's
-/// computer addressed an area, so it goes out with a media type and its
-/// fields and `written` left false.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// An EGC broadcast is a coast station warning an area: a navigational
+/// warning, a weather bulletin or a distress relay, which is something
+/// somebody has to be told about rather than a message anybody wrote.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let packets = stdc::packets(bytes);
     let p = packets.first()?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("packet".into(), common::Value::Text(p.descriptor.label().into())),
-        ("descriptor".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
-    ];
-    let mut d = Decoded::bytes("Inmarsat-C", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Psk2)
-        .with_crc(Some(p.check_ok))
-        .by(common::Identity::new("inmarsat-c", "egc").named("Inmarsat-C"));
-
     let egc = matches!(p.descriptor, stdc::Descriptor::EgcHeader1 | stdc::Descriptor::EgcHeader2)
         .then(|| stdc::Egc::parse(&p.bytes))
         .flatten();
-    if let Some(e) = egc {
-        fields.push(("service".into(), common::Value::Text(e.service.label().into())));
-        fields.push(("priority".into(), common::Value::Text(e.priority.label().into())));
-        fields.push(("message_id".into(), common::Value::Int(i64::from(e.message_id))));
-        fields.push(("part".into(), common::Value::Int(i64::from(e.packet_no))));
-        let text = e.text();
-        let summary = format!("{}: {}", e.service.label(), text.trim());
-        d = d.with_text(text).with_detail(summary).with_media(common::media::TEXT);
-    } else {
-        d = d.with_detail(p.descriptor.label().to_string());
-    }
-    Some(d.with_fields(fields))
+    let Some(e) = egc else {
+        return Some(Proto::new("inmarsat-c", p.descriptor.kind()));
+    };
+    let text = e.text().trim().to_string();
+    Some(Proto::new("inmarsat-c", "egc").saying(Fact::Alert(Alert {
+        kind: alert_kind(e.service),
+        severity: severity(e.service),
+        text: (!text.is_empty()).then_some(text),
+    })))
 }
 
-/// The row a signal unit or an assembled message becomes.
+/// What sort of warning a SafetyNET service carries
+fn alert_kind(s: stdc::Service) -> AlertKind {
+    use stdc::Service::*;
+    match s {
+        SafetyNetDistressCircular | SafetyNetSarRectangular | SafetyNetSarCircular => {
+            AlertKind::Distress
+        }
+        SafetyNetArea | SafetyNetCoastal | SafetyNetRectangular | SafetyNetCircular => {
+            AlertKind::Weather
+        }
+        _ => AlertKind::Civil,
+    }
+}
+
+fn severity(s: stdc::Service) -> Severity {
+    use stdc::Service::*;
+    match s {
+        SafetyNetDistressCircular | SafetyNetSarRectangular | SafetyNetSarCircular => {
+            Severity::Immediate
+        }
+        FleetNet | FleetNetChartCorrection | InmarsatSystem | EgcSystem => Severity::Advisory,
+        _ => Severity::Warning,
+    }
+}
+
+/// What a signal unit or an assembled message says.
 ///
 /// A signal unit is the satellite talking about itself: a channel
 /// assignment, a log on acknowledgement, a table of frequencies. An
-/// assembled message is ACARS, which is an aircraft's computer and a ground
-/// station's, so neither is `written` and both carry their fields.
-pub fn aero_decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// assembled message is ACARS, which is the aircraft speaking.
+pub fn aero_read(bytes: &[u8]) -> Option<Proto> {
     if let Some(block) = aero::acars_block(bytes) {
         let m = crate::acars::parse(block)?;
-        let mut d = crate::acars::decoded(&m, block, center);
-        d.protocol = "Aero-ACARS";
-        return Some(d.with_modulation(common::Modulation::Msk));
+        let mut p = crate::acars::read(&m);
+        p.id = "aero-acars";
+        return Some(p);
     }
     if bytes.len() != aero::SU_BYTES {
         return None;
     }
     let kind = aero::SuType::of(bytes[0]);
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("unit".into(), common::Value::Text(kind.label().into())),
-        ("type".into(), common::Value::Text(format!("{:02X}", bytes[0]))),
-    ];
-    let mut who = common::Identity::new("aero", "ges");
-    // A user data unit names the aircraft and the ground station; the rest
-    // of the units are the network's own business.
+    let mut p = Proto::new("aero", kind.kind());
+    // A user data unit names the aircraft; the rest of the units are the
+    // network's own business.
     if kind == aero::SuType::UserDataInitial {
         let aes = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]);
-        fields.push(("aes".into(), common::Value::Text(format!("{aes:06X}"))));
-        fields.push(("ges".into(), common::Value::Int(i64::from(bytes[4]))));
-        who = common::Identity::new("icao", format!("{aes:06X}"));
+        p = p.by(Entity::new("icao", Id::Hex(u64::from(aes))));
     }
-    Some(
-        Decoded::bytes("Aero", center, 0.0, bytes.to_vec())
-            .with_modulation(common::Modulation::Msk)
-            .with_crc(Some(aero::su_crc_ok(bytes)))
-            .with_detail(kind.label().to_string())
-            .with_media(common::media::BYTES)
-            .with_fields(fields)
-            .by(who),
-    )
+    Some(p)
 }
 
 pub fn config(rate: aero::Rate) -> MskConfig {

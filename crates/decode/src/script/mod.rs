@@ -27,7 +27,7 @@ use crate::protocol::{DecodeError, Proof, Protocol, Report, Value};
 use crate::protocols::find_frame_bits;
 use crate::protocols::keyfob::shared::{find_and_parse, plausible};
 use crate::slicer::{Coding, Timing, differential_manchester_decode, manchester_decode, slice};
-use common::pulse::{Package, Pulse};
+use common::pulse::Pulse;
 pub use desc::Desc;
 use desc::{Check, CheckKind, Convert, Decode, Field, Find, Item, Kind, Transform};
 use std::collections::BTreeMap;
@@ -301,7 +301,10 @@ impl Scripted {
         }
         match walk.id {
             Some(k) => r = r.identified_by(&k),
-            None => r = r.identified_by("id"),
+            // A remote calls the number it repeats in every frame its serial
+            // and a sensor calls it its id; either way it is the transmitter
+            // saying which one it is, and a device list keys on it.
+            None => r = r.identified_by("id").identified_by("serial"),
         }
         Ok(r)
     }
@@ -359,10 +362,10 @@ impl Scripted {
 
     /// The pulses one transmission of these fields is, through this
     /// protocol's timing; none for a description with no timing
-    pub fn package(
+    pub fn burst(
         &self,
         fields: &BTreeMap<String, Value>,
-    ) -> Result<Option<Package>, EncodeError> {
+    ) -> Result<Option<Vec<Pulse>>, EncodeError> {
         let air = self.air_bits(fields)?;
         Ok(self.timing.map(|t| pulses(&t, &air, self.desc.frame.repeats)))
     }
@@ -1208,20 +1211,20 @@ fn diff_manchester_chips(bits: &BitBuffer, before: bool) -> BitBuffer {
 /// PWM is the keyfob encoder's shape. PPM marks are half the short gap,
 /// which is where rtl_433's recordings of these sensors put them. NRZ and
 /// Manchester are levels run together, a package opening on its first mark.
-pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
+pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Vec<Pulse> {
     match t.coding {
         Coding::Pwm => crate::protocols::keyfob::encode::frame(*t, bits, repeats),
         Coding::Ppm => {
             // a gap carries the bit, so a closing mark is what makes the
             // last gap one rather than the silence after the frame
-            let mut pkg = Package::default();
+            let mut pkg: Vec<Pulse> = Vec::new();
             let mark = (t.short_us / 2).max(1);
             for _ in 0..repeats {
                 for i in 0..bits.len() {
                     let gap = if bits.get(i) == Some(true) { t.long_us } else { t.short_us };
-                    pkg.pulses.push(Pulse { mark, gap });
+                    pkg.push(Pulse { mark, gap });
                 }
-                pkg.pulses.push(Pulse { mark, gap: t.reset_us });
+                pkg.push(Pulse { mark, gap: t.reset_us });
             }
             pkg
         }
@@ -1248,7 +1251,7 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
                 let quiet = (t.reset_us / unit.max(1) + 2) as usize;
                 levels.extend(std::iter::repeat_n(false, quiet));
             }
-            let mut pkg = Package::default();
+            let mut pkg: Vec<Pulse> = Vec::new();
             let mut i = 0;
             while i < levels.len() {
                 let ones = levels[i..].iter().take_while(|v| **v).count();
@@ -1259,10 +1262,9 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Package {
                 i += ones;
                 let zeros = levels[i..].iter().take_while(|v| !**v).count();
                 i += zeros;
-                pkg.pulses
-                    .push(Pulse { mark: ones as u32 * unit, gap: zeros.max(1) as u32 * unit });
+                pkg.push(Pulse { mark: ones as u32 * unit, gap: zeros.max(1) as u32 * unit });
             }
-            if let Some(last) = pkg.pulses.last_mut() {
+            if let Some(last) = pkg.last_mut() {
                 last.gap = last.gap.max(t.reset_us);
             }
             pkg
@@ -1316,7 +1318,7 @@ pub fn check(p: &Scripted) -> Result<(), String> {
                 frame.to_hex()
             ));
         }
-        match p.package(&want).map_err(|e| format!("{name} vector {i}: {e}"))? {
+        match p.burst(&want).map_err(|e| format!("{name} vector {i}: {e}"))? {
             Some(pkg) => {
                 let t = p.timing.expect("a package has a timing");
                 let sliced = slice(&pkg, &t).map_err(|e| format!("{name} vector {i}: {e}"))?;

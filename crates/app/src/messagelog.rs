@@ -35,7 +35,7 @@ use crate::messages::{Message, Messages};
 
 /// Where the messages are written, beside the packet log and the calls.
 pub fn messages_dir() -> PathBuf {
-    crate::packetlog::PacketLog::default_dir()
+    crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("messages"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-messages"))
 }
@@ -181,15 +181,9 @@ impl Simple for MessageLogNode {
         }
         let at = Instant::now();
         for p in i.as_packets().unwrap_or(&[]) {
-            for d in p.decodes.iter() {
-                if !d.written {
-                    continue;
-                }
-                // The system rather than the mode: `TETRA-SDS` and
-                // `TETRA-Call` are one network, which is how the view names
-                // them too.
-                let system = d.protocol.split('-').next().unwrap_or(d.protocol);
-                let Some(m) = Message::of(system, d.center.as_f64(), &d.fields, at) else {
+            for (layer, said) in p.facts() {
+                let common::packet::Fact::Message(w) = said else { continue };
+                let Some(m) = Message::of(layer, p.carrier.center_hz as f64, &w.text, at) else {
                     continue;
                 };
                 if self.seen.push(m.clone(), at) {
@@ -246,7 +240,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::Value;
+    use common::packet::{Carrier, Fact, Frame, Link, Party, Proto};
     use pipeline::node::Node;
 
     fn dir(name: &str) -> PathBuf {
@@ -255,21 +249,22 @@ mod tests {
         d
     }
 
-    fn page(text: &str, to: &str) -> common::Packet {
-        let mut d = common::Decoded::bytes("POCSAG", common::Hz::hz(153_350_000), 0.0, vec![1])
-            .written()
-            .with_fields(vec![
-                ("address".into(), Value::Text(to.into())),
-                ("text".into(), Value::Text(text.into())),
-            ]);
-        d.crc_ok = Some(true);
-        let mut p =
-            common::Packet::of_frame(0, 12_500, common::Frame::measured(vec![1], -30.0, 20.0));
-        p.decodes.push(d);
-        p
+    fn heard(hz: u64, layer: Proto) -> common::packet::Packet {
+        let carrier =
+            Carrier::heard(common::packet::now_us(), hz, 12_500, -30.0, 20.0, common::SourceId(0));
+        common::packet::Packet::heard(carrier).framed(Frame::of(vec![1])).decoded(layer)
     }
 
-    fn run(n: &mut MessageLogNode, packets: Vec<common::Packet>) {
+    fn page(text: &str, to: &str) -> common::packet::Packet {
+        heard(
+            153_350_000,
+            Proto::new("POCSAG", "alpha")
+                .between(Link { from: None, to: Some(Party::unit(to)) })
+                .saying(Fact::message(text)),
+        )
+    }
+
+    fn run(n: &mut MessageLogNode, packets: Vec<common::packet::Packet>) {
         let ins = [PortSpec {
             spec: StreamSpec { kind: PortKind::Packets, rate: 1.0, ..Default::default() },
             latency: 0,
@@ -327,12 +322,9 @@ mod tests {
     fn a_machine_talking_is_not_written_down() {
         let d = dir("machine");
         let mut n = MessageLogNode::new(d.clone());
-        let mut p =
-            common::Packet::of_frame(0, 12_500, common::Frame::measured(vec![1], -30.0, 20.0));
-        p.decodes.push(
-            common::Decoded::bytes("rds", common::Hz::hz(95_800_000), 0.0, vec![1])
-                .with_media(common::media::TEXT)
-                .with_fields(vec![("text".into(), Value::Text("NOW PLAYING".into()))]),
+        let p = heard(
+            95_800_000,
+            Proto::new("rds", "radiotext").saying(Fact::Playing("NOW PLAYING".into())),
         );
         run(&mut n, vec![p]);
         assert_eq!(n.written(), 0);

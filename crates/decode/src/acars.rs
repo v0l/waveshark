@@ -27,7 +27,7 @@
 //! rather than the ground station that sent it.
 
 use crate::protocol::Value;
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Proto, ThingKind};
 
 const SYN: u8 = 0x16;
 const SOH: u8 = 0x01;
@@ -311,27 +311,35 @@ pub fn crc(text: &[u8], check: &[u8; 2]) -> u16 {
     crate::bits::crc16le(&whole, 0x8408, 0)
 }
 
-/// The decode an ACARS block becomes.
-pub fn decoded(m: &Message, bytes: &[u8], center: common::Hz) -> Decoded {
-    let fields = m.fields();
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let protocol = if m.downlink { "ACARS-Downlink" } else { "ACARS-Uplink" };
-    // The aircraft either way: an uplink is addressed to the aeroplane, not
-    // sent by the ground station whose name is nowhere in the block.
-    let name = m.flight.clone().filter(|f| !f.trim().is_empty()).unwrap_or_default();
-    let mut who = common::Identity::new("acars", m.registration.clone());
-    if !name.is_empty() {
-        who = who.named(name);
+/// What an ACARS block says.
+///
+/// The aircraft is the subject either way: an uplink is addressed to the
+/// aeroplane, not sent by the ground station, whose name is nowhere in the
+/// block. Most of these are a machine talking to its airline, so the text is
+/// carried as a message only where a crew typed it.
+pub fn read(m: &Message) -> Proto {
+    let mut who = Entity::new("acars", Id::Text(m.registration.clone()));
+    if let Some(f) = m.flight.as_ref().filter(|f| !f.trim().is_empty()) {
+        who = who.named(f.clone());
     }
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Msk)
-        // Odd parity on every character and a CRC-16 over the block.
-        .with_crc(Some(true));
-    d.media_type = if m.text.is_empty() { common::media::BYTES } else { common::media::TEXT };
-    d
+    let p = Proto::new("acars", if m.downlink { "downlink" } else { "uplink" })
+        .by(who.clone())
+        .saying(Fact::Named(common::packet::Named::new(who.to_string(), ThingKind::Aircraft)));
+    match free_text(m) {
+        true => p.saying(Fact::message(m.text.clone())),
+        false => p,
+    }
+}
+
+/// Whether a person composed the block rather than a system aboard.
+///
+/// The label says which: `80`, `10` and the free text labels are what a crew
+/// types, and everything else is a position report, an OOOI time or a
+/// weather request the box sent by itself. A message view that took every
+/// readable block showed the flight management computer's chatter as though
+/// somebody had written it.
+fn free_text(m: &Message) -> bool {
+    !m.text.trim().is_empty() && matches!(m.label.as_str(), "10" | "80" | "A6" | "AA" | "C1")
 }
 
 #[cfg(test)]

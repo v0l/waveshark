@@ -56,11 +56,11 @@ impl Signal for Aprs {
             afsk.process(&audio, &mut frames);
             for bytes in &frames {
                 if let Ok(f) = ax25::parse(bytes) {
-                    rows.push(decode::aprs::decoded(&f, bytes, chan.hz()));
+                    rows.push(decode::aprs::read(&f));
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

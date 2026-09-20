@@ -60,13 +60,13 @@ impl Signal for Stdc {
                     if !p.check_ok {
                         continue;
                     }
-                    if let Some(d) = decode::inmarsat::decoded(&p.bytes, chan.hz()) {
+                    if let Some(d) = decode::inmarsat::read(&p.bytes) {
                         rows.push(d);
                     }
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

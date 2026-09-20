@@ -18,7 +18,7 @@
 use crate::bits::{crc8, crc16};
 use crate::dab::ProgrammeType;
 use common::C32;
-use common::Decoded;
+use common::packet::{Fact, Id, Named, Proto, ThingKind};
 use dsp::conv;
 use dsp::drm::{self, Drm, Frame};
 use dsp::drm::{Mode, Occupancy};
@@ -689,58 +689,20 @@ impl DrmReceiver {
     }
 }
 
-/// A service, as the multiplex describes it.
-/// A service of the multiplex, as a row.
-pub fn service_decoded(
-    rx: &DrmReceiver,
-    service: Service,
-    label: Option<String>,
-    center: common::Hz,
-    at: f64,
-) -> Option<Decoded> {
-    let m = rx.multiplex();
-    let mut fields = vec![
-        ("service_id".into(), common::Value::Text(format!("{:06X}", service.id))),
-        (
-            "service".into(),
-            common::Value::Text(match &label {
-                Some(name) => name.clone(),
-                None => format!("{:06X}", service.id),
-            }),
-        ),
-        (
-            "kind".into(),
-            common::Value::Text(if service.audio { "audio".into() } else { "data".into() }),
-        ),
-        ("language".into(), common::Value::Text(service.language.label().into())),
-        ("snr_db".into(), common::Value::Float(rx.snr_db() as f64)),
-    ];
-    if let Some(mode) = m.mode {
-        fields.push(("mode".into(), common::Value::Text(mode.label().into())));
-    }
-    if let Some(occ) = m.occupancy {
-        fields.push(("occupancy".into(), common::Value::Text(occ.label().into())));
-    }
-    if service.audio && service.programme != crate::dab::ProgrammeType::None {
-        fields.push(("programme".into(), common::Value::Text(service.programme.label().into())));
-    }
-    let detail = match &label {
-        Some(name) => format!("{name} ({:06X})", service.id),
-        None => format!("{:06X}", service.id),
-    };
-    // A DRM service keeps its identifier across frequencies and times of
-    // day, which is what a station list rows on.
-    let mut who = common::Identity::new("drm-service", format!("{:06X}", service.id));
+/// What a service of the multiplex is.
+///
+/// A DRM service keeps its identifier across frequencies and times of day,
+/// which is what a station list rows on.
+pub fn service_read(service: Service, label: Option<String>) -> Option<Proto> {
+    let id = format!("{:06X}", service.id);
+    let mut who = common::packet::Entity::new("drm-service", Id::Text(id.clone()));
     if let Some(name) = label.clone() {
         who = who.named(name);
     }
     Some(
-        Decoded::bytes("DRM", center, at, Vec::new())
+        Proto::new("drm", if service.audio { "audio_service" } else { "data_service" })
             .by(who)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Ofdm)
-            .with_crc(Some(true)),
+            .saying(Fact::Named(Named::new(label.unwrap_or(id), ThingKind::Station).fixed())),
     )
 }
 

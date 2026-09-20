@@ -12,7 +12,8 @@
 //! of evidence as the classifier's row for a burst no front end read, and it
 //! carries the samples it was measured from for the same reason.
 
-use common::{C32, Modulation, Package, Packet};
+use common::packet::{Carrier, Keying, KeyingParams, Knowledge, Packet};
+use common::{C32, Modulation};
 
 use super::member::Ring;
 
@@ -84,35 +85,29 @@ impl Evidence {
         let since = self.reported_s.unwrap_or(0.0);
         self.reported_s = Some(seconds);
         let pow = std::mem::take(&mut self.peak_pow);
-        let mut p = Packet::of_pulses(
+        let carrier = Carrier::heard(
             at_us,
+            self.center_hz,
             self.width_hz as u32,
-            Package {
-                pulses: Vec::new(),
-                snr_db: self.snr_db,
-                rssi_dbfs: 10.0 * pow.max(1e-20).log10(),
-                start_sample: self.start_sample,
-                center_hz: self.center_hz,
-                modulation: None,
-            },
-        );
-        p.measure = Some(common::Measure {
-            // Nothing classified it. A row that named a modulation here
-            // would be this code guessing, which is the one thing the log
-            // is for keeping out of.
+            common::packet::dbfs(pow),
+            self.snr_db,
+            common::SourceId(0),
+        )
+        .lasting(((seconds - since) * 1e6) as u32);
+        let carrier = match ring.burst(ring.base(), ring.end()) {
+            Some(iq) => carrier.with_iq(iq),
+            None => carrier,
+        };
+        // Nothing classified it. Naming a modulation here would be this code
+        // guessing, which is the one thing the log is for keeping out of, so
+        // the keying says it was measured and says Unknown.
+        let keying = Keying {
             modulation: Modulation::Unknown,
-            confidence: 0.0,
-            front_end: common::FrontEnd::None,
-            mode: None,
-            duration_us: ((seconds - since) * 1e6) as u32,
-            bandwidth_hz: self.width_hz,
-            baud: 0.0,
-            separation_hz: 0.0,
-            sweep_hz_s: 0.0,
-            symbol_period_us: 0.0,
-        });
-        p.iq = ring.burst(ring.base(), ring.end());
-        Some(p)
+            how: Knowledge::Measured { confidence: 0.0 },
+            params: KeyingParams { bandwidth_hz: self.width_hz, ..KeyingParams::default() },
+            symbols: common::packet::Symbols::None,
+        };
+        Some(Packet::heard(carrier).keyed(keying))
     }
 }
 
@@ -140,16 +135,15 @@ mod tests {
         assert!(e.row(0, false, &ring(rate, 1)).is_none(), "0.1 s is not a report");
         e.push(&block);
         let p = e.row(0, true, &ring(rate, 4_096)).expect("a row when it closes");
-        let m = p.measure.clone().expect("the detector's measurement");
-        assert_eq!(m.modulation, Modulation::Unknown);
-        assert_eq!(m.duration_us, 200_000, "0.2 s of source");
-        assert_eq!(m.bandwidth_hz, 5e6);
-        let common::PacketBody::Pulses(pkg) = &p.body else { panic!("{p:?}") };
-        assert_eq!(pkg.start_sample, 4_096);
-        assert_eq!(pkg.snr_db, 21.0);
+        let k = p.keying.clone().expect("what the detector measured");
+        // Nothing classified it, so the keying says so rather than guessing.
+        assert_eq!(k.modulation, Modulation::Unknown);
+        assert_eq!(k.params.bandwidth_hz, 5e6);
+        assert_eq!(p.carrier.duration_us, 200_000, "0.2 s of source");
+        assert_eq!(p.carrier.snr_db, 21.0);
         // Half scale in one quadrature is a quarter of the power.
-        assert!((pkg.rssi_dbfs - (-6.02)).abs() < 0.05, "{}", pkg.rssi_dbfs);
-        assert!(p.iq.is_some(), "a row with no samples behind it");
+        assert!((p.carrier.rssi_dbfs - (-6.02)).abs() < 0.05, "{}", p.carrier.rssi_dbfs);
+        assert!(p.carrier.iq.is_some(), "a row with no samples behind it");
     }
 
     /// A carrier that never closes still says it is there, every

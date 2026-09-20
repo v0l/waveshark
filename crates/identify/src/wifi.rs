@@ -66,7 +66,7 @@ impl Signal for Wifi {
         frames
             .iter()
             .filter(|f| f.fcs_ok)
-            .filter_map(|f| decode::wifi::decoded(&f.psdu, common::Hz(f.center_hz as u64)))
+            .filter_map(|f| decode::wifi::read(&f.psdu, common::Hz(f.center_hz as u64)))
             .collect::<Vec<_>>()
             .into()
     }

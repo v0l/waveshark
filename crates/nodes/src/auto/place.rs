@@ -1,6 +1,7 @@
 //! Which decoders a source gets, when, and what they make of a block.
 
-use common::{C32, Hz, Packet, PacketBody, Result, SourceBlock, SourceId, SourceState};
+use common::packet::Packet;
+use common::{C32, Hz, Result, SourceBlock, SourceId, SourceState};
 use pipeline::event::Event;
 use pipeline::port::StreamSpec;
 use rayon::prelude::*;
@@ -163,10 +164,17 @@ impl Slot {
                 heard.push((r.name, width));
             }
         }
-        // A measurement of a source a front end reads is not news.
+        // A measurement of a source a front end reads is not news. What
+        // makes it a measurement is that the classifier reached it by
+        // measuring, not that it arrived without symbols: a front end told
+        // what it is keying states that too, and a sonde frame waiting for
+        // the calibration that names its temperature was thrown away here
+        // before it could reach the decoder.
         if self.heard {
             packets.retain(|p| {
-                !(p.measure.is_some() && matches!(&p.body, PacketBody::Pulses(v) if v.is_empty()))
+                !p.keying.as_ref().is_some_and(|k| {
+                    matches!(k.how, common::packet::Knowledge::Measured { .. }) && !p.claimed()
+                })
             });
         }
         // Done once the source has closed and nothing is still catching up
@@ -542,9 +550,9 @@ mod tests {
             .run_block(0, Some(&block(SourceId(1), rate, SourceState::Closed, loud)), 0)
             .expect("the closing block is read");
         assert_eq!(r.packets.len(), 1, "one row for the whole transmission");
-        let m = r.packets[0].measure.as_ref().expect("the measurement");
-        assert_eq!(m.bandwidth_hz, 5e6);
-        assert!(r.packets[0].iq.is_some(), "and the samples it was measured from");
+        let k = r.packets[0].keying.as_ref().expect("what the detector measured");
+        assert_eq!(k.params.bandwidth_hz, 5e6);
+        assert!(r.packets[0].carrier.iq.is_some(), "and the samples it was measured from");
     }
 
     /// What a source gets is decided by the source and the registry, and

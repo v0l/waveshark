@@ -19,13 +19,13 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Origin, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::gsm::arfcn_field;
-pub use decode::gsm::{block_rows, decoded, rows, sync_decoded};
+pub use decode::gsm::{block_read, read, sync_read};
 use dsp::gsm::{self, GsmConfig, Hit, SchDetector, sch};
 use identify::Signal;
 pub use identify::gsm::CHANNEL_WIDTH_HZ;
 pub use identify::gsm::DEFAULT_HZ;
 pub use identify::gsm::Gsm;
-use pipeline::event::{Decoded, Request};
+use pipeline::event::Request;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -202,7 +202,7 @@ impl Simple for GsmNode {
 
         // Frames rather than bytes: two bursts written into one buffer cannot
         // be told apart afterwards.
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -219,7 +219,7 @@ impl Simple for GsmNode {
         // The channel this cut out, not the span it came from: what a burst
         // was heard at is the level of one carrier.
         self.meter.feed(self.det.channel());
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         let hits = std::mem::take(&mut self.hits);
         for hit in &hits {
             // Two kinds of evidence off one carrier: the synchronisation
@@ -270,8 +270,10 @@ impl Simple for GsmNode {
             // out of one block of samples.
             out.push(
                 self.meter
-                    .frame_measured(bytes, start, len, snr_of(quality))
-                    .at(self.channel_hz as u64),
+                    .packet_measured(bytes, start, len, snr_of(quality))
+                    .at_center(self.channel_hz as u64)
+                    // The block's parity, or the burst would not be here.
+                    .checked(common::packet::Integrity::Passed),
             );
         }
         self.hits = hits;
@@ -348,11 +350,12 @@ impl Protocol for Gsm {
     /// A block arrives from a downlink band, which only a base station
     /// transmits from, and what it carries had to pass the standard's parity
     /// to reach the bus at all.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !gsm::is_downlink_band(p.center_hz() as f64) {
             return None;
         }
-        Some(rows(bytes, common::Hz(p.center_hz())))
+        Some(read(bytes, common::Hz(p.center_hz())))
     }
 
     /// The middle of the E-GSM 900 downlink. A beacon has no frequency
@@ -426,7 +429,7 @@ mod tests {
     fn the_node_outputs_frames_tagged_with_the_carrier() {
         let mut n = GsmNode::new(948_000_000.0, GsmConfig::default());
         let out = n.negotiate(&spec(2_400_000.0, 947_400_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(948_000_000));
         assert_eq!(out.bandwidth, CHANNEL_WIDTH_HZ);
     }
@@ -434,17 +437,18 @@ mod tests {
     /// A cell becomes a row saying which cell it is.
     #[test]
     fn a_burst_becomes_a_row_naming_the_cell() {
-        use common::Value;
         let sch = Sch { ncc: 5, bcc: 3, frame_number: 51 * 26 * 42 + 21 };
         let bytes = sch::pack(&sch).unwrap();
-        let d = decoded(&bytes, Hz(947_400_000)).expect("a row");
-        assert_eq!(d.protocol, "GSM-SCH");
-        assert_eq!(d.crc_ok, Some(true));
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("bsic"), Some(Value::Int(0x2B)));
-        assert_eq!(get("frame"), Some(Value::Int(i64::from(sch.frame_number))));
-        assert_eq!(get("arfcn"), Some(Value::Int(62)), "947.4 MHz is channel 62");
-        assert!(d.detail.as_deref().unwrap().contains("BSIC 53"));
+        let d = read(&bytes, Hz(947_400_000)).first().cloned().expect("a row");
+        assert_eq!((d.id, d.kind), ("gsm", "sync"));
+        // The colour code is what tells two cells apart on one channel; the
+        // channel is 62 at 947.4 MHz, and the pair is what the cell is
+        // called on the air.
+        assert!(d.facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Infrastructure(c) if c.site_code == Some(0x2B)
+        )));
+        assert_eq!(d.parties().0, Some("ARFCN 62 BSIC 53"), "the cell transmitted it");
     }
 
     /// The whole path on synthetic RF: a beacon into the node, a cell out of
@@ -465,15 +469,15 @@ mod tests {
         node.negotiate(&spec(rate, center)).unwrap();
         let ins = [spec(rate, center)];
         let tags = Vec::new();
-        let mut frames: Vec<common::Frame> = Vec::new();
+        let mut frames: Vec<common::packet::Packet> = Vec::new();
         for block in iq.chunks(8192) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let mut events = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames.extend(f);
             }
         }
@@ -486,55 +490,63 @@ mod tests {
         // and the ratio came from a noise floor that on a carrier which
         // never stops is the carrier itself, so it read nought.
         for f in &frames {
-            assert!(f.rssi_dbfs.is_finite() && f.rssi_dbfs > -100.0, "level {}", f.rssi_dbfs);
-            assert!(f.snr_db.is_finite() && f.snr_db > 0.0, "snr {}", f.snr_db);
-            assert!(f.iq.is_some(), "a burst with no samples behind it");
+            assert!(
+                f.carrier.rssi_dbfs.is_finite() && f.carrier.rssi_dbfs > -100.0,
+                "level {}",
+                f.carrier.rssi_dbfs
+            );
+            assert!(
+                f.carrier.snr_db.is_finite() && f.carrier.snr_db > 0.0,
+                "snr {}",
+                f.carrier.snr_db
+            );
+            assert!(f.carrier.iq.is_some(), "a burst with no samples behind it");
         }
         let f = &frames[0];
 
-        let d = decoded(&f.bytes, Hz(f.center_hz)).expect("a row");
-        assert_eq!(d.detail.as_deref(), Some("ARFCN 62 BSIC 26 frame 11965"));
+        let d = read(f.bytes(), Hz(f.carrier.center_hz)).first().cloned().expect("a row");
+        assert_eq!((d.id, d.kind), ("gsm", "sync"));
+        assert_eq!(d.parties().0, Some("ARFCN 62 BSIC 26"), "the cell transmitted it");
     }
 
     /// The block a cell broadcasts becomes a row naming the operator, the
     /// location area and the cell.
     #[test]
     fn a_broadcast_block_becomes_a_row_naming_the_operator() {
-        use common::Value;
         let mut block = [0x2Bu8; 23];
         block[..8].copy_from_slice(&[0x49, 0x06, 0x1B, 0x12, 0x34, 0x62, 0xF2, 0x10]);
-        let d = decoded(&block, Hz(947_400_000)).expect("a row");
-        assert_eq!(d.protocol, "GSM-SI");
-        assert_eq!(d.crc_ok, Some(true));
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("message"), Some(Value::Text("SI3".into())));
-        assert_eq!(get("cell_id"), Some(Value::Int(0x1234)));
-        assert_eq!(get("plmn"), Some(Value::Text("262-01".into())));
-        assert_eq!(d.detail.as_deref(), Some("SI3 262-01 LAC 11051 CI 4660"));
+        let d = read(&block, Hz(947_400_000)).first().cloned().expect("a row");
+        assert_eq!((d.id, d.kind), ("gsm", "system_information"));
+        let common::packet::Fact::Infrastructure(c) = &d.facts[0] else {
+            panic!("the network it belongs to, got {:?}", d.facts);
+        };
+        assert_eq!((c.mcc, c.mnc), (Some(262), Some(1)));
+        assert_eq!((c.area, c.cell), (Some(11_051), Some(0x1234)));
+        // A cell names itself, which is what a device list rows on.
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("262-01-4660"));
     }
 
     /// A block off a channel the cell assigned becomes its own kind of row:
     /// a transaction with one phone rather than something broadcast.
     #[test]
     fn a_dedicated_block_becomes_a_row_naming_the_phone() {
-        use common::Value;
         let mut b = vec![0x01, 0x03, 15 << 2, 0x05, 0x08, 0x70];
         b.extend_from_slice(&[0x00, 0xF1, 0x10, 0x00, 0x01, 0x33]);
         b.extend_from_slice(&[0x05, 0xF4, 0xAA, 0xBB, 0xCC, 0xDD]);
         b.resize(23, 0x2B);
-        let d = decoded(&b, Hz(947_400_000)).expect("a row");
-        assert_eq!(d.protocol, "GSM-SDCCH");
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("message"), Some(Value::Text("LocationUpdatingRequest".into())));
-        assert_eq!(get("phone"), Some(Value::Text("TMSI AABBCCDD".into())));
-        assert!(d.detail.as_deref().unwrap().contains("001-01"));
+        let d = read(&b, Hz(947_400_000)).first().cloned().expect("a row");
+        assert_eq!((d.id, d.kind), ("gsm", "dedicated"));
+        let common::packet::Fact::Infrastructure(c) = &d.facts[0] else {
+            panic!("the network it belongs to, got {:?}", d.facts);
+        };
+        assert_eq!((c.mcc, c.mnc), (Some(1), Some(1)));
     }
 
     /// A filler frame is not a row. A cell with nothing to say fills its
     /// blocks with 0x2B, and every one of those passes the Fire code.
     #[test]
     fn padding_is_not_a_row() {
-        assert!(decoded(&[0x2Bu8; 23], Hz(947_400_000)).is_none());
+        assert!(read(&[0x2Bu8; 23], Hz(947_400_000)).is_empty());
     }
 
     /// Two beacons ten frames apart, which is what the control multiframe
@@ -588,19 +600,19 @@ mod tests {
         b.extend_from_slice(&[0x17, 0x08, 0x29, 0x27, 0x10, 0x43, 0x65, 0x87, 0x09, 0x21]);
         b.resize(23, 0x2B);
 
-        let rows = rows(&b, Hz(947_400_000));
+        let rows = read(&b, Hz(947_400_000));
         assert_eq!(rows.len(), 2, "a request naming two phones is two rows");
-        let to: Vec<_> = rows.iter().filter_map(|r| r.link.as_ref()?.to.clone()).collect();
+        let to: Vec<_> = rows.iter().filter_map(|r| r.link.to.clone()).collect();
         assert_eq!(to[0].kind, PartyKind::Temporary, "a TMSI is not a lasting name");
         assert_eq!(to[0].id, "TMSI 00000001");
         assert_eq!(to[1].kind, PartyKind::Unit);
         assert_eq!(to[1].id, "IMSI 272013456789012");
         // The cell is the end that transmitted, and it is infrastructure.
-        let from = rows[0].link.as_ref().and_then(|l| l.from.clone()).expect("a cell");
+        let from = rows[0].link.from.clone().expect("a cell");
         assert_eq!(from.kind, PartyKind::Infrastructure);
         // And neither phone is a device: nothing here identified itself to
         // this receiver.
-        assert!(rows.iter().all(|r| r.identity.is_none()));
+        assert!(rows.iter().all(|r| r.subject.is_none()));
     }
 
     /// Bursts at symbol positions, on a carrier `frames` long, at `rate`.
@@ -634,7 +646,7 @@ mod tests {
         rate: f64,
         center: f64,
         iq: &[C32],
-    ) -> (Vec<common::Frame>, Vec<Request>) {
+    ) -> (Vec<common::packet::Packet>, Vec<Request>) {
         node.negotiate(&spec(rate, center)).unwrap();
         let ins = [spec(rate, center)];
         let tags = Vec::new();
@@ -642,12 +654,12 @@ mod tests {
         let mut asked = Vec::new();
         for block in iq.chunks(8192) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let mut events = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames.extend(f);
             }
             asked.extend(events.into_iter().filter_map(|e| match e {
@@ -715,7 +727,7 @@ mod tests {
         let mut a = GsmNode::new(beacon_hz, Default::default());
         a.configure(&origin);
         let (frames, asked) = run(&mut a, rate, beacon_hz, &beacon);
-        assert!(frames.iter().any(|f| f.bytes.len() == 23), "the assignment was not read");
+        assert!(frames.iter().any(|f| f.bytes().len() == 23), "the assignment was not read");
         assert_eq!(asked.len(), 1, "{asked:?}");
         let Request::OpenChannel { protocol, center_hz, role, settings, .. } = &asked[0] else {
             panic!("{asked:?}");
@@ -733,11 +745,11 @@ mod tests {
         b.configure(&settings);
         assert!(b.anchored());
         let (frames, _) = run(&mut b, rate, other_hz, &other);
-        let blocks: Vec<&common::Frame> = frames.iter().filter(|f| f.bytes.len() == 23).collect();
+        let blocks: Vec<_> = frames.iter().filter(|f| f.bytes().len() == 23).collect();
         assert_eq!(blocks.len(), 1, "expected the block off the other carrier, got {frames:?}");
-        assert_eq!(blocks[0].bytes, lur);
-        let d = decoded(&blocks[0].bytes, Hz(other_hz as u64)).expect("a row");
-        assert_eq!(d.protocol, "GSM-SDCCH");
+        assert_eq!(blocks[0].bytes(), lur);
+        let d = read(blocks[0].bytes(), Hz(other_hz as u64)).first().cloned().expect("a row");
+        assert_eq!((d.id, d.kind), ("gsm", "dedicated"));
 
         // A carrier with no anchor and no beacon reads nothing: the anchor
         // is what made that decode possible.

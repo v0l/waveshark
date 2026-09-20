@@ -1,7 +1,7 @@
 //! Where DrmProtocol can be and what stream it reads.
 
 use crate::{Placement, Reading, Shape, Signal};
-use common::{C32, Decoded};
+use common::C32;
 use decode::drm;
 
 pub struct DrmProtocol;
@@ -70,15 +70,15 @@ impl Signal for DrmProtocol {
             }
         }
         let m = rx.multiplex().clone();
-        let rows: Vec<Decoded> = m
+        let rows: Vec<common::packet::Proto> = m
             .services
             .iter()
             .filter_map(|s| {
                 let label = m.label(s.short_id).map(str::to_string);
-                drm::service_decoded(&rx, *s, label, chan.hz(), 0.0)
+                drm::service_read(*s, label)
             })
             .collect();
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

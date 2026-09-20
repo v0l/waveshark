@@ -70,7 +70,7 @@ fn through_a_channel(iq: &[common::C32]) -> Vec<common::C32> {
 
 /// Read timings back out of IQ the way the receiver does: envelope, then the
 /// OOK detector with its adaptive threshold.
-fn detect(iq: &[common::C32]) -> Vec<common::Package> {
+fn detect(iq: &[common::C32]) -> Vec<common::packet::Detection> {
     let cfg = dsp::PulseConfig {
         // A word gap at 20 wpm is 420 ms and the burst has to survive it, so
         // only a longer silence ends the transmission.
@@ -101,7 +101,7 @@ fn morse_keyed_by_the_transmit_chain_decodes_off_its_own_signal() {
 
     let pkgs = detect(&through_a_channel(&iq));
     assert_eq!(pkgs.len(), 1, "expected one burst, got {}", pkgs.len());
-    assert_eq!(decode::morse::decode(&pkgs[0]), text);
+    assert_eq!(decode::morse::decode(pkgs[0].pulses()), text);
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn a_capture_of_the_transmission_replays_as_the_same_text() {
     SampleFormat::Cs8.convert(&buf.lock(), &mut back);
     let pkgs = detect(&through_a_channel(&back));
     assert_eq!(pkgs.len(), 1);
-    assert_eq!(decode::morse::decode(&pkgs[0]), text);
+    assert_eq!(decode::morse::decode(pkgs[0].pulses()), text);
 }
 
 #[test]

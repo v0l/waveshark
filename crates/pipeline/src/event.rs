@@ -2,9 +2,9 @@
 
 use common::Hz;
 
-// The decode types live in `common` because a packet carries them; named
-// from here because that is where every stage already looks for them.
-pub use common::{Decoded, Link, Party, PartyKind, media};
+// The packet types live in `common` because the bus carries them; named from
+// here because that is where every stage already looks for them.
+pub use common::packet::{Fact, Link, Packet, Party, PartyKind, Proto};
 
 /// Anything a stage wants to report that is not a sample.
 ///
@@ -16,8 +16,10 @@ pub enum Event {
     /// A detector believes there is a carrier here.
     Detection { center: Hz, bandwidth: f64, snr_db: f32, at: f64 },
 
-    /// A decoder produced a frame.
-    Decoded(Decoded),
+    /// A front end read something: the reception, and whatever was read off
+    /// it. Carried whole rather than as a conclusion, so what a view acts on
+    /// and what the log keeps are the same thing.
+    Decoded(Packet),
 
     /// Something went wrong but the chain can continue: a CRC failure, a
     /// framing slip. Fatal problems come back as `Err` from `process`.

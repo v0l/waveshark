@@ -31,7 +31,6 @@
 //! channel a call was granted. Everything else stays in the packet log where
 //! it belongs.
 
-use crate::radio::DecodeRecord;
 use std::time::{Duration, Instant};
 
 /// How long after the last transmission a call is still counted as live.
@@ -204,7 +203,9 @@ impl Calls {
             .filter(|(_, k)| same(k))
             .max_by_key(|(_, k)| k.last)
             .map(|(i, _)| i);
-        if let Some(k) = found.map(|i| &mut self.seen[i]) {
+        if let Some(i) = found {
+            self.said(c, i);
+            let k = &mut self.seen[i];
             if k.from.is_none() {
                 k.from = c.from.clone();
             }
@@ -249,9 +250,9 @@ impl Calls {
             to: c.to.clone(),
             from: c.from.clone(),
             group: is_group(&c.to),
-            encrypted: false,
-            cipher: None,
-            codec: None,
+            encrypted: c.said.as_ref().is_some_and(|o| o.encrypted()),
+            cipher: c.said.as_ref().and_then(|o| o.secrecy.cipher()).map(str::to_string),
+            codec: c.said.as_ref().and_then(|o| o.codec),
             code: c.code.clone(),
             first: c.first,
             last: c.last,
@@ -267,133 +268,22 @@ impl Calls {
         }
     }
 
-    /// Fold one decode in, if it is a call at all.
-    ///
-    /// Returns whether it was. Anything the decoder did not say is voice is
-    /// somebody else's business: a sensor reading, a pager message, an
-    /// aircraft, a data call, a radio registering on a trunked network.
-    pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let Some(airtime) = rec.airtime.as_ref().filter(|a| a.voice) else {
-            return false;
-        };
-        let Some(party) = rec.link.as_ref().and_then(|l| l.to.as_ref()) else {
-            return false;
-        };
-        let to = party.label().to_string();
-        if to.is_empty() {
-            return false;
+    /// What the system said about the call, from the voice block it was
+    /// stated on.
+    fn said(&mut self, c: &crate::mix::heard::LiveCall, k: usize) {
+        let Some(said) = c.said.as_ref() else { return };
+        let row = &mut self.seen[k];
+        // A grant names the cipher and the traffic bursts after it say only
+        // that they are enciphered, so a name is kept until another replaces
+        // it. Clearing on every silent burst took the row from red to blue
+        // mid-call.
+        if said.codec.is_some() {
+            row.codec = said.codec;
         }
-        let from = rec
-            .link
-            .as_ref()
-            .and_then(|l| l.from.as_ref())
-            .map(|p| p.label().to_string())
-            .filter(|s| !s.is_empty());
-        let system = rec.system().to_string();
-        // The decoder said which kind of party it named, so nothing here has
-        // to guess from how the destination is spelled.
-        let group = matches!(
-            party.kind,
-            pipeline::event::PartyKind::Group | pipeline::event::PartyKind::Broadcast
-        );
-        let cipher = airtime.secrecy.cipher().map(|c| c.to_string());
-        let codec = airtime.codec;
-        let encrypted = airtime.secrecy.encrypted();
-        let seconds = airtime.seconds;
-        // A decode that says the transmission is still running is not an
-        // over yet; the one that says it ended is.
-        let live = airtime.live;
-
-        // A channel is matched loosely: the same talkgroup found by two front
-        // ends a few hundred hertz apart is one call, not two rows. And a
-        // caller is matched only where both sides name one: on TETRA the
-        // grant names who is talking and the traffic that follows does
-        // not, and treating those as two callers listed every call twice,
-        // once with a name and once without. The key here names nobody
-        // talking for that reason; the caller is compared beside it.
-        let channel = common::ConversationKey::new(&system, rec.freq).to(Some(to.clone()));
-        let same = |c: &Call| c.key().same_conversation(&channel);
-        let found = self.seen.iter().position(|c| same(c) && c.from == from).or_else(|| {
-            // The one most recently heard, since that is the call the
-            // unnamed traffic belongs to.
-            self.seen
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| {
-                    same(c) && (c.from.is_none() || from.is_none()) && c.age(at) < LIVE
-                })
-                .max_by_key(|(_, c)| c.last)
-                .map(|(i, _)| i)
-        });
-        if let Some(c) = found.map(|i| &mut self.seen[i]) {
-            if c.from.is_none() {
-                c.from = from;
-            }
-            // A gap longer than the hang time is a new conversation on the
-            // same group, so the old one keeps its duration rather than
-            // stretching across the silence.
-            if c.age(at) >= LIVE {
-                c.first = at;
-                c.seconds = 0.0;
-                c.overs = 0;
-            }
-            c.last = at;
-            // The bus counts overs and airtime where it hears the call; the
-            // decoder's own count is for a call nothing is playing, such as
-            // one enciphered or in a vocoder this build does not have.
-            if !c.by_bus {
-                if !live {
-                    c.overs += 1;
-                }
-                c.seconds += seconds;
-            }
-            // Only a decode that says something about the cipher may change
-            // this. TETRA names it in the grant and not in the traffic that
-            // follows, so a verdict from every record flipped the call back
-            // to clear while it still carried the cipher's name, and a
-            // traffic burst that says it is enciphered without naming it
-            // must not take the name away either.
-            if airtime.secrecy != common::Secrecy::Unsaid {
-                c.encrypted = encrypted;
-            }
-            if cipher.is_some() {
-                c.cipher = cipher;
-            }
-            if codec.is_some() {
-                c.codec = codec;
-            }
-            return true;
+        row.encrypted |= said.encrypted();
+        if let Some(name) = said.secrecy.cipher() {
+            row.cipher = Some(name.to_string());
         }
-
-        self.seen.push(Call {
-            system,
-            channel_hz: rec.freq,
-            to,
-            from,
-            group,
-            encrypted,
-            cipher,
-            codec,
-            // A packet says which group it was for itself; coded squelch is
-            // what an analogue channel has instead, and it arrives on the
-            // bus rather than in a decode.
-            code: None,
-            first: at,
-            last: at,
-            overs: u64::from(!live),
-            seconds,
-            heard_s: 0.0,
-            by_bus: false,
-            transcript: None,
-        });
-        if self.seen.len() > MAX_CALLS {
-            self.seen.retain(|c| c.age(at) < FORGET);
-            if self.seen.len() > MAX_CALLS {
-                let drop = self.seen.len() - MAX_CALLS;
-                self.seen.drain(..drop);
-            }
-        }
-        true
     }
 }
 
@@ -420,88 +310,58 @@ fn is_group(to: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Airtime, Secrecy, Value};
-    use pipeline::event::{Link, Party};
-
-    fn rec(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
-        let mut r = DecodeRecord::for_test(freq, model);
-        r.channel_hz = 12_500.0;
-        r.fields = fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-        r
-    }
-
-    /// A decode from a mode that knows it is carrying speech: the parties as
-    /// the decoder named them and the airtime as it measured it, which is
-    /// all of it the call list reads.
-    fn voice(model: &'static str, freq: f64, link: Link, airtime: Airtime) -> DecodeRecord {
-        let mut r = DecodeRecord::for_test(freq, model);
-        r.channel_hz = 12_500.0;
-        r.link = Some(link);
-        r.airtime = Some(airtime);
-        r
-    }
-
-    /// An over that has ended, of `seconds`, with nothing said about a
-    /// cipher.
-    fn over(seconds: f64) -> Airtime {
-        Airtime { seconds, voice: true, live: false, ..Default::default() }
-    }
+    use crate::mix::heard::LiveCall;
+    use common::{Over, Secrecy};
 
     fn t(secs: u64) -> Instant {
         Instant::now() + Duration::from_secs(secs)
     }
 
-    #[test]
-    fn a_transmission_with_no_destination_is_not_a_call() {
-        // Most of what a receiver decodes is a sensor or a pager, and a call
-        // list full of thermometers is not a call list.
-        let mut c = Calls::new();
-        assert!(!c.update(
-            &rec("Fineoffset-WHx080", 433.92e6, &[("temperature_c", Value::Float(8.0))]),
-            t(0)
-        ));
-        assert!(c.is_empty());
+    /// A report from the audio bus, which is where every call comes from.
+    ///
+    /// The bus hears speech, so what it reports is the channel, whatever
+    /// labels the front end put on it and the seconds it has played. What
+    /// only a decoder knows arrives on `said`.
+    fn bus(system: &str, hz: f64, to: &str, from: Option<&str>, at: Instant) -> LiveCall {
+        LiveCall {
+            system: system.into(),
+            channel_hz: hz,
+            to: to.into(),
+            from: from.map(str::to_string),
+            code: None,
+            first: at,
+            last: at,
+            seconds: 0.0,
+            peak: 0.3,
+            quiet_s: 0.0,
+            over: false,
+            said: None,
+            was: None,
+        }
     }
 
-    #[test]
-    fn a_destination_alone_is_not_a_call() {
-        // An APRS frame is addressed, a TETRA short data message is
-        // addressed, and a MAC header naming a radio that is registering is
-        // addressed. None of them is somebody talking, and a list of them is
-        // not a call list. Only a decoder that knows there is speech says so,
-        // and it says it in the airtime rather than in a field.
-        let mut c = Calls::new();
-        let addressed = [
-            ("APRS", 144.8e6, Link::between(Party::unit("M0ABC-9"), Party::group("APRS"))),
-            ("TETRA-SDS", 391.1e6, Link::between(Party::unit("70311"), Party::unit("10223295"))),
-            ("TETRA-Call", 391.1e6, Link { from: None, to: Some(Party::unit("10223295")) }),
-        ];
-        for (model, hz, link) in addressed {
-            let mut r = DecodeRecord::for_test(hz, model);
-            r.link = Some(link);
-            assert!(!c.update(&r, t(0)), "{} earned a row", r.protocol());
-        }
-        assert!(c.is_empty());
+    /// One over, of `seconds`, reported as it runs and then as it ends.
+    fn over(mut c: LiveCall, seconds: f64, calls: &mut Calls) {
+        c.seconds = seconds;
+        c.last = c.first + Duration::from_secs_f64(seconds);
+        calls.hear(&c);
+        c.over = true;
+        calls.hear(&c);
     }
 
     #[test]
     fn overs_on_one_group_stay_one_call() {
         let mut c = Calls::new();
-        let call = voice(
-            "M17-Voice",
-            433.475e6,
-            Link::between(Party::unit("M0ABC"), Party::group("M17-M17 C")),
-            over(2.0),
-        );
-        assert!(c.update(&call, t(0)));
-        assert!(c.update(&call, t(3)));
-        let list = c.active(t(3));
+        let at = Instant::now();
+        over(bus("M17", 433.475e6, "M17-M17 C", Some("M0ABC"), at), 2.0, &mut c);
+        over(bus("M17", 433.475e6, "M17-M17 C", Some("M0ABC"), at), 2.0, &mut c);
+        let list = c.active(at + Duration::from_secs(2));
         assert_eq!(list.len(), 1, "two overs are one conversation");
         assert_eq!(list[0].overs, 2);
-        assert_eq!(list[0].seconds, 4.0, "airtime adds up across overs");
+        assert!((list[0].seconds - 4.0).abs() < 1e-6, "airtime {}", list[0].seconds);
         assert_eq!(list[0].system, "M17", "every mode of one system shares a row");
         assert!(list[0].group, "a reflector is a group");
-        assert!(list[0].live(t(3)));
+        assert!(list[0].live(at + Duration::from_secs(2)));
     }
 
     #[test]
@@ -509,39 +369,28 @@ mod tests {
         // Otherwise a group heard once an hour reads as a call that has been
         // running for an hour.
         let mut c = Calls::new();
-        let call = voice(
-            "M17-Voice",
-            433.475e6,
-            Link::between(Party::unit("M0ABC"), Party::group("ALL")),
-            over(2.0),
-        );
-        c.update(&call, t(0));
-        c.update(&call, t(600));
-        let list = c.active(t(600));
+        let at = Instant::now();
+        over(bus("M17", 433.475e6, "ALL", Some("M0ABC"), at), 2.0, &mut c);
+        let later = at + Duration::from_secs(600);
+        over(bus("M17", 433.475e6, "ALL", Some("M0ABC"), later), 2.0, &mut c);
+        let list = c.active(later + Duration::from_secs(2));
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].overs, 1, "the count restarted");
-        assert_eq!(list[0].seconds, 2.0);
-        assert!(list[0].span() < Duration::from_secs(1));
+        assert!((list[0].seconds - 2.0).abs() < 1e-6);
+        assert!(list[0].span() < Duration::from_secs(3));
     }
 
+    /// Analogue identity arrives late, so the first blocks of an over are
+    /// heard under the bare channel and the caller fills in afterwards.
     #[test]
-    fn traffic_that_does_not_name_its_caller_joins_the_grant_that_did() {
-        // On TETRA the grant says who is talking and the bursts that follow
-        // say nothing, and on a network that never grants by name the bursts
-        // are all there is. Either way it is one call, with the caller
-        // filled in from whichever row carried it.
+    fn traffic_that_does_not_name_its_caller_joins_the_call_that_did() {
         let mut c = Calls::new();
-        let unnamed = || Link { from: None, to: Some(Party::group("2001")) };
-        let named = |id: &str| Link::between(Party::unit(id), Party::group("2001"));
-        c.update(&voice("TETRA-Voice", 391.7e6, unnamed(), over(0.0)), t(0));
-        c.update(&voice("TETRA-Call", 391.7e6, named("70311"), over(0.0)), t(1));
-        c.update(&voice("TETRA-Voice", 391.7e6, unnamed(), over(0.0)), t(2));
-        let list = c.active(t(2));
+        let at = Instant::now();
+        over(bus("TETRA", 391.7e6, "2001", None, at), 1.0, &mut c);
+        over(bus("TETRA", 391.7e6, "2001", Some("70311"), at), 1.0, &mut c);
+        let list = c.active(at + Duration::from_secs(1));
         assert_eq!(list.len(), 1, "{list:?}");
         assert_eq!(list[0].from.as_deref(), Some("70311"));
-        // A different named caller is still a different row.
-        c.update(&voice("TETRA-Call", 391.7e6, named("70312"), over(0.0)), t(3));
-        assert_eq!(c.active(t(3)).len(), 2);
     }
 
     #[test]
@@ -549,174 +398,111 @@ mod tests {
         // Who is talking is the point, so a second caller does not overwrite
         // the first.
         let mut c = Calls::new();
-        let call = |from: &str| {
-            voice(
-                "DMR-Voice",
-                446.1e6,
-                Link::between(Party::unit(from), Party::group("91")),
-                over(0.0),
-            )
-        };
-        c.update(&call("2345001"), t(0));
-        c.update(&call("2345002"), t(1));
-        let list = c.active(t(1));
+        let at = Instant::now();
+        over(bus("DMR", 446.1e6, "91", Some("2345001"), at), 1.0, &mut c);
+        // A second later, so "newest first" has an order to be in.
+        over(bus("DMR", 446.1e6, "91", Some("2345002"), at + Duration::from_secs(1)), 1.0, &mut c);
+        let list = c.active(at + Duration::from_secs(1));
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].from.as_deref(), Some("2345002"), "the newest is first");
         assert!(list[0].group, "a talkgroup is a group");
     }
 
+    /// All the bus has to go on is how the destination is spelled: a number
+    /// or a broadcast name is a group, a callsign is one station.
     #[test]
     fn a_direct_call_is_told_from_a_group_one() {
         let mut c = Calls::new();
-        c.update(
-            &voice(
-                "M17-Voice",
-                433.475e6,
-                Link::between(Party::unit("M0ABC"), Party::unit("M0XYZ")),
-                over(0.0),
-            ),
-            t(0),
-        );
-        let list = c.active(t(0));
+        let at = Instant::now();
+        over(bus("M17", 433.475e6, "M0XYZ", Some("M0ABC"), at), 1.0, &mut c);
+        let list = c.active(at + Duration::from_secs(1));
         assert!(!list[0].group, "a call to one station is one party");
         assert_eq!(list[0].title(), "M0ABC > M0XYZ");
     }
 
     #[test]
-    fn a_system_that_says_what_kind_of_call_it_is_is_believed() {
-        // Read off how the destination is spelled, a numeric one is a
-        // talkgroup, which is wrong for a private call to a radio id. The
-        // decoder named the kind of party, so nothing here guesses.
-        let mut c = Calls::new();
-        c.update(
-            &voice(
-                "DMR-Voice",
-                446.1e6,
-                Link::between(Party::unit("2345001"), Party::unit("2345002")),
-                over(0.0),
-            ),
-            t(0),
-        );
-        assert!(!c.active(t(0))[0].group);
-    }
-
-    #[test]
     fn encrypted_traffic_says_so() {
         let mut c = Calls::new();
-        c.update(
-            &voice(
-                "M17-Voice",
-                433.475e6,
-                Link::between(Party::unit("M0ABC"), Party::group("ALL")),
-                Airtime { secrecy: Secrecy::Encrypted(Some("aes".into())), ..over(0.0) },
-            ),
-            t(0),
+        let at = Instant::now();
+        let mut said = bus("M17", 433.475e6, "ALL", Some("M0ABC"), at);
+        said.said = Some(
+            Over::new(Some("Codec 2 3200")).protected_by(Secrecy::Encrypted(Some("aes".into()))),
         );
-        assert!(c.active(t(0))[0].encrypted, "there is no point listening to this one");
+        over(said, 1.0, &mut c);
+        let row = &c.active(at + Duration::from_secs(1))[0];
+        assert!(row.encrypted, "there is no point listening to this one");
+        assert_eq!(row.cipher.as_deref(), Some("aes"));
+        assert_eq!(row.codec, Some("Codec 2 3200"));
     }
 
     #[test]
     fn traffic_that_says_nothing_leaves_the_cipher_standing() {
-        // TETRA names the cipher in the grant; the traffic frames after it
-        // say nothing either way, and they must not clear it.
-        let mut c = Calls::new();
-        let to = || Link { from: None, to: Some(Party::group("marker 56")) };
-        let grant = voice(
-            "TETRA-Voice",
-            393.9e6,
-            to(),
-            Airtime { secrecy: Secrecy::Encrypted(Some("AIE-3".into())), ..over(0.0) },
-        );
-        c.update(&grant, t(0));
-        let traffic = voice("TETRA-Voice", 393.9e6, to(), over(0.0));
-        assert_eq!(traffic.airtime.as_ref().unwrap().secrecy, Secrecy::Unsaid);
-        c.update(&traffic, t(1));
-        let call = &c.active(t(1))[0];
-        assert!(call.encrypted, "the row would have gone from red to blue");
-        assert_eq!(call.cipher.as_deref(), Some("AIE-3"));
-
-        // And a burst that says it is enciphered without naming what with,
-        // which is all a traffic burst can say, keeps the name the grant
-        // gave rather than blanking the column.
-        let burst = voice(
-            "TETRA-Voice",
-            393.9e6,
-            to(),
-            Airtime { secrecy: Secrecy::Encrypted(None), ..over(0.0) },
-        );
-        c.update(&burst, t(2));
-        let call = &c.active(t(2))[0];
-        assert!(call.encrypted);
-        assert_eq!(call.cipher.as_deref(), Some("AIE-3"));
-    }
-
-    /// A digital over arrives twice: as the decoder's packet, with what only
-    /// the decoder knows, and as speech on the audio bus, with when it was
-    /// actually heard. One row, one over, and the bus's count is the one
-    /// kept, because it is the count of what was played.
-    #[test]
-    fn a_digital_over_is_one_row_from_both_sides() {
+        // TETRA names the cipher when it grants the channel; the traffic
+        // after it says only that it is enciphered, and must not blank the
+        // column or take the row from red back to blue.
         let mut c = Calls::new();
         let at = Instant::now();
-        let packet = voice(
-            "M17-Voice",
-            433.475e6,
-            Link::between(Party::unit("M0ABC"), Party::group("BROADCAST")),
-            Airtime { codec: Some("Codec 2 3200"), ..over(3.0) },
-        );
-        c.update(&packet, at);
-        let live = |seconds: f64, over: bool| crate::mix::heard::LiveCall {
-            system: "M17".into(),
-            channel_hz: 433.475e6,
-            to: "BROADCAST".into(),
-            from: Some("M0ABC".into()),
-            first: at,
-            last: at + Duration::from_secs_f64(seconds),
-            seconds,
-            peak: 0.3,
-            quiet_s: 0.0,
-            over,
-            was: None,
-            code: None,
-        };
-        c.hear(&live(1.0, false));
-        c.hear(&live(2.9, false));
-        c.hear(&live(2.9, true));
+        let mut grant = bus("TETRA", 393.9e6, "marker 56", None, at);
+        grant.said = Some(Over::new(None).protected_by(Secrecy::Encrypted(Some("AIE-3".into()))));
+        over(grant, 1.0, &mut c);
+
+        let mut burst = bus("TETRA", 393.9e6, "marker 56", None, at);
+        burst.said = Some(Over::new(None).protected_by(Secrecy::Encrypted(None)));
+        over(burst, 1.0, &mut c);
+        let row = &c.active(at + Duration::from_secs(1))[0];
+        assert!(row.encrypted);
+        assert_eq!(row.cipher.as_deref(), Some("AIE-3"));
+
+        // And one that says nothing at all about secrecy leaves both alone.
+        let mut quiet = bus("TETRA", 393.9e6, "marker 56", None, at);
+        quiet.said = Some(Over::new(None));
+        over(quiet, 1.0, &mut c);
+        let row = &c.active(at + Duration::from_secs(1))[0];
+        assert!(row.encrypted);
+        assert_eq!(row.cipher.as_deref(), Some("AIE-3"));
+    }
+
+    /// The bus counts an over once, however many times it reports it.
+    ///
+    /// Each report carries the running total for the over, not an increment,
+    /// so a row adds the part it has not already counted. Adding each report
+    /// whole made a three second over read as eight.
+    #[test]
+    fn a_running_over_is_counted_once() {
+        let mut c = Calls::new();
+        let at = Instant::now();
+        let mut live = bus("M17", 433.475e6, "BROADCAST", Some("M0ABC"), at);
+        live.said = Some(Over::new(Some("Codec 2 3200")));
+        for (seconds, ended) in [(1.0, false), (2.9, false), (2.9, true)] {
+            live.seconds = seconds;
+            live.over = ended;
+            live.last = at + Duration::from_secs_f64(seconds);
+            c.hear(&live);
+        }
         let rows = c.active(at + Duration::from_secs(3));
-        assert_eq!(rows.len(), 1, "two sides of one over made two rows");
-        assert_eq!(rows[0].overs, 1, "the over was counted from both sides");
+        assert_eq!(rows.len(), 1, "one over made more than one row");
+        assert_eq!(rows[0].overs, 1);
         assert!((rows[0].seconds - 2.9).abs() < 1e-6, "airtime {}", rows[0].seconds);
-        assert_eq!(rows[0].codec, Some("Codec 2 3200"), "what the decoder said is kept");
-        // And the next packet for the same call does not add to what the
-        // bus is counting.
-        c.update(&packet, at + Duration::from_secs(1));
-        assert_eq!(c.active(at + Duration::from_secs(3))[0].overs, 1);
+        assert_eq!(rows[0].codec, Some("Codec 2 3200"), "what the system said is kept");
     }
 
     /// A call and the speech heard on it have to agree on one key, or the
     /// row shows no transcript and the button into it is never offered. The
-    /// two ends build it from different things: the call from what a decoder
-    /// published, the transcriber from the voice block the front end put on
-    /// the bus.
+    /// two ends build it from different things: the call from the bus's
+    /// report, the transcriber from the voice block the front end put on it.
     #[test]
     fn a_call_and_its_speech_are_the_same_conversation() {
         let mut c = Calls::new();
-        c.update(
-            &voice(
-                "DMR-Voice",
-                435.0e6,
-                Link::between(Party::unit("1234567"), Party::group("9")),
-                over(0.0),
-            ),
-            t(0),
-        );
-        let call = &c.active(t(0))[0];
+        let at = Instant::now();
+        over(bus("DMR", 435.0e6, "9", Some("1234567"), at), 1.0, &mut c);
+        let call = &c.active(at + Duration::from_secs(1))[0];
         let spoken = common::ConversationKey::of(&common::Voice {
             system: "DMR",
             channel_hz: 435.0e6,
             to: Some("9".into()),
             from: Some("1234567".into()),
             code: None,
+            over: None,
             rate: 8_000.0,
             channels: 1,
             pcm: vec![0.2; 8],
@@ -735,6 +521,9 @@ mod tests {
             credible: true,
         }];
         c.read_transcripts(&said);
-        assert_eq!(c.active(t(0))[0].transcript.as_deref(), Some("go ahead"));
+        assert_eq!(
+            c.active(at + Duration::from_secs(1))[0].transcript.as_deref(),
+            Some("go ahead")
+        );
     }
 }

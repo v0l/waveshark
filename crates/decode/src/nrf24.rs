@@ -26,8 +26,8 @@
 //! Tables and layout from `pascallanger/DIY-Multiprotocol-TX-Module`
 //! (`XN297_EMU.ino`), whose emulation real toys bind to.
 
-use common::Decoded;
 use common::Value;
+use common::packet::{Entity, Id, Link, Party, Proto};
 use dsp::FirDecim;
 use dsp::fsk::BitSync;
 
@@ -252,27 +252,18 @@ pub fn fields(p: &Packet) -> Vec<(String, Value)> {
     ]
 }
 
-/// The row a frame off the bus becomes.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// What a frame off the bus says: which address transmitted.
+///
+/// A nRF24 address is whatever the two ends were told to use, so it names a
+/// link rather than a device that keeps the name.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let p = from_on_air(bytes)?;
-    let mut fields = fields(&p);
-    if let Some(ch) = channel_of(center.as_f64()) {
-        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
-    }
-    let address =
-        fields.iter().find(|(k, _)| k == "address").map(|(_, v)| v.to_string()).unwrap_or_default();
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+    let address: String = p.address.iter().map(|x| format!("{x:02x}")).collect();
     Some(
-        Decoded::bytes("XN297", center, 0.0, bytes.to_vec())
-            .by(common::Identity::new("nrf24", address.clone()))
-            .with_link(common::Link { from: Some(common::Party::unit(address)), to: None })
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Gfsk)
-            // The CRC-16 was checked again here, on the bytes in the row,
-            // rather than taken on trust from whatever put them on the bus.
-            .with_crc(Some(true)),
+        Proto::new("nrf24", "packet")
+            .by(Entity::new("nrf24", Id::Text(address.clone()))
+                .lasting(common::packet::Stability::Session))
+            .between(Link::from(Party::unit(address))),
     )
 }
 

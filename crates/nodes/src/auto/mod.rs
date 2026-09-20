@@ -23,7 +23,8 @@
 //! about where things are that the node keeps, because it is knowledge about
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
-use common::{Hz, Packet, Result, SourceBlock};
+use common::packet::Packet;
+use common::{Hz, Result, SourceBlock};
 use dsp::{SourceConfig, SourceDetector, SourceEvent};
 use pipeline::Graph;
 use pipeline::event::{Event, Request};

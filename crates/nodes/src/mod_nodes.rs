@@ -17,7 +17,7 @@
 //! and a clipped carrier splatters across the band instead of staying in the
 //! channel it was tuned to.
 
-use common::{C32, Package, Result};
+use common::{C32, Pulse, Result};
 use pipeline::Tag;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -82,10 +82,9 @@ fn raised_cosine(x: f32) -> f32 {
 /// timings the way a detector takes it off the air, and half of one is the
 /// most that can be shaped without eating the symbol beside it. What the
 /// shape buys is measured in `a_shaped_edge_is_quieter_off_channel_than_a_cut`.
-fn edge_samples(pkg: &Package, per_us: f64, silent_last: bool) -> Option<usize> {
-    let last = pkg.pulses.len().saturating_sub(1);
-    let shortest = pkg
-        .pulses
+fn edge_samples(burst: &[Pulse], per_us: f64, silent_last: bool) -> Option<usize> {
+    let last = burst.len().saturating_sub(1);
+    let shortest = burst
         .iter()
         .enumerate()
         .flat_map(|(i, p)| match silent_last && i == last {
@@ -194,18 +193,18 @@ impl OokModNode {
     }
 
     /// Samples this package will produce at the negotiated rate.
-    pub fn sample_count(&self, pkg: &Package) -> usize {
+    pub fn sample_count(&self, burst: &[Pulse]) -> usize {
         let per_us = self.rate / 1e6;
-        pkg.pulses.iter().map(|p| ((p.mark as f64 + p.gap as f64) * per_us).round() as usize).sum()
+        burst.iter().map(|p| ((p.mark as f64 + p.gap as f64) * per_us).round() as usize).sum()
     }
 
-    /// Key one package into `out`, carrying the carrier phase across calls so
+    /// Key one burst into `out`, carrying the carrier phase across calls so
     /// consecutive blocks join without a discontinuity.
-    fn key(&mut self, pkg: &Package, out: &mut Vec<C32>) {
+    fn key(&mut self, burst: &[Pulse], out: &mut Vec<C32>) {
         let per_us = self.rate / 1e6;
         let ramp = ((self.ramp_us as f64 * per_us).round() as usize).max(1);
 
-        for p in &pkg.pulses {
+        for p in burst.iter() {
             let mark = ((p.mark as f64 * per_us).round() as usize).max(1);
             let gap = (p.gap as f64 * per_us).round() as usize;
             // A ramp longer than half the symbol would never reach full
@@ -240,7 +239,7 @@ impl Simple for OokModNode {
     }
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
-        if input.spec.kind != PortKind::Pulses {
+        if input.spec.kind != PortKind::Timings {
             return Err(common::Error::other("ook_mod takes pulse timings"));
         }
         if input.spec.rate <= 0.0 {
@@ -266,11 +265,11 @@ impl Simple for OokModNode {
         output: &mut Payload,
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(pkgs) = input.as_pulses() else {
+        let Some(bursts) = input.as_timings() else {
             return Ok(());
         };
         let out = output.iq_mut();
-        for pkg in pkgs {
+        for pkg in bursts {
             let pkg = pkg.clone();
             let start = self.produced + out.len() as u64;
             self.key(&pkg, out);
@@ -336,7 +335,7 @@ impl Rest {
 ///
 /// The transmit side of `dsp::fsk`, and it inherits that side's convention: a
 /// mark is the upper tone and a gap the lower one, which is all
-/// [`PortKind::Pulses`] can say. Anything with more than two levels needs a
+/// [`PortKind::Timings`] can say. Anything with more than two levels needs a
 /// port that carries symbols rather than durations.
 ///
 /// The one gap that can mean something else is the last one in a package,
@@ -399,20 +398,20 @@ impl FskModNode {
         self
     }
 
-    fn key(&mut self, pkg: &Package, out: &mut Vec<C32>) {
+    fn key(&mut self, burst: &[Pulse], out: &mut Vec<C32>) {
         let per_us = self.rate / 1e6;
         let (hi, lo) = (self.offset_hz + self.shift_hz / 2.0, self.offset_hz - self.shift_hz / 2.0);
         let silent = self.rest == Rest::Silence;
-        // The shortest element seen, not the shortest in this package: a
+        // The shortest element seen, not the shortest in this burst: a
         // block cuts a transmission wherever it falls, and a fragment
         // holding none of the shortest symbol would shape an edge over one.
-        if let Some(e) = edge_samples(pkg, per_us, silent) {
+        if let Some(e) = edge_samples(burst, per_us, silent) {
             self.edge = self.edge.min(e);
         }
         let ramp = self.edge;
         let start = out.len();
-        let last = pkg.pulses.len().saturating_sub(1);
-        for (i, p) in pkg.pulses.iter().enumerate() {
+        let last = burst.len().saturating_sub(1);
+        for (i, p) in burst.iter().enumerate() {
             // A zero mark is a real thing here, where it is not for a keyed
             // carrier: both tones are carrier, so a pulse with no mark is a
             // run of the lower tone and nothing more. A BLE preamble starts
@@ -469,7 +468,7 @@ impl Simple for FskModNode {
     }
 
     fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
-        if input.spec.kind != PortKind::Pulses {
+        if input.spec.kind != PortKind::Timings {
             return Err(common::Error::other("fsk_mod takes pulse timings"));
         }
         if input.spec.rate <= 0.0 {
@@ -494,11 +493,11 @@ impl Simple for FskModNode {
         output: &mut Payload,
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        let Some(pkgs) = input.as_pulses() else {
+        let Some(bursts) = input.as_timings() else {
             return Ok(());
         };
         let out = output.iq_mut();
-        for pkg in pkgs {
+        for pkg in bursts {
             let pkg = pkg.clone();
             let start = self.produced + out.len() as u64;
             self.key(&pkg, out);
@@ -930,7 +929,7 @@ mod tests {
     use super::*;
     use common::Pulse;
 
-    fn modulate(pkg: &Package, rate: f64, offset: f64, ramp_us: f32) -> Vec<C32> {
+    fn modulate(pkg: &[Pulse], rate: f64, offset: f64, ramp_us: f32) -> Vec<C32> {
         let mut n = OokModNode::new(offset, 0.5, ramp_us);
         n.rate = rate;
         let mut out = Vec::new();
@@ -941,8 +940,7 @@ mod tests {
     #[test]
     fn a_keyed_dot_is_as_long_as_it_was_asked_to_be() {
         let rate = 250_000.0;
-        let pkg =
-            Package { pulses: vec![Pulse { mark: 60_000, gap: 60_000 }], ..Default::default() };
+        let pkg = vec![Pulse { mark: 60_000, gap: 60_000 }];
         let iq = modulate(&pkg, rate, 10_000.0, 0.0);
         assert_eq!(iq.len(), 30_000, "120 ms at 250 kS/s is 30000 samples");
         let on = iq.iter().filter(|c| c.norm() > 0.25).count();
@@ -954,7 +952,7 @@ mod tests {
     fn the_carrier_lands_at_the_offset_it_was_given() {
         let rate = 250_000.0;
         let offset = 12_500.0;
-        let pkg = Package { pulses: vec![Pulse { mark: 40_000, gap: 0 }], ..Default::default() };
+        let pkg = vec![Pulse { mark: 40_000, gap: 0 }];
         let iq = modulate(&pkg, rate, offset, 100.0);
         // Average phase advance per sample over the steady part.
         let mid = &iq[2000..8000];
@@ -972,8 +970,7 @@ mod tests {
         // hard-switched one splatters, and this is the measurement that says
         // by how much rather than an assertion that it does.
         let rate = 250_000.0;
-        let pkg =
-            Package { pulses: vec![Pulse { mark: 20_000, gap: 20_000 }], ..Default::default() };
+        let pkg = vec![Pulse { mark: 20_000, gap: 20_000 }];
         let hard = modulate(&pkg, rate, 0.0, 0.0);
         let soft = modulate(&pkg, rate, 0.0, 1000.0);
 
@@ -998,7 +995,7 @@ mod tests {
     #[test]
     fn phase_is_continuous_across_packages() {
         let rate = 250_000.0;
-        let pkg = Package { pulses: vec![Pulse { mark: 4_000, gap: 0 }], ..Default::default() };
+        let pkg = vec![Pulse { mark: 4_000, gap: 0 }];
         let mut n = OokModNode::new(10_000.0, 0.5, 0.0);
         n.rate = rate;
         let mut a = Vec::new();
@@ -1048,7 +1045,7 @@ mod tests {
         let rate = 250_000.0;
         let mut n = FskModNode::new(0.0, 50_000.0, 0.5);
         let spec = StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate,
             center: common::Hz(433_920_000),
             bandwidth: rate,
@@ -1056,8 +1053,8 @@ mod tests {
             ..Default::default()
         };
         n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
-        let pkg = Package { pulses: vec![Pulse { mark: 4_000, gap: 4_000 }], ..Default::default() };
-        let iq = run(&mut n, Payload::Pulses(vec![pkg]), spec);
+        let pkg = vec![Pulse { mark: 4_000, gap: 4_000 }];
+        let iq = run(&mut n, Payload::Timings(vec![pkg]), spec);
         assert_eq!(iq.len(), 2_000);
         assert!((mean_hz(&iq[100..900], rate) - 25_000.0).abs() < 200.0);
         assert!((mean_hz(&iq[1_100..1_900], rate) + 25_000.0).abs() < 200.0);
@@ -1075,7 +1072,7 @@ mod tests {
         let rate = 250_000.0;
         let mut n = FskModNode::new(0.0, 50_000.0, 0.5);
         let spec = StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate,
             center: common::Hz(0),
             bandwidth: rate,
@@ -1083,8 +1080,8 @@ mod tests {
             ..Default::default()
         };
         n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
-        let pkg = Package { pulses: vec![Pulse { mark: 4_000, gap: 4_000 }], ..Default::default() };
-        let iq = run(&mut n, Payload::Pulses(vec![pkg]), spec);
+        let pkg = vec![Pulse { mark: 4_000, gap: 4_000 }];
+        let iq = run(&mut n, Payload::Timings(vec![pkg]), spec);
         // Step across the boundary, against the step either side of it.
         let at = 1_000;
         let jump = (iq[at] * iq[at - 1].conj()).arg().abs();
@@ -1099,7 +1096,7 @@ mod tests {
     fn a_rest_is_silence_when_the_stage_was_told_it_is() {
         let rate = 1_000_000.0;
         let spec = StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate,
             center: common::Hz(433_920_000),
             bandwidth: rate,
@@ -1107,18 +1104,15 @@ mod tests {
             ..Default::default()
         };
         // A burst of 400 us and then a 1 ms rest, sent twice.
-        let pkg = Package {
-            pulses: vec![
-                Pulse { mark: 100, gap: 100 },
-                Pulse { mark: 100, gap: 100 },
-                Pulse { mark: 0, gap: 1_000 },
-            ],
-            ..Default::default()
-        };
+        let pkg = vec![
+            Pulse { mark: 100, gap: 100 },
+            Pulse { mark: 100, gap: 100 },
+            Pulse { mark: 0, gap: 1_000 },
+        ];
         let key = |rest: Rest| -> Vec<C32> {
             let mut n = FskModNode::new(0.0, 250_000.0, 0.5).resting(rest);
             n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
-            run(&mut n, Payload::Pulses(vec![pkg.clone(), pkg.clone()]), spec)
+            run(&mut n, Payload::Timings(vec![pkg.clone(), pkg.clone()]), spec)
         };
         let (tone, silent) = (key(Rest::Tone), key(Rest::Silence));
         assert_eq!(tone.len(), 2_800, "1.4 ms of package twice at 1 MS/s");
@@ -1172,7 +1166,7 @@ mod tests {
     fn a_shift_wider_than_the_stream_is_refused() {
         let mut n = FskModNode::new(0.0, 300_000.0, 0.5);
         let spec = StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate: 250_000.0,
             center: common::Hz(0),
             bandwidth: 250_000.0,

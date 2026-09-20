@@ -20,7 +20,7 @@ const FIXTURE: &str = "../../testdata/droneid_mini4k_2444.5M_15360k.cs8";
 const RATE: f64 = 15_360_000.0;
 const CENTER: u64 = 2_444_500_000;
 
-fn frames() -> Option<Vec<common::Frame>> {
+fn frames() -> Option<Vec<common::packet::Packet>> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     if !p.exists() {
         eprintln!("skipping: {FIXTURE} absent, run testdata/fetch.sh to enable");
@@ -39,9 +39,9 @@ fn frames() -> Option<Vec<common::Frame>> {
     let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
     let mut out = Vec::new();
     for block in iq.chunks(65_536) {
-        let mut o = Payload::Frames(Vec::new());
+        let mut o = Payload::Packets(Vec::new());
         node.process(&Payload::Iq(block.to_vec()), &mut o, &mut ctx).expect("process");
-        out.extend(o.as_frames().unwrap_or(&[]).iter().cloned());
+        out.extend(o.as_packets().unwrap_or(&[]).iter().cloned());
     }
     Some(out)
 }
@@ -55,7 +55,7 @@ fn the_capture_decodes_seven_frames_from_one_airframe() {
 
     let parsed: Vec<decode::droneid::Frame> = frames
         .iter()
-        .map(|f| decode::droneid::parse(&f.bytes[4..]).expect("a frame behind its CRC"))
+        .map(|f| decode::droneid::parse(&f.bytes()[4..]).expect("a frame behind its CRC"))
         .collect();
     for f in &parsed {
         assert_eq!(f.serial, "F8PJC254J001JR4R", "the serial on the airframe");
@@ -73,7 +73,7 @@ fn the_capture_decodes_seven_frames_from_one_airframe() {
 fn an_aircraft_without_a_fix_reports_no_position() {
     let Some(frames) = frames() else { return };
     for f in &frames {
-        let p = decode::droneid::parse(&f.bytes[4..]).expect("a frame");
+        let p = decode::droneid::parse(&f.bytes()[4..]).expect("a frame");
         assert_eq!(p.latitude, None, "latitude");
         assert_eq!(p.longitude, None, "longitude");
         assert_eq!(p.operator, None, "the operator's position");
@@ -89,13 +89,13 @@ fn an_aircraft_without_a_fix_reports_no_position() {
 fn every_frame_carries_its_measurements_and_its_samples() {
     let Some(frames) = frames() else { return };
     for f in &frames {
-        assert!(f.rssi_dbfs.is_finite(), "rssi");
-        assert!(f.snr_db.is_finite(), "snr");
-        assert!(f.iq.is_some(), "the samples the frame was read from");
+        assert!(f.carrier.rssi_dbfs.is_finite(), "rssi");
+        assert!(f.carrier.snr_db.is_finite(), "snr");
+        assert!(f.carrier.iq.is_some(), "the samples the frame was read from");
         // Measured off the bench a metre away: strong, and well clear of the
         // floor beside it.
-        assert!((-20.0..-8.0).contains(&f.rssi_dbfs), "{}", f.rssi_dbfs);
-        assert!(f.snr_db > 15.0, "{}", f.snr_db);
+        assert!((-20.0..-8.0).contains(&f.carrier.rssi_dbfs), "{}", f.carrier.rssi_dbfs);
+        assert!(f.carrier.snr_db > 15.0, "{}", f.carrier.snr_db);
     }
 }
 
@@ -103,10 +103,8 @@ fn every_frame_carries_its_measurements_and_its_samples() {
 #[test]
 fn a_frame_becomes_a_row_naming_the_serial() {
     let Some(frames) = frames() else { return };
-    let d = decode::droneid::decoded(&frames[0].bytes, Hz(CENTER)).expect("a row");
-    assert_eq!(d.protocol, "DJI-DroneID");
-    assert_eq!(d.crc_ok, Some(true));
-    let detail = d.detail.as_deref().unwrap();
-    assert!(detail.contains("serial=F8PJC254J001JR4R"), "{detail}");
-    assert!(!detail.contains("latitude"), "no fix, so no position: {detail}");
+    let d = decode::droneid::read(frames[0].bytes()).expect("a row");
+    assert_eq!(d.id, "droneid");
+    assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("F8PJC254J001JR4R"));
+    assert_eq!(d.placed(), None, "the aircraft had no fix, so it said no place");
 }

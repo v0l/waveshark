@@ -18,7 +18,7 @@
 //! wherever it is.
 
 use crate::bits::{BCH_63_51_GEN, BCH_127_106_GEN, bch_parity, bch63_51, bch127_106};
-use common::Decoded;
+use common::packet::{Alert, AlertKind, Entity, Fact, Fix, Id, Named, Proto, Severity, ThingKind};
 use dsp::biphase::CHIPS_PER_BIT;
 
 /// Bits of the short message, and of the long one.
@@ -532,63 +532,38 @@ fn standard_position(format: Format, bits: &[bool]) -> Option<(f64, f64)> {
     ))
 }
 
-/// What the receiver makes of a beacon message.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a distress beacon says.
+///
+/// The whole point of one: somebody is in trouble, or is testing the thing
+/// that says so. A self test is an alert of its own kind so that a listener
+/// can tell the drill from the real thing.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let b = parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("hex_id".into(), common::Value::Text(b.hex_id.clone())),
-        ("country".into(), common::Value::Int(i64::from(b.country))),
-        ("protocol".into(), common::Value::Text(b.coding.label().into())),
-        ("beacon".into(), common::Value::Text(b.kind().into())),
-        (
-            "mode".into(),
-            common::Value::Text(
-                match b.mode {
-                    Mode::Distress => "distress",
-                    Mode::SelfTest => "self test",
-                }
-                .into(),
-            ),
-        ),
-    ];
-    match b.identity {
-        Identity::Mmsi { last_six, beacon } => {
-            fields.push(("mmsi_last_six".into(), common::Value::Int(i64::from(last_six))));
-            fields.push(("beacon_number".into(), common::Value::Int(i64::from(beacon))));
-        }
-        Identity::AircraftAddress(a) => {
-            fields.push(("aircraft_address".into(), common::Value::Text(format!("{a:06X}"))));
-        }
-        Identity::Serial { certificate, serial } => {
-            fields.push(("certificate".into(), common::Value::Int(i64::from(certificate))));
-            fields.push(("serial".into(), common::Value::Int(i64::from(serial))));
-        }
-        Identity::Unknown => {}
-    }
-    if let Some(homing) = b.homing_121_5 {
-        fields.push(("homing_121_5".into(), common::Value::Bool(homing)));
-    }
-    if b.corrected > 0 {
-        fields.push(("corrected_bits".into(), common::Value::Int(i64::from(b.corrected))));
-    }
-
-    let mut d = Decoded::bytes("epirb", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Psk2)
-        .with_crc(Some(true))
-        .with_text(b.summary())
-        .with_detail(detail(&b))
-        .with_fields(fields)
-        .by(common::Identity::new("epirb", b.hex_id.clone()).named(b.kind()));
+    let mut p = Proto::new("epirb", mode_kind(b.mode))
+        .by(Entity::new("epirb", Id::Text(b.hex_id.clone())).named(b.kind()))
+        .saying(Fact::Named(Named::new(b.kind(), ThingKind::Mark)))
+        .saying(Fact::Alert(Alert {
+            kind: match b.mode {
+                Mode::Distress => AlertKind::Distress,
+                Mode::SelfTest => AlertKind::Test,
+            },
+            severity: match b.mode {
+                Mode::Distress => Severity::Immediate,
+                Mode::SelfTest => Severity::Advisory,
+            },
+            text: Some(b.summary()),
+        }));
     if let Some((lat, lon)) = b.position {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: None,
-            speed_kt: None,
-            course_deg: None,
-        });
+        p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: None }));
     }
-    Some(d)
+    Some(p)
+}
+
+fn mode_kind(m: Mode) -> &'static str {
+    match m {
+        Mode::Distress => "distress",
+        Mode::SelfTest => "self_test",
+    }
 }
 
 pub fn detail(b: &Beacon) -> String {

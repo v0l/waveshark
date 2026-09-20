@@ -33,7 +33,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
 use common::Result;
 pub use decode::droneid::TAG;
-pub use decode::droneid::decoded;
+pub use decode::droneid::read;
 pub use decode::droneid::wrap;
 use identify::Signal;
 pub use identify::droneid::DEFAULT_HZ;
@@ -42,7 +42,6 @@ pub use identify::droneid::RATE_HZ;
 pub use identify::droneid::THRESHOLD;
 pub use identify::droneid::WIDTH_HZ;
 pub use identify::droneid::channels;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -94,7 +93,7 @@ impl Simple for DroneIdNode {
             _ => center,
         };
         self.span = Some(span);
-        let mut out = input.spec.with_kind(PortKind::Frames);
+        let mut out = input.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
         out.bandwidth = WIDTH_HZ;
         Ok(out)
@@ -107,7 +106,7 @@ impl Simple for DroneIdNode {
         let _ = ctx;
         self.bursts.clear();
         span.process(iq, &mut self.bursts);
-        let out = output.frames_mut();
+        let out = output.packets_mut();
         for b in &self.bursts {
             // The bits are a frame when the CRC-16 the aircraft computed says
             // so; a correlation peak that was not a burst does not get that
@@ -115,16 +114,22 @@ impl Simple for DroneIdNode {
             if decode::droneid::parse(&b.frame).is_none() {
                 continue;
             }
-            let mut frame = common::Frame::measured(wrap(&b.frame), b.rssi_dbfs, b.snr_db)
-                .at(b.center_hz as u64);
+            let mut p = crate::measured(
+                b.center_hz as u64,
+                WIDTH_HZ as u32,
+                wrap(&b.frame),
+                b.rssi_dbfs,
+                b.snr_db,
+            );
             // The whole burst is the frame's own samples, at the rate the
             // centre was read at rather than the span's.
-            frame.iq = Some(std::sync::Arc::new(common::IqBurst {
+            p.carrier.iq = Some(std::sync::Arc::new(common::IqBurst {
                 rate: b.rate,
                 center_hz: b.center_hz as u64,
                 samples: b.samples.clone(),
             }));
-            out.push(frame);
+            // Both CRCs, the header's and the frame's, checked before here.
+            out.push(p.checked(common::packet::Integrity::Passed));
         }
         Ok(())
     }
@@ -160,8 +165,9 @@ impl Protocol for DroneId {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
 
     /// A burst is 720 us roughly twice a second, so a decoder that owns its
@@ -199,8 +205,8 @@ impl Protocol for DroneId {
     /// An aircraft repeats the same frame twice a second and most of it does
     /// not change on the ground. One row per serial per sequence number, so a
     /// stationary drone is one row and a moving one is a row a burst.
-    fn dedupe_key(&self, p: &common::Packet) -> Option<Vec<u8>> {
-        let common::PacketBody::Frame(fr) = &p.body else {
+    fn dedupe_key(&self, p: &common::packet::Packet) -> Option<Vec<u8>> {
+        let Some(fr) = p.frame.as_ref() else {
             return None;
         };
         let f = decode::droneid::parse(fr.bytes.get(4..)?)?;
@@ -243,22 +249,25 @@ mod tests {
         frame.resize(decode::droneid::FRAME_LEN - 2, 0);
         let crc = decode::droneid::crc16(&frame);
         frame.extend(crc.to_le_bytes());
-        let d = decoded(&wrap(&frame), common::Hz(2_444_500_000)).expect("a row");
-        assert_eq!(d.protocol, "DJI-DroneID");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("serial=F8PJC254J001JR4R"), "{detail}");
-        assert_eq!(d.crc_ok, Some(true));
+        let d = read(&wrap(&frame)).expect("a row");
+        assert_eq!(d.id, "droneid");
+        // The airframe's serial, which is the identity this protocol exists
+        // to broadcast and is printed on the aircraft.
+        assert_eq!(
+            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+            Some("F8PJC254J001JR4R")
+        );
     }
 
     #[test]
     fn bytes_that_are_not_a_frame_are_not_a_row() {
-        assert!(decoded(&[0u8; 40], common::Hz(2_444_500_000)).is_none());
+        assert!(read(&[0u8; 40]).is_none());
         // A frame with no tag in front of it did not come from here.
-        assert!(decoded(&off_air(), common::Hz(2_444_500_000)).is_none());
+        assert!(read(&off_air()).is_none());
         // And one whose CRC does not check is not reported at all.
         let mut bad = off_air();
         bad.resize(decode::droneid::FRAME_LEN, 0);
-        assert!(decoded(&wrap(&bad), common::Hz(2_444_500_000)).is_none());
+        assert!(read(&wrap(&bad)).is_none());
     }
 
     #[test]

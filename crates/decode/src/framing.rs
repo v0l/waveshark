@@ -67,6 +67,11 @@ impl Framing {
 
     /// The first four bytes after the preamble, the candidate sync word, as
     /// hex. Two receptions of one device agree here; two devices do not.
+    /// The sync word as it was on the air, for a packet's framing layer
+    pub fn sync_bytes(&self) -> Vec<u8> {
+        self.frame.as_bytes().iter().take(4).copied().collect()
+    }
+
     pub fn sync_hex(&self) -> String {
         self.frame.as_bytes().iter().take(4).map(|b| format!("{b:02x}")).collect()
     }

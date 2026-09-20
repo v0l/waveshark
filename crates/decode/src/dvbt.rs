@@ -17,7 +17,7 @@
 use crate::mpegts::Mux;
 use crate::rs::ReedSolomon;
 use common::C32;
-use common::Decoded;
+use common::packet::{Cell, Fact, Id, Named, Proto, ThingKind};
 use dsp::conv;
 use dsp::dvbt::{Inner, Mode, Params, Symbol};
 
@@ -503,60 +503,33 @@ impl DvbtReceiver {
 }
 
 /// What the multiplex's own parameters say about it.
-pub fn multiplex_decoded(params: Params, snr: f32, center: common::Hz, at: f64) -> Decoded {
-    let mut fields = vec![
-        ("mode".into(), common::Value::Text(params.mode.label().into())),
-        ("guard".into(), common::Value::Text(params.guard.label().into())),
-        ("constellation".into(), common::Value::Text(params.constellation.label().into())),
-        ("code_rate".into(), common::Value::Text(params.code_rate_hp.label().into())),
-        ("bitrate".into(), common::Value::Float(params.bitrate())),
-        ("snr_db".into(), common::Value::Float(snr as f64)),
-    ];
-    if let Some(cell) = params.cell_id {
-        fields.push(("cell_id".into(), common::Value::Text(format!("{cell:04X}"))));
+///
+/// The keying is the keying and is not repeated here; what is left is the
+/// transmitter's own identity, which is the cell identifier where it sends
+/// one.
+pub fn multiplex_read(params: Params) -> Proto {
+    let p = Proto::new("dvbt", "multiplex");
+    match params.cell_id {
+        Some(cell) => {
+            p.saying(Fact::Infrastructure(Cell { cell: Some(u64::from(cell)), ..Cell::default() }))
+        }
+        None => p,
     }
-    let detail = format!("{} {:.1} Mbit/s", params.label(), params.bitrate() / 1e6);
-    Decoded::bytes("DVB-T", center, at, Vec::new())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Ofdm)
-        .with_crc(Some(true))
 }
 
 /// A service, once the description table has named it.
-pub fn service_decoded(mux: &Mux, id: u16, center: common::Hz, at: f64) -> Option<Decoded> {
-    let Some(service) = mux.service(id) else { return None };
-    let Some(name) = service.name.clone() else { return None };
-    let mut fields = vec![
-        ("service".into(), common::Value::Text(name.clone())),
-        ("service_id".into(), common::Value::Int(id as i64)),
-    ];
-    if let Some(p) = &service.provider {
-        fields.push(("provider".into(), common::Value::Text(p.clone())));
-    }
-    if let Some(v) = service.video() {
-        fields.push(("video".into(), common::Value::Text(v.kind.label().into())));
-    }
-    if let Some(a) = service.audio() {
-        fields.push(("audio".into(), common::Value::Text(a.kind.label().into())));
-    }
-    if service.scrambled {
-        fields.push(("scrambled".into(), common::Value::Text("yes".into())));
-    }
-    let detail = match &service.provider {
-        Some(p) => format!("{name} ({p})"),
-        None => name.clone(),
-    };
-    // A service keeps its identity across multiplexes and retunes, which
-    // is what the device list rows on.
-    let who = common::Identity::new("dvb-service", format!("{id}")).named(name);
+///
+/// A service keeps its identity across multiplexes and retunes, which is what
+/// a station list rows on.
+pub fn service_read(mux: &Mux, id: u16) -> Option<Proto> {
+    let service = mux.service(id)?;
+    let name = service.name.clone()?;
+    let mut named = Named::new(name.clone(), ThingKind::Station).fixed();
+    named.role = service.video().map(|_| "television").or(Some("radio"));
     Some(
-        Decoded::bytes("DVB-T", center, at, Vec::new())
-            .by(who)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Ofdm)
-            .with_crc(Some(true)),
+        Proto::new("dvbt", "service")
+            .by(common::packet::Entity::new("dvb-service", Id::Num(u64::from(id))).named(name))
+            .saying(Fact::Named(named)),
     )
 }
 

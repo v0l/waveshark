@@ -52,9 +52,8 @@ impl Signal for Ais {
         frames
             .iter()
             .filter_map(|f| {
-                let hz = CHANNEL_HZ[(f.channel as usize).min(CHANNEL_HZ.len() - 1)];
                 let parsed = ais::parse(&f.payload).ok()?;
-                Some(ais::decoded(&parsed, &f.payload, common::Hz(hz as u64)))
+                Some(ais::read(&parsed))
             })
             .collect::<Vec<_>>()
             .into()

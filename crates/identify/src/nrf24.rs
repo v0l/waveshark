@@ -60,12 +60,12 @@ impl Signal for Nrf24 {
                 r.read(&narrow, &mut found);
             }
             for (_at, p) in &found {
-                if let Some(d) = nrf24::decoded(&p.on_air(), chan.hz()) {
+                if let Some(d) = nrf24::read(&p.on_air()) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

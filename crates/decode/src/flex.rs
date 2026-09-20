@@ -30,7 +30,7 @@
 //! it to the packet log.
 
 use crate::bits::{BCH_31_21_GEN, bch_parity, bch31_21};
-use common::Decoded;
+use common::packet::{Fact, Link, Party, Proto};
 
 /// Words in one phase of a frame.
 pub const PHASE_WORDS: usize = 88;
@@ -423,56 +423,22 @@ fn encode_numeric(text: &str) -> Vec<u32> {
 
 /// The decodes one frame becomes: one per page, across every phase.
 ///
+/// What a frame says: one layer per page.
+///
 /// A frame carries the whole transmitter's queue for its slot, so it is
-/// several pages to several pagers and each is a row of its own. What they
-/// share is the bytes they came out of, which travel with each so that the
-/// log holds the evidence.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Vec<Decoded> {
-    use common::Value;
+/// several pages to several pagers and each is a statement of its own. The
+/// capcode is the pager addressed, never the sender.
+pub fn read(bytes: &[u8]) -> Vec<Proto> {
     let Some(frame) = dsp::flex::Frame::from_bytes(bytes) else { return Vec::new() };
-    let fiw = Fiw::parse(frame.fiw);
     let names = frame.mode.phase_names();
     let mut out = Vec::new();
     for (phase, name) in frame.phases.iter().zip(names) {
         for page in pages(phase, *name) {
-            let mut fields: Vec<(String, Value)> = vec![
-                ("capcode".into(), Value::Int(i64::from(page.capcode))),
-                ("baud".into(), Value::Int(i64::from(frame.mode.baud))),
-                ("levels".into(), Value::Int(i64::from(frame.mode.levels))),
-                ("phase".into(), Value::Text(page.phase.to_string())),
-            ];
-            if let Some(f) = fiw {
-                fields.push(("cycle".into(), Value::Int(i64::from(f.cycle))));
-                fields.push(("frame".into(), Value::Int(i64::from(f.frame))));
-            }
-            if let Some(t) = &page.text {
-                fields.push(("message".into(), Value::Text(t.clone())));
-            }
-            let detail = match &page.text {
-                Some(t) => format!("capcode={} {t}", page.capcode),
-                None => format!("capcode={} tone only", page.capcode),
-            };
-            let mut d = Decoded::bytes(page.kind.label(), center, 0.0, bytes.to_vec())
-                .by(common::Identity::new("flex", page.capcode.to_string()))
-                .with_link(common::Link {
-                    from: None,
-                    to: Some(common::Party::unit(page.capcode.to_string())),
-                })
-                .with_detail(detail)
-                .with_fields(fields)
-                .with_modulation(match frame.mode.levels {
-                    4 => common::Modulation::Fsk4,
-                    _ => common::Modulation::Fsk2,
-                })
-                // Every word behind this page passed BCH(31,21) and the
-                // word's own parity bit, or was corrected by them.
-                .with_crc(Some(true));
-            if let Some(t) = page.text {
-                // A page is written to whoever carries the pager, whether a
-                // person typed it or an alarm system did.
-                d = d.written().with_text(t);
-            }
-            out.push(d);
+            out.push(
+                Proto::new("flex", page.kind.label())
+                    .between(Link { from: None, to: Some(Party::unit(page.capcode.to_string())) })
+                    .maybe(page.text.map(Fact::message)),
+            );
         }
     }
     out

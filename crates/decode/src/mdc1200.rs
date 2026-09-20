@@ -28,7 +28,7 @@
 //! produced the on-air blocks the tests carry.
 
 use crate::bits;
-use common::Decoded;
+use common::packet::{Alert, AlertKind, Entity, Fact, Id, Link, Party, Proto, Severity};
 
 /// The sync word every MDC decoder looks for, most significant bit first.
 pub const SYNC: u64 = 0x07_09_2A_44_6F;
@@ -92,6 +92,20 @@ impl Operation {
             Operation::CallAlert => "call alert".into(),
             Operation::SelectiveCall => "selective call".into(),
             Operation::Other { op, arg } => format!("op {op:02x} arg {arg:02x}"),
+        }
+    }
+
+    /// Which message it is, for a row and for anything matching on it
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Operation::PttIdPre => "ptt_id",
+            Operation::PttIdPost => "ptt_id_end",
+            Operation::Emergency => "emergency",
+            Operation::RequestToTalk => "request_to_talk",
+            Operation::RemoteMonitor => "remote_monitor",
+            Operation::CallAlert => "call_alert",
+            Operation::SelectiveCall => "selective_call",
+            Operation::Other { .. } => "other",
         }
     }
 
@@ -345,33 +359,30 @@ pub fn encode_tones(op: u8, arg: u8, unit: u16, status: u8, leader_bytes: usize)
         .collect()
 }
 
-/// One row: which radio, and what it was saying.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// Which radio, and what it was saying.
+///
+/// A call alert names the radio being paged and every other burst names the
+/// one transmitting, so the identifier is the subject in one case and the
+/// party called in the other. A directory that took it for the sender either
+/// way had a fleet where every radio paged itself.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let m = parse(bytes)?;
-    let unit = m.unit_hex();
-    let role = match m.operation.addresses_target() {
-        true => "target",
-        false => "unit",
+    let who = Entity::new("radio-unit", Id::Text(m.unit_hex()));
+    let mut p = Proto::new("mdc1200", m.operation.kind());
+    p = match m.operation.addresses_target() {
+        true => p.between(Link { from: None, to: Some(Party::unit(m.unit_hex())) }),
+        false => p.by(who).between(Link::from(Party::unit(m.unit_hex()))),
     };
-    let fields = vec![
-        (role.to_string(), common::Value::Text(unit.clone())),
-        ("operation".into(), common::Value::Text(m.operation.label())),
-        ("op".into(), common::Value::Int(i64::from(m.op))),
-        ("arg".into(), common::Value::Int(i64::from(m.arg))),
-        ("status".into(), common::Value::Int(i64::from(m.status))),
-    ];
-    Some(
-        Decoded::bytes("MDC-1200", center, 0.0, bytes.to_vec())
-            // The same namespace `ident` publishes a DTMF PTT-ID under: one
-            // fleet's unit numbers, sent two ways.
-            .by(common::Identity::new("radio-unit", unit.clone()))
-            .with_detail(format!("{unit} {}", m.operation.label()))
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Msk)
-            // The burst carried a CRC over its four information bytes and
-            // this row exists because it passed.
-            .with_crc(Some(true)),
-    )
+    // A radio declaring an emergency is the one thing here somebody has to
+    // be told about rather than shown in a list.
+    if m.operation == Operation::Emergency {
+        p = p.saying(Fact::Alert(Alert {
+            kind: AlertKind::Emergency,
+            severity: Severity::Immediate,
+            text: None,
+        }));
+    }
+    Some(p)
 }
 
 #[cfg(test)]

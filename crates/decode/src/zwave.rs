@@ -21,8 +21,8 @@
 
 use crate::bits::manchester;
 use crate::bits::{crc16, xor8};
-use common::Decoded;
 use common::Value;
+use common::packet::{Entity, Id, Link, Party, Proto};
 use dsp::fsk::BitSync;
 
 /// The byte a transmitter repeats while a receiver finds the clock: twenty
@@ -434,37 +434,37 @@ pub fn singlecast_control(sequence: u8, ack_request: bool) -> [u8; 2] {
     [0x1 | if ack_request { 0x40 } else { 0 }, sequence & 0xf]
 }
 
-/// The row a frame off the bus becomes.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a frame off the bus says: which node spoke, and to which.
+///
+/// The command class is the kind, so a row says what the frame was for
+/// without anything reading a field: a sensor report and a door lock's basic
+/// set are different news on the same network.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let f = parse(bytes)?;
-    let fields = f.fields();
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = common::Link {
-        from: Some(common::Party::unit(f.source_id())),
-        to: Some(if f.dest == NODE_BROADCAST {
-            common::Party::broadcast()
-        } else {
-            common::Party::unit(f.dest_id())
-        }),
-    };
-    let text = match f.command_class() {
-        Some(cc) => format!("{} {} -> {}", command_class(cc), f.source, f.dest),
-        None => format!("{} {} -> {}", f.header, f.source, f.dest),
-    };
     Some(
-        Decoded::bytes("Z-Wave", center, 0.0, bytes.to_vec())
-            .by(common::Identity::new("zwave", f.source_id()))
-            .with_link(link)
-            .with_text(text)
-            .with_detail(detail)
-            .with_fields(fields)
-            // 9.6 kbit/s is keyed the same way and Manchester coded above
-            // it, so the modulation is the same for all three rates.
-            .with_modulation(common::Modulation::Fsk2)
-            // The check was run again here, on the bytes in the row, rather
-            // than taken on trust from whatever put them on the bus.
-            .with_crc(Some(true)),
+        Proto::new("zwave", frame_kind(&f))
+            .by(Entity::new("zwave", Id::Text(f.source_id())))
+            .between(Link {
+                from: Some(Party::unit(f.source_id())),
+                to: Some(match f.dest == NODE_BROADCAST {
+                    true => Party::broadcast(),
+                    false => Party::unit(f.dest_id()),
+                }),
+            }),
     )
+}
+
+/// A frame's kind: the header, since the command class runs to hundreds and
+/// a row matches on a closed set
+fn frame_kind(f: &Frame) -> &'static str {
+    match f.header {
+        HeaderType::Singlecast => "singlecast",
+        HeaderType::Multicast => "multicast",
+        HeaderType::Ack => "ack",
+        HeaderType::Routed => "routed",
+        HeaderType::Explorer => "explorer",
+        HeaderType::Other(_) => "other",
+    }
 }
 
 /// Symbols kept behind the search, so a frame split across two blocks is

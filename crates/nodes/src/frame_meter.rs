@@ -16,12 +16,85 @@
 //! every one of these front ends is fed, that is the level of the thing that
 //! was demodulated.
 
-use common::{C32, IqBurst};
+use common::packet::{Frame as PacketFrame, Heard, Packet, dbfs, mean_power};
+use common::{C32, IqBurst, SourceId};
 use std::sync::Arc;
+
+/// The reception a receiver locked to a multiplex is describing.
+///
+/// A broadcast receiver publishes what it is tuned to rather than a burst
+/// somebody sent: an ensemble's name, a service's, the parameters a multiplex
+/// is running. That is still a statement made on the strength of what is
+/// coming in, so it carries how the block it was read from was heard, and the
+/// one number the receiver itself reports is the ratio it locked at.
+pub fn locked(
+    center_hz: u64,
+    bandwidth_hz: u32,
+    iq: &[C32],
+    snr_db: f32,
+) -> common::packet::Carrier {
+    common::packet::Carrier::heard(
+        common::packet::now_us(),
+        center_hz,
+        bandwidth_hz,
+        dbfs(mean_power(iq)),
+        snr_db.max(0.0),
+        SourceId(0),
+    )
+}
+
+/// The reception something read off demodulated audio.
+///
+/// Past the demodulator there is no measurement of the air left to take, so
+/// the level is the audio's own and the ratio is not claimed. A statement
+/// made here is about the channel rather than about a burst: a coded squelch,
+/// a unit identifier keyed in tones.
+pub fn off_audio(center_hz: u64, bandwidth_hz: u32, audio: &[f32]) -> common::packet::Carrier {
+    let power = match audio.is_empty() {
+        true => 0.0,
+        false => audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32,
+    };
+    common::packet::Carrier::heard(
+        common::packet::now_us(),
+        center_hz,
+        bandwidth_hz,
+        dbfs(power),
+        0.0,
+        SourceId(0),
+    )
+}
+
+/// A reception a front end measured for itself.
+///
+/// For a demodulator that reads the burst and knows what it stood at: Mode S
+/// off its preamble, BLE off the floor either side, a LoRa header off its
+/// own equaliser. The channel is the front end's own, which is finer than the
+/// port's where a span holds several channels it reads.
+pub fn measured(
+    center_hz: u64,
+    bandwidth_hz: u32,
+    bytes: Vec<u8>,
+    rssi_dbfs: f32,
+    snr_db: f32,
+) -> Packet {
+    let carrier = common::packet::Carrier::heard(
+        common::packet::now_us(),
+        center_hz,
+        bandwidth_hz,
+        rssi_dbfs,
+        snr_db,
+        SourceId(0),
+    );
+    Packet::heard(carrier).framed(PacketFrame::of(bytes))
+}
 
 pub struct FrameMeter {
     rate: f64,
     center_hz: u64,
+    /// The stream this reads, so a packet says which front end heard it. Set
+    /// by whoever built the meter, since a node knows its own source and this
+    /// does not
+    source: SourceId,
     /// Samples kept behind the demodulator, so a frame can carry what it was
     /// read from. Bounded in seconds because the front ends run at rates
     /// three orders of magnitude apart: 48 kS/s of pager audio and 20 MS/s
@@ -41,6 +114,7 @@ impl FrameMeter {
         Self {
             rate,
             center_hz,
+            source: SourceId(0),
             keep: (keep_s * rate).max(1.0) as usize,
             ring: Vec::new(),
             base: 0,
@@ -48,6 +122,12 @@ impl FrameMeter {
             peak_pow: 0.0,
             floor_pow: f32::NAN,
         }
+    }
+
+    /// Say which stream this is measuring
+    pub fn from(mut self, source: SourceId) -> Self {
+        self.source = source;
+        self
     }
 
     pub fn reset(&mut self) {
@@ -63,7 +143,7 @@ impl FrameMeter {
         if iq.is_empty() {
             return;
         }
-        let pow = iq.iter().map(|c| c.norm_sqr()).sum::<f32>() / iq.len() as f32;
+        let pow = mean_power(iq);
         self.peak_pow = self.peak_pow.max(pow);
         self.floor_pow = if self.floor_pow.is_nan() { pow } else { pow.min(self.floor_pow * 1.01) };
         self.seen += iq.len() as u64;
@@ -79,7 +159,7 @@ impl FrameMeter {
     }
 
     pub fn rssi_dbfs(&self) -> f32 {
-        10.0 * self.peak_pow.max(1e-20).log10()
+        dbfs(self.peak_pow)
     }
 
     /// Peak against floor, both clamped at the same -200 dBFS [`Self::rssi_dbfs`]
@@ -88,7 +168,7 @@ impl FrameMeter {
     /// answer there is "as far above nothing as the peak is" rather than NaN:
     /// a level that is not a number cannot be sorted, compared or drawn.
     pub fn snr_db(&self) -> f32 {
-        10.0 * (self.peak_pow.max(1e-20) / self.floor_pow.max(1e-20)).max(1.0).log10()
+        (dbfs(self.peak_pow) - dbfs(self.floor_pow)).max(0.0)
     }
 
     /// Everything read since the last frame was taken, which is the burst
@@ -135,8 +215,7 @@ impl FrameMeter {
         if s.is_empty() {
             return None;
         }
-        let pow = s.iter().map(|c| c.norm_sqr()).sum::<f32>() / s.len() as f32;
-        Some(10.0 * pow.max(1e-20).log10())
+        Some(dbfs(mean_power(s)))
     }
 
     /// A frame's own power against the channel's floor, in dB.
@@ -147,9 +226,14 @@ impl FrameMeter {
     /// every forty milliseconds is usually some other frame.
     pub fn snr_db_at(&self, start_sample: u64, len: usize) -> f32 {
         match self.power_dbfs_at(start_sample, len) {
-            Some(p) => (p - 10.0 * self.floor_pow.max(1e-20).log10()).max(0.0),
+            Some(p) => (p - dbfs(self.floor_pow)).max(0.0),
             None => self.snr_db(),
         }
+    }
+
+    /// The floor this channel has settled at, for whatever measures against it
+    pub fn floor_dbfs(&self) -> f32 {
+        dbfs(self.floor_pow)
     }
 
     /// A frame at what its own samples measured, with those samples behind
@@ -162,36 +246,61 @@ impl FrameMeter {
     /// noise floor is the quietest block it has seen, which on a carrier
     /// that never stops transmitting is the carrier, so the ratio was
     /// nought. A demodulator that equalises knows better than this does.
-    pub fn frame_measured(
+    pub fn packet_measured(
         &mut self,
         bytes: Vec<u8>,
         start_sample: u64,
         len: usize,
         snr_db: f32,
-    ) -> common::Frame {
-        common::Frame {
-            bytes,
-            center_hz: self.center_hz,
-            rssi_dbfs: self.power_dbfs_at(start_sample, len).unwrap_or_else(|| self.rssi_dbfs()),
+    ) -> Packet {
+        let here = Heard::new(self.rate, self.center_hz, self.rate as u32, self.source)
+            .at(common::packet::now_us(), self.seen);
+        let held = (len as f64 / self.rate * 1e6) as u32;
+        let carrier = here.reported(
+            start_sample,
+            self.power_dbfs_at(start_sample, len).unwrap_or_else(|| self.rssi_dbfs()),
             snr_db,
-            iq: self.iq_at(start_sample, len),
-        }
+            held,
+        );
+        let carrier = match self.iq_at(start_sample, len) {
+            Some(q) => carrier.with_iq(q),
+            None => carrier,
+        };
+        Packet::heard(carrier).framed(PacketFrame::of(bytes))
     }
 
-    /// A frame at what the channel measured, with the samples behind it.
+    /// The reception of a frame at what the channel measured, stamped now.
     ///
     /// The level is reset afterwards, so the next frame measures its own
     /// transmission rather than the loudest one of the session.
-    pub fn frame(&mut self, bytes: Vec<u8>) -> common::Frame {
-        let f = common::Frame {
-            bytes,
-            center_hz: self.center_hz,
-            rssi_dbfs: self.rssi_dbfs(),
-            snr_db: self.snr_db(),
-            iq: self.iq_since_last(),
+    pub fn packet_now(&mut self, bytes: Vec<u8>) -> Packet {
+        self.packet(bytes, common::packet::now_us())
+    }
+
+    /// The reception a frame was read at: the carrier it stood on and the
+    /// bytes that came off it.
+    ///
+    /// The one way a front end that makes bytes puts a packet together, so
+    /// nothing downstream has to repair a level, a centre or a set of samples
+    /// that never arrived. The width is the channel the front end was fed,
+    /// which is the width the frame was heard through.
+    pub fn packet(&mut self, bytes: Vec<u8>, at_us: u64) -> Packet {
+        let here = Heard::new(self.rate, self.center_hz, self.rate as u32, self.source)
+            .at(at_us, self.seen);
+        let iq = self.iq_since_last();
+        let held = iq.as_ref().map(|q| q.samples.len()).unwrap_or(0);
+        let carrier = here.reported(
+            self.seen,
+            self.rssi_dbfs(),
+            self.snr_db(),
+            (held as f64 / self.rate * 1e6) as u32,
+        );
+        let carrier = match iq {
+            Some(q) => carrier.with_iq(q),
+            None => carrier,
         };
         self.peak_pow = 0.0;
-        f
+        Packet::heard(carrier).framed(PacketFrame::of(bytes))
     }
 }
 
@@ -204,15 +313,44 @@ mod tests {
         let mut m = FrameMeter::new(1_000_000.0, 868_000_000, 0.1);
         m.feed(&vec![C32::new(0.01, 0.0); 1000]);
         m.feed(&vec![C32::new(0.5, 0.0); 1000]);
-        let f = m.frame(vec![1, 2, 3]);
+        let f = m.packet_now(vec![1, 2, 3]);
         // 0.5 of full scale is a quarter of the power: -6 dBFS.
-        assert!(f.rssi_dbfs > -7.0 && f.rssi_dbfs < -5.0, "rssi {}", f.rssi_dbfs);
-        assert!(f.snr_db > 30.0, "snr {}", f.snr_db);
-        assert_eq!(f.iq.as_ref().map(|q| q.samples.len()), Some(2000));
-        assert_eq!(f.center_hz, 868_000_000);
+        assert!(
+            f.carrier.rssi_dbfs > -7.0 && f.carrier.rssi_dbfs < -5.0,
+            "rssi {}",
+            f.carrier.rssi_dbfs
+        );
+        assert!(f.carrier.snr_db > 30.0, "snr {}", f.carrier.snr_db);
+        assert_eq!(f.carrier.iq.as_ref().map(|q| q.samples.len()), Some(2000));
+        assert_eq!(f.carrier.center_hz, 868_000_000);
         // The next frame measures its own transmission, not this one.
         m.feed(&vec![C32::new(0.05, 0.0); 1000]);
-        let g = m.frame(vec![4]);
-        assert!(g.rssi_dbfs < f.rssi_dbfs - 10.0, "{} then {}", f.rssi_dbfs, g.rssi_dbfs);
+        let g = m.packet_now(vec![4]);
+        assert!(
+            g.carrier.rssi_dbfs < f.carrier.rssi_dbfs - 10.0,
+            "{} then {}",
+            f.carrier.rssi_dbfs,
+            g.carrier.rssi_dbfs
+        );
+    }
+
+    /// A packet leaves here complete: nothing downstream may have to fill in
+    /// a level, a centre or the samples it was read from.
+    #[test]
+    fn a_packet_needs_nothing_filling_in_afterwards() {
+        let mut m = FrameMeter::new(1_000_000.0, 868_000_000, 0.1).from(SourceId(3));
+        m.feed(&vec![C32::new(0.01, 0.0); 1000]);
+        m.feed(&vec![C32::new(0.5, 0.0); 1000]);
+        let p = m.packet(vec![1, 2, 3], 1_788_177_600_000_000);
+        assert!(p.carrier.rssi_dbfs.is_finite() && p.carrier.snr_db.is_finite());
+        assert!(p.carrier.rssi_dbfs > -7.0 && p.carrier.rssi_dbfs < -5.0);
+        assert_eq!(p.carrier.center_hz, 868_000_000);
+        assert_eq!(p.carrier.bandwidth_hz, 1_000_000);
+        assert_eq!(p.carrier.source, SourceId(3));
+        assert_eq!(p.carrier.duration_us, 2_000, "two thousand samples at 1 MS/s");
+        assert_eq!(p.carrier.iq.as_ref().map(|q| q.samples.len()), Some(2000));
+        assert_eq!(p.frame.as_ref().map(|f| f.bytes.as_slice()), Some(&[1u8, 2, 3][..]));
+        // And nothing was concluded about it here: that is the decoder's job.
+        assert!(p.stack.is_empty());
     }
 }

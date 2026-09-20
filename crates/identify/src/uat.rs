@@ -51,13 +51,12 @@ impl Signal for Uat {
         for b in iq.chunks(crate::BLOCK) {
             det.process_valid(b, &mut bursts, &|b: &SyncBurst| uat::correct(b).is_some());
         }
-        let center = common::Hz(uat::CHANNEL_HZ as u64);
         bursts
             .iter()
             .filter_map(uat::correct)
             .filter_map(|c| {
                 let frame = uat::parse(&c.data)?;
-                Some(uat::decoded(&frame, &c.data, center))
+                Some(uat::read(&frame))
             })
             .flatten()
             .collect::<Vec<_>>()

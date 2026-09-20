@@ -26,7 +26,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::rtty::decoded;
+pub use decode::rtty::read;
 use decode::rtty::{self, Shift, Speed};
 pub use decode::rtty::{IDLE_SYMBOLS, MAX_CHARS, MIN_CHARS, MIN_PRINTABLE, QUIET_SYMBOLS};
 use dsp::afsk::Symbol;
@@ -37,7 +37,6 @@ pub use identify::rtty::AUDIO_HZ;
 pub use identify::rtty::CHANNEL_WIDTH_HZ;
 pub use identify::rtty::DEFAULT_HZ;
 pub use identify::rtty::Rtty;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -129,7 +128,7 @@ impl Simple for RttyNode {
             return Err(common::Error::other("rtty needs four samples a symbol"));
         }
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -149,7 +148,7 @@ impl Simple for RttyNode {
         for sym in &symbols {
             if let Some(run) = self.line.push(*sym) {
                 self.runs += 1;
-                o.frames_mut().push(self.meter.frame(run));
+                o.packets_mut().push(self.meter.packet_now(run));
             }
         }
         self.symbols = symbols;
@@ -234,11 +233,12 @@ impl Protocol for Rtty {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 30_000_000 }
     }
-    fn read_frame(&self, _p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !is_baudot(bytes) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(_p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} RTTY", hz / 1e6)
@@ -340,7 +340,7 @@ impl Simple for RttyTxNode {
         }
         self.rate = i.spec.rate;
         Ok(StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             rate: i.spec.rate,
             center: i.spec.center,
             bandwidth: CHANNEL_WIDTH_HZ,
@@ -354,7 +354,7 @@ impl Simple for RttyTxNode {
         if i.is_empty() {
             return Ok(());
         }
-        o.pulses_mut().extend(self.keyer.take(i.len(), self.rate));
+        o.timings_mut().extend(self.keyer.take(i.len(), self.rate));
         Ok(())
     }
 
@@ -437,6 +437,14 @@ fn shift_of(v: &ParamValue) -> Option<Shift> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The text a layer states, where it states one.
+    fn wrote(d: &common::packet::Proto) -> Option<String> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Message(w) => Some(w.text.clone()),
+            _ => None,
+        })
+    }
     use common::{C32, Hz};
 
     fn spec(rate: f64, center: f64) -> PortSpec {
@@ -478,12 +486,12 @@ mod tests {
         let mut frames = Vec::new();
         for block in iq.chunks(4096) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         frames
@@ -514,14 +522,14 @@ mod tests {
         let frames = run(&mut node, &iq, rate, center);
 
         assert_eq!(frames.len(), 1, "{} runs off the air", frames.len());
-        let d = decoded(&frames[0], Hz(channel as u64)).expect("a decode");
-        assert_eq!(d.text.as_deref(), Some(OVER));
-        assert_eq!(d.protocol, "RTTY");
-        assert!(d.written, "an operator typed it");
+        let d = read(&frames[0]).expect("a decode");
+        assert_eq!(wrote(&d).as_deref(), Some(OVER));
+        assert_eq!((d.id, d.kind), ("rtty", "text"));
+
         // The text is 24 characters and the five-bit code needs four shifts
-        // to reach the digits in the two calls and back again.
-        assert_eq!(d.field("characters").and_then(|v| v.as_i64()), Some(29));
-        assert_eq!(d.crc_ok, None, "nothing in RTTY checks");
+        // to reach the digits in the two calls and back again, which is what
+        // the frame holds.
+        assert_eq!(frames[0].len(), 29);
     }
 
     /// The transmitter into the receiver: an over keyed by the chain the
@@ -550,9 +558,9 @@ mod tests {
         node.negotiate(&spec(rate, center)).unwrap();
         let frames = run(&mut node, &air, rate, center);
         assert_eq!(frames.len(), 1, "{} runs off the air", frames.len());
-        let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
-        assert_eq!(d.text.as_deref(), Some(OVER));
-        assert_eq!(d.field("characters").and_then(|v| v.as_i64()), Some(29));
+        let d = read(&frames[0]).expect("a decode");
+        assert_eq!(wrote(&d).as_deref(), Some(OVER));
+        assert_eq!(frames[0].len(), 29);
     }
 
     /// The same over with mark and space the other way about, which is what
@@ -567,8 +575,8 @@ mod tests {
             node.negotiate(&spec(rate, center)).unwrap();
             let frames = run(&mut node, &iq, rate, center);
             assert_eq!(frames.len(), 1, "inverted={invert}: {} runs", frames.len());
-            let d = decoded(&frames[0], Hz(center as u64)).expect("a decode");
-            assert_eq!(d.text.as_deref(), Some(OVER), "inverted={invert}");
+            let d = read(&frames[0]).expect("a decode");
+            assert_eq!(wrote(&d).as_deref(), Some(OVER), "inverted={invert}");
         }
     }
 

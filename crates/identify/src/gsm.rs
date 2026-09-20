@@ -75,7 +75,7 @@ impl Signal for Gsm {
                     },
                     Hit::Block(b) => b.bytes.to_vec(),
                 };
-                rows.extend(gsm::rows(&bytes, center));
+                rows.extend(gsm::read(&bytes, center));
             }
         }
         rows.into()

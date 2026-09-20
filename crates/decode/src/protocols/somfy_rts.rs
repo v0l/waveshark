@@ -25,7 +25,7 @@
 use crate::bits::BitBuffer;
 use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing, manchester_decode, slice_manchester_half};
-use dsp::pulse::Package;
+use common::Pulse;
 
 pub struct SomfyRts;
 
@@ -87,15 +87,15 @@ impl Protocol for SomfyRts {
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
         // Only reachable if a caller hands over bits it paired itself. The
-        // real entry point is decode_package, which needs the raw half-symbol
+        // real entry point is decode_burst, which needs the raw half-symbol
         // stream to find the sync; here the bits are already Manchester
         // symbols, so all that is left is to read a frame off the front.
         parse(bits, 0).ok_or(DecodeError::NotThisProtocol)
     }
 
-    fn decode_package(&self, pkg: &Package) -> Result<Report, DecodeError> {
-        let raw =
-            slice_manchester_half(pkg, &self.timing()).map_err(|_| DecodeError::NotThisProtocol)?;
+    fn decode_burst(&self, pulses: &[Pulse]) -> Result<Report, DecodeError> {
+        let raw = slice_manchester_half(pulses, &self.timing())
+            .map_err(|_| DecodeError::NotThisProtocol)?;
         // A detector may hand the level stream inverted; try both polarities.
         for inverted in [false, true] {
             let r = if inverted { raw.inverted() } else { raw.clone() };
@@ -174,7 +174,7 @@ mod tests {
         address: u32,
         sync: &[u8],
         sync_bits: usize,
-    ) -> Package {
+    ) -> Vec<Pulse> {
         let mut f = [0u8; DATA_BYTES];
         f[0] = seed;
         f[1] = control << 4;
@@ -240,17 +240,7 @@ mod tests {
         // always close with a terminator; otherwise a frame whose last half is
         // low would lose it.
         pulses.push((0, TE));
-        Package {
-            pulses: pulses
-                .into_iter()
-                .map(|(m, g)| dsp::pulse::Pulse { mark: m, gap: g })
-                .collect(),
-            snr_db: 20.0,
-            rssi_dbfs: -12.0,
-            center_hz: 0,
-            start_sample: 0,
-            modulation: None,
-        }
+        pulses.into_iter().map(|(m, g)| dsp::pulse::Pulse { mark: m, gap: g }).collect()
     }
 
     #[test]
@@ -260,7 +250,7 @@ mod tests {
         let raw = slice_manchester_half(&p, &SomfyRts.timing()).unwrap();
         // sanity: raw is a half-symbol stream, the sync search should find it
         assert!(raw.find(&[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00], 49).is_some());
-        let r = SomfyRts.decode_package(&p).unwrap();
+        let r = SomfyRts.decode_burst(&p).unwrap();
         assert_eq!(r.model, "Somfy-RTS");
         assert_eq!(r.get("control"), Some(&crate::protocol::Value::Text("Up".into())));
         assert_eq!(r.get("counter"), Some(&crate::protocol::Value::Int(0x01fe)));
@@ -274,10 +264,10 @@ mod tests {
             frame(0x5b, 2, 0x01fe, 0x123456, &[0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xff, 0x00], 49);
         // Flip one data half-symbol by stretching a mark past its neighbour,
         // which corrupts a bit without disturbing the sync word.
-        let n = p.pulses.len();
-        p.pulses[n - 4].mark += TE;
-        p.pulses[n - 4].gap -= TE;
-        assert!(SomfyRts.decode_package(&p).is_err());
+        let n = p.len();
+        p[n - 4].mark += TE;
+        p[n - 4].gap -= TE;
+        assert!(SomfyRts.decode_burst(&p).is_err());
     }
 
     #[test]
@@ -285,21 +275,14 @@ mod tests {
         let pulses: Vec<_> = (0..40)
             .map(|i| dsp::pulse::Pulse { mark: TE * (1 + i % 3), gap: TE * (1 + (i + 1) % 3) })
             .collect();
-        let p = Package {
-            pulses,
-            snr_db: 20.0,
-            rssi_dbfs: -12.0,
-            center_hz: 0,
-            start_sample: 0,
-            modulation: None,
-        };
-        assert!(SomfyRts.decode_package(&p).is_err());
+        let p = pulses;
+        assert!(SomfyRts.decode_burst(&p).is_err());
     }
 
     #[test]
     fn decodes_a_first_frame() {
         let p = frame(0xa7, 8, 0x0001, 0x0000aa, &[0xf0, 0xf0, 0xff, 0x00], 25);
-        let r = SomfyRts.decode_package(&p).unwrap();
+        let r = SomfyRts.decode_burst(&p).unwrap();
         assert_eq!(r.get("control"), Some(&crate::protocol::Value::Text("Prog".into())));
         assert_eq!(r.get("counter"), Some(&crate::protocol::Value::Int(1)));
         assert_eq!(r.get("id"), Some(&crate::protocol::Value::Int(0x0000aa)));

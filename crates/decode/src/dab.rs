@@ -20,7 +20,7 @@
 use crate::bits::crc16;
 use crate::whiten::Prbs9;
 use common::C32;
-use common::Decoded;
+use common::packet::{Fact, Id, Named, Proto, ThingKind};
 use dsp::conv;
 use dsp::dab::{Dab, Mode, Symbol};
 
@@ -1007,75 +1007,33 @@ impl DabReceiver {
 
 /// What an ensemble is, once its name has arrived.
 ///
-/// A row rather than a port, because what DAB puts on the air about itself is
-/// a description of the multiplex and not a packet anybody sent. `None` until
-/// the ensemble label has been read.
-pub fn ensemble_decoded(rx: &DabReceiver, center: common::Hz, at: f64) -> Option<Decoded> {
+/// A statement rather than a port, because what DAB puts on the air about
+/// itself is a description of the multiplex and not a packet anybody sent.
+/// `None` until the ensemble label has been read.
+pub fn ensemble_read(rx: &DabReceiver) -> Option<Proto> {
     let e = rx.ensemble();
-    let Some(name) = e.name.clone() else { return None };
-    let stats = rx.stats();
-    let mut fields = vec![
-        ("ensemble".into(), common::Value::Text(name.clone())),
-        ("mode".into(), common::Value::Text(rx.front.mode().label().into())),
-        ("services".into(), common::Value::Int(e.services.len() as i64)),
-        ("snr_db".into(), common::Value::Float(rx.snr_db() as f64)),
-    ];
-    if let Some(id) = e.id {
-        fields.push(("ensemble_id".into(), common::Value::Text(format!("{id:04X}"))));
-    }
-    if let Some(q) = stats.quality() {
-        fields.push(("blocks_ok".into(), common::Value::Float((100.0 * q) as f64)));
-    }
-    let detail = match e.id {
-        Some(id) => format!("{name} ({id:04X})"),
-        None => name.clone(),
-    };
+    let name = e.name.clone()?;
     Some(
-        Decoded::bytes("DAB", center, at, Vec::new())
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Ofdm)
-            .with_crc(Some(true)),
+        Proto::new("dab", "ensemble")
+            .saying(Fact::Named(Named::new(name, ThingKind::Station).fixed())),
     )
 }
 
 /// A service of the ensemble, once the tables have named it.
-pub fn service_decoded(rx: &DabReceiver, id: u32, center: common::Hz, at: f64) -> Option<Decoded> {
+///
+/// A service keeps its identifier across ensembles and retunes, which is what
+/// a station list rows on.
+pub fn service_read(rx: &DabReceiver, id: u32) -> Option<Proto> {
     let e = rx.ensemble();
-    let Some(service) = e.service(id) else { return None };
-    let Some(name) = service.name.clone() else { return None };
-    let audio = service.audio();
-    let sub = audio.and_then(|(id, _)| e.sub_channel(id)).copied();
-    let mut fields = vec![
-        ("service".into(), common::Value::Text(name.clone())),
-        ("service_id".into(), common::Value::Text(format!("{id:04X}"))),
-    ];
-    if let Some((_, kind)) = audio {
-        fields.push(("audio".into(), common::Value::Text(kind.label())));
-    }
-    if let Some(pty) = service.programme_type.filter(|p| *p != ProgrammeType::None) {
-        fields.push(("programme".into(), common::Value::Text(pty.label().into())));
-    }
-    if let Some(sub) = sub {
-        fields.push(("subchannel".into(), common::Value::Int(sub.id as i64)));
-        fields.push(("bitrate".into(), common::Value::Int(sub.bitrate_kbps as i64)));
-        fields.push(("protection".into(), common::Value::Text(sub.protection.label())));
-    }
-    let detail = match (audio.map(|(_, k)| k.label()), sub.map(|s| s.bitrate_kbps)) {
-        (Some(kind), Some(rate)) => format!("{name} ({kind}, {rate} kbit/s)"),
-        (Some(kind), None) => format!("{name} ({kind})"),
-        _ => name.clone(),
-    };
-    // A service keeps its identifier across ensembles and retunes, which
-    // is what a station list rows on.
-    let who = common::Identity::new("dab-service", format!("{id:04X}")).named(name);
+    let service = e.service(id)?;
+    let name = service.name.clone()?;
+    let mut named = Named::new(name.clone(), ThingKind::Station).fixed();
+    named.state = service.programme_type.filter(|p| *p != ProgrammeType::None).map(|p| p.label());
     Some(
-        Decoded::bytes("DAB", center, at, Vec::new())
-            .by(who)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Ofdm)
-            .with_crc(Some(true)),
+        Proto::new("dab", if service.audio().is_some() { "audio_service" } else { "data_service" })
+            .by(common::packet::Entity::new("dab-service", Id::Text(format!("{id:04X}")))
+                .named(name))
+            .saying(Fact::Named(named)),
     )
 }
 

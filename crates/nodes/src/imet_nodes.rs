@@ -16,7 +16,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::imet;
-pub use decode::imet::decoded;
+pub use decode::imet::read;
 use dsp::afsk::{AfskBits, AfskConfig, Symbol};
 use dsp::{FirDecim, FmDemod, Mixer};
 use identify::Signal;
@@ -25,7 +25,6 @@ pub use identify::imet::BAND;
 pub use identify::imet::CHANNEL_WIDTH_HZ;
 pub use identify::imet::DEVIATION_HZ;
 pub use identify::imet::Imet;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -97,7 +96,7 @@ impl Simple for ImetNode {
         self.bits = AfskBits::new(audio_rate, AfskConfig::default());
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
     }
@@ -119,7 +118,7 @@ impl Simple for ImetNode {
         for sym in &symbols {
             if let Some(run) = self.framer.push(*sym) {
                 self.frames += 1;
-                o.frames_mut().push(self.meter.frame(run));
+                o.packets_mut().push(self.meter.packet_now(run));
             }
         }
         self.audio = audio;
@@ -162,12 +161,13 @@ impl Protocol for Imet {
     }
     /// Claimed on the packets themselves: the band holds every make of
     /// sonde, and an iMet transmission is a run of packets that check.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz) || imet::packet_len(bytes).is_none() {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes, common::Hz(p.center_hz())).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -273,13 +273,17 @@ mod tests {
         assert_eq!(got.len(), 1, "{} transmissions", got.len());
         assert_eq!(got[0], frame, "the bytes are not the ones that were keyed");
 
-        let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
-        assert_eq!(d.field("serial").map(|v| v.to_string()).as_deref(), Some("iMet-0513-4030"));
-        assert_eq!(d.field("temperature_c").map(|v| v.to_string()).as_deref(), Some("-21.5"));
-        let p = d.position.expect("a position");
+        let d = read(&got[0], common::Hz(403_000_000)).expect("a decode");
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("iMet-0513-4030"));
+        let p = d.placed().expect("a position");
         assert!((p.lat - 53.35).abs() < 1e-5, "{}", p.lat);
         assert!((p.lon + 5.0).abs() < 1e-5, "{}", p.lon);
-        assert_eq!(p.altitude_m, Some(4_712.0));
+        // An iMet is the one sonde that sends the weather worked out.
+        assert!(d.facts.contains(&common::packet::Fact::sensed(
+            common::packet::Quantity::Temperature,
+            -21.5,
+            common::Unit::Celsius
+        )));
     }
 
     /// Twenty seconds of noise produces no transmissions. The line will

@@ -13,7 +13,7 @@
 //! with a payload needs the packing, and neither wants the other's DSP.
 
 use crate::bits::{Ldpc, crc_bits};
-use common::Decoded;
+use common::packet::{Entity, Fact, Fix, Link, Party, Proto};
 use std::sync::OnceLock;
 
 /// Bits a station composes.
@@ -687,8 +687,12 @@ pub fn grid_position(grid: &str) -> Option<(f64, f64)> {
     Some((lat, lon))
 }
 
-/// What a frame off the bus says: the message, and who said what to whom.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What an FT8 or FT4 transmission says.
+///
+/// An operator's radio sent it on their behalf, to a station they named: a
+/// call, a report and an acknowledgement are a conversation however short the
+/// form is. A grid square is where the station says it is, to the square.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let mode = Mode::of_tag(*bytes.first()?)?;
     if bytes.len() != 1 + MESSAGE_BITS.div_ceil(8) {
         return None;
@@ -702,51 +706,23 @@ pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         scramble_ft4(&mut message);
     }
     let m = unpack(&message)?;
-    let mut fields = vec![("message".into(), common::Value::Text(m.text.clone()))];
-    if let Some(to) = &m.to {
-        fields.push(("to".into(), common::Value::Text(to.clone())));
-    }
+    let mut p = Proto::new(mode.kind(), "message").saying(Fact::message(m.text.clone()));
     if let Some(from) = &m.from {
-        fields.push(("from".into(), common::Value::Text(from.clone())));
+        p = p.by(Entity::call("callsign", from.clone()));
     }
-    if let Some(grid) = &m.grid {
-        fields.push(("grid".into(), common::Value::Text(grid.clone())));
-    }
-    if let Some(report) = m.report {
-        fields.push(("report_db".into(), common::Value::Int(report as i64)));
-    }
-    let mut d = Decoded::bytes(mode.label(), center, 0.0, bytes[1..].to_vec())
-        .with_modulation(match mode {
-            Mode::Ft8 => common::Modulation::Fsk8,
-            Mode::Ft4 => common::Modulation::Fsk4,
-        })
-        .with_crc(Some(true))
-        .with_detail(m.text.clone())
-        .with_fields(fields)
-        // An operator's radio sent it on their behalf, to a station they
-        // named: a call, a report and an acknowledgement are a conversation
-        // however short the form is.
-        .written()
-        .with_text(m.text.clone());
     if let (Some(from), Some(to)) = (&m.from, &m.to) {
-        d = d.with_link(common::Link::between(
-            common::Party::unit(from.clone()),
+        p = p.between(Link::between(
+            Party::unit(from.clone()),
             match to.as_str() {
-                "CQ" | "QRZ" | "DE" => common::Party::group(to.clone()),
-                _ => common::Party::unit(to.clone()),
+                "CQ" | "QRZ" | "DE" => Party::group(to.clone()),
+                _ => Party::unit(to.clone()),
             },
         ));
     }
     if let Some((lat, lon)) = m.grid.as_deref().and_then(grid_position) {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: None,
-            speed_kt: None,
-            course_deg: None,
-        });
+        p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: None }));
     }
-    Some(d)
+    Some(p)
 }
 
 pub fn unpack_bits(bytes: &[u8], n: usize) -> Vec<bool> {
@@ -762,6 +738,14 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Which mode it is, as the protocol name a row matches on
+    pub fn kind(self) -> &'static str {
+        match self {
+            Mode::Ft8 => "ft8",
+            Mode::Ft4 => "ft4",
+        }
+    }
+
     pub const ALL: [Mode; 2] = [Mode::Ft8, Mode::Ft4];
 
     pub fn waveform(self) -> dsp::mfsk::Waveform {

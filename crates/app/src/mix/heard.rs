@@ -44,6 +44,10 @@ pub struct LiveCall {
     /// The hang time has passed since the last speech: this is the last
     /// report of this call.
     pub over: bool,
+    /// What the system said about the transmission: the vocoder and what
+    /// protects it. Only a decoded call has one; an analogue channel says
+    /// nothing about itself.
+    pub said: Option<common::Over>,
     /// The conversation this was reported under before its labels filled in.
     ///
     /// Analogue identity arrives late: a coded squelch takes half a second of
@@ -128,6 +132,12 @@ impl HeardNode {
         };
         let key = common::ConversationKey::of(v);
         let peak = v.pcm.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        // A system that counts the channel for itself is talking whether or
+        // not the speech could be decoded: a P25 or NXDN call is 180 ms of
+        // the channel per frame, and a list that waited for audio showed
+        // nothing at all on a network whose vocoder is not built in.
+        let stated = v.over.as_ref().map(|o| o.seconds).filter(|s| *s > 0.0);
+        let block_s = stated.unwrap_or(block_s);
         // Keyed with nobody talking, because a trunked carrier holds several
         // groups: keyed by frequency alone the whole column moved whenever
         // any one of them spoke, and keyed by caller a meter would move to a
@@ -135,7 +145,7 @@ impl HeardNode {
         let m = self.peaks.entry(key.meter()).or_insert(0.0);
         *m = m.max(peak);
         self.peak = self.peak.max(peak);
-        let talking = peak > SPEECH_FLOOR;
+        let talking = peak > SPEECH_FLOOR || stated.is_some();
         let now = std::time::Instant::now();
         // An over whose labels fill in part way through is the same over.
         // Analogue identity arrives late by nature: a PTT-ID is tones that
@@ -186,6 +196,12 @@ impl HeardNode {
                 if v.code.is_some() {
                     c.code = v.code.clone();
                 }
+                // A grant names the cipher and the traffic that follows says
+                // nothing, so what was said stands until something says
+                // otherwise.
+                if v.over.is_some() {
+                    c.said = v.over.clone();
+                }
             }
             Some(c) => {
                 c.quiet_s += block_s;
@@ -208,6 +224,7 @@ impl HeardNode {
                         peak,
                         quiet_s: 0.0,
                         over: false,
+                        said: v.over.clone(),
                         was: None,
                     },
                 );
@@ -319,6 +336,7 @@ mod tests {
             to: Some(to.into()),
             from: Some(from.into()),
             code: None,
+            over: None,
             rate: 8_000.0,
             channels: 1,
             pcm: pcm.to_vec(),
@@ -370,6 +388,7 @@ mod tests {
             to: to.map(str::to_string),
             from: None,
             code: None,
+            over: None,
             rate: 48_000.0,
             channels: 1,
             pcm: vec![0.5; 480],

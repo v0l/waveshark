@@ -15,7 +15,7 @@ use common::Result;
 use dsp::NoiseMeter;
 use dsp::rds::{BlockSync, GroupDecoder, RdsDemod};
 use dsp::{FmDemod, StereoDecoder};
-use pipeline::event::{Decoded, Event, media};
+use pipeline::event::Event;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag, TagValue};
@@ -96,7 +96,6 @@ impl WfmDemodNode {
 
     fn emit_rds(&mut self, c: &mut NodeCtx<'_>) {
         let center = c.inputs[0].spec.center;
-        let at = c.timestamp();
         let before = self.groups.station().clone();
         for b in std::mem::take(&mut self.bits) {
             if let Some(g) = self.sync.push(b) {
@@ -110,11 +109,21 @@ impl WfmDemodNode {
             // repeating its name every 80 ms would flood the event log.
             if self.last_text.as_deref() != Some(text.as_str()) {
                 self.last_text = Some(text.clone());
+                let mut proto = common::packet::Proto::new("rds", "station");
+                if let Some(name) = now.name.clone() {
+                    proto = proto.saying(common::packet::Fact::Named(
+                        common::packet::Named::new(name, common::packet::ThingKind::Station)
+                            .fixed(),
+                    ));
+                }
+                if let Some(rt) = now.radiotext.clone() {
+                    proto = proto.saying(common::packet::Fact::Playing(rt));
+                }
+                let carrier = crate::off_audio(center.0, 0, &[]);
                 c.emit(Event::Decoded(
-                    Decoded::bytes("rds", center, at, text.clone().into_bytes())
-                        .with_media(media::TEXT)
-                        .with_text(text)
-                        .with_crc(Some(true)),
+                    common::packet::Packet::heard(carrier)
+                        .framed(common::packet::Frame::of(text.into_bytes()))
+                        .decoded(proto),
                 ));
             }
         }

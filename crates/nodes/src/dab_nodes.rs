@@ -16,7 +16,7 @@
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
 use common::{C32, Result};
-use decode::dab::{self, Audio, Ensemble, ProgrammeType};
+use decode::dab::{self, Ensemble};
 use dsp::dab::Mode;
 use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
@@ -55,6 +55,18 @@ impl Default for DabNode {
 }
 
 impl DabNode {
+    /// A statement about the multiplex this receiver is locked to, as a
+    /// reception: what it says is said on the strength of what is coming in.
+    fn locked_on(&self, said: common::packet::Proto) -> common::packet::Packet {
+        let carrier = crate::locked(
+            self.channel_hz as u64,
+            CHANNEL_WIDTH_HZ as u32,
+            &self.at_rate,
+            self.rx.snr_db(),
+        );
+        common::packet::Packet::heard(carrier).decoded(said)
+    }
+
     pub fn new(channel_hz: f64) -> Self {
         Self {
             channel_hz,
@@ -129,11 +141,10 @@ impl Simple for DabNode {
         let named = self.rx.ensemble().name.clone();
         if named.is_some()
             && self.told != named
-            && let Some(d) =
-                dab::ensemble_decoded(&self.rx, common::Hz(self.channel_hz as u64), self.at)
+            && let Some(d) = dab::ensemble_read(&self.rx)
         {
             self.told = named;
-            c.emit(pipeline::event::Event::Decoded(d));
+            c.emit(pipeline::event::Event::Decoded(self.locked_on(d)));
         }
         let fresh: Vec<u32> = self
             .rx
@@ -144,10 +155,8 @@ impl Simple for DabNode {
             .collect();
         for id in fresh {
             self.named.push(id);
-            if let Some(d) =
-                dab::service_decoded(&self.rx, id, common::Hz(self.channel_hz as u64), self.at)
-            {
-                c.emit(pipeline::event::Event::Decoded(d));
+            if let Some(d) = dab::service_read(&self.rx, id) {
+                c.emit(pipeline::event::Event::Decoded(self.locked_on(d)));
             }
         }
         let _ = o;
@@ -222,7 +231,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 /// An ensemble on the air, for a test that has to know what is in one.
 #[cfg(test)]
 pub fn transmit(seconds: f64) -> Vec<C32> {
-    use decode::dab::FicTx;
+    use decode::dab::{Audio, FicTx, ProgrammeType};
     let mode = Mode::I;
     let mut tx = FicTx::new();
     tx.ensemble(0xC1AB)
@@ -263,6 +272,7 @@ pub fn transmit(seconds: f64) -> Vec<C32> {
 mod tests {
     use super::*;
     use common::Hz;
+    use decode::dab::{Audio, ProgrammeType};
 
     /// Two seconds of a synthesised ensemble, read the whole way through: the
     /// ensemble's name, both stations, their programme types and the bit

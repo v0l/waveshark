@@ -53,12 +53,12 @@
 //!
 //! # The same directory from live packets or from the log
 //!
-//! Every row comes from a [`DecodeRecord`], so the directory is the same
-//! whether the records arrive from the bus or from `packetlog::read`. That is
+//! Every row comes from a [`Reception`], so the directory is the same
+//! whether the records arrive from the bus or from `wspkt::read`. That is
 //! what lets the pane show the past without the receiver holding a day of
 //! packets in memory.
 
-use crate::radio::DecodeRecord;
+use crate::row::Reception;
 use pipeline::event::{Party, PartyKind};
 use std::time::{Duration, Instant};
 
@@ -139,9 +139,9 @@ impl Link {
     /// arrived, read two ways, so a row in the log and a row in the follow
     /// view cannot disagree about the same packet, and following a link
     /// reaches as far back as the log does rather than as far as a buffer.
-    pub fn holds(&self, rec: &DecodeRecord) -> bool {
-        let Some(link) = &rec.link else { return false };
-        rec.system() == self.system && link.from == self.from && link.to == self.to
+    pub fn holds(&self, rec: &Reception) -> bool {
+        let Some(layer) = rec.packet.innermost() else { return false };
+        rec.system() == self.system && layer.link.from == self.from && layer.link.to == self.to
     }
 
     /// Whether the party called is many listeners rather than one radio.
@@ -165,11 +165,11 @@ impl Links {
     ///
     /// A decode with neither end named is not a link: an unknown burst has a
     /// frequency and a shape and nobody to attribute it to.
-    pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
-        let Some(link) = rec.link.clone() else {
+    pub fn update(&mut self, rec: &Reception, at: Instant) -> bool {
+        let Some(layer) = rec.packet.innermost() else {
             return false;
         };
-        let (from, to) = (link.from, link.to);
+        let (from, to) = (layer.link.from.clone(), layer.link.to.clone());
         // Both ends, or it is not a link. A beacon names one end and
         // addresses everybody, and "somebody transmitted" is a reception
         // rather than a conversation: the packet list has it, the device
@@ -187,14 +187,14 @@ impl Links {
         match found {
             Some(l) => {
                 l.last = at;
-                l.channel_hz = rec.freq;
+                l.channel_hz = rec.freq();
                 l.packets += 1;
-                l.bytes += rec.bytes.len() as u64;
-                l.last_rssi_dbfs = rec.rssi_dbfs;
-                if rec.rssi_dbfs > l.best_rssi_dbfs || l.best_rssi_dbfs.is_nan() {
-                    l.best_rssi_dbfs = rec.rssi_dbfs;
+                l.bytes += rec.bytes().len() as u64;
+                l.last_rssi_dbfs = rec.rssi_dbfs();
+                if rec.rssi_dbfs() > l.best_rssi_dbfs || l.best_rssi_dbfs.is_nan() {
+                    l.best_rssi_dbfs = rec.rssi_dbfs();
                 }
-                if rec.crc == Some(false) {
+                if rec.integrity() == common::packet::Integrity::Failed {
                     l.crc_failures += 1;
                 }
             }
@@ -203,14 +203,14 @@ impl Links {
                     system,
                     from,
                     to,
-                    channel_hz: rec.freq,
+                    channel_hz: rec.freq(),
                     first: at,
                     last: at,
                     packets: 1,
-                    bytes: rec.bytes.len() as u64,
-                    best_rssi_dbfs: rec.rssi_dbfs,
-                    last_rssi_dbfs: rec.rssi_dbfs,
-                    crc_failures: u64::from(rec.crc == Some(false)),
+                    bytes: rec.bytes().len() as u64,
+                    best_rssi_dbfs: rec.rssi_dbfs(),
+                    last_rssi_dbfs: rec.rssi_dbfs(),
+                    crc_failures: u64::from(rec.integrity() == common::packet::Integrity::Failed),
                 });
             }
         }
@@ -290,21 +290,18 @@ impl Links {
 /// microseconds are laid out relative to now, which keeps the spacing and the
 /// order and loses only the absolute clock, and nothing in the view uses one.
 pub fn from_log(path: &std::path::Path) -> std::io::Result<Links> {
-    let mut packets = crate::packetlog::read(path)?;
+    let mut packets = crate::wspkt::read(path)?;
     let mut node = nodes::PacketDecodeNode::default();
     let now = Instant::now();
-    let last_us = packets.iter().map(|p| p.at_us).max().unwrap_or(0);
+    let last_us = packets.iter().map(|p| p.carrier.at_us).max().unwrap_or(0);
     let mut links = Links::new();
     // One packet at a time, because a decode is stamped from the packet that
     // produced it and a batch would collapse a day into one instant.
     for p in &mut packets {
         node.annotate(std::slice::from_mut(p));
-        let ago = Duration::from_micros(last_us.saturating_sub(p.at_us));
+        let ago = Duration::from_micros(last_us.saturating_sub(p.carrier.at_us));
         let at = now.checked_sub(ago).unwrap_or(now);
-        for d in &p.decodes {
-            let rec = crate::chain::record_of(at, p, d);
-            links.update(&rec, at);
-        }
+        links.update(&Reception::new(at, p.clone()), at);
     }
     Ok(links)
 }
@@ -331,20 +328,12 @@ mod tests {
 
     /// A decode as a front end makes one: the parties are the decoder's own
     /// statement, which is the whole point of the typed link.
-    fn rec(model: &'static str, hz: f64, link: Option<EventLink>) -> DecodeRecord {
-        let mut r = DecodeRecord::for_test(hz, model);
-        r.rssi_dbfs = -40.0;
-        r.snr_db = 20.0;
-        r.bytes = vec![0; 10];
-        r.crc = Some(true);
-        r.link = link;
-        r
+    fn rec(model: &'static str, hz: f64, link: Option<EventLink>) -> Reception {
+        Reception::for_test(hz, model).of_bytes(vec![0; 10]).linked(link.unwrap_or_default())
     }
 
-    fn said(model: &'static str, hz: f64, link: EventLink, text: &str) -> DecodeRecord {
-        let mut r = rec(model, hz, Some(link));
-        r.fields = vec![("text".into(), common::Value::Text(text.into()))];
-        r
+    fn said(model: &'static str, hz: f64, link: EventLink, text: &str) -> Reception {
+        rec(model, hz, Some(link)).stating(common::packet::Fact::message(text))
     }
 
     fn t(secs: u64) -> Instant {
@@ -356,21 +345,21 @@ mod tests {
         let mut l = Links::new();
         let link = EventLink::between(Party::unit("1234567"), Party::group("9"));
         let link2 = link.clone();
-        assert!(l.update(&rec("DMR-Header", 446.1e6, Some(link.clone())), t(0)));
-        assert!(l.update(&rec("DMR-Voice", 446.1e6, Some(link)), t(1)));
+        assert!(l.update(&rec("dmr", 446.1e6, Some(link.clone())), t(0)));
+        assert!(l.update(&rec("dmr", 446.1e6, Some(link)), t(1)));
         let links = l.active(t(2));
         assert_eq!(links.len(), 1, "{:?}", links.iter().map(|x| x.title()).collect::<Vec<_>>());
         assert_eq!(links[0].packets, 2);
-        assert_eq!(links[0].title(), "DMR 1234567 -> 9");
+        assert_eq!(links[0].title(), "dmr 1234567 -> 9");
         // The kind travels with the party, so the directory knows this is a
         // talkgroup without knowing what DMR is.
         assert!(links[0].to_group());
         // And the packets of a link are the log's, filtered: `holds` is
         // what the follow view asks with.
-        let header = rec("DMR-Header", 446.1e6, Some(link2.clone()));
+        let header = rec("dmr", 446.1e6, Some(link2.clone()));
         assert!(links[0].holds(&header));
         let other = rec(
-            "DMR-Voice",
+            "dmr",
             446.1e6,
             Some(EventLink::between(Party::unit("7654321"), Party::group("9"))),
         );
@@ -385,7 +374,7 @@ mod tests {
     fn a_beacon_addressed_to_everybody_is_not_a_link() {
         let mut l = Links::new();
         assert!(!l.update(
-            &rec("BLE-Adv", 2426e6, Some(EventLink::beacon(Party::unit("6C:70:CB:EF:72:4D")))),
+            &rec("ble", 2426e6, Some(EventLink::beacon(Party::unit("6C:70:CB:EF:72:4D")))),
             t(0)
         ));
         assert!(l.active(t(1)).is_empty());
@@ -393,7 +382,7 @@ mod tests {
         // device it is for.
         assert!(l.update(
             &rec(
-                "BLE-Adv",
+                "ble",
                 2426e6,
                 Some(EventLink::between(
                     Party::unit("6C:70:CB:EF:72:4D"),
@@ -412,7 +401,7 @@ mod tests {
         let mut l = Links::new();
         assert!(l.update(
             &rec(
-                "DMR-Voice",
+                "dmr",
                 446.1e6,
                 Some(EventLink::between(Party::unit("1234567"), Party::group("9"))),
             ),
@@ -440,19 +429,11 @@ mod tests {
         // same end, which reading the display fields could not tell.
         let mut l = Links::new();
         l.update(
-            &rec(
-                "DMR-Voice",
-                446.1e6,
-                Some(EventLink::between(Party::unit("1"), Party::group("9"))),
-            ),
+            &rec("dmr", 446.1e6, Some(EventLink::between(Party::unit("1"), Party::group("9")))),
             t(0),
         );
         l.update(
-            &rec(
-                "DMR-Voice",
-                446.1e6,
-                Some(EventLink::between(Party::unit("1"), Party::unit("9"))),
-            ),
+            &rec("dmr", 446.1e6, Some(EventLink::between(Party::unit("1"), Party::unit("9")))),
             t(1),
         );
         assert_eq!(l.active(t(2)).len(), 2, "a group call and a private call are one link");
@@ -462,8 +443,8 @@ mod tests {
     fn the_same_ends_on_different_systems_are_different_links() {
         let mut l = Links::new();
         let link = EventLink::between(Party::unit("2001"), Party::unit("2002"));
-        l.update(&rec("TETRA-SDS", 391.1e6, Some(link.clone())), t(0));
-        l.update(&rec("M17-Packet", 433.475e6, Some(link)), t(1));
+        l.update(&rec("tetra", 391.1e6, Some(link.clone())), t(0));
+        l.update(&rec("m17", 433.475e6, Some(link)), t(1));
         assert_eq!(l.active(t(2)).len(), 2);
     }
 
@@ -474,7 +455,7 @@ mod tests {
         let mut l = Links::new();
         l.update(
             &said(
-                "TETRA-SDS",
+                "tetra",
                 391.1e6,
                 EventLink::between(Party::unit("2001"), Party::unit("2002")),
                 "on my way",
@@ -491,10 +472,10 @@ mod tests {
         // the counts added and the first and last stretched to cover both.
         let link = EventLink::between(Party::unit("aa:bb"), Party::unit("cc:dd"));
         let mut live = Links::new();
-        live.update(&rec("BLE-Adv", 2426e6, Some(link.clone())), t(10));
+        live.update(&rec("ble", 2426e6, Some(link.clone())), t(10));
         let mut loaded = Links::new();
-        loaded.update(&rec("BLE-Adv", 2426e6, Some(link.clone())), t(0));
-        loaded.update(&rec("BLE-Adv", 2426e6, Some(link)), t(5));
+        loaded.update(&rec("ble", 2426e6, Some(link.clone())), t(0));
+        loaded.update(&rec("ble", 2426e6, Some(link)), t(5));
         live.absorb(loaded);
         let links = live.active(t(11));
         assert_eq!(links.len(), 1);
@@ -509,7 +490,7 @@ mod tests {
         let mut l = Links::new();
         l.update(
             &rec(
-                "M17-Packet",
+                "m17",
                 433.475e6,
                 Some(EventLink::between(Party::unit("M0ABC"), Party::unit("M0XYZ"))),
             ),
@@ -517,7 +498,7 @@ mod tests {
         );
         l.update(
             &rec(
-                "M17-Packet",
+                "m17",
                 433.475e6,
                 Some(EventLink::between(Party::unit("M0XYZ"), Party::unit("M0ABC"))),
             ),

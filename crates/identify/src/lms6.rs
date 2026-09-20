@@ -47,18 +47,17 @@ impl Signal for Lms6 {
             return Reading::default();
         }
         let mut framer = lms6::Framer::new();
-        let center = common::Hz(center_hz as u64);
         let mut rows = Vec::new();
         for b in iq.chunks(crate::BLOCK) {
             sync.process(b, framer.sink());
             for bytes in framer.take() {
-                if let Some(d) = lms6::decoded(&bytes, center) {
+                if let Some(d) = lms6::read(&bytes) {
                     rows.push(d);
                 }
             }
             framer.trim();
         }
-        rows.into()
+        Reading::from(rows).at(center_hz)
     }
 }
 

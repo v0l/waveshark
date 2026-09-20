@@ -72,15 +72,15 @@ impl Signal for Dvbt {
         }
         let mut rows = Vec::new();
         if let Some(params) = rx.params() {
-            rows.push(dvbt::multiplex_decoded(params, rx.snr_db().unwrap_or(0.0), chan.hz(), 0.0));
+            rows.push(dvbt::multiplex_read(params));
         }
         let ids: Vec<u16> = mux.services.iter().map(|s| s.id).collect();
         for id in ids {
-            if let Some(d) = dvbt::service_decoded(&mux, id, chan.hz(), 0.0) {
+            if let Some(d) = dvbt::service_read(&mux, id) {
                 rows.push(d);
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

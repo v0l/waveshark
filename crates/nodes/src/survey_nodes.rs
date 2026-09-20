@@ -35,29 +35,24 @@
 //! fixed installation with its position entered by hand wrote every sighting
 //! blind.
 
-use common::{Packet, Result};
-use pipeline::event::Decoded;
+use common::Result;
+use common::packet::Packet;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 use survey::{Db, Report, Sighting};
 
-/// Which decoded field carries the transmitter's identity, per protocol
-/// prefix, and what to call that identity space in the database.
+/// What a packet says about who transmitted it.
 ///
-/// Matched on the start of the protocol name because several decoders report
-/// a family: `APRS-Position` and `APRS-Status` are one radio, and `AIS-Static`
-/// and `AIS-Position` are one vessel.
-/// What a decode says about who transmitted it.
-///
-/// The decoder's own answer, and there is no other: every protocol that
-/// names a transmitter says so on the decode. `None` for a decode that identifies nothing: an
-/// unclaimed burst, a frame whose protocol has no notion of a transmitter.
-/// Those are real receptions and they belong in the packet log, which has
-/// them; they are not devices.
-pub fn identity(d: &Decoded) -> Option<(String, String)> {
-    let who = d.identity.as_ref()?;
-    Some((who.space.clone(), who.id.clone()))
+/// The decoder's own answer, and there is no other: every protocol that names
+/// a transmitter says so on the layer it read. `None` for a reception that
+/// identifies nobody, or for an identifier the network hands out and takes
+/// back: an unclaimed burst and a temporary subscriber identity are both real
+/// receptions and belong in the packet log, which has them, and neither is a
+/// device.
+pub fn identity(p: &Packet) -> Option<(String, String)> {
+    let who = p.subject().filter(|e| e.identifies())?;
+    Some((who.space.to_string(), who.id.to_string()))
 }
 
 /// One reception, as every consumer of the bus records it: when, where the
@@ -65,47 +60,28 @@ pub fn identity(d: &Decoded) -> Option<(String, String)> {
 ///
 /// Shared by the three nodes that submit sightings. They had a copy each,
 /// byte for byte the same, which is three places to fix when the evidence
-/// moves. The measurement is the packet's, because the packet is what was
-/// received; the decode is only asked which channel it named.
-pub fn sighting(p: &Packet, d: &Decoded, fix: Option<gps::Fix>) -> Sighting {
+/// moves.
+pub fn sighting(p: &Packet, fix: Option<gps::Fix>) -> Sighting {
     Sighting {
-        at_us: p.at_us,
+        at_us: p.carrier.at_us,
         lat: fix.map(|f| f.lat),
         lon: fix.map(|f| f.lon),
         alt_m: fix.and_then(|f| f.alt_m),
         accuracy_m: fix.and_then(|f| f.accuracy_m()),
-        rssi_dbfs: p.rssi_dbfs().is_finite().then_some(p.rssi_dbfs()),
-        snr_db: p.snr_db().is_finite().then_some(p.snr_db()),
-        center_hz: d.center.0,
+        rssi_dbfs: p.carrier.rssi_dbfs.is_finite().then_some(p.carrier.rssi_dbfs),
+        snr_db: p.carrier.snr_db.is_finite().then_some(p.carrier.snr_db),
+        center_hz: p.carrier.center_hz,
     }
 }
 
-/// A name a device gave for itself, where its decode carries one.
-pub(crate) fn name_of(d: &Decoded) -> Option<String> {
-    if let Some(n) = d.identity.as_ref().and_then(|w| w.name.clone()) {
-        return Some(n);
-    }
-    for key in ["name", "callsign", "node_name"] {
-        if let Some((_, v)) = d.fields.iter().find(|(k, _)| k == key) {
-            let s = v.to_string();
-            if !s.is_empty() {
-                return Some(s);
-            }
-        }
-    }
-    None
+/// A name a device gave for itself, where a layer carries one.
+pub(crate) fn name_of(p: &Packet) -> Option<String> {
+    p.subject().and_then(|e| e.name.clone())
 }
 
-/// Who made it, where the decode says so.
-pub(crate) fn vendor_of(d: &Decoded) -> Option<String> {
-    if let Some(v) = d.identity.as_ref().and_then(|w| w.vendor.clone()) {
-        return Some(v);
-    }
-    d.fields
-        .iter()
-        .find(|(k, _)| k == "vendor" || k == "operator" || k == "manufacturer")
-        .map(|(_, v)| v.to_string())
-        .filter(|s| !s.is_empty())
+/// Who made it, where a layer says so.
+pub(crate) fn vendor_of(p: &Packet) -> Option<String> {
+    p.subject().and_then(|e| e.vendor.clone())
 }
 
 /// The device database on the bus.
@@ -196,25 +172,22 @@ impl Simple for SurveyNode {
         // names one is taken and the rest of that packet is left to the
         // packet list, which does report all of them.
         for p in i.as_packets().unwrap_or(&[]) {
-            for d in p.decodes.iter() {
-                let Some((protocol, ident)) = identity(d) else { continue };
-                let report = Report {
-                    protocol,
-                    ident,
-                    name: name_of(d),
-                    vendor: vendor_of(d),
-                    sighting: sighting(p, d, self.station),
-                };
-                self.heard += 1;
-                if let Some(db) = self.db.as_mut()
-                    && db.record(&report).is_err()
-                {
-                    // A survey that cannot write is a survey that stops
-                    // recording, not a receiver that stops receiving. The
-                    // count is what the interface shows.
-                    self.failures += 1;
-                }
-                break;
+            let Some((protocol, ident)) = identity(p) else { continue };
+            let report = Report {
+                protocol,
+                ident,
+                name: name_of(p),
+                vendor: vendor_of(p),
+                sighting: sighting(p, self.station),
+            };
+            self.heard += 1;
+            if let Some(db) = self.db.as_mut()
+                && db.record(&report).is_err()
+            {
+                // A survey that cannot write is a survey that stops
+                // recording, not a receiver that stops receiving. The count
+                // is what the interface shows.
+                self.failures += 1;
             }
         }
         Ok(())
@@ -235,12 +208,19 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Hz, Value};
+    use common::Hz;
+    use common::packet::{Entity, Id, Proto};
 
-    fn decoded(protocol: &'static str, fields: &[(&str, &str)]) -> Decoded {
-        Decoded::bytes(protocol, Hz(2_426_000_000), 0.0, vec![]).with_fields(
-            fields.iter().map(|(k, v)| ((*k).to_string(), Value::Text((*v).to_string()))).collect(),
-        )
+    /// A reception whose layer says what the arguments say, as the bus
+    /// carries it.
+    fn heard(id: &'static str, who: Option<Entity>) -> Packet {
+        let layer = Proto::new(id, "frame");
+        let p = crate::measured(2_426_000_000, 2_000_000, vec![], -46.0, 20.0);
+        match who {
+            Some(e) => p.decoded(layer.by(e)),
+            None if id == "unknown" => p,
+            None => p.decoded(layer),
+        }
     }
 
     /// The identity is the decoder's own statement now, whatever the
@@ -248,22 +228,21 @@ mod tests {
     /// protocol name" is a table that goes stale the day a decoder is added.
     #[test]
     fn each_protocol_gives_up_the_identity_its_decoder_named() {
-        let named = |protocol: &'static str, space: &str, id: &str| {
-            Decoded::bytes(protocol, Hz(2_426_000_000), 0.0, vec![])
-                .by(common::Identity::new(space, id))
+        let named = |protocol: &'static str, space: &'static str, id: &str| {
+            heard(protocol, Some(Entity::new(space, Id::Text(id.to_string()))))
         };
         let cases = [
-            (named("BLE-Adv", "ble", "6C:70:CB:EF:72:4D"), "ble", "6C:70:CB:EF:72:4D"),
-            (named("ADS-B-Position", "adsb", "4ca1fb"), "adsb", "4ca1fb"),
-            (named("AIS-Position", "ais", "235009802"), "ais", "235009802"),
-            (named("APRS-Position", "aprs", "EI2ABC-9"), "aprs", "EI2ABC-9"),
-            (named("POCSAG-Alpha", "pocsag", "1234568"), "pocsag", "1234568"),
+            (named("ble", "ble", "6C:70:CB:EF:72:4D"), "ble", "6C:70:CB:EF:72:4D"),
+            (named("adsb", "adsb", "4ca1fb"), "adsb", "4ca1fb"),
+            (named("ais", "ais", "235009802"), "ais", "235009802"),
+            (named("aprs", "aprs", "EI2ABC-9"), "aprs", "EI2ABC-9"),
+            (named("pocsag", "pocsag", "1234568"), "pocsag", "1234568"),
         ];
-        for (d, space, ident) in cases {
-            assert_eq!(identity(&d), Some((space.into(), ident.into())), "{}", d.protocol);
+        for (p, space, ident) in cases {
+            assert_eq!(identity(&p), Some((space.into(), ident.into())));
         }
-        // A decode that names nobody is a reception, not a device.
-        assert_eq!(identity(&decoded("unknown", &[("baud", "1500")])), None);
+        // A reception that names nobody is a reception, not a device.
+        assert_eq!(identity(&heard("unknown", None)), None);
     }
 
     /// A sensor's id is eight bits chosen when the batteries go in, so it is
@@ -273,41 +252,36 @@ mod tests {
     fn an_ism_sensor_is_identified_by_its_model_and_id_together() {
         let report = |model| {
             let r = decode::Report::new(model).int("id", 163);
-            crate::decode_nodes::decoded_event(
-                &r,
-                &common::Package::default(),
-                Hz(433_920_000),
-                common::Modulation::Ook,
-            )
+            crate::measured(433_920_000, 31_250, r.raw.clone(), -46.0, 20.0)
+                .decoded(decode::facts::proto_of(&r))
         };
         let a = report("Acurite-Tower");
         let b = report("Nexus-TH");
         assert_ne!(identity(&a), identity(&b), "two makes sharing an id are two devices");
-        assert_eq!(identity(&a), Some(("ism:Acurite-Tower".into(), "163".into())));
+        assert_eq!(identity(&a), Some(("ism".into(), "Acurite-Tower/163".into())));
     }
 
     /// A burst nothing claimed is a reception, not a device.
     #[test]
     fn a_decode_that_names_nobody_is_not_a_device() {
-        assert_eq!(identity(&decoded("unknown", &[("coding", "PWM")])), None);
-        assert_eq!(identity(&decoded("BLE-Adv", &[])), None, "a protocol without its field");
+        assert_eq!(identity(&heard("unknown", None)), None);
+        assert_eq!(identity(&heard("ble", None)), None, "a layer that named nobody");
     }
 
     /// What a pager said is not what the pager is called.
     #[test]
     fn a_page_is_not_a_name() {
-        let d = decoded("POCSAG-Alpha", &[("address", "1234568"), ("message", "CALL BASE")]);
-        assert_eq!(name_of(&d), None);
-        let ble = decoded("BLE-Adv", &[("address", "AA:BB"), ("name", "EVCS")]);
+        // A page is addressed to a pager, and the pager never named itself.
+        let page = heard("pocsag", None);
+        assert_eq!(name_of(&page), None);
+        let ble = heard("ble", Some(Entity::new("ble", Id::Text("AA:BB".into())).named("EVCS")));
         assert_eq!(name_of(&ble).as_deref(), Some("EVCS"));
     }
 
     fn packet(bytes: Vec<u8>, center_hz: u64) -> Packet {
-        Packet::of_frame(
-            1_000_000,
-            2_000_000,
-            common::Frame::measured(bytes, -46.0, 20.0).at(center_hz),
-        )
+        let mut p = crate::measured(center_hz, 2_000_000, bytes, -46.0, 20.0);
+        p.carrier.at_us = 1_000_000;
+        p
     }
 
     /// Through the protocols first, as the graph runs it: the survey reads
@@ -373,7 +347,7 @@ mod tests {
         let rows = db.devices(survey::Query::default()).unwrap();
         assert_eq!(rows.len(), 1, "expected one cell, got {rows:?}");
         assert_eq!(rows[0].protocol, "gsm");
-        assert_eq!(rows[0].ident, "001-01-1-1");
+        assert_eq!(rows[0].ident, "001-01-1");
     }
 
     /// Indoors, or before the first lock, there is no position. What was

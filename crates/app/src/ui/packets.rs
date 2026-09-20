@@ -2,6 +2,7 @@
 
 use super::state::LogState;
 use super::*;
+use crate::row::Reception;
 
 /// What the log wants done that it cannot do itself.
 pub(super) enum Action {
@@ -123,7 +124,7 @@ impl Log<'_> {
 
     /// The packet inspector under the list: a drag handle, then the burst
     /// and the bytes in exactly `height` pixels.
-    fn inspector(&mut self, ui: &mut egui::Ui, rec: &DecodeRecord, height: f32, avail: f32) {
+    fn inspector(&mut self, ui: &mut egui::Ui, rec: &Reception, height: f32, avail: f32) {
         let w = ui.available_width();
         // The handle: a thin strip that drags the divider. Dragging up makes
         // the inspector taller and the list shorter; the window is unmoved.
@@ -155,9 +156,8 @@ impl Log<'_> {
         child.add_space(3.0);
         let asked = packet_detail(&mut child, rec);
         if asked.play {
-            if let Some(a) = rec.audio.clone() {
-                self.cmds.push(Cmd::Play(a));
-            }
+            // Speech is not on the packet: an over is stated on the voice
+            // port, and the call list is what plays one back.
         }
         if asked.sigid {
             self.st.sigid = Some(rec.clone());
@@ -368,12 +368,12 @@ impl Log<'_> {
             let text = [
                 (format!("{:>4}", log.id), col),
                 (format!("{secs:8.3}"), theme::LEGEND),
-                (fmt_hz(rec.freq), theme::TRACE),
-                (rec.modulation.to_string(), theme::LEGEND),
-                (fmt_db(rec.rssi_dbfs), level_color(rec.rssi_dbfs)),
-                (fmt_db(rec.snr_db), theme::LEGEND),
+                (fmt_hz(rec.freq()), theme::TRACE),
+                (rec.modulation().to_string(), theme::LEGEND),
+                (fmt_db(rec.rssi_dbfs()), level_color(rec.rssi_dbfs())),
+                (fmt_db(rec.snr_db()), theme::LEGEND),
                 (rec.protocol().to_string(), col),
-                (format!("{:>4}", rec.bytes.len()), theme::LEGEND),
+                (format!("{:>4}", rec.bytes().len()), theme::LEGEND),
             ];
             let mut x = rect.left();
             for ((t, c), (_, cw)) in text.iter().zip(Self::COLS) {
@@ -381,7 +381,7 @@ impl Log<'_> {
                 x += cw;
             }
             let info_w = (rect.right() - x - Self::PIN_W).max(0.0);
-            widgets::cell(&p, rect, x, info_w, &rec.detail, theme::VALUE);
+            widgets::cell(&p, rect, x, info_w, &rec.detail(), theme::VALUE);
 
             // The (+): a hit target of its own at the right edge, so clicking
             // it adds a channel rather than selecting the row. Only
@@ -407,7 +407,7 @@ impl Log<'_> {
                     if hot { theme::READOUT } else { theme::LEGEND },
                 );
                 if presp.clicked() {
-                    pin = Some((rec.freq, rec.protocol().to_string()));
+                    pin = Some((rec.freq(), rec.protocol().to_string()));
                 }
                 if presp.hovered() {
                     presp.on_hover_text("decode this frequency on the channel strip");

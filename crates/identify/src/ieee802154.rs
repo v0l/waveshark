@@ -66,7 +66,7 @@ impl Signal for Ieee802154 {
             .iter()
             .filter_map(|f| {
                 let hz = channel_2450_hz(f.channel).unwrap_or(center_hz);
-                decode::ieee802154::decoded(&f.psdu, common::Hz(hz as u64))
+                decode::ieee802154::read(&f.psdu, common::Hz(hz as u64))
             })
             .collect::<Vec<_>>()
             .into()

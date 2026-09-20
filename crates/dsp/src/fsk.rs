@@ -31,8 +31,9 @@
 //! detector, which has the same problem with amplitudes that this one has with
 //! frequencies.
 
-use crate::pulse::{LevelGate, Package, PulseStats, dbfs};
+use crate::pulse::{LevelGate, PulseStats, dbfs, detected};
 use common::C32;
+use common::packet::Detection;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FskConfig {
@@ -178,7 +179,7 @@ impl FskDetector {
     }
 
     /// Feed a block of complex baseband, appending completed bursts to `out`.
-    pub fn process(&mut self, input: &[C32], out: &mut Vec<Package>) {
+    pub fn process(&mut self, input: &[C32], out: &mut Vec<Detection>) {
         let reset_samples = (self.cfg.reset_us as f64 / self.us_per_sample) as usize;
         let max_samples = (self.cfg.max_burst_us as f64 / self.us_per_sample) as usize;
         let hz_per_rad = (self.rate / std::f64::consts::TAU) as f32;
@@ -219,13 +220,13 @@ impl FskDetector {
 
     /// Force out any burst still being collected. Needed at the end of a file,
     /// where there is no trailing silence to close the last packet.
-    pub fn flush(&mut self, out: &mut Vec<Package>) {
+    pub fn flush(&mut self, out: &mut Vec<Detection>) {
         if self.in_burst {
             self.finish(out);
         }
     }
 
-    fn finish(&mut self, out: &mut Vec<Package>) {
+    fn finish(&mut self, out: &mut Vec<Detection>) {
         self.in_burst = false;
         // Trailing dropout samples belong to the silence that ended the burst,
         // not to the burst.
@@ -261,16 +262,13 @@ impl FskDetector {
         let pulses = crate::twolevel::pair_runs(&runs, self.us_per_sample, self.cfg.reset_us);
 
         if pulses.len() >= self.cfg.min_pulses {
-            out.push(Package {
+            out.push(detected(
                 pulses,
-                snr_db: snr,
-                rssi_dbfs: dbfs(self.gate.signal_level()),
-                start_sample: self.burst_start,
-                // Stamped by the node that owns this detector, which is where
-                // the stream's centre frequency is known.
-                center_hz: 0,
-                modulation: Some(common::Modulation::Fsk2),
-            });
+                common::Modulation::Fsk2,
+                dbfs(self.gate.signal_level()),
+                snr,
+                self.burst_start,
+            ));
             self.stats.accepted += 1;
         } else if !pulses.is_empty() {
             self.stats.rejected_too_few_pulses += 1;
@@ -985,7 +983,7 @@ mod tests {
         bits.iter().map(|b| (*b != 0, sym_us)).collect()
     }
 
-    fn detect(iq: &[C32], cfg: FskConfig) -> (Vec<Package>, FskDetector) {
+    fn detect(iq: &[C32], cfg: FskConfig) -> (Vec<Detection>, FskDetector) {
         let mut d = FskDetector::new(RATE, cfg);
         let mut out = Vec::new();
         d.process(iq, &mut out);
@@ -1003,10 +1001,10 @@ mod tests {
         assert_eq!(pkgs.len(), 1, "expected one burst, got {}", pkgs.len());
         let p = &pkgs[0];
         // Runs of like symbols merge, so count transitions rather than bits.
-        for (i, pulse) in p.pulses.iter().enumerate() {
+        for (i, pulse) in p.pulses().iter().enumerate() {
             assert!(pulse.mark % 100 < 25 || pulse.mark % 100 > 75, "pulse {i}: {pulse:?}");
         }
-        let marks = p.mark_histogram(30);
+        let marks = common::pulse::mark_histogram(p.pulses(), 30);
         assert!(
             marks.iter().any(|(c, _)| c.abs_diff(100) < 25),
             "no cluster at one symbol: {marks:?}"
@@ -1024,7 +1022,7 @@ mod tests {
         let (a, _) = detect(&clean, FskConfig::default());
         let (b, _) = detect(&offset, FskConfig::default());
         assert_eq!(a.len(), 1);
-        assert_eq!(a[0].pulses.len(), b[0].pulses.len(), "offset changed the pulse train");
+        assert_eq!(a[0].pulses().len(), b[0].pulses().len(), "offset changed the pulse train");
     }
 
     #[test]
@@ -1319,7 +1317,7 @@ mod tests {
         syms.extend(nrz(&[0, 1, 0, 1, 0, 1, 0, 1], 100));
         let iq = burst(&syms, 25_000.0, 0.0, 1.0, 0.02);
         let (pkgs, _) = detect(&iq, FskConfig::default());
-        let long = pkgs[0].pulses.iter().filter(|p| p.mark > 500).count();
-        assert_eq!(long, 1, "the 600 us mark was split: {:?}", pkgs[0].pulses);
+        let long = pkgs[0].pulses().iter().filter(|p| p.mark > 500).count();
+        assert_eq!(long, 1, "the 600 us mark was split: {:?}", pkgs[0].pulses());
     }
 }

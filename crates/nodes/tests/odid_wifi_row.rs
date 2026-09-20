@@ -61,13 +61,13 @@ fn span(offset_hz: f64) -> Vec<C32> {
 
 /// How many frames a node parked on `center` reads out of a beacon sent at
 /// `at`, and the rows they became.
-fn heard(center: f64, at: f64) -> Vec<pipeline::event::Decoded> {
+fn heard(center: f64, at: f64) -> Vec<common::packet::Proto> {
     let mut n = WifiNode::default();
     let out = n.negotiate(&spec(center)).unwrap();
-    assert_eq!(out.kind, PortKind::Frames);
+    assert_eq!(out.kind, PortKind::Packets);
     let ins = [spec(center)];
     let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
-    let mut output = Payload::Frames(Vec::new());
+    let mut output = Payload::Packets(Vec::new());
     let samples = span(at - center);
     for block in samples.chunks(16_384) {
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
@@ -77,10 +77,10 @@ fn heard(center: f64, at: f64) -> Vec<pipeline::event::Decoded> {
     let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
     n.process(&Payload::Iq(vec![C32::default(); 16_384]), &mut output, &mut ctx).unwrap();
     output
-        .as_frames()
-        .expect("frames")
+        .as_packets()
+        .expect("packets")
         .iter()
-        .filter_map(|f| decode::wifi::decoded(&f.bytes, Hz(center as u64)))
+        .filter_map(|f| decode::wifi::read(f.bytes(), Hz(center as u64)))
         .collect()
 }
 
@@ -89,26 +89,33 @@ fn a_captured_beacon_off_the_span_is_a_row_about_the_aircraft() {
     let rows = heard(CHANNEL_6, CHANNEL_6);
     assert_eq!(rows.len(), 1);
     let d = &rows[0];
-    assert_eq!(d.protocol, "OpenDroneID");
-    let detail = d.detail.as_deref().unwrap();
-    assert!(detail.contains("uas_id=MFG1A0123456789"), "{detail}");
-    assert!(detail.contains("operator_id=GBR-OP-123ABCD"), "{detail}");
-    assert!(detail.contains("self_id=Recreational"), "{detail}");
-    assert!(detail.contains("eu_category=1 eu_class=5"), "{detail}");
-    // The 802.11 fields are behind the aircraft's, and the beacon is also an
-    // ordinary open network announcing an SSID.
-    assert!(detail.contains("ssid=GBR-OP-123ABCD"), "{detail}");
-    assert!(detail.contains("channel=6"), "{detail}");
+    // Named for the aircraft rather than for the network it looks like, and
+    // the network it rode on is still stated beside it.
+    assert_eq!(d.id, "opendroneid");
+    assert!(d.facts.iter().any(|f| matches!(
+        f,
+        common::packet::Fact::Channel(c) if c.heard == 6
+    )));
 
     // The aircraft has a fix, so the row goes on the map. Nothing plotted an
     // Open Drone ID aircraft before this: the fields were text in a list.
-    let p = d.position.as_ref().expect("a position");
+    let p = d.placed().expect("a position");
     assert!((p.lat - 45.545_746_8).abs() < 1e-7, "{p:?}");
     assert!((p.lon + 122.968_149_6).abs() < 1e-7, "{p:?}");
-    assert_eq!(p.altitude_m, Some(237.0));
-    assert_eq!(p.course_deg, Some(92.0));
+    let Some(common::packet::Fact::Motion(m)) =
+        d.facts.iter().find(|f| matches!(f, common::packet::Fact::Motion(_)))
+    else {
+        panic!("how it was moving, got {:?}", d.facts)
+    };
+    assert_eq!(m.course_deg, Some(92.0));
     // 20.5 m/s, which the map wants in knots.
-    assert!((p.speed_kt.unwrap() - 39.848).abs() < 0.01, "{p:?}");
+    assert!((m.speed_kt.unwrap() - 39.848).abs() < 0.01, "{m:?}");
+    // The height it reported, as a reading.
+    assert!(d.facts.contains(&common::packet::Fact::sensed(
+        common::packet::Quantity::Altitude,
+        237.0,
+        common::Unit::Metre
+    )));
 }
 
 /// The other half of the question: a receiver parked on channel 6 and an
@@ -140,7 +147,7 @@ fn noise_reports_no_aircraft() {
     n.negotiate(&spec(CHANNEL_6)).unwrap();
     let ins = [spec(CHANNEL_6)];
     let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
-    let mut output = Payload::Frames(Vec::new());
+    let mut output = Payload::Packets(Vec::new());
     // A cheap LCG rather than a dependency, and the same noise every run.
     let mut x: u32 = 0x1234_5678;
     let mut rnd = || {
@@ -155,11 +162,11 @@ fn noise_reports_no_aircraft() {
         n.process(&Payload::Iq(block), &mut output, &mut ctx).unwrap();
     }
     let rows: Vec<_> = output
-        .as_frames()
-        .expect("frames")
+        .as_packets()
+        .expect("packets")
         .iter()
-        .filter_map(|f| decode::wifi::decoded(&f.bytes, Hz(CHANNEL_6 as u64)))
-        .filter(|d| d.protocol == "OpenDroneID")
+        .filter_map(|f| decode::wifi::read(f.bytes(), Hz(CHANNEL_6 as u64)))
+        .filter(|d| d.id == "opendroneid")
         .collect();
     assert_eq!(rows.len(), 0);
     assert_eq!(n.accepted(), 0, "noise passed a frame check sequence");

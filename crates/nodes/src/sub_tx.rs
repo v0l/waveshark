@@ -9,7 +9,7 @@
 //! register dump this build does not read.
 
 use common::Result;
-use common::pulse::Package;
+use common::pulse::Pulse;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
@@ -37,7 +37,7 @@ const FILE_PARAM: &str = "path";
 /// parsed at key-up would add a stall between the key going down and
 /// anything going out.
 pub struct SubTxNode {
-    bursts: Vec<Package>,
+    bursts: Vec<Vec<Pulse>>,
     path: String,
     repeats: usize,
     pause: Duration,
@@ -97,7 +97,7 @@ impl Simple for SubTxNode {
             return Err(common::Error::other("sub_tx needs the rate it should play at"));
         }
         Ok(StreamSpec {
-            kind: PortKind::Pulses,
+            kind: PortKind::Timings,
             // The timings are microseconds, so the port has no rate of its
             // own; the rate is the modulator's, passed through so a chain
             // stays rate-consistent. See `MorseKeyNode`.
@@ -121,7 +121,7 @@ impl Simple for SubTxNode {
         if input.is_empty() || self.bursts.is_empty() {
             return Ok(());
         }
-        let out = output.pulses_mut();
+        let out = output.timings_mut();
         // One pass per block: the whole file goes out the first time a block
         // arrives after a key-down, and the modulator takes it from there.
         // The pause between passes is a real gap so a burst detector at the
@@ -130,7 +130,7 @@ impl Simple for SubTxNode {
             out.push(burst.clone());
         }
         if let Some(last) = out.last_mut()
-            && let Some(p) = last.pulses.last_mut()
+            && let Some(p) = last.last_mut()
         {
             p.gap = p.gap.max(self.pause.as_micros() as u32);
         }
@@ -193,10 +193,7 @@ mod tests {
             frequency: 433_920_000,
             preset: decode::subghz::Preset::Ook,
             protocol: "RAW".into(),
-            bursts: vec![Package {
-                pulses: vec![Pulse { mark: 350, gap: 350 }, Pulse { mark: 350, gap: 350 }],
-                ..Default::default()
-            }],
+            bursts: vec![vec![Pulse { mark: 350, gap: 350 }, Pulse { mark: 350, gap: 350 }]],
         }
     }
 
@@ -204,29 +201,29 @@ mod tests {
     fn a_loaded_file_plays_once_per_block() {
         let mut n = SubTxNode::new(Some(file()));
         let input = Payload::Real(vec![0.0; 960]);
-        let mut out = Payload::empty_of(PortKind::Pulses);
+        let mut out = Payload::empty_of(PortKind::Timings);
         let mut ev = Vec::new();
         let mut tg = Vec::new();
         let ins = [spec(48_000.0)];
         let ctx = &mut NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
         Simple::process(&mut n, &input, &mut out, ctx).unwrap();
-        let pkgs = out.as_pulses().unwrap();
+        let pkgs = out.as_timings().unwrap();
         assert_eq!(pkgs.len(), 1);
-        assert_eq!(pkgs[0].pulses.len(), 2, "the file's pulses, as they are");
-        assert_eq!(pkgs[0].pulses[0].mark, 350);
+        assert_eq!(pkgs[0].len(), 2, "the file's pulses, as they are");
+        assert_eq!(pkgs[0][0].mark, 350);
     }
 
     #[test]
     fn nothing_loaded_is_silence_not_a_fault() {
         let mut n = SubTxNode::default();
         let input = Payload::Real(vec![0.0; 960]);
-        let mut out = Payload::empty_of(PortKind::Pulses);
+        let mut out = Payload::empty_of(PortKind::Timings);
         let mut ev = Vec::new();
         let mut tg = Vec::new();
         let ins = [spec(48_000.0)];
         let ctx = &mut NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
         Simple::process(&mut n, &input, &mut out, ctx).unwrap();
-        assert!(out.as_pulses().unwrap().is_empty());
+        assert!(out.as_timings().unwrap().is_empty());
     }
 
     #[test]

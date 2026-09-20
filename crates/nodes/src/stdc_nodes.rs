@@ -15,7 +15,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::inmarsat::decoded;
+pub use decode::inmarsat::read;
 use decode::inmarsat::{BAND_HZ, stdc};
 use dsp::bpsk::{BpskConfig, BpskDemod};
 use dsp::{FirDecim, Mixer};
@@ -25,7 +25,6 @@ pub use identify::stdc::DEFAULT_HZ;
 pub use identify::stdc::FEED_HZ;
 pub use identify::stdc::Stdc;
 pub use identify::stdc::WORK_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -100,7 +99,7 @@ impl Simple for StdcNode {
         // band is a thousandth of the power.
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -122,14 +121,14 @@ impl Simple for StdcNode {
         self.framer.process(&soft, &mut frames);
         self.soft = soft;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &frames {
             for p in stdc::packets(&f.bytes) {
                 if !p.check_ok {
                     continue;
                 }
                 self.packets += 1;
-                out.push(self.meter.frame(p.bytes));
+                out.push(self.meter.packet_now(p.bytes));
             }
         }
         self.frames = frames;
@@ -175,7 +174,8 @@ impl Protocol for Stdc {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND_HZ.1 - BAND_HZ.0) as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND_HZ.0..BAND_HZ.1).contains(&hz) || bytes.len() < 3 {
             return None;
@@ -185,7 +185,7 @@ impl Protocol for Stdc {
         if bytes.len() == decode::inmarsat::aero::SU_BYTES {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -210,19 +210,19 @@ mod tests {
     use common::{C32, Hz};
 
     /// Run a channel through the node and collect what reached the bus.
-    fn read(n: &mut StdcNode, rate: f64, iq: &[C32]) -> Vec<Vec<u8>> {
+    fn heard(n: &mut StdcNode, rate: f64, iq: &[C32]) -> Vec<Vec<u8>> {
         let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(DEFAULT_HZ as u64)), latency: 0 };
         n.negotiate(&spec).expect("a channel");
         let ins = [spec];
         let tags = Vec::new();
         let mut got = Vec::new();
         for chunk in iq.chunks(16_384) {
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             n.process(&Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).expect("read");
-            if let Payload::Frames(f) = out {
-                got.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                got.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         got
@@ -235,7 +235,7 @@ mod tests {
         assert!(n.negotiate(&far).is_err());
         let near = PortSpec { spec: StreamSpec::iq(200_000.0, Hz(1_541_400_000)), latency: 0 };
         let out = n.negotiate(&near).expect("a channel in the span");
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(DEFAULT_HZ as u64));
     }
 
@@ -261,13 +261,11 @@ mod tests {
         let iq: Vec<C32> = dsp::bpsk::modulate(&keyed, rate, BpskConfig::INMARSAT_C, 300.0, 0.5);
 
         let mut n = StdcNode::new(DEFAULT_HZ);
-        let frames = read(&mut n, rate, &iq);
+        let frames = heard(&mut n, rate, &iq);
         assert_eq!(frames.len(), 1, "one packet out of two frames");
         assert_eq!(n.packets(), 1);
-        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a row");
-        assert_eq!(d.protocol, "Inmarsat-C");
-        assert_eq!(d.crc_ok, Some(true));
-        assert_eq!(d.detail.as_deref(), Some("bulletin board"));
+        let d = read(&frames[0]).expect("a row");
+        assert_eq!((d.id, d.kind), ("inmarsat-c", "bulletin_board"));
     }
 
     /// An EGC broadcast is a machine addressing an area, so it carries text
@@ -284,14 +282,17 @@ mod tests {
         let n = egc.len();
         egc[n - 2..].copy_from_slice(&check);
 
-        let d = decoded(&egc, Hz(DEFAULT_HZ as u64)).expect("a row");
-        assert!(!d.written, "a coast station's computer did not write it");
-        assert_eq!(d.media_type, media::TEXT);
-        assert_eq!(d.text.as_deref(), Some("NAVAREA I 123/25 NORTH SEA UNLIT BUOY ADRIFT"));
-        let field = |k: &str| d.field(k).map(|v| v.to_string());
-        assert_eq!(field("service").as_deref(), Some("SafetyNET NAVAREA or METAREA warning"));
-        assert_eq!(field("priority").as_deref(), Some("urgency"));
-        assert_eq!(field("message_id").as_deref(), Some("7"));
+        let d = read(&egc).expect("a row");
+        // A coast station warning an area: nobody wrote it, and it is
+        // something whoever is at sea has to be told about.
+        assert_eq!((d.id, d.kind), ("inmarsat-c", "egc"));
+        assert!(d.wrote().is_none(), "a coast station's computer did not write it");
+        let common::packet::Fact::Alert(a) = &d.facts[0] else {
+            panic!("an alert, got {:?}", d.facts);
+        };
+        assert_eq!(a.kind, common::packet::AlertKind::Weather);
+        assert_eq!(a.severity, common::packet::Severity::Warning);
+        assert_eq!(a.text.as_deref(), Some("NAVAREA I 123/25 NORTH SEA UNLIT BUOY ADRIFT"));
     }
 
     /// Ten minutes of noise on the channel, and nothing reaches the bus.
@@ -309,7 +310,7 @@ mod tests {
             })
             .collect();
         let mut n = StdcNode::new(DEFAULT_HZ);
-        assert_eq!(read(&mut n, rate, &iq).len(), 0);
+        assert_eq!(heard(&mut n, rate, &iq).len(), 0);
         assert_eq!(n.packets(), 0);
     }
 }

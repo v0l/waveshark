@@ -54,14 +54,14 @@ use decode::elrs;
 pub use decode::elrs::ENVELOPE;
 pub use decode::elrs::SPREADING_FACTORS;
 pub use decode::elrs::TAG;
-pub use decode::elrs::decoded;
 pub use decode::elrs::hex;
+pub use decode::elrs::read;
 pub use decode::elrs::{CODING_RATE, RECOVER_FROM};
 use dsp::lora::{ChirpReader, Found};
 use identify::Signal;
 pub use identify::elrs::CHANNEL_WIDTH_HZ;
 pub use identify::elrs::Elrs;
-use pipeline::event::{Decoded, Request};
+use pipeline::event::Request;
 use pipeline::lock::{Lock, Raster};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
@@ -99,7 +99,10 @@ pub struct ElrsNode {
     /// Packets read before the link was known, in the order they came,
     /// for the link to be recovered from. Consecutive on one channel,
     /// since this node reads one source.
-    unplaced: Vec<Vec<u8>>,
+    /// Packets held back until the link is known, with what each was heard
+    /// at: a packet published later was still received when it was received,
+    /// and a row with no level is a row nobody can act on.
+    unplaced: Vec<(Vec<u8>, f32, f32)>,
     /// Whether the lock over the hop set has been published. Once, on the
     /// first packet that decodes: before that there is no link to lock on,
     /// and after it the statement does not change.
@@ -153,7 +156,7 @@ impl ElrsNode {
         }
     }
 
-    pub fn decoded(&self) -> u64 {
+    pub fn read(&self) -> u64 {
         self.decoded
     }
 
@@ -168,7 +171,7 @@ impl ElrsNode {
 
     /// Learn the link from a sync packet that checks itself, or from
     /// enough consecutive packets of it, when no UID was given.
-    fn learn(&mut self, packet: &[u8]) {
+    fn learn(&mut self, packet: &[u8], rssi_dbfs: f32, snr_db: f32) {
         if self.uid.is_some() {
             return;
         }
@@ -178,12 +181,14 @@ impl ElrsNode {
             self.unplaced.clear();
             return;
         }
-        self.unplaced.push(packet.to_vec());
+        self.unplaced.push((packet.to_vec(), rssi_dbfs, snr_db));
         if self.unplaced.len() < RECOVER_FROM {
             return;
         }
-        let last: Vec<&[u8]> =
-            self.unplaced[self.unplaced.len() - RECOVER_FROM..].iter().map(|p| &p[..]).collect();
+        let last: Vec<&[u8]> = self.unplaced[self.unplaced.len() - RECOVER_FROM..]
+            .iter()
+            .map(|(p, _, _)| &p[..])
+            .collect();
         if let Some(r) = elrs::recover_link(&last, self.ota_version) {
             self.uid = Some([0, 0, 0, 0, r.uid4, r.uid5.unwrap_or(0)]);
             self.uid_whole = false;
@@ -231,7 +236,7 @@ impl Simple for ElrsNode {
                 continue;
             };
             let known = self.uid.is_some();
-            self.learn(&bytes);
+            self.learn(&bytes, rssi_dbfs, snr_db);
             let Some(uid) = self.uid else {
                 self.refused += 1;
                 continue;
@@ -243,9 +248,9 @@ impl Simple for ElrsNode {
             if !known {
                 let held = std::mem::take(&mut self.unplaced);
                 let n = held.len();
-                for (k, p) in held.into_iter().enumerate() {
+                for (k, (p, rssi, snr)) in held.into_iter().enumerate() {
                     if k + 1 < n && p != bytes {
-                        ready.push((p, None, f32::NAN, f32::NAN));
+                        ready.push((p, None, rssi, snr));
                     }
                 }
             }
@@ -268,20 +273,21 @@ impl Simple for ElrsNode {
                     d.nonce,
                     &bytes,
                 );
-                let mut f = common::Frame::measured(bus, rssi_dbfs, snr_db)
-                    .at(self.reader.center_hz() as u64);
+                let mut p = crate::measured(
+                    self.reader.center_hz() as u64,
+                    CHANNEL_WIDTH_HZ as u32,
+                    bus,
+                    rssi_dbfs,
+                    snr_db,
+                );
                 if let Some(samples) = samples {
-                    f = f.with_iq(std::sync::Arc::new(common::IqBurst {
+                    p.carrier.iq = Some(std::sync::Arc::new(common::IqBurst {
                         rate: self.reader.sample_rate(),
                         center_hz: self.reader.center_hz() as u64,
                         samples,
                     }));
                 }
-                o.packets_mut().push(common::Packet::of_frame(
-                    now_us(),
-                    CHANNEL_WIDTH_HZ as u32,
-                    f,
-                ));
+                o.packets_mut().push(p);
             }
         }
         Ok(())
@@ -356,13 +362,6 @@ pub fn parse_uid(text: &str) -> Option<[u8; 6]> {
     Some(uid)
 }
 
-fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
-}
-
 impl Protocol for Elrs {
     fn id(&self) -> &'static str {
         Signal::id(self)
@@ -385,8 +384,9 @@ impl Protocol for Elrs {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
 
     fn outputs(&self) -> &'static [PortKind] {
@@ -457,7 +457,7 @@ mod tests {
         dsp::lora::modulate(7, 8, 0x12, symbols, true)
     }
 
-    fn run(node: &mut ElrsNode, iq: &[C32], rate: f64) -> Vec<common::Frame> {
+    fn run(node: &mut ElrsNode, iq: &[C32], rate: f64) -> Vec<common::packet::Packet> {
         let mut s = StreamSpec::iq(rate, Hz(2_440_400_000));
         s.bandwidth = CHANNEL_WIDTH_HZ;
         let ins = [PortSpec { spec: s, latency: 0 }];
@@ -476,10 +476,7 @@ mod tests {
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut ev, &mut nt);
             node.process(&input, &mut o, &mut ctx).unwrap();
             if let Payload::Packets(p) = o {
-                out.extend(p.into_iter().filter_map(|p| match p.body {
-                    common::PacketBody::Frame(f) => Some(f),
-                    _ => None,
-                }));
+                out.extend(p.into_iter().filter(|p| !p.bytes().is_empty()));
             }
         }
         out
@@ -501,17 +498,17 @@ mod tests {
         let (uid, whole) = n.uid().expect("a link");
         assert_eq!(uid[4..], UID[4..]);
         assert!(!whole, "two bytes off a sync packet are not the whole UID");
-        let rows: Vec<Decoded> =
-            frames.iter().filter_map(|f| decoded(&f.bytes, Hz(f.center_hz))).collect();
+        let rows: Vec<common::packet::Proto> =
+            frames.iter().filter_map(|f| read(f.bytes())).collect();
         assert_eq!(rows.len(), 3);
-        assert!(
-            rows[0].detail.as_deref().unwrap().contains("sync LoRa 250 Hz hop 37"),
-            "{:?}",
-            rows[0].detail
-        );
-        assert!(rows[1].detail.as_deref().unwrap().starts_with("SF7 rc:"), "{:?}", rows[1].detail);
-        assert_eq!(rows[1].identity.as_ref().unwrap().id, "5566");
-        assert!(frames.iter().all(|f| f.rssi_dbfs.is_finite() && f.iq.is_some()));
+        // A sync packet is the handset saying which link this is; the rc
+        // packets after it carry the sticks.
+        assert_eq!(rows[0].kind, "sync");
+        assert!(rows[1..].iter().all(|r| r.kind == "rc"));
+        assert_eq!(rows[1].subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("5566"));
+        // An rc packet is where the sticks are.
+        assert!(rows[1].facts.iter().any(|f| matches!(f, common::packet::Fact::Control(_))));
+        assert!(frames.iter().all(|f| f.carrier.rssi_dbfs.is_finite() && f.carrier.iq.is_some()));
     }
 
     /// An RC packet before any sync packet is a chirp of an unknown link:
@@ -546,7 +543,7 @@ mod tests {
         assert_eq!(uid[4] & 0x3f, UID[4] & 0x3f);
         assert!(!whole);
         assert_eq!(frames.len(), 4, "the held packets come out too, got {}", frames.len());
-        assert!(frames[3].iq.is_some() && frames[0].iq.is_none());
+        assert!(frames[3].carrier.iq.is_some() && frames[0].carrier.iq.is_none());
     }
 
     #[test]

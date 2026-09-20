@@ -18,7 +18,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::mdc1200;
-pub use decode::mdc1200::decoded;
+pub use decode::mdc1200::read;
 use dsp::afsk::{AfskBits, AfskConfig, FFSK1200};
 use dsp::{FirDecim, FmDemod, Mixer};
 use identify::Signal;
@@ -26,7 +26,6 @@ pub use identify::mdc::CHANNEL_WIDTH_HZ;
 pub use identify::mdc::DEFAULT_HZ;
 pub use identify::mdc::Mdc;
 pub use identify::mdc::{AUDIO_HZ, DEVIATION_HZ};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -113,7 +112,7 @@ impl Simple for MdcNode {
         // before the mixer is a level of the band.
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -166,7 +165,7 @@ impl Simple for MdcNode {
             // change, space for a change.
             if let Some(info) = self.framer.push(!sym.mark) {
                 self.read += 1;
-                o.frames_mut().push(self.meter.frame(info.to_vec()));
+                o.packets_mut().push(self.meter.packet_now(info.to_vec()));
             }
         }
         self.symbols = symbols;
@@ -210,8 +209,9 @@ impl Protocol for Mdc {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} MDC", hz / 1e6)
@@ -280,12 +280,12 @@ mod tests {
         let mut frames = Vec::new();
         for block in iq.chunks(4096) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         frames
@@ -315,13 +315,13 @@ mod tests {
         assert_eq!(n.read(), 1);
         assert_eq!(n.refused(), 0);
 
-        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.protocol, "MDC-1200");
-        assert_eq!(d.field("unit"), Some(&common::Value::Text("1234".into())));
-        assert_eq!(d.field("operation"), Some(&common::Value::Text("PTT-ID".into())));
-        assert_eq!(d.crc_ok, Some(true));
-        assert!(!d.written, "a radio emitted it, nobody wrote it");
-        assert_eq!(d.identity.as_ref().map(|i| i.id.as_str()), Some("1234"));
+        let d = read(&frames[0]).expect("a decode");
+        assert_eq!((d.id, d.kind), ("mdc1200", "ptt_id"));
+        // The radio transmitting names itself, which is what a device list
+        // rows on; a radio emitted it, so nobody wrote anything.
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("1234"));
+        assert_eq!(d.parties().0, Some("1234"));
+        assert!(d.wrote().is_none());
     }
 
     /// A call alert names the radio being paged, not the one sending, and
@@ -331,9 +331,12 @@ mod tests {
         let mut n = node(DEFAULT_HZ);
         let frames = run(&mut n, &keyed(0x63, 0x85, 0xABCD, 0.0, 0.0), DEFAULT_HZ);
         assert_eq!(frames.len(), 1);
-        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.field("target"), Some(&common::Value::Text("ABCD".into())));
-        assert_eq!(d.field("unit"), None, "a call alert is not the sender's id");
+        let d = read(&frames[0]).expect("a decode");
+        // A call alert names the radio being paged, so it is the party
+        // called and never the sender.
+        assert_eq!((d.id, d.kind), ("mdc1200", "call_alert"));
+        assert_eq!(d.parties(), (None, Some("ABCD")));
+        assert!(d.subject.is_none(), "a call alert is not the sender's id");
     }
 
     /// Nobody is tuned exactly, and a burst a little off the dial still

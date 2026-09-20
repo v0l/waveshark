@@ -16,7 +16,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::inmarsat::aero_decoded;
+pub use decode::inmarsat::aero_read;
 use decode::inmarsat::{BAND_HZ, aero};
 pub use decode::inmarsat::{CARRIER_RATIO, config};
 use dsp::msk::MskDemod;
@@ -27,7 +27,6 @@ pub use identify::aero::CHANNEL_WIDTH_HZ;
 pub use identify::aero::DEFAULT_HZ;
 pub use identify::aero::FEED_HZ;
 pub use identify::aero::WORK_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -124,7 +123,7 @@ impl Simple for AeroNode {
         self.assembler.reset();
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -154,17 +153,17 @@ impl Simple for AeroNode {
         let mut frames = std::mem::take(&mut self.frames);
         self.framer.process(&self.hard, &mut frames);
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &frames {
             for su in &f.sus {
                 if !su.crc_ok || su.kind() == aero::SuType::Fill {
                     continue;
                 }
                 self.units += 1;
-                out.push(self.meter.frame(su.bytes.to_vec()));
+                out.push(self.meter.packet_now(su.bytes.to_vec()));
                 if let Some(user) = self.assembler.update(su.data()) {
                     self.messages += 1;
-                    out.push(self.meter.frame(user.bytes));
+                    out.push(self.meter.packet_now(user.bytes));
                 }
             }
         }
@@ -213,12 +212,13 @@ impl Protocol for Aero {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND_HZ.1 - 1_545_000_000.0) as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(1_545_000_000.0..BAND_HZ.1).contains(&hz) {
             return None;
         }
-        Some(aero_decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(aero_read(bytes).into_iter().collect())
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -252,12 +252,12 @@ mod tests {
         let tags = Vec::new();
         let mut got = Vec::new();
         for chunk in iq.chunks(16_384) {
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             n.process(&Payload::Iq(chunk.to_vec()), &mut out, &mut ctx).expect("read");
-            if let Payload::Frames(f) = out {
-                got.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                got.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         got
@@ -270,7 +270,7 @@ mod tests {
         assert!(n.negotiate(&far).is_err());
         let near = PortSpec { spec: StreamSpec::iq(200_000.0, Hz(1_545_000_000)), latency: 0 };
         let out = n.negotiate(&near).expect("a channel in the span");
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(DEFAULT_HZ as u64));
     }
 
@@ -279,11 +279,9 @@ mod tests {
     #[test]
     fn a_signal_unit_becomes_a_row() {
         let su = aero::su_with_crc(&[0x34, 0x40, 0x62, 0x1A, 0x2A, 0x00, 0x11, 0x22, 0x33, 0x44]);
-        let d = aero_decoded(&su, Hz(DEFAULT_HZ as u64)).expect("a row");
-        assert_eq!(d.protocol, "Aero");
-        assert_eq!(d.crc_ok, Some(true));
-        assert!(!d.written);
-        assert_eq!(d.detail.as_deref(), Some("channel assignment"));
+        let d = aero_read(&su).expect("a row");
+        assert_eq!((d.id, d.kind), ("aero", "channel_assignment"));
+        assert!(d.wrote().is_none(), "the satellite is talking about itself");
     }
 
     /// Assembled user data is an ACARS block, and reads as one: the same
@@ -293,11 +291,13 @@ mod tests {
         let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
         let mut user: Vec<u8> = vec![0xFF, 0xFF, 0x01];
         user.extend(block.iter().copied());
-        let d = aero_decoded(&user, Hz(DEFAULT_HZ as u64)).expect("a row");
-        assert_eq!(d.protocol, "Aero-ACARS");
-        let detail = d.detail.clone().unwrap_or_default();
-        assert!(detail.contains("registration=EI-DEO"), "{detail}");
-        assert!(detail.contains("flight=EIN123"), "{detail}");
+        let d = aero_read(&user).expect("a row");
+        assert_eq!(d.id, "aero-acars");
+        // The aircraft either way: an uplink is addressed to the aeroplane,
+        // and the block names it by its registration and its flight.
+        let who = d.subject.as_ref().expect("the aircraft");
+        assert_eq!(who.id.to_string(), "EI-DEO");
+        assert_eq!(who.name.as_deref(), Some("EIN123"));
     }
 
     /// Ten minutes of noise on the channel, and nothing reaches the bus:

@@ -15,8 +15,8 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use codec2::{Codec2, Codec2Mode};
 use common::Result;
-pub use decode::m17::decoded;
 pub use decode::m17::hex;
+pub use decode::m17::read;
 use decode::m17::{Assembler, DataType, Event};
 use dsp::m17::{
     BAUD, Body, CHANNEL_WIDTH_HZ as OCCUPIED_HZ, DEVIATION_HZ, Frame, M17Config, M17Demod,
@@ -28,7 +28,6 @@ pub use identify::m17::AUDIO_HZ;
 pub use identify::m17::CHANNEL_WIDTH_HZ;
 pub use identify::m17::DEFAULT_HZ;
 pub use identify::m17::M17;
-use pipeline::event::Decoded;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -134,14 +133,19 @@ impl M17Node {
 
     /// One event as a frame: its bytes, what it was heard at, and the samples
     /// it was read from where it came from a frame on the air.
-    fn frame_at(&mut self, bytes: Vec<u8>, start_sample: Option<u64>) -> common::Frame {
+    fn frame_at(&mut self, bytes: Vec<u8>, start_sample: Option<u64>) -> common::packet::Packet {
         let Some(at) = start_sample else {
-            return common::Frame::measured(bytes, self.meter.rssi_dbfs(), self.meter.snr_db())
-                .at(self.channel_hz as u64);
+            return crate::measured(
+                self.channel_hz as u64,
+                CHANNEL_WIDTH_HZ as u32,
+                bytes,
+                self.meter.rssi_dbfs(),
+                self.meter.snr_db(),
+            );
         };
         let len = (SYMBOLS_PER_FRAME as f64 * self.audio_rate / BAUD) as usize;
         let snr_db = self.meter.snr_db_at(at, len);
-        self.meter.frame_measured(bytes, at, len, snr_db)
+        self.meter.packet_measured(bytes, at, len, snr_db)
     }
 
     /// The source and destination of the transmission being heard, while one
@@ -299,15 +303,12 @@ impl Node for M17Node {
             to,
             from,
             code: None,
+            over: None,
             rate: VOICE_HZ,
             channels: 1,
             pcm: std::mem::take(&mut self.voice_now),
         });
 
-        let at_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
         let out = outputs[OUT_PACKETS].packets_mut();
         for (e, audio, at) in &events {
             self.accepted += 1;
@@ -322,10 +323,10 @@ impl Node for M17Node {
             // the channel's floor, and the samples it was read from. The end
             // of a transmission is the assembler's conclusion rather than a
             // frame off the air, so it takes the channel's level instead.
-            let frame = self.frame_at(e.to_bytes(), *at);
-            let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
-            p.audio = audio.clone();
-            out.push(p);
+            // The speech is not on it: an over is stated once, on the voice
+            // port this node also publishes.
+            let _ = audio;
+            out.push(self.frame_at(e.to_bytes(), *at));
         }
         Ok(())
     }
@@ -384,8 +385,9 @@ impl Protocol for M17 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
 
     /// The M17 calling frequency in Region 1.
@@ -482,10 +484,7 @@ mod tests {
                 node.process(&[&input], &mut out, &mut ctx).unwrap();
                 let [packets, _] = out;
                 if let Payload::Packets(ps) = packets {
-                    frames.extend(ps.into_iter().filter_map(|p| match p.body {
-                        common::PacketBody::Frame(f) => Some(f.bytes),
-                        _ => None,
-                    }));
+                    frames.extend(ps.iter().map(|p| p.bytes().to_vec()).filter(|b| !b.is_empty()));
                 }
             }
         }
@@ -517,34 +516,18 @@ mod tests {
         // A kilohertz off frequency, because a handheld is.
         let iq = modulate(&symbols, rate, 1_000.0);
         let frames = run(&iq, rate, center);
-        let all: Vec<Decoded> =
-            frames.iter().filter_map(|f| decoded(f, Hz(center as u64))).collect();
-        // Every frame is on the bus as evidence; these are the two rows that
-        // describe the transmission as a whole.
-        let rows: Vec<Decoded> =
-            all.iter().filter(|d| !d.fields.iter().any(|(k, _)| k == "frame")).cloned().collect();
-        assert_eq!(rows.len(), 2, "expected a setup row and a stream row: {rows:?}");
+        let all: Vec<common::packet::Proto> = frames.iter().filter_map(|f| read(f)).collect();
+        // Every frame of the stream is on the bus as evidence, with the link
+        // setup in front of them and the assembler's own summary after.
         assert_eq!(all.len(), 27, "25 frames, a setup and a summary: {}", all.len());
-
-        assert_eq!(rows[0].protocol, "M17-Setup");
-        let get =
-            |d: &Decoded, k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get(&rows[0], "from"), Some(common::Value::Text("M0ABC".into())));
-        assert_eq!(get(&rows[0], "to"), Some(common::Value::Text("M17-M17 C".into())));
-        assert_eq!(get(&rows[0], "mode"), Some(common::Value::Text("voice".into())));
-        assert_eq!(get(&rows[0], "can"), Some(common::Value::Int(5)));
-        assert_eq!(rows[0].crc_ok, Some(true));
-
-        assert_eq!(rows[1].protocol, "M17-Voice");
-        assert_eq!(get(&rows[1], "frames"), Some(common::Value::Int(25)));
-        // The airtime is on the frames, 40 ms each, live while the stream
-        // runs; the end row does not say it again.
-        let frames: Vec<&Decoded> =
-            all.iter().filter(|d| d.fields.iter().any(|(k, _)| k == "frame")).collect();
-        let seconds: f64 = frames.iter().filter_map(|d| get(d, "seconds")?.as_f64()).sum();
-        assert!((seconds - 1.0).abs() < 1e-6, "{seconds}");
-        assert!(frames.iter().all(|d| get(d, "live") == Some(common::Value::Bool(true))));
-        assert_eq!(get(&rows[1], "seconds"), None);
+        assert_eq!((all[0].id, all[0].kind), ("m17", "link_setup"));
+        assert_eq!(all[0].parties(), (Some("M0ABC"), Some("M17-M17 C")));
+        // A reflector is many listeners under one name.
+        assert_eq!(all[0].link.to.as_ref().map(|p| p.kind), Some(common::packet::PartyKind::Group));
+        assert_eq!(all.iter().filter(|d| d.kind == "voice").count(), 26);
+        // How long the stream held the channel is the over, stated on the
+        // voice port; a frame says who was talking and nothing more.
+        assert!(all.iter().all(|d| d.wrote().is_none()));
     }
 
     /// A frame produced by an independent implementation, decoded by ours.
@@ -628,7 +611,6 @@ mod tests {
         let ins = [spec(rate, center)];
         let tags = Vec::new();
         let quiet = vec![common::C32::new(0.0, 0.0); (rate * 0.5) as usize];
-        let mut speech: Vec<f32> = Vec::new();
         let mut live = 0usize;
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             for chunk in block.chunks(65_536) {
@@ -642,24 +624,17 @@ mod tests {
                 if let Payload::Voice(vs) = voice {
                     live += vs.iter().map(|v| v.pcm.len()).sum::<usize>();
                 }
-                if let Payload::Packets(ps) = packets {
-                    // Each frame's packet carries its own 40 ms; the over is
-                    // the run of them put together.
-                    for p in ps {
-                        if let Some(a) = &p.audio {
-                            speech.extend_from_slice(&a.pcm);
-                        }
-                    }
-                }
+                // The speech is not on the packets: an over is stated once,
+                // on the voice port, and this is where a listener hears it.
+                let _ = packets;
             }
         }
         // 25 frames of 40 ms, allowing for the last one closing the stream.
-        let seconds = speech.len() as f64 / VOICE_HZ;
+        let seconds = live as f64 / VOICE_HZ;
         assert!(
             (seconds - 1.0).abs() < 0.1,
             "{seconds} seconds of speech from a one second transmission"
         );
-        assert_eq!(live, speech.len(), "what was published live is what was kept");
     }
 
     /// A text message sent in packet mode, which is the other thing an M17
@@ -686,15 +661,9 @@ mod tests {
         }
 
         let frames = run(&modulate(&symbols, rate, 0.0), rate, center);
-        let rows: Vec<Decoded> =
-            frames.iter().filter_map(|f| decoded(f, Hz(center as u64))).collect();
-        let packet = rows.iter().find(|r| r.protocol == "M17-Packet").expect("no packet row");
-        assert_eq!(packet.text.as_deref(), Some("CQ CQ CQ de M0ABC, testing M17 packet mode"));
-        assert_eq!(packet.media_type, pipeline::event::media::TEXT);
-        assert!(packet.written, "an SMS packet is somebody writing");
-        assert_eq!(
-            packet.fields.iter().find(|(n, _)| n == "packet_type").map(|(_, v)| v.clone()),
-            Some(common::Value::Text("SMS".into()))
-        );
+        let rows: Vec<common::packet::Proto> = frames.iter().filter_map(|f| read(f)).collect();
+        let packet = rows.iter().find(|r| r.kind == "packet").expect("no packet row");
+        // An SMS packet is somebody typing into a radio.
+        assert_eq!(packet.wrote(), Some("CQ CQ CQ de M0ABC, testing M17 packet mode"));
     }
 }

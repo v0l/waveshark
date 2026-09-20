@@ -470,7 +470,7 @@ impl Default for Session {
             dashboard: true,
             audio_out: String::new(),
             audio_in: String::new(),
-            log_cap_mb: Some(crate::packetlog::DEFAULT_MAX_BYTES >> 20),
+            log_cap_mb: Some(crate::wspkt::DEFAULT_MAX_BYTES >> 20),
             capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             gps: String::new(),
             wigle_name: String::new(),
@@ -530,7 +530,7 @@ impl Session {
             return None;
         }
         match self.log_dir.trim() {
-            "" => crate::packetlog::PacketLog::default_dir(),
+            "" => crate::wspkt::PacketLog::default_dir(),
             dir => Some(PathBuf::from(dir)),
         }
     }
@@ -555,7 +555,7 @@ impl Session {
             return None;
         }
         match self.survey_path.trim() {
-            "" => crate::packetlog::PacketLog::default_survey_path(),
+            "" => crate::wspkt::PacketLog::default_survey_path(),
             path => Some(PathBuf::from(path)),
         }
     }

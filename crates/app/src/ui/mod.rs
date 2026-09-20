@@ -56,9 +56,8 @@ pub(crate) mod widgets;
 
 use crate::bands;
 use crate::dial::Dial;
-use crate::radio::{
-    ChanMode, ChannelSpec, ChannelState, Cmd, DecodeRecord, Demod, Frame, Radio, StationInfo,
-};
+use crate::radio::{ChanMode, ChannelSpec, ChannelState, Cmd, Demod, Frame, Radio, StationInfo};
+use crate::row::Reception;
 use crate::theme::{self, legend, value};
 use burst::*;
 use common::{GainMode, Hz, Sps};
@@ -729,7 +728,7 @@ impl App {
         // The field shows where the log would go, not where it is going: an
         // empty box beside a switch nobody has thrown says nothing.
         app.log_dir_edit = match s.log_dir.is_empty() {
-            true => crate::packetlog::PacketLog::default_dir()
+            true => crate::wspkt::PacketLog::default_dir()
                 .map(|d| d.display().to_string())
                 .unwrap_or_default(),
             false => s.log_dir.clone(),
@@ -1484,17 +1483,12 @@ impl App {
     /// Nothing is written here. The packet log is a node in the graph and
     /// stores what the demodulators produced, which is a better record than
     /// this list: these are conclusions, and they are bounded.
-    fn log_decodes(&mut self, batch: Vec<DecodeRecord>) {
+    fn log_decodes(&mut self, batch: Vec<Reception>) {
         for rec in batch {
             if self.log.print {
                 println!("{}", rec.line(self.log.print_since));
             }
-            // A transmission that names who it is for is also a call, and
-            // the call list outlives the packet log: a group heard an hour
-            // ago has scrolled out of the log long before it is forgotten
-            // here.
-            self.calls.list.update(&rec, rec.at);
-            // Text outlives the log for the same reason a call does: a page
+            // Text outlives the log the way a call does: a page
             // read half an hour later is still the page that was sent.
             self.messages.list.update(&rec, rec.at);
             // And a transmission that names an end is a link, whether or not
@@ -1516,7 +1510,7 @@ impl App {
         // nobody reads that far back.
         let keep_from = self.log.decodes.len().saturating_sub(IQ_KEEP);
         for l in &mut self.log.decodes[..keep_from] {
-            l.rec.iq = None;
+            l.rec.packet.carrier.iq = None;
         }
         if self.log.decodes.len() > DECODE_LOG_MAX {
             let drop = self.log.decodes.len() - DECODE_LOG_MAX;
@@ -2071,7 +2065,7 @@ impl App {
     fn links_view(&mut self, ui: &mut egui::Ui) {
         // The packet list is where a followed link's packets come from, so
         // the two views cannot disagree about a packet they have both seen.
-        let packets: Vec<crate::radio::DecodeRecord> =
+        let packets: Vec<crate::row::Reception> =
             self.log.decodes.iter().map(|l| l.rec.clone()).collect();
         match (links_pane::LinksView { st: &mut self.links, packets: &packets }).show(ui) {
             Some(links_pane::Action::Clear) => self.links.list = crate::links::Links::new(),
@@ -2142,7 +2136,7 @@ impl App {
     /// and the directory is a view: what an operator wants on opening it is
     /// the recent past, not the whole disk.
     fn load_links_from_log(&mut self) {
-        let Some(dir) = crate::packetlog::PacketLog::default_dir() else {
+        let Some(dir) = crate::wspkt::PacketLog::default_dir() else {
             self.links.error = Some("no packet log folder".into());
             return;
         };
@@ -3717,32 +3711,21 @@ mod tests {
         Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(1000.0, 400.0))
     }
 
-    fn record(freq: f64, crc: Option<bool>) -> DecodeRecord {
-        DecodeRecord {
-            at: std::time::Instant::now(),
-            freq,
-            model: Some("Fineoffset-WHx080"),
-            channel_hz: 31_250.0,
-            modulation: common::Modulation::Ook,
-            detail: "temperature_c=16.2 humidity_pct=89".into(),
-            fields: vec![
-                ("temperature_c".into(), common::Value::Float(16.2)),
-                ("humidity_pct".into(), common::Value::Int(89)),
-            ],
-            media_type: pipeline::event::media::BYTES,
-            written: false,
-            rssi_dbfs: -18.0,
-            snr_db: 21.5,
-            bytes: vec![0xab, 0xcd],
-            crc,
-            link: None,
-            report: common::ReportDetail::Bare,
-            identity: None,
-            iq: None,
-            pulses: None,
-            audio: None,
-            airtime: None,
+    fn record(freq: f64, crc: Option<bool>) -> Reception {
+        use common::packet::{Fact, Integrity, Quantity};
+        let mut r = Reception::for_test(freq, "ism")
+            .of_kind("Fineoffset-WHx080")
+            .of_bytes(vec![0xab, 0xcd])
+            .stating(Fact::sensed(Quantity::Temperature, 16.2, common::Unit::Celsius))
+            .stating(Fact::sensed(Quantity::Humidity, 89.0, common::Unit::Percent));
+        if let Some(f) = r.packet.frame.as_mut() {
+            f.integrity = match crc {
+                Some(true) => Integrity::Passed,
+                Some(false) => Integrity::Failed,
+                None => Integrity::Unchecked,
+            };
         }
+        r
     }
 
     #[test]
@@ -3794,7 +3777,7 @@ mod tests {
         // bursts that arrived while it was off.
         let mut a = app();
         let mut unknown = record(a.center, None);
-        unknown.model = None;
+        unknown.packet.stack.clear();
         a.log_decodes(vec![unknown, record(a.center, Some(true))]);
         a.settings.edit(|s| s.list_unknown = false);
         assert_eq!(a.log.decodes.len(), 2, "hiding must not drop anything");
@@ -3826,7 +3809,7 @@ mod tests {
         assert_eq!(a.log.decodes.len(), DECODE_LOG_MAX);
         // The oldest are the ones dropped, so the newest packet is still there.
         let newest = 100_000_000.0 + (DECODE_LOG_MAX + 119) as f64;
-        assert_eq!(a.log.decodes.last().unwrap().rec.freq, newest);
+        assert_eq!(a.log.decodes.last().unwrap().rec.freq(), newest);
         // Numbers keep counting past what the list holds, so a row keeps the
         // number it was given.
         assert_eq!(a.log.decodes.last().unwrap().id, (DECODE_LOG_MAX + 120) as u64);

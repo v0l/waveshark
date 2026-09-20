@@ -47,15 +47,7 @@ fn main() {
                 gap: u32::from_le_bytes(body[k * 8 + 4..k * 8 + 8].try_into().unwrap()),
             })
             .collect();
-        let pkg = common::Package {
-            center_hz: hz,
-            pulses,
-            rssi_dbfs: 0.0,
-            snr_db: snr,
-            modulation: None,
-            ..Default::default()
-        };
-        let Some(an) = decode::analyze(&pkg) else {
+        let Some(an) = decode::analyze(&pulses) else {
             continue;
         };
         let bytes = an.frame_bytes();

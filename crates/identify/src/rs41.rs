@@ -97,13 +97,16 @@ impl Rs41 {
             mixer.process(block, &mut shifted);
             sync.process(&shifted, framer.sink());
             for bytes in framer.take() {
-                if let Some(d) = rs41::decoded(&bytes, common::Hz(channel_hz as u64)) {
+                if let Some(d) = rs41::read(&bytes) {
                     rows.push(d);
                 }
             }
             framer.trim();
         }
-        rows.into()
+        // The raster channel it was read on, not the recorder's centre: a
+        // sonde is tuned to Vaisala's 10 kHz grid and that is where a chaser
+        // points a receiver.
+        Reading::from(rows).at(channel_hz)
     }
 }
 

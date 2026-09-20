@@ -64,13 +64,13 @@ impl Signal for TwoTone {
             tones.process(&audio, &mut runs);
             for run in &runs {
                 if let Some(page) = pages.run(*run)
-                    && let Some(d) = twotone::decoded(&twotone::framed(&page, None), chan.hz())
+                    && let Some(d) = twotone::read(&twotone::framed(&page, None))
                 {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

@@ -21,8 +21,8 @@
 //! type 0xff, opens with a company identifier and the rest is the vendor's
 //! own, which is where most of what a device is actually saying lives.
 
-use common::Decoded;
 use common::Value;
+use common::packet::{Channel, Entity, Fact, Id, Link, Party, Proto};
 
 /// PDU types on the primary advertising channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,17 +358,16 @@ pub fn company_name(id: u16) -> Option<&'static str> {
     })
 }
 
-/// The decode an advertising PDU becomes.
+/// What an advertising PDU says.
 ///
 /// `None` when the bytes are not a PDU this reads, which is how the packet bus
-/// tells a BLE frame from anything else that arrived on the same centre.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// tells a BLE frame from anything else that arrived on the same centre. The
+/// channel is passed in because which one a frame was heard on belongs to the
+/// reception and not to the bytes.
+pub fn read(bytes: &[u8], center: common::Hz) -> Option<Proto> {
     let adv = parse(bytes)?;
-    let mut fields = adv.fields();
     // An aircraft's broadcast is not a row about a Bluetooth device that
-    // happens to carry some bytes, so it is named for what it is and its own
-    // fields go in front of the link layer's.
+    // happens to carry some bytes, so it is named for what it is.
     let odid: Vec<crate::odid::Parsed> = adv
         .data
         .iter()
@@ -376,49 +375,35 @@ pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
         .filter_map(|s| crate::odid::from_service_data(&s.value))
         .flatten()
         .collect();
-    let protocol = if odid.is_empty() { "BLE-Adv" } else { "OpenDroneID" };
-    if !odid.is_empty() {
-        let mut f = crate::odid::fields(&odid);
-        f.append(&mut fields);
-        fields = f;
-    }
-    let channel = channel_of(center.as_f64());
-    if let Some(ch) = channel {
-        fields.insert(0, ("channel".into(), Value::Int(i64::from(ch))));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let link = common::Link {
-        from: Some(common::Party::unit(adv.address.to_string())),
-        to: Some(match adv.target {
-            Some(t) => common::Party::unit(t.to_string()),
-            None => common::Party::broadcast(),
-        }),
-    };
-    let mut who = common::Identity::new("ble", adv.address.to_string());
+    let mut who = Entity::new("ble", Id::Text(adv.address.to_string()));
     who.name = adv.name.clone();
     who.vendor = adv.company.and_then(company_name).map(str::to_string);
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec());
-    if let Some(p) = crate::odid::position(&odid) {
-        d = d.at_position(p);
+    // An address a device makes up to stop being followed is not evidence of
+    // that device the next time it is heard.
+    if adv.address.random {
+        who = who.lasting(common::packet::Stability::Session);
     }
-    if let Some(ch) = channel {
-        d = d.on_channel(common::ChannelUse::new(
+    let mut p =
+        Proto::new(if odid.is_empty() { "ble" } else { "opendroneid" }, adv.pdu_type.name())
+            .by(who)
+            .between(Link {
+                from: Some(Party::unit(adv.address.to_string())),
+                to: Some(match adv.target {
+                    Some(t) => Party::unit(t.to_string()),
+                    None => Party::broadcast(),
+                }),
+            });
+    for f in crate::odid::facts(&odid) {
+        p = p.saying(f);
+    }
+    if let Some(ch) = channel_of(center.as_f64()) {
+        p = p.saying(Fact::Channel(Channel::new(
             common::ChannelPlan::Ble,
             u16::from(ch),
             CHANNEL_WIDTH_HZ as u32,
-        ));
+        )));
     }
-    Some(
-        d.with_link(link)
-            .by(who)
-            .with_detail(detail)
-            .with_fields(fields)
-            .with_modulation(common::Modulation::Gfsk)
-            // Everything that reaches here passed the link layer's CRC-24 in
-            // the demodulator, which is a real check and not an argument
-            // from plausibility.
-            .with_crc(Some(true)),
-    )
+    Some(p)
 }
 
 /// The advertising channel index a centre names, if it names one.

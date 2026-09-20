@@ -32,7 +32,7 @@ use nodes::{AgcNode, BankNode, SpectrumNode, SquelchNode, WfmDemodNode};
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
-use crate::radio::{ChanMode, ChannelSpec, DecodeRecord, Demod};
+use crate::radio::{ChanMode, ChannelSpec, Demod};
 use crate::record::Recorder;
 use std::path::PathBuf;
 
@@ -746,7 +746,7 @@ impl Receiver {
             heard: nodes::Heard::default(),
             voice: None,
             log_dir: sinks.packet_log,
-            log_cap: Some(crate::packetlog::DEFAULT_MAX_BYTES),
+            log_cap: Some(crate::wspkt::DEFAULT_MAX_BYTES),
             log_folder: 0,
             log_measured: None,
             station: None,
@@ -2387,7 +2387,7 @@ impl Receiver {
     ///
     /// One place, because there is one decoder: whatever the front end, a
     /// packet went onto the bus and came off it as a row.
-    pub fn decodes(&self, at: std::time::Instant) -> Vec<DecodeRecord> {
+    pub fn rows(&self, at: std::time::Instant) -> Vec<crate::row::Reception> {
         // Read off the bus rather than out of the node, and from the far side
         // of the dedupe: the packets there carry what they decoded to and one
         // row per burst, so the list sees exactly what the map and the device
@@ -2401,7 +2401,7 @@ impl Receiver {
         out.as_packets()
             .unwrap_or(&[])
             .iter()
-            .flat_map(|p| p.decodes.iter().map(move |d| record(at, p, d)))
+            .map(|p| crate::row::Reception::new(at, p.clone()))
             .collect()
     }
 
@@ -2471,8 +2471,8 @@ impl Receiver {
             return;
         }
         self.log_measured = Some(std::time::Instant::now());
-        let dir = self.log_dir.clone().or_else(crate::packetlog::PacketLog::default_dir);
-        self.log_folder = dir.map(|d| crate::packetlog::folder_bytes(&d)).unwrap_or(0);
+        let dir = self.log_dir.clone().or_else(crate::wspkt::PacketLog::default_dir);
+        self.log_folder = dir.map(|d| crate::wspkt::folder_bytes(&d)).unwrap_or(0);
     }
 
     pub fn log_full(&self) -> bool {
@@ -2490,8 +2490,7 @@ impl Receiver {
     fn new_sink(&self) -> Option<Box<dyn nodes::PacketSink>> {
         let cap = self.log_cap;
         self.log_dir.clone().map(|d| {
-            Box::new(crate::packetlog::PacketLog::new(d).with_cap(cap))
-                as Box<dyn nodes::PacketSink>
+            Box::new(crate::wspkt::PacketLog::new(d).with_cap(cap)) as Box<dyn nodes::PacketSink>
         })
     }
 
@@ -5019,65 +5018,13 @@ pub fn scan_marks(
     out
 }
 
-/// A decode as the packet list holds it. Public because a directory rebuilt
-/// from the log has to make the same rows the live receiver makes.
-pub fn record_of(
-    at: std::time::Instant,
-    p: &common::Packet,
-    d: &pipeline::event::Decoded,
-) -> DecodeRecord {
-    record(at, p, d)
-}
-
-/// One row from a packet and one of the conclusions on it.
-///
-/// The packet is what carries the evidence: how strongly it was heard, the
-/// samples it was read from, the speech it brought and the width it came
-/// through. The decode says only what it was. They used to be copied onto the
-/// conclusion as well, filled in by four different fallbacks, and the two
-/// copies disagreed as soon as one of them was missed.
-fn record(
-    at: std::time::Instant,
-    p: &common::Packet,
-    d: &pipeline::event::Decoded,
-) -> DecodeRecord {
-    DecodeRecord {
-        at,
-        freq: d.center.as_f64(),
-        // The width the packet was heard through, as the front end that
-        // produced it declared. This used to be read off the keying where a
-        // decode carried no width of its own, which meant a table here of
-        // which protocol is heard through what: a guess that had to be kept
-        // in step with every front end, and one the packet has always been
-        // able to answer for itself.
-        channel_hz: f64::from(p.bandwidth_hz),
-        model: (d.protocol != nodes::UNKNOWN).then_some(d.protocol),
-        modulation: d.modulation.unwrap_or(common::Modulation::Unknown),
-        detail: d.detail.clone().or_else(|| d.text.clone()).unwrap_or_default(),
-        fields: d.fields.clone(),
-        media_type: d.media_type,
-        written: d.written,
-        rssi_dbfs: p.rssi_dbfs(),
-        snr_db: p.snr_db(),
-        bytes: d.payload.clone(),
-        crc: d.crc_ok,
-        link: d.link.clone(),
-        report: d.report.clone(),
-        identity: d.identity.clone(),
-        iq: p.samples().cloned(),
-        pulses: p.package().map(|pkg| std::sync::Arc::new(pkg.clone())),
-        audio: p.audio.clone(),
-        airtime: d.airtime.clone(),
-    }
-}
-
 /// Where raw span captures go when nobody says otherwise: beside the packet
 /// log, since both are recordings of what was on the air.
 /// Where speech models are kept: `models` beside the packet log, one
 /// directory per model.
 #[cfg(feature = "stt")]
 pub fn models_root() -> PathBuf {
-    crate::packetlog::PacketLog::default_dir()
+    crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("models"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-models"))
 }
@@ -5092,7 +5039,7 @@ pub fn default_model_dir() -> PathBuf {
 }
 
 pub fn default_capture_dir() -> PathBuf {
-    crate::packetlog::PacketLog::default_dir()
+    crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("captures"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-captures"))
 }
@@ -5101,7 +5048,7 @@ pub fn default_capture_dir() -> PathBuf {
 /// looks for the operator's own: beside the captures, because a saved key is
 /// a recording of a transmission like any other.
 pub fn default_sub_dir() -> PathBuf {
-    crate::packetlog::PacketLog::default_dir()
+    crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("sub"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-sub"))
 }
@@ -5926,8 +5873,9 @@ pub(crate) mod tests {
         assert!(inner.nodes.iter().any(|n| n.label.contains("Classify")));
         assert!(bank.inner_count > 1, "a bank of one channel is not a bank");
         // What a bank passes on is the bursts its channels detected, decoded
-        // or not, which is what a log or an analyser attaches to.
-        assert_eq!(bank.outputs[0].1.kind, pipeline::PortKind::Pulses);
+        // or not, as receptions: which channel heard one is known here and
+        // nowhere downstream.
+        assert_eq!(bank.outputs[0].1.kind, pipeline::PortKind::Packets);
     }
 
     #[test]
@@ -6862,7 +6810,7 @@ pub(crate) mod tests {
             "every bank tier feeds it"
         );
         // Every input carries detected bursts rather than decoded frames.
-        assert!(bus.inputs.iter().all(|(_, s)| s.kind == pipeline::PortKind::Pulses));
+        assert!(bus.inputs.iter().all(|(_, s)| s.kind == pipeline::PortKind::Packets));
         // And what leaves it is one stream, whatever produced it.
         assert_eq!(bus.outputs[0].1.kind, pipeline::PortKind::Packets);
         let _ = std::fs::remove_dir_all(&d);
@@ -7889,17 +7837,23 @@ mod tx_tests {
         // Replay through the receiver the live one runs, and read the code
         // back off the decode.
         let rows = crate::radio::replay(&path).expect("replay the capture");
-        let codes: Vec<i64> = rows
+        // The code is the frame: twenty-four bits of which the top twenty
+        // are the remote's serial and the rest the button.
+        let codes: Vec<Vec<u8>> =
+            rows.iter().filter(|r| r.kind() == "Princeton").map(|r| r.bytes().to_vec()).collect();
+        assert!(
+            !codes.is_empty(),
+            "no Princeton decode in {:?}",
+            rows.iter().map(|r| (r.protocol(), r.kind(), r.detail())).collect::<Vec<_>>()
+        );
+        assert!(codes.iter().all(|c| c == &[0x6a, 0x2a, 0x2b]), "codes: {codes:?}");
+        // And the remote it came from, which is the serial it repeats.
+        let who: Vec<String> = rows
             .iter()
-            .filter(|r| r.model == Some("Princeton"))
-            .filter_map(|r| r.fields.iter().find(|(n, _)| n == "code"))
-            .filter_map(|(_, v)| match v {
-                common::Value::Int(i) => Some(*i),
-                _ => None,
-            })
+            .filter(|r| r.kind() == "Princeton")
+            .filter_map(|r| r.packet.subject().map(|e| e.id.to_string()))
             .collect();
-        assert!(!codes.is_empty(), "no Princeton decode in {rows:?}");
-        assert!(codes.iter().all(|c| *c == 0x6a_2a_2b), "codes: {codes:?}");
+        assert!(who.iter().all(|w| w == "Princeton/434850"), "{who:?}");
         let _ = std::fs::remove_file(&path);
     }
 }

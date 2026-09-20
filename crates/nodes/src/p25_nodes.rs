@@ -28,10 +28,16 @@ pub use decode::p25::FLAG_HAVE_LC;
 pub use decode::p25::HEAD_LEN;
 pub use decode::p25::P25_TAG;
 pub use decode::p25::VOICE_SECONDS;
-pub use decode::p25::decoded;
+
+/// Rate the voice port is declared at. Nothing here decodes IMBE, so no
+/// samples travel on it; the rate is what the vocoder would produce.
+pub const VOICE_HZ: f64 = 8_000.0;
+
+const OUT_PACKETS: usize = 0;
+const OUT_VOICE: usize = 1;
 pub use decode::p25::encode_frame;
+pub use decode::p25::read;
 use decode::p25::{self, P25Frame};
-use decode::p25::{Duid, Encryption, LinkControl};
 pub use decode::p25::{SYNC_TOLERANCE, WINDOW};
 use dsp::c4fm::SymbolClock;
 use dsp::fir::FirDecimReal;
@@ -43,8 +49,7 @@ pub use identify::p25::CHANNEL_WIDTH_HZ;
 pub use identify::p25::DEFAULT_HZ;
 pub use identify::p25::P25;
 pub use identify::p25::{AUDIO_HZ, DEVIATION_HZ, RRC_ALPHA};
-use pipeline::event::Decoded;
-use pipeline::node::{NodeCtx, PortSpec, Simple};
+use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
@@ -74,6 +79,11 @@ pub struct P25Node {
     meter: crate::FrameMeter,
     audio_rate: f64,
     accepted: u64,
+    /// Who the last link control named, so the voice frames between them
+    /// belong to the call it opened.
+    talking: Option<(String, String)>,
+    /// What the last encryption sync said protects the speech.
+    secrecy: common::Secrecy,
 }
 
 impl Default for P25Node {
@@ -100,6 +110,8 @@ impl P25Node {
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S),
             audio_rate: AUDIO_HZ,
             accepted: 0,
+            talking: None,
+            secrecy: common::Secrecy::Unsaid,
         }
     }
 
@@ -113,28 +125,72 @@ impl P25Node {
 
     /// One frame as a packet: what it said, the level it was heard at and the
     /// samples it was sliced from, found by the frame's symbol index.
-    fn packet(&mut self, frame: &P25Frame) -> common::Packet {
-        let at_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
+    /// The call this frame is part of, for the voice port.
+    ///
+    /// A frame that carries speech is 180 ms of the channel whoever is
+    /// listening; the link control names the parties, and a frame without one
+    /// belongs to the call the last one opened.
+    fn call(&mut self, frame: &P25Frame) -> Option<common::Voice> {
+        if !frame.duid.voice() {
+            return None;
+        }
+        if let Some(lc) = frame.lc.as_ref().filter(|lc| !lc.encrypted())
+            && let (Some(src), Some(tg)) = (lc.source(), lc.talkgroup())
+        {
+            self.talking = Some((src.to_string(), tg.to_string()));
+        }
+        // The encryption sync says what protects the speech, and it is sent
+        // on the other kind of voice frame, so what it said stands until the
+        // next one says otherwise.
+        if let Some(es) = frame.es.as_ref() {
+            self.secrecy = match es.algid == p25::Encryption::CLEAR {
+                true => common::Secrecy::Clear,
+                false => common::Secrecy::Encrypted(None),
+            };
+        }
+        let secrecy = self.secrecy.clone();
+        // A protected link control cannot be read, and the call is still on
+        // the channel: the network access code is what the frame did say, so
+        // it stands for the group until something names one.
+        let (from, to) = match self.talking.clone() {
+            Some(pair) => pair,
+            None => (String::new(), format!("NAC {:03X}", frame.nac)),
+        };
+        Some(common::Voice {
+            system: "P25",
+            channel_hz: self.channel_hz,
+            to: Some(to),
+            from: Some(from).filter(|f| !f.is_empty()),
+            code: None,
+            over: Some(common::Over::new(Some(CODEC)).protected_by(secrecy).lasting(VOICE_SECONDS)),
+            rate: VOICE_HZ,
+            channels: 1,
+            pcm: Vec::new(),
+        })
+    }
+
+    fn packet(&mut self, frame: &P25Frame) -> common::packet::Packet {
         self.accepted += 1;
         let sps = self.audio_rate / BAUD;
         let bytes = encode_frame(frame);
         let start = (frame.at as f64 * sps) as u64;
         let len = (p25::LDU_DIBITS as f64 * sps) as usize;
         let snr_db = self.meter.snr_db_at(start, len);
-        let measured = self.meter.frame_measured(bytes, start, len, snr_db);
-        common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, measured)
+        self.meter.packet_measured(bytes, start, len, snr_db)
     }
 }
 
-impl Simple for P25Node {
+impl Node for P25Node {
     fn name(&self) -> &str {
         "p25"
     }
 
-    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+    fn num_outputs(&self) -> usize {
+        2
+    }
+
+    fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
+        let i = &inputs[0];
         if i.spec.kind != PortKind::Iq {
             return Err(common::Error::other("p25 reads complex baseband"));
         }
@@ -157,11 +213,23 @@ impl Simple for P25Node {
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         out.rate = 0.0;
-        Ok(out)
+        // The call itself, on the port a call is stated on. Nothing here
+        // decodes IMBE, so the speech is empty and the over carries what the
+        // network said: who is talking, in which vocoder, under what cipher,
+        // and how much of the channel this frame was.
+        let mut voice = out.with_kind(PortKind::Voice);
+        voice.rate = VOICE_HZ;
+        voice.channels = 1;
+        Ok(vec![out, voice])
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
-        let Some(iq) = i.as_iq() else { return Ok(()) };
+    fn process(
+        &mut self,
+        inputs: &[&Payload],
+        outputs: &mut [Payload],
+        _c: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(iq) = inputs[0].as_iq() else { return Ok(()) };
         self.mixed.clear();
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
@@ -186,8 +254,11 @@ impl Simple for P25Node {
         self.syms = syms;
 
         for f in &frames {
+            if let Some(v) = self.call(f) {
+                outputs[OUT_VOICE].voice_mut().push(v);
+            }
             let p = self.packet(f);
-            o.packets_mut().push(p);
+            outputs[OUT_PACKETS].packets_mut().push(p);
         }
         Ok(())
     }
@@ -229,12 +300,13 @@ impl Protocol for P25 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
 
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Packets]
+        &[PortKind::Packets, PortKind::Voice]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -259,6 +331,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 mod tests {
     use super::*;
     use common::Hz;
+    use decode::p25::{Duid, Encryption, LinkControl};
     use pipeline::port::StreamSpec;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
@@ -306,29 +379,47 @@ mod tests {
     }
 
     /// Run IQ through the node and return the rows it wrote.
-    fn replay(iq: &[common::C32], rate: f64, center: f64, hz: f64) -> Vec<Decoded> {
+    fn replay(
+        iq: &[common::C32],
+        rate: f64,
+        center: f64,
+        hz: f64,
+    ) -> (Vec<common::packet::Proto>, Vec<common::Voice>) {
         let mut node = P25Node::new(hz);
-        node.negotiate(&spec(rate, center)).unwrap();
+        node.negotiate(&[spec(rate, center)]).unwrap();
         let ins = [spec(rate, center)];
         let tags = Vec::new();
-        let mut rows = Vec::new();
+        let (mut rows, mut voices) = (Vec::new(), Vec::new());
         for chunk in iq.chunks(16_384) {
             let input = Payload::Iq(chunk.to_vec());
-            let mut out = Payload::Packets(Vec::new());
+            let mut outs = [Payload::Packets(Vec::new()), Payload::Voice(Vec::new())];
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Packets(ps) = &out {
+            node.process(&[&input], &mut outs, &mut ctx).unwrap();
+            let [packets, voice] = outs;
+            if let Payload::Voice(v) = voice {
+                voices.extend(v);
+            }
+            if let Payload::Packets(ps) = &packets {
                 for p in ps {
-                    if let common::PacketBody::Frame(f) = &p.body {
-                        assert!(p.rssi_dbfs().is_finite() && p.snr_db().is_finite());
-                        assert!(p.samples().is_some_and(|q| !q.samples.is_empty()));
-                        rows.extend(decoded(&f.bytes, common::Hz(p.center_hz())));
+                    if p.bytes().is_empty() {
+                        continue;
                     }
+                    assert!(p.carrier.rssi_dbfs.is_finite() && p.carrier.snr_db.is_finite());
+                    assert!(p.carrier.iq.as_ref().is_some_and(|q| !q.samples.is_empty()));
+                    rows.extend(read(p.bytes()));
                 }
             }
         }
-        rows
+        (rows, voices)
+    }
+
+    /// What a layer states about the site it was heard from.
+    fn site(d: &common::packet::Proto) -> Option<u16> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Infrastructure(c) => c.site_code,
+            _ => None,
+        })
     }
 
     /// Dibits with all four levels and no sync word in them, keyed either
@@ -364,8 +455,8 @@ mod tests {
     #[test]
     fn negotiates_a_channel_inside_the_span() {
         let mut n = P25Node::default();
-        assert!(n.negotiate(&spec(2_048_000.0, DEFAULT_HZ)).is_ok());
-        assert!(n.negotiate(&spec(2_048_000.0, 460_000_000.0)).is_err());
+        assert!(n.negotiate(&[spec(2_048_000.0, DEFAULT_HZ)]).is_ok());
+        assert!(n.negotiate(&[spec(2_048_000.0, 460_000_000.0)]).is_err());
     }
 
     #[test]
@@ -377,24 +468,22 @@ mod tests {
             lc: Some(LinkControl { bytes: group_lc(), repaired: 0 }),
             es: None,
         });
-        let d = decoded(&bytes, Hz(155_752_500)).expect("a P25 row");
-        assert_eq!(d.protocol, "P25-Voice");
-        let get = |k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
-        };
-        assert_eq!(get("nac"), "293");
-        assert_eq!(get("to"), "1234");
-        assert_eq!(get("from"), "5679413");
-        assert_eq!(get("call_type"), "group");
-        let air = d.airtime.as_ref().expect("a voice frame with no airtime");
-        assert_eq!(air.seconds, VOICE_SECONDS);
-        assert!(air.voice && air.live);
-        assert_eq!(air.codec, Some(CODEC));
-        assert_eq!(air.secrecy, common::Secrecy::Clear);
-        // Nobody wrote this, so it is not a message.
-        assert!(!d.written);
-        assert!(decoded(b"random", Hz(0)).is_none());
-        assert!(decoded(b"P1", Hz(0)).is_none());
+        let d = read(&bytes).expect("a P25 row");
+        assert_eq!((d.id, d.kind), ("p25", "voice-1"));
+        assert_eq!(site(&d), Some(0x293), "the network access code names the site");
+        assert_eq!(
+            (
+                d.parties().0.unwrap_or_default().to_string(),
+                d.parties().1.unwrap_or_default().to_string()
+            ),
+            ("5679413".to_string(), "1234".to_string())
+        );
+        assert_eq!(d.link.to.map(|p| p.kind), Some(common::packet::PartyKind::Group));
+        // Nobody wrote this, so it is not a message, and how long it held
+        // the channel is the over rather than a field on the frame.
+        assert!(d.facts.iter().all(|f| !matches!(f, common::packet::Fact::Message(_))));
+        assert!(read(b"random").is_none());
+        assert!(read(b"P1").is_none());
     }
 
     /// A keyed call off the node's own front end: every frame of it read, the
@@ -404,22 +493,25 @@ mod tests {
     fn reads_a_keyed_call_through_the_front_end() {
         let rate = 96_000.0;
         let iq = keyed(&call(0x293), rate, 0.0, 0.0);
-        let rows = replay(&iq, rate, 155_752_500.0, 155_752_500.0);
+        let (rows, voices) = replay(&iq, rate, 155_752_500.0, 155_752_500.0);
         assert_eq!(rows.len(), 10, "ten frames keyed, {} read", rows.len());
-        assert!(rows.iter().all(|d| d.protocol == "P25-Voice"));
-        let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
-        };
-        assert!(rows.iter().all(|d| get(d, "nac") == "293"));
-        let named = rows.iter().filter(|d| get(d, "to") == "1234").count();
+        assert!(rows.iter().all(|d| d.kind.starts_with("voice")));
+        assert!(rows.iter().all(|d| site(d) == Some(0x293)));
+        let named = rows.iter().filter(|d| d.parties().1.unwrap_or_default() == "1234").count();
         assert_eq!(named, 5, "five frames carry the link control");
         assert!(
-            rows.iter().filter(|d| get(d, "to") == "1234").all(|d| get(d, "from") == "5679413")
+            rows.iter().filter(|d| d.parties().1.unwrap_or_default() == "1234").all(|d| d
+                .parties()
+                .0
+                .unwrap_or_default()
+                == "5679413")
         );
-        // Nothing is encrypted, so no row claims a key.
-        assert_eq!(rows.iter().filter(|d| get(d, "encrypted") == "true").count(), 0);
-        // Every row is 180 ms of speech in the call list.
-        assert_eq!(rows.iter().filter(|d| d.airtime.is_some()).count(), 10);
+        // Every frame is 180 ms of the channel in the call list, and none of
+        // it is enciphered.
+        assert_eq!(voices.len(), 10);
+        assert!(voices.iter().all(|v| v.over.as_ref().is_some_and(|o| {
+            o.seconds == VOICE_SECONDS && o.codec == Some(CODEC) && !o.encrypted()
+        })));
     }
 
     /// Off frequency and in noise, which is what a receiver actually hands
@@ -429,13 +521,9 @@ mod tests {
     fn reads_a_call_off_frequency_and_in_noise() {
         let rate = 96_000.0;
         let iq = keyed(&call(0x4d2), rate, -2_500.0, 0.1);
-        let rows = replay(&iq, rate, 155_755_000.0, 155_752_500.0);
+        let (rows, _) = replay(&iq, rate, 155_755_000.0, 155_752_500.0);
         assert_eq!(rows.len(), 10);
-        let nacs = rows
-            .iter()
-            .filter(|d| d.fields.iter().any(|(k, v)| k == "nac" && v.to_string() == "4D2"))
-            .count();
-        assert_eq!(nacs, 10);
+        assert_eq!(rows.iter().filter(|d| site(d) == Some(0x4d2)).count(), 10);
     }
 
     /// An enciphered call says so, and says under which key, without
@@ -455,16 +543,21 @@ mod tests {
         dibits.extend(p25::frame_dibits(0x293, Duid::Voice2, &p25::hex_words(&es)));
         dibits.extend(tail());
         let rate = 96_000.0;
-        let rows = replay(&keyed(&dibits, rate, 0.0, 0.0), rate, DEFAULT_HZ, DEFAULT_HZ);
+        let (rows, voices) = replay(&keyed(&dibits, rate, 0.0, 0.0), rate, DEFAULT_HZ, DEFAULT_HZ);
         assert_eq!(rows.len(), 2);
-        let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string()).unwrap_or_default()
-        };
-        assert_eq!(get(&rows[0], "emergency"), "true");
-        assert_eq!(get(&rows[0], "encrypted"), "true");
-        assert_eq!(get(&rows[1], "algorithm"), "ADP");
-        assert_eq!(get(&rows[1], "key_id"), "42");
-        assert_eq!(rows[0].airtime.as_ref().unwrap().secrecy, common::Secrecy::Encrypted(None));
+        // A radio declaring an emergency is told to somebody rather than
+        // spelled in a field.
+        assert!(
+            rows[0].facts.iter().any(|f| matches!(f, common::packet::Fact::Alert(_))),
+            "{:?}",
+            rows[0].facts
+        );
+        // The encryption sync rides on the other kind of voice frame, so the
+        // call is judged from the frame after the one that opened it.
+        assert_eq!(
+            voices.last().and_then(|v| v.over.as_ref()).map(|o| o.secrecy.clone()),
+            Some(common::Secrecy::Encrypted(None))
+        );
     }
 
     /// Minutes of noise, and nothing said about any of it.
@@ -482,6 +575,6 @@ mod tests {
             })
             .collect();
         let rows = replay(&iq, rate, DEFAULT_HZ, DEFAULT_HZ);
-        assert_eq!(rows.len(), 0, "two minutes of noise read as {} frames", rows.len());
+        assert_eq!(rows.0.len(), 0, "two minutes of noise read as {} frames", rows.0.len());
     }
 }

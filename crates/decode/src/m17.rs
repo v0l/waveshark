@@ -18,8 +18,8 @@
 //! rebuilt link setup exactly like a received one: the CRC is what makes them
 //! equivalent.
 
-use common::Decoded;
 use common::Value;
+use common::packet::{Fact, Link, Party, Proto};
 use dsp::m17::{Body, Frame};
 
 /// The M17 alphabet, ordered by value. A space is zero, so trailing spaces
@@ -640,9 +640,11 @@ pub fn fields(lsf: &Lsf) -> Vec<(String, Value)> {
     f
 }
 
-/// The row a transmission becomes.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// What a transmission says: who called whom, and anything a person typed.
+///
+/// How long a stream held the channel and which vocoder it used is the over,
+/// stated once on the voice port. An SMS packet is somebody writing.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let event = Event::parse(bytes)?;
     let lsf = match &event {
         Event::LinkSetup { lsf, .. } => Some(lsf),
@@ -650,97 +652,36 @@ pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
             lsf.as_ref()
         }
     };
-    let mut fields: Vec<(String, Value)> = lsf.map(fields).unwrap_or_default();
-    let mut text = None;
-
-    let protocol = match &event {
-        Event::LinkSetup { late, .. } => {
-            if *late {
-                // Rebuilt from the link information channel rather than heard
-                // outright, which is worth saying: it means the receiver
-                // joined the transmission after it started.
-                fields.push(("late_entry".into(), Value::Bool(true)));
-            }
-            "M17-Setup"
-        }
-        Event::Packet { data, .. } => {
-            let (id, payload) = data.split_first().unwrap_or((&0, &[]));
-            if let Some(name) = packet_protocol(*id) {
-                fields.push(("packet_type".into(), Value::Text(name.into())));
-            } else {
-                fields.push(("packet_type".into(), Value::Int(i64::from(*id))));
-            }
-            fields.push(("bytes".into(), Value::Int(data.len() as i64)));
-            // SMS is a null-terminated UTF-8 string, and every other type may
-            // or may not be text. Only the one the specification says is text
-            // is shown as text.
-            if *id == 0x05 {
-                let s = String::from_utf8_lossy(payload).trim_end_matches('\0').to_string();
-                fields.push(("message".into(), Value::Text(s.clone())));
-                text = Some(s);
-            }
-            "M17-Packet"
-        }
-        // One frame of a stream, which is what the log holds and what the
-        // audio is rebuilt from. The row is deliberately thin: a list showing
-        // twenty-five of these a second is a list nobody reads, and the
-        // interface folds them into the transmission they belong to.
-        Event::StreamFrame { number, payload, .. } => {
-            fields.push(("frame".into(), Value::Int(i64::from(*number))));
-            // 40 ms, the one duration in M17 that needs no clock, so anything
-            // counting airtime can add these up without waiting for the
-            // transmission to end.
-            fields.push(("seconds".into(), Value::Float(0.04)));
-            fields.push(("live".into(), Value::Bool(true)));
-            fields.push(("payload".into(), Value::Text(hex(payload))));
-            match lsf.map(|l| l.data_type()) {
-                Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
-                _ => "M17-Stream",
-            }
-        }
-        Event::Stream { frames, complete, .. } => {
-            // The end of the run of frames, each of which carried its own
-            // 40 ms; anything adding airtime up has done so already.
-            fields.push(("frames".into(), Value::Int(i64::from(*frames))));
-            if !complete {
-                fields.push(("truncated".into(), Value::Bool(true)));
-            }
-            match lsf.map(|l| l.data_type()) {
-                Some(DataType::Voice) | Some(DataType::VoiceData) => "M17-Voice",
-                _ => "M17-Stream",
-            }
-        }
+    let kind = match &event {
+        Event::LinkSetup { .. } => "link_setup",
+        Event::Packet { .. } => "packet",
+        Event::StreamFrame { .. } | Event::Stream { .. } => match lsf.map(|l| l.data_type()) {
+            Some(DataType::Voice) | Some(DataType::VoiceData) => "voice",
+            _ => "stream",
+        },
     };
-
-    let link = lsf.map(|l| {
+    let mut p = Proto::new("m17", kind);
+    if let Some(l) = lsf {
         let dst = l.destination().to_string();
         // ALL and a reflector's own name are many listeners under one name;
         // anything else is the callsign of one station.
-        let to = if dst.eq_ignore_ascii_case("all") || dst.starts_with("M17-") {
-            common::Party::group(dst)
-        } else if dst.is_empty() {
-            common::Party::broadcast()
-        } else {
-            common::Party::unit(dst)
+        let to = match () {
+            _ if dst.eq_ignore_ascii_case("all") || dst.starts_with("M17-") => Party::group(dst),
+            _ if dst.is_empty() => Party::broadcast(),
+            _ => Party::unit(dst),
         };
-        common::Link::between(common::Party::unit(l.source().to_string()), to)
-    });
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fsk4)
-        // Every link setup here passed the CRC over its 28 bytes and every
-        // packet the CRC over the whole of it; a transmission whose checks
-        // failed never became an event.
-        .with_crc(Some(true));
-    if let Some(t) = text {
-        // An M17 SMS packet: a person typed it into a radio.
-        d = d.written().with_text(t);
+        p = p
+            .by(common::packet::Entity::call("m17", l.source().to_string()))
+            .between(Link::between(Party::unit(l.source().to_string()), to));
     }
-    d.link = link;
-    d.identity = lsf.map(|l| common::Identity::new("m17", l.source().to_string()));
-    Some(d)
+    // An M17 SMS packet: a person typed it into a radio.
+    if let Event::Packet { data, .. } = &event
+        && let Some((0x05, payload)) = data.split_first().map(|(i, r)| (*i, r))
+    {
+        let text = String::from_utf8_lossy(payload).trim_end_matches('\0').to_string();
+        p = p.saying(Fact::message(text));
+    }
+    Some(p)
 }
 
 /// Payload bytes as hex, so a row carries what was on the air in a form that

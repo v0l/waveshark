@@ -176,6 +176,7 @@ impl Node for FaderNode {
                         // A fader in front of a channel with no identity
                         // stage has nothing to say about the group.
                         code: None,
+                        over: None,
                         rate,
                         channels,
                         pcm: pcm.clone(),
@@ -290,6 +291,7 @@ mod tests {
             to: Some("ALL".into()),
             from: Some("M0ABC".into()),
             code: None,
+            over: None,
             rate: 8_000.0,
             channels: 1,
             pcm: vec![0.8, -0.8],

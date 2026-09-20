@@ -11,9 +11,10 @@
 #![allow(dead_code)]
 
 use common::C32;
+use common::packet::Detection;
 use decode::Protocols;
 use decode::protocol::{Report, Value};
-use dsp::{FirDecim, FskConfig, FskDetector, Mixer, OokDetector, Package, PulseConfig};
+use dsp::{FirDecim, FskConfig, FskDetector, Mixer, OokDetector, PulseConfig};
 use sources::FileSource;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -113,7 +114,7 @@ impl Fixture {
         let protocols = Protocols::published();
         let mut reports: Vec<Report> = Vec::new();
         for pkg in packages(&self.path) {
-            for r in protocols.decode_all(&pkg) {
+            for r in protocols.decode_all(pkg.pulses()) {
                 if !reports.iter().any(|p| p.model == r.model && p.fields == r.fields) {
                     reports.push(r);
                 }
@@ -138,7 +139,7 @@ impl Fixture {
 /// out of a noise floor made mostly of empty spectrum. In the live receiver the
 /// channelizer resolves this by mixing each burst down to its own centre; here
 /// the cheaper answer is to try the span whole as well.
-pub fn packages(path: &Path) -> Vec<Package> {
+pub fn packages(path: &Path) -> Vec<Detection> {
     packages_at(path, None)
 }
 
@@ -146,7 +147,7 @@ pub fn packages(path: &Path) -> Vec<Package> {
 ///
 /// Most of rtl_433's corpus predates the naming convention, so a caller that
 /// knows the rate from a README has to be able to say so.
-pub fn packages_at(path: &Path, rate_hz: Option<f64>) -> Vec<Package> {
+pub fn packages_at(path: &Path, rate_hz: Option<f64>) -> Vec<Detection> {
     let src = match rate_hz {
         Some(r) => FileSource::open_at_rate(path, common::Sps(r as u64)).expect("open capture"),
         None => FileSource::open(path).expect("open capture"),
@@ -191,16 +192,16 @@ pub fn packages_at(path: &Path, rate_hz: Option<f64>) -> Vec<Package> {
 }
 
 /// Sample ranges covering each detected burst, merged where they overlap.
-pub fn windows(pkgs: &[Package], rate: f64, len: usize) -> Vec<(usize, usize)> {
+pub fn windows(pkgs: &[Detection], rate: f64, len: usize) -> Vec<(usize, usize)> {
     let mut spans: Vec<(usize, usize)> = pkgs
         .iter()
         .map(|p| {
-            let us: u64 = p.pulses.iter().map(|q| q.mark as u64 + q.gap as u64).sum();
+            let us: u64 = p.pulses().iter().map(|q| q.mark as u64 + q.gap as u64).sum();
             let dur = (us as f64 * 1e-6 * rate) as usize;
             // A margin either side, because the detector triggers partway into
             // the first mark and the estimate wants the whole burst.
             let margin = (rate * 1e-3) as usize;
-            let start = (p.start_sample as usize).saturating_sub(margin);
+            let start = (p.at_sample as usize).saturating_sub(margin);
             (start, (start + dur + 2 * margin).min(len))
         })
         .filter(|(a, b)| b > a)
@@ -243,7 +244,7 @@ pub fn carrier_offset(iq: &[C32], rate: f64) -> f64 {
     acc.arg() as f64 * rate / std::f64::consts::TAU
 }
 
-fn detect(iq: &[C32], rate: f64, out: &mut Vec<Package>) {
+fn detect(iq: &[C32], rate: f64, out: &mut Vec<Detection>) {
     // Two resets, because the gap that ends a transmission is per protocol and
     // nothing knows it yet at this point in the chain. The scanner's default,
     // 4 ms, keeps repeats apart, which is what the checksum-free protocols need

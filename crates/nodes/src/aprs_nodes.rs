@@ -14,7 +14,7 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::aprs::decoded;
+pub use decode::aprs::read;
 pub use decode::aprs::round;
 use decode::ax25;
 use dsp::afsk::{AfskConfig, AfskDemod};
@@ -24,7 +24,6 @@ pub use identify::aprs::Aprs;
 pub use identify::aprs::CHANNEL_WIDTH_HZ;
 pub use identify::aprs::DEFAULT_HZ;
 pub use identify::aprs::{AUDIO_HZ, DEVIATION_HZ};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -102,7 +101,7 @@ impl Simple for AprsNode {
         // taken before the mixer is a level of everything else.
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -123,10 +122,10 @@ impl Simple for AprsNode {
         self.afsk.process(&audio, &mut self.frames);
         self.audio = audio;
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             self.accepted += 1;
-            out.push(self.meter.frame(f.clone()));
+            out.push(self.meter.packet_now(f.clone()));
         }
         Ok(())
     }
@@ -167,12 +166,12 @@ impl Protocol for Aprs {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 2_000_000 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::afsk::is_packet_band(p.center_hz() as f64) {
             return None;
         }
-        let center = common::Hz(p.center_hz());
-        Some(ax25::parse(bytes).map(|f| vec![decoded(&f, bytes, center)]).unwrap_or_default())
+        Some(ax25::parse(bytes).map(|f| vec![read(&f)]).unwrap_or_default())
     }
 
     /// Where APRS is across Europe. North America is 144.390 and Japan
@@ -553,12 +552,12 @@ mod tests {
         let quiet = vec![common::C32::new(0.0, 0.0); 8192];
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
 
@@ -567,12 +566,11 @@ mod tests {
 
         let parsed = ax25::parse(&frames[0]).expect("an AX.25 frame");
         assert_eq!(parsed.source.to_string(), "EI2ABC-9");
-        let d = decoded(&parsed, &frames[0], Hz(144_800_000));
-        assert_eq!(d.protocol, "APRS-Position");
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
-        assert_eq!(get("lon"), Some(common::Value::Float(-6.25)));
-        assert_eq!(get("from"), Some(common::Value::Text("EI2ABC-9".into())));
+        let d = read(&parsed);
+        assert_eq!((d.id, d.kind), ("aprs", "position"));
+        let p = d.placed().expect("where it said it was");
+        assert!((p.lat - 53.63333).abs() < 1e-5 && (p.lon + 6.25).abs() < 1e-5);
+        assert_eq!(d.parties().0, Some("EI2ABC-9"));
     }
 
     /// The transmitter into the receiver: a beacon keyed by the chain the
@@ -606,12 +604,12 @@ mod tests {
         let mut frames: Vec<Vec<u8>> = Vec::new();
         for chunk in air.chunks(4_096) {
             let input = Payload::Iq(chunk.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
 
@@ -622,12 +620,11 @@ mod tests {
         assert_eq!(parsed.path.len(), 1);
         assert_eq!(parsed.path[0].to_string(), "WIDE1-1");
         assert_eq!(parsed.info, report.as_bytes());
-        let d = decoded(&parsed, &frames[0], Hz(center as u64));
-        assert_eq!(d.protocol, "APRS-Position");
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("lat"), Some(common::Value::Float(53.63333)));
-        assert_eq!(get("lon"), Some(common::Value::Float(-6.25)));
-        assert_eq!(get("from"), Some(common::Value::Text("MI0ABC-9".into())));
+        let d = read(&parsed);
+        assert_eq!((d.id, d.kind), ("aprs", "position"));
+        let p = d.placed().expect("where it said it was");
+        assert!((p.lat - 53.63333).abs() < 1e-5 && (p.lon + 6.25).abs() < 1e-5);
+        assert_eq!(d.parties().0, Some("MI0ABC-9"));
     }
 
     /// A station with nothing to say transmits nothing, rather than keying a
@@ -662,8 +659,9 @@ mod tests {
         f[14] = 0x00;
         let parsed = ax25::parse(&f).unwrap();
         assert!(!parsed.is_ui());
-        let d = decoded(&parsed, &f, Hz(144_800_000));
-        assert_eq!(d.protocol, "AX25");
-        assert_eq!(d.crc_ok, Some(true));
+        // Plenty of AX.25 is not APRS at all, and a frame that passed its
+        // check sequence is reported rather than dropped.
+        let d = read(&parsed);
+        assert_eq!((d.id, d.kind), ("aprs", "ax25"));
     }
 }

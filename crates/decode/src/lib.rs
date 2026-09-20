@@ -37,6 +37,7 @@ pub mod dvbt;
 pub mod eas;
 pub mod elrs;
 pub mod epirb;
+pub mod facts;
 pub mod flex;
 pub mod flysky;
 pub mod framing;

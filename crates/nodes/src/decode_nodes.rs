@@ -8,7 +8,7 @@
 use common::Result;
 use decode::protocol::{DecodeError, Protocols};
 use dsp::{AskConfig, AskDetector, FskConfig, FskDetector, OokDetector, PulseConfig};
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Event;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec, Tag, TagValue};
@@ -50,7 +50,7 @@ impl Simple for PulseDetectNode {
             ));
         }
         self.det = OokDetector::new(i.spec.rate, self.cfg);
-        // Packages are events in time, not a sampled stream, so a "rate" here
+        // Detections are events in time, not a sampled stream, so a "rate" here
         // would be a fiction. Zero says so explicitly rather than inviting
         // something downstream to divide by it.
         let mut out = i.spec.with_kind(PortKind::Pulses);
@@ -59,20 +59,17 @@ impl Simple for PulseDetectNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let pkgs = o.pulses_mut();
-        self.det.process(i.as_real().unwrap(), pkgs);
-        // Where the burst was received. The detector reads a stream and knows
-        // nothing about frequency; the port it arrived on does, and in a
-        // channel bank that is the channel's centre rather than the tuner's.
-        let center = c.inputs[0].spec.center.0;
-        for p in pkgs.iter_mut() {
-            p.center_hz = center;
-        }
-        for p in pkgs.iter() {
+        // Where and when the stream is. The detector reads samples and knows
+        // neither; the port it arrived on knows both, and in a channel bank
+        // the centre is the channel's rather than the tuner's.
+        let mut found = Vec::new();
+        self.det.process(i.as_real().unwrap(), &mut found);
+        for d in &found {
             // Tag the burst so anything downstream, or a waterfall, can point
             // at exactly where in the stream it happened.
-            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+            c.tag(Tag::new(d.at_sample, "burst", TagValue::Float(d.snr_db as f64)));
         }
+        o.pulses_mut().extend(found);
 
         // Report what was thrown away. Without this a mistuned chain produces
         // total silence, which looks identical to a disconnected antenna and
@@ -181,18 +178,14 @@ impl Simple for AskDetectNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let pkgs = o.pulses_mut();
-        self.det.process(i.as_real().unwrap(), pkgs);
-        // Where the burst was received; see `pulse_detect`.
-        let center = c.inputs[0].spec.center.0;
-        for p in pkgs.iter_mut() {
-            p.center_hz = center;
-        }
+        let mut found = Vec::new();
+        self.det.process(i.as_real().unwrap(), &mut found);
         let depth = self.det.depth_db() as f64;
-        for p in pkgs.iter() {
-            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
-            c.tag(Tag::new(p.start_sample, "ask_depth_db", TagValue::Float(depth)));
+        for d in &found {
+            c.tag(Tag::new(d.at_sample, "burst", TagValue::Float(d.snr_db as f64)));
+            c.tag(Tag::new(d.at_sample, "ask_depth_db", TagValue::Float(depth)));
         }
+        o.pulses_mut().extend(found);
 
         let s = self.det.take_stats();
         if s.rejected_total() > 0 {
@@ -307,20 +300,20 @@ impl Simple for FskDetectNode {
     }
 
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
-        let pkgs = o.pulses_mut();
-        self.det.process(i.as_iq().unwrap(), pkgs);
-        // Where the burst was received; see `pulse_detect`.
-        let center = c.inputs[0].spec.center.0;
-        for p in pkgs.iter_mut() {
-            p.center_hz = center;
-        }
+        let mut found = Vec::new();
+        self.det.process(i.as_iq().unwrap(), &mut found);
         let sep = self.det.separation_hz() as f64;
-        for p in pkgs.iter() {
-            c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
+        for d in &found {
+            c.tag(Tag::new(d.at_sample, "burst", TagValue::Float(d.snr_db as f64)));
             // The measured deviation names a device family before anything has
             // decoded, so it is worth carrying even when no protocol matches.
-            c.tag(Tag::new(p.start_sample, "fsk_separation_hz", TagValue::Float(sep)));
+            c.tag(Tag::new(d.at_sample, "fsk_separation_hz", TagValue::Float(sep)));
         }
+        let mut found = found;
+        for d in &mut found {
+            d.keying.params.separation_hz = sep as f32;
+        }
+        o.pulses_mut().extend(found);
 
         let s = self.det.take_stats();
         if s.rejected_total() > 0 {
@@ -397,138 +390,10 @@ impl Simple for FskDetectNode {
     }
 }
 
-/// Turn one report into the event a consumer sees.
-///
-/// The conclusion only. How strongly the burst was heard and what it was read
-/// from stay on the package and the packet the decode is attached to.
-///
-/// Shared with the packet bus decoder, which runs the same protocols over the
-/// same packages at a different point in the graph. Two copies of this drifted
-/// within a day of existing.
-pub fn decoded_event(
-    report: &decode::Report,
-    pkg: &common::Package,
-    center: common::Hz,
-    modulation: common::Modulation,
-) -> Decoded {
-    let mut d = Decoded::bytes(report.model, center, pkg.start_sample as f64, report.raw.clone())
-        .with_text(report.to_string())
-        .with_detail(report.fields_line())
-        .with_fields(report.fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .with_types(report.types.iter().map(|(k, t)| (k.clone(), *t)).collect())
-        .with_modulation(modulation)
-        .with_crc(report.proof.as_flag());
-    if let Some(id) = &report.device {
-        // The model is part of the space, not decoration. A sensor's id is a
-        // handful of bits chosen at random, so two stations of different
-        // makes sharing one is ordinary, and merging them would report a
-        // single device reading two temperatures.
-        d = d.by(common::Identity::new(format!("ism:{}", report.model), id.clone()));
-    }
-    d
-}
-
 /// What a burst no protocol claimed is named, everywhere it is asked about.
 /// An open identifier rather than a set, since every other value is a
 /// protocol id from the registry.
 pub const UNKNOWN: &str = "unknown";
-
-/// The event for a burst no protocol claimed, read under a guessed coding.
-///
-/// Worth emitting, and it is the whole reason a scanner is worth running
-/// across a band: an unknown device is exactly what should be surfaced.
-/// Silence would make the receiver useless for the case it should be best at,
-/// and the inferred bits are where reverse engineering starts.
-pub fn unmatched_event(
-    pkg: &common::Package,
-    center: common::Hz,
-    modulation: common::Modulation,
-    measure: Option<&common::Measure>,
-) -> Decoded {
-    let at = pkg.start_sample as f64;
-    // What the burst was measured to be comes first, since it is what
-    // there is to say about a burst nothing decoded: the coding guessed
-    // from the timings follows, where there were timings.
-    let measured = measure.map(|m| m.summary());
-    let join = |a: Option<String>, b: String| match a {
-        Some(a) => format!("{a}; {b}"),
-        None => b,
-    };
-    let mut framing_fields: Vec<(String, common::Value)> = Vec::new();
-    let ev = match decode::analyze(pkg) {
-        // The bytes are the frame-aligned ones where the burst carried a
-        // preamble to align to. Handing over the slicer's own phase instead is
-        // what makes one device look like a different one on every reception.
-        Some(a) => {
-            if let Some(f) = &a.framing {
-                framing_fields
-                    .push(("preamble_bits".into(), common::Value::Int(f.preamble_bits as i64)));
-                framing_fields.push(("sync".into(), common::Value::Text(f.sync_hex())));
-                framing_fields
-                    .push(("frame_bytes".into(), common::Value::Int(f.content_bytes() as i64)));
-                if !f.repeats.is_empty() {
-                    framing_fields
-                        .push(("copies".into(), common::Value::Int(f.repeats.len() as i64 + 1)));
-                }
-            }
-            if let Some(f) = &a.framed {
-                framing_fields
-                    .push(("frame_len".into(), common::Value::Int(f.payload.len() as i64)));
-                framing_fields.push((
-                    "whitening".into(),
-                    common::Value::Text(if f.whitened { "PN9".into() } else { "none".into() }),
-                ));
-            }
-            Decoded::bytes(UNKNOWN, center, at, a.frame_bytes().to_vec())
-                .with_text(format!("unknown: {}", a.summary()))
-                .with_detail(join(measured, a.summary()))
-        }
-        // Too short or too irregular to read. Still worth a line: it says
-        // something was there, which is the difference between a quiet band
-        // and a misconfigured chain.
-        None if pkg.pulses.is_empty() && measure.is_some() => {
-            Decoded::bytes(UNKNOWN, center, at, Vec::new())
-                .with_text(format!("unknown: {}", measured.clone().unwrap_or_default()))
-                .with_detail(measured.unwrap_or_default())
-        }
-        None => Decoded::bytes(UNKNOWN, center, at, Vec::new())
-            .with_text("unknown: unreadable burst")
-            .with_detail(join(
-                measured,
-                format!(
-                    "{} pulses, {:.1} ms, no coding inferred",
-                    pkg.pulses.len(),
-                    pkg.duration_us() as f64 / 1000.0,
-                ),
-            )),
-    };
-    let mut ev = ev.with_modulation(modulation);
-    let mut fields: Vec<(String, common::Value)> = Vec::new();
-    if let Some(m) = measure {
-        fields.push(("confidence".into(), common::Value::Float(m.confidence as f64)));
-        if m.baud > 0.0 {
-            fields.push(("baud".into(), common::Value::Float(m.baud as f64)));
-        }
-        if m.separation_hz > 0.0 {
-            fields.push(("separation_hz".into(), common::Value::Float(m.separation_hz as f64)));
-        }
-        if m.sweep_hz_s.abs() > 0.0 {
-            fields.push(("sweep_hz_per_s".into(), common::Value::Float(m.sweep_hz_s as f64)));
-        }
-        if m.symbol_period_us > 0.0 {
-            fields
-                .push(("symbol_period_us".into(), common::Value::Float(m.symbol_period_us as f64)));
-        }
-        if let Some(mode) = &m.mode {
-            fields.push(("mode".into(), common::Value::Text(mode.clone())));
-        }
-    }
-    fields.append(&mut framing_fields);
-    if !fields.is_empty() {
-        ev = ev.with_fields(fields);
-    }
-    ev
-}
 
 /// Run protocols against pulse packages and emit decodes as events.
 pub struct ProtocolDecodeNode {
@@ -567,13 +432,33 @@ impl ProtocolDecodeNode {
         self
     }
 
-    /// Emit a burst no protocol claimed, read under a guessed coding.
-    fn report_unmatched(&self, pkg: &common::Package, c: &mut NodeCtx<'_>) {
+    /// Report a burst no protocol claimed: the reception and its timings,
+    /// saying nothing, since a slicer's guess at a coding is not a statement
+    /// about the world.
+    fn report_unmatched(&self, found: &common::packet::Detection, c: &mut NodeCtx<'_>) {
         if !self.report_unknown {
             return;
         }
-        let center = c.inputs[0].spec.center;
-        c.emit(Event::Decoded(unmatched_event(pkg, center, self.modulation, None)));
+        c.emit(Event::Decoded(self.reception(found, c)));
+    }
+
+    /// What a detection was heard at, from the stream it was read on.
+    fn reception(
+        &self,
+        found: &common::packet::Detection,
+        c: &NodeCtx<'_>,
+    ) -> common::packet::Packet {
+        let spec = &c.inputs[0].spec;
+        let carrier = common::packet::Carrier::heard(
+            common::packet::now_us(),
+            spec.center.0,
+            spec.bandwidth as u32,
+            found.rssi_dbfs,
+            found.snr_db,
+            common::SourceId(0),
+        )
+        .lasting(found.duration_us);
+        common::packet::Packet::heard(carrier).keyed(found.keying.clone())
     }
 
     pub fn all() -> Self {
@@ -603,18 +488,16 @@ impl Simple for ProtocolDecodeNode {
         let out = o.bytes_mut();
         for pkg in i.as_pulses().unwrap() {
             let mut matched = false;
-            for (name, res) in self.protocols.diagnose(pkg) {
+            for (name, res) in self.protocols.diagnose(pkg.pulses()) {
                 match res {
                     Ok(report) => {
                         matched = true;
                         out.extend_from_slice(&report.raw);
-                        let center = c.inputs[0].spec.center;
-                        c.emit(Event::Decoded(decoded_event(
-                            &report,
-                            pkg,
-                            center,
-                            self.modulation,
-                        )));
+                        let read = self
+                            .reception(pkg, c)
+                            .framed(common::packet::Frame::of(report.raw.clone()))
+                            .decoded(decode::facts::proto_of(&report));
+                        c.emit(Event::Decoded(read));
                         if !self.report_all {
                             break;
                         }
@@ -626,7 +509,7 @@ impl Simple for ProtocolDecodeNode {
                         c.warn(format!(
                             "{name}: timings matched but CRC failed \
                              ({} pulses, {:.1} dB SNR)",
-                            pkg.pulses.len(),
+                            pkg.pulses().len(),
                             pkg.snr_db
                         ));
                     }
@@ -711,13 +594,6 @@ pub struct BurstRouteNode {
 /// to say it is still there, is what "which channels are busy" needs.
 const REPORT_S: f64 = 5.0;
 
-fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
-}
-
 impl BurstRouteNode {
     pub fn new(cfg: dsp::RouterConfig) -> Self {
         Self {
@@ -752,22 +628,26 @@ impl BurstRouteNode {
     }
 }
 
-/// What a routed burst was measured to be, as evidence a packet carries.
-pub fn measure_of(b: &dsp::RoutedBurst, centre_hz: f64) -> common::Measure {
+/// How a burst was keyed, as the classifier measured it.
+///
+/// The verdict and the numbers that belong to it, with the confidence beside
+/// them: a burst nothing decoded is a carrier and this, which is the whole
+/// record of the transmission.
+pub fn keying_of(b: &dsp::RoutedBurst) -> common::packet::Keying {
     let f = &b.class.features;
-    let mode = dsp::classify::mode::identify(b.class.modulation, f, centre_hz).map(|m| m.label());
-    common::Measure {
-        modulation: b.class.modulation,
-        confidence: b.class.confidence,
-        front_end: b.routed_to,
-        mode,
-        duration_us: f.duration_us as u32,
-        bandwidth_hz: f.bandwidth_hz,
-        baud: f.baud,
-        separation_hz: f.separation_hz,
-        sweep_hz_s: f.chirp_rate,
-        symbol_period_us: if f.cyclic_period_s > 0.0 { f.cyclic_period_s * 1e6 } else { 0.0 },
-    }
+    common::packet::Keying::measured(
+        b.class.modulation,
+        b.class.confidence,
+        common::packet::KeyingParams {
+            bandwidth_hz: f.bandwidth_hz,
+            baud: f.baud,
+            separation_hz: f.separation_hz,
+            sweep_hz_s: f.chirp_rate,
+            symbol_period_us: if f.cyclic_period_s > 0.0 { f.cyclic_period_s * 1e6 } else { 0.0 },
+            spreading: None,
+            evm: 0.0,
+        },
+    )
 }
 
 impl Node for BurstRouteNode {
@@ -791,10 +671,10 @@ impl Node for BurstRouteNode {
         self.router = dsp::BurstRouter::new(i.spec.rate, self.cfg);
         let mut out = i.spec.with_kind(PortKind::Pulses);
         out.rate = 0.0;
-        // What each burst was, as evidence: the packages read from it where
-        // something read them, the measurement either way, and the samples it
-        // was cut from. The pulses port is for the chain that reads them on;
-        // this port is the burst itself, for whatever logs it.
+        // What each burst was, as evidence: what a front end read off it
+        // where something read it, the measurement either way, and the
+        // samples it was cut from. The pulses port is for the chain that
+        // reads them on; this port is the burst itself, for whatever logs it.
         let mut packets = out.with_kind(PortKind::Packets);
         packets.rate = 0.0;
         Ok(vec![out, packets])
@@ -812,7 +692,7 @@ impl Node for BurstRouteNode {
         let center = c.inputs[0].spec.center.0;
         let rate = c.inputs[0].spec.rate.max(1.0);
         let bandwidth_hz = c.inputs[0].spec.bandwidth as u32;
-        let at_us = now_us();
+        let at_us = common::packet::now_us();
         let (pulses, packets) = outputs.split_at_mut(1);
         let pkgs = pulses[0].pulses_mut();
         let out = packets[0].packets_mut();
@@ -864,29 +744,46 @@ impl Node for BurstRouteNode {
                     TagValue::Float(b.class.features.baud as f64),
                 ));
             }
-            // The measurement and the samples, built once for the burst and
-            // only where a packet leaves carrying them.
-            let evidence = || {
-                (
-                    measure_of(b, center as f64),
-                    Some(std::sync::Arc::new(common::IqBurst {
-                        rate,
-                        center_hz: center,
-                        samples: b.iq.clone(),
-                    })),
-                )
+            // The samples, built once for the burst and only where a packet
+            // leaves carrying them.
+            let samples = || {
+                std::sync::Arc::new(common::IqBurst {
+                    rate,
+                    center_hz: center,
+                    samples: b.iq.clone(),
+                })
             };
-            if !b.packages.is_empty() {
-                let (m, iq) = evidence();
-                for p in &b.packages {
-                    c.tag(Tag::new(p.start_sample, "burst", TagValue::Float(p.snr_db as f64)));
-                    let mut p = p.clone();
-                    p.center_hz = center;
-                    let mut pkt = common::Packet::of_pulses(at_us, bandwidth_hz, p.clone());
-                    pkt.measure = Some(m.clone());
-                    pkt.iq = iq.clone();
-                    out.push(pkt);
-                    pkgs.push(p);
+            // Measured here, off the burst's own samples, rather than left
+            // for whatever holds the stream to fill in. It is the level in
+            // the band that was read, which is the band this packet states it
+            // was heard through: on the 2.4 GHz capture that matches the
+            // source's own block power within 0.6 dB on narrowband traffic,
+            // and reads 11 dB below it on a Wi-Fi channel, where the router
+            // reads 4.4 MHz of a 20 MHz signal. A level of the whole source
+            // against a width the packet never carried is the number that
+            // could not be compared.
+            let heard = |snr_db: f32, held_us: u32| {
+                common::packet::Carrier::heard(
+                    at_us,
+                    center,
+                    bandwidth_hz,
+                    dsp::level::active_dbfs(&b.iq, rate),
+                    snr_db.max(0.0),
+                    common::SourceId(0),
+                )
+                .lasting(held_us)
+                .with_iq(samples())
+            };
+            if !b.detections.is_empty() {
+                for d in &b.detections {
+                    c.tag(Tag::new(d.at_sample, "burst", TagValue::Float(d.snr_db as f64)));
+                    let mut keying = keying_of(b);
+                    keying.symbols = d.keying.symbols.clone();
+                    keying.modulation = d.modulation();
+                    out.push(
+                        common::packet::Packet::heard(heard(d.snr_db, d.duration_us)).keyed(keying),
+                    );
+                    pkgs.push(d.clone());
                 }
             }
 
@@ -895,87 +792,23 @@ impl Node for BurstRouteNode {
             // and a count in a warning: nothing a packet list could show. A
             // chirp swept at 30 MHz per second is a more useful log line than
             // silence, and it is the line somebody starts from when they go
-            // looking for a decoder to write.
+            // looking for a decoder to write. A piece of a transmission that
+            // is still going is the same news as the last piece, so those are
+            // reported every [`REPORT_S`].
             if b.routed_to == common::FrontEnd::None
                 && b.class.confidence >= self.report_min_confidence
                 && b.class.modulation.is_named()
             {
-                let f = &b.class.features;
-                let mut fields: Vec<(String, common::Value)> = Vec::new();
-                if f.baud > 0.0 {
-                    fields.push(("baud".into(), common::Value::Float(f.baud as f64)));
-                }
-                if f.separation_hz > 0.0 {
-                    fields.push((
-                        "separation_hz".into(),
-                        common::Value::Float(f.separation_hz as f64),
-                    ));
-                }
-                if f.chirp_rate.abs() > 0.0 {
-                    fields
-                        .push(("sweep_hz_per_s".into(), common::Value::Float(f.chirp_rate as f64)));
-                }
-                if f.cyclic_period_s > 0.0 {
-                    fields.push((
-                        "symbol_period_us".into(),
-                        common::Value::Float(f.cyclic_period_s as f64 * 1e6),
-                    ));
-                }
-                fields.push(("confidence".into(), common::Value::Float(b.class.confidence as f64)));
-
-                // Name the mode where the parameters place one. This is the
-                // only caller: the router needs a family to pick a front end
-                // and nothing more, but a log wants "LoRa SF11 BW250".
-                let mode = dsp::classify::mode::identify(
-                    b.class.modulation,
-                    &b.class.features,
-                    center as f64,
-                );
                 let at = b.start_sample as f64 / c.inputs[0].spec.rate.max(1.0);
-                let d = Decoded::bytes("unidentified", common::Hz(center), at, Vec::new())
-                    .with_modulation(b.class.modulation)
-                    .with_fields(fields);
-                let d = match mode {
-                    Some(m) => d.with_detail(m.label()),
-                    None => {
-                        d.with_detail(format!("no front end reads {}", b.class.modulation.label()))
-                    }
-                };
-                c.emit(Event::Decoded(d));
-
-                // And as a packet, so what is left of a burst nothing read is
-                // a row with its measurement and its samples on it rather
-                // than a line of text. A piece of a transmission that is
-                // still going is the same news as the last piece, so those
-                // are reported every [`REPORT_S`].
                 let due = !b.continuous || self.last_report_s.is_none_or(|l| at - l >= REPORT_S);
-                if b.packages.is_empty() && due {
+                if b.detections.is_empty() && due {
                     if b.continuous {
                         self.last_report_s = Some(at);
                     }
-                    let (m, iq) = evidence();
-                    // The level is filled in by whatever holds the samples
-                    // this was cut from; the classifier measures the burst
-                    // against the noise it found and reports nothing when it
-                    // never found any.
-                    let mut pkt = common::Packet::of_pulses(
-                        at_us,
-                        bandwidth_hz,
-                        common::Package {
-                            pulses: Vec::new(),
-                            snr_db: if b.class.features.snr_db > 0.0 {
-                                b.class.features.snr_db
-                            } else {
-                                f32::NAN
-                            },
-                            rssi_dbfs: f32::NAN,
-                            start_sample: b.start_sample,
-                            center_hz: center,
-                            modulation: None,
-                        },
-                    );
-                    pkt.measure = Some(m);
-                    pkt.iq = iq;
+                    let f = &b.class.features;
+                    let pkt = common::packet::Packet::heard(heard(f.snr_db, f.duration_us as u32))
+                        .keyed(keying_of(b));
+                    c.emit(Event::Decoded(pkt.clone()));
                     out.push(pkt);
                 }
             }

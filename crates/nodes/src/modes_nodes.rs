@@ -23,12 +23,11 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::adsb::commb_fields;
-pub use decode::adsb::decoded;
+pub use decode::adsb::read;
 pub use decode::adsb::round1;
 use decode::adsb::{self, AddressBook};
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
 use identify::Signal;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -99,7 +98,7 @@ impl Simple for ModeSNode {
         // Frames rather than bytes: two short replies written into one
         // buffer are indistinguishable from one long frame, and a reply's
         // length is what says which kind of reply it is.
-        Ok(i.spec.with_kind(PortKind::Frames))
+        Ok(i.spec.with_kind(PortKind::Packets))
     }
 
     fn params(&self) -> Vec<Param> {
@@ -138,7 +137,7 @@ impl Simple for ModeSNode {
         self.book = book.into_inner();
 
         let center = c.inputs[0].spec.center;
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             // Correcting a flipped bit is arithmetic on the frame, so it
             // happens in `adsb::accept` rather than in the demodulator, and
@@ -151,9 +150,15 @@ impl Simple for ModeSNode {
             // 8 us of preamble and 56 or 112 us of data at 1 Mbit/s, with a
             // little either side.
             let len = ((bytes.len() * 8 + 16) as f64 * 1e-6 * self.rate) as usize;
-            let mut f2 = common::Frame::measured(bytes.clone(), f.rssi_dbfs, self.meter.snr_db());
-            f2.iq = self.meter.iq_at(f.at_sample, len);
-            out.push(f2);
+            let mut pkt = crate::measured(
+                center.0,
+                c.inputs[0].spec.bandwidth as u32,
+                bytes.clone(),
+                f.rssi_dbfs,
+                self.meter.snr_db(),
+            );
+            pkt.carrier.iq = self.meter.iq_at(f.at_sample, len);
+            out.push(pkt);
             // Not emitted as a decode here. The frame goes on the bus and
             // the decoder attached to it turns every packet into a row,
             // whichever front end produced it.
@@ -192,12 +197,12 @@ impl Protocol for ModeS {
     }
     /// A Mode S frame and an AIS frame are both bytes, and nothing tells them
     /// apart except where they were received.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::modes::is_modes_band(p.center_hz() as f64) {
             return None;
         }
-        let center = common::Hz(p.center_hz());
-        Some(adsb::parse(bytes).map(|f| vec![decoded(&f, bytes, center)]).unwrap_or_default())
+        Some(adsb::parse(bytes).map(|f| vec![read(&f)]).unwrap_or_default())
     }
     fn shape(&self) -> Shape {
         Signal::shape(self)
@@ -252,29 +257,33 @@ mod tests {
     fn the_node_outputs_bytes() {
         let mut n = ModeSNode::default();
         let out = n.negotiate(&spec(2_400_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
     }
 
     #[test]
     fn a_position_frame_becomes_a_decoded_event_with_fields() {
-        use common::Value;
         let bytes = hex("8d40621d58c382d690c8ac2863a7");
         let frame = adsb::parse(&bytes).unwrap();
-        let d = decoded(&frame, &bytes, Hz(1_090_000_000));
-        assert_eq!(d.protocol, "ADSB-Position");
-        assert_eq!(d.crc_ok, Some(true));
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("icao"), Some(Value::Text("40621d".into())));
-        assert_eq!(get("altitude_ft"), Some(Value::Int(38_000)));
+        let d = read(&frame);
+        assert_eq!((d.id, d.kind), ("adsb", "airborne_position"));
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("40621d"));
+        // Half a position, which is all a frame carries, and a height, which
+        // is a reading rather than part of a place.
+        assert!(d.facts.iter().any(|f| matches!(f, common::packet::Fact::PartialPosition(_))));
+        assert!(d.facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Sensed(r)
+                if r.quantity == common::packet::Quantity::Altitude
+                    && (r.value - 38_000.0 * 0.3048).abs() < 1.0
+        )));
     }
 
     #[test]
     fn a_short_reply_claims_no_integrity_check() {
         let bytes = hex("02e19838adb7c4");
         let frame = adsb::parse(&bytes).unwrap();
-        let d = decoded(&frame, &bytes, Hz(1_090_000_000));
-        assert_eq!(d.protocol, "ModeS-Reply");
-        assert_eq!(d.crc_ok, None, "a reply's parity is an address, not a check");
+        let d = read(&frame);
+        assert_eq!((d.id, d.kind), ("adsb", "reply"));
     }
 
     fn hex(s: &str) -> Vec<u8> {

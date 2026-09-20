@@ -27,7 +27,7 @@ use crate::bits::BitBuffer;
 use crate::framing::{Framing, MIN_PREAMBLE_BITS, frame_from_preamble};
 use crate::slicer::{Coding, Timing, slice};
 use crate::whiten::{Framed, read_framed};
-use common::pulse::Package;
+use common::Pulse;
 
 /// What a burst looks like, and the bits that fall out under that reading.
 #[derive(Clone, Debug, PartialEq)]
@@ -128,10 +128,10 @@ const TOL_US: u32 = 120;
 /// So the bucket is a fraction of the width a fifth of the runs are shorter
 /// than, which is the symbol or close to it, and never wider than the
 /// ceiling.
-fn tolerance(pkg: &Package) -> u32 {
-    let n = pkg.pulses.len().saturating_sub(1);
+fn tolerance(pulses: &[Pulse]) -> u32 {
+    let n = pulses.len().saturating_sub(1);
     let mut widths: Vec<u32> =
-        pkg.pulses[..n].iter().flat_map(|p| [p.mark, p.gap]).filter(|w| *w > 0).collect();
+        pulses[..n].iter().flat_map(|p| [p.mark, p.gap]).filter(|w| *w > 0).collect();
     if widths.len() < 4 {
         return TOL_US;
     }
@@ -144,13 +144,13 @@ fn tolerance(pkg: &Package) -> u32 {
 ///
 /// `None` when the burst is too short or too irregular to say anything about,
 /// which is better than inventing a reading for what was probably noise.
-pub fn analyze(pkg: &Package) -> Option<Analysis> {
-    if pkg.pulses.len() < 4 {
+pub fn analyze(pulses: &[Pulse]) -> Option<Analysis> {
+    if pulses.len() < 4 {
         return None;
     }
-    let tol = tolerance(pkg);
-    let marks = cluster(pkg.mark_histogram(tol));
-    let gaps = cluster(pkg.gap_histogram(tol));
+    let tol = tolerance(pulses);
+    let marks = cluster(common::pulse::mark_histogram(pulses, tol));
+    let gaps = cluster(common::pulse::gap_histogram(pulses, tol));
     if marks.is_empty() {
         return None;
     }
@@ -174,7 +174,7 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
             // Manchester on one reception and NRZ on the next.
             let ratio = marks[1] as f32 / marks[0].max(1) as f32;
             let symbol = marks[0].min(gaps[0]);
-            if (1.6..2.6).contains(&ratio) && longest_run(pkg) <= symbol * 5 / 2 {
+            if (1.6..2.6).contains(&ratio) && longest_run(pulses) <= symbol * 5 / 2 {
                 (Coding::Manchester, marks[0], marks[1])
             } else {
                 (Coding::Nrz, symbol, symbol)
@@ -205,9 +205,9 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
         // protocol, and refusing the whole burst over one stray pulse throws
         // away the only look anyone will get at an unknown device.
         tolerance_us: (long_us / 2).max(tol),
-        reset_us: pkg.pulses.last().map(|p| p.gap).unwrap_or(0),
+        reset_us: pulses.last().map(|p| p.gap).unwrap_or(0),
     };
-    let bits = slice(pkg, &t).ok()?;
+    let bits = slice(pulses, &t).ok()?;
     if bits.is_empty() {
         return None;
     }
@@ -222,8 +222,8 @@ pub fn analyze(pkg: &Package) -> Option<Analysis> {
         coding,
         short_us,
         long_us,
-        pulses: pkg.pulses.len(),
-        duration_us: pkg.duration_us(),
+        pulses: pulses.len(),
+        duration_us: common::pulse::duration_us(pulses),
         bits,
         framing,
         framed,
@@ -250,13 +250,13 @@ fn read_frame_of(f: &Framing) -> Option<Framed> {
 
 /// The longest mark or gap in the burst, excluding the gap that ended it:
 /// that one is the silence afterwards and says nothing about the coding.
-fn longest_run(pkg: &Package) -> u32 {
-    let n = pkg.pulses.len().saturating_sub(1);
-    pkg.pulses
+fn longest_run(pulses: &[Pulse]) -> u32 {
+    let n = pulses.len().saturating_sub(1);
+    pulses
         .iter()
         .take(n)
         .flat_map(|p| [p.mark, p.gap])
-        .chain(pkg.pulses.last().map(|p| p.mark))
+        .chain(pulses.last().map(|p| p.mark))
         .max()
         .unwrap_or(0)
 }
@@ -284,19 +284,12 @@ mod tests {
     use super::*;
     use common::pulse::Pulse;
 
-    fn pkg(pulses: &[(u32, u32)]) -> Package {
-        Package {
-            pulses: pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect(),
-            snr_db: 20.0,
-            rssi_dbfs: -12.0,
-            start_sample: 0,
-            center_hz: 0,
-            modulation: None,
-        }
+    fn pkg(pulses: &[(u32, u32)]) -> Vec<Pulse> {
+        pulses.iter().map(|(m, g)| Pulse { mark: *m, gap: *g }).collect()
     }
 
     /// A PWM train: the mark carries the bit, gaps are fixed.
-    fn pwm(bits: &[u8]) -> Package {
+    fn pwm(bits: &[u8]) -> Vec<Pulse> {
         pkg(&bits.iter().map(|b| (if *b == 1 { 500 } else { 1500 }, 500)).collect::<Vec<_>>())
     }
 
@@ -357,7 +350,7 @@ mod tests {
     fn a_lone_odd_width_does_not_invent_a_third_symbol() {
         // One stray mark among forty must not turn PWM into something else.
         let mut p = pwm(&[1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1]);
-        p.pulses[7].mark = 2600;
+        p[7].mark = 2600;
         let a = analyze(&p).expect("analysis");
         assert_eq!(a.coding, Coding::Pwm, "{a:?}");
     }
@@ -415,7 +408,7 @@ mod tests {
     /// which is what a gate opening a fraction of a symbol early does, and is
     /// the reason two receptions of one device come out at different bit
     /// offsets.
-    fn nrz_package(bytes: &[u8], sym_us: u32, stretch: bool) -> Package {
+    fn nrz_package(bytes: &[u8], sym_us: u32, stretch: bool) -> Vec<Pulse> {
         let mut bits: Vec<bool> = Vec::new();
         for &b in bytes {
             for i in (0..8).rev() {

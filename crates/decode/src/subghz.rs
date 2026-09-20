@@ -20,7 +20,7 @@
 use crate::protocols::keyfob::encode::{self, INTER_FRAME_GAP_US};
 
 use crate::slicer::Timing;
-use common::pulse::{Package, Pulse};
+use common::pulse::Pulse;
 use std::time::Duration;
 
 /// Why a `.sub` file could not be read.
@@ -139,7 +139,7 @@ pub struct Save {
 pub enum Body {
     /// The burst as heard. Anything can be written this way, and nothing is
     /// claimed about it beyond the widths.
-    Raw(Package),
+    Raw(Vec<Pulse>),
     /// A protocol's key, which a Flipper can replay, edit and put in a
     /// remote. Only written where a decoder recovered the code.
     Key {
@@ -162,7 +162,7 @@ pub enum Body {
 /// is not derivable from the parse side's own list, because two decoders
 /// report the complement of the bits they sliced; the round-trip test below
 /// keys every protocol here through its own decoder.
-pub fn key_of_decode(protocol: &str, fields: &[(String, common::Value)]) -> Option<Body> {
+pub fn key_of_decode(protocol: &str, code: u64) -> Option<Body> {
     // Name, bits, TE where the timing is a multiple of one, and whether the
     // key file's value is the code as reported.
     let (name, bit, te, key_is_code) = match protocol {
@@ -182,11 +182,6 @@ pub fn key_of_decode(protocol: &str, fields: &[(String, common::Value)]) -> Opti
         "SMC5326" => ("SMC5326", 25, Some(320), false),
         _ => return None,
     };
-    // `code` for most, `cnt` for the two that call the frame a counter.
-    let code = ["code", "cnt"]
-        .iter()
-        .find_map(|k| fields.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_i64()))?
-        as u64;
     let n = bit as usize;
     let key = if key_is_code { code & mask(n) } else { !code & mask(n) };
     Some(Body::Key { protocol: name, bit, key, te })
@@ -211,8 +206,8 @@ impl Save {
                 // lines the way the Flipper writes them: its own reader
                 // takes a bounded line, and a single line of a long capture
                 // is tens of kilobytes.
-                let mut values = Vec::with_capacity(pkg.pulses.len() * 2);
-                for p in &pkg.pulses {
+                let mut values: Vec<i64> = Vec::with_capacity(pkg.len() * 2);
+                for p in pkg.iter() {
                     if p.mark > 0 {
                         values.push(p.mark as i64);
                     }
@@ -278,7 +273,7 @@ pub struct SubGhz {
     /// The bursts to key, in microseconds. Raw files carry theirs as
     /// recorded; key files carry the encoding of their key. The final gap of
     /// the last burst is the tail silence, not a symbol.
-    pub bursts: Vec<Package>,
+    pub bursts: Vec<Vec<Pulse>>,
 }
 
 impl SubGhz {
@@ -290,12 +285,8 @@ impl SubGhz {
 
     /// Total keyed duration, from the widths themselves.
     pub fn duration(&self) -> Duration {
-        let us: u64 = self
-            .bursts
-            .iter()
-            .flat_map(|b| b.pulses.iter())
-            .map(|p| p.mark as u64 + p.gap as u64)
-            .sum();
+        let us: u64 =
+            self.bursts.iter().flat_map(|b| b.iter()).map(|p| p.mark as u64 + p.gap as u64).sum();
         Duration::from_micros(us)
     }
 }
@@ -340,8 +331,8 @@ pub fn parse(text: &str) -> Result<SubGhz, SubError> {
     let protocol = get("Protocol").ok_or(SubError::BadField("Protocol"))?;
 
     let bursts = match protocol.as_str() {
-        "RAW" => vec![raw_package(&raw_data)?],
-        other => vec![key_package(other, &get)?],
+        "RAW" => vec![raw_burst(&raw_data)?],
+        other => vec![key_burst(other, &get)?],
     };
     Ok(SubGhz { frequency, preset, protocol, bursts })
 }
@@ -350,7 +341,7 @@ pub fn parse(text: &str) -> Result<SubGhz, SubError> {
 /// The Flipper's writer zeroes the sign pattern on the first value in
 /// practice but the format says positive first; both are accepted, and a
 /// leading gap is dropped rather than played as a pause before nothing.
-fn raw_package(data: &[i64]) -> Result<Package, SubError> {
+fn raw_burst(data: &[i64]) -> Result<Vec<Pulse>, SubError> {
     if data.is_empty() {
         return Err(SubError::BadField("RAW_Data"));
     }
@@ -371,14 +362,14 @@ fn raw_package(data: &[i64]) -> Result<Package, SubError> {
         }
         i += 2;
     }
-    Ok(Package { pulses, ..Default::default() })
+    Ok(pulses)
 }
 
 /// A key file into pulses, via the encoder for the protocol it names.
 ///
 /// `get` reads fields past the key/value list, which key files carry in
 /// whatever order their writer chose.
-fn key_package(protocol: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<Package, SubError> {
+fn key_burst(protocol: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<Vec<Pulse>, SubError> {
     let bit: u32 = get("Bit").and_then(|v| v.parse().ok()).ok_or(SubError::BadField("Bit"))?;
     let key = get("Key")
         .map(|v| v.split_whitespace().collect::<String>())
@@ -415,7 +406,7 @@ fn key_package(protocol: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<P
             Timing::pwm(te, te * 3, te * 30)
         }
         "CAME" => {
-            return came_package(bit, key, complement, repeats);
+            return came_burst(bit, key, complement, repeats);
         }
         "Nice FLO" => Timing::pwm(700, 1400, 3000),
         "Holtek" => Timing::pwm(430, 870, 4000),
@@ -440,7 +431,12 @@ fn key_package(protocol: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<P
     Ok(encode::frame(timing, &bits(v, n as u32), repeats))
 }
 
-fn came_package(bit: u32, key: u64, complement: bool, repeats: usize) -> Result<Package, SubError> {
+fn came_burst(
+    bit: u32,
+    key: u64,
+    complement: bool,
+    repeats: usize,
+) -> Result<Vec<Pulse>, SubError> {
     // CAME's header is a long silence before a short start mark, sent
     // ahead of the frame on every repeat: 47 te_short for 12-bit, 76 for
     // 24-bit, per the Flipper's own encoder. The frame's bits then run
@@ -469,7 +465,7 @@ fn came_package(bit: u32, key: u64, complement: bool, repeats: usize) -> Result<
         mark = next;
     }
     pulses.push(Pulse { mark, gap: INTER_FRAME_GAP_US });
-    let one = Package { pulses, ..Default::default() };
+    let one = pulses;
     Ok(encode::repeated(&one, repeats, Duration::from_micros(320 * header_te as u64)))
 }
 
@@ -522,9 +518,9 @@ TE: 400
         assert_eq!(s.protocol, "RAW");
         assert_eq!(s.bursts.len(), 1);
         let p = &s.bursts[0];
-        assert_eq!(p.pulses.len(), 16, "one pulse per mark/gap pair");
-        assert_eq!(p.pulses[0], Pulse { mark: 350, gap: 350 });
-        assert_eq!(p.pulses[1], Pulse { mark: 350, gap: 700 });
+        assert_eq!(p.len(), 16, "one pulse per mark/gap pair");
+        assert_eq!(p[0], Pulse { mark: 350, gap: 350 });
+        assert_eq!(p[1], Pulse { mark: 350, gap: 700 });
     }
 
     #[test]
@@ -540,7 +536,7 @@ TE: 400
         // key comes out complemented (short mark 0 on the air): the same
         // value the Flipper's decoder reports for this file.
         let p = crate::script::named("Princeton").unwrap();
-        let r = p.decode_package(pkg).expect("the encoder's own pulses decode");
+        let r = p.decode_burst(pkg).expect("the encoder's own pulses decode");
         assert_eq!(r.get("code"), Some(&crate::protocol::Value::Int(0x6a_2a_2b)));
     }
 
@@ -554,9 +550,9 @@ TE: 400
         // the timings are that protocol's but the frame is short, so the
         // decoder refuses it rather than reading a code out of a fragment.
         let s = parse(PRINCETON_RAW).unwrap();
-        assert_eq!(s.bursts[0].pulses.len(), 16);
+        assert_eq!(s.bursts[0].len(), 16);
         let p = crate::script::named("Princeton").unwrap();
-        assert_eq!(p.decode_package(&s.bursts[0]), Err(DecodeError::NotThisProtocol));
+        assert_eq!(p.decode_burst(&s.bursts[0]), Err(DecodeError::NotThisProtocol));
     }
 
     /// Every protocol [`key_of_decode`] writes, keyed through its own
@@ -586,14 +582,13 @@ TE: 400
         ];
         for (name, field, code) in cases {
             let decoder = crate::script::named(name).unwrap();
-            let fields = vec![(field.to_string(), Value::Int(code as i64))];
-            let body = key_of_decode(name, &fields).unwrap_or_else(|| panic!("{name} has a key"));
+            let body = key_of_decode(name, code).unwrap_or_else(|| panic!("{name} has a key"));
             let save = Save { frequency: 433_920_000, preset: Preset::Ook, body };
             let text = save.text();
             let back =
                 parse(&text).unwrap_or_else(|e| panic!("{name} writes a readable file: {e}"));
             let r = decoder
-                .decode_package(&back.bursts[0])
+                .decode_burst(&back.bursts[0])
                 .unwrap_or_else(|e| panic!("{name} decodes its own key file: {e:?}"));
             assert_eq!(
                 r.get(field),
@@ -613,8 +608,7 @@ TE: 400
         use crate::protocol::Value;
         for (name, bit, code) in [("CAME-12bit", 12u32, 0xabc_u64), ("CAME-24bit", 24, 0xab_cd_ef)]
         {
-            let fields = vec![("code".to_string(), Value::Int(code as i64))];
-            let body = key_of_decode(name, &fields).unwrap();
+            let body = key_of_decode(name, code).unwrap();
             assert_eq!(
                 body,
                 Body::Key { protocol: "CAME", bit, key: !code & mask(bit as usize), te: None }
@@ -624,15 +618,13 @@ TE: 400
             assert_eq!(back.protocol, "CAME");
             // Ten repeats of the frame: twelve or twenty-four symbols and
             // the start mark, each time.
-            assert_eq!(back.bursts[0].pulses.len(), 10 * (bit as usize + 1));
+            assert_eq!(back.bursts[0].len(), 10 * (bit as usize + 1));
         }
     }
 
     #[test]
     fn a_key_file_is_written_the_way_the_flipper_writes_one() {
-        use crate::protocol::Value;
-        let fields = vec![("code".to_string(), Value::Int(0x6a_2a_2b))];
-        let body = key_of_decode("Princeton", &fields).unwrap();
+        let body = key_of_decode("Princeton", 0x6a_2a_2b).unwrap();
         let save = Save { frequency: 433_920_000, preset: Preset::Ook, body };
         assert_eq!(save.text(), PRINCETON_KEY_OUT);
         // And the file the corpus carries for the same code parses to the
@@ -642,14 +634,11 @@ TE: 400
 
     #[test]
     fn a_raw_save_keeps_every_width() {
-        let pkg = Package {
-            pulses: vec![
-                Pulse { mark: 350, gap: 350 },
-                Pulse { mark: 350, gap: 700 },
-                Pulse { mark: 700, gap: 10_000 },
-            ],
-            ..Default::default()
-        };
+        let pkg = vec![
+            Pulse { mark: 350, gap: 350 },
+            Pulse { mark: 350, gap: 700 },
+            Pulse { mark: 700, gap: 10_000 },
+        ];
         let save = Save {
             frequency: 315_000_000,
             preset: Preset::Fsk(12_000),
@@ -660,29 +649,22 @@ TE: 400
         assert!(text.contains("Preset: FuriHalSubGhzPreset2FSKDev12KAsync\n"));
         let back = parse(&text).unwrap();
         assert_eq!(back.frequency, 315_000_000);
-        assert_eq!(back.bursts[0].pulses, pkg.pulses);
+        assert_eq!(back.bursts[0], pkg);
     }
 
     #[test]
     fn a_long_capture_is_written_over_several_lines() {
         let pulses: Vec<Pulse> = (0..600).map(|_| Pulse { mark: 350, gap: 350 }).collect();
-        let save = Save {
-            frequency: 433_920_000,
-            preset: Preset::Ook,
-            body: Body::Raw(Package { pulses: pulses.clone(), ..Default::default() }),
-        };
+        let save =
+            Save { frequency: 433_920_000, preset: Preset::Ook, body: Body::Raw(pulses.clone()) };
         let text = save.text();
         assert_eq!(text.lines().filter(|l| l.starts_with("RAW_Data:")).count(), 3);
-        assert_eq!(parse(&text).unwrap().bursts[0].pulses, pulses);
+        assert_eq!(parse(&text).unwrap().bursts[0], pulses);
     }
 
     #[test]
     fn a_protocol_with_no_encoder_is_not_offered_a_key_file() {
-        use crate::protocol::Value;
-        let fields = vec![("code".to_string(), Value::Int(1))];
-        assert_eq!(key_of_decode("KeeLoq", &fields), None);
-        // And a decode carrying no code at all cannot be written as a key.
-        assert_eq!(key_of_decode("Princeton", &[]), None);
+        assert_eq!(key_of_decode("KeeLoq", 1), None);
     }
 
     #[test]
@@ -736,6 +718,6 @@ Protocol: RAW
 RAW_Data: 100 -100
 ";
         let s = parse(text).expect("comments do not break the parse");
-        assert_eq!(s.bursts[0].pulses.len(), 1);
+        assert_eq!(s.bursts[0].len(), 1);
     }
 }

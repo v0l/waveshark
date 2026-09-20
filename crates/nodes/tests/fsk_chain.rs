@@ -50,7 +50,7 @@ fn specs(kind: &str) -> Vec<NodeSpec> {
     }
 }
 
-fn pulses(kind: &str, iq: &[C32]) -> Vec<common::Package> {
+fn pulses(kind: &str, iq: &[C32]) -> Vec<common::packet::Detection> {
     let spec = StreamSpec::iq(RATE, Hz::mhz(868));
     let mut g = build_chain(spec, &specs(kind), &registry()).expect("build chain");
     g.feed_iq(iq).expect("run graph");
@@ -74,7 +74,7 @@ fn the_fsk_chain_recovers_the_transmitted_bits() {
         tolerance_us: 30,
         reset_us: 2_000,
     };
-    let got = slice(&pkgs[0], &t).expect("slice");
+    let got = slice(pkgs[0].pulses(), &t).expect("slice");
 
     // One bit is lost at the leading edge, and it is structural rather than
     // error: the burst opens on a mark, so the low run before it has no pulse
@@ -88,7 +88,7 @@ fn the_fsk_chain_recovers_the_transmitted_bits() {
 #[test]
 fn the_ook_chain_sees_the_same_burst_as_one_flat_mark() {
     let pkgs = pulses("ook", &fsk_burst(&test_bits()));
-    let marks: usize = pkgs.iter().map(|p| p.pulses.len()).sum();
+    let marks: usize = pkgs.iter().map(|p| p.pulses().len()).sum();
     assert!(marks <= 1, "constant envelope produced {marks} pulses: {pkgs:?}");
 }
 

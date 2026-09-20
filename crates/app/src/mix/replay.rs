@@ -106,6 +106,7 @@ impl Node for ReplayNode {
                 to: None,
                 from: None,
                 code: None,
+                over: None,
                 rate: self.out_rate,
                 channels: 1,
                 pcm: block,

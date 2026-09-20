@@ -14,12 +14,12 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::uat::MAX_SYNC_ERRORS;
-pub use decode::uat::adsb_decoded;
-pub use decode::uat::decoded;
-pub use decode::uat::product_decoded;
+pub use decode::uat::adsb_read;
+pub use decode::uat::product_read;
+pub use decode::uat::read;
 pub use decode::uat::round1;
 pub use decode::uat::round5;
-pub use decode::uat::uplink_decoded;
+pub use decode::uat::uplink_read;
 use decode::uat::{self};
 pub use decode::uat::{ADSB, UPLINK, patterns};
 pub use decode::uat::{correct, pack};
@@ -27,7 +27,6 @@ use dsp::fsk::{SyncBurst, SyncDetector};
 use identify::Signal;
 pub use identify::uat::CHANNEL_WIDTH_HZ;
 pub use identify::uat::Uat;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -89,7 +88,7 @@ impl Simple for UatNode {
         // Frames rather than bytes: an 18-byte basic message and a 34-byte
         // long one written into one buffer cannot be told apart afterwards,
         // and the length is what says which it was.
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(uat::CHANNEL_HZ as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -102,12 +101,12 @@ impl Simple for UatNode {
         // The code is the acceptance test, so only a frame that corrected
         // blanks the air behind it.
         self.det.process_valid(iq, &mut self.bursts, &|b: &SyncBurst| correct(b).is_some());
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for b in &self.bursts {
             let Some(c) = correct(b) else { continue };
             self.accepted += 1;
             let snr = self.meter.snr_db_at(b.at_sample, b.len_samples);
-            out.push(self.meter.frame_measured(c.data, b.at_sample, b.len_samples, snr));
+            out.push(self.meter.packet_measured(c.data, b.at_sample, b.len_samples, snr));
         }
         Ok(())
     }
@@ -146,12 +145,12 @@ impl Protocol for Uat {
     /// A UAT payload and any other frame are both bytes; where it was
     /// received is what tells them apart, and then its length says which of
     /// the three forms it is.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !uat::is_uat_band(p.center_hz() as f64) {
             return None;
         }
-        let center = common::Hz(p.center_hz());
-        Some(uat::parse(bytes).map(|f| decoded(&f, bytes, center)).unwrap_or_default())
+        Some(uat::parse(bytes).map(|f| read(&f)).unwrap_or_default())
     }
 
     fn stage_label(&self, _hz: f64) -> String {
@@ -222,18 +221,18 @@ mod tests {
     }
 
     /// Run blocks through the node and collect what reached the bus.
-    fn run(node: &mut UatNode, blocks: &[Vec<C32>]) -> Vec<common::Frame> {
+    fn run(node: &mut UatNode, blocks: &[Vec<C32>]) -> Vec<common::packet::Packet> {
         let ins = [spec(2_400_000.0, uat::CHANNEL_HZ)];
         let tags = Vec::new();
         let mut frames = Vec::new();
         for block in blocks {
             let input = Payload::Iq(block.clone());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let mut events = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames.extend(f);
             }
         }
@@ -258,25 +257,27 @@ mod tests {
         );
 
         assert_eq!(frames.len(), 1, "one frame off the air");
-        assert_eq!(frames[0].bytes, payload, "the 34 bytes the aircraft sent");
-        assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
-        assert!(frames[0].iq.is_some(), "the samples it was read from");
+        assert_eq!(frames[0].bytes(), payload, "the 34 bytes the aircraft sent");
+        assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());
+        assert!(frames[0].carrier.iq.is_some(), "the samples it was read from");
         assert_eq!(node.accepted(), 1);
 
-        let rows = Uat
-            .read_frame(&packet(&frames[0]), &frames[0].bytes)
-            .expect("a frame from the UAT channel");
+        let rows = Uat.stated(&frames[0]).expect("a frame from the UAT channel");
         assert_eq!(rows.len(), 1);
         let d = &rows[0];
-        assert_eq!(d.protocol, "UAT-Position");
-        assert_eq!(d.crc_ok, Some(true));
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("address"), Some(common::Value::Text("a0dead".into())));
-        assert_eq!(get("altitude_ft"), Some(common::Value::Int(9_500)));
-        assert_eq!(get("callsign"), Some(common::Value::Text("N172SP".into())));
-        let p = d.position.as_ref().expect("a position");
+        assert_eq!((d.id, d.kind), ("uat", "position"));
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("a0dead"));
+        assert_eq!(d.subject.as_ref().and_then(|e| e.name.clone()), Some("N172SP".into()));
+        let p = d.placed().expect("a position");
         assert!((p.lat - 40.0).abs() < 0.001 && (p.lon + 105.0).abs() < 0.001);
-        assert_eq!(d.identity.as_ref().and_then(|i| i.name.clone()), Some("N172SP".into()));
+        // Height is a reading: an aircraft sends one in frames that say
+        // nothing about where it is.
+        assert!(d.facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Sensed(r)
+                if r.quantity == common::packet::Quantity::Altitude
+                    && (r.value - 9_500.0 * 0.3048).abs() < 1.0
+        )));
     }
 
     /// Minutes of noise, and nothing reaches the bus: a sync word that
@@ -311,7 +312,7 @@ mod tests {
             &[noise(16_384, 3, 0.02), on_air(uat::ADSB_SYNC, &coded), noise(16_384, 4, 0.02)],
         );
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].bytes, payload);
+        assert_eq!(frames[0].bytes(), payload);
     }
 
     /// A ground station's uplink: 552 bytes of interleaved codewords, read
@@ -354,22 +355,21 @@ mod tests {
             &[noise(16_384, 5, 0.02), on_air(uat::UPLINK_SYNC, &coded), noise(16_384, 6, 0.02)],
         );
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].bytes.len(), uat::UPLINK_DATA_BYTES);
+        assert_eq!(frames[0].bytes().len(), uat::UPLINK_DATA_BYTES);
 
-        let rows = Uat.read_frame(&packet(&frames[0]), &frames[0].bytes).expect("an uplink");
+        let rows = Uat.stated(&frames[0]).expect("an uplink");
         assert_eq!(rows.len(), 2, "the station, and the product it sent");
-        assert_eq!(rows[0].protocol, "UAT-Uplink");
-        let site = rows[0].position.as_ref().expect("a site position");
+        assert_eq!((rows[0].id, rows[0].kind), ("uat", "uplink"));
+        let site = rows[0].placed().expect("a site position");
         assert!((site.lat - 39.861_67).abs() < 0.001 && (site.lon + 104.673).abs() < 0.001);
-        assert_eq!(rows[1].protocol, "FISB");
-        let get = |k: &str| rows[1].fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("product"), Some(common::Value::Text("national NEXRAD".into())));
-        assert_eq!(get("product_id"), Some(common::Value::Int(51)));
-        assert!(!rows[1].written, "a machine composed it and addressed it to nobody");
-    }
-
-    fn packet(f: &common::Frame) -> common::Packet {
-        common::Packet::of_frame(0, 2_000_000, f.clone())
+        // A weather product a machine composed and broadcast to everybody in
+        // range: an advisory, and never a message anybody wrote.
+        assert_eq!(rows[1].id, "fisb");
+        assert!(rows[1].wrote().is_none());
+        assert!(rows[1].facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Alert(a) if a.kind == common::packet::AlertKind::Weather
+        )));
     }
 
     /// The aircraft of the decode crate's own test: 40 N, 105 W at 9500

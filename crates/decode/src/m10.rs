@@ -14,7 +14,7 @@
 //! them, the M10 counts degrees in 2^30ths of ninety and the M20 in
 //! millionths, and the serial numbers are printed differently.
 
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 /// The shortest frame worth looking at: an M20's own length.
 pub const MIN_FRAME: usize = 0x45;
 
@@ -323,62 +323,26 @@ fn gps_to_utc(week: u16, sec: u32, frac: f64) -> (i32, u32, u32, u32, u32, f64) 
     )
 }
 
-/// What the protocols node makes of a Meteomodem frame.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a Meteomodem M10 or M20 frame says.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let r = parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("model".into(), common::Value::Text(r.model.label().into())),
-        ("serial".into(), common::Value::Text(r.serial.clone())),
-        ("counter".into(), common::Value::Int(r.counter as i64)),
-    ];
+    let mut p = Proto::new("m10", "frame")
+        .by(Entity::new("meteomodem", Id::Text(r.serial.clone())).made_by("Meteomodem"))
+        .saying(Fact::Named(Named::new(r.serial.clone(), ThingKind::Sonde)));
     if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
+        for fact in crate::facts::of_flight(
+            r.lat_deg,
+            r.lon_deg,
+            r.altitude_m,
+            r.climb_ms,
+            r.speed_kt,
+            r.course_deg,
+            None,
+        ) {
+            p = p.saying(fact);
+        }
     }
-    if r.satellites > 0 {
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
-    }
-    if r.gps_week > 0 {
-        fields.push(("gps_week".into(), common::Value::Int(r.gps_week as i64)));
-    }
-    if let Some((y, mo, d, h, mi, s)) = r.utc {
-        fields.push((
-            "utc".into(),
-            common::Value::Text(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:04.1}")),
-        ));
-    }
-
-    let mut d = Decoded::bytes("m10", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("{}, counter {}", r.model.label(), r.counter))
-        .with_fields(fields)
-        .by(common::Identity::new("meteomodem", r.serial.clone()).made_by("Meteomodem"));
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                // Neither sonde sends its battery voltage in the standard
-                // part of the frame; not-a-number is how a sonde track says
-                // a reading has not been read.
-                battery_v: f32::NAN,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
+    Some(p)
 }
 
 /// The sync header, as chips. Not a byte of the frame: the frame's own

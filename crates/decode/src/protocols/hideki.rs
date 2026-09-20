@@ -25,7 +25,7 @@
 use crate::bits::{BitBuffer, crc8, xor8};
 use crate::protocol::{DecodeError, Proof, Protocol, Report};
 use crate::slicer::{Coding, Timing, differential_manchester_decode, slice_manchester_half};
-use dsp::pulse::Package;
+use common::Pulse;
 
 pub struct Hideki;
 
@@ -50,14 +50,14 @@ impl Protocol for Hideki {
     }
 
     fn decode(&self, bits: &BitBuffer) -> Result<Report, DecodeError> {
-        // The differential decoder's output, which is what `decode_package`
+        // The differential decoder's output, which is what `decode_burst`
         // hands over once it has found the sync.
         read(bits)
     }
 
-    fn decode_package(&self, pkg: &Package) -> Result<Report, DecodeError> {
-        let raw =
-            slice_manchester_half(pkg, &self.timing()).map_err(|_| DecodeError::NotThisProtocol)?;
+    fn decode_burst(&self, pulses: &[Pulse]) -> Result<Report, DecodeError> {
+        let raw = slice_manchester_half(pulses, &self.timing())
+            .map_err(|_| DecodeError::NotThisProtocol)?;
         // Differential decoding is blind to polarity, so both ways round are
         // one stream here. The sync is written the way the specification has
         // it and the payload is sent inverted, which is why the search and the

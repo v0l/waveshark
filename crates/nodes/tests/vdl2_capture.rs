@@ -20,7 +20,7 @@ const FIXTURE: &str = "../../testdata/vdl2_model_136.975M_1050k.wav";
 const RATE: f64 = 1_050_000.0;
 const CENTER: u64 = 136_975_000;
 
-fn frames() -> Option<Vec<common::Frame>> {
+fn frames() -> Option<Vec<common::packet::Packet>> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     if !p.exists() {
         eprintln!("skipping: {FIXTURE} absent, run testdata/fetch.sh to enable");
@@ -47,9 +47,9 @@ fn frames() -> Option<Vec<common::Frame>> {
     let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
     let mut out = Vec::new();
     for block in iq.chunks(65_536) {
-        let mut o = Payload::Frames(Vec::new());
+        let mut o = Payload::Packets(Vec::new());
         node.process(&Payload::Iq(block.to_vec()), &mut o, &mut ctx).expect("process");
-        out.extend(o.as_frames().unwrap_or(&[]).iter().cloned());
+        out.extend(o.as_packets().unwrap_or(&[]).iter().cloned());
     }
     Some(out)
 }
@@ -63,7 +63,7 @@ fn the_burst_carries_the_two_frames_dumpvdl2_reads() {
 
     let parsed: Vec<decode::vdl2::Frame> = frames
         .iter()
-        .map(|f| decode::vdl2::parse_frame(&f.bytes).expect("a frame behind its check sequence"))
+        .map(|f| decode::vdl2::parse_frame(f.bytes()).expect("a frame behind its check sequence"))
         .collect();
     let lengths: Vec<usize> = parsed.iter().map(|f| f.info.len()).collect();
     assert_eq!(lengths, vec![303, 175], "information octets in each frame");
@@ -78,8 +78,8 @@ fn the_burst_carries_the_two_frames_dumpvdl2_reads() {
 
     for f in &frames {
         // A frame with no level is a frame that cannot be sorted by strength.
-        assert!(f.rssi_dbfs.is_finite(), "the frame carries what it was heard at");
-        assert!(f.snr_db.is_finite(), "the frame carries its signal to noise");
+        assert!(f.carrier.rssi_dbfs.is_finite(), "the frame carries what it was heard at");
+        assert!(f.carrier.snr_db.is_finite(), "the frame carries its signal to noise");
     }
 
     // The text is the evidence that the Reed-Solomon and the unstuffing put

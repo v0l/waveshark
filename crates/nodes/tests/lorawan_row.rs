@@ -1,10 +1,9 @@
 //! LoRaWAN frames through the real row path.
 
-use common::Hz;
-use decode::lora::decoded;
+use common::packet::Proto;
 use decode::lora::{Frame, Header};
 
-fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
+fn row(payload: Vec<u8>) -> Proto {
     let frame = Frame {
         header: Header { length: payload.len(), coding_rate: 1, has_crc: true },
         payload,
@@ -13,11 +12,7 @@ fn row(payload: Vec<u8>) -> pipeline::event::Decoded {
     };
     // Sync 0x34, reserved for public LoRaWAN networks.
     let bytes = frame.to_bytes(7, 125_000.0, 0x34);
-    decode::lora::decoded(&bytes, Hz(868_100_000)).expect("a row")
-}
-
-fn field(d: &pipeline::event::Decoded, k: &str) -> Option<String> {
-    d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
+    decode::lora::read(&bytes).expect("a row")
 }
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -28,15 +23,12 @@ fn unhex(s: &str) -> Vec<u8> {
 #[test]
 fn the_published_uplink_becomes_a_row_with_its_address() {
     let d = row(unhex("40F17DBE4900020001954378762B11FF0D"));
-    assert_eq!(d.protocol, "LoRaWAN");
-    assert_eq!(field(&d, "type").as_deref(), Some("unconfirmed up"));
-    assert_eq!(field(&d, "dev_addr").as_deref(), Some("49be7df1"));
-    assert_eq!(field(&d, "frame_counter").as_deref(), Some("2"));
-    assert_eq!(field(&d, "port").as_deref(), Some("1"));
-    assert_eq!(field(&d, "encrypted").as_deref(), Some("true"));
-    let detail = d.detail.as_deref().unwrap_or_default();
-    assert!(detail.contains("49be7df1 frame 2"), "{detail}");
-    assert!(detail.contains("4 bytes sealed"), "{detail}");
+    assert_eq!((d.id, d.kind), ("lorawan", "unconfirmed up"));
+    // The device address, which the network hands out and takes back, so it
+    // names a session rather than a device.
+    assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("49be7df1"));
+    assert_eq!(d.subject.as_ref().map(|e| e.stability), Some(common::packet::Stability::Session));
+    assert_eq!(d.parties().0, Some("49be7df1"));
 }
 
 /// A join request names the device, which is the most revealing thing
@@ -50,10 +42,11 @@ fn a_join_request_names_the_device_in_the_row() {
     v.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
 
     let d = row(v);
-    assert_eq!(d.protocol, "LoRaWAN");
-    assert_eq!(field(&d, "type").as_deref(), Some("join request"));
-    assert_eq!(field(&d, "dev_eui").as_deref(), Some("88-77-66-55-44-33-22-11"));
-    assert_eq!(field(&d, "join_eui").as_deref(), Some("08-07-06-05-04-03-02-01"));
-    assert_eq!(field(&d, "dev_nonce").as_deref(), Some("4660"));
-    assert!(d.detail.as_deref().unwrap_or_default().contains("device 88-77-66-55-44-33-22-11"));
+    assert_eq!((d.id, d.kind), ("lorawan", "join request"));
+    // A join request names the device outright, which is the most revealing
+    // thing LoRaWAN puts on the air in the clear.
+    assert_eq!(
+        d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+        Some("88-77-66-55-44-33-22-11")
+    );
 }

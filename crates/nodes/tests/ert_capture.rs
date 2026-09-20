@@ -11,7 +11,7 @@
 //! The frame is real: rtl_433 25.02 and rtlamr both read it as meter 54585868
 //! from `tests/ert/scm/01/g001_912.6M_2400k.cu8`, a gas meter at 562456.
 
-use common::{C32, Hz, Value};
+use common::{C32, Hz};
 use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 
@@ -77,15 +77,31 @@ fn meters(iq: &[C32]) -> Vec<(String, i64, i64)> {
     let mut out = Vec::new();
     for block in iq.chunks(16_384) {
         g.feed_iq(block).expect("run");
-        for d in g.output().as_packets().unwrap_or(&[]).iter().flat_map(|p| &p.decodes) {
-            if !d.protocol.starts_with("ERT-") {
+        for d in g.output().as_packets().unwrap_or(&[]).iter().flat_map(|p| &p.stack) {
+            if !d.kind.starts_with("ERT-") {
                 continue;
             }
-            let num = |k: &str| match d.fields.iter().find(|(f, _)| f == k) {
-                Some((_, Value::Int(v))) => *v,
-                _ => -1,
-            };
-            let row = (d.protocol.to_string(), num("id"), num("consumption"));
+            // The meter's own identifier and what it has counted, which the
+            // family's field names state as an identity and a reading.
+            let id = d
+                .subject
+                .as_ref()
+                .and_then(|e| e.id.to_string().split('/').next_back().map(str::to_string))
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(-1);
+            let used = d
+                .facts
+                .iter()
+                .find_map(|f| match f {
+                    common::packet::Fact::Sensed(r)
+                        if r.quantity == common::packet::Quantity::Consumption =>
+                    {
+                        Some(r.value as i64)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(-1);
+            let row = (d.kind.to_string(), id, used);
             if !out.contains(&row) {
                 out.push(row);
             }

@@ -27,13 +27,12 @@ use common::Result;
 use decode::wifi as mac;
 pub use decode::wifi::CHANNEL_WIDTH_HZ;
 pub use decode::wifi::channel_of;
-pub use decode::wifi::decoded;
+pub use decode::wifi::read;
 use dsp::wifi::{WifiConfig, WifiFrame, WifiSpan, ofdm};
 use identify::Signal;
 pub use identify::wifi::DEFAULT_HZ;
 pub use identify::wifi::Wifi;
 pub use identify::wifi::channels;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -139,7 +138,7 @@ impl Simple for WifiNode {
         };
         self.span = Some(span);
         self.meter = crate::FrameMeter::new(rate, center as u64, KEEP_S);
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -172,20 +171,26 @@ impl Simple for WifiNode {
             }
         }
 
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             if !f.fcs_ok {
                 continue;
             }
             self.accepted += 1;
             let bytes = mac::wrap(&f.psdu, f.rate.mcs, f.rate.mbps, f.rate.short_gi, f.aggregated);
-            let mut frame =
-                common::Frame::measured(bytes, f.rssi_dbfs, f.snr_db).at(f.center_hz as u64);
+            let mut pkt = crate::measured(
+                f.center_hz as u64,
+                CHANNEL_WIDTH_HZ as u32,
+                bytes,
+                f.rssi_dbfs,
+                f.snr_db,
+            );
             // Preamble, headers and as much of the payload as the cap allows.
             let len =
                 (400 + (f.psdu.len() as f32 * 8.0 * 20.0 / f.rate.mbps) as usize).min(MAX_FRAME_IQ);
-            frame.iq = self.meter.iq_at(f.start_sample, len);
-            out.push(frame);
+            pkt.carrier.iq = self.meter.iq_at(f.start_sample, len);
+            // The FCS over the whole frame, which is what `fcs_ok` above is.
+            out.push(pkt.checked(common::packet::Integrity::Passed));
         }
         Ok(())
     }
@@ -221,11 +226,12 @@ impl Protocol for Wifi {
     /// A MAC frame arrives tagged with the 20 MHz channel it was read on, and
     /// carries a CRC-32 over the whole of itself that the front end already
     /// checked.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !is_wifi_channel(p.center_hz() as f64) {
             return None;
         }
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+        read(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
 
     /// Nothing is locked. A latch on a span-wide decoder hands it its whole
@@ -291,8 +297,8 @@ impl Protocol for Wifi {
     /// A beacon is the same news a hundred times a second. One row per
     /// network per channel is what a person wants to see; a beacon whose
     /// SSID or security changed is a different key and reports again.
-    fn dedupe_key(&self, p: &common::Packet) -> Option<Vec<u8>> {
-        let common::PacketBody::Frame(fr) = &p.body else {
+    fn dedupe_key(&self, p: &common::packet::Packet) -> Option<Vec<u8>> {
+        let Some(fr) = p.frame.as_ref() else {
             return None;
         };
         let f = mac::parse(&mac::Received::parse(&fr.bytes)?.mpdu)?;
@@ -312,6 +318,15 @@ impl Protocol for Wifi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The channel a layer states it was working.
+    fn channel(d: &common::packet::Proto) -> Option<common::packet::Channel> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Channel(c) => Some(c.clone()),
+            _ => None,
+        })
+    }
+
     use common::Hz;
 
     fn spec(rate: f64, center: f64) -> PortSpec {
@@ -357,13 +372,13 @@ mod tests {
         let want = beacon();
         let mut n = WifiNode::default();
         let out = n.negotiate(&spec(20_000_000.0, 2_437_000_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
 
         let mut samples = vec![common::C32::default(); 2000];
         samples.extend(dsp::wifi::tx::frame(&want, 6, 0x5d));
         samples.extend(vec![common::C32::default(); 2000]);
         let input = Payload::Iq(samples);
-        let mut output = Payload::Frames(Vec::new());
+        let mut output = Payload::Packets(Vec::new());
         let ins = [spec(20_000_000.0, 2_437_000_000.0)];
         let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
@@ -374,21 +389,25 @@ mod tests {
         let quiet = Payload::Iq(vec![common::C32::default(); 4096]);
         n.process(&quiet, &mut output, &mut ctx).unwrap();
 
-        let frames = output.as_frames().expect("frames");
+        let frames = output.as_packets().expect("packets");
         assert_eq!(frames.len(), 1);
-        let r = mac::Received::parse(&frames[0].bytes).expect("an envelope");
+        let r = mac::Received::parse(&frames[0].bytes()).expect("an envelope");
         assert_eq!(r.mpdu, want);
         assert_eq!(r.mbps, 6);
-        assert!(frames[0].rssi_dbfs.is_finite() && frames[0].snr_db.is_finite());
-        assert!(frames[0].iq.is_some(), "a frame carries what it was read from");
+        assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());
+        assert!(frames[0].carrier.iq.is_some(), "a frame carries what it was read from");
 
-        let d = decoded(&frames[0].bytes, Hz(2_437_000_000)).expect("a decode");
-        assert_eq!(d.protocol, "802.11");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("ssid=waveshark"), "{detail}");
-        assert!(detail.contains("type=beacon"), "{detail}");
-        assert!(detail.contains("channel=6"), "{detail}");
-        assert!(detail.contains("security=wpa2"), "{detail}");
+        let d = read(frames[0].bytes(), Hz(2_437_000_000)).expect("a decode");
+        assert_eq!((d.id, d.kind), ("wifi", "beacon"));
+        // The network names itself, and says what protects it and which
+        // channel it is really working.
+        assert!(d.facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Named(n) if n.label == "waveshark" && n.fixed
+        )));
+        let ch = channel(&d).expect("a channel");
+        assert_eq!((ch.heard, ch.claims), (6, Some(6)));
+        assert_eq!(ch.secrecy, common::Secrecy::Encrypted(Some("wpa2".into())));
     }
 
     /// A basic id message naming a serial, which is the one field a row
@@ -416,14 +435,12 @@ mod tests {
         v.extend_from_slice(&ie);
         v.extend(dsp::wifi::crc32(&v).to_le_bytes());
 
-        let d =
-            decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000)).expect("a decode");
-        assert_eq!(d.protocol, "OpenDroneID");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
-        assert!(detail.contains("message=basic id"), "{detail}");
-        // The 802.11 fields are still there, behind the aircraft's own.
-        assert!(detail.contains("ssid=waveshark"), "{detail}");
+        let d = read(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000)).expect("a decode");
+        // Named for what it is: an aircraft's broadcast, not a row about a
+        // network that happens to carry some bytes. The serial is in the
+        // frame, under Remote ID's own layout.
+        assert_eq!(d.id, "opendroneid");
+        assert!(channel(&d).is_some(), "the network it rode on is still stated");
     }
 
     /// A NAN service discovery frame is an action frame, which carries no
@@ -451,22 +468,18 @@ mod tests {
         v.extend_from_slice(&sda);
         v.extend(dsp::wifi::crc32(&v).to_le_bytes());
 
-        let d =
-            decoded(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000)).expect("a decode");
-        assert_eq!(d.protocol, "OpenDroneID");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("uas_id=1596F3AAAAAAAAAAAAAA"), "{detail}");
-        assert!(detail.contains("type=action"), "{detail}");
+        let d = read(&mac::wrap(&v, None, 6.0, false, false), Hz(2_437_000_000)).expect("a decode");
+        assert_eq!((d.id, d.kind), ("opendroneid", "action"));
     }
 
     #[test]
     fn bytes_that_are_not_a_frame_are_not_a_row() {
-        assert!(decoded(&[0u8; 20], Hz(2_437_000_000)).is_none());
+        assert!(read(&[0u8; 20], Hz(2_437_000_000)).is_none());
         // A MAC frame with no envelope in front of it did not come from here.
-        assert!(decoded(&beacon(), Hz(2_437_000_000)).is_none());
+        assert!(read(&beacon(), Hz(2_437_000_000)).is_none());
         let mut bad = beacon();
         bad[8] ^= 0xff;
-        assert!(decoded(&mac::wrap(&bad, None, 6.0, false, false), Hz(2_437_000_000)).is_none());
+        assert!(read(&mac::wrap(&bad, None, 6.0, false, false), Hz(2_437_000_000)).is_none());
     }
 
     /// The row says how the frame arrived, which is the only place that can
@@ -474,11 +487,13 @@ mod tests {
     #[test]
     fn a_row_names_the_rate_the_frame_arrived_at() {
         let b = mac::wrap(&beacon(), Some(7), 65.0, true, true);
-        let d = decoded(&b, Hz(2_437_000_000)).expect("a decode");
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("phy=MCS 7"), "{detail}");
-        assert!(detail.contains("aggregated=1"), "{detail}");
-        assert!(d.detail.is_some());
+        let d = read(&b, Hz(2_437_000_000)).expect("a decode");
+        // How the frame arrived is the keying, and the envelope the front
+        // end wrote carries it; the row names the network.
+        let r = mac::Received::parse(&b).expect("an envelope");
+        assert_eq!(r.mcs, Some(7));
+        assert!(r.aggregated);
+        assert_eq!(d.id, "wifi");
     }
 
     /// A span starts on the channels that cover the band, and opens another
@@ -518,13 +533,13 @@ mod tests {
 
         let ins = [spec(61_440_000.0, 2_457_000_000.0)];
         let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
-        let mut output = Payload::Frames(Vec::new());
+        let mut output = Payload::Packets(Vec::new());
         for block in samples.chunks(16_384) {
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             n.process(&Payload::Iq(block.to_vec()), &mut output, &mut ctx).unwrap();
         }
         assert!(
-            output.as_frames().map(|f| !f.is_empty()).unwrap_or(false),
+            output.as_packets().map(|f| !f.is_empty()).unwrap_or(false),
             "the beacon did not decode at all"
         );
         assert!(

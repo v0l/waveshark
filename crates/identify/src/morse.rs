@@ -48,7 +48,6 @@ impl Signal for Morse {
         let mut decim =
             dsp::FirDecim::design_band(rate_hz, factor, PITCH_HZ + REACH_HZ, EDGE_HZ, 60.0);
         let mut det = CwDetector::new(audio_rate, morse::config(PITCH_HZ, REACH_HZ));
-        let center = common::Hz(center_hz as u64);
         let (mut mixed, mut narrow, mut audio, mut packages) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut rows = Vec::new();
@@ -62,14 +61,14 @@ impl Signal for Morse {
             packages.clear();
             det.process(&audio, &mut packages);
             for pkg in &packages {
-                if let Some(bytes) = morse::framed(pkg)
-                    && let Some(d) = morse::decoded(&bytes, center)
+                if let Some(bytes) = morse::framed(pkg.pulses())
+                    && let Some(d) = morse::read(&bytes)
                 {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(center_hz)
     }
 }
 

@@ -13,7 +13,7 @@
 //! the air says whose they are, so a name comes from a list the operator
 //! supplies ([`Pagers`]) and a page with no match still reports its pair.
 
-use common::Decoded;
+use common::packet::{Link, Party, Proto};
 use dsp::tone::Run;
 
 /// What was sent: a pair addressed to one pager, or a long tone addressed to
@@ -191,62 +191,49 @@ impl Pagers {
     }
 }
 
-/// One row: which tones, how long each was held, and whose pager that is
-/// where the operator said.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// Whose pager was opened.
+///
+/// The tones are the address, so the pager is the party called and the
+/// operator's list is what turns a pair of frequencies into a name. How long
+/// each tone was held is in the frame, where the detector wrote it.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     if bytes.len() <= TAG.len() || bytes[..TAG.len()] != TAG {
         return None;
     }
     let body = String::from_utf8_lossy(&bytes[TAG.len()..]).to_string();
     let (kind, rest) = body.split_once(' ')?;
-    // The name is whatever is left after the numbers, spaces and all.
     let mut words = match kind {
         "pair" => rest.splitn(5, ' '),
         _ => rest.splitn(3, ' '),
     };
     let num = |w: Option<&str>| w.and_then(|w| w.parse::<f64>().ok());
-    let mut fields: Vec<(String, common::Value)> = Vec::new();
-    let (tones, seconds, name) = match kind {
+    let (tones, name) = match kind {
         "pair" => {
-            let (a_hz, a_s, b_hz, b_s) =
+            let (a_hz, _a_s, b_hz, _b_s) =
                 (num(words.next())?, num(words.next())?, num(words.next())?, num(words.next())?);
-            fields.push(("tone_a_hz".into(), common::Value::Float(a_hz)));
-            fields.push(("tone_b_hz".into(), common::Value::Float(b_hz)));
-            fields.push(("tone_a_s".into(), common::Value::Float(a_s)));
-            fields.push(("tone_b_s".into(), common::Value::Float(b_s)));
-            (format!("{a_hz:.1}/{b_hz:.1}"), a_s + b_s, words.next())
+            (format!("{a_hz:.1}/{b_hz:.1}"), words.next())
         }
         "group" => {
-            let (hz, seconds) = (num(words.next())?, num(words.next())?);
-            fields.push(("tone_hz".into(), common::Value::Float(hz)));
-            fields.push(("tone_s".into(), common::Value::Float(seconds)));
-            // A long tone opens every pager on it, so it is addressed to a
-            // fleet rather than to one radio.
-            fields.push(("call".into(), common::Value::Text("group".into())));
-            (format!("{hz:.1}"), seconds, words.next())
+            let (hz, _seconds) = (num(words.next())?, num(words.next())?);
+            (format!("{hz:.1}"), words.next())
         }
         _ => return None,
     };
-    fields.insert(0, ("tones".into(), common::Value::Text(tones.clone())));
-    let detail = match name {
-        Some(name) => {
-            fields.push(("pager".into(), common::Value::Text(name.to_string())));
-            format!("{name} on {tones}")
-        }
-        None => format!("{tones} for {seconds:.1} s"),
+    // A long tone opens every pager on it, so it calls a fleet; a pair opens
+    // one.
+    let called = match kind {
+        "group" => Party::group(name.map(str::to_string).unwrap_or(tones)),
+        _ => Party::unit(name.map(str::to_string).unwrap_or(tones)),
     };
-    let mut d = Decoded::bytes("Two-tone page", center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Fm);
-    // The tones are the address, so a named pager is a device heard rather
-    // than a field: the operator's list is what turns a pair into a who.
-    if let Some(name) = name {
-        d = d.by(common::Identity::new("pager-tones", tones).named(name.to_string()));
+    Some(Proto::new("twotone", kind_of(kind)).between(Link { from: None, to: Some(called) }))
+}
+
+/// The two ways a pager is opened, as the names a row matches on
+fn kind_of(tag: &str) -> &'static str {
+    match tag {
+        "group" => "group",
+        _ => "pair",
     }
-    // Nothing checks, because two tones carry nothing to check with.
-    d.crc_ok = None;
-    Some(d)
 }
 
 /// Bytes before the page on the bus: the tag this front end writes, which is

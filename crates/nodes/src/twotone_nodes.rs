@@ -15,8 +15,8 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::twotone::TAG;
-pub use decode::twotone::decoded;
 pub use decode::twotone::framed;
+pub use decode::twotone::read;
 use decode::twotone::{Pagers, Sequential};
 use dsp::tone::{RunConfig, ToneRuns};
 use dsp::{FirDecim, FmDemod, Mixer};
@@ -25,7 +25,6 @@ pub use identify::twotone::CHANNEL_WIDTH_HZ;
 pub use identify::twotone::DEFAULT_HZ;
 pub use identify::twotone::TwoTone;
 pub use identify::twotone::{AUDIO_HZ, DEVIATION_HZ};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -115,7 +114,7 @@ impl Simple for TwoToneNode {
         self.pages.reset();
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(rate);
         Ok(out)
@@ -173,7 +172,7 @@ impl Simple for TwoToneNode {
             if let Some(page) = self.pages.run(*run) {
                 self.read += 1;
                 let name = self.who.who(&page).map(|p| p.name.clone());
-                o.frames_mut().push(self.meter.frame(framed(&page, name.as_deref())));
+                o.packets_mut().push(self.meter.packet_now(framed(&page, name.as_deref())));
             }
         }
         self.runs = runs;
@@ -216,8 +215,9 @@ impl Protocol for TwoTone {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
     fn stage_label(&self, hz: f64) -> String {
         format!("{:.4} 2-TONE", hz / 1e6)
@@ -306,12 +306,12 @@ mod tests {
         let mut frames = Vec::new();
         for block in iq.chunks(4096) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
         frames
@@ -335,22 +335,21 @@ mod tests {
         assert_eq!(frames.len(), 1, "{} pages off the air", frames.len());
         assert_eq!(n.read(), 1);
 
-        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.protocol, "Two-tone page");
+        let d = read(&frames[0]).expect("a decode");
+        assert_eq!((d.id, d.kind), ("twotone", "pair"));
+        // The pager the tones opened, by the name the operator's list gives
+        // it: the tones themselves are in the frame, which is where a
+        // measurement belongs.
+        assert_eq!(d.link.to.as_ref().map(|p| p.id.as_str()), Some("Station 3"));
+        assert!(d.subject.is_none(), "a tone sender names nobody");
         // The tone reading is a few hertz off, which is what a 25 ms window
         // measures a tone to; the pager list matches within 1.5%.
-        let a = d.field("tone_a_hz").and_then(|v| v.as_f64()).expect("an A tone");
-        let b = d.field("tone_b_hz").and_then(|v| v.as_f64()).expect("a B tone");
-        assert!((a - 947.3).abs() < 5.0, "A read as {a:.1}");
-        assert!((b - 332.5).abs() < 5.0, "B read as {b:.1}");
-        let a_s = d.field("tone_a_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let b_s = d.field("tone_b_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        assert!((a_s - 1.0).abs() < 0.1, "A held {a_s:.2} s");
-        assert!((b_s - 3.0).abs() < 0.1, "B held {b_s:.2} s");
-        assert_eq!(d.field("pager"), Some(&common::Value::Text("Station 3".into())));
-        assert_eq!(d.identity.as_ref().map(|i| i.name.clone()), Some(Some("Station 3".into())));
-        assert!(!d.written, "a tone sender wrote nothing");
-        assert_eq!(d.crc_ok, None, "two tones carry no check");
+        let body = String::from_utf8_lossy(&frames[0][TAG.len()..]).to_string();
+        let n: Vec<f64> = body.split(' ').skip(1).filter_map(|w| w.parse().ok()).collect();
+        assert!((n[0] - 947.3).abs() < 5.0, "A read as {:.1}", n[0]);
+        assert!((n[1] - 1.0).abs() < 0.1, "A held {:.2} s", n[1]);
+        assert!((n[2] - 332.5).abs() < 5.0, "B read as {:.1}", n[2]);
+        assert!((n[3] - 3.0).abs() < 0.1, "B held {:.2} s", n[3]);
     }
 
     /// A pair nobody listed is still a page: the tones are the address
@@ -360,11 +359,11 @@ mod tests {
         let mut n = node(DEFAULT_HZ, "");
         let frames = run(&mut n, &keyed(&[(600.9, 1.0), (1153.4, 3.0)], 0.0), DEFAULT_HZ);
         assert_eq!(frames.len(), 1);
-        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.field("pager"), None);
-        assert_eq!(d.identity, None, "an unlisted pair names nobody");
-        let tones = d.field("tones").map(|v| v.to_string()).unwrap_or_default();
-        assert!(tones.starts_with("60"), "{tones}");
+        let d = read(&frames[0]).expect("a decode");
+        // With nobody listed, the tones are the name of whoever was called.
+        let called = d.link.to.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+        assert!(called.starts_with("60"), "{called}");
+        assert!(d.subject.is_none(), "an unlisted pair names nobody");
     }
 
     /// A long tone is an all-call, and it is published as one rather than as
@@ -374,10 +373,13 @@ mod tests {
         let mut n = node(DEFAULT_HZ, "Fire brigade = 1122.5/1153.4\n");
         let frames = run(&mut n, &keyed(&[(1153.4, 8.0)], 0.0), DEFAULT_HZ);
         assert_eq!(frames.len(), 1);
-        let d = decoded(&frames[0], Hz(DEFAULT_HZ as u64)).expect("a decode");
-        assert_eq!(d.field("call"), Some(&common::Value::Text("group".into())));
-        assert_eq!(d.field("pager"), Some(&common::Value::Text("Fire brigade".into())));
-        let seconds = d.field("tone_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let d = read(&frames[0]).expect("a decode");
+        // A long tone opens every pager on it, so it calls a fleet.
+        assert_eq!((d.id, d.kind), ("twotone", "group"));
+        assert_eq!(d.link.to.as_ref().map(|p| p.kind), Some(common::packet::PartyKind::Group));
+        assert_eq!(d.link.to.as_ref().map(|p| p.id.as_str()), Some("Fire brigade"));
+        let body = String::from_utf8_lossy(&frames[0][TAG.len()..]).to_string();
+        let seconds: f64 = body.split(' ').nth(2).and_then(|w| w.parse().ok()).unwrap_or(0.0);
         assert!((seconds - 8.0).abs() < 0.1, "held {seconds:.2} s");
     }
 

@@ -56,13 +56,13 @@ impl Signal for Epirb {
             demod.process(&narrow, &mut chips);
             for chip in &chips {
                 if let Some(message) = framer.push(*chip)
-                    && let Some(d) = epirb::decoded(&message, chan.hz())
+                    && let Some(d) = epirb::read(&message)
                 {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

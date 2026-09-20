@@ -1,43 +1,36 @@
 //! Decoding, as a consumer of the packet bus.
 //!
-//! Every front end puts what it produced on the bus, and this reads it: a
-//! burst of timings goes through the protocol tables, a frame of bytes goes
-//! to whichever registered protocol claims it. Both come out as decodes,
-//! which is what a packet list, a chart or an alert wants.
+//! Every front end puts what it heard on the bus, and this reads it: a burst
+//! of timings goes through the protocol tables, a frame of bytes goes to
+//! whichever registered protocol claims it, and what either concludes is
+//! pushed onto the packet as a protocol layer.
 //!
 //! It runs here rather than inside each channel's chain, where it used to,
 //! because there is one of it. A decoder per channel meant the same protocol
 //! tables were consulted in a hundred places, decodes reached the rest of the
 //! program through whatever collected them, and a burst that arrived by some
 //! other route (a log being replayed, a future front end) got no decoding at
-//! all. Decoding is cheap integer work on a burst that has already been found:
-//! the expensive per-sample DSP stays parallel in the banks, and this sees a
-//! few packets a second.
+//! all. Decoding is cheap integer work on a burst that has already been
+//! found: the expensive per-sample DSP stays parallel in the banks, and this
+//! sees a few packets a second.
 
-use common::{Packet, PacketBody, Result};
+use common::Result;
+use common::packet::{Frame, Framing, Integrity, Packet, Symbols};
 use decode::Protocols;
-use pipeline::event::{Decoded, Event};
+use pipeline::event::Event;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
-use crate::decode_nodes::{decoded_event, unmatched_event};
 use pipeline::registry::{Category, Settings, StageDesc};
 
 pub struct PacketDecodeNode {
     protocols: Protocols,
     /// Report every protocol that claims a packet, rather than only the first.
     report_all: bool,
-    /// Report bursts no protocol claimed, with the coding inferred from their
-    /// timings.
+    /// Read the framing out of a burst nothing claimed, so the bits are there
+    /// for somebody working a device out.
     report_unknown: bool,
-    /// What decoded in the last block, for a host that wants this node's
-    /// output rather than every event the graph produced.
-    hits: Vec<Decoded>,
-    /// Where each packet's decodes sit in `hits`, one span per packet of the
-    /// last batch, so the conclusions can be handed back to the packets they
-    /// came from.
-    spans: Vec<(usize, usize)>,
 }
 
 impl Default for PacketDecodeNode {
@@ -48,137 +41,84 @@ impl Default for PacketDecodeNode {
 
 impl PacketDecodeNode {
     pub fn new(protocols: Protocols) -> Self {
-        Self {
-            protocols,
-            report_all: true,
-            report_unknown: true,
-            hits: Vec::new(),
-            spans: Vec::new(),
-        }
+        Self { protocols, report_all: true, report_unknown: true }
     }
 
-    /// Decode a batch of packets and write the conclusions onto them, which
-    /// is the whole of what this node does to a packet.
+    /// Read a batch of packets, pushing what each protocol concluded onto the
+    /// packet it concluded it from.
     ///
     /// Public because the bus is not the only source of packets: a directory
     /// rebuilt from the packet log has to reach the same conclusions as the
     /// receiver did when the packets were live, and two implementations of
     /// "what protocol is this" would drift apart the first time one was
-    /// fixed. A replay annotates and then reads `Packet::decodes`, exactly as
-    /// a view wired to the bus does.
+    /// fixed. A replay reads and then walks the stack, exactly as a view
+    /// wired to the bus does.
     pub fn annotate(&mut self, packets: &mut [Packet]) {
-        self.decode_all(packets);
-        for (p, hits) in packets.iter_mut().zip(self.per_packet()) {
-            // Replaced only where there is something to replace it with, so
-            // annotating twice is still idempotent. A conclusion the
-            // protocols cannot reach from the bytes is the front end's, and
-            // overwriting it lost the only copy: an analogue voice channel
-            // carries an empty frame with its speech beside it, so every over
-            // arrived here as a packet nothing could read and left as a
-            // packet saying nothing. No call row, nothing to subscribe to,
-            // and a channel marked as voice that could not be heard.
-            if !hits.is_empty() {
-                p.decodes = hits.to_vec();
+        for p in packets.iter_mut() {
+            // A layer already read is the front end's own, from a decoder
+            // that had more than the bytes to go on: an analogue voice
+            // channel carries an empty frame with its speech beside it, and
+            // overwriting that lost the only copy.
+            if p.claimed() {
+                continue;
+            }
+            match p.keying.as_ref().map(|k| &k.symbols) {
+                Some(Symbols::Pulses(pulses)) => {
+                    let pulses = pulses.clone();
+                    self.read_burst(p, &pulses);
+                }
+                _ => read_frame(p),
             }
         }
     }
 
-    fn decode_all(&mut self, packets: &[Packet]) {
-        self.hits.clear();
-        self.spans.clear();
-        for p in packets {
-            let from = self.hits.len();
-            match &p.body {
-                PacketBody::Pulses(pkg) => self.decode_burst(p, pkg, keying_of(p)),
-                PacketBody::Frame(f) => self.decode_frame(p, &f.bytes),
-            }
-            // Where this packet's decodes are in `hits`, so they can be put
-            // back on the packet they came from without matching on anything.
-            self.spans.push((from, self.hits.len()));
-        }
-    }
-
-    /// What each packet of the last batch decoded to, in the same order.
-    fn per_packet(&self) -> impl Iterator<Item = &[Decoded]> {
-        self.spans.iter().map(|(a, b)| &self.hits[*a..*b])
-    }
-
-    fn decode_burst(&mut self, p: &Packet, pkg: &common::Package, modulation: common::Modulation) {
-        decode_burst_into(
-            &self.protocols,
-            Options { report_all: self.report_all, report_unknown: self.report_unknown },
-            p,
-            pkg,
-            modulation,
-            &mut self.hits,
-        );
-    }
-
-    fn decode_frame(&mut self, p: &Packet, bytes: &[u8]) {
-        decode_frame_into(p, bytes, &mut self.hits);
-    }
-}
-
-/// What to report about a burst: every protocol that claimed it or only the
-/// first, and whether a burst nothing claimed is reported at all. A
-/// preference rather than a fact about the packet, which is why it is the
-/// node's parameters and travels with the call rather than being decided
-/// below.
-#[derive(Clone, Copy, Debug)]
-struct Options {
-    report_all: bool,
-    report_unknown: bool,
-}
-
-/// Which keying a burst arrived under, which is not something the protocols
-/// can tell and belongs in the packet list's own column: a device that exists
-/// in both an OOK and an FSK variant decodes the same either way.
-///
-/// Measured where a classifier saw the burst. The fallback is the channel
-/// width the packet arrived through, which is only ever a guess: the wide
-/// tier carries plenty of on-off keyed sensors, and this used to label every
-/// one of them FSK.
-fn keying_of(p: &Packet) -> common::Modulation {
-    p.modulation().unwrap_or(match p.measure.as_ref() {
-        Some(m) => m.modulation,
-        None if p.bandwidth_hz > 60_000 => common::Modulation::Fsk2,
-        None => common::Modulation::Ook,
-    })
-}
-
-fn decode_burst_into(
-    protocols: &Protocols,
-    opts: Options,
-    p: &Packet,
-    pkg: &common::Package,
-    modulation: common::Modulation,
-    hits: &mut Vec<Decoded>,
-) {
-    let center = common::Hz(p.center_hz());
-    let mut matched = false;
-    // A protocol that fails is not reported. A CRC failure in particular
-    // is a protocol saying "those were my timings but the reception was
-    // not good enough", which is worth knowing while tuning a chain and
-    // is noise in a packet list.
-    for (_, res) in protocols.diagnose(pkg) {
-        if let Ok(report) = res {
-            matched = true;
-            hits.push(decoded_event(&report, pkg, center, modulation));
-            if !opts.report_all {
-                break;
+    /// What the tables make of a burst's timings.
+    ///
+    /// A protocol that fails is not reported. A CRC failure in particular is
+    /// a protocol saying "those were my timings but the reception was not
+    /// good enough", which is worth knowing while tuning a chain and is noise
+    /// in a packet list.
+    fn read_burst(&mut self, p: &mut Packet, pulses: &[common::Pulse]) {
+        let mut matched = false;
+        for (_, res) in self.protocols.diagnose(pulses) {
+            if let Ok(report) = res {
+                matched = true;
+                p.frame = Some(Frame::of(report.raw.clone()).checked(integrity(&report)));
+                p.stack.push(decode::facts::proto_of(&report));
+                if !self.report_all {
+                    break;
+                }
             }
         }
+        // Worth reading, and the whole reason a scanner is worth running
+        // across a band: an unknown device is exactly what should be
+        // surfaced, and the inferred bits are where reverse engineering
+        // starts. It states nothing, because a slicer's guess at a coding is
+        // not a statement about the world.
+        if !matched
+            && self.report_unknown
+            && let Some(a) = decode::analyze(pulses)
+        {
+            let mut frame = Frame::of(a.frame_bytes().to_vec());
+            if let Some(f) = &a.framing {
+                frame = frame.found_by(Framing {
+                    preamble_bits: f.preamble_bits as u32,
+                    sync: f.sync_bytes(),
+                    whitening: a.framed.as_ref().and_then(|f| f.whitened.then_some("PN9")),
+                    fec: None,
+                });
+            }
+            p.frame = Some(frame);
+        }
     }
-    if !matched && opts.report_unknown {
-        // The keying column shows what the classifier measured where it
-        // is more specific than the front end that read the burst: a
-        // chirp or a carrier that no front end reads, or a burst it
-        // could not name at all.
-        let label = match p.measure.as_ref().map(|m| m.modulation) {
-            Some(l) if l != common::Modulation::Unknown => l,
-            _ => modulation,
-        };
-        hits.push(unmatched_event(pkg, center, label, p.measure.as_ref()));
+}
+
+/// What proves a device report: the check the description ran over it.
+fn integrity(r: &decode::Report) -> Integrity {
+    match r.proof.as_flag() {
+        Some(true) => Integrity::Passed,
+        Some(false) => Integrity::Failed,
+        None => Integrity::Unchecked,
     }
 }
 
@@ -192,13 +132,16 @@ fn decode_burst_into(
 /// carries, and a 162 MHz frame is not a Mode S frame no matter what its bits
 /// would parse as.
 ///
-/// Parsing again here rather than carrying the demodulator's own parse on
-/// the bus is deliberate: what travels is the evidence, and every consumer
-/// draws its own conclusions from it.
-fn decode_frame_into(p: &Packet, bytes: &[u8], hits: &mut Vec<Decoded>) {
+/// Reading again here rather than carrying the demodulator's own parse on the
+/// bus is deliberate: what travels is the evidence, and every consumer draws
+/// its own conclusions from it.
+fn read_frame(p: &mut Packet) {
+    if p.frame.as_ref().is_none_or(|f| f.bytes.is_empty()) {
+        return;
+    }
     for proto in crate::protocol::frame_readers() {
-        if let Some(rows) = proto.read_frame(p, bytes) {
-            hits.extend(rows);
+        if let Some(rows) = proto.stated(p) {
+            p.stack.extend(rows);
             return;
         }
     }
@@ -227,8 +170,8 @@ impl Simple for PacketDecodeNode {
         // conclusions the log's replay would reach.
         let mut packets: Vec<Packet> = i.as_packets().unwrap_or(&[]).to_vec();
         self.annotate(&mut packets);
-        for d in &self.hits {
-            c.emit(Event::Decoded(d.clone()));
+        for p in &packets {
+            c.emit(Event::Decoded(p.clone()));
         }
         o.packets_mut().extend(packets);
         Ok(())
@@ -294,7 +237,7 @@ struct Heard {
     known: bool,
 }
 
-/// One decode as the dedupe reads it: where it was heard, how wide the
+/// One reception as the dedupe reads it: where it was heard, how wide the
 /// channel it came through was, how it was keyed, how strong it was, and
 /// whether a protocol claimed it.
 #[derive(Clone, Copy, Debug)]
@@ -307,15 +250,19 @@ struct Seen {
 }
 
 impl Seen {
-    fn of(p: &Packet, d: &Decoded) -> Self {
+    fn of(p: &Packet) -> Self {
         Self {
-            freq: d.center.as_f64(),
+            freq: p.carrier.center_hz as f64,
             // The width the packet was heard through, as the front end that
             // produced it declared.
-            channel_hz: f64::from(p.bandwidth_hz),
-            modulation: d.modulation.unwrap_or(common::Modulation::Unknown),
-            rssi_dbfs: p.rssi_dbfs(),
-            known: d.protocol != crate::decode_nodes::UNKNOWN,
+            channel_hz: f64::from(p.carrier.bandwidth_hz),
+            modulation: p
+                .keying
+                .as_ref()
+                .map(|k| k.modulation)
+                .unwrap_or(common::Modulation::Unknown),
+            rssi_dbfs: p.carrier.rssi_dbfs,
+            known: p.claimed(),
         }
     }
 
@@ -419,32 +366,13 @@ impl Simple for DedupeNode {
         // burst falls across the blocks a radio delivers, and a replay is
         // driven at whatever speed the machine manages.
         let now = std::time::Instant::now();
-        let seen: Vec<Seen> =
-            packets.iter().flat_map(|p| p.decodes.iter().map(|d| Seen::of(p, d))).collect();
+        let seen: Vec<Seen> = packets.iter().map(Seen::of).collect();
         let first = first_reports(&seen, now);
-        let mut k = 0;
-        for p in packets {
-            // A packet nothing decoded, from a front end that puts what it
-            // heard on the bus either way, has nothing to compare and passes
-            // through untouched.
-            if p.decodes.is_empty() {
-                o.packets_mut().push(p.clone());
-                continue;
-            }
-            let mut kept = p.clone();
-            let from = k;
-            kept.decodes = p
-                .decodes
-                .iter()
-                .enumerate()
-                .filter(|(n, _)| first[from + n] && self.accept(&seen[from + n], now))
-                .map(|(_, d)| d.clone())
-                .collect();
-            k += p.decodes.len();
+        for (n, p) in packets.iter().enumerate() {
             // Every reading of this burst was a copy of one already reported,
-            // so the packet itself is that copy.
-            if !kept.decodes.is_empty() {
-                o.packets_mut().push(kept);
+            // so this packet is that copy.
+            if first[n] && self.accept(&seen[n], now) {
+                o.packets_mut().push(p.clone());
             }
         }
         Ok(())
@@ -492,7 +420,8 @@ mod tests {
         PortSpec { spec: s, latency: 0 }
     }
 
-    fn run(node: &mut PacketDecodeNode, packets: Vec<Packet>) -> Vec<Decoded> {
+    /// The packets a block comes out of the node as.
+    fn run(node: &mut PacketDecodeNode, packets: Vec<Packet>) -> Vec<Packet> {
         let ins = [spec()];
         let mut events = Vec::new();
         let tags = Vec::new();
@@ -500,22 +429,38 @@ mod tests {
         let mut out = Payload::Packets(Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
         Simple::process(node, &Payload::Packets(packets), &mut out, &mut ctx).unwrap();
-        out.as_packets().unwrap_or(&[]).iter().flat_map(|p| p.decodes.clone()).collect()
+        out.as_packets().unwrap_or(&[]).to_vec()
+    }
+
+    /// What every layer of a block of packets said, in order.
+    fn said(packets: &[Packet]) -> Vec<common::packet::Proto> {
+        packets.iter().flat_map(|p| p.stack.clone()).collect()
     }
 
     fn burst(center_hz: u64, bandwidth_hz: u32, pulses: Vec<Pulse>) -> Packet {
-        Packet::of_pulses(
+        let carrier = common::packet::Carrier::heard(
             0,
+            center_hz,
             bandwidth_hz,
-            common::Package {
-                pulses,
-                snr_db: 22.0,
-                rssi_dbfs: -20.0,
-                start_sample: 0,
-                center_hz,
-                modulation: None,
-            },
+            -20.0,
+            22.0,
+            common::SourceId(0),
+        );
+        // The front end the width places it on: the narrow tier reads on-off
+        // keying and the wide one two-level FSK.
+        let modulation = match bandwidth_hz > 60_000 {
+            true => common::Modulation::Fsk2,
+            false => common::Modulation::Ook,
+        };
+        Packet::heard(carrier).keyed(
+            common::packet::Keying::configured(modulation)
+                .with(common::packet::Symbols::Pulses(pulses)),
         )
+    }
+
+    /// A frame on the bus, as a demodulator that makes bytes puts it there.
+    fn framed(center_hz: u64, bandwidth_hz: u32, bytes: Vec<u8>) -> Packet {
+        crate::measured(center_hz, bandwidth_hz, bytes, -18.0, 12.0)
     }
 
     #[test]
@@ -525,10 +470,14 @@ mod tests {
         // chain.
         let mut n = PacketDecodeNode::default();
         let pulses: Vec<Pulse> = (0..24).map(|_| Pulse { mark: 500, gap: 1500 }).collect();
-        let hits = run(&mut n, vec![burst(433_920_000, 31_250, pulses)]);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].protocol, "unknown");
-        assert_eq!(hits[0].center, Hz(433_920_000));
+        let out = run(&mut n, vec![burst(433_920_000, 31_250, pulses)]);
+        assert_eq!(out.len(), 1);
+        // Nothing claimed it, so it states nothing; the reception, the
+        // timings and the bits the slicer read off them are the whole of
+        // what there is to say.
+        assert!(!out[0].claimed());
+        assert_eq!(out[0].center_hz(), 433_920_000);
+        assert!(!out[0].bytes().is_empty(), "the bits it was read as");
     }
 
     #[test]
@@ -542,17 +491,10 @@ mod tests {
                 u8::from_str_radix(&"8D4840D6202CC371C32CE0576098"[i * 2..i * 2 + 2], 16).unwrap()
             })
             .collect();
-        let hits = run(
-            &mut n,
-            vec![Packet::of_frame(
-                0,
-                2_000_000,
-                common::Frame::measured(bytes, -18.0, 12.0).at(1_090_000_000),
-            )],
-        );
+        let hits = said(&run(&mut n, vec![framed(1_090_000_000, 2_000_000, bytes)]));
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].protocol, "ADSB-Identification");
-        assert!(hits[0].detail.as_deref().unwrap_or_default().contains("KLM1023"));
+        assert_eq!((hits[0].id, hits[0].kind), ("adsb", "identification"));
+        assert_eq!(hits[0].subject.as_ref().and_then(|e| e.name.clone()), Some("KLM1023".into()));
     }
 
     /// The samples a front end attached to its frame stay with the decoded
@@ -570,16 +512,16 @@ mod tests {
                 u8::from_str_radix(&"8D4840D6202CC371C32CE0576098"[i * 2..i * 2 + 2], 16).unwrap()
             })
             .collect();
-        let mut frame = common::Frame::measured(bytes, -18.0, 12.0).at(1_090_000_000);
-        frame.iq = Some(std::sync::Arc::new(common::IqBurst {
+        let mut frame = framed(1_090_000_000, 2_000_000, bytes);
+        frame.carrier.iq = Some(std::sync::Arc::new(common::IqBurst {
             rate: 2_400_000.0,
             center_hz: 1_090_000_000,
             samples: vec![common::C32::new(0.5, -0.5); 32],
         }));
-        let mut packets = vec![Packet::of_frame(0, 2_000_000, frame)];
+        let mut packets = vec![frame];
         n.annotate(&mut packets);
-        assert_eq!(packets[0].decodes.len(), 1, "the frame should have decoded");
-        let iq = packets[0].samples().expect("the packet kept the frame's samples");
+        assert_eq!(packets[0].stack.len(), 1, "the frame should have decoded");
+        let iq = packets[0].carrier.iq.as_ref().expect("the packet kept its samples");
         assert_eq!(iq.samples.len(), 32);
     }
 
@@ -590,9 +532,9 @@ mod tests {
         let mut n = PacketDecodeNode::default();
         let pulses: Vec<Pulse> = (0..24).map(|_| Pulse { mark: 500, gap: 1500 }).collect();
         let ook = run(&mut n, vec![burst(433_920_000, 31_250, pulses.clone())]);
-        assert_eq!(ook[0].modulation, Some(common::Modulation::Ook));
+        assert_eq!(ook[0].keying.as_ref().map(|k| k.modulation), Some(common::Modulation::Ook));
         let fsk = run(&mut n, vec![burst(868_300_000, 125_000, pulses)]);
-        assert_eq!(fsk[0].modulation, Some(common::Modulation::Fsk2));
+        assert_eq!(fsk[0].keying.as_ref().map(|k| k.modulation), Some(common::Modulation::Fsk2));
     }
 
     /// A pager transmission arrives as bytes like a Mode S frame does, and
@@ -603,18 +545,11 @@ mod tests {
     fn a_pager_transmission_becomes_a_row_for_each_page() {
         let bytes = pocsag_frame();
         let mut n = PacketDecodeNode::default();
-        let hits = run(
-            &mut n,
-            vec![Packet::of_frame(
-                0,
-                12_500,
-                common::Frame::measured(bytes, -18.0, 12.0).at(439_987_500),
-            )],
-        );
+        let hits = said(&run(&mut n, vec![framed(439_987_500, 12_500, bytes)]));
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].protocol, "POCSAG-Alpha");
-        assert_eq!(hits[0].text.as_deref(), Some("ON CALL"));
-        assert_eq!(hits[1].protocol, "POCSAG-Numeric");
+        assert_eq!((hits[0].id, hits[0].kind), ("pocsag", "alpha"));
+        assert_eq!(hits[0].wrote(), Some("ON CALL"));
+        assert_eq!((hits[1].id, hits[1].kind), ("pocsag", "numeric"));
     }
 
     /// Bytes a pager transmission travels on the bus as: two pages, as a
@@ -667,16 +602,12 @@ mod tests {
             ("tetra", 425_000_000, tetra),
         ];
         for (id, hz, bytes) in cases {
-            let p = Packet::of_frame(
-                0,
-                12_500,
-                common::Frame::measured(bytes.clone(), -18.0, 12.0).at(hz),
-            );
+            let p = framed(hz, 12_500, bytes.clone());
             let winner = crate::protocol::by_id(id).expect("a registered protocol");
-            let rows = winner.read_frame(&p, &bytes).expect("its own frame");
+            let rows = winner.stated(&p).expect("its own frame");
             assert!(!rows.is_empty(), "{id} read nothing at {hz} Hz");
             for other in crate::protocol::all().iter().filter(|o| o.id() != id) {
-                if other.read_frame(&p, &bytes).is_some_and(|r| !r.is_empty()) {
+                if other.stated(&p).is_some_and(|r| !r.is_empty()) {
                     assert!(
                         other.frame_claim() > winner.frame_claim(),
                         "{} claims a {id} frame at {hz} Hz on an equal or better claim",
@@ -684,10 +615,10 @@ mod tests {
                     );
                 }
             }
-            let mut hits = Vec::new();
-            decode_frame_into(&p, &bytes, &mut hits);
-            let read: Vec<&str> = hits.iter().map(|d| d.protocol).collect();
-            let want: Vec<&str> = rows.iter().map(|d| d.protocol).collect();
+            let mut walked = p.clone();
+            read_frame(&mut walked);
+            let read: Vec<&str> = walked.stack.iter().map(|d| d.id).collect();
+            let want: Vec<&str> = rows.iter().map(|d| d.id).collect();
             assert_eq!(read, want, "what the walk read at {hz} Hz");
         }
     }
@@ -695,15 +626,8 @@ mod tests {
     #[test]
     fn a_frame_that_is_not_mode_s_is_dropped_rather_than_guessed_at() {
         let mut n = PacketDecodeNode::default();
-        let hits = run(
-            &mut n,
-            vec![Packet::of_frame(
-                0,
-                2_000_000,
-                common::Frame::measured(vec![0xff; 5], -18.0, 12.0).at(1_090_000_000),
-            )],
-        );
-        assert!(hits.is_empty());
+        let out = run(&mut n, vec![framed(1_090_000_000, 2_000_000, vec![0xff; 5])]);
+        assert!(said(&out).is_empty());
     }
 
     /// A channel the wide bank splits the span into.
@@ -714,27 +638,24 @@ mod tests {
     /// One burst as it reaches the dedupe: a packet the protocols have
     /// already annotated, at the width the front end heard it through.
     fn heard(freq: f64, protocol: &'static str, rssi: f32) -> Packet {
-        let mut p = Packet::of_pulses(
+        let carrier = common::packet::Carrier::heard(
             0,
+            freq as u64,
             WIDE_HZ as u32,
-            common::Package {
-                pulses: Vec::new(),
-                snr_db: 20.0,
-                rssi_dbfs: rssi,
-                start_sample: 0,
-                center_hz: freq as u64,
-                modulation: None,
-            },
+            rssi,
+            20.0,
+            common::SourceId(0),
         );
-        p.decodes = vec![
-            Decoded::bytes(protocol, Hz(freq as u64), 0.0, vec![1, 2, 3])
-                .with_modulation(common::Modulation::Fsk2),
-        ];
-        p
+        let p = Packet::heard(carrier)
+            .keyed(common::packet::Keying::configured(common::Modulation::Fsk2));
+        match protocol == UNKNOWN {
+            true => p,
+            false => p.decoded(common::packet::Proto::new("ism", protocol)),
+        }
     }
 
-    /// What one block of packets comes out of the node as, in rows.
-    fn deduped(node: &mut DedupeNode, packets: Vec<Packet>) -> Vec<Decoded> {
+    /// What one block of packets comes out of the node as.
+    fn deduped(node: &mut DedupeNode, packets: Vec<Packet>) -> Vec<Packet> {
         let ins = [spec()];
         let mut events = Vec::new();
         let tags = Vec::new();
@@ -742,7 +663,7 @@ mod tests {
         let mut out = Payload::Packets(Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
         Simple::process(node, &Payload::Packets(packets), &mut out, &mut ctx).unwrap();
-        out.as_packets().unwrap_or(&[]).iter().flat_map(|p| p.decodes.clone()).collect()
+        out.as_packets().unwrap_or(&[]).to_vec()
     }
 
     #[test]
@@ -759,7 +680,7 @@ mod tests {
             ],
         );
         assert_eq!(kept.len(), 1, "kept {kept:#?}");
-        assert_eq!(kept[0].center, Hz(868_100_000 + WIDE_HZ as u64), "the strongest wins");
+        assert_eq!(kept[0].center_hz(), 868_100_000 + WIDE_HZ as u64, "the strongest wins");
     }
 
     #[test]
@@ -772,7 +693,11 @@ mod tests {
             ],
         );
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].protocol, "Fineoffset-WHx080", "a CRC beats a stronger guess");
+        assert_eq!(
+            kept[0].innermost().map(|l| l.kind),
+            Some("Fineoffset-WHx080"),
+            "a CRC beats a stronger guess"
+        );
     }
 
     #[test]
@@ -801,19 +726,18 @@ mod tests {
         // The OOK and FSK branches see the same channel, so a burst can be
         // decoded by one and guessed at by the other. That is one packet.
         let mut ook = heard(868_100_000.0, "Fineoffset-WHx080", -44.0);
-        ook.decodes[0].modulation = Some(common::Modulation::Ook);
+        ook.keying = Some(common::packet::Keying::configured(common::Modulation::Ook));
         let kept =
             deduped(&mut DedupeNode::default(), vec![heard(868_100_000.0, UNKNOWN, -30.0), ook]);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].protocol, "Fineoffset-WHx080");
+        assert_eq!(kept[0].innermost().map(|l| l.kind), Some("Fineoffset-WHx080"));
     }
 
     /// A burst nothing decoded at all still crosses the node: what a front
     /// end put on the bus is evidence whether or not a protocol claimed it.
     #[test]
     fn a_packet_with_no_decodes_passes_through() {
-        let mut p = heard(868_100_000.0, UNKNOWN, -30.0);
-        p.decodes.clear();
+        let p = heard(868_100_000.0, UNKNOWN, -30.0);
         let ins = [spec()];
         let mut events = Vec::new();
         let tags = Vec::new();

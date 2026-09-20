@@ -56,11 +56,10 @@ impl Signal for ModeS {
                 book.borrow_mut().accept(&f.bytes)
             });
         }
-        let center = common::Hz(1_090_000_000);
         frames
             .iter()
             .filter_map(|f| adsb::accept(&f.bytes))
-            .map(|(bytes, frame)| adsb::decoded(&frame, &bytes, center))
+            .map(|(_, frame)| adsb::read(&frame))
             .collect::<Vec<_>>()
             .into()
     }

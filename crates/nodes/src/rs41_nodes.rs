@@ -18,10 +18,10 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::rs41;
-pub use decode::rs41::decoded;
+pub use decode::rs41::read;
 use dsp::fsk::BitSync;
 use identify::Signal;
-use pipeline::event::{Decoded, Request};
+use pipeline::event::Request;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -53,6 +53,8 @@ pub struct Rs41Node {
     meter: crate::FrameMeter,
     framer: rs41::Framer,
     frames: u64,
+    /// The factory calibration, a sixteenth of a frame at a time
+    cal: rs41::Calibration,
     /// The middle of the stream this node was handed, which is what a
     /// measured offset is measured from.
     center_hz: f64,
@@ -73,6 +75,7 @@ impl Rs41Node {
             meter: crate::FrameMeter::new(1.0, 0, 0.6),
             framer: rs41::Framer::new(),
             frames: 0,
+            cal: rs41::Calibration::new(),
             center_hz: 0.0,
             moved_s: None,
         }
@@ -82,6 +85,29 @@ impl Rs41Node {
     /// made.
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    /// What a frame says, with the air temperature the calibration allows.
+    ///
+    /// A sonde sends a sixteenth of its factory calibration per frame and
+    /// the sensor block is ratios until the pieces that turn them into
+    /// degrees have arrived, so the fold is here, where a flight is being
+    /// followed, rather than in the stateless read: the balloon was sent up
+    /// for the thermometer, and one frame alone cannot read it.
+    fn read_flight(&mut self, bytes: &[u8]) -> Option<common::packet::Proto> {
+        use common::packet::{Fact, Quantity};
+        let mut p = rs41::read(bytes)?;
+        let f = rs41::parse(bytes)?;
+        if let Some((n, piece)) = &f.subframe {
+            self.cal.feed(*n, piece);
+        }
+        let meas = f.meas?;
+        let t = self.cal.air_temperature_c(&meas)?;
+        p = p.saying(Fact::sensed(Quantity::Temperature, f64::from(t), common::Unit::Celsius));
+        if let Some(rh) = self.cal.humidity_pct(&meas, t) {
+            p = p.saying(Fact::sensed(Quantity::Humidity, f64::from(rh), common::Unit::Percent));
+        }
+        Some(p)
     }
 
     /// Ask for the channel to be cut `offset_hz` further along, where the
@@ -129,7 +155,7 @@ impl Simple for Rs41Node {
         // give one back once it has decoded.
         self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 0.6);
         self.center_hz = i.spec.center.0 as f64;
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)
     }
@@ -145,7 +171,19 @@ impl Simple for Rs41Node {
         let decoded = !frames.is_empty();
         for frame in frames {
             self.frames += 1;
-            o.frames_mut().push(self.meter.frame(frame));
+            // Both Reed-Solomon codewords decoded and every block's CRC
+            // passed, or the framer would not have handed this over.
+            let keying = common::packet::Keying::configured(common::Modulation::Fsk2)
+                .of(common::packet::KeyingParams { baud: BAUD as f32, ..Default::default() });
+            let mut p = self
+                .meter
+                .packet_now(frame)
+                .keyed(keying)
+                .checked(common::packet::Integrity::Passed);
+            if let Some(read) = self.read_flight(p.bytes()) {
+                p = p.decoded(read);
+            }
+            o.packets_mut().push(p);
         }
         if decoded {
             self.follow_drift(offset_hz, c);
@@ -157,6 +195,7 @@ impl Simple for Rs41Node {
     fn reset(&mut self) {
         self.meter.reset();
         self.framer.reset();
+        self.cal = rs41::Calibration::new();
         self.moved_s = None;
         if let Some(s) = &mut self.sync {
             s.reset();
@@ -208,7 +247,8 @@ impl Protocol for Rs41 {
     /// The band alone is not enough to claim a frame here: a DFM is launched
     /// into the same six megahertz, so the frame has to be the length of an
     /// RS41's and start with its header before this refuses to pass it on.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz) {
             return None;
@@ -218,7 +258,7 @@ impl Protocol for Rs41 {
         {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -242,6 +282,16 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The height a layer stated, which is a reading rather than a place.
+    fn height(d: &common::packet::Proto) -> Option<f64> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Sensed(r) if r.quantity == common::packet::Quantity::Altitude => {
+                Some(r.value)
+            }
+            _ => None,
+        })
+    }
 
     /// A frame made here, keyed at 4800 baud and read back off the samples,
     /// which is the whole chain this file is: bit clock, header search,
@@ -314,13 +364,12 @@ mod tests {
         }
         assert_eq!(got.len(), 1, "{} frames off one transmission", got.len());
         assert_eq!(got[0], frame, "the bytes are not the ones that were keyed");
-        let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
-        assert_eq!(d.field("serial").map(|v| v.to_string()).as_deref(), Some("W1234567"));
-        assert_eq!(d.crc_ok, Some(true));
-        let p = d.position.expect("a position");
+        let d = read(&got[0]).expect("a decode");
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("W1234567"));
+        let p = d.placed().expect("a position");
         assert!((p.lat - 53.385_054).abs() < 1e-5, "{}", p.lat);
         assert!((p.lon + 5.112_850).abs() < 1e-5, "{}", p.lon);
-        assert!((p.altitude_m.unwrap() - 4_712.22).abs() < 0.01, "{:?}", p.altitude_m);
+        assert!(height(&d).is_some_and(|m| (m - 4_712.22).abs() < 0.01), "{d:?}");
     }
 
     /// A sonde keyed 1.6 kHz off the middle of its channel still decodes,
@@ -351,11 +400,11 @@ mod tests {
         let mut moves: Vec<f64> = Vec::new();
         for block in iq.chunks(2048) {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             n.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames += f.len();
             }
             for e in events {
@@ -401,7 +450,7 @@ mod tests {
             let block: Vec<common::C32> =
                 (0..4096).map(|_| common::C32::new(rng(), rng())).collect();
             let input = Payload::Iq(block);
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             n.process(&input, &mut out, &mut ctx).unwrap();

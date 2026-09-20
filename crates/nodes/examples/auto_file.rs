@@ -36,47 +36,42 @@ fn main() {
         for p in g.output().as_packets().unwrap_or(&[]) {
             packets += 1;
             if std::env::var_os("MEASURE").is_some() {
-                if let Some(m) = &p.measure {
+                if let Some(k) = &p.keying {
                     eprintln!(
-                        "MEASURE at {:.2}s: {:.4} MHz {} conf {:.2} -> {} {:?} {} us {:.0} Hz sweep {:.0} Hz/s",
+                        "MEASURE at {:.2}s: {:.4} MHz {} {:?} {} us {:.0} Hz sweep {:.0} Hz/s",
                         i as f64 * block as f64 / rate,
-                        p.center_hz() as f64 / 1e6,
-                        m.modulation,
-                        m.confidence,
-                        m.front_end,
-                        m.mode,
-                        m.duration_us,
-                        m.bandwidth_hz,
-                        m.sweep_hz_s
+                        p.carrier.center_hz as f64 / 1e6,
+                        k.modulation,
+                        k.how,
+                        p.carrier.duration_us,
+                        k.params.bandwidth_hz,
+                        k.params.sweep_hz_s
                     );
                 }
             }
-            if let common::PacketBody::Frame(fr) = &p.body {
-                let b = &fr.bytes;
-                if let Some(d) = decode::lora::decoded(&b[..], common::Hz(p.center_hz()))
-                    .or_else(|| decode::elrs::decoded(&b[..], common::Hz(p.center_hz())))
-                {
+            if !p.bytes().is_empty() {
+                let b = p.bytes();
+                if let Some(d) = decode::lora::read(b).or_else(|| decode::elrs::read(b)) {
                     eprintln!(
                         "LORA at {:.2}s: rssi {:.1} snr {:.1} iq {} @ {}: {:?}",
                         i as f64 * block as f64 / rate,
-                        p.rssi_dbfs(),
-                        p.snr_db(),
-                        p.iq.as_ref().map(|q| q.samples.len()).unwrap_or(0),
-                        p.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
+                        p.carrier.rssi_dbfs,
+                        p.carrier.snr_db,
+                        p.carrier.iq.as_ref().map(|q| q.samples.len()).unwrap_or(0),
+                        p.carrier.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
                         d
                     );
                 } else if std::env::var_os("FRAMES").is_some() {
                     eprintln!(
-                        "FRAME at {:.2}s: {:.4} MHz {} B mod {:?} audio {} iq {} @ {:.0} rssi {:.1} snr {:.1}",
+                        "FRAME at {:.2}s: {:.4} MHz {} B mod {:?} iq {} @ {:.0} rssi {:.1} snr {:.1}",
                         i as f64 * block as f64 / rate,
-                        p.center_hz() as f64 / 1e6,
+                        p.carrier.center_hz as f64 / 1e6,
                         b.len(),
-                        p.modulation(),
-                        p.audio.as_ref().map(|a| a.pcm.len()).unwrap_or(0),
-                        p.iq.as_ref().map(|q| q.samples.len()).unwrap_or(0),
-                        p.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
-                        p.rssi_dbfs(),
-                        p.snr_db()
+                        p.keying.as_ref().map(|k| k.modulation),
+                        p.carrier.iq.as_ref().map(|q| q.samples.len()).unwrap_or(0),
+                        p.carrier.iq.as_ref().map(|q| q.rate).unwrap_or(0.0),
+                        p.carrier.rssi_dbfs,
+                        p.carrier.snr_db
                     );
                 }
             }

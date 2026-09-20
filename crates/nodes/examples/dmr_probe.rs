@@ -16,12 +16,10 @@ fn run(label: &str, iq: &[C32], rate: f64, center: f64, channel: f64) {
         if let Some(p) = g.output().as_packets() {
             for p in p {
                 frames += 1;
-                voice += p.audio.as_ref().map(|a| a.pcm.len()).unwrap_or(0);
-                if let common::PacketBody::Frame(fr) = &p.body {
-                    let b = &fr.bytes;
-                    if let Some(d) = decode::dmr::decoded(b, common::Hz(p.center_hz())) {
-                        eprintln!("  {label}: {:?}", d.detail);
-                    }
+                if !p.bytes().is_empty()
+                    && let Some(d) = decode::dmr::read(p.bytes())
+                {
+                    eprintln!("  {label}: {} {}", d.id, d.kind);
                 }
             }
         }

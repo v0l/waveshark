@@ -21,8 +21,8 @@ use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stic
 use common::Result;
 pub use decode::iridium::MAX_FRAME_BITS;
 pub use decode::iridium::TAG;
-pub use decode::iridium::decoded;
 pub use decode::iridium::pack;
+pub use decode::iridium::read;
 pub use decode::iridium::unpack;
 use decode::iridium::{self, RING_ALERT_HZ};
 use dsp::dqpsk::{DqpskBurst, DqpskConfig, DqpskDemod};
@@ -31,7 +31,6 @@ use identify::Signal;
 pub use identify::iridium::FEED_HZ;
 pub use identify::iridium::Iridium;
 pub use identify::iridium::WORK_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -116,7 +115,7 @@ impl Simple for IridiumNode {
         self.demod = DqpskDemod::new(work, DqpskConfig::IRIDIUM);
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 0.5);
 
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = iridium::CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -133,7 +132,7 @@ impl Simple for IridiumNode {
         self.bursts.clear();
         let mut bursts = std::mem::take(&mut self.bursts);
         self.demod.process(&self.narrow, &mut bursts);
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for b in &bursts {
             // Read here as well as on the bus, so a burst whose blocks do
             // not check never becomes a row: an access word comes up in
@@ -144,11 +143,16 @@ impl Simple for IridiumNode {
                 continue;
             }
             self.frames += 1;
-            let mut frame =
-                common::Frame::measured(bytes, b.rssi_dbfs, b.snr_db).at(self.channel_hz as u64);
+            let mut pkt = crate::measured(
+                self.channel_hz as u64,
+                iridium::CHANNEL_WIDTH_HZ as u32,
+                bytes,
+                b.rssi_dbfs,
+                b.snr_db,
+            );
             let length = (b.bits.len() / 2) as f64 * self.demod.sps();
-            frame.iq = self.meter.iq_at(b.start_sample, length as usize);
-            out.push(frame);
+            pkt.carrier.iq = self.meter.iq_at(b.start_sample, length as usize);
+            out.push(pkt);
         }
         self.bursts = bursts;
         Ok(())
@@ -195,8 +199,9 @@ impl Protocol for Iridium {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
     }
     /// A ring alert says where the satellite that sent it is, which is a
     /// track the map can draw.
@@ -265,7 +270,12 @@ mod tests {
     /// One keyed burst on the ring alert channel, read through the node the
     /// receiver builds and offered to the registry the way the packet bus
     /// offers it.
-    fn read(rate: f64, center: f64, offset_hz: f64, noise: f32) -> (Vec<common::Frame>, u64) {
+    fn read(
+        rate: f64,
+        center: f64,
+        offset_hz: f64,
+        noise: f32,
+    ) -> (Vec<common::packet::Packet>, u64) {
         let bits = decode::iridium::encode_ring_alert(&a_ring_alert());
         let burst = dsp::dqpsk::key(&bits, rate, &DqpskConfig::IRIDIUM, offset_hz);
         let mut s = 0x9e37_79b9_7f4a_7c15u64;
@@ -302,11 +312,11 @@ mod tests {
         let tags = Vec::new();
         let mut frames = Vec::new();
         for block in iq2.chunks(32_768) {
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&Payload::Iq(block.to_vec()), &mut out, &mut ctx).expect("read");
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames.extend(f);
             }
         }
@@ -338,30 +348,29 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(counted, 1);
         let frame = &frames[0];
-        assert_eq!(frame.center_hz, RING_ALERT_HZ as u64);
-        assert!(frame.rssi_dbfs.is_finite() && frame.snr_db.is_finite());
-        assert!(frame.iq.is_some(), "a frame carries the samples it was read from");
+        assert_eq!(frame.carrier.center_hz, RING_ALERT_HZ as u64);
+        assert!(frame.carrier.rssi_dbfs.is_finite() && frame.carrier.snr_db.is_finite());
+        assert!(frame.carrier.iq.is_some(), "a frame carries the samples it was read from");
 
-        let packet = common::Packet::of_frame(0, iridium::CHANNEL_WIDTH_HZ as u32, frame.clone());
-        let rows: Vec<Decoded> = crate::protocol::frame_readers()
+        let rows = crate::protocol::frame_readers()
             .iter()
-            .find_map(|p| p.read_frame(&packet, &frame.bytes))
+            .find_map(|p| p.stated(frame))
             .expect("a protocol claimed it");
         assert_eq!(rows.len(), 1);
         let d = &rows[0];
-        assert_eq!(d.protocol, "Iridium");
-        assert_eq!(d.crc_ok, Some(true));
-        assert!(!d.written);
-        assert_eq!(d.identity.as_ref().map(|i| i.id.clone()), Some("SV108".into()));
-        let detail = d.detail.as_deref().unwrap();
-        assert!(detail.contains("frame=IRA"), "{detail}");
-        assert!(detail.contains("channel=S.07"), "{detail}");
-        assert!(detail.contains("beam=31"), "{detail}");
-        assert!(detail.contains("tmsi=0a1b2c3d"), "{detail}");
-        let p = d.position.clone().expect("a position");
+        assert_eq!(d.id, "iridium");
+        assert!(d.wrote().is_none());
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("SV108"));
+        let p = d.placed().expect("a position");
         assert!((p.lat - 63.09).abs() < 0.02, "{}", p.lat);
         assert!((p.lon - -5.16).abs() < 0.02, "{}", p.lon);
-        assert!((p.altitude_m.unwrap() - 780_000.0).abs() < 8_000.0);
+        // The height it reported, as a reading rather than part of the place.
+        assert!(d.facts.iter().any(|f| matches!(
+            f,
+            common::packet::Fact::Sensed(r)
+                if r.quantity == common::packet::Quantity::Altitude
+                    && (r.value - 780_000.0).abs() < 8_000.0
+        )));
     }
 
     /// The same burst with a satellite's doppler on it and noise 5 dB below
@@ -407,11 +416,11 @@ mod tests {
                     C32::new(next(), next())
                 })
                 .collect();
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&Payload::Iq(block), &mut out, &mut ctx).expect("read");
-            if let Payload::Frames(f) = out {
+            if let Payload::Packets(f) = out {
                 frames += f.len();
             }
         }
@@ -424,19 +433,8 @@ mod tests {
     #[test]
     fn a_frame_without_the_tag_is_not_claimed() {
         assert!(unpack(&[0, 1, 2, 3, 4, 5]).is_none());
-        assert!(decoded(b"IRD\x00\x08\xff", Hz(RING_ALERT_HZ as u64)).is_none());
-        assert!(
-            Iridium
-                .read_frame(
-                    &common::Packet::of_frame(
-                        0,
-                        1_000,
-                        common::Frame::measured(vec![1, 2, 3], -30.0, 10.0)
-                            .at(RING_ALERT_HZ as u64),
-                    ),
-                    &[1, 2, 3],
-                )
-                .is_none()
-        );
+        assert!(decode::iridium::read(b"IRD\x00\x08\xff", Hz(RING_ALERT_HZ as u64)).is_none());
+        let p = crate::measured(RING_ALERT_HZ as u64, 1_000, vec![1, 2, 3], -30.0, 10.0);
+        assert!(Iridium.stated(&p).is_none());
     }
 }

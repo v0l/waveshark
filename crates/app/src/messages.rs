@@ -22,8 +22,7 @@
 //! two identical pages an hour apart are two pages, two a second apart are one
 //! transmission heard twice.
 
-use crate::radio::DecodeRecord;
-use common::Value;
+use crate::row::Reception;
 use std::time::{Duration, Instant};
 
 /// How close two identical messages have to be to be the same message.
@@ -121,7 +120,7 @@ impl Messages {
     /// Fold one decode in, if it carried text at all.
     ///
     /// Returns whether it did.
-    pub fn update(&mut self, rec: &DecodeRecord, at: Instant) -> bool {
+    pub fn update(&mut self, rec: &Reception, at: Instant) -> bool {
         let Some(msg) = rec.to_message(at) else {
             return false;
         };
@@ -157,7 +156,7 @@ impl Messages {
     }
 }
 
-impl DecodeRecord {
+impl Reception {
     /// The message this decode carries, if it carries one.
     ///
     /// This is the one place the convention lives, so anything holding a
@@ -179,12 +178,13 @@ impl DecodeRecord {
     /// type instead filled it with an FM station's track listing and an
     /// aircraft's position report, which are text and are not messages.
     /// What belongs here is somebody writing to somebody, and only the
-    /// decoder knows: it says so with [`common::Decoded::written`].
+    /// decoder knows: it says so with [`common::packet::Fact::Message`].
     pub fn to_message(&self, at: Instant) -> Option<Message> {
-        if !self.written {
-            return None;
-        }
-        Message::of(self.system(), self.freq, &self.fields, at)
+        let (layer, written) = self.packet.facts().find_map(|(l, f)| match f {
+            common::packet::Fact::Message(w) => Some((l, w)),
+            _ => None,
+        })?;
+        Message::of(layer, self.freq(), &written.text, at)
     }
 }
 
@@ -193,27 +193,27 @@ impl Message {
     /// than a record: the log node writes from the bus, the view folds from
     /// the record, and both have to read the same names.
     pub fn of(
-        system: &str,
+        layer: &common::packet::Proto,
         channel_hz: f64,
-        fields: &[(String, Value)],
+        text: &str,
         at: Instant,
     ) -> Option<Self> {
-        let body = text(fields, &["text", "message", "sms"]).filter(|t| !t.trim().is_empty())?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        let who = |p: &Option<common::packet::Party>| {
+            p.as_ref().map(|q| q.label().to_string()).filter(|s| !s.is_empty())
+        };
         Some(Message {
-            system: system.to_string(),
+            system: layer.id.to_string(),
             channel_hz,
-            // `sender` first: where a protocol carries a name somebody typed
-            // as well as the address the radio sent from, the name is what a
-            // message is from. It is also unauthenticated, which the message
-            // view says elsewhere.
-            from: text(fields, &["sender", "from", "src", "source", "radio_id"])
-                .filter(|s| !s.is_empty()),
-            to: text(
-                fields,
-                &["addressee", "to", "dst", "destination", "talkgroup", "channel", "address"],
-            )
-            .filter(|s| !s.is_empty()),
-            text: body,
+            // The sender the protocol named. Where a message carries a name
+            // somebody typed as well, the decoder puts the typed name in the
+            // text it states, because a group message carries no signature
+            // and anyone with the channel key can write any name there.
+            from: who(&layer.link.from),
+            to: who(&layer.link.to),
+            text: text.to_string(),
             first: at,
             last: at,
             at_us: now_us(),
@@ -231,21 +231,11 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-/// The first of these fields the decode carries, as text.
-fn text(fields: &[(String, Value)], keys: &[&str]) -> Option<String> {
-    for k in keys {
-        if let Some((_, v)) = fields.iter().find(|(name, _)| name == k) {
-            return Some(match v {
-                Value::Text(t) => t.clone(),
-                other => other.to_string(),
-            });
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use common::packet::{Carrier, Fact, Link, Packet, Party, Proto};
+
     /// A message read back off the file is marked as such, and says when it
     /// was heard rather than how long ago.
     ///
@@ -255,14 +245,9 @@ mod tests {
     /// mesh nodes from another session appeared to be on the air.
     #[test]
     fn a_message_off_the_log_says_so() {
-        let now = std::time::Instant::now();
-        let heard = super::Message::of(
-            "Meshtastic",
-            869_519_700.0,
-            &[("text".into(), common::Value::Text("Hi".into()))],
-            now,
-        )
-        .expect("a message");
+        let now = Instant::now();
+        let heard = Message::of(&Proto::new("meshtastic", "text"), 869_519_700.0, "Hi", now)
+            .expect("a message");
         assert!(!heard.logged, "something heard now is not from the log");
 
         let dir = std::env::temp_dir().join(format!("waveshark-msg-{}", std::process::id()));
@@ -271,9 +256,6 @@ mod tests {
         let back = crate::messagelog::recent(&dir, 2);
         assert_eq!(back.len(), 1, "the message did not come back: {back:?}");
         assert!(back[0].logged, "a message off the file is not marked as read back");
-        assert_eq!(back[0].text, "Hi");
-        // The log carries the real timestamp, so the card shows the clock
-        // time it was heard at rather than a guess from an age.
         assert_eq!(back[0].at_us, heard.at_us, "the timestamp did not survive the file");
         assert_eq!(
             back[0].when(),
@@ -281,7 +263,7 @@ mod tests {
             "a message from today reads as a time of day"
         );
         // And one from another day says which.
-        let yesterday = super::Message { at_us: heard.at_us - 86_400_000_000, ..heard.clone() };
+        let yesterday = Message { at_us: heard.at_us - 86_400_000_000, ..heard.clone() };
         assert!(
             yesterday.when().starts_with(&crate::segments::day_of(yesterday.at_us)),
             "{}",
@@ -290,25 +272,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    use super::*;
-
-    /// A decode that says somebody wrote it, which is what this view reads.
-    fn rec(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
-        let mut r = DecodeRecord::for_test(freq, model);
-        r.channel_hz = 12_500.0;
-        r.media_type = pipeline::event::media::TEXT;
-        r.written = true;
-        r.fields = fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-        r
+    /// A reception carrying one decode, as the bus delivers it.
+    fn heard(id: &'static str, kind: &'static str, freq: f64, layer: Proto) -> Reception {
+        let carrier =
+            Carrier::heard(now_us(), freq as u64, 12_500, -70.0, 12.0, common::SourceId(0));
+        let _ = (id, kind);
+        Reception::new(Instant::now(), Packet::heard(carrier).decoded(layer))
     }
 
-    /// And one that nobody wrote: a decode whose fields happen to include a
-    /// `message` or a `text`, or whose payload really is text, but which is
-    /// a machine talking.
-    fn not_written(model: &'static str, freq: f64, fields: &[(&str, Value)]) -> DecodeRecord {
-        let mut r = rec(model, freq, fields);
-        r.written = false;
-        r
+    /// A decode that says somebody wrote it, which is what this view reads.
+    fn wrote(id: &'static str, freq: f64, link: Link, text: &str) -> Reception {
+        heard(id, "text", freq, Proto::new(id, "text").between(link).saying(Fact::message(text)))
     }
 
     fn t(secs: u64) -> Instant {
@@ -317,51 +291,37 @@ mod tests {
 
     /// The mesh protocols reach this view, sender and all.
     ///
-    /// The field names here are the ones `nodes::lora_nodes::lora_decoded`
-    /// actually emits. MeshCore named its sender `sender` once, which is not
-    /// a name this reads, and the messages arrived with nobody on them.
+    /// Both name their ends on the link, so the view reads them the same way
+    /// without knowing what either protocol is.
     #[test]
     fn the_mesh_protocols_arrive_with_their_sender_and_recipient() {
         let mut m = Messages::default();
 
-        // Meshtastic: a text message on the default channel.
-        let meshtastic = rec(
-            "Meshtastic",
-            869.495e6,
-            &[
-                ("source", Value::Text("1de7f958".into())),
-                ("destination", Value::Text("broadcast".into())),
-                ("channel", Value::Text("LongFast (default key)".into())),
-                ("port", Value::Text("text".into())),
-                ("text", Value::Text("on my way".into())),
-            ],
-        );
+        let meshtastic =
+            wrote("meshtastic", 869.495e6, Link::beacon(Party::unit("1de7f958")), "on my way");
         assert!(m.update(&meshtastic, t(0)));
 
-        // MeshCore: a message on the public channel.
-        let meshcore = rec(
-            "MeshCore",
+        // A group message names the channel as its recipient, because that is
+        // as far as the protocol says it went.
+        let meshcore = wrote(
+            "meshcore",
             869.525e6,
-            &[
-                ("type", Value::Text("group text".into())),
-                ("channel", Value::Text("Public (default key)".into())),
-                ("from", Value::Text("kieran".into())),
-                ("text", Value::Text("on my way".into())),
-            ],
+            Link::between(Party::unit("kieran"), Party::group("Public")),
+            "on my way",
         );
         assert!(m.update(&meshcore, t(0)));
 
         let got = m.recent();
         assert_eq!(got.len(), 2, "two systems, two messages");
 
-        let mt = got.iter().find(|x| x.system == "Meshtastic").expect("meshtastic");
+        let mt = got.iter().find(|x| x.system == "meshtastic").expect("meshtastic");
         assert_eq!(mt.from.as_deref(), Some("1de7f958"));
         assert_eq!(mt.to.as_deref(), Some("broadcast"));
         assert_eq!(mt.text, "on my way");
 
-        let mc = got.iter().find(|x| x.system == "MeshCore").expect("meshcore");
+        let mc = got.iter().find(|x| x.system == "meshcore").expect("meshcore");
         assert_eq!(mc.from.as_deref(), Some("kieran"), "the sender must survive");
-        assert_eq!(mc.to.as_deref(), Some("Public (default key)"));
+        assert_eq!(mc.to.as_deref(), Some("Public"));
         assert!(!mc.title().is_empty(), "a message with no title is the bug");
     }
 
@@ -369,69 +329,71 @@ mod tests {
     #[test]
     fn one_systems_words_do_not_swallow_anothers() {
         let mut m = Messages::default();
-        let f = [("from", Value::Text("kieran".into())), ("text", Value::Text("hi".into()))];
-        assert!(m.update(&rec("MeshCore", 869.5e6, &f), t(0)));
-        assert!(m.update(&rec("Meshtastic", 869.5e6, &f), t(1)));
+        let link = || Link::from(Party::unit("kieran"));
+        assert!(m.update(&wrote("meshcore", 869.5e6, link(), "hi"), t(0)));
+        assert!(m.update(&wrote("meshtastic", 869.5e6, link(), "hi"), t(1)));
         assert_eq!(m.recent().len(), 2);
     }
 
+    /// Nothing but a stated message reaches this view.
+    ///
+    /// A voice transmission names its ends and carries no text; a packet
+    /// whose text is empty is a link setup, not somebody writing nothing.
     #[test]
     fn a_decode_without_text_is_not_a_message() {
         let mut m = Messages::default();
-        assert!(
-            !m.update(&rec("M17-Voice", 433.475e6, &[("from", Value::Text("M0ABC".into()))]), t(0))
+        let voice = heard(
+            "m17",
+            "voice",
+            433.475e6,
+            Proto::new("m17", "voice").between(Link::from(Party::unit("M0ABC"))),
         );
-        assert!(
-            !m.update(
-                &rec("M17-Packet", 433.475e6, &[("message", Value::Text("  ".into()))]),
-                t(0)
-            )
-        );
+        assert!(!m.update(&voice, t(0)));
+        let blank = wrote("m17", 433.475e6, Link::from(Party::unit("M0ABC")), "  ");
+        assert!(!m.update(&blank, t(0)));
         assert!(m.is_empty());
     }
 
+    /// Any system that says somebody wrote something joins this view.
+    ///
+    /// The view is not a switch on protocol and not a search for a field
+    /// called `text`: TETRA, M17 and a pager network have nothing in common
+    /// but the statement.
     #[test]
-    fn every_system_that_names_its_text_the_same_way_joins_the_view() {
-        // The point of the field names: this view is not a switch on protocol.
+    fn every_system_that_states_a_message_joins_the_view() {
         let mut m = Messages::default();
         assert!(m.update(
-            &rec(
-                "TETRA-SDS",
+            &wrote(
+                "tetra",
                 391.1e6,
-                &[
-                    ("from", Value::Text("2001".into())),
-                    ("to", Value::Text("10223295".into())),
-                    ("text", Value::Text("on scene".into()))
-                ]
+                Link::between(Party::unit("2001"), Party::group("10223295")),
+                "on scene"
             ),
             t(0),
         ));
         assert!(m.update(
-            &rec(
-                "M17-Packet",
+            &wrote(
+                "m17",
                 433.475e6,
-                &[
-                    ("from", Value::Text("M0ABC".into())),
-                    ("to", Value::Text("M0XYZ".into())),
-                    ("message", Value::Text("hello".into()))
-                ]
+                Link::between(Party::unit("M0ABC"), Party::unit("M0XYZ")),
+                "hello"
             ),
             t(1),
         ));
+        // A pager network has nothing but an address, and the address is who
+        // the page was for rather than who sent it.
         assert!(m.update(
-            &rec(
-                "POCSAG-Alpha",
+            &wrote(
+                "pocsag",
                 153.35e6,
-                &[
-                    ("address", Value::Int(1234567)),
-                    ("message", Value::Text("CALL CONTROL".into()))
-                ]
+                Link { from: None, to: Some(Party::unit("1234567")) },
+                "CALL CONTROL"
             ),
             t(2),
         ));
         let list = m.recent();
         assert_eq!(list.len(), 3);
-        assert_eq!(list[0].system, "POCSAG", "the newest is first");
+        assert_eq!(list[0].system, "pocsag", "the newest is first");
         assert_eq!(list[0].to.as_deref(), Some("1234567"), "a capcode is who it was for");
         assert!(list[0].from.is_none(), "a pager network does not say who sent it");
         assert_eq!(list[2].title(), "2001 > 10223295");
@@ -442,17 +404,20 @@ mod tests {
         // Pagers repeat, TETRA retransmits until acknowledged, and an M17
         // link setup carries its text on every frame of the stream.
         let mut m = Messages::default();
-        let page = rec(
-            "POCSAG-Alpha",
-            153.35e6,
-            &[("address", Value::Int(1234567)), ("message", Value::Text("CALL CONTROL".into()))],
-        );
-        m.update(&page, t(0));
-        m.update(&page, t(4));
+        let page = || {
+            wrote(
+                "pocsag",
+                153.35e6,
+                Link { from: None, to: Some(Party::unit("1234567")) },
+                "CALL CONTROL",
+            )
+        };
+        m.update(&page(), t(0));
+        m.update(&page(), t(4));
         assert_eq!(m.recent().len(), 1);
         assert_eq!(m.recent()[0].heard, 2);
         // Far enough apart and it is somebody sending the same words again.
-        m.update(&page, t(600));
+        m.update(&page(), t(600));
         assert_eq!(m.recent().len(), 2);
     }
 
@@ -460,54 +425,39 @@ mod tests {
     fn the_same_words_to_a_different_recipient_are_a_different_message() {
         let mut m = Messages::default();
         let to = |who: &str| {
-            rec(
-                "TETRA-SDS",
-                391.1e6,
-                &[("to", Value::Text(who.into())), ("text", Value::Text("rtb".into()))],
-            )
+            wrote("tetra", 391.1e6, Link { from: None, to: Some(Party::group(who)) }, "rtb")
         };
         m.update(&to("10223295"), t(0));
         m.update(&to("15835885"), t(1));
         assert_eq!(m.recent().len(), 2);
     }
-    /// A machine is not a correspondent. GSM calls its field `message` and
-    /// puts `SI3` or `Paging1` in it, Open Drone ID does the same with its
-    /// message types, an FM station's radiotext is its track listing and an
-    /// ACARS downlink is an aeroplane reporting its position. All four are
-    /// text; none of them is somebody writing to somebody. What decides is
-    /// the decoder's own statement.
+
+    /// A machine is not a correspondent.
+    ///
+    /// GSM calls one of its fields `message` and puts `SI3` in it, an FM
+    /// station's radiotext is its track listing, and an ACARS downlink is an
+    /// aeroplane reporting its position. All three are text and none was
+    /// written to anybody, so none of them states a message: what a station
+    /// is playing is a fact of its own, and a position is a position.
     #[test]
     fn a_machine_talking_is_not_a_message() {
         let mut m = Messages::default();
-        assert!(!m.update(
-            &not_written("GSM-CCCH", 947.4e6, &[("message", Value::Text("Paging1".into()))]),
-            t(0)
-        ));
-        assert!(!m.update(
-            &not_written("GSM-SI", 947.4e6, &[("message", Value::Text("SI3".into()))]),
-            t(0)
-        ));
-        assert!(!m.update(
-            &not_written("OpenDroneID", 2431e6, &[("message", Value::Text("Basic ID".into()))]),
-            t(0)
-        ));
-        // Text, and still not a message: the payload being text is a
-        // different question from somebody having written it.
-        assert!(!m.update(
-            &not_written("rds", 95.8e6, &[("text", Value::Text("NOW PLAYING".into()))]),
-            t(0)
-        ));
-        assert!(!m.update(
-            &not_written(
-                "ACARS-Downlink",
-                131.725e6,
-                &[
-                    ("text", Value::Text("POS N51.4 W000.4".into())),
-                    ("label", Value::Text("16".into()))
-                ]
-            ),
-            t(0)
-        ));
+        let gsm = heard("gsm", "SI3", 947.4e6, Proto::new("gsm", "SI3"));
+        assert!(!m.update(&gsm, t(0)));
+        let rds = heard(
+            "rds",
+            "radiotext",
+            95.8e6,
+            Proto::new("rds", "radiotext").saying(Fact::Playing("NOW PLAYING".into())),
+        );
+        assert!(!m.update(&rds, t(0)));
+        let acars = heard(
+            "acars",
+            "downlink",
+            131.725e6,
+            Proto::new("acars", "downlink").between(Link::from(Party::unit("G-EZBF"))),
+        );
+        assert!(!m.update(&acars, t(0)));
         assert!(m.recent().is_empty(), "{:?}", m.recent());
     }
 }

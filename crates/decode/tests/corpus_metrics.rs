@@ -134,9 +134,9 @@ fn how_far_into_the_noise_each_capture_survives() {
             for seed in SEEDS {
                 let dirty = noisy(&buf.samples, snr as f64, seed ^ snr as u64);
                 write_cu8(&path, &dirty);
-                let ok = packages(&path)
-                    .iter()
-                    .any(|pkg| protocols.decode_all(pkg).iter().any(|r| f.rtl_433_saw(r.model)));
+                let ok = packages(&path).iter().any(|pkg| {
+                    protocols.decode_all(pkg.pulses()).iter().any(|r| f.rtl_433_saw(r.model))
+                });
                 hits += ok as usize;
             }
             row += &format!("{hits}");
@@ -259,7 +259,7 @@ fn false_decodes_on_pure_noise() {
         let path = dir.join(format!("noise_433.920000M_{:.0}k.cu8", rate / 1e3));
         write_cu8(&path, &samples);
         for pkg in packages(&path) {
-            for r in protocols.decode_all(&pkg) {
+            for r in protocols.decode_all(pkg.pulses()) {
                 let e = by_model.entry(r.model.to_string()).or_default();
                 if r.proof.passed() {
                     e.0 += 1;
@@ -299,7 +299,7 @@ fn the_noise_harness_actually_produces_bursts() {
         let path = dir.join("noise_433.920000M_250k.cu8");
         write_cu8(&path, &samples);
         let pkgs = packages(&path);
-        let pulses: usize = pkgs.iter().map(|p| p.pulses.len()).sum();
+        let pulses: usize = pkgs.iter().map(|p| p.pulses().len()).sum();
         println!("sigma {sigma}: {} packages, {pulses} pulses", pkgs.len());
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -346,9 +346,9 @@ fn where_a_weak_capture_fails() {
                     OokDetector::new(r, PulseConfig { min_pulses: 8, ..Default::default() });
                 let mut pkgs = Vec::new();
                 det.process(&env, &mut pkgs);
-                let ok = pkgs
-                    .iter()
-                    .any(|pkg| protocols.decode_all(pkg).iter().any(|r| f.rtl_433_saw(r.model)));
+                let ok = pkgs.iter().any(|pkg| {
+                    protocols.decode_all(pkg.pulses()).iter().any(|r| f.rtl_433_saw(r.model))
+                });
                 let tag = if ok {
                     "decode"
                 } else if !pkgs.is_empty() {
@@ -395,12 +395,12 @@ fn how_the_pulses_degrade() {
         );
         let mut pkgs = Vec::new();
         det.process(&env, &mut pkgs);
-        let Some(p) = pkgs.iter().max_by_key(|p| p.pulses.len()) else {
+        let Some(p) = pkgs.iter().max_by_key(|p| p.pulses().len()) else {
             println!("{snr:>3} dB: no burst");
             continue;
         };
-        let marks: Vec<u32> = p.pulses.iter().map(|x| x.mark).collect();
-        let gaps: Vec<u32> = p.pulses.iter().map(|x| x.gap).take(p.pulses.len() - 1).collect();
+        let marks: Vec<u32> = p.pulses().iter().map(|x| x.mark).collect();
+        let gaps: Vec<u32> = p.pulses().iter().map(|x| x.gap).take(p.pulses().len() - 1).collect();
         let spread = |v: &[u32]| -> String {
             let mut s = v.to_vec();
             s.sort_unstable();
@@ -411,7 +411,7 @@ fn how_the_pulses_degrade() {
         };
         println!(
             "{snr:>3} dB: {:>3} pulses  marks min/med/max {:<16} gaps {:<16} rejoined {}",
-            p.pulses.len(),
+            p.pulses().len(),
             spread(&marks),
             spread(&gaps),
             det.stats().rejoined_marks

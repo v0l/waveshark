@@ -60,13 +60,13 @@ impl Signal for Imet {
             bits.process(&audio, &mut symbols);
             for sym in &symbols {
                 if let Some(run) = framer.push(*sym)
-                    && let Some(d) = imet::decoded(&run, chan.hz())
+                    && let Some(d) = imet::read(&run, chan.hz())
                 {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

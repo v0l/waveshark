@@ -13,7 +13,7 @@ use decode::bits::{checksum8, crc8, lfsr_digest8_reflect};
 use decode::protocol::{Proof, Value};
 use decode::protocols::{GtWt02, SomfyRts};
 use decode::{Protocol, Protocols};
-use dsp::pulse::{Package, Pulse};
+use dsp::pulse::Pulse;
 
 /// The published description of `name`, from the fetched tree: nothing is
 /// built in, so a test installs before it asks
@@ -22,15 +22,8 @@ fn named(name: &str) -> Option<decode::script::Scripted> {
     decode::script::named(name)
 }
 
-fn package(pulses: Vec<(u32, u32)>) -> Package {
-    Package {
-        pulses: pulses.into_iter().map(|(mark, gap)| Pulse { mark, gap }).collect(),
-        snr_db: 22.0,
-        rssi_dbfs: -20.0,
-        start_sample: 0,
-        center_hz: 0,
-        modulation: None,
-    }
+fn package(pulses: Vec<(u32, u32)>) -> Vec<Pulse> {
+    pulses.into_iter().map(|(mark, gap)| Pulse { mark, gap }).collect()
 }
 
 fn bits_of(bytes: &[u8], n: usize) -> Vec<bool> {
@@ -38,7 +31,7 @@ fn bits_of(bytes: &[u8], n: usize) -> Vec<bool> {
 }
 
 /// PPM: every mark the same, a short gap for 0 and a long one for 1.
-fn ppm(bits: &[bool], mark: u32, short: u32, long: u32, reset: u32) -> Package {
+fn ppm(bits: &[bool], mark: u32, short: u32, long: u32, reset: u32) -> Vec<Pulse> {
     let mut p: Vec<(u32, u32)> =
         bits.iter().map(|b| (mark, if *b { long } else { short })).collect();
     p.push((mark, reset));
@@ -57,7 +50,7 @@ fn an_acurite_609txc_burst_decodes_from_its_timings() {
     // rtl_433: OOK_PULSE_PPM, short 1000, long 2000, reset 10000.
     let pkg = ppm(&bits_of(&f, 40), 500, 1000, 2000, 10_000);
 
-    let r = named("Acurite-609TXC").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Acurite-609TXC").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x8f)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(30.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(56)));
@@ -79,7 +72,7 @@ fn an_acurite_tower_burst_decodes_from_its_timings() {
     pulses.extend(pwm(&bits_of(&inverted, 56), 220, 408));
     let pkg = package(pulses);
 
-    let r = named("Acurite-Tower").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Acurite-Tower").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x1234)));
     assert_eq!(r.get("channel"), Some(&Value::Text("A".into())));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(18.4)));
@@ -101,7 +94,7 @@ fn a_lacrosse_tx141th_burst_decodes_through_its_sync_marks() {
     }
     let pkg = package(pulses);
 
-    let r = named("LaCrosse-TX141THBv2").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("LaCrosse-TX141THBv2").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x9c)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.6)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(44)));
@@ -145,7 +138,7 @@ fn a_lacrosse_it_burst_decodes_from_fsk_runs() {
     pulses.push((BIT_US, 4000));
     let pkg = package(pulses);
 
-    let r = named("LaCrosse-TX29IT").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("LaCrosse-TX29IT").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x25)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.3)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(57)));
@@ -158,7 +151,7 @@ fn a_nexus_burst_decodes_from_its_timings() {
     let pkg = ppm(&bits_of(&f, 36), 500, 1000, 2000, 5000);
 
     let nexus = named("Nexus-TH").expect("a published description");
-    let r = nexus.decode_package(&pkg).expect("decode");
+    let r = nexus.decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x5c)));
     assert_eq!(r.get("channel"), Some(&Value::Int(2)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(19.4)));
@@ -176,7 +169,7 @@ fn an_ev1527_remote_press_decodes_from_its_timings() {
     pulses.push((464, 10_000));
     let pkg = package(pulses);
 
-    let r = named("Generic-Remote").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Generic-Remote").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0xa13f)));
     assert_eq!(r.get("cmd"), Some(&Value::Int(8)));
     assert_eq!(r.proof, Proof::None);
@@ -189,7 +182,7 @@ fn a_rubicson_burst_decodes_from_its_timings() {
     let f = [0x74, 0x80, 0x95, 0xf4, 0x90];
     let pkg = ppm(&bits_of(&f, 36), 500, 1000, 2000, 4800);
 
-    let r = named("Rubicson-Temperature").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Rubicson-Temperature").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x74)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(14.9)));
     // Nexus shares this layout and must hand the frame over rather than
@@ -209,7 +202,7 @@ fn a_bresser_3ch_burst_decodes_from_its_timings() {
     pulses.extend(pwm(&bits_of(&inverted, 40), 250, 500));
     let pkg = package(pulses);
 
-    let r = named("Bresser-3CH").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Bresser-3CH").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x3d)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(20.0)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(51)));
@@ -222,7 +215,7 @@ fn a_gt_wt_02_burst_decodes_from_its_millisecond_symbols() {
     let f = [0x34, 0x00, 0xed, 0x47, 0x60];
     let pkg = ppm(&bits_of(&f, 37), 600, 2500, 5000, 12_000);
 
-    let r = GtWt02.decode_package(&pkg).expect("decode");
+    let r = GtWt02.decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x34)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.7)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(35)));
@@ -246,7 +239,7 @@ fn a_gt_wt_03_burst_decodes_from_its_timings() {
     pulses.extend(pwm(&bits_of(&inverted, 41), 256, 625));
     let pkg = package(pulses);
 
-    let r = named("GT-WT03").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("GT-WT03").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Int(0x17)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(26.1)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));
@@ -254,7 +247,7 @@ fn a_gt_wt_03_burst_decodes_from_its_timings() {
 }
 
 /// NRZ: runs of like bits become one mark and one gap at `bit_us` a bit.
-fn nrz(bits: &[bool], bit_us: u32) -> Package {
+fn nrz(bits: &[bool], bit_us: u32) -> Vec<Pulse> {
     let mut pulses: Vec<(u32, u32)> = Vec::new();
     let mut i = 0;
     while i < bits.len() {
@@ -299,7 +292,7 @@ fn a_wh51_soil_probe_decodes_from_fsk_runs() {
     bits.extend(bits_of(&f, 14 * 8));
     let pkg = nrz(&bits, 58);
 
-    let r = named("Fineoffset-WH51").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Fineoffset-WH51").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("id"), Some(&Value::Text("006b58".into())));
     assert_eq!(r.get("moisture_pct"), Some(&Value::Int(36)));
     assert_eq!(r.get("ad_raw"), Some(&Value::Int(210)));
@@ -347,7 +340,7 @@ fn an_oregon_v3_burst_decodes_from_manchester_timings() {
     }
     let pkg = package(pulses);
 
-    let r = named("Oregon-THGR810").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("Oregon-THGR810").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.model, "Oregon-THGR810");
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(21.7)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(48)));
@@ -358,7 +351,7 @@ fn an_x10_press_decodes_from_its_timings() {
     let f = [0x60u8, !0x60u8, 0x00, 0xff];
     let pkg = ppm(&bits_of(&f, 32), 562, 562, 1687, 6000);
 
-    let r = named("X10-RF").unwrap().decode_package(&pkg).expect("decode");
+    let r = named("X10-RF").unwrap().decode_burst(&pkg).expect("decode");
     assert_eq!(r.get("channel"), Some(&Value::Text("A".into())));
     assert_eq!(r.get("unit"), Some(&Value::Int(1)));
     assert_eq!(r.get("state"), Some(&Value::Text("ON".into())));
@@ -413,7 +406,7 @@ fn a_somfy_rts_burst_decodes_from_its_manchester_timings() {
     pulses.push((0, HALF));
     let pkg = package(pulses);
 
-    let r = SomfyRts.decode_package(&pkg).expect("decode");
+    let r = SomfyRts.decode_burst(&pkg).expect("decode");
     assert_eq!(r.model, "Somfy-RTS");
     assert_eq!(r.get("id"), Some(&Value::Int(0x123456)));
     assert_eq!(r.get("control"), Some(&Value::Text("Up".into())));

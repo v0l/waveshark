@@ -665,12 +665,13 @@ fn uplink_power_mw(index: u8) -> Option<u16> {
     POWER_MW.get(usize::from(index)).copied()
 }
 
-/// The sticks this packet carried, for the views that draw a control link.
+/// Where the sticks were, as microseconds of servo pulse.
 ///
-/// `None` for anything that is not an RC packet: a sync or a telemetry packet
-/// says nothing about where the sticks are, and a report of zeros would be a
-/// centred handset that nothing transmitted.
-pub fn control(packet: &Packet) -> Option<common::ReportDetail> {
+/// Microseconds because that is the quantity every one of these links carries
+/// whatever it puts on the air, and the conversion from ExpressLRS's ten bit
+/// counts happens here rather than in a view. A channel the frame did not
+/// carry is absent rather than centred.
+pub fn control(packet: &Packet) -> Option<common::packet::Sticks> {
     let mut out = [None; common::CONTROL_CHANNELS];
     match packet {
         // The four channels the ordinary rate sends are the sticks. The rest
@@ -681,7 +682,7 @@ pub fn control(packet: &Packet) -> Option<common::ReportDetail> {
             for (slot, raw) in out.iter_mut().zip(channels) {
                 *slot = Some(microseconds(*raw));
             }
-            Some(common::ReportDetail::Control {
+            Some(common::packet::Sticks {
                 channels: out,
                 armed: Some(*armed),
                 uplink_power_mw: None,
@@ -697,10 +698,10 @@ pub fn control(packet: &Packet) -> Option<common::ReportDetail> {
                     *c = Some(microseconds(*raw));
                 }
             }
-            Some(common::ReportDetail::Control {
+            Some(common::packet::Sticks {
                 channels: out,
                 armed: Some(*armed),
-                uplink_power_mw: uplink_power_mw(*uplink_power),
+                uplink_power_mw: uplink_power_mw(*uplink_power).map(u32::from),
             })
         }
         Packet::Sync(_) | Packet::Data { .. } | Packet::Unknown(_) => None,
@@ -957,11 +958,13 @@ pub fn decode(packet: &[u8], uid: &[u8; 6], ota_version: u8) -> Option<Decoded> 
     Some(Decoded { packet: parse(packet)?, nonce })
 }
 
-/// One packet off the bus as a row: which link, what kind of packet, and
-/// what it carried. Checked again against the UID bytes it travelled with,
-/// so a row is never taken on the front end's word alone.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<common::Decoded> {
-    use common::Value;
+/// What an ExpressLRS packet says: whose link it is, and where the sticks
+/// were.
+///
+/// The handset is the transmitting end and the link's UID bytes are the
+/// nearest thing to its name; the model it flies is the other end.
+pub fn read(bytes: &[u8]) -> Option<common::packet::Proto> {
+    use common::packet::{Entity, Fact, Id, Link, Party, Proto};
     if bytes.len() < ENVELOPE + PACKET_LEN || bytes[..4] != TAG {
         return None;
     }
@@ -974,58 +977,19 @@ pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<common::Decoded> {
         return None;
     }
     let d = decode(packet, &uid, ota)?;
+    let link_id = format!("{:02x}{:02x}", uid[4], uid[5]);
     let kind = match &d.packet {
         Packet::Rc { .. } | Packet::RcFull { .. } => "rc",
         Packet::Sync(_) => "sync",
         Packet::Data { .. } => "data",
         Packet::Unknown(_) => "unknown",
     };
-    let link_id = format!("{:02x}{:02x}", uid[4], uid[5]);
-    let mut fields: Vec<(String, Value)> = vec![
-        ("spreading_factor".into(), Value::Int(i64::from(sf))),
-        ("bandwidth_hz".into(), Value::Float(f64::from(khz) * 1e3)),
-        ("link".into(), Value::Text(link_id.clone())),
-        ("full".into(), Value::Bool(packet.len() >= PACKET_LEN_FULL)),
-    ];
-    fields.extend(crate::elrs::fields(&d));
-    let detail = match &d.packet {
-        Packet::Rc { channels, armed, .. } => format!(
-            "rc {}{}",
-            channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
-            if *armed { " armed" } else { "" }
-        ),
-        Packet::RcFull { channels, armed, .. } => format!(
-            "rc {}{}",
-            channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
-            if *armed { " armed" } else { "" }
-        ),
-        Packet::Sync(s) => format!(
-            "sync {} hop {} counter {}",
-            RATES_2G4.get(usize::from(s.rate_index)).map_or("unknown rate", |r| r.name),
-            s.fhss_index,
-            s.nonce
-        ),
-        Packet::Data { package_index, payload } => {
-            format!("data {package_index}: {}", hex(payload))
-        }
-        Packet::Unknown(k) => format!("packet type {k}"),
-    };
-    let mut out = common::Decoded::bytes("ExpressLRS", center, 0.0, packet.to_vec())
-        .with_modulation(common::Modulation::Css)
-        .with_crc(Some(true))
-        .with_detail(format!("SF{sf} {kind}: {detail} link {link_id}"))
-        .with_fields(fields);
-    // The handset is the transmitting end and the link's UID bytes are the
-    // nearest thing to its name; the model it flies is the other end.
-    out.link = Some(common::Link {
-        from: Some(common::Party::unit(format!("elrs {link_id}"))),
-        to: Some(common::Party::unit(format!("elrs {link_id} rx"))),
-    });
-    out.identity = Some(common::Identity::new("elrs", link_id));
-    if let Some(control) = control(&d.packet) {
-        out.report = control;
-    }
-    Some(out)
+    let p =
+        Proto::new("elrs", kind).by(Entity::new("elrs", Id::Text(link_id.clone()))).between(Link {
+            from: Some(Party::unit(format!("elrs {link_id}"))),
+            to: Some(Party::unit(format!("elrs {link_id} rx"))),
+        });
+    Some(p.maybe(control(&d.packet).map(Fact::Control)))
 }
 
 pub fn hex(b: &[u8]) -> String {
@@ -1399,8 +1363,7 @@ mod tests {
     #[test]
     fn an_rc_packet_reports_the_sticks_it_carried() {
         let packet = Packet::Rc { channels: [496, 86, 905, 496], switches: 0, armed: true };
-        let Some(common::ReportDetail::Control { channels, armed, uplink_power_mw }) =
-            control(&packet)
+        let Some(common::packet::Sticks { channels, armed, uplink_power_mw }) = control(&packet)
         else {
             panic!("an rc packet with no control report")
         };
@@ -1416,8 +1379,7 @@ mod tests {
     fn a_full_packet_puts_its_aux_group_where_the_packet_says() {
         let packet =
             Packet::RcFull { channels: [496; 8], armed: false, high_aux: false, uplink_power: 5 };
-        let Some(common::ReportDetail::Control { channels, uplink_power_mw, .. }) =
-            control(&packet)
+        let Some(common::packet::Sticks { channels, uplink_power_mw, .. }) = control(&packet)
         else {
             panic!("no control report")
         };
@@ -1427,8 +1389,7 @@ mod tests {
 
         let high =
             Packet::RcFull { channels: [496; 8], armed: false, high_aux: true, uplink_power: 9 };
-        let Some(common::ReportDetail::Control { channels, uplink_power_mw, .. }) = control(&high)
-        else {
+        let Some(common::packet::Sticks { channels, uplink_power_mw, .. }) = control(&high) else {
             panic!("no control report")
         };
         assert!(channels[..4].iter().all(Option::is_some));

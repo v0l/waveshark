@@ -248,7 +248,20 @@ fn read(path: &Path, capture: &Path, rate: Option<f64>) -> i32 {
             }
         };
         match decode::subghz::parse(&text) {
-            Ok(s) => s.bursts,
+            // A saved burst is timings and nothing else, so what it was heard
+            // at is unknown rather than zero.
+            Ok(s) => s
+                .bursts
+                .into_iter()
+                .map(|pulses| {
+                    common::packet::Detection::new(
+                        common::packet::Keying::configured(common::Modulation::Ook)
+                            .with(common::packet::Symbols::Pulses(pulses)),
+                        f32::NAN,
+                        f32::NAN,
+                    )
+                })
+                .collect(),
             Err(e) => {
                 eprintln!("{}: {e:?}", capture.display());
                 return 1;
@@ -265,7 +278,7 @@ fn read(path: &Path, capture: &Path, rate: Option<f64>) -> i32 {
     let mut read = 0;
     for (i, pkg) in packages.iter().enumerate() {
         for p in script::current() {
-            if let Ok(r) = p.decode_package(pkg) {
+            if let Ok(r) = p.decode_burst(pkg.pulses()) {
                 println!("  burst {i}: {} {}", r.model, r.fields_line());
                 read += 1;
             }

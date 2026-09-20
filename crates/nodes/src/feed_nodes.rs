@@ -16,7 +16,8 @@
 //! not: the log holds evidence, and a conclusion stored without what it was
 //! drawn from cannot be checked or read again later.
 
-use common::{Error, Hz, Packet, Result};
+use common::packet::Packet;
+use common::{Error, Hz, Result};
 use pipeline::StreamSpec;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind};
@@ -298,12 +299,21 @@ fn read_loop(
             state.frames.fetch_add(1, Ordering::Relaxed);
             // The far end's own reading, and no noise floor with it: a feed
             // carries what its receiver measured and nothing about the
-            // channel it measured it in. A format that reports no level at
-            // all (AVR) leaves both absent, which is a fact about the feed
-            // rather than a level of zero.
-            let frame =
-                common::Frame::measured(f.bytes, f.rssi_dbfs, f32::NAN).at(spec.kind.center_hz);
-            let packet = Packet::of_frame(at_us, spec.kind.bandwidth_hz, frame);
+            // channel it measured it in, so nothing is claimed above the
+            // floor. A format that reports no level at all (AVR) reads as
+            // the quietest a level can be, which is a fact about the feed.
+            let rssi_dbfs = match f.rssi_dbfs.is_finite() {
+                true => f.rssi_dbfs,
+                false => common::packet::SILENCE_DBFS,
+            };
+            let mut packet = crate::measured(
+                spec.kind.center_hz,
+                spec.kind.bandwidth_hz,
+                f.bytes,
+                rssi_dbfs,
+                0.0,
+            );
+            packet.carrier.at_us = at_us;
             if tx.send(packet).is_err() {
                 return;
             }
@@ -657,7 +667,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(got.len(), 3, "three frames sent, {} arrived", got.len());
-        assert_eq!(got[0].frame().unwrap(), &LONG);
+        assert_eq!(got[0].bytes(), &LONG);
         assert_eq!(got[0].center_hz(), 1_090_000_000);
         assert_eq!(node.frames(), 3);
     }

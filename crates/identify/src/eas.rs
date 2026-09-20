@@ -69,7 +69,7 @@ impl Signal for Eas {
                 };
                 if let Some(burst) = burst
                     && let Some(header) = assembler.push(burst)
-                    && let Some(d) = eas::decoded(&header, chan.hz())
+                    && let Some(d) = eas::read(&header)
                 {
                     rows.push(d);
                 }
@@ -77,12 +77,12 @@ impl Signal for Eas {
             // The three copies take about a second each with a second
             // between them, so time passing is what ends a group of two.
             if let Some(header) = assembler.advance(audio.len() as f64 / chan.rate_hz.max(1.0))
-                && let Some(d) = eas::decoded(&header, chan.hz())
+                && let Some(d) = eas::read(&header)
             {
                 rows.push(d);
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

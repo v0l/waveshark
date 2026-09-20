@@ -17,7 +17,7 @@
 //! the output against.
 
 use crate::rs::ReedSolomon;
-use common::Decoded;
+use common::packet::{Entity, Id, Link, Party, Proto};
 
 /// The scrambler's starting state: a 15-bit register, x^15 + x + 1.
 const LFSR_IV: u16 = 0x6959;
@@ -144,6 +144,15 @@ impl Control {
             Control::Supervisory(b)
         } else {
             Control::Unnumbered(b)
+        }
+    }
+
+    /// Which frame it is, as the name a row matches on
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Control::Info { .. } => "info",
+            Control::Supervisory(_) => "supervisory",
+            Control::Unnumbered(_) => "unnumbered",
         }
     }
 
@@ -489,38 +498,33 @@ pub fn parse_frame(buf: &[u8]) -> Option<Frame> {
     })
 }
 
-/// The decode an AVLC frame becomes.
-pub fn decoded(f: &Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("from".into(), common::Value::Text(format!("{:06X}", f.src.addr))),
-        ("from_kind".into(), common::Value::Text(f.src.kind.label().into())),
-        ("to".into(), common::Value::Text(format!("{:06X}", f.dst.addr))),
-        ("to_kind".into(), common::Value::Text(f.dst.kind.label().into())),
-        ("frame".into(), common::Value::Text(f.control.label().into())),
-    ];
-    let acars = f.acars();
-    if let Some(a) = &acars {
-        fields.extend(a.fields());
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    // An aircraft is named by its ICAO address, which is the same number
-    // ADS-B carries, so a frame here and a position there are one aeroplane.
-    let who = if f.src.kind.is_aircraft() {
-        common::Identity::new("icao", format!("{:06X}", f.src.addr))
-    } else {
-        common::Identity::new("vdl2-gs", format!("{:06X}", f.src.addr))
+/// What a VDL Mode 2 frame says: which aircraft or ground station spoke, and
+/// anything a crew typed into the ACARS block it carried.
+///
+/// An aircraft is named by its ICAO address, the same number ADS-B carries,
+/// so a frame here and a position there are one aeroplane.
+pub fn read(f: &Frame) -> Proto {
+    let space = match f.src.kind.is_aircraft() {
+        true => "icao",
+        false => "vdl2-gs",
     };
-    let mut d = Decoded::bytes("VDL2", center, 0.0, bytes.to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::D8psk)
-        // The frame check sequence, over the whole frame.
-        .with_crc(Some(true));
-    if acars.as_ref().is_some_and(|a| !a.text.is_empty()) {
-        d.media_type = common::media::TEXT;
+    let mut p = Proto::new("vdl2", f.control.kind())
+        .by(Entity::new(space, Id::Hex(u64::from(f.src.addr))))
+        .between(Link::between(
+            Party::unit(format!("{:06X}", f.src.addr)),
+            Party::unit(format!("{:06X}", f.dst.addr)),
+        ));
+    if let Some(a) = f.acars() {
+        let inner = crate::acars::read(&a);
+        p = p.by(inner
+            .subject
+            .clone()
+            .unwrap_or_else(|| Entity::new(space, Id::Hex(u64::from(f.src.addr)))));
+        for fact in inner.facts {
+            p = p.saying(fact);
+        }
     }
-    d
+    p
 }
 
 #[cfg(test)]

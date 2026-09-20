@@ -4,6 +4,7 @@
 //! and keeps nothing between frames.
 
 use super::*;
+use crate::row::Reception;
 
 /// A level in dB, or blank when the decoder did not measure one. Blank rather
 /// than a zero: a missing measurement and a strong signal must not look alike.
@@ -28,37 +29,18 @@ pub(super) fn level_color(rssi_dbfs: f32) -> Color32 {
 /// a time rather than glanced at.
 const DENSE: f32 = 11.0;
 
-/// A decoded field as it is worth reading.
-///
-/// A float arrives at whatever precision the decoder computed in, and a
-/// confidence shown as 0.7089155912399292 is a dozen digits of arithmetic
-/// noise across a row somebody is scanning. The packet log holds the value as
-/// it was decoded either way, so nothing is lost by rounding the one on
-/// screen.
-fn field_value(v: &common::Value) -> String {
-    let common::Value::Float(f) = v else {
-        return v.to_string();
-    };
-    // Small enough that six places would show zero, which would be a lie
-    // rather than a rounding.
-    if *f != 0.0 && f.abs() < 1e-5 {
-        return format!("{f:.3e}");
-    }
-    let s = format!("{f:.6}");
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
-}
-
 /// Green for a verified packet, amber for one with no check to verify, red for
 /// a failed one, grey for a burst nothing claimed. The same colours are used
 /// on the waterfall.
-pub(super) fn row_color(rec: &DecodeRecord) -> Color32 {
+pub(super) fn row_color(rec: &Reception) -> Color32 {
     if !rec.is_known() {
         return theme::LEGEND;
     }
-    match rec.crc {
-        Some(true) => CRC_OK,
-        Some(false) => theme::FAULT,
-        None => theme::READOUT,
+    match rec.integrity() {
+        common::packet::Integrity::Passed => CRC_OK,
+        common::packet::Integrity::Corrected { .. } => CRC_OK,
+        common::packet::Integrity::Failed => theme::FAULT,
+        common::packet::Integrity::Unchecked => theme::READOUT,
     }
 }
 
@@ -88,27 +70,48 @@ pub(super) struct Asked {
 /// Flipper can edit and put back in a remote; the timings as heard
 /// otherwise, which is all that can honestly be said about a burst nothing
 /// claimed.
-pub(super) fn sub_save(rec: &DecodeRecord) -> Option<decode::subghz::Save> {
-    let body = rec
-        .model
-        .and_then(|m| decode::subghz::key_of_decode(m, &rec.fields))
-        .or_else(|| rec.pulses.as_ref().map(|p| decode::subghz::Body::Raw((**p).clone())))?;
+pub(super) fn sub_save(rec: &Reception) -> Option<decode::subghz::Save> {
+    // A remote is its code, so the identity the decoder stated is what a key
+    // file is written from; a burst nothing claimed is written as the widths
+    // it was heard at.
+    let body =
+        code_of(rec).and_then(|c| decode::subghz::key_of_decode(rec.kind(), c)).or_else(|| {
+            match rec.packet.keying.as_ref().map(|k| &k.symbols) {
+                Some(common::packet::Symbols::Pulses(v)) => {
+                    Some(decode::subghz::Body::Raw(v.clone()))
+                }
+                _ => None,
+            }
+        })?;
     Some(decode::subghz::Save {
-        frequency: rec.freq.max(0.0) as u64,
-        preset: decode::subghz::Preset::of_modulation(rec.modulation),
+        frequency: rec.freq().max(0.0) as u64,
+        preset: decode::subghz::Preset::of_modulation(rec.modulation()),
         body,
     })
 }
 
+/// The code a fixed-code remote sends, which is the whole of its frame.
+///
+/// Read off the bytes rather than out of the identity: a remote's identifier
+/// is the serial it repeats, and the button it was pressed with is the rest
+/// of the same word. A key file carries the word.
+fn code_of(rec: &Reception) -> Option<u64> {
+    let bytes = rec.bytes();
+    if bytes.is_empty() || bytes.len() > 8 {
+        return None;
+    }
+    Some(bytes.iter().fold(0u64, |acc, b| (acc << 8) | u64::from(*b)))
+}
+
 /// The detail pane under the packet list.
-pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
+pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
     // The burst view takes up to half the room the inspector was dragged
     // to, never less than its natural height, so dragging the divider up
     // grows the RF view and the bytes together rather than only the
     // scrollback under them. A packet without samples gets the same area,
     // blank, so the bytes sit where they did for the last packet.
     let h = (ui.available_height() * 0.5).clamp(BURST_VIEW_H, 320.0);
-    match &rec.iq {
+    match &rec.packet.carrier.iq {
         Some(iq) => burst_view(ui, iq, h),
         None => {
             theme::Line::new().legend("burst").note("no samples kept for this packet").show(ui);
@@ -121,7 +124,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
     // A voice transmission's payload is what was said, so the row offers to
     // say it again. The bytes below are the vocoder's, and nobody reads those.
     let mut asked = Asked::default();
-    if let Some(a) = &rec.audio {
+    if let Some(a) = None::<&std::sync::Arc<common::Speech>> {
         let (peak, rms) = crate::mix::levels_db(a);
         ui.horizontal(|ui| {
             asked.play = ui.button("PLAY").clicked();
@@ -139,11 +142,13 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
         });
         ui.add_space(4.0);
     }
-    if !rec.fields.is_empty() {
+    let said: Vec<(&'static str, String)> =
+        rec.packet.facts().map(|(_, f)| (f.kind().label(), f.says())).collect();
+    if !said.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            for (k, v) in &rec.fields {
-                theme::Line::new().legend(k).value(field_value(v)).size(11.0).show(ui);
+            for (k, v) in &said {
+                theme::Line::new().legend(*k).value(v).size(11.0).show(ui);
             }
         });
         ui.add_space(4.0);
@@ -152,9 +157,9 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
     // and a decode from a protocol with no check, which reads framing off
     // whatever carries its sync word and cannot say whose it is.
     let save = sub_save(rec);
-    if rec.crc != Some(true) || save.is_some() {
+    if rec.integrity() != common::packet::Integrity::Passed || save.is_some() {
         ui.horizontal(|ui| {
-            if rec.crc != Some(true) {
+            if rec.integrity() != common::packet::Integrity::Passed {
                 asked.sigid = ui
                     .button("CHECK SIGID")
                     .on_hover_text("what the signal identification wiki lists near this burst")
@@ -166,7 +171,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
                         format!("a {protocol} key file a Flipper can replay and edit")
                     }
                     decode::subghz::Body::Raw(p) => {
-                        format!("the {} timings of this burst, as heard", p.pulses.len() * 2)
+                        format!("the {} timings of this burst, as heard", p.len() * 2)
                     }
                 };
                 asked.save_sub = ui.button("SAVE .SUB").on_hover_text(what).clicked();
@@ -174,48 +179,58 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &DecodeRecord) -> Asked {
         });
         ui.add_space(4.0);
     }
-    hex_dump(ui, &rec.bytes);
+    hex_dump(ui, &rec.bytes());
     asked
 }
 
 /// What the burst was measured to be, in the wiki's terms.
-fn sigid_query(rec: &DecodeRecord) -> datasets::sigid::Query {
-    let field = |k: &str| rec.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
-    let named = rec.modulation.is_named();
+fn sigid_query(rec: &Reception) -> datasets::sigid::Query {
+    let named = rec.modulation().is_named();
     datasets::sigid::Query {
-        center_hz: rec.freq,
-        bandwidth_hz: (rec.channel_hz > 0.0).then_some(rec.channel_hz),
-        modulation: named.then_some(rec.modulation),
-        period_us: field("symbol_period_us").and_then(|v| v.as_f64()),
+        center_hz: rec.freq(),
+        bandwidth_hz: (rec.channel_hz() > 0.0).then_some(rec.channel_hz()),
+        modulation: named.then_some(rec.modulation()),
+        period_us: rec
+            .packet
+            .keying
+            .as_ref()
+            .map(|k| f64::from(k.params.symbol_period_us))
+            .filter(|v| *v > 0.0),
     }
 }
 
 /// The same measurements, as a report somebody else can read.
-fn sigid_observation(rec: &DecodeRecord) -> datasets::sigid::Observation {
-    let field = |k: &str| rec.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+fn sigid_observation(rec: &Reception) -> datasets::sigid::Observation {
     let q = sigid_query(rec);
     // A decoder that named it without a check is worth passing on as the
     // guess it is.
     let notes = if rec.is_known() {
-        Some(format!("Read as {} (no integrity check): {}", rec.protocol(), rec.detail))
+        Some(format!("Read as {} (no integrity check): {}", rec.protocol(), rec.detail()))
     } else {
-        Some(rec.detail.clone())
+        Some(rec.detail())
     };
     datasets::sigid::Observation {
-        center_hz: rec.freq,
+        center_hz: rec.freq(),
         modulation: q.modulation,
         bandwidth_hz: q.bandwidth_hz,
-        baud: field("baud").and_then(|v| v.as_f64()),
+        baud: rec.packet.keying.as_ref().map(|k| f64::from(k.params.baud)).filter(|v| *v > 0.0),
         // The samples kept run from lead-in to the silence that ended the
         // burst, so their length is not the burst's; the detail line carries
         // the measured one and goes in the notes.
         duration_ms: None,
-        sync_hex: field("sync").map(|v| v.to_string()),
-        preamble_bits: field("preamble_bits").and_then(|v| v.as_i64()).map(|n| n as u32),
-        frame_bytes: field("frame_bytes").and_then(|v| v.as_i64()).map(|n| n as usize),
+        // The framing the slicer found, which is what identifies a device
+        // long before anything decodes it.
+        sync_hex: framing(rec).map(|f| f.sync.iter().map(|b| format!("{b:02x}")).collect()),
+        preamble_bits: framing(rec).map(|f| f.preamble_bits),
+        frame_bytes: Some(rec.bytes().len()).filter(|n| *n > 0),
         location: None,
         notes,
     }
+}
+
+/// How the frame was found in the burst, where anything found one.
+fn framing(rec: &Reception) -> Option<&common::packet::Framing> {
+    rec.packet.frame.as_ref().and_then(|f| f.framing.as_ref())
 }
 
 /// How many candidates are worth a line. Past the first few the score is
@@ -229,7 +244,7 @@ const SIGID_SHOWN: usize = 12;
 /// Asking for the database starts its download the first time; until it
 /// lands the modal says so rather than nothing, so the operator knows there
 /// is something to wait for. Returns whether it was closed.
-pub(super) fn sigid_modal(ctx: &egui::Context, rec: &DecodeRecord) -> bool {
+pub(super) fn sigid_modal(ctx: &egui::Context, rec: &Reception) -> bool {
     let mut close = false;
     let r = egui::containers::Modal::new(egui::Id::new("sigid"))
         .backdrop_color(Color32::from_black_alpha(150))
@@ -241,13 +256,13 @@ pub(super) fn sigid_modal(ctx: &egui::Context, rec: &DecodeRecord) -> bool {
                 .legend("burst")
                 .value(format!(
                     "{} {} {}",
-                    fmt_hz(rec.freq),
-                    rec.modulation,
+                    fmt_hz(rec.freq()),
+                    rec.modulation(),
                     q.bandwidth_hz.map(|b| format!("{} wide", datasets::sigid::fmt_hz(b))).unwrap_or_default()
                 ))
                 .show(ui);
-            if !rec.detail.is_empty() {
-                widgets::hint(ui, &rec.detail);
+            if !rec.detail().is_empty() {
+                widgets::hint(ui, &rec.detail());
             }
             ui.add_space(8.0);
             match crate::data::sigid() {
@@ -451,7 +466,7 @@ pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let span = (0.0 - floor).max(6.0);
     let mut pixels = vec![Color32::BLACK; cols * n];
     for r in 0..n {
-        // Row zero of the transform is the lowest frequency; the screen has
+        // Reception zero of the transform is the lowest frequency; the screen has
         // the highest at the top, so the image is filled upside down.
         let dst = (n - 1 - r) * cols;
         for c in 0..cols {
@@ -587,31 +602,18 @@ pub(super) fn thousands(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::Value;
-
-    /// The inspector is read at a glance, and a confidence of
-    /// 0.7089155912399292 is a dozen digits of arithmetic noise. A position
-    /// still has to keep the places that put it on the right street, and a
-    /// small value must not round to a flat zero.
-    #[test]
-    fn a_float_field_is_shown_at_a_readable_precision() {
-        assert_eq!(field_value(&Value::Float(0.7089155912399292)), "0.708916");
-        assert_eq!(field_value(&Value::Float(-213_364_400.0)), "-213364400");
-        assert_eq!(field_value(&Value::Float(53.640_123_4)), "53.640123");
-        assert_eq!(field_value(&Value::Float(0.0)), "0");
-        assert_eq!(field_value(&Value::Float(1.5e-7)), "1.500e-7");
-        assert_eq!(field_value(&Value::Int(42_000)), "42000");
-        assert_eq!(field_value(&Value::Text("KE0ABC".into())), "KE0ABC");
-    }
 
     /// What the SAVE .SUB button offers, per packet: the key where a remote
     /// was decoded, the timings where only a burst was heard, and nothing
     /// at all for a protocol that arrived as bytes.
     #[test]
     fn a_decoded_remote_saves_as_a_key_and_a_bare_burst_as_timings() {
+        use common::packet::{Entity, Id};
         use decode::subghz::Body;
-        let mut rec = DecodeRecord::for_test(433_920_000.0, "Princeton");
-        rec.fields = vec![("code".to_string(), Value::Int(0xa1_3f_08))];
+        let rec = Reception::for_test(433_920_000.0, "ism")
+            .of_kind("Princeton")
+            .of_bytes(vec![0xa1, 0x3f, 0x08])
+            .by(Entity::new("ism", Id::Text("Princeton/660464".into())));
         let save = sub_save(&rec).expect("a decoded remote is a key file");
         assert_eq!(save.frequency, 433_920_000);
         assert_eq!(
@@ -624,17 +626,17 @@ mod tests {
             common::pulse::Pulse { mark: 350, gap: 350 },
             common::pulse::Pulse { mark: 700, gap: 10_000 },
         ];
-        let mut heard = DecodeRecord::for_test(433_920_000.0, nodes::UNKNOWN);
-        heard.pulses = Some(std::sync::Arc::new(common::Package {
-            pulses: pulses.clone(),
-            ..Default::default()
-        }));
+        let mut heard = Reception::for_test(433_920_000.0, nodes::UNKNOWN);
+        heard.packet = heard.packet.keyed(
+            common::packet::Keying::configured(common::Modulation::Ook)
+                .with(common::packet::Symbols::Pulses(pulses.clone())),
+        );
         match sub_save(&heard).expect("a burst with timings is a raw file").body {
-            Body::Raw(p) => assert_eq!(p.pulses, pulses),
+            Body::Raw(p) => assert_eq!(p, pulses),
             other => panic!("expected raw timings, got {other:?}"),
         }
 
         // A frame protocol with no timings kept has no file to write.
-        assert!(sub_save(&DecodeRecord::for_test(868_000_000.0, "POCSAG")).is_none());
+        assert!(sub_save(&Reception::for_test(868_000_000.0, "POCSAG")).is_none());
     }
 }

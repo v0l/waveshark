@@ -9,7 +9,8 @@
 //! works out again each frame stays a local.
 
 use crate::dial::Dial;
-use crate::radio::{ChanMode, Cmd, DecodeRecord};
+use crate::radio::{ChanMode, Cmd};
+use crate::row::Reception;
 use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
 use std::time::Instant;
@@ -19,7 +20,7 @@ pub struct Logged {
     /// Position in the capture, counted from the first packet and never
     /// reused, so a row keeps its number as the list scrolls.
     pub(super) id: u64,
-    pub(super) rec: DecodeRecord,
+    pub(super) rec: Reception,
 }
 
 pub struct Channel {
@@ -426,7 +427,7 @@ pub(super) struct LogState {
     pub print: bool,
     pub print_since: Instant,
     /// The packet the signal identification modal is open on, if it is.
-    pub sigid: Option<DecodeRecord>,
+    pub sigid: Option<Reception>,
     /// The `.sub` file being written out of a packet, if one is.
     pub sub_save: SubSave,
 }

@@ -93,22 +93,25 @@ fn decodes_four_simultaneous_transmitters_in_one_pass() {
     let wide = wideband(&buf.samples, &bank);
     let events = bank.process(&wide).expect("run bank").to_vec();
 
-    let decodes: Vec<(usize, Hz, String)> = events
+    let decodes: Vec<(usize, Hz, String, String)> = events
         .iter()
         .filter_map(|e| match &e.event {
-            Event::Decoded(d) => Some((e.channel, e.center, d.text.clone().unwrap_or_default())),
+            Event::Decoded(p) => Some((
+                e.channel,
+                e.center,
+                p.innermost().map(|l| l.kind.to_string()).unwrap_or_default(),
+                p.facts().map(|(_, f)| f.says()).collect::<Vec<_>>().join(" "),
+            )),
             _ => None,
         })
         .collect();
 
-    let channels: Vec<usize> = decodes.iter().map(|(c, _, _)| *c).collect();
+    let channels: Vec<usize> = decodes.iter().map(|(c, ..)| *c).collect();
     assert_eq!(channels, OCCUPIED, "expected a decode on each occupied channel, got {decodes:#?}");
 
-    for (ch, center, text) in &decodes {
-        assert!(text.contains("Fineoffset-WHx080"), "channel {ch}: {text}");
-        assert!(text.contains("station_id=196"), "channel {ch}: {text}");
-        assert!(text.contains("temperature_c=16.2"), "channel {ch}: {text}");
-        assert!(text.contains("[CRC ok]"), "channel {ch}: {text}");
+    for (ch, center, model, said) in &decodes {
+        assert_eq!(model, "Fineoffset-WHx080", "channel {ch}");
+        assert!(said.contains("temperature 16.2"), "channel {ch}: {said}");
         // The reported frequency must be that channel's, not the bank centre.
         assert_eq!(*center, bank.channel_center(*ch));
     }
@@ -127,12 +130,12 @@ fn empty_channels_stay_silent() {
     let events = bank.process(&wide).unwrap().to_vec();
 
     for e in &events {
-        if let Event::Decoded(d) = &e.event {
+        if let Event::Decoded(p) = &e.event {
             assert!(
                 OCCUPIED.contains(&e.channel),
                 "phantom decode on empty channel {}: {:?}",
                 e.channel,
-                d.text
+                p.innermost()
             );
         }
     }
@@ -194,18 +197,31 @@ fn results_are_deterministic_despite_parallel_execution() {
     let wide = wideband(&buf.samples, &a);
 
     let first: Vec<(usize, String)> =
-        a.process(&wide).unwrap().iter().map(|e| (e.channel, format!("{:?}", e.event))).collect();
+        a.process(&wide).unwrap().iter().map(|e| (e.channel, said(&e.event))).collect();
 
     for _ in 0..5 {
         let mut b = make_bank();
         b.set_all_chains(&ook_chain(), &registry()).unwrap();
-        let again: Vec<(usize, String)> = b
-            .process(&wide)
-            .unwrap()
-            .iter()
-            .map(|e| (e.channel, format!("{:?}", e.event)))
-            .collect();
+        let again: Vec<(usize, String)> =
+            b.process(&wide).unwrap().iter().map(|e| (e.channel, said(&e.event))).collect();
         assert_eq!(first, again, "parallel execution produced a different result");
+    }
+}
+
+/// What an event says, without the clock it was stamped at.
+///
+/// Every reception carries the wall clock it was heard at, which differs
+/// between two runs of the same samples by however long the first took. What
+/// must not differ is what was read.
+fn said(e: &Event) -> String {
+    match e {
+        Event::Decoded(p) => format!(
+            "{:?} {:?} {:?}",
+            p.carrier.center_hz,
+            p.bytes(),
+            p.stack.iter().map(|l| (l.id, l.kind, &l.facts)).collect::<Vec<_>>()
+        ),
+        other => format!("{other:?}"),
     }
 }
 
@@ -234,7 +250,7 @@ fn channels_without_a_chain_are_skipped() {
 /// name the device.
 #[test]
 fn the_automatic_chain_decodes_without_being_told_the_modulation() {
-    use common::Packet;
+    use common::packet::Packet;
     descriptions();
     let base = need_fixture!(fixture());
     let mut bank = make_bank();
@@ -246,16 +262,26 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
     let wide = wideband(&base.samples, &bank);
 
     let mut decoder = nodes::PacketDecodeNode::default();
-    let mut found: Vec<(u64, String)> = Vec::new();
+    let mut found: Vec<(u64, String, String)> = Vec::new();
     let mut unknown = 0;
     for block in wide.chunks(65_536) {
         bank.process(block).expect("run bank");
         let packets: Vec<Packet> = bank
-            .packages()
+            .detections()
             .iter()
-            .map(|p| Packet::of_pulses(0, bank.channel_bandwidth() as u32, p.clone()))
+            .map(|(center, d)| {
+                let carrier = common::packet::Carrier::heard(
+                    0,
+                    center.0,
+                    bank.channel_bandwidth() as u32,
+                    d.rssi_dbfs,
+                    d.snr_db,
+                    common::SourceId(0),
+                );
+                Packet::heard(carrier).keyed(d.keying.clone())
+            })
             .collect();
-        for d in decode_packets(&mut decoder, packets) {
+        for (hz, d) in decode_packets(&mut decoder, packets) {
             // Bursts nothing claims are still reported, and they are counted
             // rather than matched: the point here is the decode.
             //
@@ -264,30 +290,34 @@ fn the_automatic_chain_decodes_without_being_told_the_modulation() {
             // transmission, which is a burst the classifier no longer sends
             // it. A phantom reading of a real packet is the one kind of
             // unknown worth losing.
-            if d.protocol == "unknown" {
+            let Some(l) = d.innermost() else {
                 unknown += 1;
                 continue;
-            }
-            found.push((d.center.0, d.text.clone().unwrap_or_default()));
+            };
+            found.push((
+                hz,
+                l.kind.to_string(),
+                d.facts().map(|(_, f)| f.says()).collect::<Vec<_>>().join(" "),
+            ));
         }
     }
     assert_eq!(unknown, 0, "the only bursts here are the transmission, and it decodes");
 
-    let mut channels: Vec<usize> = found.iter().map(|(hz, _)| bank.channel_for(Hz(*hz))).collect();
+    let mut channels: Vec<usize> = found.iter().map(|(hz, ..)| bank.channel_for(Hz(*hz))).collect();
     channels.sort_unstable();
     channels.dedup();
     assert_eq!(channels, OCCUPIED, "wrong channels decoded: {found:?}");
-    for (_, text) in &found {
-        assert!(text.contains("Fineoffset-WHx080"), "{text}");
-        assert!(text.contains("[CRC ok]"), "{text}");
+    for (_, model, said) in &found {
+        assert_eq!(model, "Fineoffset-WHx080");
+        assert!(said.contains("temperature 16.2"), "{said}");
     }
 }
 
 /// Run the bus decoder over one block's worth of packets.
 fn decode_packets(
     node: &mut nodes::PacketDecodeNode,
-    packets: Vec<common::Packet>,
-) -> Vec<pipeline::event::Decoded> {
+    packets: Vec<common::packet::Packet>,
+) -> Vec<(u64, common::packet::Packet)> {
     use pipeline::node::{NodeCtx, PortSpec, Simple};
     use pipeline::port::{Payload, PortKind};
     let mut spec = pipeline::StreamSpec::iq(0.0, Hz(0)).with_kind(PortKind::Packets);
@@ -301,7 +331,7 @@ fn decode_packets(
     Simple::process(node, &Payload::Packets(packets), &mut out, &mut ctx).unwrap();
     // Off the packets the node passed on, which is where every view reads
     // them.
-    out.as_packets().unwrap_or(&[]).iter().flat_map(|p| p.decodes.clone()).collect()
+    out.as_packets().unwrap_or(&[]).iter().map(|p| (p.carrier.center_hz, p.clone())).collect()
 }
 
 /// The channel graph must measure the burst rather than assume it, or the

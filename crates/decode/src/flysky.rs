@@ -144,7 +144,7 @@ impl Packet {
     /// `None` for a packet that carries none. A failsafe packet does carry
     /// positions, and the channels it holds rather than drives are the
     /// marker rather than a width, so those are absent.
-    pub fn control(&self) -> Option<common::ReportDetail> {
+    pub fn control(&self) -> Option<common::packet::Sticks> {
         if !matches!(self.kind, Kind::Sticks | Kind::Failsafe) {
             return None;
         }
@@ -152,7 +152,7 @@ impl Packet {
         for (slot, &us) in channels.iter_mut().zip(&self.channels) {
             *slot = (us != HOLD).then_some(us);
         }
-        Some(common::ReportDetail::Control { channels, armed: None, uplink_power_mw: None })
+        Some(common::packet::Sticks { channels, armed: None, uplink_power_mw: None })
     }
 }
 
@@ -378,7 +378,7 @@ mod tests {
         let mut values = [1500u16; 16];
         values[2] = HOLD;
         let p = parse(&sticks(values)).expect("a packet");
-        let Some(common::ReportDetail::Control { channels, .. }) = p.control() else {
+        let Some(common::packet::Sticks { channels, .. }) = p.control() else {
             panic!("no control report")
         };
         assert_eq!(channels[0], Some(1500));

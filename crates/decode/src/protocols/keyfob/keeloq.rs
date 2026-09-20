@@ -94,7 +94,6 @@ mod tests {
     use super::*;
     use crate::protocol::Value;
     use dsp::Pulse;
-    use dsp::pulse::Package;
 
     /// The burst as it came off the air, one of a remote pressed every few
     /// seconds on 433.889 MHz: the preamble, the header gap, 66 bits.
@@ -180,16 +179,13 @@ mod tests {
         (413, 10000),
     ];
 
-    fn package(pulses: &[(u32, u32)]) -> Package {
-        Package {
-            pulses: pulses.iter().map(|&(mark, gap)| Pulse { mark, gap }).collect(),
-            ..Default::default()
-        }
+    fn package(pulses: &[(u32, u32)]) -> Vec<Pulse> {
+        pulses.iter().map(|&(mark, gap)| Pulse { mark, gap }).collect()
     }
 
     #[test]
     fn a_remote_off_the_air_decodes() {
-        let r = KeeLoq.decode_package(&package(&OFF_AIR)).expect("a KeeLoq frame");
+        let r = KeeLoq.decode_burst(&package(&OFF_AIR)).expect("a KeeLoq frame");
         assert_eq!(r.get("serial"), Some(&Value::Int(0x01c4a39)));
         assert_eq!(r.get("btn"), Some(&Value::Int(2)));
         assert_eq!(r.get("hop"), Some(&Value::Int(0x697b4d73)));
@@ -219,7 +215,7 @@ mod tests {
     #[test]
     fn every_field_comes_back_where_it_was_put() {
         let r = KeeLoq
-            .decode_package(&package(&frame(0x1234_5678, 0x0abc_def, 0x4, false, false)))
+            .decode_burst(&package(&frame(0x1234_5678, 0x0abc_def, 0x4, false, false)))
             .unwrap();
         assert_eq!(r.get("hop"), Some(&Value::Int(0x1234_5678)));
         assert_eq!(r.get("serial"), Some(&Value::Int(0x0abc_def)));
@@ -235,10 +231,10 @@ mod tests {
         // claimed however well its bits fit.
         let mut p = frame(0x1234_5678, 0x0abc_def, 0x4, false, false);
         p[12].1 = TE;
-        assert_eq!(KeeLoq.decode_package(&package(&p)), Err(DecodeError::NotThisProtocol));
+        assert_eq!(KeeLoq.decode_burst(&package(&p)), Err(DecodeError::NotThisProtocol));
         // And a frame cut short is not one either.
         let short: Vec<(u32, u32)> =
             frame(0x1234_5678, 0x0abc_def, 0x4, false, false)[..40].to_vec();
-        assert_eq!(KeeLoq.decode_package(&package(&short)), Err(DecodeError::NotThisProtocol));
+        assert_eq!(KeeLoq.decode_burst(&package(&short)), Err(DecodeError::NotThisProtocol));
     }
 }

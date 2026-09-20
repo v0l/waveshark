@@ -71,16 +71,16 @@ impl Signal for DabProtocol {
             }
         }
         let mut rows = Vec::new();
-        if let Some(d) = dab::ensemble_decoded(&rx, chan.hz(), 0.0) {
+        if let Some(d) = dab::ensemble_read(&rx) {
             rows.push(d);
         }
         let ids: Vec<u32> = rx.ensemble().stations().map(|s| s.id).collect();
         for id in ids {
-            if let Some(d) = dab::service_decoded(&rx, id, chan.hz(), 0.0) {
+            if let Some(d) = dab::service_read(&rx, id) {
                 rows.push(d);
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

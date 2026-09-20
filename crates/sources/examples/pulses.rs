@@ -23,15 +23,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, p) in pkgs.iter().enumerate() {
         println!(
             "\n--- package {i}: {} pulses, {:.1} ms, SNR {:.1} dB, at sample {}",
-            p.pulses.len(),
-            p.duration_us() as f64 / 1000.0,
+            p.pulses().len(),
+            common::pulse::duration_us(p.pulses()) as f64 / 1000.0,
             p.snr_db,
-            p.start_sample
+            p.at_sample
         );
-        println!("  mark clusters: {:?}", p.mark_histogram(150));
-        println!("  gap  clusters: {:?}", p.gap_histogram(150));
+        println!("  mark clusters: {:?}", common::pulse::mark_histogram(p.pulses(), 150));
+        println!("  gap  clusters: {:?}", common::pulse::gap_histogram(p.pulses(), 150));
         let s: Vec<String> =
-            p.pulses.iter().take(24).map(|x| format!("{}/{}", x.mark, x.gap)).collect();
+            p.pulses().iter().take(24).map(|x| format!("{}/{}", x.mark, x.gap)).collect();
         println!("  pulses: {}", s.join(" "));
     }
     Ok(())

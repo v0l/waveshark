@@ -26,8 +26,8 @@
 //! rather than from a published specification.
 
 use crate::bits::{BCH_31_21_IRIDIUM_GEN, bch_repair2};
-use common::Decoded;
 use common::Value;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 
 /// Symbols a second on every Iridium channel, duplex and simplex alike.
 pub const SYMBOL_RATE: f64 = 25_000.0;
@@ -509,40 +509,27 @@ pub fn encode_ring_alert(r: &RingAlert) -> Vec<bool> {
     out
 }
 
-/// The row a frame becomes.
-///
-/// Nobody wrote any of it: a ring alert is one machine paging another, so
-/// the row carries its fields, its position and no claim that it is a
-/// message.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What an Iridium burst says: which satellite sent it, and where that
+/// satellite is where the frame carried an ephemeris.
+pub fn read(bytes: &[u8], _center: common::Hz) -> Option<Proto> {
     let bits = unpack(bytes)?;
     let f = parse(&bits)?;
-    let mut fields = f.fields();
-    if let Some(ch) = channel_at(center.as_f64()) {
-        fields.insert(1, ("channel".into(), common::Value::Text(ch.label())));
-    }
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut who = common::Identity::new("iridium", format!("SV{:03}", f.sat()));
-    who.name = Some(format!("Iridium {}", f.sat()));
-    who.vendor = Some("Iridium".into());
-    let mut d = Decoded::bytes("Iridium", center, 0.0, bytes.to_vec())
-        .by(who)
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_media(common::media::BYTES)
-        .with_modulation(common::Modulation::Dqpsk)
-        // Every block carried a BCH(31,21) and a parity bit, and a frame
-        // reaching here had all of them agree.
-        .with_crc(Some(true));
+    let name = format!("Iridium {}", f.sat());
+    let mut p = Proto::new("iridium", f.kind())
+        .by(Entity::new("iridium", Id::Text(format!("SV{:03}", f.sat())))
+            .named(name.clone())
+            .made_by("Iridium"))
+        .saying(Fact::Named(Named::new(name, ThingKind::Station)));
     if let Some((lat, lon, altitude_km)) = f.position() {
-        d = d.at_position(common::Position {
-            lat,
-            lon,
-            altitude_m: Some(altitude_km * 1000.0),
-            ..Default::default()
-        });
+        p = p
+            .saying(Fact::Position(common::packet::Fix { lat, lon, precision_bits: None }))
+            .saying(Fact::sensed(
+                common::packet::Quantity::Altitude,
+                altitude_km * 1000.0,
+                common::Unit::Metre,
+            ));
     }
-    Some(d)
+    Some(p)
 }
 
 /// The bits back out of a frame the front end wrote.

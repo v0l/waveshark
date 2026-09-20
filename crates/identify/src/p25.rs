@@ -68,12 +68,12 @@ impl Signal for P25 {
             let mut frames = Vec::new();
             framer.push(&syms, &mut frames);
             for f in &frames {
-                if let Some(d) = p25::decoded(&p25::encode_frame(f), chan.hz()) {
+                if let Some(d) = p25::read(&p25::encode_frame(f)) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

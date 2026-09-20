@@ -10,6 +10,7 @@
 //! The fixture is fetched by `testdata/fetch.sh`. When it is absent the test
 //! skips rather than fails, so a fresh clone with no network still passes.
 
+use common::packet::Detection;
 use decode::protocol::Value;
 use decode::{Protocol, Protocols};
 use dsp::{FirDecim, OokDetector, PulseConfig};
@@ -22,7 +23,7 @@ fn fixture_path() -> Option<std::path::PathBuf> {
     p.exists().then_some(p)
 }
 
-fn packages() -> Option<Vec<dsp::Package>> {
+fn packages() -> Option<Vec<Detection>> {
     let path = fixture_path()?;
     let src = FileSource::open(&path).expect("open fixture");
     let buf = src.read_all().expect("read fixture");
@@ -67,16 +68,16 @@ fn detects_exactly_one_transmission() {
     assert_eq!(pkgs.len(), 1, "expected one package, got {}", pkgs.len());
     // 11 bytes plus a possible partial leading pulse.
     assert!(
-        (88..=89).contains(&pkgs[0].pulses.len()),
+        (88..=89).contains(&pkgs[0].pulses().len()),
         "expected 88 pulses for an 11-byte frame, got {}",
-        pkgs[0].pulses.len()
+        pkgs[0].pulses().len()
     );
 }
 
 #[test]
 fn measured_timings_match_the_published_protocol() {
     let pkgs = skip_without_fixture!(packages());
-    let marks = pkgs[0].mark_histogram(150);
+    let marks = common::pulse::mark_histogram(pkgs[0].pulses(), 150);
     let clusters: Vec<u32> = marks.iter().filter(|(_, n)| *n > 5).map(|(c, _)| *c).collect();
     assert_eq!(clusters.len(), 2, "expected two PWM symbol widths, got {marks:?}");
 
@@ -99,7 +100,7 @@ fn decodes_and_agrees_with_rtl_433() {
     assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
     let report = decode::script::named("Fineoffset-WHx080")
         .unwrap()
-        .decode_package(&pkgs[0])
+        .decode_burst(pkgs[0].pulses())
         .expect("decode the real capture");
 
     // Ground truth, from: rtl_433 -r fineoffset_wh1080_433.92M_250k.cu8
@@ -125,7 +126,7 @@ fn the_registry_finds_it_without_being_told_which_protocol() {
     let pkgs = skip_without_fixture!(packages());
     let _g = decode::script::test_lock();
     assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
-    let reports = Protocols::all().decode_all(&pkgs[0]);
+    let reports = Protocols::all().decode_all(pkgs[0].pulses());
     assert_eq!(reports.len(), 1, "expected exactly one protocol to claim it");
     assert_eq!(reports[0].model, "Fineoffset-WHx080");
 }

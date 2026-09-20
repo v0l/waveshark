@@ -40,16 +40,15 @@ impl Signal for Wmbus {
         if !demod.usable() {
             return Reading::default();
         }
-        let center = common::Hz(center_hz as u64);
         let mut rows = Vec::new();
         for b in iq.chunks(crate::BLOCK) {
             for f in demod.process(b) {
-                if let Some(d) = decode::wmbus::decoded(&f.bytes, center) {
+                if let Some(d) = decode::wmbus::read(&f.bytes) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(center_hz)
     }
 }
 

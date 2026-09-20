@@ -65,11 +65,15 @@ fn events_of(g: &mut pipeline::Graph, iq: &[common::C32]) -> Vec<Event> {
     g.feed_iq(iq).expect("run graph").iter().map(|e| e.event.clone()).collect()
 }
 
+/// What the graph said about what it read, one line a layer.
 fn decodes_from(graph_events: &[Event]) -> Vec<String> {
     graph_events
         .iter()
         .filter_map(|e| match e {
-            Event::Decoded(d) => d.text.clone(),
+            Event::Decoded(p) => p.innermost().map(|l| {
+                let said: Vec<String> = l.facts.iter().map(|f| f.says()).collect();
+                format!("{} {} {}", l.id, l.kind, said.join(" "))
+            }),
             _ => None,
         })
         .collect()
@@ -87,13 +91,16 @@ fn a_runtime_assembled_graph_decodes_the_real_capture() {
 
     assert_eq!(decodes.len(), 1, "expected one decode, got {decodes:?}");
     let text = &decodes[0];
-    // Same ground truth as the direct test: rtl_433 25.02 on this recording.
-    assert!(text.contains("Fineoffset-WHx080"), "{text}");
-    assert!(text.contains("station_id=196"), "{text}");
-    assert!(text.contains("temperature_c=16.2"), "{text}");
-    assert!(text.contains("humidity_pct=89"), "{text}");
-    assert!(text.contains("rain_total_mm=84.3"), "{text}");
-    assert!(text.contains("[CRC ok]"), "{text}");
+    // Same ground truth as the direct test: rtl_433 25.02 on this recording,
+    // as the statements the readings become. The station's own number is in
+    // the frame; what a chart plots is the quantity, the value and the unit.
+    assert!(text.starts_with("ism Fineoffset-WHx080"), "{text}");
+    assert!(text.contains("temperature 16.2 \u{b0}C"), "{text}");
+    assert!(text.contains("humidity 89.0 %"), "{text}");
+    assert!(text.contains("rainfall 84.3 mm"), "{text}");
+    assert!(text.contains("wind direction 180.0"), "{text}");
+    // The battery flag reads as the alarm it is, the other way up.
+    assert!(text.contains("low battery clear"), "{text}");
 }
 
 #[test]
@@ -143,10 +150,7 @@ fn retuning_a_parameter_at_runtime_changes_behaviour() {
     ];
     let mut g = build_chain(spec, &bad, &registry()).unwrap();
     let events = events_of(&mut g, &buf.samples);
-    assert!(
-        decodes_from(&events).is_empty(),
-        "too short a reset gap should have fragmented the packet"
-    );
+    assert_eq!(reported(&events), 0, "too short a reset gap should have fragmented the packet");
 
     // Now fix it in place, without rebuilding the graph.
     let id = pipeline::NodeId(2);
@@ -158,7 +162,16 @@ fn retuning_a_parameter_at_runtime_changes_behaviour() {
     g.reset();
 
     let events = events_of(&mut g, &buf.samples);
-    assert_eq!(decodes_from(&events).len(), 1, "restoring the reset gap should decode again");
+    assert_eq!(reported(&events), 1, "restoring the reset gap should read the burst again");
+}
+
+/// Bursts the chain reported, claimed or not.
+///
+/// What this measures is whether the detector handed the decoder a whole
+/// transmission: a burst cut into fragments produces nothing at all, and one
+/// read end to end produces a packet whether or not a protocol claimed it.
+fn reported(graph_events: &[Event]) -> usize {
+    graph_events.iter().filter(|e| matches!(e, Event::Decoded(_))).count()
 }
 
 #[test]
@@ -181,7 +194,7 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
     let events = events_of(&mut g, &buf.samples);
 
-    let packets: Vec<&pipeline::event::Decoded> = events
+    let packets: Vec<&common::packet::Packet> = events
         .iter()
         .filter_map(|e| match e {
             Event::Decoded(d) => Some(d),
@@ -189,18 +202,17 @@ fn an_unrecognised_burst_is_reported_as_a_packet_of_its_own() {
         })
         .collect();
     assert!(!packets.is_empty(), "an unknown burst must be reported: {events:?}");
-    for d in &packets {
-        assert_eq!(d.protocol, "unknown", "nothing should have matched: {d:?}");
-        assert_eq!(
-            d.modulation,
-            Some(common::Modulation::Ook),
-            "the modulation belongs in the report"
-        );
-        let detail = d.detail.as_deref().unwrap_or_default();
-        // Enough to start reverse engineering from: a coding with its
-        // timings, and bits to compare between receptions.
-        assert!(detail.contains("us"), "no timings in {detail:?}");
-        assert!(detail.contains("pulses"), "no pulse count in {detail:?}");
+    for p in &packets {
+        assert!(!p.claimed(), "nothing should have matched: {p:?}");
+        let k = p.keying.as_ref().expect("how it was keyed");
+        assert_eq!(k.modulation, common::Modulation::Ook, "the keying belongs on the packet");
+        // Enough to start reverse engineering from: the timings it was read
+        // at, and how strongly it was heard.
+        let common::packet::Symbols::Pulses(pulses) = &k.symbols else {
+            panic!("no timings on {p:?}")
+        };
+        assert!(!pulses.is_empty(), "no pulses on {p:?}");
+        assert!(p.carrier.rssi_dbfs.is_finite() && p.carrier.snr_db > 0.0, "{p:?}");
     }
 
     // How strongly it was received is on the burst the decode was made from
@@ -230,15 +242,14 @@ fn turning_off_unknown_reporting_silences_them_without_touching_decodes() {
     let mut g = build_chain(spec, &specs, &registry()).unwrap();
     let events = events_of(&mut g, &buf.samples);
 
-    let unknown =
-        events.iter().filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unknown")).count();
+    let unknown = events.iter().filter(|e| matches!(e, Event::Decoded(p) if !p.claimed())).count();
     assert_eq!(unknown, 0, "unknown reporting was turned off");
 
     // And with it on, the same chain does report them.
     let mut g = build_chain(spec, &specs_with_unknown(), &registry()).unwrap();
     let events = events_of(&mut g, &buf.samples);
     assert!(
-        events.iter().any(|e| matches!(e, Event::Decoded(d) if d.protocol == "unknown")),
+        events.iter().any(|e| matches!(e, Event::Decoded(p) if !p.claimed())),
         "the same chain must report unknowns when asked to"
     );
 }
@@ -331,9 +342,8 @@ fn the_ask_detector_decodes_the_real_capture_too() {
     let decodes = decodes_from(&events);
 
     assert_eq!(decodes.len(), 1, "expected one decode, got {decodes:?}");
-    assert!(decodes[0].contains("station_id=196"), "{}", decodes[0]);
-    assert!(decodes[0].contains("temperature_c=16.2"), "{}", decodes[0]);
-    assert!(decodes[0].contains("[CRC ok]"), "{}", decodes[0]);
+    assert!(decodes[0].starts_with("ism Fineoffset-WHx080"), "{}", decodes[0]);
+    assert!(decodes[0].contains("temperature 16.2"), "{}", decodes[0]);
 }
 
 /// A burst no front end reads must still reach the log.
@@ -380,20 +390,27 @@ fn an_unreadable_burst_is_still_reported() {
     // of text.
     let packets = out[1].as_packets().expect("a packets port");
     assert!(!packets.is_empty(), "the burst left no packet");
-    assert!(packets[0].measure.is_some(), "the packet carries no measurement");
-    assert!(packets[0].iq.is_some(), "the packet carries no samples");
+    assert!(
+        packets[0]
+            .keying
+            .as_ref()
+            .is_some_and(|k| matches!(k.how, common::packet::Knowledge::Measured { .. })),
+        "the packet carries no measurement"
+    );
+    assert!(packets[0].carrier.iq.is_some(), "the packet carries no samples");
 
     let reported: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            Event::Decoded(d) if d.protocol == "unidentified" => Some(d),
+            Event::Decoded(p) if !p.claimed() => Some(p),
             _ => None,
         })
         .collect();
     assert!(!reported.is_empty(), "a burst with no front end produced no log entry: {events:?}");
-    let d = reported[0];
-    assert!(d.modulation.is_some(), "reported without naming the modulation");
-    assert!(d.detail.is_some(), "reported without saying why nothing read it");
+    let p = reported[0];
+    let k = p.keying.as_ref().expect("reported without saying how it was keyed");
+    assert!(k.modulation.is_named(), "reported without naming the modulation");
+    assert!(k.params.bandwidth_hz > 0.0, "reported without saying how wide it was");
 
     // And the other direction: an entry is a claim somebody reads, so a
     // classifier that is unsure must stay quiet. Raising the bar above what
@@ -410,9 +427,7 @@ fn an_unreadable_burst_is_still_reported() {
     let inputs = [port];
     let mut ctx = NodeCtx::new(0, &inputs, &[], &mut events, &mut tags);
     Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("process");
-    let still: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, Event::Decoded(d) if d.protocol == "unidentified"))
-        .collect();
+    let still: Vec<_> =
+        events.iter().filter(|e| matches!(e, Event::Decoded(p) if !p.claimed())).collect();
     assert!(still.is_empty(), "reported despite the confidence bar: {still:?}");
 }

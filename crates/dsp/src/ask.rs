@@ -25,7 +25,8 @@
 //! receiver whose AGC is compressing, and, most often, an adjacent channel
 //! bleeding into a narrow channelizer bin and filling in the gaps.
 
-use crate::pulse::{LevelGate, Package, PulseStats, dbfs};
+use crate::pulse::{LevelGate, PulseStats, dbfs, detected};
+use common::packet::Detection;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AskConfig {
@@ -155,7 +156,7 @@ impl AskDetector {
     }
 
     /// Feed an envelope block, appending completed bursts to `out`.
-    pub fn process(&mut self, env: &[f32], out: &mut Vec<Package>) {
+    pub fn process(&mut self, env: &[f32], out: &mut Vec<Detection>) {
         let reset_samples = (self.cfg.reset_us as f64 / self.us_per_sample) as usize;
         let max_samples = (self.cfg.max_burst_us as f64 / self.us_per_sample) as usize;
 
@@ -193,13 +194,13 @@ impl AskDetector {
 
     /// Force out a burst still being collected, for the end of a file where
     /// there is no trailing silence to close it.
-    pub fn flush(&mut self, out: &mut Vec<Package>) {
+    pub fn flush(&mut self, out: &mut Vec<Detection>) {
         if self.in_burst {
             self.finish(out);
         }
     }
 
-    fn finish(&mut self, out: &mut Vec<Package>) {
+    fn finish(&mut self, out: &mut Vec<Detection>) {
         self.in_burst = false;
         // The silence that ended the burst is not part of it, and leaving it
         // in would drag the low level down onto the noise floor and with it
@@ -236,16 +237,13 @@ impl AskDetector {
         let pulses = crate::twolevel::pair_runs(&runs, self.us_per_sample, self.cfg.reset_us);
 
         if pulses.len() >= self.cfg.min_pulses {
-            out.push(Package {
+            out.push(detected(
                 pulses,
-                snr_db: snr,
-                rssi_dbfs: dbfs(self.gate.signal_level()),
-                start_sample: self.burst_start,
-                // Stamped by the node that owns this detector, which is where
-                // the stream's centre frequency is known.
-                center_hz: 0,
-                modulation: Some(common::Modulation::Ask),
-            });
+                common::Modulation::Ask,
+                dbfs(self.gate.signal_level()),
+                snr,
+                self.burst_start,
+            ));
             self.stats.accepted += 1;
         } else if !pulses.is_empty() {
             self.stats.rejected_too_few_pulses += 1;
@@ -293,7 +291,7 @@ mod tests {
         ]
     }
 
-    fn detect(env: &[f32]) -> Vec<Package> {
+    fn detect(env: &[f32]) -> Vec<Detection> {
         let mut d = AskDetector::new(RATE, AskConfig::default());
         let mut out = Vec::new();
         d.process(env, &mut out);
@@ -309,14 +307,14 @@ mod tests {
         let mut ook = OokDetector::new(RATE, PulseConfig::default());
         let mut ook_out = Vec::new();
         ook.process(&env, &mut ook_out);
-        let ook_pulses = ook_out.first().map(|p| p.pulses.len()).unwrap_or(0);
+        let ook_pulses = ook_out.first().map(|p| p.pulses().len()).unwrap_or(0);
         assert!(ook_pulses <= 1, "the OOK detector was supposed to latch, got {ook_pulses}");
 
         let pkgs = detect(&env);
         assert_eq!(pkgs.len(), 1, "expected one burst, got {}", pkgs.len());
         let want = train();
-        assert_eq!(pkgs[0].pulses.len(), want.len(), "{:?}", pkgs[0].pulses);
-        for (got, exp) in pkgs[0].pulses.iter().zip(&want) {
+        assert_eq!(pkgs[0].pulses().len(), want.len(), "{:?}", pkgs[0].pulses());
+        for (got, exp) in pkgs[0].pulses().iter().zip(&want) {
             assert!(got.mark.abs_diff(exp.0) < 60, "mark {} vs {}", got.mark, exp.0);
         }
     }
@@ -330,12 +328,12 @@ mod tests {
             let pkgs = detect(&ask(&want, depth_db, 0.02));
             assert_eq!(pkgs.len(), 1, "{depth_db} dB depth produced {} bursts", pkgs.len());
             assert_eq!(
-                pkgs[0].pulses.len(),
+                pkgs[0].pulses().len(),
                 want.len(),
                 "{depth_db} dB depth: {:?}",
-                pkgs[0].pulses
+                pkgs[0].pulses()
             );
-            for (got, exp) in pkgs[0].pulses.iter().zip(&want) {
+            for (got, exp) in pkgs[0].pulses().iter().zip(&want) {
                 assert!(
                     got.mark.abs_diff(exp.0) < 60,
                     "{depth_db} dB depth: mark {} vs {}",

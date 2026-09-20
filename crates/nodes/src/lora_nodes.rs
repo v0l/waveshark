@@ -29,14 +29,13 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::lora::KNOWN_SYNC;
-pub use decode::lora::decoded;
+pub use decode::lora::read;
 use decode::lora::{self};
 pub use dsp::lora::{ChirpReader, Found, HOLD_SECONDS, OUTSIDE_RATIO};
 use identify::Signal;
 pub use identify::lora::ALL_BANDWIDTHS_HZ;
 pub use identify::lora::Lora;
 pub use identify::lora::{BANDWIDTHS_2G4_HZ, BANDWIDTHS_HZ, is_2g4};
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -73,7 +72,7 @@ impl LoraNode {
     }
 
     /// Frames whose header checksum passed since the node was built.
-    pub fn decoded(&self) -> u64 {
+    pub fn read(&self) -> u64 {
         self.decoded
     }
 
@@ -200,18 +199,32 @@ impl Simple for LoraNode {
                 }
                 Ok(frame) => {
                     self.decoded += 1;
-                    let f = common::Frame::measured(
+                    let mut f = crate::measured(
+                        self.reader.center_hz() as u64,
+                        bw as u32,
                         frame.to_bytes(packet.sf, bw, packet.sync_word),
                         rssi_dbfs,
                         snr_db,
-                    )
-                    .at(self.reader.center_hz() as u64)
-                    .with_iq(std::sync::Arc::new(common::IqBurst {
+                    );
+                    f.carrier.iq = Some(std::sync::Arc::new(common::IqBurst {
                         rate: self.reader.sample_rate(),
                         center_hz: self.reader.center_hz() as u64,
                         samples,
                     }));
-                    o.packets_mut().push(common::Packet::of_frame(now_us(), bw as u32, f));
+                    // How it was keyed, which for LoRa is the spreading
+                    // factor and the width the chirp sweeps: a row cannot
+                    // say which channel plan a mesh is on without them.
+                    let keying = common::packet::Keying::configured(common::Modulation::Chirp).of(
+                        common::packet::KeyingParams {
+                            bandwidth_hz: bw as f32,
+                            spreading: Some(packet.sf),
+                            ..Default::default()
+                        },
+                    );
+                    // The payload CRC the header asked for, checked by the
+                    // reader before it called this a frame.
+                    o.packets_mut()
+                        .push(f.keyed(keying).checked(common::packet::Integrity::Passed));
                 }
                 Err(e) => {
                     c.warn(format!(
@@ -253,13 +266,6 @@ impl Simple for LoraNode {
     }
 }
 
-fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
-}
-
 impl Protocol for Lora {
     fn id(&self) -> &'static str {
         Signal::id(self)
@@ -283,8 +289,9 @@ impl Protocol for Lora {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
-        decoded(bytes, common::Hz(p.center_hz())).map(|d| vec![d])
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
+        read(bytes).map(|d| vec![d])
     }
 
     /// The Meshtastic EU_868 slot, which is where a LoRa packet heard in

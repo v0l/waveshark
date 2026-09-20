@@ -17,7 +17,7 @@ use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::dfm;
-pub use decode::dfm::decoded;
+pub use decode::dfm::read;
 use dsp::fsk::BitSync;
 use identify::Signal;
 pub use identify::dfm::BAND;
@@ -25,7 +25,6 @@ pub use identify::dfm::BAUD;
 pub use identify::dfm::CHANNEL_WIDTH_HZ;
 pub use identify::dfm::Dfm;
 pub use identify::dfm::OCCUPIED_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -76,7 +75,7 @@ impl Simple for DfmNode {
         }
         self.sync = Some(s);
         self.meter = crate::FrameMeter::new(i.spec.rate, i.spec.center.0, 2.5);
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.bandwidth = CHANNEL_WIDTH_HZ.min(i.spec.rate);
         Ok(out)
     }
@@ -88,7 +87,7 @@ impl Simple for DfmNode {
         self.meter.feed(iq);
         s.process(iq, self.framer.sink());
         for record in self.framer.take() {
-            o.frames_mut().push(self.meter.frame(record));
+            o.packets_mut().push(self.meter.packet_now(record));
         }
         self.framer.trim();
         Ok(())
@@ -130,12 +129,13 @@ impl Protocol for Dfm {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: (BAND.1 - BAND.0) as u64 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         let hz = p.center_hz() as f64;
         if !(BAND.0..BAND.1).contains(&hz) || bytes.len() != dfm::RECORD {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
     fn reports_position(&self) -> bool {
         true
@@ -159,6 +159,16 @@ pub fn build(_s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The height a layer stated, which is a reading rather than a place.
+    fn height(d: &common::packet::Proto) -> Option<f64> {
+        d.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Sensed(r) if r.quantity == common::packet::Quantity::Altitude => {
+                Some(r.value)
+            }
+            _ => None,
+        })
+    }
 
     /// A frame's chips: the header, then every bit of the frame as a
     /// transition.
@@ -264,16 +274,15 @@ mod tests {
             assert_eq!(got.len(), 1, "{} records, inverted {inverted}", got.len());
             assert_eq!(n.frames(), 5, "{} frames read", n.frames());
 
-            let d = decoded(&got[0], common::Hz(403_000_000)).expect("a decode");
-            assert_eq!(d.field("model").map(|v| v.to_string()).as_deref(), Some("DFM-17"));
+            let d = read(&got[0]).expect("a decode");
             assert_eq!(
-                d.field("serial").map(|v| v.to_string()),
+                d.subject.as_ref().map(|e| e.id.to_string()),
                 Some(format!("{}", 0x0163_4A21u32))
             );
-            let p = d.position.expect("a position");
+            let p = d.placed().expect("a position");
             assert!((p.lat - 53.35).abs() < 1e-6, "{}", p.lat);
             assert!((p.lon + 5.0).abs() < 1e-6, "{}", p.lon);
-            assert!((p.altitude_m.unwrap() - 4_712.22).abs() < 0.01, "{:?}", p.altitude_m);
+            assert!(height(&d).is_some_and(|m| (m - 4_712.22).abs() < 0.01), "{d:?}");
         }
     }
 

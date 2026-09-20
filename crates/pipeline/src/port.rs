@@ -1,6 +1,6 @@
 //! What flows between stages, and how a stage advertises its rate.
 
-use common::{C32, Hz, Package, SourceBlock};
+use common::{C32, Hz, SourceBlock};
 
 /// The data type carried on a port. Checked when a chain is built so a
 /// mis-ordered chain fails at construction rather than producing silence.
@@ -21,22 +21,28 @@ pub enum PortKind {
     /// DSP, everything downstream is cheap integer parsing, and every OOK or
     /// two-level FSK protocol meets here.
     Pulses,
-    /// Packets on the bus: bursts and frames with the metadata that places
-    /// them, whatever front end produced them.
+    /// Bursts to key, as mark and gap timings.
+    ///
+    /// The transmit counterpart of [`PortKind::Pulses`] and deliberately not
+    /// the same kind: what a keyer hands a modulator is a plan, and what a
+    /// detector hands a decoder is evidence. Sharing one kind meant a burst
+    /// waiting to be transmitted carried a received level and a centre
+    /// frequency, both invented, because the type it travelled in had
+    /// nowhere else to put them.
+    Timings,
+    /// Packets on the bus: a reception and the layers read off it, whatever
+    /// front end produced them.
+    ///
+    /// A front end that makes bytes puts them here too. There used to be a
+    /// second kind for whole frames, which meant a frame reached the bus with
+    /// no level, no time and no samples and something downstream had to
+    /// repair all three.
     ///
     /// The junction the consumers pivot on, the way [`PortKind::Pulses`] is
     /// the junction the decoders pivot on. A log, a packet list, a tracker
     /// and a map all want the same thing and none of them should care which
     /// demodulator it came from.
     Packets,
-    /// Whole frames, each a run of bytes with its own boundaries.
-    ///
-    /// Distinct from [`PortKind::Bytes`] because a byte stream cannot say
-    /// where one frame ends and the next begins, and for a framed protocol
-    /// that is most of the information. Mode S made the point: two 7-byte
-    /// replies written into one buffer came back out of a log as a single
-    /// 14-byte frame that never existed.
-    Frames,
     /// Transmitters found in a wideband stream, each as its own run of
     /// samples at its own rate.
     ///
@@ -86,9 +92,9 @@ pub enum Payload {
     Real(Vec<f32>),
     Soft(Vec<f32>),
     Bytes(Vec<u8>),
-    Pulses(Vec<Package>),
-    Frames(Vec<common::Frame>),
-    Packets(Vec<common::Packet>),
+    Pulses(Vec<common::packet::Detection>),
+    Timings(Vec<Vec<common::Pulse>>),
+    Packets(Vec<common::packet::Packet>),
     Sources(Vec<SourceBlock>),
     Voice(Vec<common::Voice>),
     Video(Vec<common::VideoFrame>),
@@ -103,7 +109,7 @@ impl Payload {
             PortKind::Soft => Payload::Soft(Vec::new()),
             PortKind::Bytes => Payload::Bytes(Vec::new()),
             PortKind::Pulses => Payload::Pulses(Vec::new()),
-            PortKind::Frames => Payload::Frames(Vec::new()),
+            PortKind::Timings => Payload::Timings(Vec::new()),
             PortKind::Packets => Payload::Packets(Vec::new()),
             PortKind::Sources => Payload::Sources(Vec::new()),
             PortKind::Voice => Payload::Voice(Vec::new()),
@@ -119,7 +125,7 @@ impl Payload {
             Payload::Soft(_) => PortKind::Soft,
             Payload::Bytes(_) => PortKind::Bytes,
             Payload::Pulses(_) => PortKind::Pulses,
-            Payload::Frames(_) => PortKind::Frames,
+            Payload::Timings(_) => PortKind::Timings,
             Payload::Packets(_) => PortKind::Packets,
             Payload::Sources(_) => PortKind::Sources,
             Payload::Voice(_) => PortKind::Voice,
@@ -134,7 +140,7 @@ impl Payload {
             Payload::Real(v) | Payload::Soft(v) => v.len(),
             Payload::Bytes(v) => v.len(),
             Payload::Pulses(v) => v.len(),
-            Payload::Frames(v) => v.len(),
+            Payload::Timings(v) => v.len(),
             Payload::Packets(v) => v.len(),
             Payload::Sources(v) => v.len(),
             Payload::Voice(v) => v.len(),
@@ -154,7 +160,7 @@ impl Payload {
             Payload::Real(v) | Payload::Soft(v) => v.clear(),
             Payload::Bytes(v) => v.clear(),
             Payload::Pulses(v) => v.clear(),
-            Payload::Frames(v) => v.clear(),
+            Payload::Timings(v) => v.clear(),
             Payload::Packets(v) => v.clear(),
             Payload::Sources(v) => v.clear(),
             Payload::Voice(v) => v.clear(),
@@ -184,21 +190,22 @@ impl Payload {
         }
     }
 
-    pub fn as_pulses(&self) -> Option<&[Package]> {
+    pub fn as_pulses(&self) -> Option<&[common::packet::Detection]> {
         match self {
             Payload::Pulses(v) => Some(v),
             _ => None,
         }
     }
 
-    pub fn as_frames(&self) -> Option<&[common::Frame]> {
+    /// The bursts a keyer is asking for, for a modulator
+    pub fn as_timings(&self) -> Option<&[Vec<common::Pulse>]> {
         match self {
-            Payload::Frames(v) => Some(v),
+            Payload::Timings(v) => Some(v),
             _ => None,
         }
     }
 
-    pub fn as_packets(&self) -> Option<&[common::Packet]> {
+    pub fn as_packets(&self) -> Option<&[common::packet::Packet]> {
         match self {
             Payload::Packets(v) => Some(v),
             _ => None,
@@ -261,24 +268,24 @@ impl Payload {
         }
     }
 
-    pub fn packets_mut(&mut self) -> &mut Vec<common::Packet> {
+    pub fn packets_mut(&mut self) -> &mut Vec<common::packet::Packet> {
         match self {
             Payload::Packets(v) => v,
             _ => panic!("payload is {:?}, not Packets", self.kind()),
         }
     }
 
-    pub fn frames_mut(&mut self) -> &mut Vec<common::Frame> {
-        match self {
-            Payload::Frames(v) => v,
-            _ => panic!("payload is {:?}, not Frames", self.kind()),
-        }
-    }
-
-    pub fn pulses_mut(&mut self) -> &mut Vec<Package> {
+    pub fn pulses_mut(&mut self) -> &mut Vec<common::packet::Detection> {
         match self {
             Payload::Pulses(v) => v,
             _ => panic!("payload is {:?}, not Pulses", self.kind()),
+        }
+    }
+
+    pub fn timings_mut(&mut self) -> &mut Vec<Vec<common::Pulse>> {
+        match self {
+            Payload::Timings(v) => v,
+            _ => panic!("payload is {:?}, not Timings", self.kind()),
         }
     }
 

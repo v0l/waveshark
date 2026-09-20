@@ -406,11 +406,7 @@ mod tests {
         let save = decode::subghz::Save {
             frequency: 433_920_000,
             preset: decode::subghz::Preset::Ook,
-            body: decode::subghz::key_of_decode(
-                "Princeton",
-                &[("code".to_string(), common::Value::Int(0xa1_3f_08))],
-            )
-            .unwrap(),
+            body: decode::subghz::key_of_decode("Princeton", 0xa1_3f_08).unwrap(),
         };
         let path = d.join(format!("{}.sub", save.file_stem("Princeton", std::time::UNIX_EPOCH)));
         std::fs::write(&path, save.text()).unwrap();
@@ -421,7 +417,7 @@ mod tests {
         assert_eq!(f.file.frequency, 433_920_000);
         assert_eq!(f.label(), "Princeton");
         // Ten repeats of a 24-bit frame, which is what the encoder keys.
-        assert_eq!(f.file.bursts[0].pulses.len(), 240);
+        assert_eq!(f.file.bursts[0].len(), 240);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -26,7 +26,7 @@
 //! Checked against two off-air Meshtastic transmissions at SF11: both give a
 //! valid header checksum and a payload CRC that matches the transmitter's.
 
-use common::Decoded;
+use common::packet::{Entity, Fact, Fix, Id, Link, Named, Party, Proto, Quantity, ThingKind};
 /// Whitening sequence: an eight bit LFSR over x^8 + x^6 + x^5 + x^4 + 1,
 /// seeded all ones, taken a byte per step. Building it beats a 255 byte
 /// literal because the polynomial is the thing worth writing down.
@@ -565,402 +565,147 @@ pub fn symbol_count(length: usize, sf: u8, coding_rate: u8, has_crc: bool, ldro:
     8 + blocks as usize * (coding_rate as usize + 4)
 }
 
-/// One frame off the bus as a row: what the radio parameters were, what the
-/// header said, and whose packet it is where that can be read.
+/// What a LoRa packet says, whichever network is riding on it.
 ///
-/// Recognised the way an M17 transmission is, by its shape rather than by
-/// its frequency, because a chirp arrives wherever somebody put it: 433, 868
-/// and 915 MHz are all in use and none of them is only LoRa.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
-    use common::Value;
+/// Three networks share the modulation and none of them is the modulation:
+/// Meshtastic names its nodes in a clear header, MeshCore keeps its routing
+/// in the clear and its payload shut unless a channel key opens it, and
+/// LoRaWAN is sealed under keys nobody publishes. What the radio shape was is
+/// the keying and is not repeated here.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let r = Received::parse(bytes)?;
-    let cr = format!("4/{}", 4 + r.coding_rate);
-    let mut fields: Vec<(String, Value)> = vec![
-        ("spreading_factor".into(), Value::Int(i64::from(r.sf))),
-        ("bandwidth_hz".into(), Value::Float(r.bandwidth_hz)),
-        ("coding_rate".into(), Value::Text(cr.clone())),
-        ("sync_word".into(), Value::Text(format!("0x{:02x}", r.sync_word))),
-        ("payload_len".into(), Value::Int(r.payload.len() as i64)),
-    ];
-
-    let mut fix: Option<common::Position> = None;
-    let mut media = common::media::BYTES;
-    // Somebody typing into a phone, as opposed to a node reporting where it
-    // is or what its battery is doing. Only the first belongs in the
-    // message view.
-    let mut written = false;
-    let mut report = common::ReportDetail::Bare;
-    let mesh = r.meshtastic();
-    if let Some(m) = &mesh {
-        let dest = if m.is_broadcast() {
-            "broadcast".to_string()
-        } else {
-            format!("{:08x}", m.destination)
-        };
-        fields.extend([
-            ("source".into(), Value::Text(format!("{:08x}", m.source))),
-            ("destination".into(), Value::Text(dest)),
-            ("packet_id".into(), Value::Text(format!("{:08x}", m.packet_id))),
-            ("hops".into(), Value::Text(format!("{}/{}", m.hop_limit, m.hop_start))),
-            ("channel_hash".into(), Value::Int(i64::from(m.channel_hash))),
-        ]);
+    if let Some(m) = r.meshtastic() {
+        return Some(meshtastic_proto(&r, &m));
     }
-
-    // What the packet says, where the default key or one of the operator's
-    // channel keys opens it, and which channel that was.
-    let opened = r.meshtastic_message_on();
-    let channel_name: Option<String> = match (&mesh, &opened) {
-        (Some(_), Some((_, Some(name)))) => Some(name.clone()),
-        (Some(m), _) => m.well_known_channel().map(str::to_string),
-        _ => None,
-    };
-    if let Some(name) = &channel_name {
-        fields.push(("channel".into(), Value::Text(name.clone())));
+    if let Some(c) = r.meshcore() {
+        return Some(meshcore_proto(&r, &c));
     }
-    let body = opened.map(|(d, _)| d);
-    if let Some(d) = &body {
-        fields.push(("port".into(), Value::Text(d.port().into())));
-        if d.data.reply_id != 0 {
-            fields.push(("reply_to".into(), Value::Text(format!("{:08x}", d.data.reply_id))));
-        }
-        match &d.message {
-            crate::meshtastic::Message::Text(t) => {
-                fields.push(("text".into(), Value::Text(t.clone())));
-                media = common::media::TEXT;
-                written = true;
-            }
-            crate::meshtastic::Message::Position(p) => {
-                report = common::ReportDetail::Mesh {
-                    long_name: None,
-                    short_name: None,
-                    battery_pct: None,
-                    precision_bits: p.precision_bits,
-                    temperature_c: None,
-                    humidity_pct: None,
-                    pressure_hpa: None,
-                };
-                if let (Some(lat), Some(lon)) = (p.latitude, p.longitude) {
-                    fix = Some(common::Position {
-                        lat,
-                        lon,
-                        altitude_m: p.altitude.map(f64::from),
-                        speed_kt: None,
-                        course_deg: None,
-                    });
-                    fields.push(("latitude".into(), Value::Float(lat)));
-                    fields.push(("longitude".into(), Value::Float(lon)));
-                }
-                if let Some(a) = p.altitude {
-                    fields.push(("altitude_m".into(), Value::Int(i64::from(a))));
-                }
-                if let Some(s) = p.sats_in_view {
-                    fields.push(("satellites".into(), Value::Int(i64::from(s))));
-                }
-                // Worth showing: a low precision is the sender deliberately
-                // blurring where it is, not a poor fix.
-                if let Some(b) = p.precision_bits {
-                    fields.push(("precision_bits".into(), Value::Int(i64::from(b))));
-                }
-            }
-            crate::meshtastic::Message::NodeInfo(u) => {
-                report = common::ReportDetail::Mesh {
-                    long_name: (!u.long_name.is_empty()).then(|| u.long_name.clone()),
-                    short_name: (!u.short_name.is_empty()).then(|| u.short_name.clone()),
-                    battery_pct: None,
-                    precision_bits: None,
-                    temperature_c: None,
-                    humidity_pct: None,
-                    pressure_hpa: None,
-                };
-                fields.push(("name".into(), Value::Text(u.long_name.clone())));
-                fields.push(("short_name".into(), Value::Text(u.short_name.clone())));
-                if u.is_licensed {
-                    fields.push(("licensed".into(), Value::Bool(true)));
-                }
-            }
-            crate::meshtastic::Message::Telemetry(t) => {
-                report = common::ReportDetail::Mesh {
-                    long_name: None,
-                    short_name: None,
-                    battery_pct: t.battery_level,
-                    precision_bits: None,
-                    temperature_c: t.temperature,
-                    humidity_pct: t.relative_humidity,
-                    pressure_hpa: t.barometric_pressure,
-                };
-                if let Some(b) = t.battery_level {
-                    fields.push(("battery".into(), Value::Int(i64::from(b))));
-                }
-                if let Some(v) = t.voltage {
-                    fields.push(("voltage".into(), Value::Float(f64::from(v))));
-                }
-                if let Some(c) = t.channel_utilization {
-                    fields.push(("channel_util".into(), Value::Float(f64::from(c))));
-                }
-                if let Some(c) = t.temperature {
-                    fields.push(("temperature".into(), Value::Float(f64::from(c))));
-                }
-                if let Some(u) = t.uptime_seconds {
-                    fields.push(("uptime_s".into(), Value::Int(i64::from(u))));
-                }
-            }
-            crate::meshtastic::Message::Opaque => {}
-        }
+    if let Some(w) = r.lorawan() {
+        return Some(lorawan_proto(&w));
     }
+    Some(Proto::new("lora", "packet"))
+}
 
-    // MeshCore keeps its routing in the clear, so the shape of the packet
-    // reads whether or not its payload does; an advert is the whole node.
-    let core = r.meshcore();
-    let mut core_link: Option<common::Link> = None;
-    if let Some(p) = &core {
-        fields.push(("type".into(), Value::Text(p.payload_type.name().into())));
-        fields.push(("route".into(), Value::Text(p.route.name().into())));
-        fields.push(("hops".into(), Value::Int(p.hops() as i64)));
-        // MeshCore has no sync word of its own, so say plainly whether
-        // anything past the header agreed this is one.
-        fields.push(("verified".into(), Value::Bool(p.corroborated())));
-        if p.payload_type.is_encrypted() {
-            fields.push(("encrypted".into(), Value::Bool(true)));
-        }
-        if let Some(a) = p.advert() {
-            report = common::ReportDetail::MeshCore {
-                role: a.node_type.name(),
-                fixed: matches!(
-                    a.node_type,
-                    crate::meshcore::NodeType::Repeater
-                        | crate::meshcore::NodeType::RoomServer
-                        | crate::meshcore::NodeType::Sensor
-                ),
-            };
-            core_link =
-                Some(common::Link::beacon(common::Party::unit(format!("{:02x}", a.hash()))));
-            fields.push(("node".into(), Value::Text(a.node_type.name().into())));
-            fields.push(("node_hash".into(), Value::Text(format!("{:02x}", a.hash()))));
-            if let Some(n) = &a.name {
-                fields.push(("name".into(), Value::Text(n.clone())));
+/// What a Meshtastic packet says: who sent it to whom, and what was inside
+/// where a channel key opened it.
+fn meshtastic_proto(r: &Received, m: &Meshtastic) -> Proto {
+    let mut p = Proto::new("meshtastic", "packet")
+        .by(Entity::new("meshtastic", Id::Hex(u64::from(m.source))))
+        .between(Link {
+            from: Some(Party::unit(format!("{:08x}", m.source))),
+            to: Some(match m.is_broadcast() {
+                true => Party::broadcast(),
+                false => Party::unit(format!("{:08x}", m.destination)),
+            }),
+        });
+    let Some((d, _)) = r.meshtastic_message_on() else { return p };
+    p.kind = d.port();
+    match &d.message {
+        // Somebody typing into a phone, as opposed to a node reporting where
+        // it is or what its battery is doing.
+        crate::meshtastic::Message::Text(t) => p.saying(Fact::message(t.clone())),
+        crate::meshtastic::Message::Position(pos) => {
+            if let (Some(lat), Some(lon)) = (pos.latitude, pos.longitude) {
+                // A low precision is the sender deliberately blurring where
+                // it is, not a poor fix.
+                p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: pos.precision_bits }));
             }
-            if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
-                fix = Some(common::Position {
-                    lat,
-                    lon,
-                    altitude_m: None,
-                    speed_kt: None,
-                    course_deg: None,
-                });
-                fields.push(("latitude".into(), Value::Float(lat)));
-                fields.push(("longitude".into(), Value::Float(lon)));
-            }
-        }
-        if let Some((m, on)) = p.any_message() {
-            fields.push((
-                "channel".into(),
-                Value::Text(on.unwrap_or_else(|| "Public (default key)".into())),
-            ));
-            // The text travels as `sender: message`, and the name in front of
-            // it is part of the plaintext rather than a protocol field. A
-            // group message carries no signature, so anyone holding the
-            // channel key can write any name there; `text` is what was sent,
-            // and `from` is only what it claims to be.
-            //
-            // Named `sender` and not `from`, because `from` is the end of a
-            // link and this is a name typed into a phone. The message view
-            // prefers this one; the links directory keys on the node hash,
-            // which is at least something the radio said.
-            let (sender, body) = m.sender_and_body();
-            if let Some(s) = sender {
-                fields.push(("sender".into(), Value::Text(s.to_string())));
-            }
-            fields.push(("text".into(), Value::Text(body.to_string())));
-            media = common::media::TEXT;
-            written = true;
-        }
-    }
-
-    // LoRaWAN: the keys are per device and not published, so this is the
-    // metadata around a payload that stays shut. A join request is the
-    // exception and names the device outright.
-    let wan = r.lorawan();
-    if let Some(f) = &wan {
-        fields.push(("type".into(), Value::Text(f.mtype.name().into())));
-        match &f.body {
-            crate::lorawan::Body::Join(j) => {
-                fields.push(("dev_eui".into(), Value::Text(crate::lorawan::format_eui(j.dev_eui))));
-                fields
-                    .push(("join_eui".into(), Value::Text(crate::lorawan::format_eui(j.join_eui))));
-                fields.push(("dev_nonce".into(), Value::Int(i64::from(j.dev_nonce))));
-            }
-            crate::lorawan::Body::Data(d) => {
-                fields.push(("dev_addr".into(), Value::Text(format!("{:08x}", d.dev_addr))));
-                fields.push(("frame_counter".into(), Value::Int(i64::from(d.f_cnt))));
-                if let Some(p) = d.f_port {
-                    fields.push(("port".into(), Value::Int(i64::from(p))));
-                }
-                fields.push(("payload_len".into(), Value::Int(d.payload_len as i64)));
-                if d.adr {
-                    fields.push(("adr".into(), Value::Bool(true)));
-                }
-                if d.ack {
-                    fields.push(("ack".into(), Value::Bool(true)));
-                }
-                if d.f_pending {
-                    fields.push(("pending".into(), Value::Bool(true)));
-                }
-                if d.f_opts_len > 0 {
-                    fields.push(("mac_bytes".into(), Value::Int(i64::from(d.f_opts_len))));
-                }
-                // The payload is enciphered under a session key that is not
-                // public, so say so rather than leaving it to be inferred.
-                if d.payload_len > 0 {
-                    fields.push(("encrypted".into(), Value::Bool(true)));
-                }
-            }
-            crate::lorawan::Body::JoinAccept | crate::lorawan::Body::Opaque => {}
-        }
-    }
-
-    let shape = format!("SF{} BW{:.0}k {cr}", r.sf, r.bandwidth_hz / 1e3);
-    let detail = match &mesh {
-        Some(m) => {
-            let chan = match &channel_name {
-                Some(name) => format!(" on {name}"),
-                None => format!(" on channel #{:02x}", m.channel_hash),
-            };
-            // What it says comes first past the routing, since that is what
-            // a reader is looking for; the radio shape stays in front because
-            // it is what tells two networks apart.
-            let says = match body.as_ref().map(|d| (&d.message, d.port())) {
-                Some((crate::meshtastic::Message::Text(t), _)) => format!(", \"{t}\""),
-                Some((crate::meshtastic::Message::Position(p), _)) => {
-                    match (p.latitude, p.longitude) {
-                        (Some(lat), Some(lon)) => format!(", at {lat:.5}, {lon:.5}"),
-                        _ => ", position".to_string(),
-                    }
-                }
-                Some((crate::meshtastic::Message::NodeInfo(u), _)) => {
-                    format!(", is {} ({})", u.long_name, u.short_name)
-                }
-                Some((crate::meshtastic::Message::Telemetry(t), _)) => match t.battery_level {
-                    Some(b) => format!(", telemetry, battery {b}%"),
-                    None => ", telemetry".to_string(),
-                },
-                Some((crate::meshtastic::Message::Opaque, port)) => format!(", {port}"),
-                None => String::new(),
-            };
-            format!(
-                "{shape}, {:08x} to {}, {} of {} hops left{chan}{says}",
-                m.source,
-                if m.is_broadcast() { "everyone".into() } else { format!("{:08x}", m.destination) },
-                m.hop_limit,
-                m.hop_start,
+            p.maybe(
+                pos.altitude
+                    .map(|a| Fact::sensed(Quantity::Altitude, f64::from(a), common::Unit::Metre)),
             )
         }
-        None => match &core {
-            Some(p) => {
-                let mut s = format!("{shape}, {} {}", p.payload_type.name(), p.route.name());
-                if p.hops() > 0 {
-                    s.push_str(&format!(", {} hops", p.hops()));
-                }
-                if let Some(a) = p.advert() {
-                    match &a.name {
-                        Some(n) => s.push_str(&format!(", \"{n}\" ({})", a.node_type.name())),
-                        None => s.push_str(&format!(", {}", a.node_type.name())),
-                    }
-                    if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
-                        s.push_str(&format!(" at {lat:.5}, {lon:.5}"));
-                    }
-                } else if let Some((m, _)) = p.any_message() {
-                    let (sender, body) = m.sender_and_body();
-                    match sender {
-                        Some(who) => s.push_str(&format!(", {who}: \"{body}\"")),
-                        None => s.push_str(&format!(", \"{body}\"")),
-                    }
-                } else {
-                    // Nothing but the header said this was MeshCore, and a
-                    // packet from another network on the same sync word can
-                    // say that much. Do not let it read as a certainty.
-                    s.push_str(", header only");
-                }
-                s
+        crate::meshtastic::Message::NodeInfo(u) => {
+            let label = match u.long_name.is_empty() {
+                true => u.short_name.clone(),
+                false => u.long_name.clone(),
+            };
+            if let Some(e) = p.subject.as_mut() {
+                e.name = Some(label.clone());
             }
-            None => match &wan {
-                Some(f) => {
-                    let mut s = format!("{shape}, {}", f.mtype.name());
-                    match &f.body {
-                        crate::lorawan::Body::Join(j) => s.push_str(&format!(
-                            ", device {} joining {}",
-                            crate::lorawan::format_eui(j.dev_eui),
-                            crate::lorawan::format_eui(j.join_eui)
-                        )),
-                        crate::lorawan::Body::Data(d) => {
-                            s.push_str(&format!(", {:08x} frame {}", d.dev_addr, d.f_cnt));
-                            match d.f_port {
-                                Some(0) => s.push_str(", mac commands"),
-                                Some(p) => s.push_str(&format!(", port {p}")),
-                                None => {}
-                            }
-                            if d.payload_len > 0 {
-                                s.push_str(&format!(", {} bytes sealed", d.payload_len));
-                            }
-                        }
-                        crate::lorawan::Body::JoinAccept => s.push_str(", sealed"),
-                        crate::lorawan::Body::Opaque => {}
-                    }
-                    s
-                }
-                None => {
-                    format!("{shape}, {} byte payload, sync 0x{:02x}", r.payload.len(), r.sync_word)
-                }
-            },
-        },
-    };
-
-    let protocol = if mesh.is_some() {
-        "Meshtastic"
-    } else if core.is_some() {
-        "MeshCore"
-    } else if wan.is_some() {
-        "LoRaWAN"
-    } else {
-        "LoRa"
-    };
-
-    let link = mesh.as_ref().map(|m| common::Link {
-        from: Some(common::Party::unit(format!("{:08x}", m.source))),
-        to: Some(if m.is_broadcast() {
-            common::Party::broadcast()
-        } else {
-            common::Party::unit(format!("{:08x}", m.destination))
-        }),
-    });
-    let mut d = Decoded::bytes(protocol, center, 0.0, r.payload.clone())
-        .with_modulation(common::Modulation::Css)
-        .with_crc(r.crc_ok)
-        .with_detail(detail)
-        .with_fields(fields);
-    d.link = link.or(core_link);
-    d.position = fix;
-    d.report = report;
-    d.media_type = media;
-    d.written = written;
-    // A mesh node is a device: Meshtastic names itself in every header, and
-    // MeshCore in its advert, which is the packet a survey wants.
-    d.identity = mesh
-        .as_ref()
-        .map(|m| common::Identity::new("meshtastic", format!("{:08x}", m.source)))
-        .or_else(|| {
-            core.as_ref().and_then(|p| p.advert()).map(|a| {
-                common::Identity::new(
-                    "meshcore",
-                    a.public_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-                )
-            })
-        });
-    if let (Some(who), Some(name)) =
-        (d.identity.as_mut(), core.as_ref().and_then(|p| p.advert()).and_then(|a| a.name.clone()))
-    {
-        who.name = Some(name);
+            p.saying(Fact::Named(Named::new(label, ThingKind::Node)))
+        }
+        crate::meshtastic::Message::Telemetry(t) => p
+            .maybe(
+                t.battery_level
+                    .map(|b| Fact::sensed(Quantity::Battery, f64::from(b), common::Unit::Percent)),
+            )
+            .maybe(
+                t.voltage
+                    .map(|v| Fact::sensed(Quantity::Voltage, f64::from(v), common::Unit::Volt)),
+            )
+            .maybe(
+                t.temperature.map(|c| {
+                    Fact::sensed(Quantity::Temperature, f64::from(c), common::Unit::Celsius)
+                }),
+            )
+            .maybe(
+                t.relative_humidity
+                    .map(|h| Fact::sensed(Quantity::Humidity, f64::from(h), common::Unit::Percent)),
+            )
+            .maybe(t.barometric_pressure.map(|hpa| {
+                Fact::sensed(Quantity::Pressure, f64::from(hpa), common::Unit::HectoPascal)
+            })),
+        crate::meshtastic::Message::Opaque => p,
     }
-    Some(d)
+}
+
+/// What a MeshCore packet says: an advert is the whole node, and a message is
+/// whatever a channel key opened.
+fn meshcore_proto(_r: &Received, c: &crate::meshcore::Packet<'_>) -> Proto {
+    let mut p = Proto::new("meshcore", c.payload_type.name());
+    if let Some(a) = c.advert() {
+        let who = Entity::new("meshcore", Id::Key(a.public_key.to_vec().into_boxed_slice()));
+        let mut named = Named::new(
+            a.name.clone().unwrap_or_else(|| format!("{:02x}", a.hash())),
+            ThingKind::Node,
+        )
+        .playing(a.node_type.name());
+        // What it is decides how it is drawn: a repeater, a room server or a
+        // sensor is installed somewhere, a chat node is carried.
+        named.fixed = matches!(
+            a.node_type,
+            crate::meshcore::NodeType::Repeater
+                | crate::meshcore::NodeType::RoomServer
+                | crate::meshcore::NodeType::Sensor
+        );
+        p = p
+            .by(match &a.name {
+                Some(n) => who.named(n.clone()),
+                None => who,
+            })
+            .between(Link::beacon(Party::unit(format!("{:02x}", a.hash()))))
+            .saying(Fact::Named(named));
+        if let (Some(lat), Some(lon)) = (a.latitude, a.longitude) {
+            p = p.saying(Fact::Position(Fix { lat, lon, precision_bits: None }));
+        }
+    }
+    // The text travels as `sender: message`, and the name in front of it is
+    // part of the plaintext rather than a protocol field: a group message
+    // carries no signature, so anyone holding the channel key can write any
+    // name there. What was sent is the message; who it claims to be from is
+    // not evidence and stays in the frame.
+    match c.any_message() {
+        Some((m, _)) => p.saying(Fact::message(m.sender_and_body().1.to_string())),
+        None => p,
+    }
+}
+
+/// What a LoRaWAN frame says. The keys are per device and not published, so
+/// this is the metadata around a payload that stays shut; a join request is
+/// the exception and names the device outright.
+fn lorawan_proto(f: &crate::lorawan::Frame) -> Proto {
+    let p = Proto::new("lorawan", f.mtype.name());
+    match &f.body {
+        crate::lorawan::Body::Join(j) => p
+            .by(Entity::new("lorawan", Id::Text(crate::lorawan::format_eui(j.dev_eui))))
+            .between(Link::from(Party::unit(crate::lorawan::format_eui(j.dev_eui)))),
+        crate::lorawan::Body::Data(d) => p
+            .by(Entity::new("lorawan", Id::Hex(u64::from(d.dev_addr)))
+                .lasting(common::packet::Stability::Session))
+            .between(Link::from(Party::unit(format!("{:08x}", d.dev_addr)))),
+        crate::lorawan::Body::JoinAccept | crate::lorawan::Body::Opaque => p,
+    }
 }
 
 /// Sync words of the networks whose frames are believed without a payload

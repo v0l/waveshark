@@ -15,7 +15,9 @@
 //!
 //! Everything here is a pure function of bytes. Nothing knows about radios.
 
-use common::Decoded;
+use common::packet::{
+    Entity, Fact, Fix, Id, Link, Motion, Named, Party, Proto, Quantity, ThingKind,
+};
 /// A position, however it was encoded.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Position {
@@ -297,101 +299,88 @@ fn altitude(comment: &str) -> Option<i32> {
     comment.get(at + 3..at + 9)?.trim().parse().ok()
 }
 
-/// The decode an AX.25 frame becomes.
-pub fn decoded(frame: &crate::ax25::Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    fields.push(("from".into(), Value::Text(frame.source.to_string())));
-    fields.push(("to".into(), Value::Text(frame.destination.to_string())));
-    if !frame.path.is_empty() {
-        let path: Vec<String> = frame.path.iter().map(|a| a.to_string()).collect();
-        fields.push(("path".into(), Value::Text(path.join(","))));
-    }
-
+/// What an AX.25 frame says.
+///
+/// A callsign is both the address and the name: there is nothing else to call
+/// an APRS station. The destination is usually a software identifier rather
+/// than a station, which is why it is a group: a label many senders share,
+/// not somebody listening.
+pub fn read(frame: &crate::ax25::Frame) -> Proto {
     // The destination is not only an address: Mic-E hides half its latitude
     // in there, so the payload cannot be read without it.
-    let aprs_report = frame.is_ui().then(|| parse(&frame.info, &frame.destination.call)).flatten();
-
-    let mut fix = None;
-    let mut media = common::media::BYTES;
-    let mut written = false;
-    let mut report = common::ReportDetail::Bare;
-    let protocol = match &aprs_report {
-        Some(Report::Position { position, comment }) => {
-            fix = Some(common::Position {
-                lat: position.lat,
-                lon: position.lon,
-                altitude_m: position.altitude_ft.map(|f| f64::from(f) * 0.3048),
-                speed_kt: position.speed_kt,
-                course_deg: position.course_deg,
-            });
-            report = common::ReportDetail::Aprs {
-                symbol_table: position.symbol_table,
-                symbol_code: position.symbol_code,
-                comment: comment.clone(),
-            };
-            fields.push(("lat".into(), Value::Float(round(position.lat, 5))));
-            fields.push(("lon".into(), Value::Float(round(position.lon, 5))));
-            if let Some(v) = position.course_deg {
-                fields.push(("track_deg".into(), Value::Float(v)));
+    let report = frame.is_ui().then(|| parse(&frame.info, &frame.destination.call)).flatten();
+    let call = frame.source.to_string();
+    let mut p = Proto::new("aprs", kind_of(report.as_ref()))
+        .by(Entity::new("aprs", Id::Call(call.clone())).named(call.clone()))
+        .between(Link::between(
+            Party::unit(call.clone()),
+            Party::group(frame.destination.to_string()),
+        ));
+    match &report {
+        Some(Report::Position { position, .. }) => {
+            let (thing, fixed) = thing_of(position.symbol_code);
+            let mut named = Named::new(call, thing);
+            named.fixed = fixed;
+            p = p
+                .saying(Fact::Named(named))
+                .saying(Fact::Position(Fix {
+                    lat: position.lat,
+                    lon: position.lon,
+                    precision_bits: None,
+                }))
+                .saying(Fact::Motion(Motion {
+                    speed_kt: position.speed_kt,
+                    course_deg: position.course_deg,
+                    climb_ms: None,
+                    heading_deg: None,
+                }));
+            if let Some(ft) = position.altitude_ft {
+                p = p.saying(Fact::sensed(
+                    Quantity::Altitude,
+                    f64::from(ft) * 0.3048,
+                    common::Unit::Metre,
+                ));
             }
-            if let Some(v) = position.speed_kt {
-                fields.push(("ground_speed_kt".into(), Value::Float(v)));
-            }
-            if let Some(v) = position.altitude_ft {
-                fields.push(("altitude_ft".into(), Value::Int(i64::from(v))));
-            }
-            if let Some(c) = comment {
-                fields.push(("comment".into(), Value::Text(c.clone())));
-            }
-            "APRS-Position"
         }
-        Some(Report::Status(s)) => {
-            fields.push(("status".into(), Value::Text(s.clone())));
-            "APRS-Status"
-        }
+        // A message is addressed to a station and typed by whoever sent it. A
+        // position, a status and a telemetry frame are the radio talking
+        // about itself.
         Some(Report::Message { to, text }) => {
-            fields.push(("addressee".into(), Value::Text(to.clone())));
-            fields.push(("message".into(), Value::Text(text.clone())));
-            media = common::media::TEXT;
-            // A message is addressed to a station and was typed by whoever
-            // sent it. A position, a status and a telemetry frame are the
-            // radio talking about itself.
-            written = true;
-            "APRS-Message"
+            p.link.to = Some(Party::unit(to.clone()));
+            p = p.saying(Fact::message(text.clone()));
         }
-        Some(Report::Other(k)) => {
-            fields.push(("data_type".into(), Value::Text(k.to_string())));
-            "APRS-Other"
-        }
-        // Plenty of AX.25 is not APRS at all, and a frame that reached here
-        // passed its check sequence, so it is reported rather than dropped.
-        None => "AX25",
-    };
+        Some(Report::Status(_)) | Some(Report::Other(_)) | None => {}
+    }
+    p
+}
 
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        // A callsign is both the address and the name: there is nothing else
-        // to call an APRS station.
-        .by(common::Identity::new("aprs", frame.source.to_string()).named(frame.source.to_string()))
-        // The AX.25 addresses. A destination on APRS is usually a software
-        // identifier rather than a station, which is why it is a group: it
-        // is a label many senders share, not somebody listening.
-        .with_link(common::Link::between(
-            common::Party::unit(frame.source.to_string()),
-            common::Party::group(frame.destination.to_string()),
-        ))
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Afsk)
-        // Every frame here passed the X.25 frame check sequence in the
-        // demodulator, which is a real integrity check.
-        .with_crc(Some(true));
-    d.position = fix;
-    d.report = report;
-    d.media_type = media;
-    d.written = written;
-    d
+/// What a station is, from the symbol it draws itself with.
+///
+/// Coarse on purpose: the symbol set has a couple of hundred entries and what
+/// a view needs from it is whether to draw something that moves and roughly
+/// what it is.
+fn thing_of(code: char) -> (ThingKind, bool) {
+    match code {
+        '-' | '_' | '#' | '&' | 'r' | 'l' | 'I' | ';' | '=' => (ThingKind::Station, true),
+        '^' | '\'' => (ThingKind::Aircraft, false),
+        's' | 'Y' => (ThingKind::Vessel, false),
+        '>' | '<' | 'k' | 'v' | 'u' | 'j' => (ThingKind::Vehicle, false),
+        'O' => (ThingKind::Sonde, false),
+        '[' | 'b' => (ThingKind::Handset, false),
+        _ => (ThingKind::Unknown, false),
+    }
+}
+
+/// Which report it is, as the name a row matches on. Plenty of AX.25 is not
+/// APRS at all, and a frame that reached here passed its check sequence.
+fn kind_of(r: Option<&Report>) -> &'static str {
+    match r {
+        Some(Report::Position { .. }) => "position",
+        Some(Report::Status(_)) => "status",
+        Some(Report::Message { .. }) => "message",
+        Some(Report::Other(_)) => "other",
+        None => "ax25",
+    }
 }
 
 pub fn round(v: f64, places: i32) -> f64 {

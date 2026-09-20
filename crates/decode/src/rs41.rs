@@ -22,7 +22,7 @@ use crate::bits::crc16;
 use crate::geo::{ecef_to_geodetic, ecef_velocity_to_enu};
 use crate::rs::ReedSolomon;
 use crate::whiten;
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
 
 /// Header the sonde keys before anything else, as it arrives, least
 /// significant bit first. This is what a receiver correlates against: the
@@ -213,6 +213,15 @@ pub enum Flight {
 }
 
 impl Flight {
+    /// Which part of the flight it is, as the name a row matches on
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Flight::Ground => "ground",
+            Flight::Ascent => "ascent",
+            Flight::Descent => "descent",
+        }
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Flight::Ground => "on the ground",
@@ -743,58 +752,31 @@ impl Frame {
     }
 }
 
-/// What the protocols node makes of a sonde frame: which balloon it is,
-/// where, and how it is flying.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What a Vaisala RS41 frame says.
+///
+/// The sensor block is measurements the sonde cannot turn into degrees by
+/// itself: the calibration arrives sixteen bytes at a time over 51 frames, so
+/// whatever is following the flight holds the pieces and the temperature is
+/// stated once they add up.
+pub fn read(bytes: &[u8]) -> Option<Proto> {
     let f = parse(bytes)?;
-    let mut fields: Vec<(String, common::Value)> = vec![
-        ("serial".into(), common::Value::Text(f.serial.clone())),
-        ("frame".into(), common::Value::Int(f.frame_no as i64)),
-        ("battery_v".into(), common::Value::Float(f.battery_v as f64)),
-        ("state".into(), common::Value::Text(f.flight.label().into())),
-    ];
+    let mut p = Proto::new("rs41", f.flight.kind())
+        .by(Entity::new("vaisala", Id::Text(f.serial.clone())).made_by("Vaisala"))
+        .saying(Fact::Named(Named::new(f.serial.clone(), ThingKind::Sonde)));
     if f.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(f.altitude_m)));
-        fields.push(("climb_ms".into(), common::Value::Float(f.climb_ms)));
-        fields.push(("speed_kt".into(), common::Value::Float(f.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(f.course_deg)));
-        fields.push(("satellites".into(), common::Value::Int(f.satellites as i64)));
+        for fact in crate::facts::of_flight(
+            f.lat_deg,
+            f.lon_deg,
+            f.altitude_m,
+            f.climb_ms,
+            f.speed_kt,
+            f.course_deg,
+            Some(f.battery_v),
+        ) {
+            p = p.saying(fact);
+        }
     }
-    if let (Some(w), Some(t)) = (f.gps_week, f.gps_tow_ms) {
-        fields.push(("gps_week".into(), common::Value::Int(w as i64)));
-        fields.push(("gps_tow_ms".into(), common::Value::Int(t as i64)));
-    }
-    fields.push(("pcb_temp_c".into(), common::Value::Int(f.pcb_temp_c as i64)));
-    if f.bad_blocks > 0 {
-        fields.push(("bad_blocks".into(), common::Value::Int(f.bad_blocks as i64)));
-    }
-
-    let mut d = Decoded::bytes("rs41", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Fsk2)
-        .with_crc(Some(f.bad_blocks == 0))
-        .with_text(f.summary())
-        .with_detail(format!("frame {}, {:.1} V, {}", f.frame_no, f.battery_v, f.flight.label()))
-        .with_fields(fields)
-        .by(common::Identity::new("vaisala", f.serial.clone()).made_by("Vaisala"));
-    if f.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: f.altitude_m,
-                climb_ms: f.climb_ms,
-                battery_v: f.battery_v,
-                satellites: f.satellites,
-                descending: f.flight == Flight::Descent,
-                sensors: f.meas.map(|meas| common::SondeSensors { meas, calibration: f.subframe }),
-            })
-            .at_position(common::Position {
-                lat: f.lat_deg,
-                lon: f.lon_deg,
-                altitude_m: Some(f.altitude_m),
-                speed_kt: Some(f.speed_kt),
-                course_deg: Some(f.course_deg),
-            });
-    }
-    Some(d)
+    Some(p)
 }
 
 #[cfg(test)]

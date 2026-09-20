@@ -80,7 +80,7 @@ impl Signal for Dmr {
                     dmr::DmrEvent::Data { bits, .. } => (dmr::POS_DATA, bits),
                 };
                 let bytes = dmr::encode_burst(pos, framer.colour, lc.as_ref(), &bits);
-                if let Some(d) = dmr::decoded(&bytes, chan.hz()) {
+                if let Some(d) = dmr::read(&bytes) {
                     rows.push(d);
                 }
             }

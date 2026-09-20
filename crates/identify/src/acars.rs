@@ -59,11 +59,11 @@ impl Signal for Acars {
             framer.process(&bits, &mut blocks);
             for block in &blocks {
                 if let Some(m) = acars::parse(block) {
-                    rows.push(acars::decoded(&m, block, chan.hz()));
+                    rows.push(acars::read(&m));
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

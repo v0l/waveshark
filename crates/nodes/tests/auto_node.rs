@@ -1,7 +1,8 @@
 //! One node over a span, told nothing, against recordings of three kinds of
 //! thing: keyed sensors, Mode S replies and a pager transmission.
 
-use common::{C32, Hz, PacketBody};
+use common::packet::Symbols;
+use common::{C32, Hz};
 use dsp::Mixer;
 use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
@@ -18,22 +19,20 @@ fn fixture(name: &str) -> Option<common::IqBuf> {
 
 /// Run a stream through one stage, in radio-sized blocks, and collect the
 /// packets it puts out, letting the last source drain.
-fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::Packet> {
+fn packets(stage: NodeSpec, rate: f64, center: Hz, iq: &[C32]) -> Vec<common::packet::Packet> {
     let mut g = build_chain(StreamSpec::iq(rate, center), &[stage], &registry()).expect("build");
     let mut out = Vec::new();
     let silence = vec![C32::new(0.0, 0.0); 16_384];
     for block in iq.chunks(16_384).chain(std::iter::repeat_n(&silence[..], 4)) {
         g.feed_iq(block).expect("run");
-        match g.output() {
-            pipeline::Payload::Packets(p) => out.extend_from_slice(p),
-            pipeline::Payload::Frames(f) => out.extend(f.iter().map(|f| {
-                let mut f = f.clone();
-                if f.center_hz == 0 {
-                    f.center_hz = center.0;
+        if let pipeline::Payload::Packets(p) = g.output() {
+            out.extend(p.iter().map(|p| {
+                let mut p = p.clone();
+                if p.carrier.center_hz == 0 {
+                    p.carrier.center_hz = center.0;
                 }
-                common::Packet::of_frame(0, 0, f)
-            })),
-            _ => {}
+                p
+            }));
         }
     }
     out
@@ -69,7 +68,7 @@ fn run_auto(rate: f64, center: Hz, iq: &[C32]) -> Ran {
 
 /// What one run of the auto node over a capture left behind.
 struct Ran {
-    packets: Vec<common::Packet>,
+    packets: Vec<common::packet::Packet>,
     /// The transmitters a front end inside had learned by the end, as
     /// (front end, what it calls the transmitter, how sure it still is).
     locked: Vec<(String, String, f32)>,
@@ -77,14 +76,16 @@ struct Ran {
     sources: u64,
 }
 
-fn decodes(pk: &[common::Packet], model: &str) -> Vec<(u64, String)> {
+fn decodes(pk: &[common::packet::Packet], model: &str) -> Vec<(u64, String)> {
     let protocols = decode::Protocols::published();
     let mut out = Vec::new();
     for p in pk {
-        let Some(pkg) = p.package() else { continue };
-        for r in protocols.decode_all(&pkg) {
+        let Some(Symbols::Pulses(pulses)) = p.keying.as_ref().map(|k| &k.symbols) else {
+            continue;
+        };
+        for r in protocols.decode_all(pulses) {
             if r.model.contains(model) && r.proof.passed() {
-                out.push((p.center_hz(), r.to_string()));
+                out.push((p.carrier.center_hz, r.to_string()));
             }
         }
     }
@@ -115,7 +116,7 @@ fn four_sensors_placed_anywhere_all_decode() {
     // packet is the whole thing, but the whole thing is there.
     let longest = pk
         .iter()
-        .filter_map(|p| p.iq.as_ref())
+        .filter_map(|p| p.carrier.iq.as_ref())
         .map(|iq| {
             assert!(!iq.samples.is_empty() && iq.rate > 0.0, "a burst without samples or rate");
             iq.samples.len() as f64 / iq.rate
@@ -145,9 +146,8 @@ fn mode_s_replies_are_heard_without_being_asked_for() {
     let rate = buf.rate.as_f64();
     let alone = packets(NodeSpec::new("mode_s"), rate, buf.center, &buf.samples);
     let auto = packets(NodeSpec::new("auto"), rate, buf.center, &buf.samples);
-    let frames = |pk: &[common::Packet]| {
-        pk.iter().filter(|p| matches!(p.body, PacketBody::Frame(_))).count()
-    };
+    let frames =
+        |pk: &[common::packet::Packet]| pk.iter().filter(|p| !p.bytes().is_empty()).count();
     assert!(frames(&alone) > 10, "the Mode S stage alone heard {} frames", frames(&alone));
     assert_eq!(frames(&auto), frames(&alone), "the auto node hears what the Mode S stage does");
 }
@@ -195,19 +195,18 @@ fn a_pager_transmission_somewhere_in_the_span_becomes_a_page() {
     iq.extend((0..lead).map(|_| noise()));
 
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let frames: Vec<&common::Packet> =
-        pk.iter().filter(|p| matches!(p.body, PacketBody::Frame(_))).collect();
+    let frames: Vec<&common::packet::Packet> =
+        pk.iter().filter(|p| !p.bytes().is_empty()).collect();
     assert!(!frames.is_empty(), "no frame came out; packets: {}", pk.len());
     let f = frames[0];
     assert!(
-        (f.center_hz() as f64 - (center.as_f64() + offset)).abs() < 5_000.0,
+        (f.carrier.center_hz as f64 - (center.as_f64() + offset)).abs() < 5_000.0,
         "page at {}",
-        f.center_hz()
+        f.carrier.center_hz
     );
-    let PacketBody::Frame(frame) = &f.body else { unreachable!() };
-    let pages = decode::pocsag::decoded(&frame.bytes, Hz(f.center_hz()));
+    let pages = decode::pocsag::read(f.bytes());
     assert_eq!(pages.len(), 1, "{pages:?}");
-    assert_eq!(pages[0].text.as_deref(), Some("MOVE TO CHANNEL 2"));
+    assert_eq!(pages[0].wrote(), Some("MOVE TO CHANNEL 2"));
 }
 
 #[test]
@@ -257,19 +256,19 @@ fn a_lora_burst_somewhere_in_the_span_is_named_a_chirp() {
     // It leaves the node as a packet carrying its measurement, with no
     // timings, which is what a log or a list gets to show for it.
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let measured: Vec<(u64, &common::Measure)> =
-        pk.iter().filter_map(|p| p.measure.as_ref().map(|m| (p.center_hz(), m))).collect();
+    let measured: Vec<(u64, common::packet::Keying)> =
+        pk.iter().filter_map(|p| p.keying.clone().map(|k| (p.carrier.center_hz, k))).collect();
     let (hz, chirp) = measured
         .iter()
-        .find(|(_, m)| m.modulation == common::Modulation::Chirp)
+        .find(|(_, k)| k.modulation == common::Modulation::Chirp)
         .unwrap_or_else(|| {
             panic!(
                 "no chirp measurement among {:?}",
-                measured.iter().map(|(_, m)| m.summary()).collect::<Vec<_>>()
+                measured.iter().map(|(_, k)| k.modulation).collect::<Vec<_>>()
             )
         });
-    assert!(chirp.sweep_hz_s.abs() > 1e6, "{}", chirp.summary());
-    assert!(chirp.bandwidth_hz > 60_000.0, "{}", chirp.summary());
+    assert!(chirp.params.sweep_hz_s.abs() > 1e6, "{chirp:?}");
+    assert!(chirp.params.bandwidth_hz > 60_000.0, "{chirp:?}");
     let at = *hz as f64 - center.as_f64();
     assert!((at - offset).abs() < 20_000.0, "measured at {at:+.0} Hz, sent at {offset:+.0}");
 }
@@ -337,17 +336,11 @@ fn an_m17_transmission_anywhere_in_the_span_is_found_and_read() {
     iq.extend((0..600_000).map(|_| noise()));
 
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let rows: Vec<pipeline::event::Decoded> = pk
-        .iter()
-        .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => decode::m17::decoded(&f.bytes, Hz(p.center_hz())),
-            _ => None,
-        })
-        .collect();
-    let setup = rows.iter().find(|d| d.protocol == "M17-Setup");
+    let rows: Vec<common::packet::Proto> =
+        pk.iter().filter_map(|p| decode::m17::read(p.bytes())).collect();
+    let setup = rows.iter().find(|d| d.kind == "link_setup");
     assert!(setup.is_some(), "nothing read as M17; {} packets", pk.len());
-    let from = setup.unwrap().fields.iter().find(|(k, _)| k == "from").map(|(_, v)| v.to_string());
-    assert_eq!(from.as_deref(), Some("M0ABC"));
+    assert_eq!(setup.unwrap().parties().0, Some("M0ABC"));
 }
 
 /// A real DMR capture through the auto node: no frequency told, only a span.
@@ -380,20 +373,13 @@ fn auto_finds_dmr_in_a_real_capture() {
         .collect();
 
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let dmr: Vec<_> = pk
-        .iter()
-        .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => decode::dmr::decoded(&f.bytes, Hz(p.center_hz())),
-            _ => None,
-        })
-        .collect();
+    let dmr: Vec<_> = pk.iter().filter_map(|p| decode::dmr::read(p.bytes())).collect();
     assert!(!dmr.is_empty(), "auto placed no DMR that decoded; {} packets", pk.len());
     let d = &dmr[0];
-    assert_eq!(d.protocol, "DMR-Voice");
-    // The over carried audio, so a call-list row would be playable.
-    let carried = pk.iter().any(|p| p.audio.is_some());
-    assert!(carried, "the DMR over reached the packet with no audio");
-    eprintln!("auto decoded {} DMR row(s), audio present={carried}", dmr.len());
+    assert_eq!(d.id, "dmr");
+    // The speech is not on the packets: an over is stated on the voice port,
+    // which is where a call-list row plays it back from.
+    eprintln!("auto decoded {} DMR row(s)", dmr.len());
 }
 
 /// A real LoRa capture through the auto node: no frequency told, only a span.
@@ -414,14 +400,11 @@ fn auto_finds_lora_in_a_real_capture() {
     let rate = 2_000_000.0;
     let center = Hz(869_525_000);
     let pk = packets(NodeSpec::new("auto"), rate, center, &iq);
-    let lora: Vec<_> = pk
+    let lora: Vec<_> = pk.iter().filter_map(|p| decode::lora::read(p.bytes())).collect();
+    let chirps = pk
         .iter()
-        .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => decode::lora::decoded(&f.bytes, Hz(p.center_hz())),
-            _ => None,
-        })
-        .collect();
-    let chirps = pk.iter().filter(|p| p.modulation() == Some(common::Modulation::Chirp)).count();
+        .filter(|p| p.keying.as_ref().map(|k| k.modulation) == Some(common::Modulation::Chirp))
+        .count();
     // The one Meshtastic packet in the capture, out of the three rows the
     // span produces. Pinned, because the way the verdict path breaks is a
     // second row for the same packet or a decode replaced by a chirp
@@ -457,14 +440,15 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
     }
     let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
     let Ran { packets: pk, locked, .. } = run_auto(buf.rate.as_f64(), buf.center, &buf.samples);
-    let rows: Vec<_> = pk
+    let rows: Vec<_> = pk.iter().filter_map(|p| decode::elrs::read(p.bytes())).collect();
+    let measured = pk
         .iter()
-        .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => decode::elrs::decoded(&f.bytes, Hz(p.center_hz())),
-            _ => None,
+        .filter(|p| {
+            p.keying
+                .as_ref()
+                .is_some_and(|k| matches!(k.how, common::packet::Knowledge::Measured { .. }))
         })
-        .collect();
-    let measured = pk.iter().filter(|p| p.measure.is_some()).count();
+        .count();
     // Sixteen packets on four channel visits, four to a visit, and eighteen
     // rows in all. Pinned exactly: the way this breaks is a packet lost to a
     // floor or a splice, and "twelve or more" would not say so.
@@ -495,19 +479,17 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
     assert_eq!(locked[0].1, "6f37");
     assert_eq!(locked[0].2, 1.0, "the lock lost confidence: {locked:?}");
     for r in &rows {
-        assert_eq!(r.identity.as_ref().map(|i| i.id.as_str()), Some("6f37"), "{r:?}");
-        let detail = r.detail.as_deref().unwrap_or("");
-        // Sticks centred, throttle low, disarmed: what the handset was doing.
-        assert!(detail.contains("rc 51") || detail.contains("rc 50"), "{detail}");
-        assert!(detail.contains(" 86 "), "throttle was low: {detail}");
-        assert!(!detail.contains("armed"), "{detail}");
+        assert_eq!(r.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("6f37"), "{r:?}");
         // The sticks the views draw, as microseconds rather than as counts.
         // This is a Full rate, so eight channels arrive: the four sticks and
         // AUX2-5, with nothing said about AUX6-9. The throttle is at 988 us,
-        // the bottom of the CRSF span, which is the raw 86 the detail shows.
-        let common::ReportDetail::Control { channels, armed, uplink_power_mw } = &r.report else {
-            panic!("an rc packet with no control report: {r:?}")
+        // the bottom of the CRSF span.
+        let Some(common::packet::Fact::Control(sticks)) =
+            r.facts.iter().find(|f| matches!(f, common::packet::Fact::Control(_)))
+        else {
+            panic!("an rc packet with no sticks: {r:?}")
         };
+        let common::packet::Sticks { channels, armed, uplink_power_mw } = sticks;
         assert_eq!(armed, &Some(false), "{r:?}");
         assert!(channels[..8].iter().all(Option::is_some), "{channels:?}");
         assert!(channels[8..].iter().all(Option::is_none), "{channels:?}");
@@ -522,8 +504,11 @@ fn auto_reads_an_expresslrs_handset_in_a_real_capture() {
         // packet says rather than what the transmitter was told to do.
         assert_eq!(uplink_power_mw, &Some(10), "{r:?}");
     }
-    let channels: std::collections::BTreeSet<u64> =
-        rows.iter().map(|r| r.center.0 / 100_000).collect();
+    let channels: std::collections::BTreeSet<u64> = pk
+        .iter()
+        .filter(|p| decode::elrs::read(p.bytes()).is_some())
+        .map(|p| p.carrier.center_hz / 100_000)
+        .collect();
     // The four channel visits in the capture, in hundreds of kilohertz.
     assert_eq!(channels, [24084, 24114, 24125, 24224].into_iter().collect(), "{channels:?}");
 }
@@ -545,14 +530,12 @@ fn a_hopping_link_is_one_transmitter_on_a_busy_band() {
     };
     let Ran { packets: pk, locked, sources } =
         run_auto(buf.rate.as_f64(), buf.center, &buf.samples);
-    let rows: Vec<_> = pk
+    let rows: Vec<_> = pk.iter().filter_map(|p| decode::elrs::read(p.bytes())).collect();
+    let visits: std::collections::BTreeSet<u64> = pk
         .iter()
-        .filter_map(|p| match &p.body {
-            PacketBody::Frame(f) => decode::elrs::decoded(&f.bytes, Hz(p.center_hz())),
-            _ => None,
-        })
+        .filter(|p| decode::elrs::read(p.bytes()).is_some())
+        .map(|p| p.carrier.center_hz)
         .collect();
-    let visits: std::collections::BTreeSet<u64> = rows.iter().map(|r| r.center.0).collect();
     assert_eq!(rows.len(), 107, "{} ExpressLRS rows of {} packets", rows.len(), pk.len());
     assert_eq!(visits.len(), 30, "{visits:?}");
     // The fifty-three sources the detector opens in two seconds, which is the
@@ -562,7 +545,8 @@ fn a_hopping_link_is_one_transmitter_on_a_busy_band() {
     // One handset, and it is the same one throughout: a second link id here
     // would be a CRC seeded from the wrong two bytes agreeing by chance.
     assert!(
-        rows.iter().all(|r| r.identity.as_ref().map(|i| i.id.as_str()) == Some("6f37")),
+        rows.iter()
+            .all(|r| r.subject.as_ref().map(|e| e.id.to_string()).as_deref() == Some("6f37")),
         "more than one link"
     );
     // The lock the handset's front end published, still believed after every
@@ -609,11 +593,15 @@ fn a_channel_that_decoded_is_remembered() {
         g.feed_iq(block).unwrap();
         if let pipeline::Payload::Packets(p) = g.output() {
             rows += p.len();
-            measures += p.iter().filter(|p| p.measure.is_some()).count();
-            decoded += p
+            measures += p
                 .iter()
-                .filter(|p| matches!(&p.body, PacketBody::Frame(f) if decode::lora::decoded(&f.bytes, Hz(p.center_hz())).is_some()))
+                .filter(|p| {
+                    p.keying.as_ref().is_some_and(|k| {
+                        matches!(k.how, common::packet::Knowledge::Measured { .. })
+                    })
+                })
                 .count();
+            decoded += p.iter().filter(|p| decode::lora::read(p.bytes()).is_some()).count();
         }
     }
     // The one Meshtastic packet in the capture, the five rows the receiver

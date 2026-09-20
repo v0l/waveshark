@@ -27,7 +27,8 @@
 //! is already known. Both are implemented here: [`cpr_global`] for a cold
 //! start from two frames, [`cpr_local`] for the cheap path afterwards.
 
-use common::Decoded;
+use common::Cpr;
+use common::packet::{Entity, Fact, Id, Link, Motion, Named, Party, Proto, Quantity, ThingKind};
 use std::fmt;
 
 /// A parsed 1090 MHz frame.
@@ -580,139 +581,117 @@ pub fn cpr_local(reference: (f64, f64), cpr: (u32, u32), odd: bool) -> (f64, f64
     (lat, lon)
 }
 
-/// The decode a Mode S frame becomes.
+/// What a Mode S frame says.
 ///
-/// Takes the bytes rather than the demodulator's own frame record: what
-/// travels on the packet bus is the bytes, with the level and the samples the
-/// demodulator measured carried alongside them on the frame.
-pub fn decoded(frame: &Frame, bytes: &[u8], center: common::Hz) -> Decoded {
-    use common::Value;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-    // What the map needs, typed, so nothing downstream parses these bytes a
-    // second time to find it.
-    let mut air = Air::default();
-    if let Some(icao) = frame.icao {
-        fields.push(("icao".into(), Value::Text(format!("{icao:06x}"))));
-    }
-    let protocol = match &frame.kind {
-        Message::Identification { callsign, category } => {
-            fields.push(("callsign".into(), Value::Text(callsign.clone())));
-            fields.push(("category".into(), Value::Int(*category as i64)));
-            "ADSB-Identification"
-        }
-        Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
-            air.altitude_ft = *altitude_ft;
-            air.cpr = Some(common::Cpr { odd: *odd, lat: *lat_cpr, lon: *lon_cpr });
-            if let Some(alt) = altitude_ft {
-                fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
-            }
-            // The encoded halves are reported as they arrive. Turning a pair
-            // of them into a latitude needs state across frames, which is a
-            // tracker's job rather than a decoder's.
-            fields.push(("cpr_odd".into(), Value::Bool(*odd)));
-            fields.push(("lat_cpr".into(), Value::Int(*lat_cpr as i64)));
-            fields.push(("lon_cpr".into(), Value::Int(*lon_cpr as i64)));
-            "ADSB-Position"
-        }
-        Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
-            // On the ground, so the altitude that goes with this position is
-            // zero and not whatever it was reporting on the way down.
-            air.altitude_ft = Some(0);
-            air.cpr = Some(common::Cpr { odd: *odd, lat: *lat_cpr, lon: *lon_cpr });
-            fields.push(("cpr_odd".into(), Value::Bool(*odd)));
-            fields.push(("lat_cpr".into(), Value::Int(*lat_cpr as i64)));
-            fields.push(("lon_cpr".into(), Value::Int(*lon_cpr as i64)));
-            "ADSB-Surface"
-        }
-        Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
-            air.ground_speed_kt = Some(*ground_speed_kt);
-            air.track_deg = Some(*track_deg);
-            air.vertical_rate_fpm = Some(*vertical_rate_fpm);
-            fields.push(("ground_speed_kt".into(), Value::Float(round1(*ground_speed_kt))));
-            fields.push(("track_deg".into(), Value::Float(round1(*track_deg))));
-            fields.push(("vertical_rate_fpm".into(), Value::Int(*vertical_rate_fpm as i64)));
-            "ADSB-Velocity"
-        }
-        Message::Unsupported { type_code } => {
-            fields.push(("type_code".into(), Value::Int(*type_code as i64)));
-            "ADSB-Other"
-        }
-        // A reply to a radar, which is where the weather is: an aircraft's
-        // wind and temperature go out in answer to an interrogation and never
-        // in a broadcast.
-        Message::CommB { altitude_ft, squawk, report } => {
-            air.altitude_ft = *altitude_ft;
-            air.squawk = *squawk;
-            if let Some(crate::bds::Report::Meteo(m)) = report {
-                if let (Some(kt), Some(deg)) = (m.wind_kt, m.wind_dir_deg) {
-                    air.wind = Some((kt, deg));
-                }
-                air.temp_c = Some(m.temp_c);
-            }
-            if let Some(crate::bds::Report::TrackTurn { track_deg, ground_speed_kt, .. }) = report {
-                air.ground_speed_kt = *ground_speed_kt;
-                air.track_deg = *track_deg;
-            }
-            if let Some(alt) = altitude_ft {
-                fields.push(("altitude_ft".into(), Value::Int(*alt as i64)));
-            }
-            if let Some(sq) = squawk {
-                fields.push(("squawk".into(), Value::Text(format!("{sq:04}"))));
-            }
-            match report {
-                Some(r) => {
-                    fields.push(("bds".into(), Value::Text(r.bds().to_string())));
-                    commb_fields(r, &mut fields);
-                    match r {
-                        crate::bds::Report::Meteo(_) => "ModeS-Weather",
-                        crate::bds::Report::Identification { .. } => "ModeS-Ident",
-                        crate::bds::Report::TrackTurn { .. } => "ModeS-Track",
-                        crate::bds::Report::HeadingSpeed { .. } => "ModeS-Speed",
-                        crate::bds::Report::VerticalIntent { .. } => "ModeS-Intent",
-                        crate::bds::Report::Capability { .. } => "ModeS-Capability",
-                    }
-                }
-                // The register is only a guess, and the frame is worth
-                // reporting without one: it still says this aircraft is up
-                // there and how high.
-                None => "ModeS-CommB",
-            }
-        }
-        // A reply to an interrogation, which is most of what a busy sky
-        // sounds like. Worth reporting: it says an aircraft is up there, and
-        // its address is the only identity it gives.
-        Message::ShortReply => "ModeS-Reply",
-    };
-    let detail = fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-    let mut d = Decoded::bytes(protocol, center, 0.0, bytes.to_vec())
-        .with_detail(detail)
-        .with_fields(fields)
-        .with_modulation(common::Modulation::Ppm)
-        // Only the extended squitters carry a CRC of their own. A short reply
-        // is believed because its address is one an ADS-B frame proved, which
-        // is corroboration rather than an integrity check.
-        .with_crc(matches!(frame.df, 17 | 18).then_some(true))
-        .reporting(air.into());
+/// A position frame carries half a place, so it states the compact halves and
+/// the tracker resolves them: a decoder that answered with a latitude would be
+/// inventing one. Height is a reading rather than part of a place, because an
+/// aircraft sends one in frames that say nothing about where it is.
+pub fn read(frame: &Frame) -> Proto {
+    let mut p = Proto::new("adsb", kind_of(&frame.kind));
     if let Some(icao) = frame.icao {
         let id = format!("{icao:06x}");
-        d.link = Some(common::Link::beacon(common::Party::unit(id.clone())));
-        let mut who = common::Identity::new("adsb", id);
-        // The callsign is the aircraft naming itself, which is what a device
-        // list shows next to the address nobody can read.
-        match &frame.kind {
-            Message::Identification { callsign, .. } => who.name = Some(callsign.clone()),
-            // A Comm-B identification register is the same aircraft naming
-            // itself, in answer to a radar rather than in a broadcast, and it
-            // is the only name some aircraft ever give.
-            Message::CommB {
-                report: Some(crate::bds::Report::Identification { callsign }),
-                ..
-            } => who.name = Some(callsign.clone()),
-            _ => {}
-        }
-        d.identity = Some(who);
+        p = p
+            .by(Entity::new("adsb", Id::Hex(u64::from(icao))))
+            .between(Link::beacon(Party::unit(id)));
     }
-    d
+    match &frame.kind {
+        Message::Identification { callsign, .. } => {
+            p = p.saying(Fact::Named(Named::new(callsign.clone(), ThingKind::Aircraft)));
+            if let Some(e) = p.subject.as_mut() {
+                e.name = Some(callsign.clone());
+            }
+        }
+        Message::AirbornePosition { altitude_ft, odd, lat_cpr, lon_cpr } => {
+            p = p.saying(Fact::PartialPosition(Cpr { odd: *odd, lat: *lat_cpr, lon: *lon_cpr }));
+            p = p.maybe(altitude_ft.map(feet));
+        }
+        Message::SurfacePosition { odd, lat_cpr, lon_cpr } => {
+            // On the ground, so the height that goes with this position is
+            // zero and not whatever it was reporting on the way down.
+            p = p
+                .saying(Fact::PartialPosition(Cpr { odd: *odd, lat: *lat_cpr, lon: *lon_cpr }))
+                .saying(feet(0));
+        }
+        Message::Velocity { ground_speed_kt, track_deg, vertical_rate_fpm } => {
+            p = p.saying(Fact::Motion(Motion {
+                speed_kt: Some(*ground_speed_kt),
+                course_deg: Some(*track_deg),
+                climb_ms: Some(f64::from(*vertical_rate_fpm) * FPM_TO_MS),
+                heading_deg: None,
+            }));
+        }
+        Message::CommB { altitude_ft, report, .. } => {
+            p = p.maybe(altitude_ft.map(feet));
+            match report {
+                Some(crate::bds::Report::Meteo(m)) => {
+                    if let (Some(kt), Some(deg)) = (m.wind_kt, m.wind_dir_deg) {
+                        p = p
+                            .saying(Fact::sensed(Quantity::WindSpeed, kt, common::Unit::Knot))
+                            .saying(Fact::sensed(
+                                Quantity::WindDirection,
+                                deg,
+                                common::Unit::Degree,
+                            ));
+                    }
+                    p = p.saying(Fact::sensed(
+                        Quantity::Temperature,
+                        m.temp_c,
+                        common::Unit::Celsius,
+                    ));
+                }
+                Some(crate::bds::Report::TrackTurn { track_deg, ground_speed_kt, .. }) => {
+                    p = p.saying(Fact::Motion(Motion {
+                        speed_kt: *ground_speed_kt,
+                        course_deg: *track_deg,
+                        climb_ms: None,
+                        heading_deg: None,
+                    }));
+                }
+                Some(crate::bds::Report::Identification { callsign }) => {
+                    // The same aircraft naming itself, in answer to a radar
+                    // rather than in a broadcast, and the only name some of
+                    // them ever give.
+                    p = p.saying(Fact::Named(Named::new(callsign.clone(), ThingKind::Aircraft)));
+                    if let Some(e) = p.subject.as_mut() {
+                        e.name = Some(callsign.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Message::Unsupported { .. } | Message::ShortReply => {}
+    }
+    p
+}
+
+/// A height the frame reported, in the unit every reading is stated in
+fn feet(ft: i32) -> Fact {
+    Fact::sensed(Quantity::Altitude, f64::from(ft) * 0.3048, common::Unit::Metre)
+}
+
+/// Feet a minute as metres a second, which is the unit a climb is stated in
+const FPM_TO_MS: f64 = 0.00508;
+
+/// Which message it is, as the name a row matches on
+fn kind_of(m: &Message) -> &'static str {
+    match m {
+        Message::Identification { .. } => "identification",
+        Message::AirbornePosition { .. } => "airborne_position",
+        Message::SurfacePosition { .. } => "surface_position",
+        Message::Velocity { .. } => "velocity",
+        Message::Unsupported { .. } => "other",
+        Message::ShortReply => "reply",
+        Message::CommB { report, .. } => match report {
+            Some(crate::bds::Report::Meteo(_)) => "weather",
+            Some(crate::bds::Report::Identification { .. }) => "identification",
+            Some(crate::bds::Report::TrackTurn { .. }) => "track",
+            Some(crate::bds::Report::HeadingSpeed { .. }) => "heading_speed",
+            Some(crate::bds::Report::VerticalIntent { .. }) => "vertical_intent",
+            Some(crate::bds::Report::Capability { .. }) => "capability",
+            None => "comm_b",
+        },
+    }
 }
 
 /// The fields of one Comm-B register, named the way the rest of the log names
@@ -794,34 +773,6 @@ pub fn commb_fields(r: &crate::bds::Report, fields: &mut Vec<(String, common::Va
 
 pub fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
-}
-
-/// The aircraft fields as they are collected, before they become a report.
-#[derive(Default)]
-struct Air {
-    altitude_ft: Option<i32>,
-    ground_speed_kt: Option<f64>,
-    track_deg: Option<f64>,
-    vertical_rate_fpm: Option<i32>,
-    squawk: Option<u16>,
-    wind: Option<(f64, f64)>,
-    temp_c: Option<f64>,
-    cpr: Option<common::Cpr>,
-}
-
-impl From<Air> for common::ReportDetail {
-    fn from(a: Air) -> Self {
-        common::ReportDetail::Aircraft {
-            altitude_ft: a.altitude_ft,
-            ground_speed_kt: a.ground_speed_kt,
-            track_deg: a.track_deg,
-            vertical_rate_fpm: a.vertical_rate_fpm,
-            squawk: a.squawk,
-            wind: a.wind,
-            temp_c: a.temp_c,
-            cpr: a.cpr,
-        }
-    }
 }
 
 #[cfg(test)]

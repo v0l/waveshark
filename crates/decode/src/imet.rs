@@ -23,7 +23,7 @@
 //! `imet/imet1rs_dft.c`.
 
 use crate::bits::crc16;
-use common::Decoded;
+use common::packet::{Entity, Fact, Id, Named, Proto, Quantity, ThingKind};
 
 /// The byte every packet starts with.
 pub const SOH: u8 = 0x01;
@@ -228,68 +228,42 @@ fn read_packet(p: &[u8], r: &mut Report, seen_counter: &mut bool) {
     }
 }
 
-/// What the protocols node makes of a transmission.
-pub fn decoded(bytes: &[u8], center: common::Hz) -> Option<Decoded> {
+/// What an InterMet frame says.
+///
+/// An iMet names itself by the frequency it was found on where the frame
+/// carries no serial, so the centre comes in with the bytes.
+pub fn read(bytes: &[u8], center: common::Hz) -> Option<Proto> {
     let r = parse(bytes)?;
     let serial = r.name(center.as_f64());
-    let mut fields: Vec<(String, common::Value)> =
-        vec![("packet".into(), common::Value::Int(r.counter as i64))];
+    let mut p = Proto::new("imet", "frame");
     if !serial.is_empty() {
-        fields.push(("serial".into(), common::Value::Text(serial.clone())));
+        p = p
+            .by(Entity::new("imet", Id::Text(serial.clone())).made_by("InterMet"))
+            .saying(Fact::Named(Named::new(serial, ThingKind::Sonde)));
     }
     if r.has_position() {
-        fields.push(("altitude_m".into(), common::Value::Float(r.altitude_m)));
-        fields.push(("satellites".into(), common::Value::Int(r.satellites as i64)));
+        for fact in crate::facts::of_flight(
+            r.lat_deg,
+            r.lon_deg,
+            r.altitude_m,
+            r.climb_ms,
+            r.speed_kt,
+            r.course_deg,
+            r.battery_v.map(|v| v as f32),
+        ) {
+            p = p.saying(fact);
+        }
     }
-    if r.speed_kt > 0.0 {
-        fields.push(("speed_kt".into(), common::Value::Float(r.speed_kt)));
-        fields.push(("course_deg".into(), common::Value::Float(r.course_deg)));
-        fields.push(("climb_ms".into(), common::Value::Float(r.climb_ms)));
-    }
-    if let Some(v) = r.pressure_mbar {
-        fields.push(("pressure_mbar".into(), common::Value::Float(v)));
-    }
-    if let Some(v) = r.temperature_c {
-        fields.push(("temperature_c".into(), common::Value::Float(v)));
-    }
-    if let Some(v) = r.humidity_pct {
-        fields.push(("humidity_pct".into(), common::Value::Float(v)));
-    }
-    if let Some(v) = r.battery_v {
-        fields.push(("battery_v".into(), common::Value::Float(v)));
-    }
-    if let Some((h, m, s)) = r.utc {
-        fields.push(("utc".into(), common::Value::Text(format!("{h:02}:{m:02}:{s:02}"))));
-    }
-
-    let mut d = Decoded::bytes("imet", center, 0.0, bytes.to_vec())
-        .with_modulation(common::Modulation::Afsk)
-        .with_crc(Some(true))
-        .with_text(r.summary())
-        .with_detail(format!("{} packets, counter {}", r.packets, r.counter))
-        .with_fields(fields);
-    if !serial.is_empty() {
-        d = d.by(common::Identity::new("imet", serial.clone()).made_by("InterMet"));
-    }
-    if r.has_position() {
-        d = d
-            .reporting(common::ReportDetail::Sonde {
-                altitude_m: r.altitude_m,
-                climb_ms: r.climb_ms,
-                battery_v: r.battery_v.unwrap_or(f64::NAN) as f32,
-                satellites: r.satellites,
-                descending: r.climb_ms < -1.0,
-                sensors: None,
-            })
-            .at_position(common::Position {
-                lat: r.lat_deg,
-                lon: r.lon_deg,
-                altitude_m: Some(r.altitude_m),
-                speed_kt: Some(r.speed_kt),
-                course_deg: Some(r.course_deg),
-            });
-    }
-    Some(d)
+    // An iMet is the one sonde here that sends the weather already worked out.
+    p = p
+        .maybe(
+            r.temperature_c.map(|v| Fact::sensed(Quantity::Temperature, v, common::Unit::Celsius)),
+        )
+        .maybe(
+            r.pressure_mbar.map(|v| Fact::sensed(Quantity::Pressure, v, common::Unit::HectoPascal)),
+        )
+        .maybe(r.humidity_pct.map(|v| Fact::sensed(Quantity::Humidity, v, common::Unit::Percent)));
+    Some(p)
 }
 
 /// Characters off an asynchronous line gathered into transmissions.

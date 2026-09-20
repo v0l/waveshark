@@ -13,14 +13,13 @@
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
-pub use decode::ais::decoded;
+pub use decode::ais::read;
 pub use decode::ais::round;
 use decode::ais::{self};
 use dsp::ais::{AisConfig, AisDetector, AisFrame, BAND_CENTER_HZ, CHANNEL_HZ};
 use identify::Signal;
 pub use identify::ais::Ais;
 pub use identify::ais::CHANNEL_WIDTH_HZ;
-use pipeline::event::Decoded;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -84,7 +83,7 @@ impl Simple for AisNode {
         // The centre reported on the port is the band; each frame carries
         // the channel it actually arrived on, since the demodulator knows
         // which of the two it read.
-        let mut out = i.spec.with_kind(PortKind::Frames);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(BAND_CENTER_HZ as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
         Ok(out)
@@ -95,11 +94,11 @@ impl Simple for AisNode {
         self.meter.feed(iq);
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
-        let out = o.frames_mut();
+        let out = o.packets_mut();
         for f in &self.frames {
             self.accepted += 1;
             let hz = CHANNEL_HZ[(f.channel as usize).min(CHANNEL_HZ.len() - 1)];
-            out.push(self.meter.frame(f.payload.clone()).at(hz as u64));
+            out.push(self.meter.packet_now(f.payload.clone()).at_center(hz as u64));
         }
         Ok(())
     }
@@ -132,12 +131,12 @@ impl Protocol for Ais {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Band { width_hz: 200_000 }
     }
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::ais::is_ais_band(p.center_hz() as f64) {
             return None;
         }
-        let center = common::Hz(p.center_hz());
-        Some(ais::parse(bytes).map(|f| vec![decoded(&f, bytes, center)]).unwrap_or_default())
+        Some(ais::parse(bytes).map(|f| vec![read(&f)]).unwrap_or_default())
     }
     /// It mixes its two channels out of the span itself, rather than taking
     /// one from the bank the extractor channelizes the span with.
@@ -206,7 +205,7 @@ mod tests {
     fn the_node_outputs_frames_tagged_with_the_band() {
         let mut n = AisNode::default();
         let out = n.negotiate(&spec(2_400_000.0, 162_000_000.0)).unwrap();
-        assert_eq!(out.kind, PortKind::Frames);
+        assert_eq!(out.kind, PortKind::Packets);
         assert_eq!(out.center, Hz(BAND_CENTER_HZ as u64));
         assert_eq!(out.bandwidth, CHANNEL_WIDTH_HZ);
     }
@@ -221,13 +220,11 @@ mod tests {
             0x21, 0x6f, 0xff, 0x9c, 0x00, 0x56, 0x78,
         ];
         let frame = ais::parse(&bytes).unwrap();
-        let d = decoded(&frame, &bytes, Hz(BAND_CENTER_HZ as u64));
-        assert_eq!(d.protocol, "AIS-Position");
-        assert_eq!(d.crc_ok, Some(true), "it passed the check sequence to get here");
-        let get = |k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get("mmsi"), Some(Value::Int(227_006_760)));
-        assert_eq!(get("lat"), Some(Value::Float(49.47558)));
-        assert_eq!(get("lon"), Some(Value::Float(0.13138)));
+        let d = read(&frame);
+        assert_eq!((d.id, d.kind), ("ais", "position"));
+        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("227006760"));
+        let p = d.placed().expect("where the vessel said it was");
+        assert!((p.lat - 49.475_58).abs() < 1e-5 && (p.lon - 0.131_38).abs() < 1e-5);
     }
 
     /// Modulate on-air symbols as FSK at the AIS rate and deviation.
@@ -277,13 +274,13 @@ mod tests {
         // closing flag is still inside the filter when the block ends.
         for block in [&quiet[..], &iq[..], &quiet[..]] {
             let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Frames(Vec::new());
+            let mut out = Payload::Packets(Vec::new());
             let mut events = Vec::new();
             let mut new_tags = Vec::new();
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Frames(f) = out {
-                frames.extend(f.into_iter().map(|x| x.bytes));
+            if let Payload::Packets(f) = out {
+                frames.extend(f.into_iter().map(|x| x.bytes().to_vec()));
             }
         }
 
@@ -296,8 +293,7 @@ mod tests {
         assert!((lon - 0.131_38).abs() < 1e-5, "longitude {lon}");
 
         // And the row the packet list would show for it.
-        let d = decoded(&parsed, &frames[0], Hz(BAND_CENTER_HZ as u64));
-        assert_eq!(d.protocol, "AIS-Position");
-        assert_eq!(d.crc_ok, Some(true));
+        let d = read(&parsed);
+        assert_eq!((d.id, d.kind), ("ais", "position"));
     }
 }

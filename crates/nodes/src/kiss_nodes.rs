@@ -19,7 +19,7 @@
 //! samples only while that channel is keyed, so a frame arriving from a
 //! client waits in the queue exactly as a beacon would.
 
-use common::{PacketBody, Result};
+use common::Result;
 use decode::{ax25, kiss};
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -319,16 +319,16 @@ impl Simple for KissTncNode {
 
     fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
         for p in i.as_packets().unwrap_or(&[]) {
-            let PacketBody::Frame(f) = &p.body else { continue };
             // What a TNC is for is AX.25, and the bus carries every protocol
             // the receiver reads. The band is where the receiver already
             // decides an unlabelled frame is AX.25, and the parse is the
             // decoder's own answer rather than a guess at the bytes.
-            if !dsp::afsk::is_packet_band(f.center_hz as f64) {
+            if !dsp::afsk::is_packet_band(p.center_hz() as f64) {
                 continue;
             }
-            if ax25::parse(&f.bytes).is_ok() {
-                self.tnc.broadcast(&f.bytes);
+            let bytes = p.bytes();
+            if !bytes.is_empty() && ax25::parse(bytes).is_ok() {
+                self.tnc.broadcast(bytes);
             }
         }
         Ok(())
@@ -434,12 +434,8 @@ mod tests {
         panic!("timed out waiting for {what}");
     }
 
-    fn packet_of(bytes: Vec<u8>, center_hz: u64) -> common::Packet {
-        common::Packet::of_frame(
-            0,
-            16_000,
-            common::Frame::measured(bytes, -60.0, 20.0).at(center_hz),
-        )
+    fn packet_of(bytes: Vec<u8>, center_hz: u64) -> common::packet::Packet {
+        crate::measured(center_hz, 16_000, bytes, -60.0, 20.0)
     }
 
     /// The whole receive direction: frames off the bus, KISS on the socket.

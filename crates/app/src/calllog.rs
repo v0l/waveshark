@@ -184,7 +184,7 @@ impl Call {
 
 /// Where calls are written, beside the packet log and the pictures.
 pub fn calls_dir() -> PathBuf {
-    crate::packetlog::PacketLog::default_dir()
+    crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("calls"))
         .unwrap_or_else(|| std::env::temp_dir().join("waveshark-calls"))
 }
@@ -1038,6 +1038,7 @@ mod tests {
             to: Some("ALL".into()),
             from: Some(from.into()),
             code: None,
+            over: None,
             rate,
             channels: 1,
             pcm,

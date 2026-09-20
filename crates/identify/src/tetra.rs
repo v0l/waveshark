@@ -67,12 +67,12 @@ impl Signal for Tetra {
             }
             for block in &blocks {
                 let Some(event) = tetra::Event::from_block(block) else { continue };
-                if let Some(d) = tetra::decoded(&event.to_bytes(), chan.hz()) {
+                if let Some(d) = tetra::read(&event.to_bytes()) {
                     rows.push(d);
                 }
             }
         }
-        rows.into()
+        Reading::from(rows).at(chan.hz().as_f64())
     }
 }
 

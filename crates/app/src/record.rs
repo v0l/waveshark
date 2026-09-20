@@ -12,7 +12,7 @@
 //! rtl_433 itself can be pointed at them for comparison. That mattered more
 //! than saving a few bytes with a private format.
 
-use crate::radio::DecodeRecord;
+use crate::row::Reception;
 use common::{C32, Hz};
 use dsp::fir::FirDecim;
 use dsp::mixer::Mixer;
@@ -174,7 +174,7 @@ impl Recorder {
     ///
     /// Returns the file written, or `None` when the burst has already fallen
     /// out of the ring or the disk budget is spent.
-    pub fn capture(&mut self, r: &DecodeRecord) -> Option<PathBuf> {
+    pub fn capture(&mut self, r: &Reception) -> Option<PathBuf> {
         if self.full {
             return None;
         }
@@ -192,7 +192,7 @@ impl Recorder {
         // Mix the burst to DC before filtering, so what survives the decimator
         // is the band around the signal rather than the band around wherever
         // the receiver happened to be tuned.
-        Mixer::new(self.center - r.freq, self.rate).process(&raw, &mut shifted);
+        Mixer::new(self.center - r.freq(), self.rate).process(&raw, &mut shifted);
         let iq = if factor > 1 {
             let mut out = Vec::with_capacity(shifted.len() / factor + 1);
             FirDecim::design_hz(self.rate, factor, out_rate * 0.4, 60.0)
@@ -212,8 +212,8 @@ impl Recorder {
             "g{:04}_{}_{}_{:.4}M_{:.0}k.cu8",
             self.seq,
             sanitise(r.protocol()),
-            r.modulation.label().to_ascii_lowercase(),
-            r.freq / 1e6,
+            r.modulation().label().to_ascii_lowercase(),
+            r.freq() / 1e6,
             out_rate / 1e3,
         );
         let path = self.dir.join(&name);
@@ -241,7 +241,7 @@ impl Recorder {
     /// Written by hand rather than through a serialiser because the shape is
     /// flat and the file's whole purpose is to be read by something else,
     /// `jq` or a script or a person, without this program being involved.
-    fn append_index(&self, name: &str, r: &DecodeRecord, rate: f64, samples: usize) {
+    fn append_index(&self, name: &str, r: &Reception, rate: f64, samples: usize) {
         let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -249,11 +249,12 @@ impl Recorder {
         else {
             return;
         };
-        let hex: String = r.bytes.iter().map(|b| format!("{b:02x}")).collect();
-        let crc = match r.crc {
-            Some(true) => "\"ok\"",
-            Some(false) => "\"bad\"",
-            None => "null",
+        let hex: String = r.bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let crc = match r.integrity() {
+            common::packet::Integrity::Passed => "\"ok\"",
+            common::packet::Integrity::Failed => "\"bad\"",
+            common::packet::Integrity::Corrected { .. } => "\"corrected\"",
+            common::packet::Integrity::Unchecked => "null",
         };
         let _ = writeln!(
             f,
@@ -263,16 +264,16 @@ impl Recorder {
                 r#""crc":{},"bytes":"{}","detail":"{}"}}"#
             ),
             esc(name),
-            r.freq,
+            r.freq(),
             rate,
             samples,
             esc(r.protocol()),
-            esc(r.modulation.label()),
-            r.rssi_dbfs,
-            r.snr_db,
+            esc(r.modulation().label()),
+            r.rssi_dbfs(),
+            r.snr_db(),
             crc,
             hex,
-            esc(&r.detail),
+            esc(&r.detail()),
         );
     }
 }
@@ -373,7 +374,7 @@ mod tests {
         let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap();
         let (live, _rec) = crate::radio::scan_with_recorder(&buf, rec);
         assert!(
-            live.iter().any(|r| r.protocol().contains("Fineoffset")),
+            live.iter().any(|r| r.kind().contains("Fineoffset")),
             "the fixture did not decode live, so replay proves nothing"
         );
 
@@ -387,14 +388,19 @@ mod tests {
         let mut found = false;
         for f in &files {
             for r in crate::radio::replay(f).unwrap() {
-                if r.protocol().contains("Fineoffset") {
+                if r.kind().contains("Fineoffset") {
                     found = true;
+                    let temp = r.packet.facts().find_map(|(_, f)| match f {
+                        common::packet::Fact::Sensed(s)
+                            if s.quantity == common::packet::Quantity::Temperature =>
+                        {
+                            Some(s.value)
+                        }
+                        _ => None,
+                    });
                     assert_eq!(
-                        r.fields
-                            .iter()
-                            .find(|(k, _)| k == "temperature_c")
-                            .map(|(_, v)| v.as_f64()),
-                        Some(Some(16.2)),
+                        temp,
+                        Some(16.2),
                         "the same packet came back with a different reading"
                     );
                 }
@@ -448,7 +454,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recorder::new(&dir, 250_000.0, Hz::mhz(434)).unwrap();
         r.push(&ramp(4096, 0.0));
-        let rec = crate::radio::DecodeRecord::for_test(433_920_000.0, "Fineoffset-WHx080");
+        let rec = crate::row::Reception::for_test(433_920_000.0, "Fineoffset-WHx080");
         let path = r.capture(&rec).unwrap();
 
         let meta = sources::parse_filename(&path);
@@ -464,15 +470,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recorder::new(&dir, 250_000.0, Hz::mhz(434)).unwrap();
         r.push(&ramp(4096, 0.0));
-        let mut rec = crate::radio::DecodeRecord::for_test(433_920_000.0, "Fineoffset-WHx080");
-        rec.detail = "temperature_c=16.2".into();
+        let rec = crate::row::Reception::for_test(433_920_000.0, "Fineoffset-WHx080").stating(
+            common::packet::Fact::sensed(
+                common::packet::Quantity::Temperature,
+                16.2,
+                common::Unit::Celsius,
+            ),
+        );
         let path = r.capture(&rec).expect("a burst still in the ring must be written");
         let name = path.file_name().unwrap().to_str().unwrap();
 
         let index = std::fs::read_to_string(dir.join("index.jsonl")).unwrap();
         assert!(index.contains(name), "the capture is not in the index");
         assert!(index.contains("\"freq_hz\":433920000"), "{index}");
-        assert!(index.contains("temperature_c=16.2"), "{index}");
+        assert!(index.contains("temperature 16.2"), "{index}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

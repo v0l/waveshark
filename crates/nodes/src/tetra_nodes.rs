@@ -35,7 +35,7 @@ pub use decode::tetra::TETRA_CODEC;
 pub use decode::tetra::TRAFFIC_BURST_TAG;
 pub use decode::tetra::traffic_burst_layout;
 pub use decode::tetra::{TRAFFIC_BURST_LEN, TRAFFIC_BURST_LEN_V1};
-pub use decode::tetra::{decoded, traffic_burst_decoded};
+pub use decode::tetra::{read, traffic_burst_read};
 use dsp::tetra::speech;
 use dsp::tetra::{
     BAUD, Block, Burst, BurstKind, NDB_BB1, NDB_BLK1, NDB_BLK2, OCCUPIED_HZ, SLOT_BITS,
@@ -47,7 +47,7 @@ pub use identify::tetra::CHANNEL_WIDTH_HZ;
 pub use identify::tetra::DEMOD_HZ;
 pub use identify::tetra::MIN_RATE_HZ;
 pub use identify::tetra::Tetra;
-use pipeline::event::{Decoded, Request};
+use pipeline::event::Request;
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
@@ -225,7 +225,6 @@ struct VoiceBurst {
     from: Option<u32>,
     frame: u8,
     crc_ok: bool,
-    pcm: Vec<f32>,
 }
 
 pub struct TetraNode {
@@ -581,15 +580,20 @@ impl TetraNode {
     /// what *this* burst arrived at. Where the slot is not one of the bursts
     /// just read, which is what a reaped traffic event is, the channel's own
     /// level stands in and there are no samples to point at.
-    fn frame_at(&mut self, bytes: Vec<u8>, start_sample: Option<u64>) -> common::Frame {
+    fn frame_at(&mut self, bytes: Vec<u8>, start_sample: Option<u64>) -> common::packet::Packet {
         let len = self.slot_samples();
         match start_sample {
             Some(at) => {
                 let snr_db = self.meter.snr_db_at(at, len);
-                self.meter.frame_measured(bytes, at, len, snr_db)
+                self.meter.packet_measured(bytes, at, len, snr_db)
             }
-            None => common::Frame::measured(bytes, self.meter.rssi_dbfs(), self.meter.snr_db())
-                .at(self.channel_hz as u64),
+            None => crate::measured(
+                self.channel_hz as u64,
+                CHANNEL_WIDTH_HZ as u32,
+                bytes,
+                self.meter.rssi_dbfs(),
+                self.meter.snr_db(),
+            ),
         }
     }
 
@@ -647,6 +651,14 @@ impl TetraNode {
             // key, so enciphered traffic is always silence there.
             let enciphered = self.last_aie != 0 || self.slot_enciphered(tn);
             if enciphered && !keyed {
+                // Silence, but still a call: the channel is held, and what
+                // leaves on the voice port says so and says what protects
+                // it, so a list shows an enciphered call rather than
+                // nothing at all.
+                pcm.entry(tn).or_default();
+                if !seen_tn.contains(&tn) {
+                    seen_tn.push(tn);
+                }
                 continue;
             }
 
@@ -671,7 +683,6 @@ impl TetraNode {
                 from: self.talker(marker),
                 frame: time.frame,
                 crc_ok,
-                pcm: mine,
             });
             if !seen_tn.contains(&tn) {
                 seen_tn.push(tn);
@@ -696,12 +707,23 @@ impl TetraNode {
                     None => format!("marker {m}"),
                 });
                 let from = marker.and_then(|m| self.talker(m)).map(|s| s.to_string());
+                // What the network said about the call, stated once here
+                // beside the speech it is about. The cipher is the grant's
+                // word where there was one and the slot's own behaviour
+                // otherwise: frames that move like ciphertext are all a
+                // receiver that joined late has to go on.
+                let secrecy = match (self.last_aie, self.slot_enciphered(tn)) {
+                    (0, false) => common::Secrecy::Clear,
+                    (0, true) => common::Secrecy::Encrypted(None),
+                    (aie, _) => common::Secrecy::Encrypted(Some(format!("AIE-{aie}"))),
+                };
                 common::Voice {
                     system: "TETRA",
                     channel_hz: self.channel_hz,
                     to,
                     from,
                     code: None,
+                    over: Some(common::Over::new(Some(TETRA_CODEC)).protected_by(secrecy)),
                     rate: VOICE_HZ,
                     channels: 1,
                     pcm: pcm.remove(&tn).unwrap_or_default(),
@@ -790,10 +812,6 @@ impl Node for TetraNode {
         let slot_starts: Vec<(u64, u64)> =
             self.bursts.iter().map(|b| (b.slot, b.start_sample)).collect();
 
-        let at_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
         let out = outputs[OUT_PACKETS].packets_mut();
         // Every block's event, then the traffic the access assign fields
         // describe, as events of the node's own.
@@ -912,8 +930,7 @@ impl Node for TetraNode {
             // Measured where the slot it came out of sat, so a row says what
             // that burst arrived at rather than what the carrier is doing.
             let start = slot_starts.iter().find(|(s, _)| *s == slot).map(|(_, at)| *at);
-            let frame = self.frame_at(bytes, start);
-            out.push(common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame));
+            out.push(self.frame_at(bytes, start));
         }
         // Speech the traffic slots carried this block, one Voice per call
         // for the bus and one packet per burst for the log.
@@ -925,12 +942,10 @@ impl Node for TetraNode {
             self.accepted += 1;
             let bytes =
                 encode_traffic_burst(&vb, b, self.last_aie != 0 || self.slot_enciphered(vb.tn));
+            // The speech is not on it: an over is stated once, on the voice
+            // port, where the audio it is about already travels.
             let start = b.start_sample;
-            let frame = self.frame_at(bytes, Some(start));
-            let mut p = common::Packet::of_frame(at_us, CHANNEL_WIDTH_HZ as u32, frame);
-            p.audio = (!vb.pcm.is_empty())
-                .then(|| std::sync::Arc::new(common::Speech { pcm: vb.pcm, rate: VOICE_HZ }));
-            out.push(p);
+            out.push(self.frame_at(bytes, Some(start)));
         }
         self.bursts = bursts;
         let vout = outputs[OUT_VOICE].voice_mut();
@@ -1015,11 +1030,12 @@ impl Protocol for Tetra {
     /// A broadcast identifies itself twice over: it arrives from a downlink
     /// band, and its bytes are a tagged PDU that had to pass the standard's
     /// own CRC to exist at all.
-    fn read_frame(&self, p: &common::Packet, bytes: &[u8]) -> Option<Vec<Decoded>> {
+    fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
+        let bytes = p.bytes();
         if !dsp::tetra::is_downlink_band(p.center_hz() as f64) {
             return None;
         }
-        Some(decoded(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(read(bytes).into_iter().collect())
     }
 
     /// A carrier is on all day and measures however wide the tuner's
@@ -1034,8 +1050,8 @@ impl Protocol for Tetra {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
-    fn dedupe_key(&self, p: &common::Packet) -> Option<Vec<u8>> {
-        let common::PacketBody::Frame(f) = &p.body else {
+    fn dedupe_key(&self, p: &common::packet::Packet) -> Option<Vec<u8>> {
+        let Some(f) = p.frame.as_ref() else {
             return None;
         };
         decode::tetra::Event::identity_key(&f.bytes)
@@ -1136,8 +1152,8 @@ mod tests {
             }
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(f) = p.body {
-                        rows.push(decoded(&f.bytes, Hz(hz as u64)).unwrap());
+                    if let Some(said) = read(p.bytes()) {
+                        rows.push(said);
                     }
                 }
             }
@@ -1146,15 +1162,18 @@ mod tests {
         // Forty repeats of the same broadcast are two rows: one identity,
         // one system broadcast.
         assert_eq!(rows.len(), 2, "{rows:?}");
-        let sync = rows.iter().find(|r| r.protocol == "TETRA-Sync").expect("no sync row");
-        let get =
-            |d: &Decoded, k: &str| d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        assert_eq!(get(sync, "mcc"), Some(common::Value::Int(272)));
-        assert_eq!(get(sync, "mnc"), Some(common::Value::Int(91)));
-        assert_eq!(get(sync, "colour"), Some(common::Value::Int(7)));
-        let si = rows.iter().find(|r| r.protocol == "TETRA-Sysinfo").expect("no sysinfo row");
-        assert_eq!(get(si, "carrier_hz"), Some(common::Value::Float(390_006_250.0)));
-        assert_eq!(get(si, "la"), Some(common::Value::Int(4321)));
+        let cell = |r: &common::packet::Proto| {
+            r.facts.iter().find_map(|f| match f {
+                common::packet::Fact::Infrastructure(c) => Some(c.clone()),
+                _ => None,
+            })
+        };
+        let sync = rows.iter().find(|r| r.kind == "sync").expect("no sync row");
+        let c = cell(sync).expect("the cell a sync burst names");
+        assert_eq!((c.mcc, c.mnc), (Some(272), Some(91)));
+        assert_eq!(c.site_code.map(|b| b & 0x3f), Some(7));
+        let si = rows.iter().find(|r| r.kind == "sysinfo").expect("no sysinfo row");
+        assert_eq!(cell(si).and_then(|c| c.area), Some(4321));
         assert_eq!(node.cell().map(|c| (c.mcc, c.mnc)), Some((272, 91)));
     }
 
@@ -1229,53 +1248,52 @@ mod tests {
             }
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(f) = &p.body {
-                        let b = &f.bytes;
-                        let d = decoded(b, Hz(hz as u64)).unwrap();
-                        if d.protocol == "TETRA-Voice" {
-                            // Every burst carries what it was heard at and
-                            // the samples it was sliced from, a slot's worth
-                            // at the demodulator's rate.
-                            let q = p.samples().expect("a traffic burst without its samples");
-                            assert_eq!(q.samples.len(), (255.0 * q.rate / 18_000.0) as usize);
-                            assert!(p.rssi_dbfs().is_finite() && p.snr_db().is_finite());
-                            assert!(traffic_burst_bits(b).is_some());
-                        }
-                        rows.push(d);
+                    let b = p.bytes().to_vec();
+                    if b.is_empty() {
+                        continue;
                     }
+                    let d = read(&b).unwrap();
+                    if d.kind == "voice" {
+                        // Every burst carries what it was heard at and the
+                        // samples it was sliced from, a slot's worth at the
+                        // demodulator's rate.
+                        let q = p.carrier.iq.as_ref().expect("a traffic burst without its samples");
+                        assert_eq!(q.samples.len(), (255.0 * q.rate / 18_000.0) as usize);
+                        assert!(p.carrier.rssi_dbfs.is_finite() && p.carrier.snr_db.is_finite());
+                        assert!(traffic_burst_bits(&b).is_some());
+                    }
+                    rows.push(d);
                 }
             }
         }
-        let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
+        let called = |d: &common::packet::Proto| {
+            d.link.to.as_ref().map(|p| p.id.clone()).unwrap_or_default()
         };
         // One packet per traffic burst on the slot, between the markers:
         // thirty frames carried the marker, and the first is what opens it.
-        let bursts: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Voice").collect();
+        let bursts: Vec<_> = rows.iter().filter(|r| r.kind == "voice").collect();
         // Fewer than thirty: the demodulator locks a few frames in.
         assert!((20..=30).contains(&bursts.len()), "{} traffic bursts", bursts.len());
-        assert!(bursts.iter().all(|b| get(b, "timeslot").as_deref() == Some("2")
-            && get(b, "marker").as_deref() == Some("23")));
-        let traffic: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
-        let names: Vec<String> = traffic.iter().filter_map(|r| get(r, "pdu")).collect();
-        assert_eq!(names, ["TRAFFIC", "TRAFFIC END"], "{rows:?}");
-        assert_eq!(get(traffic[0], "to").as_deref(), Some("marker 23"));
-        assert_eq!(get(traffic[0], "timeslot").as_deref(), Some("2"));
-        assert_eq!(get(traffic[0], "live").as_deref(), Some("true"));
-        // The same said as the call list reads it, in types rather than in
-        // fields: speech in the one vocoder TETRA has, still running.
-        let air = traffic[0].airtime.as_ref().expect("a call with no airtime");
-        assert!(air.voice && air.live);
-        assert_eq!(air.codec, Some(TETRA_CODEC));
-        assert_eq!(air.secrecy, common::Secrecy::Clear, "this call was in the clear");
-        // Twenty-nine frames of four slots between the first and the last
-        // frame the marker was seen on.
-        let secs: f64 = get(traffic[1], "seconds").unwrap().parse().unwrap();
-        let ended = traffic[1].airtime.as_ref().expect("an end with no airtime");
-        assert!(!ended.live, "the call ended");
-        assert_eq!(ended.seconds, secs, "the airtime and the field are one measurement");
-        let want = 29.0 * 4.0 * 255.0 / 18_000.0;
-        assert!((secs - want).abs() < 0.2, "{secs} s of traffic, wanted about {want:.2}");
+        assert!(bursts.iter().all(|b| called(b) == "marker 23"), "{bursts:?}");
+        let traffic: Vec<_> = rows.iter().filter(|r| r.kind == "call").collect();
+        assert_eq!(traffic.len(), 2, "a start and an end, {rows:?}");
+        assert_eq!(called(traffic[0]), "marker 23");
+        // How long the channel was held, in which vocoder and under what
+        // cipher, is the over, and an over is stated on the voice port. The
+        // speech is one burst's worth per burst read: fewer than the thirty
+        // the marker was seen on, because the demodulator locks a few frames
+        // in, and each of those is 60 ms of the channel.
+        let spoken: f64 = voices.iter().map(|v| v.seconds()).sum();
+        // Two 30 ms vocoder frames a burst, which is what a TETRA timeslot
+        // carries.
+        let want = bursts.len() as f64 * 0.06;
+        assert!((spoken - want).abs() < 0.1, "{spoken} s of speech, wanted about {want:.2}");
+        let said = voices
+            .iter()
+            .find_map(|v| v.over.clone())
+            .expect("the network says what protects a call");
+        assert_eq!(said.codec, Some(TETRA_CODEC));
+        assert_eq!(said.secrecy, common::Secrecy::Clear, "this call was in the clear");
         // The speech is named as the row is. The network never said which
         // group marker 23 stands for, and speech with no name is dropped by
         // the bus, so a call that was listed and ticked was never heard.
@@ -1362,17 +1380,13 @@ mod tests {
             }
             if let Payload::Packets(ps) = out {
                 for p in ps {
-                    if let common::PacketBody::Frame(f) = &p.body {
-                        rows.push(decoded(&f.bytes, Hz(hz as u64)).unwrap());
+                    if let Some(said) = read(p.bytes()) {
+                        rows.push(said);
                     }
                 }
             }
         }
-        let get = |d: &Decoded, k: &str| {
-            d.fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string())
-        };
-        let bursts: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Voice").collect();
-        let traffic: Vec<&Decoded> = rows.iter().filter(|r| r.protocol == "TETRA-Call").collect();
+        let bursts: Vec<_> = rows.iter().filter(|r| r.kind == "voice").collect();
         assert!(!bursts.is_empty(), "no traffic was followed at all");
         // A verdict needs its sixteen frames, so the first bursts of a call
         // joined mid-stream do play before the slot is judged: that is the
@@ -1380,19 +1394,21 @@ mod tests {
         // be muted for it. What must never happen is static for the whole
         // call, and a burst row is only emitted while the slot is still
         // played, so rows and voices run out together.
-        assert!(voices.len() <= 8, "{} voices of static left the node", voices.len());
-        assert!(
-            bursts.len() == voices.len(),
-            "burst rows outlive the speech they were played with"
-        );
-        // The start row is judged with the frames it has, so it may still
-        // say none; by the end of the call the evidence is in, and the end
-        // row says what the frames proved, so a key found later has a row
-        // to change.
-        assert!(
-            traffic.last().map(|r| get(r, "encryption").as_deref() == Some("AIE-3")) == Some(true),
-            "{:?}",
-            traffic.iter().map(|r| get(r, "encryption")).collect::<Vec<_>>()
+        // Silence, and a block per burst saying the channel is held: what
+        // must never happen is static, so nothing carries samples once the
+        // slot has been judged.
+        let spoken = voices.iter().filter(|v| !v.pcm.is_empty()).count();
+        assert!(spoken <= 8, "{spoken} voices of static left the node");
+        assert!(bursts.len() >= spoken, "more speech than bursts");
+        // The call is judged with the frames it has, so the first speech may
+        // go out before the slot is judged; by the end the evidence is in,
+        // and what the node says about the last of the speech is what the
+        // frames proved.
+        let secrecy = voices.last().and_then(|v| v.over.as_ref()).map(|o| o.secrecy.clone());
+        assert_eq!(
+            secrecy,
+            Some(common::Secrecy::Encrypted(None)),
+            "frames that move like ciphertext are the only word on an unheard grant"
         );
     }
 
