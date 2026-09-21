@@ -289,13 +289,20 @@ mod tests {
     }
 
     /// A secured frame says what protects it, which is the statement the
-    /// channel view reads.
+    /// channel view reads. A level below four authenticates the payload and
+    /// leaves it readable, so only a level above says the traffic is shut.
     #[test]
     fn a_secured_frame_names_what_protects_it() {
-        let mpdu = [0x69, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
+        let mut mpdu = vec![0x69, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00];
+        mpdu.extend_from_slice(&[0x0d, 0x01, 0x00, 0x00, 0x00, 0x01]);
+        mpdu.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xde, 0xad, 0xbe, 0xef]);
         let d = read(&mpdu, Hz(2_425_000_000)).expect("a decode");
         let ch = channel(&d).expect("a channel");
         assert_eq!(ch.secrecy, common::Secrecy::Encrypted(Some("802.15.4 MAC".into())));
+
+        mpdu[9] = 0x09;
+        let d = read(&mpdu, Hz(2_425_000_000)).expect("a decode");
+        assert_eq!(channel(&d).expect("a channel").secrecy, common::Secrecy::Unsaid);
     }
 
     /// An extended address is the device's EUI-64, so the row carries the

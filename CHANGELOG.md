@@ -179,6 +179,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- 802.15.4 frames from Thread and newer Zigbee stacks named wrong addresses,
+  read with the older edition's rules.
 - SSTV pictures came back washed out, with black read as dark grey and white
   as light grey.
 - `--device` now moves the dial, sets the span and starts the radio it names.

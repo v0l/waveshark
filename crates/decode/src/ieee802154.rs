@@ -58,6 +58,48 @@ impl FrameType {
     }
 }
 
+/// Which edition of the standard laid the header out.
+///
+/// The addressing fields are walked differently for a frame the 2015 edition
+/// calls its own: the PAN identifier fields are in Table 7-2 rather than in
+/// the 2006 rule, the sequence number may be suppressed, information
+/// elements may follow the addressing fields, and an acknowledgement may
+/// carry addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Version {
+    Ieee2003,
+    Ieee2006,
+    Ieee2015,
+    /// The fourth value, which no edition has assigned and which is walked
+    /// the 2015 way.
+    Reserved,
+}
+
+impl Version {
+    pub fn from_bits(fcf: u16) -> Self {
+        match fcf >> 12 & 0x03 {
+            0 => Self::Ieee2003,
+            1 => Self::Ieee2006,
+            2 => Self::Ieee2015,
+            _ => Self::Reserved,
+        }
+    }
+
+    /// Whether the header is laid out the 2015 way.
+    pub fn enhanced(&self) -> bool {
+        matches!(self, Self::Ieee2015 | Self::Reserved)
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Ieee2003 => "2003",
+            Self::Ieee2006 => "2006",
+            Self::Ieee2015 => "2015",
+            Self::Reserved => "reserved",
+        }
+    }
+}
+
 /// An address field, which is absent, short or extended depending on the two
 /// bits of the frame control field that introduce it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,8 +217,12 @@ pub struct Frame {
     /// is told to stay awake.
     pub pending: bool,
     pub ack_request: bool,
-    pub version: u8,
+    pub version: Version,
     pub seq: Option<u8>,
+    /// The security level of the auxiliary header, where the frame carried
+    /// one. Four and above encipher the payload; one to three authenticate
+    /// it and leave it readable to anyone above this decoder.
+    pub security_level: Option<u8>,
     pub dst_pan: Option<u16>,
     pub dst: Address,
     pub src_pan: Option<u16>,
@@ -192,6 +238,66 @@ fn u16le(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
+/// Which PAN identifier fields a header carries: Table 7-2 of
+/// 802.15.4-2015 for a frame of that version, the 2006 rule for anything
+/// older.
+fn pan_ids_present(version: Version, compressed: bool, dst_mode: u8, src_mode: u8) -> (bool, bool) {
+    let plain = (dst_mode != 0, src_mode != 0 && !compressed);
+    if !version.enhanced() {
+        return plain;
+    }
+    match (compressed, dst_mode, src_mode) {
+        (true, 0, 0) => (true, false),
+        (true, 0, _) | (true, _, 0) => (false, false),
+        (true, 3, 3) => (false, false),
+        (false, 3, 3) => (true, false),
+        _ => plain,
+    }
+}
+
+/// How many bytes the auxiliary security header occupies, and the security
+/// level it declares.
+fn aux_security(mpdu: &[u8], at: usize) -> Option<(usize, u8)> {
+    let sc = *mpdu.get(at)?;
+    let mut len = 1usize;
+    if sc >> 5 & 1 == 0 {
+        len += 4;
+    }
+    len += match sc >> 3 & 0x03 {
+        0 => 0,
+        1 => 1,
+        2 => 5,
+        _ => 9,
+    };
+    (at + len <= mpdu.len()).then_some((len, sc & 0x07))
+}
+
+/// Walk the header information elements a 2015 frame may put between its
+/// addressing fields and its payload, returning where the payload starts.
+fn skip_header_ies(mpdu: &[u8], mut at: usize) -> Option<usize> {
+    while at < mpdu.len() {
+        let ie = u16le(mpdu, at)?;
+        let len = (ie & 0x7f) as usize;
+        let id = (ie >> 7 & 0xff) as u8;
+        at = at.checked_add(2 + len).filter(|a| *a <= mpdu.len())?;
+        if id == 0x7e || id == 0x7f {
+            break;
+        }
+    }
+    Some(at)
+}
+
+/// How many bytes of message integrity code a security level puts at the end
+/// of the frame, which are not payload.
+fn mic_len(level: u8) -> usize {
+    match level & 0x03 {
+        0 => 0,
+        1 => 4,
+        2 => 8,
+        _ => 16,
+    }
+}
+
 /// Parse a MAC frame as `dsp::oqpsk` hands it over: the frame control field
 /// onwards, without the two check bytes.
 pub fn parse(mpdu: &[u8]) -> Option<Frame> {
@@ -202,15 +308,19 @@ pub fn parse(mpdu: &[u8]) -> Option<Frame> {
     let ack_request = fcf >> 5 & 1 == 1;
     let pan_compressed = fcf >> 6 & 1 == 1;
     let dst_mode = (fcf >> 10 & 0x03) as u8;
-    let version = (fcf >> 12 & 0x03) as u8;
+    let version = Version::from_bits(fcf);
     let src_mode = (fcf >> 14 & 0x03) as u8;
     // A reserved addressing mode means this is not a frame laid out the way
     // the header walk below assumes.
     if dst_mode == 1 || src_mode == 1 {
         return None;
     }
-    let seq = mpdu.get(2).copied();
-    let mut at = 3usize;
+    let suppressed = version.enhanced() && fcf >> 8 & 1 == 1;
+    let ies = version.enhanced() && fcf >> 9 & 1 == 1;
+    let (seq, mut at) = match suppressed {
+        true => (None, 2usize),
+        false => (Some(*mpdu.get(2)?), 3usize),
+    };
 
     let address = |mode: u8, at: &mut usize| -> Option<Address> {
         Some(match mode {
@@ -230,42 +340,43 @@ pub fn parse(mpdu: &[u8]) -> Option<Frame> {
         })
     };
 
+    let (wants_dst_pan, wants_src_pan) =
+        pan_ids_present(version, pan_compressed, dst_mode, src_mode);
     let mut dst_pan = None;
     let mut src_pan = None;
-    let mut dst = Address::Absent;
-    let mut src = Address::Absent;
-    if frame_type != FrameType::Ack {
-        if dst_mode != 0 {
-            dst_pan = u16le(mpdu, at);
-            at += 2;
-            dst = address(dst_mode, &mut at)?;
-        }
-        if src_mode != 0 {
-            // With the compression bit set and both addresses present, the
-            // source is in the destination's PAN and sends no identifier of
-            // its own.
-            if !(pan_compressed && dst_mode != 0) {
-                src_pan = u16le(mpdu, at);
-                at += 2;
-            } else {
-                src_pan = dst_pan;
-            }
-            src = address(src_mode, &mut at)?;
-        }
+    if wants_dst_pan {
+        dst_pan = Some(u16le(mpdu, at)?);
+        at += 2;
+    }
+    let dst = address(dst_mode, &mut at)?;
+    if wants_src_pan {
+        src_pan = Some(u16le(mpdu, at)?);
+        at += 2;
+    }
+    let src = address(src_mode, &mut at)?;
+    if src != Address::Absent && src_pan.is_none() {
+        src_pan = dst_pan;
     }
     if at > mpdu.len() {
         return None;
     }
-    // The auxiliary security header is not walked: what follows it is
-    // encrypted anyway, so the header fields are the evidence either way and
-    // the payload is reported as it stands.
-    let body = &mpdu[at..];
+    let mut security_level = None;
+    if secured {
+        let (len, level) = aux_security(mpdu, at)?;
+        at += len;
+        security_level = Some(level);
+    }
+    if ies {
+        at = skip_header_ies(mpdu, at)?;
+    }
+    let end = mpdu.len().checked_sub(security_level.map_or(0, mic_len)).filter(|e| *e >= at)?;
+    let body = &mpdu[at..end];
 
     let mut command = None;
     let mut superframe = None;
     match frame_type {
         FrameType::Command if !secured => command = body.first().map(|&v| Command::from_id(v)),
-        FrameType::Beacon if !secured => {
+        FrameType::Beacon if !secured && !version.enhanced() => {
             if let Some(s) = u16le(body, 0) {
                 superframe = Some(Superframe {
                     beacon_order: (s & 0x0f) as u8,
@@ -285,6 +396,7 @@ pub fn parse(mpdu: &[u8]) -> Option<Frame> {
         ack_request,
         version,
         seq,
+        security_level,
         dst_pan,
         dst,
         src_pan,
@@ -338,6 +450,9 @@ impl Frame {
             f.push(("beacon_order".into(), Value::Int(i64::from(s.beacon_order))));
         }
         f.push(("secured".into(), Value::Bool(self.secured)));
+        if let Some(level) = self.security_level {
+            f.push(("security_level".into(), Value::Int(i64::from(level))));
+        }
         if self.ack_request {
             f.push(("ack_request".into(), Value::Bool(true)));
         }
@@ -382,9 +497,11 @@ pub fn read(bytes: &[u8], center: common::Hz) -> Option<Proto> {
         // promise about the Zigbee or Thread payload above it, so an
         // unsecured frame says nothing rather than saying the network is
         // open.
-        let secrecy = match f.secured {
-            true => common::Secrecy::Encrypted(Some("802.15.4 MAC".into())),
-            false => common::Secrecy::Unsaid,
+        // Levels one to three authenticate the payload and leave it
+        // readable, so only four and above are a statement that it is not.
+        let secrecy = match f.security_level {
+            Some(level) if level >= 4 => common::Secrecy::Encrypted(Some("802.15.4 MAC".into())),
+            _ => common::Secrecy::Unsaid,
         };
         p = p.saying(Fact::Channel(
             Channel::new(common::ChannelPlan::Ieee802154, u16::from(ch), CHANNEL_WIDTH_HZ as u32)
@@ -494,15 +611,218 @@ mod tests {
     }
 
     /// A secured frame says so, and its payload is not read: the key belongs
-    /// to the network.
+    /// to the network. The auxiliary header and the integrity code are
+    /// walked off either end of it, so what is reported as payload is the
+    /// enciphered bytes and nothing else.
     #[test]
-    fn a_secured_frame_reports_that_it_is_secured_and_nothing_from_inside() {
-        let mut mpdu = DATA.to_vec();
-        mpdu[0] |= 0x08;
+    fn a_secured_frame_reports_its_level_and_the_length_of_what_it_hides() {
+        // Security control 0x0d: level 5, key identifier mode 1, so a four
+        // byte frame counter and a one byte key index follow, and level 5
+        // puts a four byte integrity code at the end.
+        let mut mpdu = vec![0x69, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00];
+        mpdu.extend_from_slice(&[0x0d, 0x01, 0x00, 0x00, 0x00, 0x01]);
+        mpdu.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        mpdu.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         let f = parse(&mpdu).expect("a frame");
         assert!(f.secured);
+        assert_eq!(f.security_level, Some(5));
         assert_eq!(f.command, None);
+        assert_eq!(f.payload, vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(f.dst, Address::Short(0x0001));
         assert!(f.fields().iter().any(|(k, v)| k == "secured" && *v == Value::Bool(true)));
+        assert!(f.fields().iter().any(|(k, v)| k == "security_level" && *v == Value::Int(5)));
+    }
+
+    /// A frame counter that is suppressed and a key named by an extended
+    /// address are nine bytes of auxiliary header rather than six, and a
+    /// level of two puts eight bytes of integrity code on the end.
+    #[test]
+    fn an_auxiliary_header_is_as_long_as_its_control_byte_says() {
+        // 0x3a: level 2, key identifier mode 3 (eight byte source and an
+        // index), frame counter suppressed.
+        let mut mpdu = vec![0x69, 0x88, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0x3a];
+        mpdu.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 0x09]);
+        mpdu.extend_from_slice(&[0xaa, 0xbb]);
+        mpdu.extend_from_slice(&[0; 8]);
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.security_level, Some(2));
+        assert_eq!(f.payload, vec![0xaa, 0xbb]);
+        let cut = &mpdu[..mpdu.len() - 3];
+        assert!(parse(cut).is_none(), "a frame too short for its own integrity code");
+    }
+
+    /// Table 7-2 of 802.15.4-2015, a row at a time, against the 2006 rule it
+    /// replaced. Walked the same way as tcpdump's `print-802_15_4.c` and
+    /// Wireshark's `packet-ieee802154.c`, which is what the byte offsets in
+    /// the tests below were checked against.
+    #[test]
+    fn the_pan_identifier_fields_are_table_7_2_for_a_version_two_frame() {
+        let v2 = Version::Ieee2015;
+        const NONE: u8 = 0;
+        const SHORT: u8 = 2;
+        const EXT: u8 = 3;
+        // The rows the 2015 table changed.
+        assert_eq!(pan_ids_present(v2, true, NONE, NONE), (true, false));
+        assert_eq!(pan_ids_present(v2, true, SHORT, NONE), (false, false));
+        assert_eq!(pan_ids_present(v2, true, NONE, SHORT), (false, false));
+        assert_eq!(pan_ids_present(v2, true, EXT, EXT), (false, false));
+        assert_eq!(pan_ids_present(v2, false, EXT, EXT), (true, false));
+        // The rows it kept.
+        assert_eq!(pan_ids_present(v2, false, NONE, NONE), (false, false));
+        assert_eq!(pan_ids_present(v2, false, SHORT, NONE), (true, false));
+        assert_eq!(pan_ids_present(v2, false, NONE, SHORT), (false, true));
+        assert_eq!(pan_ids_present(v2, false, SHORT, SHORT), (true, true));
+        assert_eq!(pan_ids_present(v2, false, SHORT, EXT), (true, true));
+        assert_eq!(pan_ids_present(v2, false, EXT, SHORT), (true, true));
+        assert_eq!(pan_ids_present(v2, true, SHORT, SHORT), (true, false));
+        assert_eq!(pan_ids_present(v2, true, SHORT, EXT), (true, false));
+        assert_eq!(pan_ids_present(v2, true, EXT, SHORT), (true, false));
+        // The five combinations the two editions disagree about, read the
+        // 2006 way for a 2006 frame.
+        let v1 = Version::Ieee2006;
+        assert_eq!(pan_ids_present(v1, true, NONE, NONE), (false, false));
+        assert_eq!(pan_ids_present(v1, true, SHORT, NONE), (true, false));
+        assert_eq!(pan_ids_present(v1, true, NONE, SHORT), (false, false));
+        assert_eq!(pan_ids_present(v1, true, EXT, EXT), (true, false));
+        assert_eq!(pan_ids_present(v1, false, EXT, EXT), (true, true));
+        assert_eq!(pan_ids_present(Version::Ieee2003, false, SHORT, SHORT), (true, true));
+        assert_eq!(pan_ids_present(Version::Reserved, false, EXT, EXT), (true, false));
+    }
+
+    /// Two extended addresses and a clear compression bit carry one PAN, the
+    /// destination's, where the 2006 rule reads a second. Read the old way
+    /// the source comes out as 0x4b00_1122_3344_5566, two bytes into its own
+    /// address, which is a plausible EUI-64 and therefore silent.
+    #[test]
+    fn a_version_two_frame_with_two_extended_addresses_has_one_pan() {
+        let mut mpdu = vec![0x01, 0xec, 0x11, 0x34, 0x12];
+        mpdu.extend_from_slice(&[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
+        mpdu.extend_from_slice(&[0x44, 0x33, 0x22, 0x11, 0x00, 0x4b, 0x12, 0x00]);
+        mpdu.extend_from_slice(&[0xaa, 0xbb]);
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.version, Version::Ieee2015);
+        assert_eq!(f.dst_pan, Some(0x1234));
+        assert_eq!(f.dst, Address::Extended(0x1122_3344_5566_7788));
+        assert_eq!(f.src, Address::Extended(0x0012_4b00_1122_3344));
+        assert_eq!(f.src_pan, Some(0x1234));
+        assert_eq!(f.payload, vec![0xaa, 0xbb]);
+        assert_eq!(f.source_id().as_deref(), Some("00:12:4B:00:11:22:33:44"));
+    }
+
+    /// The same two addresses with the compression bit set carry no PAN at
+    /// all, where the 2006 rule reads the first two bytes of the destination
+    /// as one.
+    #[test]
+    fn a_version_two_frame_with_two_extended_addresses_compressed_has_no_pan() {
+        let mut mpdu = vec![0x41, 0xec, 0x11];
+        mpdu.extend_from_slice(&[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
+        mpdu.extend_from_slice(&[0x44, 0x33, 0x22, 0x11, 0x00, 0x4b, 0x12, 0x00]);
+        mpdu.extend_from_slice(&[0xaa]);
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.dst_pan, None);
+        assert_eq!(f.src_pan, None);
+        assert_eq!(f.dst, Address::Extended(0x1122_3344_5566_7788));
+        assert_eq!(f.src, Address::Extended(0x0012_4b00_1122_3344));
+        assert_eq!(f.payload, vec![0xaa]);
+        assert_eq!(f.fields().iter().filter(|(k, _)| k == "pan").count(), 0);
+    }
+
+    /// One address and the compression bit set carry no PAN either, and two
+    /// absent addresses with it set carry a destination PAN and nothing to
+    /// go with it.
+    #[test]
+    fn a_version_two_frame_with_one_address_compressed_has_no_pan() {
+        let one = [0x41, 0x28, 0x11, 0x01, 0x00, 0xaa, 0xbb];
+        let f = parse(&one).expect("a frame");
+        assert_eq!(f.dst, Address::Short(0x0001));
+        assert_eq!(f.dst_pan, None);
+        assert_eq!(f.src, Address::Absent);
+        assert_eq!(f.payload, vec![0xaa, 0xbb]);
+
+        let neither = [0x41, 0x20, 0x11, 0x34, 0x12, 0xcc];
+        let f = parse(&neither).expect("a frame");
+        assert_eq!(f.dst_pan, Some(0x1234));
+        assert_eq!(f.dst, Address::Absent);
+        assert_eq!(f.src, Address::Absent);
+        assert_eq!(f.payload, vec![0xcc]);
+    }
+
+    /// A version two frame may leave its sequence number out, which shortens
+    /// the header by the byte every older frame has there.
+    #[test]
+    fn a_suppressed_sequence_number_is_not_a_byte_of_the_header() {
+        let mpdu = [0x61, 0xa9, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
+        assert_eq!(mpdu.len(), 10);
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.seq, None);
+        assert_eq!(f.dst_pan, Some(0x1234));
+        assert_eq!(f.dst, Address::Short(0x0001));
+        assert_eq!(f.src, Address::Short(0x0000));
+        assert_eq!(f.payload, vec![0xaa, 0xbb]);
+        assert!(f.fields().iter().all(|(k, _)| k != "seq"));
+        // The same bit in a 2006 frame is reserved and says nothing.
+        let older = [0x61, 0x99, 0x2b, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa];
+        let f = parse(&older).expect("a frame");
+        assert_eq!(f.version, Version::Ieee2006);
+        assert_eq!(f.seq, Some(0x2b));
+        assert_eq!(f.payload, vec![0xaa]);
+    }
+
+    /// Header information elements sit between the addressing fields and the
+    /// payload, so a frame carrying them reports six bytes of payload where
+    /// the walk that does not know about them reports twelve.
+    #[test]
+    fn header_information_elements_are_walked_off_the_front_of_the_payload() {
+        let mut mpdu = vec![0x61, 0xab, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00];
+        // Element 0x1a, two bytes of content.
+        mpdu.extend_from_slice(&[0x02, 0x0d, 0x33, 0x44]);
+        // Header termination 2: the payload follows directly.
+        mpdu.extend_from_slice(&[0x80, 0x3f]);
+        mpdu.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.seq, None);
+        assert_eq!(f.dst, Address::Short(0x0001));
+        assert_eq!(f.payload, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            f.fields().iter().find(|(k, _)| k == "payload_bytes").map(|(_, v)| v.clone()),
+            Some(Value::Int(6))
+        );
+        // An element claiming more bytes than the frame holds is a
+        // truncated reception.
+        let mut short = mpdu.clone();
+        short[8] = 0x40;
+        assert!(parse(&short).is_none());
+    }
+
+    /// An enhanced acknowledgement carries addresses, where the three byte
+    /// acknowledgement of every older version names nobody.
+    #[test]
+    fn an_enhanced_acknowledgement_names_who_it_is_for() {
+        let mpdu = [0x02, 0x29, 0x34, 0x12, 0x01, 0x00, 0x99];
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.frame_type, FrameType::Ack);
+        assert_eq!(f.version, Version::Ieee2015);
+        assert_eq!(f.seq, None);
+        assert_eq!(f.dst_pan, Some(0x1234));
+        assert_eq!(f.dst, Address::Short(0x0001));
+        assert_eq!(f.src, Address::Absent);
+        assert_eq!(f.payload, vec![0x99]);
+    }
+
+    /// An enhanced beacon carries its contents in information elements, so
+    /// the two bytes where an older beacon puts its superframe specification
+    /// are not one.
+    #[test]
+    fn an_enhanced_beacon_has_no_superframe_specification() {
+        let mpdu = [0x00, 0xa0, 0x11, 0x34, 0x12, 0x00, 0x00, 0xff, 0xcf];
+        let f = parse(&mpdu).expect("a frame");
+        assert_eq!(f.frame_type, FrameType::Beacon);
+        assert_eq!(f.version, Version::Ieee2015);
+        assert_eq!(f.src_pan, Some(0x1234));
+        assert_eq!(f.superframe, None);
+        assert_eq!(f.payload, vec![0xff, 0xcf]);
+        let older = [0x00, 0x80, 0x11, 0x34, 0x12, 0x00, 0x00, 0xff, 0xcf, 0x00, 0x00];
+        assert!(parse(&older).expect("a frame").superframe.is_some());
     }
 
     /// A header that runs off the end of the frame is a truncated reception,
