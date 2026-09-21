@@ -1434,6 +1434,56 @@ impl App {
                 s.feeds.remove(i);
             });
         }
+        ui.add_space(8.0);
+        self.kiss_section(ui);
+    }
+
+    /// The KISS TNC: where it listens, and what is connected to it.
+    ///
+    /// Beside the feeds because it is the same socket seen from the other
+    /// end: those are packets from another receiver, this is packets to
+    /// somebody else's software. Off until it is asked for, since it opens a
+    /// listening port and a client on it can key the transmitter.
+    fn kiss_section(&mut self, ui: &mut egui::Ui) {
+        let addr = self.setting(|s| s.kiss_address());
+        let tnc = addr.and_then(nodes::kiss_nodes::running);
+        section(ui, "tnc", "AX.25 to packet software here, over KISS", |ui| {
+            let mut on = self.setting(|s| s.kiss_on);
+            let help = "Serves every AX.25 frame heard on the packet band to anything \
+                        speaking KISS, and keys the transmitter with what a client sends \
+                        back. Direwolf, Xastir, APRSIS32 and pat all speak it.";
+            if switch(ui, "serve", &mut on, "a KISS TNC on this machine", help) {
+                self.settings.edit(|s| s.kiss_on = on);
+            }
+            row_help(ui, "listen", "A port, or host:port. A port alone is loopback.", |ui| {
+                let mut text = self.setting(|s| s.kiss_addr.clone());
+                if field(ui, &mut text, "8001, or 0.0.0.0:8001").changed() {
+                    self.settings.edit(|s| s.kiss_addr = text.clone());
+                }
+            });
+            if let Some(tnc) = &tnc {
+                reading(ui, "clients", tnc.connected().to_string());
+                reading(ui, "to clients", format!("{} frames", tnc.sent()));
+                reading(ui, "from clients", format!("{} frames", tnc.received()));
+                // Frames a client sent that no keyed channel took. Shown
+                // rather than counted silently: a client talking into a
+                // receiver with no transmit channel looks like a TNC that
+                // works until nothing goes out.
+                if tnc.dropped() > 0 {
+                    reading(ui, "dropped", format!("{} frames", tnc.dropped()));
+                }
+            }
+            match (on, addr, tnc.as_ref()) {
+                (false, _, _) => lamp(ui, false, "off: nothing is served"),
+                (true, None, _) => lamp(ui, false, "not a port or a host:port"),
+                (true, _, Some(t)) => match (t.error(), t.bound()) {
+                    (Some(e), _) => lamp(ui, false, &e),
+                    (None, Some(b)) => lamp(ui, true, &format!("listening on {b}")),
+                    (None, None) => lamp(ui, false, "not listening"),
+                },
+                (true, Some(a), None) => lamp(ui, false, &format!("{a} is not being served yet")),
+            }
+        });
     }
 
     /// Everything the radio itself can be set to.

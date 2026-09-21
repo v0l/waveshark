@@ -860,6 +860,14 @@ impl App {
         if all || now.gps != before.gps {
             crate::station::set_source(now.gps_source());
         }
+        // The transmit half is built from the protocol registry on the
+        // transmitter's own thread and has no plan to read, so the address
+        // goes to the registry as well as to the receiver.
+        if let Some(addr) = now.kiss()
+            && (all || now.kiss() != before.kiss())
+        {
+            nodes::kiss_nodes::set_default_address(addr);
+        }
         if all || now.beacondb_lookup != before.beacondb_lookup {
             // The lookup answers the map rather than the graph, so it is set
             // here rather than sent.
@@ -1090,7 +1098,17 @@ impl App {
     /// from the protocol registry and has no plan to read it from.
     pub fn serve_kiss(&mut self, addr: std::net::SocketAddr) {
         nodes::kiss_nodes::set_default_address(addr);
+        self.settings.edit(|s| {
+            s.kiss_addr = addr.to_string();
+            s.kiss_on = true;
+        });
         self.send(Cmd::Kiss(Some(addr)));
+    }
+
+    /// Serve no KISS TNC this session, whatever the saved switch says.
+    pub fn stop_kiss(&mut self) {
+        self.settings.edit(|s| s.kiss_on = false);
+        self.send(Cmd::Kiss(None));
     }
 
     /// Publish every device heard to this broker, from the command line.
@@ -2663,6 +2681,7 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
         Cmd::Wigle(now.wigle_on.then(|| account.clone())),
     );
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
+    when(now.kiss() != was.kiss(), Cmd::Kiss(now.kiss()));
     when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
     when(now.heat_plan() != was.heat_plan(), Cmd::Heatmap(now.heat_plan()));
     let publish = now.publish();
@@ -3522,6 +3541,7 @@ mod tests {
                 "gps",
                 "heatmap",
                 "homeassistant",
+                "kiss",
                 "location",
                 "log_cap",
                 "manual",
@@ -3555,6 +3575,67 @@ mod tests {
         moved.center = 868_300_000.0;
         assert!(settings_cmds(&moved, Some(&was)).is_empty(), "a drag reapplied the settings");
         assert!(settings_cmds(&was, Some(&was)).is_empty());
+    }
+
+    /// The TNC's switch and address reach the receiver from the settings
+    /// card, which is what this issue was: served from the command line or
+    /// not at all.
+    #[test]
+    fn the_tnc_switch_serves_where_the_card_says() {
+        let was = crate::session::Session::default();
+        assert_eq!(was.kiss(), None, "a fresh install listens on nothing");
+
+        let served = |cmds: Vec<Cmd>| -> Vec<Option<std::net::SocketAddr>> {
+            cmds.into_iter()
+                .map(|c| match c {
+                    Cmd::Kiss(a) => a,
+                    other => panic!("{} was sent, not the TNC", named(&other)),
+                })
+                .collect()
+        };
+
+        let mut now = was.clone();
+        now.kiss_on = true;
+        assert_eq!(
+            served(settings_cmds(&now, Some(&was))),
+            [Some(std::net::SocketAddr::from(([127, 0, 0, 1], 8001)))],
+            "one command, and a port with no host is loopback"
+        );
+
+        // Typing a host in while it is on moves the listener.
+        let mut moved = now.clone();
+        moved.kiss_addr = "0.0.0.0:8010".into();
+        assert_eq!(
+            served(settings_cmds(&moved, Some(&now))),
+            [Some("0.0.0.0:8010".parse().unwrap())]
+        );
+
+        // Half an address typed is no address, and the switch stops serving
+        // rather than serving the last one that parsed.
+        let mut half = now.clone();
+        half.kiss_addr = "0.0.0.0:".into();
+        assert_eq!(served(settings_cmds(&half, Some(&now))), [None]);
+
+        assert_eq!(served(settings_cmds(&was, Some(&now))), [None], "off stops the listener");
+        assert!(settings_cmds(&now, Some(&now)).is_empty());
+    }
+
+    /// The switch survives the file, and a command line address is written
+    /// into the card so the operator can see where it went.
+    #[test]
+    fn serving_a_tnc_from_the_command_line_shows_in_the_card() {
+        let mut a = app();
+        a.serve_kiss("127.0.0.1:8099".parse().unwrap());
+        assert!(a.setting(|s| s.kiss_on));
+        assert_eq!(a.setting(|s| s.kiss_addr.clone()), "127.0.0.1:8099");
+        assert_eq!(nodes::kiss_nodes::default_address(), "127.0.0.1:8099".parse().unwrap());
+
+        let back = crate::session::Session::parse(&a.settings.get().render());
+        assert_eq!(back.kiss(), Some("127.0.0.1:8099".parse().unwrap()));
+
+        a.stop_kiss();
+        assert!(!a.setting(|s| s.kiss_on));
+        assert_eq!(crate::session::Session::parse(&a.settings.get().render()).kiss(), None);
     }
 
     /// A feed with half an account typed into it cannot upload, and the

@@ -356,6 +356,11 @@ pub struct Session {
     pub ha_on: bool,
     /// Whether calls and messages go to the house as well as the sensors.
     pub ha_buses: bool,
+    /// Where a KISS TNC is served, as typed: a port, or host:port. Off until
+    /// it is asked for, because it opens a listening socket and is also how
+    /// a client keys the transmitter.
+    pub kiss_addr: String,
+    pub kiss_on: bool,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -496,6 +501,8 @@ impl Default for Session {
             ha_spaces: DEFAULT_HA_SPACES.into(),
             ha_on: false,
             ha_buses: true,
+            kiss_addr: nodes::kiss_nodes::DEFAULT_PORT.to_string(),
+            kiss_on: false,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -623,6 +630,23 @@ impl Session {
             spaces: self.ha_spaces.trim().to_string(),
             buses: self.ha_buses,
         }
+    }
+
+    /// Where the TNC listens, or `None` when it is off or the address is not
+    /// one. A port alone is loopback: a socket that keys the transmitter is
+    /// not opened to the network because a port was typed without a host.
+    pub fn kiss_address(&self) -> Option<std::net::SocketAddr> {
+        let typed = self.kiss_addr.trim();
+        if let Ok(port) = typed.parse::<u16>() {
+            return Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+        }
+        typed.parse().ok()
+    }
+
+    /// Where the TNC is to be served, which is nowhere until the switch is on
+    /// and the address reads.
+    pub fn kiss(&self) -> Option<std::net::SocketAddr> {
+        self.kiss_on.then(|| self.kiss_address()).flatten()
     }
 
     /// The GPS the operator named, or `None` for the local gpsd the reader
@@ -848,6 +872,11 @@ impl Session {
                 .unwrap_or_else(|| DEFAULT_HA_SPACES.into()),
             ha_on: kv.get("ha_on").map(|v| *v == "true").unwrap_or(false),
             ha_buses: kv.get("ha_buses").map(|v| *v == "true").unwrap_or(true),
+            kiss_addr: kv
+                .get("kiss_addr")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| d.kiss_addr.clone()),
+            kiss_on: kv.get("kiss_on").map(|v| *v == "true").unwrap_or(false),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -921,6 +950,7 @@ impl Session {
             ("ha_prefix", &self.ha_prefix),
             ("ha_topic", &self.ha_topic),
             ("ha_spaces", &self.ha_spaces),
+            ("kiss_addr", &self.kiss_addr),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -989,6 +1019,9 @@ impl Session {
         s.push_str(&format!("scan_sparse = {}\n", self.scan_sparse));
         s.push_str(&format!("scan_linger_s = {}\n", self.scan_linger_s));
         s.push_str(&format!("ha_buses = {}\n", self.ha_buses));
+        if self.kiss_on {
+            s.push_str("kiss_on = true\n");
+        }
         if self.ha_on {
             s.push_str("ha_on = true\n");
         }
@@ -1163,6 +1196,8 @@ mod tests {
             ha_spaces: "ism,wmbus".into(),
             ha_on: true,
             ha_buses: true,
+            kiss_addr: "0.0.0.0:8001".into(),
+            kiss_on: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             heat_on: false,
@@ -1201,6 +1236,27 @@ mod tests {
             map_layers: vec![("rings".into(), true), ("airports".into(), false)],
         };
         assert_eq!(Session::parse(&s.render()), s);
+    }
+
+    /// A port with no host is loopback, because the client on the other end
+    /// of it can key the transmitter.
+    #[test]
+    fn a_tnc_address_is_a_port_or_a_host_and_port() {
+        let at = |typed: &str| Session::parse(&format!("kiss_addr = {typed}")).kiss_address();
+        assert_eq!(at("8001"), Some("127.0.0.1:8001".parse().unwrap()));
+        assert_eq!(at("0.0.0.0:8010"), Some("0.0.0.0:8010".parse().unwrap()));
+        assert_eq!(at("[::1]:8001"), Some("[::1]:8001".parse().unwrap()));
+        assert_eq!(at("banana"), None);
+        assert_eq!(at("8001 "), Some("127.0.0.1:8001".parse().unwrap()), "trimmed");
+        // A host with no port is not an address: a listener bound to a port
+        // the kernel chose is one nothing can be told to connect to.
+        assert_eq!(at("0.0.0.0"), None);
+        // A default install serves nothing, whatever the address says.
+        assert_eq!(Session::default().kiss(), None);
+        assert_eq!(
+            Session::parse("kiss_on = true").kiss(),
+            Some("127.0.0.1:8001".parse().unwrap())
+        );
     }
 
     /// A stitched receiver's per-tuner trim is a driver setting like a

@@ -1166,11 +1166,11 @@ struct Args {
     #[arg(long, value_name = "SPACES")]
     ha_spaces: Option<String>,
     /// Serve a KISS TNC on this address, so packet software can use the
-    /// radio: a port, or host:port. Loopback unless a host is given. Off
-    /// unless this says otherwise, since it is also how a client keys the
-    /// transmitter
-    #[arg(long, value_name = "ADDR", default_value = "off")]
-    kiss_listen: Listen,
+    /// radio: a port, host:port, or `off`. Loopback unless a host is given.
+    /// The Packet log settings hold the switch; this overrides it for the
+    /// session
+    #[arg(long, value_name = "ADDR")]
+    kiss_listen: Option<Listen>,
 
     /// Serve MCP on this address, so an agent can drive this receiver:
     /// a port, or host:port. Loopback unless a host is given. Served on
@@ -1662,8 +1662,10 @@ fn main() -> eframe::Result<()> {
             // uses, and a port on 127.0.0.1 reaches no further than this
             // machine. A port already in use is said once and carried on
             // from, because it is not a reason to refuse to be a receiver.
-            if let Some(addr) = args.kiss_listen.0 {
-                app.serve_kiss(addr);
+            match args.kiss_listen {
+                Some(Listen(Some(addr))) => app.serve_kiss(addr),
+                Some(Listen(None)) => app.stop_kiss(),
+                None => {}
             }
             #[cfg(feature = "mcp")]
             if let Some(addr) = args.mcp_listen.0 {

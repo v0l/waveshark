@@ -35,8 +35,8 @@ the code is in the commit log.
 - `wave1090`, a Mode S receiver of its own, serving dump1090's AVR, BaseStation
   and Beast ports off a dongle or an iqstream server, taking mlat results back
   and passing the samples on over iqstream itself.
-- KISS TNC on `--kiss-listen`: packet software reads what the radio heard and
-  keys AX.25 through it.
+- KISS TNC on `--kiss-listen` or the packet log card: packet software reads
+  what the radio heard and keys AX.25 through it.
 - FT8 and FT4 on the HF dials: every station in the passband, with their grid
   squares on the map.
 - Protocol descriptions: sensors, remotes and FSK links as YAML files
