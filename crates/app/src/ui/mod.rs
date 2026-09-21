@@ -1138,8 +1138,11 @@ impl App {
 
     pub fn set_device(&mut self, want: &str) {
         let w = want.to_lowercase();
-        match self.devices.iter().find(|d| d.label.to_lowercase().contains(&w)) {
-            Some(d) => self.device = Some(d.clone()),
+        match self.devices.iter().find(|d| d.label.to_lowercase().contains(&w)).cloned() {
+            Some(d) => {
+                self.adopt_device(d);
+                self.autostart = true;
+            }
             None => {
                 let have: Vec<&str> = self.devices.iter().map(|d| d.label.as_str()).collect();
                 eprintln!("no radio matching {want:?}; attached: {have:?}");
@@ -1208,11 +1211,7 @@ impl App {
             self.err_at = Some(std::time::Instant::now());
             return;
         };
-        self.spans = crate::devices::spans_with_zoom(&device_rates(&entry));
-        if !self.spans.iter().any(|s| (s.effective() - self.rate).abs() < 1.0) {
-            self.rate = self.spans.last().map(|s| s.effective()).unwrap_or(self.rate);
-            self.zoom = 1;
-        }
+        self.fit_spans();
         let c = ctx.clone();
         self.radio = Some(Radio::start(
             entry,
@@ -1286,6 +1285,16 @@ impl App {
         if self.device.as_ref() == Some(&e) {
             return;
         }
+        self.adopt_device(e);
+        self.connect(ctx);
+    }
+
+    /// Take a receiver as the one being used, without opening it.
+    ///
+    /// Everything the choice decides that is not the connection itself, so
+    /// the command line can make the same choice before there is a window to
+    /// connect from.
+    fn adopt_device(&mut self, e: crate::devices::Entry) {
         // A remote tuner is pinned to one frequency, so the dial goes there
         // rather than the samples arriving under whatever it was last on.
         if let Some(f) = e.pinned {
@@ -1300,7 +1309,17 @@ impl App {
         self.radio_settings.offset = self.offset_by_device.get(&e.label).copied().unwrap_or(0.0);
         self.device = Some(e);
         self.audio.listening = None;
-        self.connect(ctx);
+        self.fit_spans();
+    }
+
+    /// The span list this receiver can offer, and a rate it can deliver.
+    fn fit_spans(&mut self) {
+        let Some(entry) = self.device.as_ref() else { return };
+        self.spans = crate::devices::spans_with_zoom(&device_rates(entry));
+        if !self.spans.iter().any(|s| (s.effective() - self.rate).abs() < 1.0) {
+            self.rate = self.spans.last().map(|s| s.effective()).unwrap_or(self.rate);
+            self.zoom = 1;
+        }
     }
 
     fn send(&self, c: Cmd) {
@@ -4315,6 +4334,55 @@ mod tests {
         assert!(!a.view_live(View::Dashboard));
         assert!(!a.view_live(View::Spectrum));
         assert!(!a.view_live(View::Chain));
+    }
+
+    /// `--device` is the same choice as clicking the receiver in the list,
+    /// so it moves the dial to a pinned recording, rebuilds the span list
+    /// from that receiver's rates and starts it.
+    ///
+    /// Without this, `--capture x_868.3M_250k.cu8 --device x` opened on last
+    /// session's 100 MHz at 2.304 MS/s, neither of which the file delivers,
+    /// and needed `--span 250 --run` typed after it to show anything.
+    #[test]
+    fn naming_a_capture_as_the_device_fixes_the_span_and_the_dial() {
+        let dir = std::env::temp_dir().join("sr_set_device");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench_868.3M_250k.cu8");
+        std::fs::write(&path, vec![0u8; 500_000]).unwrap();
+        let capture = crate::devices::add_capture(path.clone()).expect("a capture");
+
+        let mut a = App { center: 100e6, rate: 2_304_000.0, ..Default::default() };
+        a.scope.wf_center = 100e6;
+        a.scope.db_center = 100e6;
+        a.devices = vec![capture.entry(0)];
+        a.set_device("bench_868.3M");
+
+        assert_eq!(a.device.as_ref().and_then(|d| d.path.as_deref()), Some(path.as_path()));
+        assert_eq!(a.center, 868_300_000.0);
+        assert_eq!(a.scope.wf_center, 868_300_000.0);
+        assert_eq!(a.scope.db_center, 868_300_000.0);
+        // One rate in, three spans out: the file's own, and the two software
+        // zooms above 48 kHz.
+        let spans: Vec<f64> = a.spans.iter().map(|s| s.effective()).collect();
+        assert_eq!(spans, vec![62_500.0, 125_000.0, 250_000.0], "span list");
+        assert_eq!(a.rate, 250_000.0, "2.304 MS/s is not a rate this file delivers");
+        assert_eq!(a.zoom, 1);
+        assert!(a.autostart, "a named receiver is connected to, as clicking one is");
+
+        // A name nothing answers to changes nothing and starts nothing,
+        // rather than leaving the receiver pointed at a device it has not got.
+        let mut b = App { center: 100e6, rate: 2_304_000.0, ..Default::default() };
+        b.devices = vec![capture.entry(0)];
+        b.set_device("no such radio");
+        assert_eq!(b.device, None);
+        assert_eq!(b.spans.len(), 0);
+        assert_eq!(b.center, 100e6);
+        assert_eq!(b.rate, 2_304_000.0);
+        assert!(!b.autostart);
+
+        crate::devices::remove_capture(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

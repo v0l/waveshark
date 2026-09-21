@@ -176,6 +176,7 @@ the code is in the commit log.
 
 - SSTV pictures came back washed out, with black read as dark grey and white
   as light grey.
+- `--device` now moves the dial, sets the span and starts the radio it names.
 - Comm-B and surveillance replies named an address that was not the
   aircraft's, so an altitude or a squawk was filed under a hex code no
   aircraft has.
