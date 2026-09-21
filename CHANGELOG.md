@@ -111,8 +111,10 @@ the code is in the commit log.
   SSTV pictures in Martin, Scottie and Robot modes, and RDS station names
   over a programme.
 - Recorded captures sent back out: pick a file on a channel and transmit it.
-- VOX: speech keys the transmit channel, with a tail, a roger beep and the
-  receiver's own audio kept out of it.
+- VOX: speech keys the transmit channel, with a tail and the receiver's own
+  audio kept out of it.
+- Roger beep at the end of an over, whether a hand, a voice or the agent
+  let the key up.
 - Flipper `.sub` files: a scripts panel down the left holding every one this
   machine has, as a tree by where it came from, and a TX button that keys one
   at the frequency it names. RAW plays its recorded timings; Princeton, CAME,

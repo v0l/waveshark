@@ -816,6 +816,17 @@ impl Receiver {
         self.tx.unkey()
     }
 
+    /// Tell the transmit chain the over has ended. True while the courtesy
+    /// tone it answers with is still going out, which is how long the key
+    /// has to stay down.
+    pub fn end_over(&mut self) -> bool {
+        self.tx.end_over()
+    }
+
+    pub fn sending_roger(&self) -> bool {
+        self.tx.sending_roger()
+    }
+
     pub fn keyed(&self) -> bool {
         self.tx.keyed()
     }
@@ -2988,8 +2999,11 @@ pub mod derived {
     /// Between the microphone and the modulator when a voice keys the
     /// channel rather than a hand.
     pub const VOX: u64 = Patch::DERIVED_BASE + 33;
+    /// The courtesy tone at the end of an over, between what is modulated
+    /// and the modulator, so every way of letting the key up reaches it.
+    pub const ROGER: u64 = Patch::DERIVED_BASE + 36;
     /// The stages that transmit, which are run on a thread of their own.
-    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, TX_MOD, TX_RADIO];
+    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, ROGER, TX_MOD, TX_RADIO];
     /// What is going out, drawn on the span the receiver is deaf to while it
     /// goes out. In front of the head, so everything downstream sees it.
     pub const TX_MONITOR: u64 = Patch::DERIVED_BASE + 19;
@@ -3232,10 +3246,22 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 s.insert("threshold".into(), pipeline::ParamValue::Float(f64::from(v.threshold)));
                 s.insert("tail_ms".into(), pipeline::ParamValue::Float(v.tail_ms));
                 s.insert("anti_trip".into(), pipeline::ParamValue::Bool(v.anti_trip));
-                s.insert("roger_ms".into(), pipeline::ParamValue::Float(v.roger_ms));
                 p.add_derived(derived::VOX, "vox", s);
                 p.connect(modulates, (derived::VOX, 0));
                 modulates = Source::Stage(derived::VOX, 0);
+            }
+            // The end of an over is the same end however the key came up, so
+            // the tone is a stage of its own that the vox, a hand on the key
+            // and the agent all transmit through. A recording and a `.sub`
+            // took the branch above: what they send is somebody else's
+            // transmission, and a tone on the end of it is not in it.
+            if tx.spec.roger_ms > 0.0 {
+                let mut s = Settings::new();
+                s.insert("roger_ms".into(), pipeline::ParamValue::Float(tx.spec.roger_ms));
+                s.insert("roger_hz".into(), pipeline::ParamValue::Float(tx.spec.roger_hz));
+                p.add_derived(derived::ROGER, "roger", s);
+                p.connect(modulates, (derived::ROGER, 0));
+                modulates = Source::Stage(derived::ROGER, 0);
             }
 
             // A recording needs no modulator at all: what stands in its place
@@ -8744,6 +8770,66 @@ vectors:
         rx.unkey();
     }
 
+    /// A hand on the key gets the courtesy tone the channel was set to.
+    ///
+    /// The tone used to live on the vox, so it existed only where a voice
+    /// keyed the channel and a hand or the agent ended an over with nothing
+    /// on it. The end of an over is now announced to the chain, and the key
+    /// stays down until the stage says the tone has gone out.
+    #[test]
+    fn a_hand_keyed_over_ends_with_the_courtesy_tone() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        // 700 Hz on the air for the over, and 1500 Hz for 150 ms to end it.
+        let spec = TxSpec {
+            source: TxSource::Tone,
+            tone_hz: 700.0,
+            roger_ms: 150.0,
+            roger_hz: 1_500.0,
+            ..Default::default()
+        };
+        plan.channels[0].tx = Some(spec);
+        plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())));
+        // 600 000 samples at 2 MS/s is 300 ms of over before it ends.
+        until("an over on the air", || radio.samples() > 600_000);
+        assert!(rx.end_over(), "nothing was sent to end the over");
+        until("the courtesy tone to go out", || !rx.sending_roger());
+        rx.unkey();
+        assert!(rx.tx_settled());
+
+        // What went out, read back off the carrier and cut into 10 ms
+        // windows, each read as the pitch it carried.
+        let air = radio.transmitted();
+        let mut demod = dsp::FmDemod::new(plan.rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&air, &mut audio);
+        let window = (plan.rate * 0.01) as usize;
+        let pitches: Vec<f64> = audio
+            .chunks_exact(window)
+            .map(|w| {
+                let crossings = w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count();
+                crossings as f64 / 0.01
+            })
+            .collect();
+        let near = |want: f64| move |hz: &&f64| (**hz - want).abs() < 120.0;
+        let roger = pitches.iter().filter(near(1_500.0)).count();
+        // 150 ms of tone, less the window it starts in and the one it ends
+        // in, both of which carry some of the 700 Hz either side of it.
+        assert_eq!(roger, 15, "150 ms of 1500 Hz in 10 ms windows: {pitches:?}");
+        let first = pitches.iter().position(|hz| (hz - 1_500.0).abs() < 120.0).unwrap();
+        let over = pitches[..first].iter().filter(near(700.0)).count();
+        assert!(over >= 25, "only {over} windows of the over itself at 700 Hz");
+        assert_eq!(
+            pitches[first..first + roger].iter().filter(near(1_500.0)).count(),
+            roger,
+            "the courtesy tone was broken up rather than sent in one piece"
+        );
+    }
+
     /// An agent channel transmits the agent, not the room.
     ///
     /// The source stage is built on every rebuild, and what it reads was
@@ -8809,13 +8895,8 @@ vectors:
     #[test]
     fn a_voice_on_the_microphone_asks_for_the_key() {
         let mut plan = plan_with_tx(TxSource::Mic);
-        let vox = crate::radio::VoxSpec {
-            on: true,
-            threshold: 0.1,
-            tail_ms: 100.0,
-            anti_trip: true,
-            roger_ms: 0.0,
-        };
+        let vox =
+            crate::radio::VoxSpec { on: true, threshold: 0.1, tail_ms: 100.0, anti_trip: true };
         let spec = TxSpec { source: TxSource::Mic, vox, ..Default::default() };
         plan.channels[0].tx = Some(spec);
         plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
@@ -8852,13 +8933,8 @@ vectors:
     #[test]
     fn the_speaker_does_not_ask_for_the_key() {
         let mut plan = plan_with_tx(TxSource::Mic);
-        let vox = crate::radio::VoxSpec {
-            on: true,
-            threshold: 0.02,
-            tail_ms: 100.0,
-            anti_trip: true,
-            roger_ms: 0.0,
-        };
+        let vox =
+            crate::radio::VoxSpec { on: true, threshold: 0.02, tail_ms: 100.0, anti_trip: true };
         let spec = TxSpec { source: TxSource::Mic, vox, ..Default::default() };
         plan.channels[0].tx = Some(spec);
         plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });

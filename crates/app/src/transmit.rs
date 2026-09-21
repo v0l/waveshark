@@ -59,6 +59,10 @@ pub struct Readings {
     /// holding the key up.
     pub vox_level: AtomicU32,
     pub vox_held: AtomicBool,
+    /// Whether the courtesy tone that ends the over is still going out, so
+    /// the key is held down until it has. Set by whoever let the key up,
+    /// cleared by the thread when the stage has sent it.
+    pub roger: AtomicBool,
     /// Blocks the radio refused, which is how a device unplugged in the
     /// middle of an over shows up: the stream reports every write failing
     /// and there is nothing else to notice it by.
@@ -84,6 +88,9 @@ enum Job {
     /// A chain to run from now on, and whether it runs before it is keyed.
     Chain(Box<Graph>, bool),
     Key(Box<dyn TxStream>),
+    /// The over has ended, told to the chain so the stage that ends one can
+    /// send its tone before the radio goes back.
+    EndOver,
     Unkey,
     /// Nothing left to transmit: the chain goes, and with it anything that
     /// was waiting to be put on it.
@@ -213,10 +220,37 @@ impl Transmitter {
         self.to.send(Job::Key(stream)).is_ok()
     }
 
+    /// Tell the chain the over has ended.
+    ///
+    /// True when a courtesy tone is on its way out, which is the answer to
+    /// whether the key may come up yet: it is the same answer whether a
+    /// voice, a hand or the agent ended the over, because all three arrive
+    /// here. Reported from the chain that was built rather than from the
+    /// thread, since whoever asks has to know before the thread runs again.
+    pub fn end_over(&mut self) -> bool {
+        let ms = self
+            .built
+            .as_ref()
+            .and_then(|p| p.stage(crate::chain::derived::ROGER))
+            .map(|s| s.settings.get("roger_ms").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .unwrap_or(0.0);
+        if ms <= 0.0 || !self.armed {
+            return false;
+        }
+        self.readings.roger.store(true, Ordering::Relaxed);
+        self.to.send(Job::EndOver).is_ok()
+    }
+
+    /// Whether the courtesy tone is still going out.
+    pub fn sending_roger(&self) -> bool {
+        self.readings.roger.load(Ordering::Relaxed)
+    }
+
     /// Let the queue out and give the radio back, reporting the idle
     /// transfers the over cost.
     pub fn unkey(&mut self) -> u64 {
         self.armed = false;
+        self.readings.roger.store(false, Ordering::Relaxed);
         // Marked up here rather than on the thread: the interface asks
         // whether it is still transmitting in the same breath as telling it
         // to stop, and an answer that lags the key by a block reads as a key
@@ -300,8 +334,14 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                     arm(g, &mut waiting);
                 }
             }
+            Some(Job::EndOver) => {
+                let sending =
+                    graph.as_mut().and_then(roger_of).map(|r| r.end_over()).unwrap_or(false);
+                readings.roger.store(sending, Ordering::Relaxed);
+            }
             Some(Job::Unkey) => {
                 waiting = None;
+                readings.roger.store(false, Ordering::Relaxed);
                 if let Some(g) = graph.as_mut()
                     && let Some(sink) = sink_of(g)
                 {
@@ -312,6 +352,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
             }
             Some(Job::Drop) => {
                 waiting = None;
+                readings.roger.store(false, Ordering::Relaxed);
                 if let Some(mut g) = graph.take()
                     && let Some(sink) = sink_of(&mut g)
                 {
@@ -396,6 +437,14 @@ fn read_off(g: &mut Graph, readings: &Readings) -> bool {
     if let Some((peak, clipped)) = mic {
         readings.mic_peak.store(peak.to_bits(), Ordering::Relaxed);
         readings.mic_clipped.store(clipped, Ordering::Relaxed);
+    }
+    if let Some(r) = roger_of(g) {
+        let sending = r.sending();
+        // Only ever cleared here: the key went down again while the tone was
+        // going out, and the stage was reset with the rest of the chain.
+        if !sending {
+            readings.roger.store(false, Ordering::Relaxed);
+        }
     }
     let vox = g
         .by_tag(crate::chain::derived::VOX)
@@ -489,6 +538,11 @@ fn hand_back(mut old: Graph, new: &mut Graph) {
 fn sink_of(g: &mut Graph) -> Option<&mut nodes::TxSinkNode> {
     let id = g.by_tag(crate::chain::derived::TX_RADIO)?;
     g.node_mut(id)?.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
+}
+
+fn roger_of(g: &mut Graph) -> Option<&mut nodes::RogerNode> {
+    let id = g.by_tag(crate::chain::derived::ROGER)?;
+    g.node_mut(id)?.as_any_mut().downcast_mut::<nodes::RogerNode>()
 }
 
 /// Keeps the chain from running away from real time before the radio's own

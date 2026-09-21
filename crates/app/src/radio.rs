@@ -695,6 +695,12 @@ pub struct TxSpec {
     pub trim_db: f32,
     /// Whether speech keys the channel, and how.
     pub vox: VoxSpec,
+    /// A courtesy tone at the end of an over, or zero for none, and the
+    /// pitch it is sent at. On a channel with no squelch tail the far end
+    /// has nothing else to tell it the over finished, and the end of an over
+    /// is the same end whether a voice, a hand or the agent let the key up.
+    pub roger_ms: f64,
+    pub roger_hz: f64,
 }
 
 /// What lets a voice key the transmitter instead of a hand.
@@ -715,8 +721,6 @@ pub struct VoxSpec {
     /// Whether what the speaker is playing raises the threshold. Off for a
     /// headset, where nothing coming out of it reaches the microphone.
     pub anti_trip: bool,
-    /// A courtesy tone at the end of an over, or zero for none.
-    pub roger_ms: f64,
 }
 
 impl Default for VoxSpec {
@@ -726,7 +730,6 @@ impl Default for VoxSpec {
             threshold: nodes::DEFAULT_VOX_THRESHOLD,
             tail_ms: nodes::DEFAULT_VOX_TAIL_MS,
             anti_trip: true,
-            roger_ms: 0.0,
         }
     }
 }
@@ -743,6 +746,8 @@ impl Default for TxSpec {
             tone_hz: 1_000.0,
             trim_db: 0.0,
             vox: VoxSpec::default(),
+            roger_ms: 0.0,
+            roger_hz: 1_000.0,
         }
     }
 }
@@ -2137,6 +2142,10 @@ struct Tx {
     /// The channel a voice keyed, so the same voice stopping lets it up and
     /// a hand on the key is left alone.
     vox_keyed: Option<u64>,
+    /// When the over ended, while the courtesy tone that closes it is still
+    /// going out. The radio goes back when the tone has, so a half duplex
+    /// radio is not retuned out from under it.
+    ending: Option<std::time::Instant>,
 }
 
 /// How long past the key coming up the transcriber stays deaf.
@@ -2145,6 +2154,11 @@ struct Tx {
 /// receiver said must not be written down, and what somebody says straight
 /// after must be.
 const DEAF_TAIL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The longest an over is held open for its courtesy tone: the longest tone
+/// that can be set ([`nodes::ROGER_MAX_MS`]) and a block or two for the
+/// chain to have made it.
+const ROGER_LIMIT: std::time::Duration = std::time::Duration::from_millis(1_500);
 
 /// The speaker and the microphone, and the devices they were asked for.
 struct AudioIo {
@@ -2378,6 +2392,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 keying_for: None,
                 last_keyed: None,
                 vox_keyed: None,
+                ending: None,
                 last_on_air: None,
             },
             voice: None,
@@ -2435,6 +2450,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             let _b = tracing::info_span!("block").entered();
             self.meter_mic();
             self.vox();
+            self.finish_over();
             // Whether the monitor stage draws what is going out on the span.
             // Only while the radio is deaf: a full duplex one hears its own
             // transmission for real, and mirroring on top of that would draw
@@ -2454,10 +2470,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // A radio unplugged mid-over ends the over itself, and the key
             // has to come up with it: a lit key over a transmitter that
             // stopped transmitting is worse than no key at all.
+            // No courtesy tone on the way out: the chain is clocked by the
+            // device taking samples away, so a device that stopped taking
+            // them cannot send one and the key would stay lit waiting.
             if self.rx.tx_lost() {
                 *self.status.error.lock() =
                     Some("the radio stopped taking samples: the transmission ended".into());
-                self.unkey();
+                self.unkey_now();
             }
 
             if let Flow::Stop = self.process(&buf.samples) {
@@ -2894,10 +2913,47 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     }
 
     /// Take the radio back off the transmit stage.
+    ///
+    /// The over's end is announced to the transmit chain first, because that
+    /// is the one place that knows whether anything is still to be sent: a
+    /// channel with a courtesy tone keeps the key down for it, and the radio
+    /// goes back on a later block when [`Self::finish_over`] sees it out.
     fn unkey(&mut self) {
         // A key let up before the rebuild it was waiting for: the rebuild
         // must not go on to announce it on air.
         self.tx.keying_for = None;
+        if self.tx.ending.is_some() {
+            return;
+        }
+        if !self.rx.keyed() && self.status.keyed.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        if self.rx.end_over() {
+            self.tx.ending = Some(std::time::Instant::now());
+            return;
+        }
+        self.unkey_now();
+    }
+
+    /// The tone that ends the over is out, or has had long enough: the radio
+    /// goes back.
+    ///
+    /// The deadline is what covers a radio unplugged mid-tone. The chain is
+    /// clocked by the device taking samples away, so a device that stopped
+    /// taking them is a stage that never finishes sending and a key that
+    /// never comes up.
+    fn finish_over(&mut self) {
+        let Some(since) = self.tx.ending else { return };
+        if self.rx.sending_roger() && since.elapsed() < ROGER_LIMIT {
+            return;
+        }
+        self.tx.ending = None;
+        self.unkey_now();
+    }
+
+    fn unkey_now(&mut self) {
+        self.tx.keying_for = None;
+        self.tx.ending = None;
         if !self.rx.keyed() && self.status.keyed.load(Ordering::Relaxed) == 0 {
             return;
         }
@@ -2928,6 +2984,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     /// gap rather than stopping; on a full duplex one it goes on hearing the
     /// band.
     fn key(&mut self, id: u64) {
+        // Keyed again while the last over's tone was going out: it is one
+        // over now, and nothing is waiting to be given back.
+        self.tx.ending = None;
         let Some(ch) = self.plan.channels.iter().find(|c| c.id == id).cloned() else {
             *self.status.error.lock() = Some("there is no such channel to key".into());
             return;
@@ -3226,8 +3285,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                     Some("the transmit chain did not build; nothing is on air".into());
                 // Let the key back up with it. A key held down over a
                 // transmitter that never got a chain is a state nothing can
-                // leave: every further key is ignored as already keyed.
-                self.unkey();
+                // leave: every further key is ignored as already keyed. No
+                // tone to end it either: nothing was ever on air.
+                self.unkey_now();
             }
         }
         // Its own slot, not the fault line: a front end the span cannot hold
@@ -4006,7 +4066,7 @@ pub(crate) mod tests {
 
     fn vox_channel(id: u64, offset: f64) -> ChannelSpec {
         let vox =
-            VoxSpec { on: true, threshold: 0.1, tail_ms: 100.0, anti_trip: true, roger_ms: 0.0 };
+            VoxSpec { on: true, threshold: 0.1, tail_ms: 100.0, anti_trip: true };
         ChannelSpec {
             tx: Some(TxSpec { source: TxSource::Mic, vox, ..Default::default() }),
             ..strip_channel(id, offset)

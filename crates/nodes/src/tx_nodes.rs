@@ -1503,23 +1503,9 @@ pub struct VoxNode {
     threshold: f32,
     tail_ms: f64,
     anti_trip: bool,
-    /// Length and pitch of the courtesy tone sent at the end of an over, or
-    /// zero length for none. On a channel with no squelch tail the far end
-    /// has nothing else to tell it the over finished.
-    roger_ms: f64,
-    roger_hz: f64,
     rate: f64,
     heard: Heard,
     open: bool,
-    /// Samples of roger beep still to send. The key is held down for them,
-    /// since a beep sent after the carrier drops is not sent at all.
-    beep: usize,
-    /// Whether this block carried any of the beep, which is what holds the
-    /// key down over the block that finishes it: the samples are queued
-    /// before anybody asks again, and unkeying on the same block cuts the
-    /// tone off in the radio's own buffer.
-    beeping: bool,
-    phase: f64,
 }
 
 impl Default for VoxNode {
@@ -1537,14 +1523,9 @@ impl VoxNode {
             threshold,
             tail_ms,
             anti_trip: true,
-            roger_ms: 0.0,
-            roger_hz: 1_000.0,
             rate: 0.0,
             heard: Heard::default(),
             open: false,
-            beep: 0,
-            beeping: false,
-            phase: 0.0,
         }
     }
 
@@ -1557,9 +1538,10 @@ impl VoxNode {
         self.heard.clone()
     }
 
-    /// Whether the key should be down: the voice, or the beep that ends it.
+    /// Whether the key should be down, which is whether somebody is
+    /// talking. What happens at the end of the over is [`RogerNode`]'s.
     pub fn is_open(&self) -> bool {
-        self.open || self.beeping
+        self.open
     }
 
     /// The level the decision is being made on, as an amplitude in 0..1, so
@@ -1634,37 +1616,14 @@ impl Simple for VoxNode {
         if audio.is_empty() {
             return Ok(());
         }
-        let was = self.open;
         self.open = self.vox.update(audio, self.heard_db(), audio.len());
-        if was && !self.open && self.roger_ms > 0.0 {
-            self.beep = (self.rate * self.roger_ms / 1000.0) as usize;
-            self.phase = 0.0;
-        }
-        let out = output.real_mut();
-        out.extend_from_slice(audio);
-        self.beeping = self.beep > 0;
-        if self.beep == 0 {
-            return Ok(());
-        }
-        // The beep replaces the audio rather than adding to it: what it is
-        // laid over is the tail of an over that has already finished, and a
-        // courtesy tone mixed with the last syllable is neither.
-        let n = self.beep.min(out.len());
-        let step = std::f64::consts::TAU * self.roger_hz / self.rate.max(1.0);
-        for s in out.iter_mut().take(n) {
-            *s = 0.5 * self.phase.sin() as f32;
-            self.phase += step;
-        }
-        self.beep -= n;
+        output.real_mut().extend_from_slice(audio);
         Ok(())
     }
 
     fn reset(&mut self) {
         self.vox.reset();
         self.open = false;
-        self.beep = 0;
-        self.beeping = false;
-        self.phase = 0.0;
     }
 
     fn params(&self) -> Vec<Param> {
@@ -1672,10 +1631,6 @@ impl Simple for VoxNode {
             Param::float(THRESHOLD, self.threshold as f64, 0.0..=1.0).label("Vox threshold"),
             Param::float(TAIL_MS, self.tail_ms, 0.0..=5_000.0).label("Vox tail").unit("ms"),
             Param::bool(ANTI_TRIP, self.anti_trip).label("Ignore the speaker"),
-            Param::float(ROGER_MS, self.roger_ms, 0.0..=1_000.0).label("Roger beep").unit("ms"),
-            Param::float(ROGER_HZ, self.roger_hz, 300.0..=3_000.0)
-                .label("Roger beep pitch")
-                .unit("Hz"),
         ]
     }
 
@@ -1693,8 +1648,6 @@ impl Simple for VoxNode {
                 self.anti_trip = value.as_bool().unwrap_or(true);
                 self.vox.set_anti_trip(self.anti_trip);
             }
-            ROGER_MS => self.roger_ms = value.as_f64().unwrap_or(0.0).clamp(0.0, 1_000.0),
-            ROGER_HZ => self.roger_hz = value.as_f64().unwrap_or(1_000.0).clamp(300.0, 3_000.0),
             _ => return Err(common::Error::other(format!("vox: unknown parameter {name:?}"))),
         }
         Ok(())
@@ -1771,26 +1724,226 @@ mod vox_tests {
         assert_eq!(down, 20, "a voice in a quiet room did not key");
     }
 
-    /// The over ends with a courtesy tone, and the key stays down for it.
+    /// The vox says whether a voice is talking and nothing more: the tone
+    /// that ends the over is a stage of its own, so a hand key gets one too.
     #[test]
-    fn the_roger_beep_is_sent_before_the_key_comes_up() {
+    fn the_key_comes_up_with_the_voice() {
         let mut node = VoxNode::new(0.1, 0.0);
-        Node::set_param(&mut node, ROGER_MS, ParamValue::Float(100.0)).unwrap();
         let (down, _) = run(&mut node, 0.5, 5);
         assert_eq!(down, 5);
-        // No tail, so the key comes up on the first silent block and the beep
-        // holds it down for five more: 100 ms at 20 ms a block.
-        let (down, out) = run(&mut node, 0.0, 20);
-        assert_eq!(down, 5, "100 ms of roger beep, in blocks of 20 ms");
-        assert_eq!(out.len(), BLOCK, "the beep changed the block's length");
-        assert!(!node.is_open(), "the key stayed down after the beep");
+        let (down, _) = run(&mut node, 0.0, 20);
+        assert_eq!(down, 0, "the key hung on after the voice stopped");
+    }
+}
 
-        // And with no beep asked for, the key comes up at once.
-        let mut bare = VoxNode::new(0.1, 0.0);
-        let (down, _) = run(&mut bare, 0.5, 5);
-        assert_eq!(down, 5);
-        let (down, _) = run(&mut bare, 0.0, 20);
-        assert_eq!(down, 0, "the key hung on with no beep to send");
+/// The courtesy tone that ends an over.
+///
+/// The end of an over is announced to the chain rather than worked out
+/// inside it: [`Self::end_over`] is called by whoever let the key up, so the
+/// vox, a hand on the key and the agent all reach the same tone. The stage
+/// sits between the source and the modulator, passes the audio through, and
+/// says through [`Self::sending`] whether the key still has to be held down.
+pub struct RogerNode {
+    ms: f64,
+    hz: f64,
+    rate: f64,
+    left: usize,
+    phase: f64,
+}
+
+impl Default for RogerNode {
+    fn default() -> Self {
+        Self { ms: 0.0, hz: 1_000.0, rate: 0.0, left: 0, phase: 0.0 }
+    }
+}
+
+impl RogerNode {
+    pub fn new(ms: f64, hz: f64) -> Self {
+        Self { ms: ms.clamp(0.0, ROGER_MAX_MS), hz, ..Self::default() }
+    }
+
+    /// The over has ended. True when there is a tone to send, which is the
+    /// answer to whether the key may come up yet.
+    pub fn end_over(&mut self) -> bool {
+        self.left = (self.rate * self.ms / 1_000.0) as usize;
+        self.phase = 0.0;
+        self.left > 0
+    }
+
+    pub fn sending(&self) -> bool {
+        self.left > 0
+    }
+
+    pub fn ms(&self) -> f64 {
+        self.ms
+    }
+}
+
+impl Simple for RogerNode {
+    fn name(&self) -> &str {
+        "roger"
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        vec![(
+            "roger".into(),
+            match (self.ms > 0.0, self.sending()) {
+                (false, _) => "off".into(),
+                (true, false) => format!("{:.0} ms at {:.0} Hz", self.ms, self.hz),
+                (true, true) => "sending".into(),
+            },
+        )]
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Real {
+            return Err(common::Error::other("roger runs on a real audio stream"));
+        }
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("roger needs the rate its tone is counted in"));
+        }
+        self.rate = input.spec.rate;
+        Ok(input.spec)
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(audio) = input.as_real() else {
+            return Ok(());
+        };
+        let out = output.real_mut();
+        out.extend_from_slice(audio);
+        if self.left == 0 {
+            return Ok(());
+        }
+        // The tone replaces the audio rather than adding to it: what it is
+        // laid over is an over that has already finished, and a courtesy
+        // tone mixed with the last syllable is neither.
+        let n = self.left.min(out.len());
+        let step = std::f64::consts::TAU * self.hz / self.rate.max(1.0);
+        for s in out.iter_mut().take(n) {
+            *s = 0.5 * self.phase.sin() as f32;
+            self.phase += step;
+        }
+        self.left -= n;
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.left = 0;
+        self.phase = 0.0;
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::float(ROGER_MS, self.ms, 0.0..=ROGER_MAX_MS).label("Roger beep").unit("ms"),
+            Param::float(ROGER_HZ, self.hz, 300.0..=3_000.0).label("Roger beep pitch").unit("Hz"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            ROGER_MS => self.ms = value.as_f64().unwrap_or(0.0).clamp(0.0, ROGER_MAX_MS),
+            ROGER_HZ => self.hz = value.as_f64().unwrap_or(1_000.0).clamp(300.0, 3_000.0),
+            _ => return Err(common::Error::other(format!("roger: unknown parameter {name:?}"))),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod roger_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+    const BLOCK: usize = 960;
+
+    fn spec() -> PortSpec {
+        PortSpec {
+            spec: StreamSpec {
+                kind: PortKind::Real,
+                rate: RATE,
+                flow: Flow::Tx,
+                bandwidth: 6_000.0,
+                ..Default::default()
+            },
+            latency: 0,
+        }
+    }
+
+    fn block(node: &mut RogerNode, amp: f32) -> Vec<f32> {
+        let audio: Vec<f32> = (0..BLOCK)
+            .map(|i| amp * (std::f32::consts::TAU * 400.0 * i as f32 / RATE as f32).sin())
+            .collect();
+        let mut out = Payload::Real(Vec::new());
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let ins = [spec()];
+        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+        Simple::process(node, &Payload::Real(audio), &mut out, &mut ctx).unwrap();
+        let Payload::Real(v) = out else { unreachable!() };
+        v
+    }
+
+    /// The end of the over is told to the stage, and the stage holds the key
+    /// down until the tone is out: five blocks of 20 ms for 100 ms of tone.
+    #[test]
+    fn the_tone_holds_the_key_down_for_its_own_length() {
+        let mut node = RogerNode::new(100.0, 1_000.0);
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        let speech = block(&mut node, 0.5);
+        assert_eq!(speech.len(), BLOCK);
+        assert!(!node.sending(), "a tone before the over ended");
+        let peak = speech.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "the audio came through at {peak}");
+
+        assert!(node.end_over(), "nothing to send at 100 ms");
+        let mut held = 0;
+        for _ in 0..20 {
+            let out = block(&mut node, 0.0);
+            assert_eq!(out.len(), BLOCK, "the tone changed the block's length");
+            if node.sending() {
+                held += 1;
+            }
+        }
+        assert_eq!(held, 4, "100 ms of tone, in blocks of 20 ms");
+        assert!(!node.sending(), "the key stayed down after the tone");
+    }
+
+    /// And with no tone asked for, the key comes up at once.
+    #[test]
+    fn no_tone_asked_for_holds_nothing() {
+        let mut node = RogerNode::default();
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        assert!(!node.end_over(), "a tone with none set");
+        assert!(!node.sending());
+        let out = block(&mut node, 0.5);
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "the audio was touched at {peak}");
+    }
+
+    /// It is the tone that was set, at the pitch it was set to: 100 ms of
+    /// 1500 Hz is 150 cycles, so 300 zero crossings.
+    #[test]
+    fn the_tone_is_the_pitch_it_was_set_to() {
+        let mut node = RogerNode::new(100.0, 1_500.0);
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        assert!(node.end_over());
+        let mut tone = Vec::new();
+        for _ in 0..6 {
+            tone.extend(block(&mut node, 0.0));
+        }
+        let sent = &tone[..(RATE * 0.1) as usize];
+        let peak = sent.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "the tone went out at {peak}");
+        let crossings = sent.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        assert_eq!(crossings, 150, "150 cycles of 1500 Hz in 100 ms");
+        // And nothing after it: the over is over.
+        let after = &tone[(RATE * 0.1) as usize..];
+        assert_eq!(after.iter().filter(|s| s.abs() > 1e-6).count(), 0);
     }
 }
 
@@ -1861,6 +2014,10 @@ const ANTI_TRIP: &str = "anti_trip";
 const ROGER_MS: &str = "roger_ms";
 const ROGER_HZ: &str = "roger_hz";
 
+/// The longest courtesy tone that is a courtesy rather than a transmission
+/// of its own.
+pub const ROGER_MAX_MS: f64 = 1_000.0;
+
 /// Where a vox starts: a voice at a hand's width from the microphone reads
 /// about a tenth of full scale through the speech filter, and a room with
 /// nobody in it a hundredth.
@@ -1926,9 +2083,18 @@ pub fn build_vox(s: &Settings) -> Result<Box<dyn Node>> {
         s.f64_or(TAIL_MS, DEFAULT_VOX_TAIL_MS),
     );
     Node::set_param(&mut n, ANTI_TRIP, ParamValue::Bool(s.bool_or(ANTI_TRIP, true)))?;
-    Node::set_param(&mut n, ROGER_MS, ParamValue::Float(s.f64_or(ROGER_MS, 0.0)))?;
-    Node::set_param(&mut n, ROGER_HZ, ParamValue::Float(s.f64_or(ROGER_HZ, 1_000.0)))?;
     Ok(Box::new(n))
+}
+
+pub const ROGER: StageDesc = StageDesc {
+    name: "roger",
+    summary: "A courtesy tone at the end of an over, however the key came up",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_roger(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(RogerNode::new(s.f64_or(ROGER_MS, 0.0), s.f64_or(ROGER_HZ, 1_000.0))))
 }
 
 pub const MORSE_TX: StageDesc = StageDesc {

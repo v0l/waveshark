@@ -470,20 +470,43 @@ impl Strip<'_> {
                 tx.vox.anti_trip = !tx.vox.anti_trip;
                 changed = true;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut ms = tx.vox.roger_ms;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut ms).speed(5.0).range(0.0..=1_000.0).suffix(" ms"),
-                    )
-                    .on_hover_text("A courtesy tone at the end of an over, or zero for none")
-                    .changed()
-                {
-                    tx.vox.roger_ms = ms;
-                    changed = true;
-                }
-                theme::Line::new().legend("roger").show(ui);
-            });
+        });
+        changed
+    }
+
+    /// The courtesy tone that ends an over, on every channel that transmits
+    /// audio rather than only on one with a vox: the key comes up by hand,
+    /// by voice or by the agent, and all three end the same over.
+    fn channel_roger(ui: &mut egui::Ui, tx: &mut crate::radio::TxSpec) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("roger").show(ui);
+            let mut ms = tx.roger_ms;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut ms)
+                        .speed(5.0)
+                        .range(0.0..=nodes::ROGER_MAX_MS)
+                        .suffix(" ms"),
+                )
+                .on_hover_text("A courtesy tone at the end of an over, or zero for none")
+                .changed()
+            {
+                tx.roger_ms = ms;
+                changed = true;
+            }
+            if tx.roger_ms <= 0.0 {
+                return;
+            }
+            let mut hz = tx.roger_hz;
+            if ui
+                .add(egui::DragValue::new(&mut hz).speed(10.0).range(300.0..=3_000.0).suffix(" Hz"))
+                .on_hover_text("What pitch the courtesy tone is sent at")
+                .changed()
+            {
+                tx.roger_hz = hz;
+                changed = true;
+            }
         });
         changed
     }
@@ -580,9 +603,12 @@ impl Strip<'_> {
         });
 
         match tx.source {
-            // Nothing: the panel where the key would be says what the agent
-            // is doing, which is the same thing said better.
-            TxSource::Agent => {}
+            // Nothing but the tone that ends its overs: the panel where the
+            // key would be says what the agent is doing, which is the same
+            // thing said better.
+            TxSource::Agent => {
+                changed |= Self::channel_roger(ui, tx);
+            }
             TxSource::Sub => {
                 // The file is parsed on the interface and handed to the
                 // radio thread whole (`Cmd::SubFile`), so the chain reads
@@ -783,6 +809,7 @@ impl Strip<'_> {
                     });
                 }
                 changed |= Self::channel_vox(ui, tx, vox);
+                changed |= Self::channel_roger(ui, tx);
             }
             TxSource::Tone => {
                 ui.horizontal(|ui| {
