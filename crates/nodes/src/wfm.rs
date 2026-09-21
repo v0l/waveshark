@@ -24,6 +24,17 @@ use pipeline::registry::{Category, Settings, StageDesc};
 /// Peak deviation of broadcast FM.
 const DEVIATION_HZ: f64 = 75_000.0;
 
+/// The top of a broadcast programme. Above this the audio walks into the
+/// 19 kHz pilot, and a pilot with programme on it is a station a receiver
+/// hears as mono with no data.
+const PROGRAMME_HZ: f64 = 15_000.0;
+
+/// Taps for that cut, which is a multiply each on every sample of the
+/// multiplex. Measured on the designed response at 320 kS/s: 63 taps has
+/// already taken 0.9 dB off 10 kHz and leaves the pilot only 16 dB down,
+/// and 255 buys another 40 dB at 19 kHz on a band with nothing up there.
+const PROGRAMME_TAPS: usize = 127;
+
 pub struct WfmDemodNode {
     demod: FmDemod,
     stereo: StereoDecoder,
@@ -281,6 +292,11 @@ impl Node for WfmDemodNode {
 /// output can be the programme; with nothing connected the station carries
 /// its identity and silence.
 ///
+/// The programme arrives on the second input at the stream's own rate, which
+/// is what `mic` resamples to, and is folded to mono and cut off at 15 kHz
+/// here: the pilot is at 19 kHz and anything the programme puts near it is
+/// heard as a station with no pilot at all.
+///
 /// Mono only. The difference signal on 38 kHz is the other half of a stereo
 /// multiplex and needs a second channel to carry, which this port does not
 /// have.
@@ -292,11 +308,24 @@ pub struct RdsTxNode {
     /// across blocks and across repeats of the groups.
     mpx: Option<dsp::rds::tx::Multiplex>,
     rate: f64,
+    /// The programme, folded to mono and band limited, block by block.
+    programme: Vec<f32>,
+    /// What keeps the programme out of the pilot.
+    band: Option<crate::RealFir>,
+    channels: usize,
 }
 
 impl Default for RdsTxNode {
     fn default() -> Self {
-        Self { station: dsp::rds::tx::Station::default(), bits: Vec::new(), mpx: None, rate: 0.0 }
+        Self {
+            station: dsp::rds::tx::Station::default(),
+            bits: Vec::new(),
+            mpx: None,
+            rate: 0.0,
+            programme: Vec::new(),
+            band: None,
+            channels: 0,
+        }
     }
 }
 
@@ -329,12 +358,19 @@ impl Node for RdsTxNode {
         RDS_TX.name
     }
 
+    /// The clock, and the programme to carry under the pilot.
     fn num_inputs(&self) -> usize {
-        1
+        2
     }
 
     fn num_outputs(&self) -> usize {
         1
+    }
+
+    /// A station with nothing on its programme input transmits its identity
+    /// over silence, which is what a test transmitter does.
+    fn optional_inputs(&self) -> bool {
+        true
     }
 
     fn negotiate(&mut self, inputs: &[PortSpec]) -> Result<Vec<StreamSpec>> {
@@ -351,6 +387,28 @@ impl Node for RdsTxNode {
             )));
         }
         self.rate = i.spec.rate;
+        self.channels = 0;
+        self.band = None;
+        if let Some(a) = inputs.get(1).filter(|a| !a.spec.is_silence()) {
+            if a.spec.kind != PortKind::Real && a.spec.kind != PortKind::Voice {
+                return Err(common::Error::other("rds_tx carries audio as its programme"));
+            }
+            // `fm_mod` takes one real sample per output sample, so the
+            // programme has to arrive at the multiplex's rate already; `mic`
+            // interpolates to whatever it is negotiated at.
+            if (a.spec.rate - i.spec.rate).abs() > 1.0 {
+                return Err(common::Error::other(format!(
+                    "rds_tx wants its programme at {:.0}, got {:.0}",
+                    i.spec.rate, a.spec.rate
+                )));
+            }
+            self.channels = a.spec.channels.max(1);
+            self.band = Some(crate::RealFir::new(dsp::fir::lowpass(
+                PROGRAMME_TAPS,
+                PROGRAMME_HZ / i.spec.rate,
+                60.0,
+            )));
+        }
         self.build_round();
         let mut out = i.spec.with_kind(PortKind::Real).with_channels(1);
         out.flow = pipeline::port::Flow::Tx;
@@ -366,17 +424,31 @@ impl Node for RdsTxNode {
         outputs: &mut [Payload],
         _c: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        let n = inputs[0].len();
+        self.programme.clear();
+        if let Some(band) = self.band.as_mut() {
+            let channels = self.channels.max(1);
+            let audio = inputs.get(1).and_then(|p| p.as_real()).unwrap_or(&[]);
+            let scale = 1.0 / channels as f32;
+            self.programme.extend(
+                audio.chunks_exact(channels).map(|f| f.iter().sum::<f32>() * scale).take(n),
+            );
+            band.process(&mut self.programme);
+        }
         let Some(mpx) = self.mpx.as_mut() else { return Ok(()) };
         // The rounds run back to back with no gap: RDS is continuous on a
         // broadcast station, and what a receiver does at a join is pull its
         // loop back in, which costs it the groups either side.
-        mpx.push(&[], inputs[0].len(), outputs[0].real_mut());
+        mpx.push(&self.programme, n, outputs[0].real_mut());
         Ok(())
     }
 
     fn reset(&mut self) {
         if let Some(m) = self.mpx.as_mut() {
             m.reset();
+        }
+        if let Some(b) = self.band.as_mut() {
+            b.reset();
         }
     }
 
@@ -385,6 +457,13 @@ impl Node for RdsTxNode {
             ("as".into(), self.station.name.clone()),
             ("pi".into(), format!("{:04X}", self.station.pi)),
             ("groups".into(), self.groups().to_string()),
+            (
+                "programme".into(),
+                match self.band.is_some() {
+                    true => "connected".into(),
+                    false => "silence".into(),
+                },
+            ),
         ]
     }
 
@@ -506,6 +585,184 @@ mod tests {
         assert_eq!(rx.station().pi, Some(0xC479));
         assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"));
         assert_eq!(rx.station().radiotext.as_deref(), Some("A TEST OF THE RDS TRANSMITTER"));
+    }
+
+    /// One frequency's amplitude in a real block, by Goertzel: the audio is
+    /// four seconds at 320 kS/s and a whole transform of it says nothing a
+    /// handful of bins do not.
+    fn amplitude_at(audio: &[f32], hz: f64, rate: f64) -> f32 {
+        let w = std::f64::consts::TAU * hz / rate;
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (n, s) in audio.iter().enumerate() {
+            let p = w * n as f64;
+            re += f64::from(*s) * p.cos();
+            im += f64::from(*s) * p.sin();
+        }
+        (2.0 * (re * re + im * im).sqrt() / audio.len() as f64) as f32
+    }
+
+    /// A station with a programme under it, through the modulator and back
+    /// out of the receiver's own demodulator.
+    fn station_over(programme: &[f32], channels: usize, rate: f64) -> (WfmDemodNode, Vec<f32>) {
+        let mut tx = RdsTxNode::new(0xC479, "WAVESHRK", "A TEST OF THE RDS TRANSMITTER");
+        let audio_in = PortSpec {
+            spec: StreamSpec { kind: PortKind::Real, rate, channels, ..Default::default() },
+            latency: 0,
+        };
+        let mpx_spec = tx.negotiate(&[spec(rate), audio_in]).unwrap();
+        let mut modulator = crate::mod_nodes::FmModNode::new(0.0, DEVIATION_HZ, 0.5);
+        Simple::negotiate(&mut modulator, &PortSpec { spec: mpx_spec[0], latency: 0 }).unwrap();
+        let mut rx = WfmDemodNode::new().mono();
+        rx.negotiate(&[spec(rate)]).unwrap();
+
+        let ins = [spec(rate)];
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let block = 8192 * channels;
+        let mut heard: Vec<f32> = Vec::new();
+        for b in 0..(4.0 * rate / 8192.0) as usize {
+            let clock = Payload::Real(vec![0.0; 8192]);
+            let here = Payload::Real(programme[b * block..(b + 1) * block].to_vec());
+            let mut mpx = Payload::Real(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            tx.process(&[&clock, &here], std::slice::from_mut(&mut mpx), &mut ctx).unwrap();
+
+            let mut iq = Payload::Iq(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(&mut modulator, &mpx, &mut iq, &mut ctx).unwrap();
+
+            let mut audio = Payload::Real(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            rx.process(&[&iq], std::slice::from_mut(&mut audio), &mut ctx).unwrap();
+            if let Payload::Real(a) = audio {
+                heard.extend(a.chunks_exact(2).map(|f| f[0]));
+            }
+        }
+        (rx, heard)
+    }
+
+    fn tone(hz: f64, level: f32, rate: f64, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| level * (std::f64::consts::TAU * hz * i as f64 / rate).sin() as f32)
+            .collect()
+    }
+
+    /// The whole point of the second input: a station that announces a name
+    /// and plays nothing is a station nobody would leave running. Both
+    /// halves have to survive the same multiplex, so what is pinned is the
+    /// tone at the frequency it went in at and the name and the radiotext
+    /// still arriving on the subcarrier above it.
+    #[test]
+    fn a_tone_under_the_station_is_heard_and_the_station_still_reads() {
+        let rate = 320_000.0;
+        let programme = tone(1_000.0, 0.2, rate, 8192 * 157);
+        let (rx, heard) = station_over(&programme, 1, rate);
+
+        let (groups, errors, synced) = rx.rds_stats();
+        assert!(synced, "the block synchroniser never framed under a programme");
+        // The same 44 groups and one reject the silent station reads, so the
+        // programme costs the data nothing at this level.
+        assert_eq!(groups, 43, "groups in four seconds with a tone underneath");
+        assert_eq!(errors, 1, "blocks rejected");
+        assert_eq!(rx.station().pi, Some(0xC479));
+        assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"));
+        assert_eq!(rx.station().radiotext.as_deref(), Some("A TEST OF THE RDS TRANSMITTER"));
+
+        // What the pilot and the data leave: 1 - 0.09 - 0.04 of what was
+        // handed in, which is the level the multiplex says it mixes at.
+        let at = amplitude_at(&heard, 1_000.0, rate);
+        assert!((0.173..=0.175).contains(&at), "a 0.2 tone came back at {at:.5}, wanted 0.174");
+        let off = amplitude_at(&heard, 3_000.0, rate);
+        assert!(off < 1e-3, "the programme spread to 3 kHz at {off:.5}");
+    }
+
+    /// Two channels are summed rather than refused: a mono station carrying
+    /// a stereo programme transmits the sum, which is what the difference
+    /// signal on 38 kHz would have been taken from.
+    #[test]
+    fn a_stereo_programme_is_folded_to_the_mono_a_station_transmits() {
+        let rate = 320_000.0;
+        let left = tone(1_000.0, 0.2, rate, 8192 * 157);
+        let right = tone(4_000.0, 0.2, rate, 8192 * 157);
+        let mut both = Vec::with_capacity(left.len() * 2);
+        for (l, r) in left.iter().zip(&right) {
+            both.push(*l);
+            both.push(*r);
+        }
+        let (rx, heard) = station_over(&both, 2, rate);
+
+        assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"));
+        // Halved by the fold, then the 0.87 the multiplex leaves the
+        // programme: 0.2 in each channel is 0.087 of each out.
+        for hz in [1_000.0, 4_000.0] {
+            let at = amplitude_at(&heard, hz, rate);
+            assert!((0.086..=0.088).contains(&at), "{hz} Hz came back at {at:.5}, wanted 0.087");
+        }
+    }
+
+    /// A programme reaching the pilot is a station with no pilot, so the cut
+    /// happens here rather than being left to whatever is connected.
+    ///
+    /// Measured through this receiver at 320 kS/s with a full scale tone on
+    /// the programme input: at 19.5 kHz unfiltered the station reads zero
+    /// groups and never gives its name, and through this filter it reads 32
+    /// of the 44 and names itself. 10 kHz passes untouched either way.
+    #[test]
+    fn a_programme_above_fifteen_kilohertz_is_cut_before_it_reaches_the_pilot() {
+        let rate = 320_000.0;
+        let (rx, heard) = station_over(&tone(19_500.0, 1.0, rate, 8192 * 157), 1, rate);
+        let at = amplitude_at(&heard, 19_500.0, rate);
+        assert!(at < 1e-4, "19.5 kHz reached the multiplex at {at:.6}");
+        let (groups, _, _) = rx.rds_stats();
+        assert_eq!(groups, 32, "groups under a full scale tone on the pilot");
+        assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"), "unfiltered this reads nothing");
+
+        let (rx, heard) = station_over(&tone(10_000.0, 0.2, rate, 8192 * 157), 1, rate);
+        let at = amplitude_at(&heard, 10_000.0, rate);
+        assert!((0.173..=0.175).contains(&at), "10 kHz came back at {at:.5}, wanted 0.174");
+        assert_eq!(rx.rds_stats().0, 43, "groups under a 10 kHz programme");
+    }
+
+    /// The taps are what decides where the programme stops, and the cost is
+    /// a multiply a tap on every sample of the multiplex.
+    ///
+    /// Measured on the designed response at 320 kS/s. 63 taps has already
+    /// taken 0.9 dB off 10 kHz, which is inside the programme, and leaves a
+    /// component on the pilot only 16 dB down; 255 taps buys another 40 dB
+    /// at 19 kHz on a band that has nothing up there, for twice the work.
+    #[test]
+    fn the_programme_filter_is_flat_to_ten_kilohertz_and_gone_by_the_pilot() {
+        let rate = 320_000.0;
+        let taps = dsp::fir::lowpass(PROGRAMME_TAPS, PROGRAMME_HZ / rate, 60.0);
+        let db = |hz: f64| {
+            let w = std::f64::consts::TAU * hz / rate;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (k, t) in taps.iter().enumerate() {
+                re += f64::from(*t) * (w * k as f64).cos();
+                im -= f64::from(*t) * (w * k as f64).sin();
+            }
+            20.0 * (re * re + im * im).sqrt().log10()
+        };
+        assert!(db(1_000.0).abs() < 0.05, "1 kHz at {:.2} dB", db(1_000.0));
+        assert!(db(10_000.0).abs() < 0.05, "10 kHz at {:.2} dB, 63 taps takes 0.9", db(10_000.0));
+        assert!((-6.2..=-5.8).contains(&db(15_000.0)), "15 kHz at {:.2} dB", db(15_000.0));
+        assert!(db(19_000.0) < -38.0, "the pilot at {:.2} dB, 63 taps leaves 16", db(19_000.0));
+    }
+
+    /// `fm_mod` takes one real sample per output sample, so a programme at
+    /// any other rate would be transmitted at the wrong speed. Everything in
+    /// the tree that feeds a transmitter resamples itself; `mic` does.
+    #[test]
+    fn a_programme_at_another_rate_is_refused() {
+        let mut tx = RdsTxNode::default();
+        let at = |rate: f64| PortSpec {
+            spec: StreamSpec { kind: PortKind::Real, rate, channels: 1, ..Default::default() },
+            latency: 0,
+        };
+        assert!(tx.negotiate(&[spec(320_000.0), at(320_000.0)]).is_ok());
+        assert!(tx.negotiate(&[spec(320_000.0), at(48_000.0)]).is_err());
+        // Nothing connected is a station carrying its identity over silence.
+        let silent = PortSpec { spec: StreamSpec::silence(), latency: 0 };
+        assert!(tx.negotiate(&[spec(320_000.0), silent]).is_ok());
     }
 
     /// The subcarrier is at 57 kHz, so a stream that cannot reach it is
