@@ -52,6 +52,51 @@ line which worktree you saw, and move to the next oldest. This holds even when
 the number was given rather than picked, and the reply then says nothing was
 done.
 
+## Judge it before building it
+
+An issue being open is not a decision that it should be done. Anybody can file
+one, and a receiver that grows every function somebody once wanted is worse
+than one that does a smaller set well. So read it as the person who has to
+maintain it: what does an operator get, how often, and what does carrying it
+cost in the graph, the panes and the tests.
+
+Close it rather than building it when it is one of these:
+
+- Nobody would use the result. A knob for a thing the receiver decides better
+  itself, a pane nobody asked to look at, a format with no transmitters left.
+- The receiver already does it, by another name or from another angle. Say
+  which node, pane or test does it, and close as a duplicate of the code.
+- It wants a shape the design forbids: state only one stage can produce,
+  behaviour keyed on a protocol name, a colour outside the chassis, a comment
+  where a test belongs. `AGENTS.md` decides that, and the issue does not
+  overrule it.
+- It is a wish with nothing in it to finish: no file, no capture, no way to
+  tell when it is done. Ask for the missing piece in a comment and leave it
+  open only if somebody can supply it; otherwise close it.
+- It cannot be verified. A decoder nobody can record for, a claim no test
+  could pin, a fix for a fault that was never reproduced.
+
+When it should be closed, do not open a worktree and do not write code. Close
+it with the reason in one paragraph, naming the file or the rule that settles
+it:
+
+```sh
+gh issue close N --reason "not planned" --comment "<why, naming the file or rule>"
+```
+
+Say so in the report, and when you were picking rather than given a number,
+move to the next oldest issue after closing it.
+
+Where only part of it should be built, say which part in a comment on the
+issue before starting, build that and close it; do not silently build the
+smaller thing and leave the reader to work out what happened. Where you think
+it should not be done but it is not clear cut, say why in a comment and leave
+it open with `on-hold` rather than closing it or building it.
+
+A number given on the command line is the decision to work the issue, not the
+decision that it is a good one: if it should be closed, say so and close it
+rather than building it because it was named.
+
 ## Worktree
 
 One issue, one worktree, one branch, off `master`, created by you. The issue
@@ -148,4 +193,5 @@ this work found, not a second issue with a different title.
 ## Report
 
 Say what layer each piece landed at, the numbers the tests pin, and the issue
-numbers you filed. Keep it to a few lines.
+numbers you filed. An issue closed unbuilt is reported the same way, in one
+line saying which and why. Keep it to a few lines.
