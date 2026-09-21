@@ -4350,7 +4350,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bench_868.3M_250k.cu8");
         std::fs::write(&path, vec![0u8; 500_000]).unwrap();
-        let capture = crate::devices::add_capture(path.clone()).expect("a capture");
+        let capture = crate::devices::add_named_capture(path.clone()).expect("a capture");
 
         let mut a = App { center: 100e6, rate: 2_304_000.0, ..Default::default() };
         a.scope.wf_center = 100e6;
