@@ -102,13 +102,24 @@ fn hits(f: &Fixture, reports: &[Report]) -> usize {
 /// Captures the auto node is known to hear less of than the banks, with the
 /// reason. Checked both ways, as the corpus test checks its gaps: a capture
 /// that starts decoding through the auto node fails until it is struck off.
-const KNOWN_LOSSES: &[(&str, &str)] = &[(
-    "kerui_d026",
-    "the source the detector opens on this recording holds one frame and \
-     fragments of the next, where the 125 kHz bank tier saw the whole \
-     burst of twelve; a 25 bit fixed code with no check is only believed on \
-     a row of exactly its length, and the auto node's package has none",
-)];
+const KNOWN_LOSSES: &[(&str, &str)] = &[
+    (
+        "kerui_d026",
+        "the source the detector opens on this recording holds one frame and \
+         fragments of the next, where the 125 kHz bank tier saw the whole \
+         burst of twelve; a 25 bit fixed code with no check is only believed \
+         on a row of exactly its length, and the auto node's package has none",
+    ),
+    (
+        "gm_tpms_a",
+        "the auto node opens one source here and it holds twenty pulses, a \
+         fragment of a transmission that is 130 bits of Manchester, so no row \
+         is long enough to carry the frame. Not the detector settling: \
+         prepending five seconds of the recording's own noise changes \
+         nothing. The same sensor's pressurised capture decodes through auto, \
+         where the source it opens holds 113 pulses",
+    ),
+];
 
 #[test]
 fn the_auto_node_hears_at_least_what_the_banks_did() {

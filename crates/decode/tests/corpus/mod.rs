@@ -797,6 +797,17 @@ pub static SPECS: &[ModelSpec] = &[
         ],
     },
     ModelSpec {
+        rtl: "GM-Aftermarket",
+        ours: "GM-Aftermarket",
+        fields: &[
+            ("id", "id", Num),
+            ("flags", "flags", Num),
+            ("pressure_kPa", "pressure_kpa", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("battery_ok", "battery_ok", Bool),
+        ],
+    },
+    ModelSpec {
         rtl: "Schrader",
         ours: "Schrader",
         fields: &[

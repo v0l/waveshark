@@ -40,22 +40,45 @@ use crate::bits::BitBuffer;
 /// well a window inside it checksums. Several rtl_433 decoders test the row
 /// length before anything else for exactly that reason.
 ///
+/// This asks whether any row is that long, which is the cheap question. The
+/// row a frame was actually taken from is the one that has to be that long,
+/// and [`row_len_at`] answers that where the caller knows the offset.
+///
 /// A buffer with no cut in it is one row, which is what the detector says it
 /// is: a burst it saw begin and end. That is the common case here, since the
 /// gap between copies is usually long enough to end the package rather than
 /// only the row.
 pub(crate) fn rows_within(bits: &BitBuffer, row_bits: std::ops::RangeInclusive<usize>) -> bool {
-    // A boundary list need not begin at zero: a burst sliced as one row can
-    // come back with a single mark at its end, and taking those marks as row
-    // starts then measures the empty tail after the last one and misses the
-    // row itself. Every frame in such a package was refused on its length.
+    row_lengths(bits).any(|(_, len)| row_bits.contains(&len))
+}
+
+/// The length of the row bit `at` falls in, for a decoder that searches
+/// offsets rather than taking a row whole.
+///
+/// rtl_433 hands a decoder one row and it checks that row's length:
+/// tpms_gm.c wants `num_rows == 1` and 130 bits before it looks at the
+/// preamble. A search that accepts because some *other* row in the package
+/// was the right length is not the same test, and that is how the
+/// GM-Aftermarket description read a window of zeros out of an Oregon
+/// RTGN318 burst.
+pub(crate) fn row_len_at(bits: &BitBuffer, at: usize) -> usize {
+    row_lengths(bits)
+        .find(|(start, len)| at >= *start && at < start + len)
+        .map(|(_, len)| len)
+        .unwrap_or(0)
+}
+
+// A boundary list need not begin at zero: a burst sliced as one row can come
+// back with a single mark at its end, and taking those marks as row starts
+// then measures the empty tail after the last one and misses the row itself.
+fn row_lengths(bits: &BitBuffer) -> impl Iterator<Item = (usize, usize)> + '_ {
     let mut starts: Vec<usize> = bits.rows().to_vec();
     if starts.first() != Some(&0) {
         starts.insert(0, 0);
     }
-    let starts = &starts[..];
-    let ends = starts.iter().skip(1).copied().chain(std::iter::once(bits.len()));
-    starts.iter().copied().zip(ends).any(|(start, end)| row_bits.contains(&(end - start)))
+    let ends: Vec<usize> =
+        starts.iter().skip(1).copied().chain(std::iter::once(bits.len())).collect();
+    starts.into_iter().zip(ends).map(|(start, end)| (start, end.saturating_sub(start)))
 }
 
 /// [`find_frame`] for a frame whose length is not a whole number of bytes,

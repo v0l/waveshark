@@ -67,6 +67,16 @@ const KNOWN_MISSES: &[(&str, &str)] = &[
          arise; the test harness has no bank",
     ),
     (
+        "gm_tpms_a_433.92M_250k.cu8",
+        "120 us Manchester chips, so a window holding a transmission is half \
+         carrier at a rate the envelope histogram reads as one level: every \
+         burst here measures an envelope ratio of 1.00 over a single mode and \
+         no amplitude hypothesis scores, leaving the noise-like fallback. \
+         Narrowing the window to a 31 kHz channel does not separate the \
+         levels either. The decoder reads both captures to rtl_433's values",
+    ),
+    ("gm_tpms_b_433.92M_250k.cu8", "as the capture above, over all seven bursts"),
+    (
         "interlogix_tamper_319.5M_250k.cu8",
         "the sensor keys 122 us pulses with gaps as short as 96 us, so a window \
          holding a whole transmission is 90% carrier and its envelope fits \

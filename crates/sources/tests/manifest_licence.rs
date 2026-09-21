@@ -150,7 +150,7 @@ fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
         .lines()
         .filter(|l| l.trim_start().starts_with("url = ") || l.contains("reference_url = "))
         .count();
-    assert_eq!(urls, 180, "URLs in rtl433.toml");
+    assert_eq!(urls, 184, "URLs in rtl433.toml");
     assert!(!corpus.contains("nostr.download"), "an rtl_433 capture has been re-hosted");
     assert!(
         !manifest("survey.toml").contains("nostr.download"),

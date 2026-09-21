@@ -388,6 +388,11 @@ impl Scripted {
             if extract(bits, at, n) != word {
                 continue;
             }
+            if let Some([lo, hi]) = f.row_bits
+                && !(lo..=hi).contains(&crate::protocols::row_len_at(bits, at))
+            {
+                continue;
+            }
             let start = at + skip;
             let (frame, end) = match f.decode {
                 Decode::None => {
@@ -1242,7 +1247,9 @@ pub fn pulses(t: &Timing, bits: &BitBuffer, repeats: usize) -> Vec<Pulse> {
                 } else {
                     // a run of zero bits first, as every transmitter sends,
                     // so the slicer has the symbol phase before the frame
-                    let lead = std::iter::repeat_n(false, 8);
+                    let already =
+                        (0..bits.len()).take_while(|i| bits.get(*i) == Some(false)).count();
+                    let lead = std::iter::repeat_n(false, 8usize.saturating_sub(already));
                     for b in lead.chain((0..bits.len()).map(|i| bits.get(i).unwrap_or(false))) {
                         levels.push(b);
                         levels.push(!b);
@@ -1400,6 +1407,102 @@ fields:
             p.read(&BitBuffer::from_bytes(&[0, 0, 0, 1])).is_ok(),
             "one bit set is not silence"
         );
+    }
+
+    /// A sync found in the wrong row is not a frame, whatever else the
+    /// package holds.
+    ///
+    /// `row_bits` used to ask only whether *some* row of the package was the
+    /// right length, so a sync matched in a row of any other length still
+    /// decoded. That is how GM-Aftermarket, whose sync is 48 zero bits,
+    /// claimed a reading out of an Oregon RTGN318 burst: rtl_433's tpms_gm.c
+    /// is handed one row and refuses it unless that row is 130 bits.
+    #[test]
+    fn a_sync_in_a_row_of_the_wrong_length_is_not_a_frame() {
+        let gated = r#"
+name: Gated
+timing: {ppm: [2000, 4000], reset_us: 9100}
+frame: {bits: 16, find: sync, sync: "ac", sync_bits: 8, row_bits: [24, 24]}
+fields: [{name: a, bits: 16, data: int}]
+"#;
+        let p = Scripted::new(Desc::parse(gated).expect("a description"));
+
+        let package = |rows: &[&[u8]]| {
+            let mut b = BitBuffer::new();
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    b.mark_row();
+                }
+                for byte in row.iter() {
+                    for bit in 0..8 {
+                        b.push(byte >> (7 - bit) & 1 == 1);
+                    }
+                }
+            }
+            b
+        };
+
+        let carrier: &[u8] = &[0xac, 0x2a, 0x17];
+        let quiet: &[u8] = &[0x11, 0x22, 0x33];
+
+        let one = package(&[carrier]);
+        assert_eq!(one.rows().len(), 0, "a single row is marked by nothing");
+        assert_eq!(
+            p.decode(&one).expect("the one row is 24 bits").get("a"),
+            Some(&Value::Int(0x2a17))
+        );
+
+        // The same bits in a 32 bit row: the sync is there and the frame
+        // behind it reads, and the length says it is somebody else's.
+        let wrong = package(&[&[0xac, 0x2a, 0x17, 0x00]]);
+        assert!(matches!(p.decode(&wrong), Err(DecodeError::NotThisProtocol)));
+
+        // The sync only in the 32 bit row, with a 24 bit row of something
+        // else beside it. Asking whether *any* row is 24 bits says yes and
+        // reads a frame out of the wrong one; asking about the row the sync
+        // sits in says no.
+        let elsewhere = package(&[&[0xac, 0x2a, 0x17, 0x00], quiet]);
+        assert_eq!(elsewhere.rows(), [32], "one cut, after the long row");
+        assert!(matches!(p.decode(&elsewhere), Err(DecodeError::NotThisProtocol)));
+
+        // And the other way round, so the gate is the length and not the
+        // order: the 24 bit row carries the sync and is read.
+        let found = package(&[quiet, carrier]);
+        assert_eq!(
+            p.decode(&found).expect("the second row is 24 bits").get("a"),
+            Some(&Value::Int(0x2a17))
+        );
+    }
+
+    /// A keyed Manchester row is as long as the air it carries, so a
+    /// description can pin its length against a capture.
+    ///
+    /// The keyer opens a Manchester burst with eight zero chips to give the
+    /// slicer its symbol phase, which a description whose sync is already a
+    /// run of zeros does not need: it made a GM-Aftermarket row 138 bits
+    /// where rtl_433's tpms_gm.c refuses anything but 130, so the one gate
+    /// that keeps the description off an Oregon burst could not be written.
+    #[test]
+    fn a_zero_run_sync_keys_a_row_the_length_of_its_air() {
+        let zero_led = r#"
+name: Lead
+timing: {manchester: [120, 240], reset_us: 15600}
+frame: {bits: 16, find: sync, sync: "000000000000", sync_bits: 48}
+fields: [{name: a, bits: 16, data: int}]
+"#;
+        let p = Scripted::new(Desc::parse(zero_led).expect("a description"));
+        let fields = BTreeMap::from([("a".to_string(), Value::Int(0x2a17))]);
+        let pkg = p.burst(&fields).expect("keys").expect("a timing");
+        let sliced = slice(&pkg, &p.timing.expect("a timing")).expect("slices");
+        assert_eq!(sliced.len(), 64, "48 bits of sync and 16 of frame, and no lead");
+
+        // A frame opening on a one still gets the full eight chips, so a
+        // description with no zero run to ride on is unchanged.
+        let no_lead = zero_led.replace("sync: \"000000000000\"", "sync: \"ffffffffffff\"");
+        let q = Scripted::new(Desc::parse(&no_lead).expect("a description"));
+        let pkg = q.burst(&fields).expect("keys").expect("a timing");
+        let sliced = slice(&pkg, &q.timing.expect("a timing")).expect("slices");
+        assert_eq!(sliced.len(), 72, "eight chips of lead ahead of the same 64");
     }
 
     #[test]

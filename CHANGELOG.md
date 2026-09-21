@@ -173,7 +173,8 @@ the code is in the commit log.
   aircraft has.
 - Sensors invented out of a neighbour's burst: a reading that proved itself
   by a checksum now stands alone, where a protocol with a parity bit used to
-  be published beside it.
+  be published beside it, and a frame found by a sync word is believed only
+  in a row of the length its description states.
 - Band ribbon labels overlapped where one allocation sits inside another,
   as PMR446 does inside land mobile UHF.
 - Scanner blocks were placed across a radio's filter rolloff, decoding its

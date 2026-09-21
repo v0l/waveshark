@@ -219,15 +219,15 @@ fn a_gt_wt_02_burst_decodes_from_its_millisecond_symbols() {
     assert_eq!(r.get("id"), Some(&Value::Int(0x34)));
     assert_eq!(r.get("temperature_c"), Some(&Value::Float(23.7)));
     assert_eq!(r.get("humidity_pct"), Some(&Value::Int(35)));
-    // Two, and honestly so: the same burst frames as a GT-TMBBQ05 as well,
-    // and with six bits of nibble sum against five neither reading is proved.
-    // Nothing here may pick between them, so both go out and the packet list
-    // says what each is worth.
+    // One. This burst used to frame as a GT-TMBBQ05 as well, because that
+    // description searched every bit offset behind a one bit sync and has
+    // only five bits of check to refuse what it finds. rtl_433's
+    // gt_tmbbq05.c takes a row of exactly 33 bits, and the row_bits on the
+    // description now says so: these rows are 37.
     let all = Protocols::published().decode_all(&pkg);
-    let mut models: Vec<&str> = all.iter().map(|r| r.model).collect();
-    models.sort_unstable();
-    assert_eq!(models, ["GT-TMBBQ05", "GT-WT02"]);
-    assert!(all.iter().all(|r| !r.proof.sound()), "one of these proved itself");
+    let models: Vec<&str> = all.iter().map(|r| r.model).collect();
+    assert_eq!(models, ["GT-WT02"]);
+    assert!(all.iter().all(|r| !r.proof.sound()), "six bits of nibble sum is not proof");
 }
 
 #[test]

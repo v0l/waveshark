@@ -733,3 +733,19 @@ url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f26
 reference_sha256 = "c10a181d84562a925a0012b0b95bc689a885038f349d40d4259cebf39e540f68"
 reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/ttx201/01/g001_433.92M_250k.json"
 description = "An Emos TTX201 thermometer, Manchester with a six bit nibble sum, the packet sent eight times"
+
+[[sample]]
+name = "gm_tpms_a_433.92M_250k.cu8"
+sha256 = "e9dd1cb8c1bd67ae7d905b62a350dcb994d1d5d173921248ac781a834d691846"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/gm_tpms/pres_0_temp_27_id_2017968551_433.92M_250k.cu8"
+reference_sha256 = "c607aac6d93a4ca247abf54977d3a35933bb254db36a109523c047c5da3aaa55"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/gm_tpms/pres_0_temp_27_id_2017968551_433.92M_250k.json"
+description = "A GM aftermarket tyre pressure sensor at zero pressure, in learn mode, Manchester behind six bytes of zeros"
+
+[[sample]]
+name = "gm_tpms_b_433.92M_250k.cu8"
+sha256 = "07f7d5ee66d69493ffaccde290b696a62d737f7021153d781cf241f471fb4aaa"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/gm_tpms/pres_96.25_temp_28_id_2017968551_433.92M_250k.cu8"
+reference_sha256 = "82dcfd6014415bd81d637184ca2ff6e39b40d06beb9f257bd0b40359b5aaaf8a"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/gm_tpms/pres_96.25_temp_28_id_2017968551_433.92M_250k.json"
+description = "The same sensor pressurised and operational, the pair that says the row length gate on the description does not cost a real decode"
