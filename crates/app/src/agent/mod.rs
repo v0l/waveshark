@@ -649,6 +649,10 @@ pub mod args {
         /// As in `add_channel`. Defaults to what the band plan suggests.
         pub mode: Option<String>,
         pub bandwidth_khz: Option<f64>,
+        /// The coded squelch it opens on, as a radio writes it: "88.5" for a
+        /// CTCSS tone or "D023" for a DCS code. Left out, it hears whoever
+        /// is on the channel.
+        pub tone: Option<String>,
     }
 
     /// A saved channel, by what tells it from the others.

@@ -1214,6 +1214,7 @@ impl App {
             voice: speaks(&ChanMode::Audio(demod)),
             reads: None,
             tx: None,
+            tone: None,
             doppler: false,
         });
         self.audio.next_id += 1;
@@ -2752,6 +2753,7 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
         squelch_db: None,
         agc: true,
         tx: None,
+        tone: None,
         doppler: false,
     }
 }
@@ -2767,7 +2769,12 @@ fn recalled(id: u64, s: &crate::memory::Saved) -> Channel {
         true => None,
         false => Some(s.label.clone()),
     };
-    Channel { bandwidth_hz: s.bandwidth_hz, tx: s.tx, ..fresh(id, s.freq, s.mode.clone(), label) }
+    Channel {
+        bandwidth_hz: s.bandwidth_hz,
+        tx: s.tx,
+        tone: s.tone,
+        ..fresh(id, s.freq, s.mode.clone(), label)
+    }
 }
 
 /// The whole channel list as the radio takes it: offsets from wherever the
@@ -2790,6 +2797,7 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             // channel transmits at all is its mode's question, asked by the
             // receiver: see `ChannelSpec::spec_to_transmit`.
             tx: c.tx,
+            tone: c.tone,
         })
         .collect()
 }
@@ -3791,6 +3799,7 @@ mod tests {
             voice: false,
             reads: None,
             tx: None,
+            tone: None,
             doppler: false,
         });
     }
@@ -3981,6 +3990,7 @@ mod tests {
                 voice: false,
                 reads: None,
                 tx: None,
+                tone: None,
                 doppler: false,
             });
         }

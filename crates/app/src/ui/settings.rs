@@ -181,6 +181,9 @@ impl App {
                                     .gap(10.0)
                                     .value(format!("{} kHz", crate::scanners::num(bw / 1e3)));
                             }
+                            if let Some(tone) = s.tone {
+                                line = line.gap(10.0).set(tone.label());
+                            }
                             if !s.label.is_empty() {
                                 line = line.gap(12.0).words(&s.label);
                             }

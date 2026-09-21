@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- CTCSS tones and DCS codes on a saved channel, imported, exported and squelched on.
 - MDC-1200 bursts damaged in the air are repaired from the parity the radio sent.
 - EAS, SSTV, APT and WEFAX read off a listening channel's audio, picked on the
   strip.

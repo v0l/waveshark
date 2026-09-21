@@ -78,6 +78,7 @@ fn memory_json(s: &crate::memory::Saved) -> Value {
         "hz": s.freq,
         "mode": s.mode.label(),
         "bandwidth_hz": s.bandwidth_hz,
+        "tone": s.tone.map(|c| c.label()),
     })
 }
 
@@ -261,6 +262,12 @@ impl super::App {
             Some(m) => super::agent::parse_mode(m)?,
             None => ChanMode::Audio(crate::bands::demod_at(freq)),
         };
+        let tone = match a.tone.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => Some(t.parse().map_err(|()| {
+                format!("{t:?} is neither a CTCSS tone such as 88.5 nor a DCS code such as D023")
+            })?),
+            None => None,
+        };
         self.memory.add(crate::memory::Saved {
             group: a.group.unwrap_or_default(),
             label: a.label,
@@ -268,6 +275,7 @@ impl super::App {
             mode,
             bandwidth_hz: a.bandwidth_khz.filter(|k| *k > 0.0).map(|k| k * 1e3),
             tx: None,
+            tone,
         });
         let _ = self.memory.save();
         Ok(json!({
@@ -1009,12 +1017,14 @@ mod tests {
                 group: Some("Broadcast".into()),
                 mode: Some("wfm".into()),
                 bandwidth_khz: Some(180.0),
+                tone: Some("88.5".into()),
             }),
         )
         .expect("it is saved");
         assert_eq!(a.memory.list.len(), 1);
         assert_eq!(a.memory.list[0].group, "Broadcast");
         assert_eq!(a.memory.list[0].bandwidth_hz, Some(180_000.0));
+        assert_eq!(a.memory.list[0].tone, Some(dsp::squelch::Coded::Tone(8)));
 
         let v = call(
             &mut a,
@@ -1023,7 +1033,25 @@ mod tests {
         .expect("it is recalled");
         assert_eq!(a.audio.channels.len(), 1);
         assert_eq!(a.audio.channels[0].freq, 100_500_000.0);
+        // The group it was programmed to comes back with it: a channel
+        // recalled without its tone opens on the next town's traffic.
+        assert_eq!(a.audio.channels[0].tone, Some(dsp::squelch::Coded::Tone(8)));
         assert_eq!(v["hz"], 100_500_000.0);
+
+        // A tone no radio offers is refused rather than saved as nothing.
+        let refused = call(
+            &mut a,
+            Action::AddMemory(args::AddMemory {
+                mhz: 145.5,
+                label: "Bad".into(),
+                group: None,
+                mode: None,
+                bandwidth_khz: None,
+                tone: Some("89.2".into()),
+            }),
+        );
+        assert!(refused.is_err(), "89.2 Hz is not a tone any radio sends");
+        assert_eq!(a.memory.list.len(), 1);
 
         call(&mut a, Action::RemoveMemory(args::FindMemory { label: None, mhz: Some(100.5) }))
             .expect("it is forgotten");

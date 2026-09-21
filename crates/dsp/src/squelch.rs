@@ -254,6 +254,89 @@ impl NoiseMeter {
     }
 }
 
+/// The coded squelch a channel is set to, or heard on: one of the fifty
+/// tones or one of the 104 codes, and nothing else.
+///
+/// A radio's menu offers the two sets and no free number, so this is the
+/// value a frequency list carries, a memory keeps and a squelch compares
+/// against. Written the way a radio writes it: `88.5` for a tone and `D023`
+/// for a code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Coded {
+    /// Where it is in [`crate::ctcss::TONES`], which is what a codeplug
+    /// stores.
+    Tone(usize),
+    /// The three octal digits of a DCS code, as a decimal number.
+    Dcs(u16),
+}
+
+/// How far a written tone may be from a member of the set and still be that
+/// tone, in hertz.
+///
+/// The closest pair in the set is 2.3 Hz apart, so half a hertz cannot reach
+/// the wrong neighbour while still taking the roundings a list writes: 67,
+/// 88.50, 100.
+const TONE_SLACK_HZ: f32 = 0.5;
+
+impl Coded {
+    /// What a radio's menu calls it: `88.5`, or `D023`.
+    pub fn label(self) -> String {
+        match self {
+            Coded::Tone(i) => format!("{:.1}", crate::ctcss::TONES[i]),
+            Coded::Dcs(d) => format!("D{d:03}"),
+        }
+    }
+
+    pub fn hz(self) -> Option<f32> {
+        match self {
+            Coded::Tone(i) => Some(crate::ctcss::TONES[i]),
+            Coded::Dcs(_) => None,
+        }
+    }
+
+    /// The tone nearest `hz`, or `None` for a frequency no radio offers.
+    pub fn tone(hz: f32) -> Option<Self> {
+        crate::ctcss::TONES.iter().position(|t| (t - hz).abs() <= TONE_SLACK_HZ).map(Coded::Tone)
+    }
+
+    /// The code with those octal digits, or `None` for digits outside the
+    /// standard table: a word not in the table is a rotation of one that is,
+    /// and no receiver can be set to it.
+    pub fn dcs(digits: u16) -> Option<Self> {
+        crate::dcs::CODES.contains(&digits).then_some(Coded::Dcs(digits))
+    }
+}
+
+impl std::str::FromStr for Coded {
+    type Err = ();
+
+    /// A tone as a frequency, or a code as `D023`, `023` being ambiguous
+    /// with nothing since no tone is that low.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        let s = s.trim();
+        let (digits, hz) = match s.strip_prefix(['d', 'D']) {
+            Some(rest) => (Some(rest.trim_end_matches(['n', 'N', 'i', 'I'])), None),
+            None => match s.parse::<f32>() {
+                // No tone is below 67 Hz, and no code above 754, so a bare
+                // number says which set it is from.
+                Ok(v) if v < 67.0 => (Some(s), None),
+                Ok(v) => (None, Some(v)),
+                Err(_) => (None, None),
+            },
+        };
+        if let Some(d) = digits {
+            return d.trim().parse::<u16>().ok().and_then(Coded::dcs).ok_or(());
+        }
+        hz.and_then(Coded::tone).ok_or(())
+    }
+}
+
+impl std::fmt::Display for Coded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label())
+    }
+}
+
 /// Mean power of a block in dBFS, for the modes with no capture effect.
 pub fn level_db(buf: &[f32]) -> f32 {
     if buf.is_empty() {
@@ -444,5 +527,38 @@ mod tests {
         assert!(buf[0] < 0.02, "the first sample jumped straight to {}", buf[0]);
         let biggest = buf.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
         assert!(biggest < 0.01, "a step of {biggest} is audible as a click");
+    }
+
+    /// A coded squelch reads back as the radio wrote it, whichever set it
+    /// came from and whichever way a list spelled it.
+    #[test]
+    fn a_coded_squelch_reads_as_a_radio_writes_it() {
+        let of = |s: &str| s.parse::<Coded>().ok();
+        assert_eq!(of("88.5"), Some(Coded::Tone(8)));
+        assert_eq!(of("88.50"), Some(Coded::Tone(8)));
+        assert_eq!(of("100"), Some(Coded::Tone(12)));
+        assert_eq!(of(" 141.3 "), Some(Coded::Tone(22)));
+        assert_eq!(of("254.1"), Some(Coded::Tone(49)));
+        assert_eq!(of("D023"), Some(Coded::Dcs(23)));
+        assert_eq!(of("023"), Some(Coded::Dcs(23)));
+        assert_eq!(of("D023N"), Some(Coded::Dcs(23)), "the polarity is not a code of its own");
+        assert_eq!(of("d754"), Some(Coded::Dcs(754)));
+        assert_eq!(of("88.5").map(Coded::label).as_deref(), Some("88.5"));
+        assert_eq!(of("023").map(Coded::label).as_deref(), Some("D023"));
+        assert_eq!(of("100").map(Coded::hz), Some(Some(100.0)));
+        assert_eq!(of("D023").map(Coded::hz), Some(None));
+    }
+
+    /// Nothing a radio cannot be set to is a code.
+    ///
+    /// A tone half a hertz off is the same tone rounded, and one a hertz off
+    /// is a number somebody made up: the set is 2.3 Hz apart at its closest,
+    /// so neither reading can reach the wrong neighbour.
+    #[test]
+    fn a_value_outside_the_two_sets_is_not_a_code() {
+        for s in ["", "none", "89.2", "66.0", "300.0", "D024", "D999", "0", "0.0"] {
+            assert_eq!(s.parse::<Coded>().ok(), None, "{s} was taken as a code");
+        }
+        assert_eq!("88.4".parse::<Coded>().ok(), Some(Coded::Tone(8)), "a rounding is the tone");
     }
 }

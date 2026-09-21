@@ -6,10 +6,11 @@
 //! in MHz or in Hz, and a width may be in kHz or in Hz.
 //!
 //! What the bank cannot hold is counted rather than guessed at. A range entry
-//! is a band, not a channel, and a CTCSS tone has nowhere to go because the
-//! receiver detects tones and is not squelched by one.
+//! is a band, not a channel, and a coded squelch a receiver cannot be set to,
+//! a tone sent but not listened for or one of Chirp's cross modes, is a tone
+//! read and dropped.
 
-use super::{Memory, Saved, UNGROUPED, mode_from};
+use super::{Coded, Memory, Saved, UNGROUPED, mode_from};
 use crate::radio::{ChanMode, Demod, TxSpec};
 
 /// The shape of a frequency list, read off its first lines.
@@ -78,7 +79,7 @@ pub struct Read {
     pub list: Vec<Saved>,
     /// Entries naming a band rather than a channel.
     pub ranges: usize,
-    /// Entries carrying a CTCSS tone, which is dropped.
+    /// Entries carrying a coded squelch this cannot open on.
     pub tones: usize,
     /// Lines that said nothing a channel could be built from.
     pub skipped: usize,
@@ -92,7 +93,8 @@ impl Read {
             s.push_str(&format!(", {} ranges dropped", self.ranges));
         }
         if self.tones > 0 {
-            s.push_str(&format!(", {} CTCSS tones dropped", self.tones));
+            let plural = if self.tones == 1 { "" } else { "s" };
+            s.push_str(&format!(", {} tone{plural} dropped", self.tones));
         }
         if self.skipped > 0 {
             s.push_str(&format!(", {} lines unread", self.skipped));
@@ -136,8 +138,18 @@ pub fn write_csv(m: &Memory) -> String {
         let comment =
             format!("{} waveshark:{}", c.group, c.mode.label().to_ascii_lowercase()).trim().into();
         let comment: String = comment;
+        // Chirp holds the two coded squelches in different columns and says
+        // which it means in `Tone`, so a channel opening on a tone leaves as
+        // TSQL and one on a code as DTCS. The columns it is not using still
+        // have to carry something a handheld will accept.
+        let (tone_mode, ctcss, dtcs) = match c.tone {
+            Some(t @ Coded::Tone(_)) => ("TSQL", t.hz().unwrap_or(88.5), 23),
+            Some(Coded::Dcs(d)) => ("DTCS", 88.5, d),
+            None => ("", 88.5, 23),
+        };
         s.push_str(&format!(
-            "{n},{},{:.6},{duplex},{:.6},,88.5,88.5,023,NN,{},5.00,,{}\n",
+            "{n},{},{:.6},{duplex},{:.6},{tone_mode},{ctcss:.1},{ctcss:.1},{dtcs:03},NN,{},\
+             5.00,,{}\n",
             quoted(&c.label),
             c.freq / 1e6,
             offset / 1e6,
@@ -224,7 +236,13 @@ struct Columns {
     group: Option<usize>,
     duplex: Option<usize>,
     offset: Option<usize>,
-    tone: Option<usize>,
+    /// Chirp's `Tone`, which says which of the four tone columns is in use.
+    tone_mode: Option<usize>,
+    /// The tone the receiver opens on, and the one it sends. They differ on
+    /// a repeater that wants a tone it does not send back.
+    rx_tone: Option<usize>,
+    tx_tone: Option<usize>,
+    dtcs: Option<usize>,
     comment: Option<usize>,
 }
 
@@ -248,7 +266,10 @@ impl Columns {
                 "group" | "groupname" | "category" | "bank" => &mut c.group,
                 "duplex" => &mut c.duplex,
                 "offset" | "shift" => &mut c.offset,
-                "tone" | "rtonefreq" | "ctcss" | "ctonefreq" => &mut c.tone,
+                "tone" | "tonemode" | "tonesql" => &mut c.tone_mode,
+                "ctonefreq" | "ctcss" | "ctcssrx" | "rxtone" => &mut c.rx_tone,
+                "rtonefreq" | "txtone" => &mut c.tx_tone,
+                "dtcscode" | "dtcs" | "dcs" => &mut c.dtcs,
                 "comment" | "notes" => &mut c.comment,
                 _ => continue,
             };
@@ -256,6 +277,38 @@ impl Columns {
         }
         c.freq?;
         Some(c)
+    }
+
+    /// The coded squelch a row programs the receiver to, and whether it
+    /// carried one that had to be dropped.
+    ///
+    /// Chirp writes all four tone columns on every row, filled in whether or
+    /// not they are used, and its `Tone` column is what says which of them
+    /// the radio obeys: `TSQL` the receive tone, `DTCS` the code, `Tone` a
+    /// tone sent to open a repeater and not listened for, `Cross` a
+    /// different one each way. Only the first two are something a receiver
+    /// can be squelched on. A list with no such column and a tone column
+    /// filled in means the tone, which is what everybody else writes.
+    fn coded(&self, at: impl Fn(Option<usize>) -> String) -> (Option<Coded>, bool) {
+        let parse = |s: String| s.parse::<Coded>().ok();
+        let used = |s: &str| !matches!(s, "" | "0" | "0.0" | "000");
+        let Some(mode) = self.tone_mode.map(|_| at(self.tone_mode)) else {
+            let said = at(self.rx_tone);
+            let said = match used(&said) {
+                true => said,
+                false => at(self.tx_tone),
+            };
+            return match used(&said) {
+                true => (parse(said.clone()), parse(said).is_none()),
+                false => (None, false),
+            };
+        };
+        let got = match mode.to_ascii_uppercase().as_str() {
+            "TSQL" | "TSQL-R" => parse(at(self.rx_tone)),
+            "DTCS" | "DTCS-R" => parse(format!("D{}", at(self.dtcs))),
+            _ => None,
+        };
+        (got, got.is_none() && used(&mode))
     }
 
     /// The channel a row holds, and whether it carried a tone that had to be
@@ -297,7 +350,7 @@ impl Columns {
             ("", None) => comment.to_string(),
             (n, _) => n.to_string(),
         };
-        let tone = !matches!(at(self.tone), "" | "0" | "0.0");
+        let (tone, dropped) = self.coded(|i| at(i).to_string());
         let group = match (at(self.group), ours.map(|(g, _)| g.trim())) {
             ("", None | Some("")) => group.to_string(),
             ("", Some(g)) => g.to_string(),
@@ -311,8 +364,9 @@ impl Columns {
                 mode,
                 bandwidth_hz,
                 tx: (shift != 0.0).then(|| TxSpec { shift_hz: shift, ..TxSpec::default() }),
+                tone,
             },
-            tone,
+            dropped,
         ))
     }
 }
@@ -334,7 +388,8 @@ fn freqman(text: &str, group: &str) -> Read {
         let mut label = String::new();
         let mut mode = None;
         let mut bandwidth_hz = None;
-        let mut tone = false;
+        let mut tone = None;
+        let mut tone_said = false;
         for token in line.split(',') {
             let Some((k, v)) = token.split_once('=') else { continue };
             match k.trim().to_ascii_lowercase().as_str() {
@@ -348,11 +403,17 @@ fn freqman(text: &str, group: &str) -> Read {
                 "d" => label = v.trim().to_string(),
                 "m" => mode = mode_of(v.trim()).map(|(m, _)| m),
                 "bw" => bandwidth_hz = width(v.trim()),
-                "c" => tone = !v.trim().is_empty(),
+                // Mayhem writes the tone as its frequency, to two decimals
+                // where it has them: `c=69.33` is 69.3, and `c=0.0` is a
+                // channel with no tone at all.
+                "c" => {
+                    tone_said = !matches!(v.trim(), "" | "0" | "0.0");
+                    tone = v.trim().parse().ok();
+                }
                 _ => {}
             }
         }
-        out.tones += usize::from(tone);
+        out.tones += usize::from(tone_said && tone.is_none());
         if range {
             out.ranges += 1;
             continue;
@@ -369,6 +430,7 @@ fn freqman(text: &str, group: &str) -> Read {
             mode: mode.unwrap_or(ChanMode::Audio(Demod::Nfm)),
             bandwidth_hz,
             tx: (shift != 0.0).then(|| TxSpec { shift_hz: shift, ..TxSpec::default() }),
+            tone,
         });
     }
     out
@@ -396,6 +458,7 @@ fn sdrsharp(text: &str, group: &str) -> Read {
             mode,
             bandwidth_hz: tag(body, "FilterBandwidth").and_then(|b| width(&b)).or(default_bw),
             tx: (shift != 0.0).then(|| TxSpec { shift_hz: shift, ..TxSpec::default() }),
+            tone: None,
         });
     }
     out
@@ -512,8 +575,8 @@ mod tests {
     /// A handheld programmer's export, which is where most lists arrive from.
     ///
     /// Chirp writes the frequency and the offset in MHz, the shift as a
-    /// direction in `Duplex`, and the tone in three columns of which only
-    /// `Tone` says whether it is used.
+    /// direction in `Duplex`, and the tone in four columns of which only
+    /// `Tone` says which is in use.
     #[test]
     fn a_chirp_export_reads_with_its_shifts() {
         let text = "Location,Name,Frequency,Duplex,Offset,Tone,rToneFreq,cToneFreq,DtcsCode,\
@@ -526,7 +589,8 @@ mod tests {
         assert_eq!(format, Format::Chirp);
         assert_eq!(out.list.len(), 4);
         assert_eq!(out.skipped, 0);
-        assert_eq!(out.tones, 1, "only the first entry says its tone is used");
+        assert_eq!(out.tones, 1, "the tone the first entry sends is not one it opens on");
+        assert!(out.list.iter().all(|c| c.tone.is_none()), "nothing here squelches on a tone");
 
         assert_eq!(out.list[0].label, "GB3DB");
         assert_eq!(out.list[0].freq, 145_725_000.0);
@@ -544,6 +608,45 @@ mod tests {
         assert_eq!(out.list[3].freq, 98_100_000.0);
     }
 
+    /// A channel a handheld is squelched on arrives squelched on the same
+    /// thing.
+    ///
+    /// Which of Chirp's four tone columns the radio obeys is what its `Tone`
+    /// column says: `TSQL` the receive tone, `DTCS` the code, `Tone` a tone
+    /// sent to open a repeater that the radio does not listen for, and
+    /// `Cross` one of each way, which is not a channel this can be set to.
+    #[test]
+    fn a_chirp_tone_squelch_arrives_as_the_tone_the_channel_opens_on() {
+        let text = "Location,Name,Frequency,Duplex,Offset,Tone,rToneFreq,cToneFreq,DtcsCode,\
+             DtcsPolarity,Mode,TStep,Skip,Comment\n\
+             0,GB3DB,145.725000,-,0.600000,TSQL,103.5,110.9,023,NN,FM,5.00,,\n\
+             1,GB7IC,430.875000,-,7.600000,DTCS,88.5,88.5,047,NN,NFM,12.50,,\n\
+             2,Simplex,145.500000,,0.000000,,88.5,88.5,023,NN,NFM,12.50,,\n\
+             3,Split,145.550000,,0.000000,Cross,88.5,88.5,023,NN,NFM,12.50,,\n\
+             4,Odd,145.575000,,0.000000,TSQL,88.5,89.2,023,NN,NFM,12.50,,\n";
+        let (_, out) = read(text, "Import");
+        assert_eq!(out.list.len(), 5);
+        assert_eq!(
+            out.list.iter().map(|c| c.tone).collect::<Vec<_>>(),
+            vec![Some(Coded::Tone(15)), Some(Coded::Dcs(47)), None, None, None],
+            "110.9 is the tone it listens for, not the 103.5 it sends"
+        );
+        assert_eq!(out.tones, 2, "the cross entry and the tone no radio offers");
+        assert!(out.note(Format::Chirp).contains("2 tones dropped"), "{}", out.note(Format::Chirp));
+    }
+
+    /// A list with one tone column and nothing saying what it is for means
+    /// the tone the channel opens on, which is what every exporter but
+    /// Chirp writes.
+    #[test]
+    fn a_plain_ctcss_column_is_the_tone_the_channel_opens_on() {
+        let (_, out) = read("Frequency,Name,CTCSS\n145.5,Calling,88.5\n145.6,Quiet,\n", "Import");
+        assert_eq!(out.list.len(), 2);
+        assert_eq!(out.list[0].tone, Some(Coded::Tone(8)));
+        assert_eq!(out.list[1].tone, None);
+        assert_eq!(out.tones, 0);
+    }
+
     /// Mayhem's list, where a range is a band and a repeater is a pair.
     #[test]
     fn a_freqman_list_keeps_the_pairs_and_counts_the_ranges() {
@@ -557,8 +660,12 @@ mod tests {
         assert_eq!(format, Format::Freqman);
         assert_eq!(out.list.len(), 3);
         assert_eq!(out.ranges, 1, "a band is not a channel");
-        assert_eq!(out.tones, 1);
+        assert_eq!(out.tones, 0, "the tone it carries is one the bank can hold");
         assert_eq!(out.skipped, 1, "the line with no frequency");
+        // Mayhem writes the tone as its frequency, with the fraction it has:
+        // `c=69.33` is 69.3 and `c=0.0` is no tone at all.
+        assert_eq!(out.list[2].tone, Some(Coded::Tone(8)));
+        assert_eq!(out.list[0].tone, None);
 
         assert_eq!(out.list[0].freq, 446_006_250.0);
         assert_eq!(out.list[0].bandwidth_hz, Some(12_500.0), "12k5 is 12.5 kHz");
@@ -636,7 +743,7 @@ mod tests {
     fn the_export_reads_back_as_the_same_bank() {
         let bank = Memory::parse(
             "[Airband]\n118.1 MHz AM Dublin tower\n\
-             [Repeaters]\n145.7375 MHz NFM 12.5 kHz shift:-600kHz GB3XX\n\
+             [Repeaters]\n145.7375 MHz NFM 12.5 kHz shift:-600kHz tone:88.5 GB3XX\n\
              [Pagers]\n439.9875 MHz POCSAG capcodes\n\
              [Watch]\n433.475 MHz auto 40 kHz calling\n",
         );
@@ -661,6 +768,9 @@ mod tests {
         let labels: Vec<&str> = back.list.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["Dublin tower", "GB3XX", "capcodes", "calling"]);
         assert_eq!(back.list[1].tx.expect("the shift").shift_hz, -600_000.0);
+        assert_eq!(back.list[1].tone, Some(Coded::Tone(8)), "the tone left and came back");
+        assert_eq!(back.list[0].tone, None);
+        assert!(csv.contains("TSQL,88.5,88.5"), "{csv}");
         assert_eq!(back.list[1].freq, 145_737_500.0);
         assert_eq!(back.list[3].freq, 433_475_000.0);
         // Chirp keeps five decimal places of a megahertz at most, so a

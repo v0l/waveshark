@@ -51,6 +51,8 @@ pub struct Channel {
     /// What this channel transmits when it is keyed, or `None` for a channel
     /// that only listens. Every channel starts that way.
     pub(super) tx: Option<crate::radio::TxSpec>,
+    /// The coded squelch it opens on, or `None` to hear whoever is there.
+    pub(super) tone: Option<dsp::squelch::Coded>,
     /// Whether a satellite pass is tuning this channel. Its dial belongs to
     /// the pass: a frequency typed in here would be overwritten within the
     /// second, which is a control that appears to do nothing.

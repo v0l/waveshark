@@ -13,6 +13,7 @@ pub mod formats;
 
 use crate::radio::{ChanMode, TxSource, TxSpec};
 use crate::scanners::{hz, num};
+pub use dsp::squelch::Coded;
 use std::path::PathBuf;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -30,6 +31,13 @@ pub struct Saved {
     /// frequency: recalled without one it is a channel that works simplex
     /// on a repeater's output, which nobody hears.
     pub tx: Option<TxSpec>,
+    /// The coded squelch it opens on, or `None` to hear whoever is there.
+    ///
+    /// The other half of what a programmed channel is: two groups share the
+    /// frequency and the tone is what says which of them this channel is
+    /// for, so a repeater saved without it comes back opening on the next
+    /// town's traffic.
+    pub tone: Option<Coded>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -158,9 +166,9 @@ impl Memory {
                 }
                 _ => (None, 0),
             };
-            let (tx, label_from) = transmit(&rest[label_from..], label_from);
+            let (tx, tone, label_from) = tokens(&rest[label_from..], label_from);
             let label = rest[label_from..].join(" ");
-            list.push(Saved { group: group.clone(), label, freq, mode, bandwidth_hz, tx });
+            list.push(Saved { group: group.clone(), label, freq, mode, bandwidth_hz, tx, tone });
         }
         Self { list }
     }
@@ -179,7 +187,7 @@ impl Memory {
                     Some(bw) => s.push_str(&format!("{:<12}", format!("{} kHz", num(bw / 1e3)))),
                     None => s.push_str(&format!("{:<12}", "")),
                 }
-                for token in transmit_tokens(c.tx.as_ref()) {
+                for token in written_tokens(c) {
                     s.push_str(&format!("{token:<16}"));
                 }
                 s.push_str(c.label.trim());
@@ -190,30 +198,34 @@ impl Memory {
     }
 }
 
-/// The transmit side, read off the `key:value` tokens in front of the label,
-/// and how many tokens that took.
+/// What a channel carries beyond its frequency, read off the `key:value`
+/// tokens in front of the label, and how many tokens that took.
 ///
 /// Only what differs from the mode's own default is written, so a plain
 /// simplex channel reads and writes exactly as it did before any of this.
-fn transmit(rest: &[&str], from: usize) -> (Option<TxSpec>, usize) {
+fn tokens(rest: &[&str], from: usize) -> (Option<TxSpec>, Option<Coded>, usize) {
     let mut tx: Option<TxSpec> = None;
+    let mut tone: Option<Coded> = None;
     let mut n = 0;
     for token in rest {
         let Some((key, value)) = token.split_once(':') else { break };
-        let spec = tx.get_or_insert_with(TxSpec::default);
         match key.to_ascii_lowercase().as_str() {
             "shift" => match hz(value) {
-                Some(v) => spec.shift_hz = v,
+                Some(v) => tx.get_or_insert_with(TxSpec::default).shift_hz = v,
                 None => break,
             },
             "src" => match value.to_ascii_lowercase().as_str() {
-                "mic" => spec.source = TxSource::Mic,
-                "tone" => spec.source = TxSource::Tone,
+                "mic" => tx.get_or_insert_with(TxSpec::default).source = TxSource::Mic,
+                "tone" => tx.get_or_insert_with(TxSpec::default).source = TxSource::Tone,
                 _ => break,
             },
             "trim" => match value.trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse() {
-                Ok(v) => spec.trim_db = v,
+                Ok(v) => tx.get_or_insert_with(TxSpec::default).trim_db = v,
                 Err(_) => break,
+            },
+            "tone" => match value.parse() {
+                Ok(c) => tone = Some(c),
+                Err(()) => break,
             },
             // A label may hold a colon. Anything not named here ends the
             // tokens and starts it.
@@ -221,26 +233,28 @@ fn transmit(rest: &[&str], from: usize) -> (Option<TxSpec>, usize) {
         }
         n += 1;
     }
-    // Every token was refused, so nothing was said about transmitting.
-    if n == 0 {
-        return (None, from);
+    match n {
+        0 => (None, None, from),
+        n => (tx, tone, from + n),
     }
-    (tx, from + n)
 }
 
-fn transmit_tokens(tx: Option<&TxSpec>) -> Vec<String> {
-    let (Some(tx), default) = (tx, TxSpec::default()) else {
-        return Vec::new();
-    };
+fn written_tokens(c: &Saved) -> Vec<String> {
     let mut out = Vec::new();
-    if tx.shift_hz != default.shift_hz {
-        out.push(format!("shift:{}kHz", num(tx.shift_hz / 1e3)));
+    if let Some(tx) = c.tx {
+        let default = TxSpec::default();
+        if tx.shift_hz != default.shift_hz {
+            out.push(format!("shift:{}kHz", num(tx.shift_hz / 1e3)));
+        }
+        if tx.source != default.source {
+            out.push(format!("src:{}", tx.source.label().to_ascii_lowercase()));
+        }
+        if tx.trim_db != default.trim_db {
+            out.push(format!("trim:{}dB", num(tx.trim_db as f64)));
+        }
     }
-    if tx.source != default.source {
-        out.push(format!("src:{}", tx.source.label().to_ascii_lowercase()));
-    }
-    if tx.trim_db != default.trim_db {
-        out.push(format!("trim:{}dB", num(tx.trim_db as f64)));
+    if let Some(tone) = c.tone {
+        out.push(format!("tone:{tone}"));
     }
     out
 }
@@ -280,6 +294,7 @@ const HEADER: &str = "\
 #   shift:  what it transmits away from its own frequency, e.g. shift:-600kHz
 #   src:    what it transmits, mic or tone; tone unless it says otherwise
 #   trim:   this channel's own offset from the transmit gain, e.g. trim:-6dB
+#   tone:   the coded squelch it opens on, e.g. tone:88.5 or tone:D023
 ";
 
 #[cfg(test)]
@@ -305,7 +320,42 @@ mod tests {
         assert_eq!(m.list[3].mode, ChanMode::Auto);
         assert_eq!(m.groups(), ["Airband", "Repeaters"]);
         assert_eq!(m.list.iter().filter(|c| c.tx.is_some()).count(), 0);
+        assert_eq!(m.list.iter().filter(|c| c.tone.is_some()).count(), 0);
         assert_eq!(Memory::parse(&m.render()), m);
+    }
+
+    /// A channel keeps the coded squelch it was programmed with.
+    ///
+    /// Two groups share a repeater's output and the tone is what says which
+    /// of them this channel is for. Saved without it, the channel comes back
+    /// opening on the other one.
+    #[test]
+    fn a_channel_keeps_the_coded_squelch_it_opens_on() {
+        let m = Memory::parse(
+            "[Repeaters]\n\
+             145.7375 MHz NFM 12.5 kHz shift:-600kHz tone:88.5 GB3XX\n\
+             430.875 MHz NFM tone:D023 GB7YY\n\
+             446.05 MHz NFM PMR5\n\
+             433.5 MHz NFM tone:89.2 made up\n",
+        );
+        assert_eq!(m.list.len(), 4);
+        assert_eq!(m.list[0].tone, Some(Coded::Tone(8)));
+        assert_eq!(m.list[0].tx.expect("the shift").shift_hz, -600_000.0);
+        assert_eq!(m.list[0].label, "GB3XX");
+        assert_eq!(m.list[1].tone, Some(Coded::Dcs(23)));
+        assert_eq!(m.list[1].tx, None, "a tone is not a transmit side");
+        assert_eq!(m.list[1].label, "GB7YY");
+        assert_eq!(m.list[2].tone, None, "nothing said, so whoever is there");
+        // A tone no radio offers is not a tone, and the line is still a
+        // channel: the token stays in the label rather than programming the
+        // channel to something it cannot hear.
+        assert_eq!(m.list[3].tone, None);
+        assert_eq!(m.list[3].label, "tone:89.2 made up");
+
+        let written = m.render();
+        assert!(written.contains("tone:88.5"), "{written}");
+        assert!(written.contains("tone:D023"), "{written}");
+        assert_eq!(Memory::parse(&written).list[..3], m.list[..3]);
     }
 
     /// A repeater channel keeps its shift.
@@ -362,6 +412,7 @@ mod tests {
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: bw,
             tx: None,
+            tone: None,
         };
         m.add(s("first", None));
         m.add(s("second", Some(25_000.0)));

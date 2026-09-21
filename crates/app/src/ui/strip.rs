@@ -5,6 +5,7 @@ use super::state::AudioState;
 use super::*;
 use crate::chain::derived;
 use crate::radio::{SubFile, TxSource};
+use dsp::squelch::Coded;
 use pipeline::param::ParamValue;
 
 /// What the strip wants done that it cannot do itself.
@@ -194,6 +195,57 @@ impl Strip<'_> {
                 theme::Line::new().note(format!("now {measured:.0} dB")).show(ui);
             });
         }
+        // The coded squelch, which is the half of the decision a level
+        // cannot make: two groups share the channel and only one of them is
+        // this one's. FM alone, because that is what sends one.
+        if demod == Demod::Nfm {
+            changed |= Self::channel_tone(ui, ch, st.code);
+        }
+        changed
+    }
+
+    /// Which group this channel is for, against what is being sent now.
+    ///
+    /// The receiver reads the tone whether or not the channel is set to one,
+    /// so what is heard is offered as the thing to set: an operator on a
+    /// repeater does not know its tone, and the radio does.
+    fn channel_tone(ui: &mut egui::Ui, ch: &mut Channel, heard: Option<Coded>) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("sql code").show(ui);
+            let set = ch.tone;
+            let mut picked = set;
+            let list = egui::ComboBox::from_id_salt(("chan-tone", ch.id))
+                .selected_text(set.map(|c| c.label()).unwrap_or_else(|| "ANY".into()))
+                .width(78.0)
+                .show_ui(ui, |ui| {
+                    let tones = (0..dsp::ctcss::TONES.len()).map(Coded::Tone);
+                    let codes = dsp::dcs::CODES.iter().map(|d| Coded::Dcs(*d));
+                    if ui.selectable_label(set.is_none(), "ANY").clicked() {
+                        picked = None;
+                    }
+                    ui.separator();
+                    for want in tones.chain(codes) {
+                        if ui.selectable_label(set == Some(want), want.label()).clicked() {
+                            picked = Some(want);
+                        }
+                    }
+                });
+            list.response.on_hover_text("open only on this CTCSS tone or DCS code");
+            if picked != set {
+                ch.tone = picked;
+                changed = true;
+            }
+            // What the channel is carrying now, and the way to be set to it.
+            let Some(heard) = heard else {
+                return;
+            };
+            theme::Line::new().heard(heard.label()).size(11.0).show(ui);
+            if ch.tone != Some(heard) && ui.small_button("USE").clicked() {
+                ch.tone = Some(heard);
+                changed = true;
+            }
+        });
         changed
     }
 
@@ -1187,6 +1239,7 @@ impl Strip<'_> {
                                                     mode: ch.mode.clone(),
                                                     bandwidth_hz: ch.bandwidth_hz,
                                                     tx: ch.tx,
+                                                    tone: ch.tone,
                                                 });
                                                 let _ = self.memory.save();
                                                 ui.close();

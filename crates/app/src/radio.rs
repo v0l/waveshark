@@ -643,6 +643,14 @@ pub struct ChannelSpec {
     /// input, and two entries kept in step by hand is how an operator ends up
     /// transmitting on the wrong half of the pair.
     pub tx: Option<TxSpec>,
+    /// The coded squelch this channel opens on, or `None` to hear whoever
+    /// is there.
+    ///
+    /// A tone rather than a level: two groups share the frequency, both are
+    /// loud, and only one of them is this channel's. Programmed rather than
+    /// set against the day's signal, so it comes off the memory bank with
+    /// the channel and goes back into it.
+    pub tone: Option<dsp::squelch::Coded>,
 }
 
 impl ChannelSpec {
@@ -956,6 +964,9 @@ pub struct ChannelState {
     pub agc_gain_db: f32,
     pub squelch_open: bool,
     pub squelch_db: f32,
+    /// The coded squelch heard on the channel now, whatever it is set to:
+    /// what a control offers to programme the channel with.
+    pub code: Option<dsp::squelch::Coded>,
     pub stereo_blend: f32,
     /// What it is putting into the mix, at its own fader setting, for the
     /// meter beside that fader.
@@ -2033,6 +2044,7 @@ impl Audio {
             reads: None,
             agc: true,
             tx: None,
+            tone: None,
         };
         let plan = Plan {
             center: Hz(0),
@@ -4036,6 +4048,7 @@ pub(crate) mod tests {
             reads: None,
             agc: true,
             tx: Some(TxSpec { source, ..Default::default() }),
+            tone: None,
         };
         plan.channels = vec![ch(1, 25_000.0, TxSource::Tone), ch(2, -50_000.0, TxSource::Mic)];
         let first = derive_tx(&plan, true, None).expect("a chain to hold ready");
@@ -4075,6 +4088,7 @@ pub(crate) mod tests {
             // As the strip sends it: nobody has said anything about
             // transmitting, and the mode decides.
             tx: None,
+            tone: None,
         }
     }
 
@@ -4669,6 +4683,7 @@ pub(crate) mod tests {
             reads: None,
             agc: true,
             tx: None,
+            tone: None,
         };
         let outside = ChannelSpec { id: 2, offset_hz: -994_200_000.0, ..inside.clone() };
         assert!(inside.offset_hz.abs() <= rate / 2.0);
@@ -6110,6 +6125,7 @@ pub(crate) mod tests {
             reads: None,
             agc: true,
             tx: None,
+            tone: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
@@ -6158,6 +6174,7 @@ pub(crate) mod tests {
             reads: None,
             agc: true,
             tx: None,
+            tone: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a channel");
         let out = replay_blocks(&mut rx, &buf);
@@ -6239,6 +6256,7 @@ pub(crate) mod tests {
             voice: false,
             reads: None,
             tx: None,
+            tone: None,
         }];
         crate::chain::Receiver::build(&plan, Default::default()).expect("the widest chain")
     }
@@ -6635,6 +6653,7 @@ pub(crate) mod tests {
             voice: true,
             reads: None,
             tx: None,
+            tone: None,
         }];
         let since = std::time::Instant::now();
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
@@ -6704,6 +6723,7 @@ pub(crate) mod tests {
             voice,
             reads: None,
             tx: None,
+            tone: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
         assert!(
@@ -6826,6 +6846,7 @@ pub(crate) mod tests {
             voice: true,
             reads: None,
             tx: None,
+            tone: None,
         }];
         let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
         let id = rx.node_of_stage(crate::chain::derived::CALL_LOG).expect("a call log");
@@ -7053,6 +7074,7 @@ mod zoom_tests {
             voice: false,
             reads: None,
             tx: None,
+            tone: None,
         }];
         let mut rx =
             crate::chain::Receiver::build(&plan, Default::default()).expect("a zoom chain");

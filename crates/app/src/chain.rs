@@ -155,6 +155,7 @@ pub struct Chan {
     pub agc_gain_db: f32,
     pub squelch_open: bool,
     pub squelch_db: f32,
+    pub squelch_code: Option<dsp::squelch::Coded>,
     pub blend: f32,
     pub station: Station,
     pub rds_stats: (u64, u64, bool),
@@ -1449,6 +1450,7 @@ impl Receiver {
                 agc_gain_db: 0.0,
                 squelch_open: false,
                 squelch_db: 0.0,
+                squelch_code: None,
                 blend: 0.0,
                 station: Station::default(),
                 rds_stats: (0, 0, false),
@@ -1646,6 +1648,7 @@ impl Receiver {
             if let Some(sq) = c.squelch.and_then(|id| downcast::<SquelchNode>(&self.graph, id)) {
                 c.squelch_open = sq.is_open();
                 c.squelch_db = sq.measured_db();
+                c.squelch_code = sq.code();
             }
             if let Some(w) = c.wfm.and_then(|id| downcast::<WfmDemodNode>(&self.graph, id)) {
                 c.station = w.station().clone();
@@ -1908,6 +1911,7 @@ impl Receiver {
                 agc_gain_db: c.agc_gain_db,
                 squelch_open: c.squelch_open,
                 squelch_db: c.squelch_db,
+                code: c.squelch_code,
                 stereo_blend: c.blend,
                 level: self.fader(c.spec.id).map(|f| f.peak()).unwrap_or(0.0),
             })
@@ -4407,12 +4411,23 @@ fn audio_channel_stages(
     p.connect(tail, (scope, 0));
     tail = Source::Stage(scope, 0);
 
-    if let Some(db) = spec.squelch_db.or_else(|| mode.default_squelch_db()) {
+    // A channel set to a tone gets the stage whatever its mode says about a
+    // level, at the bottom of the control's range: the tone is the whole
+    // decision on a channel whose mode has no threshold of its own.
+    let threshold = spec
+        .squelch_db
+        .or_else(|| mode.default_squelch_db())
+        .or_else(|| spec.tone.map(|_| mode.squelch_range().0));
+    if let Some(db) = threshold {
         let mut s = Settings::new();
         let measure =
             if mode == Demod::Nfm { nodes::SquelchKind::Noise } else { nodes::SquelchKind::Level };
         s.insert("kind".into(), V::Text(measure.to_string()));
         s.insert("threshold_db".into(), V::Float(db as f64));
+        // Written whether or not there is one: a setting left out of the
+        // drawing is a setting the running node keeps, and a channel set
+        // back to hearing everybody would stay on its old tone.
+        s.insert("code".into(), V::Text(spec.tone.map(|t| t.label()).unwrap_or_default()));
         let sq = at(p, "chan_squelch", "squelch", s);
         p.connect(tail, (sq, 0));
         tail = Source::Stage(sq, 0);
@@ -5842,6 +5857,7 @@ pub(crate) mod tests {
             voice: false,
             reads: None,
             tx: None,
+            tone: None,
         }
     }
 
@@ -6830,6 +6846,54 @@ pub(crate) mod tests {
         assert!(running(&rx, "mode_s"), "the new band's front end was not built");
         // And what the receiver reports as the edits is what was made.
         assert_eq!(rx.edits(), p.edits);
+    }
+
+    /// A channel programmed to a group is built squelched on it, and
+    /// changing which group does not rebuild the chain.
+    ///
+    /// The tone comes off the memory bank with the channel, so it has to
+    /// reach the node the same way a squelch threshold does: through the
+    /// plan, on a chain that keeps running.
+    #[test]
+    fn a_channel_set_to_a_group_carries_its_tone_to_the_squelch() {
+        let mut p = plan(2_400_000.0, Hz::mhz(145));
+        p.fronts.clear();
+        let mut spec = chan(1, 200_000.0, Demod::Nfm);
+        spec.tone = Some(dsp::squelch::Coded::Tone(8));
+        p.channels = vec![spec.clone()];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let code = |rx: &Receiver| {
+            let id =
+                rx.node_of_stage(chan_stage_id("chan_squelch", &spec, p.eff_rate())).unwrap().0;
+            let node = rx.graph.node(NodeId(id)).expect("the squelch");
+            node.params()
+                .into_iter()
+                .find(|q| q.name == "code")
+                .expect("a code")
+                .value
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(code(&rx), "88.5");
+
+        // Another group on the same frequency: a parameter, not a chain.
+        let mut moved = plan(2_400_000.0, Hz::mhz(145));
+        let mut other = spec.clone();
+        other.tone = Some(dsp::squelch::Coded::Dcs(23));
+        moved.fronts.clear();
+        moved.channels = vec![other];
+        assert!(rx.params_only(&moved), "a tone change was taken as a rebuild");
+        rx.apply_params(&moved);
+        assert_eq!(code(&rx), "D023");
+
+        // And back to hearing everybody, which a setting left undrawn would
+        // not have done.
+        let mut open = plan(2_400_000.0, Hz::mhz(145));
+        open.fronts.clear();
+        open.channels = vec![chan(1, 200_000.0, Demod::Nfm)];
+        rx.apply_params(&open);
+        assert_eq!(code(&rx), "");
     }
 
     #[test]
@@ -8032,6 +8096,7 @@ mod refusal_tests {
             voice: false,
             reads: None,
             tx: None,
+            tone: None,
         }];
         // A stage that will not take anything, wired to the head, standing in
         // for the decoder that cannot reach its own rate. Built as an edit,
@@ -8087,6 +8152,7 @@ mod tx_in_graph_tests {
             voice: false,
             reads: None,
             tx: Some(TxSpec { source, ..Default::default() }),
+            tone: None,
         }];
         p.tx = Some(TxPlan {
             spec: TxSpec { source, ..Default::default() },
@@ -8316,6 +8382,7 @@ mod tx_in_graph_tests {
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
+            tone: None,
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
             .expect("a television channel can be keyed");
@@ -8382,6 +8449,7 @@ mod tx_in_graph_tests {
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),
+                tone: None,
             }];
             let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
                 .unwrap_or_else(|| panic!("{id} can be keyed"));
@@ -8418,6 +8486,7 @@ mod tx_in_graph_tests {
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
+            tone: None,
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
             .expect("a packet channel can be keyed");
@@ -8498,6 +8567,7 @@ vectors:
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
+            tone: None,
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
             .expect("a described protocol can be keyed");
@@ -8594,6 +8664,7 @@ vectors:
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
+            tone: None,
         }];
         plan.tx = Some(TxPlan {
             spec: TxSpec::default(),
@@ -8695,6 +8766,7 @@ vectors:
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
+            tone: None,
         }];
         plan.tx = Some(TxPlan {
             spec: TxSpec::default(),
@@ -9211,6 +9283,7 @@ vectors:
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
+            tone: None,
         }];
         plan.tx = Some(TxPlan {
             spec: TxSpec::default(),

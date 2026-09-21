@@ -889,10 +889,10 @@ pub struct SquelchNode {
     /// The coded squelch: a tone, or a code, whichever the group uses.
     ctcss: dsp::ctcss::Ctcss,
     dcs: dsp::dcs::Dcs,
-    /// What is being sent now, as a radio names it: "141.3" or "D023".
-    code: Option<String>,
-    /// The code this channel is set to, or empty for whoever is there.
-    want: String,
+    /// What is being sent now: a tone, or a code.
+    code: Option<dsp::squelch::Coded>,
+    /// The code this channel is set to, or `None` for whoever is there.
+    want: Option<dsp::squelch::Coded>,
     filter_tones: bool,
     tone_filter: [dsp::filter::Biquad; TONE_POLES],
 }
@@ -922,7 +922,7 @@ impl SquelchNode {
             ctcss: dsp::ctcss::Ctcss::new(48_000.0),
             dcs: dsp::dcs::Dcs::new(48_000.0),
             code: None,
-            want: String::new(),
+            want: None,
             filter_tones: true,
             tone_filter: [dsp::filter::Biquad::design(
                 dsp::filter::Response::Highpass,
@@ -933,9 +933,9 @@ impl SquelchNode {
         }
     }
 
-    /// The coded squelch heard now, as a radio names it.
-    pub fn code(&self) -> Option<&str> {
-        self.code.as_deref()
+    /// The coded squelch heard now.
+    pub fn code(&self) -> Option<dsp::squelch::Coded> {
+        self.code
     }
 
     /// Whether what is being sent is what this channel is set to.
@@ -944,8 +944,7 @@ impl SquelchNode {
     /// scanner that stayed shut until it was told a code would hear nothing
     /// at all on a channel nobody had set up.
     fn wanted(&self) -> bool {
-        let want = self.want.trim();
-        want.is_empty() || self.code.as_deref().map(str::trim) == Some(want)
+        self.want.is_none() || self.want == self.code
     }
 
     /// Narrowband FM, at the level where a signal becomes intelligible.
@@ -1028,13 +1027,13 @@ impl Simple for SquelchNode {
         let code = self.dcs.push(input);
         let tone = self.ctcss.push(input);
         let read = match (code, tone, self.dcs.code()) {
-            (Some(c), _, _) => Some(c.label()),
-            (None, Some(t), None) => Some(t.label()),
+            (Some(c), _, _) => Some(dsp::squelch::Coded::Dcs(c.digits)),
+            (None, Some(t), None) => Some(dsp::squelch::Coded::Tone(t.index)),
             _ => None,
         };
         if let Some(read) = read {
-            self.code = Some(read.clone());
-            c.tag(Tag::new(c.sample_index, "squelch_code", TagValue::Text(read)));
+            self.code = Some(read);
+            c.tag(Tag::new(c.sample_index, "squelch_code", TagValue::Text(read.label())));
         }
         // The coded squelch is the other half of the decision, and it is the
         // squelch's own: a channel set to one group stays shut for another
@@ -1081,7 +1080,8 @@ impl Simple for SquelchNode {
             Param::float(HYSTERESIS_DB, self.hysteresis_db as f64, 0.0..=20.0)
                 .unit("dB")
                 .label("Hysteresis"),
-            Param::text("code", self.want.clone()).label("Only this group"),
+            Param::text("code", self.want.map(|c| c.label()).unwrap_or_default())
+                .label("Only this group"),
             Param::bool("filter_tones", self.filter_tones).label("Filter the coded squelch out"),
         ]
     }
@@ -1095,7 +1095,15 @@ impl Simple for SquelchNode {
                 self.hysteresis_db = v.as_f64().unwrap_or(DEFAULT_HYSTERESIS_DB) as f32
             }
             "code" => {
-                self.want = v.as_str().unwrap_or_default().to_string();
+                let said = v.as_str().unwrap_or_default().trim().to_string();
+                self.want = match said.is_empty() {
+                    true => None,
+                    false => Some(said.parse().map_err(|()| {
+                        common::Error::other(format!(
+                            "squelch: {said:?} is neither a CTCSS tone nor a DCS code"
+                        ))
+                    })?),
+                };
                 return Ok(());
             }
             "filter_tones" => {
@@ -1251,7 +1259,13 @@ pub const SQUELCH: StageDesc = StageDesc {
 
 pub fn build_squelch(s: &Settings) -> Result<Box<dyn Node>> {
     let kind = s.str_or(KIND, SquelchKind::Noise.label()).parse().unwrap_or(SquelchKind::Noise);
-    Ok(Box::new(SquelchNode::new(kind, s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32)))
+    let mut n = SquelchNode::new(kind, s.f64_or(THRESHOLD_DB, DEFAULT_SQUELCH_DB as f64) as f32);
+    for name in ["code", "filter_tones"] {
+        if let Some(v) = s.get(name) {
+            Node::set_param(&mut n, name, v.clone())?;
+        }
+    }
+    Ok(Box::new(n))
 }
 
 #[cfg(test)]
@@ -1315,7 +1329,7 @@ mod squelch_tests {
     }
 
     /// One block through, answering with the audio and the tags it published.
-    fn run(n: &mut SquelchNode, pcm: &[f32]) -> (Vec<f32>, Vec<Tag>) {
+    fn run(n: &mut dyn Node, pcm: &[f32]) -> (Vec<f32>, Vec<Tag>) {
         let spec =
             StreamSpec { kind: PortKind::Real, rate: RATE, channels: 1, ..Default::default() };
         let ins = [PortSpec { spec, latency: 0 }];
@@ -1385,7 +1399,7 @@ mod squelch_tests {
         let mut n = node();
         let (_, tags) = run(&mut n, &with_tone(&voice, 141.3, 0.2));
         assert_eq!(said(&tags).as_deref(), Some("141.3"));
-        assert_eq!(n.code(), Some("141.3"));
+        assert_eq!(n.code().map(|c| c.label()).as_deref(), Some("141.3"));
 
         // DCS: the same, with a code instead of a tone.
         let mut n = node();
@@ -1470,5 +1484,45 @@ mod squelch_tests {
         let mut n = node();
         let (out, _) = run(&mut n, &with_code(&voice, 25));
         assert!(out.iter().any(|s| s.abs() > 0.01), "an unset channel muted a signal");
+    }
+
+    /// A tone the channel is recalled with is the tone it opens on.
+    ///
+    /// The saved half of the same decision: a memory carries the tone a
+    /// repeater sends, and the stage is built with it rather than set by
+    /// hand afterwards.
+    #[test]
+    fn a_squelch_built_with_a_tone_opens_on_that_tone_alone() {
+        let voice = talking(2.0);
+        let mut s = Settings::new();
+        s.insert("kind".into(), ParamValue::Text(SquelchKind::Noise.label().into()));
+        s.insert("threshold_db".into(), ParamValue::Float(DEFAULT_SQUELCH_DB as f64));
+        s.insert("code".into(), ParamValue::Text("88.5".into()));
+        let built = |s: &Settings| {
+            let mut n = build_squelch(s).expect("a squelch");
+            let spec = StreamSpec {
+                kind: PortKind::Real,
+                rate: RATE,
+                center: common::Hz(145_500_000),
+                channels: 1,
+                ..Default::default()
+            };
+            Node::negotiate(n.as_mut(), &[PortSpec { spec, latency: 0 }]).expect("audio in");
+            n
+        };
+
+        let mut n = built(&s);
+        let (out, _) = run(n.as_mut(), &with_tone(&voice, 88.5, 0.2));
+        assert!(out.iter().any(|v| v.abs() > 0.01), "the channel's own tone was muted");
+
+        let mut n = built(&s);
+        let (out, _) = run(n.as_mut(), &with_tone(&voice, 141.3, 0.2));
+        assert!(out.iter().all(|v| v.abs() < 0.01), "the next town's tone came through");
+
+        // A number no radio offers is refused rather than quietly heard as
+        // everybody: a codeplug typed wrong is a channel that would open on
+        // whatever is there.
+        s.insert("code".into(), ParamValue::Text("89.2".into()));
+        assert!(build_squelch(&s).is_err(), "89.2 Hz is not a tone any radio sends");
     }
 }
