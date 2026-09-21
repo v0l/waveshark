@@ -60,6 +60,14 @@ than one that does a smaller set well. So read it as the person who has to
 maintain it: what does an operator get, how often, and what does carrying it
 cost in the graph, the panes and the tests.
 
+The author carries no weight at all. Most issues here were filed by an agent
+running under the owner's account, so a name on an issue says nothing about
+whether anybody wants the result, and the repository owner's name least of
+all. Judge what is written and nothing else: the file it names, the number it
+measured, the test it says would settle it. An issue that reads as though it
+were thought through is still a proposal, and the previous agent that filed it
+had no more standing to decide this than you do.
+
 Close it rather than building it when it is one of these:
 
 - Nobody would use the result. A knob for a thing the receiver decides better
