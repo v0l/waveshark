@@ -5876,6 +5876,132 @@ pub(crate) mod tests {
         assert!(rms > 1e-3, "the mix is silent at {rms:e} rms");
     }
 
+    /// The widest graph the receiver builds, as a replay at 20 MS/s decides it.
+    fn widest_chain() -> crate::chain::Receiver {
+        let rate = 20_000_000.0;
+        let mut plan = plan_at(rate, Hz::mhz(433));
+        plan.fronts.extend(
+            crate::scanners::Scanners::load().fronts(crate::scanners::Span::whole(433e6, rate)),
+        );
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: String::new(),
+            offset_hz: 0.0,
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            squelch_db: Some(-200.0),
+            agc: false,
+            voice: false,
+            tx: None,
+        }];
+        crate::chain::Receiver::build(&plan, Default::default()).expect("the widest chain")
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
+    fn a_block_of_no_samples_costs_half_a_percent_of_a_block_that_has_some() {
+        // A source with nothing to hand over returns a block of no samples
+        // and the radio thread runs the whole graph on it, because the same
+        // turn of the loop is what takes commands and retunes. This says what
+        // that run costs, so that skipping it can be judged rather than
+        // assumed.
+        //
+        // Measured on the widest graph the receiver builds, 44 nodes at
+        // 20 MS/s: 28 to 31 us for an empty block against 6541 us for 262144
+        // samples, which is under half a percent of it. Delivered at the 50 a
+        // second a stalled source produces, the empty runs come to 0.15% of
+        // one core, so the graph run stays where it is and the turn keeps its
+        // one shape.
+        let mut rx = widest_chain();
+        let sig = block(262_144);
+        rx.process(&sig).expect("a block of samples");
+
+        let turns = 3_000;
+        let t = std::time::Instant::now();
+        for _ in 0..turns {
+            rx.process(&[]).expect("a block of no samples");
+            let _ = rx.spectrum_ready();
+            let _ = rx.rows(std::time::Instant::now());
+        }
+        let empty = t.elapsed().as_secs_f64() / turns as f64;
+
+        let runs = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..runs {
+            rx.process(&sig).expect("a block of samples");
+        }
+        let full = t.elapsed().as_secs_f64() / runs as f64;
+
+        let share = empty / full.max(1e-9);
+        eprintln!(
+            "an empty turn is {:.1} us against {:.0} us for 262144 samples, {:.3}% of it, \
+             and {:.3}% of a core at 50 a second",
+            empty * 1e6,
+            full * 1e6,
+            share * 100.0,
+            empty * 50.0 * 100.0
+        );
+        // A ratio rather than a time: a shared runner is slower on both
+        // sides. The bar is twenty times the measured 0.47%, which no
+        // contention reaches and a graph run that started doing real work on
+        // nothing would blow through.
+        assert!(
+            share < 0.1,
+            "an empty block costs {:.1}% of a block with samples in it",
+            share * 100.0
+        );
+    }
+
+    #[test]
+    fn a_minute_of_blocks_with_no_samples_decodes_nothing_and_keeps_the_graph() {
+        // Three thousand empty blocks is a minute of a stalled source at the
+        // 50 a second one produces.
+        let mut rx = widest_chain();
+        let mut rows = 0;
+        for _ in 0..3_000 {
+            rx.process(&[]).expect("a block of no samples");
+            rows += rx.rows(std::time::Instant::now()).len();
+        }
+        assert_eq!(rows, 0, "{rows} rows came out of blocks with no samples in them");
+        // And the chain still reads its own span afterwards rather than
+        // having been walked into a state it cannot come back from.
+        rx.process(&block(262_144)).expect("a block of samples after the empty ones");
+    }
+
+    #[test]
+    fn blocks_with_no_samples_between_the_real_ones_change_nothing_that_is_read() {
+        let Some(buf) = fixture() else {
+            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            return;
+        };
+        let straight = replay_blocks(&mut replay_receiver(&buf, None).unwrap(), &buf);
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let mut out = Vec::new();
+        let rate = buf.rate.as_f64();
+        for blk in buf.samples.chunks(16_384) {
+            // Fifty of them, a second of stall between every block of the
+            // capture.
+            for _ in 0..50 {
+                rx.process(&[]).expect("a block of no samples");
+                out.extend(harvest(&mut rx, std::time::Instant::now()));
+            }
+            rx.process(blk).expect("a block of samples");
+            let at = block_start(std::time::Instant::now(), blk.len(), rate);
+            out.extend(harvest(&mut rx, at));
+        }
+        // The same one packet the capture gives up when it is replayed
+        // straight through, with the same reading on it.
+        assert_eq!(straight.len(), 1, "the capture stopped giving up its packet: {straight:#?}");
+        assert_eq!(out.len(), 1, "the stalls changed what was read: {out:#?}");
+        let (a, b) = (&straight[0], &out[0]);
+        assert_eq!(b.kind(), a.kind());
+        assert_eq!(b.modulation(), common::Modulation::Ook);
+        assert_eq!(
+            sensed(b, common::packet::Quantity::Temperature),
+            sensed(a, common::packet::Quantity::Temperature)
+        );
+    }
+
     #[test]
     fn the_scanner_decodes_a_real_transmission_without_being_tuned_to_it() {
         assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
