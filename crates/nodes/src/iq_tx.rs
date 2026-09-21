@@ -160,6 +160,23 @@ impl IqTxNode {
         self.fit_rate();
     }
 
+    fn rewind(&mut self) {
+        let Some(r) = self.open.as_mut() else {
+            self.load();
+            return;
+        };
+        if r.file.seek(SeekFrom::Start(0)).is_err() {
+            self.load();
+            return;
+        }
+        r.sent = 0;
+        r.pending.clear();
+        r.finished = false;
+        if let Some(rs) = r.resample.as_mut() {
+            rs.reset();
+        }
+    }
+
     /// Put the resampler between the file's rate and the graph's.
     ///
     /// A capture recorded at the rate the radio is transmitting at needs
@@ -293,6 +310,10 @@ impl Simple for IqTxNode {
 
     fn reset(&mut self) {
         self.load();
+    }
+
+    fn over_began(&mut self) {
+        self.rewind();
     }
 
     fn params(&self) -> Vec<Param> {
@@ -455,6 +476,29 @@ mod tests {
         // Sample 512 is sample 0 again: the file starts over rather than
         // running on into whatever is after it on disc.
         assert!((out[512].re - out[0].re).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_over_begins_at_the_first_sample_however_the_last_one_ended() {
+        let path = capture("rewind_433.92M_250k.cu8", 1024);
+        let mut n = IqTxNode::new(&path.display().to_string(), 250_000.0);
+        n.repeat = false;
+        Simple::negotiate(&mut n, &spec(250_000.0)).unwrap();
+
+        let first = run(&mut n, 250_000.0, 256);
+        assert!((first[0].re - -DEFAULT_LEVEL).abs() < 0.01, "{:?}", first[0]);
+        assert!((n.progress() - 0.25).abs() < 0.05, "played {}", n.progress());
+
+        Simple::over_began(&mut n);
+        assert_eq!(n.progress(), 0.0);
+        let second = run(&mut n, 250_000.0, 256);
+        assert_eq!(second, first, "the over after it read on from where the last stopped");
+
+        let _ = run(&mut n, 250_000.0, 1024);
+        assert!(!n.is_playing(), "a file that ran out is still playing");
+        Simple::over_began(&mut n);
+        assert!(n.is_playing(), "the key did not start the file again");
+        assert_eq!(run(&mut n, 250_000.0, 256), first);
     }
 
     #[test]

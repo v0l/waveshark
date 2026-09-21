@@ -8223,6 +8223,46 @@ mod tx_in_graph_tests {
         assert!(quarter, "the shift never reached the air: {tail:?}");
     }
 
+    #[test]
+    fn each_over_replays_the_capture_from_its_first_sample() {
+        let dir = std::env::temp_dir().join("sr_chain_tx_rewind");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("steps_446.05M_2000k.cu8");
+        let steps: Vec<u8> =
+            (0..200_000usize).flat_map(|i| [((i / 1_000) % 256) as u8, 128u8]).collect();
+        std::fs::write(&path, &steps).unwrap();
+
+        let mut plan = plan_with_tx(TxSource::Capture);
+        plan.tx_capture = crate::radio::TxCapture::open(&path);
+        plan.tx.as_mut().unwrap().mode = TxMode::Iq;
+        plan.channels[0].tx.as_mut().unwrap().source = TxSource::Capture;
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+
+        for over in 0..3 {
+            let radio = Counted::default();
+            assert!(rx.key(Box::new(radio.clone())), "over {over} was not taken");
+            until(&format!("over {over} on the air"), || radio.samples() > 50_000);
+            rx.unkey();
+            assert!(rx.tx_settled());
+            let air = radio.transmitted();
+            assert!(air.len() > 50_000, "over {over} sent {} samples", air.len());
+            assert!(
+                (air[0].re + 0.8).abs() < 0.02,
+                "over {over} began at {:?}, not the file's first sample, which is \
+                 0 of 255 in offset binary at the stage's level of 0.8, so -0.8; \
+                 before the key reached the source stage the second over began \
+                 51,000 samples in, at 0.204",
+                air[0]
+            );
+            assert!(
+                (air[1_000].re - (-0.8 + 0.8 * 2.0 / 255.0)).abs() < 0.02,
+                "over {over} held one sample rather than reading the file on: \
+                 a thousand samples in is the next step of the ramp, {:?}",
+                air[1_000]
+            );
+        }
+    }
+
     /// A recording from another program is named for what it holds, so what
     /// the operator typed has to reach the stage that reads the bytes: the
     /// extension `.iq` says nothing and the stage would otherwise refuse it.

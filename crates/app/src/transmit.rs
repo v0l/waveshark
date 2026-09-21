@@ -319,6 +319,9 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                 if let Some(old) = graph.take() {
                     hand_back(old, &mut g);
                 }
+                if waiting.is_some() {
+                    over_began(&mut g);
+                }
                 arm(&mut g, &mut waiting);
                 graph = Some(g);
                 idle = runs_idle;
@@ -331,6 +334,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                 clock = Clock::default();
                 waiting = Some(stream);
                 if let Some(g) = graph.as_mut() {
+                    over_began(g);
                     arm(g, &mut waiting);
                 }
             }
@@ -511,6 +515,15 @@ fn scope_frames(g: &mut Graph) -> Vec<(usize, nodes::ScopeFrame)> {
 /// than one, because a single failure could be a stall; a device that has
 /// been unplugged refuses every one.
 const REFUSALS: u64 = 3;
+
+fn over_began(g: &mut Graph) {
+    let ids: Vec<_> = g.order().map(|(id, _)| id).collect();
+    for id in ids {
+        if let Some(n) = g.node_mut(id) {
+            pipeline::node::walk_mut(n, &mut |n| n.over_began());
+        }
+    }
+}
 
 /// Put the radio on the chain, if both are to hand.
 fn arm(g: &mut Graph, waiting: &mut Option<Box<dyn TxStream>>) {

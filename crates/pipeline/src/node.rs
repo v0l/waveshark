@@ -149,6 +149,8 @@ macro_rules! node_options {
         /// reuse.
         fn reset(&mut self) {}
 
+        fn over_began(&mut self) {}
+
         /// Take what a stage's description says that [`Node::set_param`]
         /// cannot carry one value at a time, as the graph is built.
         ///
@@ -218,6 +220,9 @@ macro_rules! forward_node_options {
         }
         fn reset(&mut self) {
             Simple::reset(self)
+        }
+        fn over_began(&mut self) {
+            Simple::over_began(self)
         }
         fn configure(&mut self, settings: &crate::registry::Settings) {
             Simple::configure(self, settings)
