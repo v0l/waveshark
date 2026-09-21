@@ -45,6 +45,7 @@
 //!   --center-in-hz N input centre, when the filename does not say
 //! ```
 use common::{C32, SampleFormat};
+use sources::clip::{Bursts, Cut};
 use sources::parse_filename;
 use std::io::Read;
 use std::path::Path;
@@ -110,12 +111,19 @@ fn main() {
         total as f64 / rate
     );
 
-    let skip = (args.skip * rate) as usize;
-    let spans = match (args.seconds, args.bursts) {
-        (Some(secs), _) => vec![(skip, (skip + (secs * rate) as usize).min(total))],
-        (None, true) => bursts(&bytes, format, rate, &args, skip),
-        (None, false) => vec![(skip, total)],
+    let how = Bursts {
+        margin_ms: args.margin_ms,
+        bridge_ms: args.bridge_ms,
+        threshold_db: args.threshold_db,
+        min_us: args.min_us,
+        max_bursts: args.max_bursts,
     };
+    let cut = match (args.seconds, args.bursts) {
+        (Some(seconds), _) => Cut::Window { skip_s: args.skip, seconds },
+        (None, true) => Cut::Bursts { skip_s: args.skip, how },
+        (None, false) => Cut::Whole { skip_s: args.skip },
+    };
+    let spans = sources::clip::spans(&bytes, format, rate, &cut);
 
     let kept: usize = spans.iter().map(|(a, b)| b - a).sum();
     eprintln!(
@@ -217,88 +225,6 @@ fn write_samples(samples: &[C32], format: SampleFormat, out: &mut Vec<u8>) {
             }
         }
     }
-}
-
-/// Sample ranges holding a transmission, merged where their margins overlap.
-///
-/// The same shape as the burst cut in `decode`'s off-air classifier test: mean
-/// power per block, a floor taken as a low percentile of those blocks, and a
-/// threshold some decibels above it. The floor is a percentile rather than a
-/// mean because a capture with a loud transmitter in it has a mean well above
-/// its own noise.
-fn bursts(
-    bytes: &[u8],
-    format: SampleFormat,
-    rate: f64,
-    args: &Args,
-    skip: usize,
-) -> Vec<(usize, usize)> {
-    const BLOCK: usize = 128;
-    let bps = format.bytes_per_sample();
-    let mut iq = Vec::new();
-    format.convert(&bytes[skip * bps..], &mut iq);
-    let power: Vec<f32> = iq
-        .chunks_exact(BLOCK)
-        .map(|c| c.iter().map(|s| s.norm_sqr()).sum::<f32>() / BLOCK as f32)
-        .collect();
-    if power.is_empty() {
-        return Vec::new();
-    }
-    let mut sorted = power.clone();
-    sorted.sort_by(f32::total_cmp);
-    let floor = sorted[sorted.len() / 10].max(1e-20);
-    let threshold = floor * 10f32.powf(args.threshold_db as f32 / 10.0);
-
-    let margin = (args.margin_ms * 1e-3 * rate) as usize;
-    let bridge = (args.bridge_ms * 1e-3 * rate) as usize;
-    let min_len = (args.min_us * 1e-6 * rate) as usize;
-
-    let mut raw: Vec<(usize, usize, f32)> = Vec::new();
-    let mut open: Option<usize> = None;
-    let mut peak = 0.0f32;
-    let mut quiet = 0usize;
-    for (i, &p) in power.iter().enumerate() {
-        if p > threshold {
-            quiet = 0;
-            peak = peak.max(p);
-            open.get_or_insert(i * BLOCK);
-        } else if let Some(s) = open {
-            quiet += 1;
-            // Three quiet blocks before a burst is called finished, so a
-            // dropout inside one does not split it in two.
-            if quiet > 3 {
-                raw.push((s, (i - quiet) * BLOCK, peak));
-                open = None;
-                peak = 0.0;
-            }
-        }
-    }
-    if let Some(s) = open {
-        raw.push((s, iq.len(), peak));
-    }
-    raw.retain(|(a, b, _)| b - a >= min_len);
-
-    // The loudest first when there is a cap, so what survives a limit is the
-    // clearest evidence rather than whatever happened to be recorded first.
-    if args.max_bursts > 0 && raw.len() > args.max_bursts {
-        raw.sort_by(|a, b| b.2.total_cmp(&a.2));
-        raw.truncate(args.max_bursts);
-    }
-    raw.sort_by_key(|(a, _, _)| *a);
-
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (a, b, _) in raw {
-        let a = skip + a.saturating_sub(margin);
-        let b = skip + (b + margin).min(iq.len());
-        match merged.last_mut() {
-            // Two bursts closer than the bridge stay one span with the gap
-            // they actually had, rather than being butted together at a
-            // discontinuity a demodulator would read as a transient.
-            Some(last) if a <= last.1 + bridge => last.1 = last.1.max(b),
-            _ => merged.push((a, b)),
-        }
-    }
-    merged
 }
 
 fn parse_args() -> Args {

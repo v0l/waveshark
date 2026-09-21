@@ -14,6 +14,8 @@ the code is in the commit log.
 - MDC-1200 bursts damaged in the air are repaired from the parity the radio sent.
 - Captures named outside the rtl_433 convention: a card asks the centre, rate
   and format, for replay and for transmit.
+- Trim card on the radio settings, cutting a replayed capture to its
+  transmissions or a window.
 - Distress and emergency alerts on a map row, ahead of whatever else it says.
 - Open Drone ID aircraft on the map, gathered from the separate adverts that
   carry a drone's identity, position and height.

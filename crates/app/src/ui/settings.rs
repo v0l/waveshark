@@ -6,8 +6,8 @@
 use super::*;
 use crate::agent::config::{Reading, Speech};
 use crate::ui::widgets::{
-    card, choice, field, field_then, footer, hint, lamp, prose, row, row_help, secret, section,
-    switch,
+    card, choice, field, field_then, footer, hint, lamp, prose, reading, row, row_help, secret,
+    section, switch,
 };
 
 /// Ask every USB serial port whether a sub-ghz-modem is on it.
@@ -2914,10 +2914,181 @@ impl App {
         ui.add_space(8.0);
 
         self.raw_capture(ui);
+        ui.add_space(8.0);
+        self.trim_capture(ui);
 
         if changed {
             self.apply_radio_settings();
         }
+    }
+
+    /// Cutting the capture being replayed down to what is in it.
+    ///
+    /// Only on a file, because there is nothing to cut on a radio. The same
+    /// cut the `iq_clipper` example makes, which was the only way to reach it
+    /// and is findable by nobody: a recording is made here, played here, and
+    /// is trimmed here too. The output is a second file beside the original,
+    /// named so the receiver list reads its centre and rate back.
+    fn trim_capture(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self
+            .device
+            .as_ref()
+            .filter(|d| d.kind == common::device::DriverKind::File)
+            .and_then(|d| d.path.clone())
+        else {
+            return;
+        };
+        if self.trimming.as_ref().is_some_and(|p| p.ready().is_some()) {
+            let done = self.trimming.take().expect("a cut that is ready").block_and_take();
+            if let Ok(made) = &done {
+                crate::devices::add_named_capture(made.path.clone());
+                self.devices = crate::devices::list();
+            }
+            self.trim.said = Some(done);
+        }
+        let meta = sources::parse_filename(&path);
+        let running = self.trimming.is_some();
+        let mut cut = false;
+        card(
+            ui,
+            None,
+            |ui| {
+                theme::Line::new().legend("trim").show(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    cut = ui.add_enabled(!running, egui::Button::new("TRIM")).clicked();
+                    theme::Line::new()
+                        .note("a shorter capture beside this one")
+                        .size(10.5)
+                        .elided(ui);
+                });
+            },
+            |ui| {
+                let keep_help = "The transmissions keeps what is over the noise and drops \
+                                 the silence between, which is what makes a capture small \
+                                 enough to keep. A window keeps a stretch of the recording \
+                                 whatever is in it.";
+                row_help(ui, "keep", keep_help, |ui| {
+                    choice(
+                        ui,
+                        "trim_keep",
+                        &mut self.trim.bursts,
+                        [(true, "the transmissions".to_string()), (false, "a window".to_string())],
+                    );
+                });
+                if self.trim.bursts {
+                    let margin_help = "Quiet kept either side of a transmission. A detector \
+                                       takes its noise floor from the band next to a burst, \
+                                       so a file cut flush to the edges reads worse than the \
+                                       one it came from: the BLE capture reads five of \
+                                       eleven packets at 2 ms and six at 4 ms.";
+                    row_help(ui, "margin", margin_help, |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim.margin_ms)
+                                .speed(0.5)
+                                .range(0.0..=1000.0)
+                                .suffix(" ms either side"),
+                        );
+                    });
+                    let over_help = "How far over the noise floor a burst has to be. The \
+                                     floor is a low percentile of the whole file, so a \
+                                     recording that is mostly transmission has a high one.";
+                    row_help(ui, "over", over_help, |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim.threshold_db)
+                                .speed(0.5)
+                                .range(1.0..=60.0)
+                                .suffix(" dB"),
+                        );
+                    });
+                } else {
+                    row_help(ui, "window", "Where the window starts and how long it runs.", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim.skip_s)
+                                .speed(0.1)
+                                .range(0.0..=100_000.0)
+                                .max_decimals(3)
+                                .suffix(" s in"),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.trim.seconds)
+                                .speed(0.1)
+                                .range(0.001..=100_000.0)
+                                .max_decimals(3)
+                                .suffix(" s long"),
+                        );
+                    });
+                }
+                let name_help = "Added to the name of the new file, which keeps the centre \
+                                 and the rate of the original so it replays.";
+                row_help(ui, "called", name_help, |ui| {
+                    field(ui, &mut self.trim.tag, "clip");
+                });
+                match (meta.center, meta.rate) {
+                    (Some(c), Some(r)) => {
+                        let name = sources::clip::output_name(&path, c, r, self.trim.tag.trim());
+                        reading(
+                            ui,
+                            "writes",
+                            name.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                        );
+                    }
+                    _ => {
+                        lamp(ui, false, "this capture's name carries no centre and rate");
+                    }
+                }
+                if running {
+                    lamp(ui, true, "cutting");
+                } else if let Some(said) = &self.trim.said {
+                    match said {
+                        Ok(c) => lamp(
+                            ui,
+                            true,
+                            &format!(
+                                "{} span(s), {:.3} s kept, {:.1}% of the recording",
+                                c.spans.len(),
+                                c.seconds(meta.rate.unwrap_or(common::Sps(1))),
+                                100.0 * c.share()
+                            ),
+                        ),
+                        Err(e) => lamp(ui, false, e),
+                    }
+                }
+            },
+        );
+        if !cut {
+            return;
+        }
+        let (Some(center), Some(rate)) = (meta.center, meta.rate) else {
+            self.trim.said = Some(Err("this capture's name carries no centre and rate".into()));
+            return;
+        };
+        let out = sources::clip::free_name(sources::clip::output_name(
+            &path,
+            center,
+            rate,
+            self.trim.tag.trim(),
+        ));
+        let cut = match self.trim.bursts {
+            true => sources::Cut::Bursts {
+                skip_s: 0.0,
+                how: sources::clip::Bursts {
+                    margin_ms: self.trim.margin_ms,
+                    threshold_db: self.trim.threshold_db,
+                    ..Default::default()
+                },
+            },
+            false => sources::Cut::Window { skip_s: self.trim.skip_s, seconds: self.trim.seconds },
+        };
+        self.trim.said = None;
+        let ctx = ui.ctx().clone();
+        // Off the frame: a gigabyte read, measured and written back is
+        // seconds of work, and a window that does not paint is a window the
+        // compositor puts a "not responding" dialog over.
+        self.trimming = Some(poll_promise::Promise::spawn_thread("trim capture", move || {
+            let r = sources::clip_file(&path, &out, &cut).map_err(|e| e.to_string());
+            ctx.request_repaint();
+            r
+        }));
     }
 
     /// Writing the span to disk exactly as it arrives.
@@ -3410,6 +3581,35 @@ fn key_of(s: &crate::session::Session, which: crate::data::Which, index: usize) 
         (crate::data::Which::Satellites(g), 0) if g.needs_login() => Some(&s.spacetrack_identity),
         (crate::data::Which::Satellites(g), _) if g.needs_login() => Some(&s.spacetrack_password),
         _ => None,
+    }
+}
+
+/// How the capture on the dial is to be cut.
+#[derive(Clone, Debug)]
+pub struct TrimEdit {
+    /// The transmissions, or a window of the recording.
+    bursts: bool,
+    margin_ms: f64,
+    threshold_db: f64,
+    skip_s: f64,
+    seconds: f64,
+    /// Added to the new file's name, so a folder of cuts says which is which.
+    tag: String,
+    /// What the last cut came to, kept beside the card that asked for it.
+    said: Option<std::result::Result<sources::Clipped, String>>,
+}
+
+impl Default for TrimEdit {
+    fn default() -> Self {
+        Self {
+            bursts: true,
+            margin_ms: 2.0,
+            threshold_db: 6.0,
+            skip_s: 0.0,
+            seconds: 5.0,
+            tag: "clip".into(),
+            said: None,
+        }
     }
 }
 

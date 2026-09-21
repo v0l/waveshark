@@ -137,6 +137,9 @@ pub struct App {
     /// The open-a-capture dialog, while it is up. It runs on its own thread
     /// so the receiver keeps painting behind it.
     picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
+    /// How the capture being replayed is to be cut, and the cut in progress.
+    trim: settings::TrimEdit,
+    trimming: Option<poll_promise::Promise<std::result::Result<sources::Clipped, String>>>,
     /// The open-a-file dialog for a stage's own setting, wherever it was
     /// asked for: the chain view's inspector or the channel strip.
     pick_file: state::FilePick,
@@ -640,6 +643,8 @@ impl Default for App {
             open: None,
             devices: Vec::new(),
             picking: None,
+            trim: Default::default(),
+            trimming: None,
             pick_file: state::FilePick::default(),
             device: None,
             reach: (24e6, 1766e6),
