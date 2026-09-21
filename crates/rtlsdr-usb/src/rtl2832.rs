@@ -132,8 +132,8 @@ pub fn enumerate() -> Vec<Enumerated> {
 fn port_path(d: &nusb::DeviceInfo) -> String {
     let ports: Vec<String> = d.port_chain().iter().map(|p| p.to_string()).collect();
     match ports.is_empty() {
-        true => format!("{}-?", d.busnum()),
-        false => format!("{}-{}", d.busnum(), ports.join(".")),
+        true => format!("{}-?", d.bus_id()),
+        false => format!("{}-{}", d.bus_id(), ports.join(".")),
     }
 }
 
