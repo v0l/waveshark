@@ -3,8 +3,8 @@
 //! One pySSTV recording per mode, all of the same picture: the colour bars
 //! across the top half, a red-to-green ramp at constant blue across the
 //! bottom. What should come out is therefore not a judgement, and what is
-//! asserted is which colour each bar reads as, which line count came back,
-//! and that the ramp rises.
+//! asserted is the value each bar reads as, which line count came back, and
+//! that the ramp rises.
 //!
 //! Bars rather than a photograph, because what differs between the modes is
 //! the timing table and nothing else, and a wrong figure there gives a
@@ -94,10 +94,9 @@ fn pixel(p: &sstv::Picture, x: usize, y: usize) -> (u8, u8, u8) {
     (p.rgb[at], p.rgb[at + 1], p.rgb[at + 2])
 }
 
-/// Which bar a pixel is, rather than how many counts it is off by. A colour
-/// difference is sent at half the picture's resolution and read through a
-/// window several pixels wide, so a saturated bar lands tens of counts from
-/// where it started; what must not happen is it landing on another bar.
+/// Which bar a pixel is, for asking where a bar landed rather than what
+/// value it read: a picture read off a clock that is not the transmitter's
+/// has moved sideways, and the colour it moved to is what says so.
 fn nearest_bar(got: (u8, u8, u8)) -> usize {
     BARS.iter()
         .enumerate()
@@ -107,6 +106,13 @@ fn nearest_bar(got: (u8, u8, u8)) -> usize {
         })
         .map(|(k, _)| k)
         .unwrap_or(usize::MAX)
+}
+
+/// How far a pixel is from the colour that was sent, in counts of the
+/// furthest of its three channels.
+fn off_by(got: (u8, u8, u8), want: (u8, u8, u8)) -> i64 {
+    let d = |a: u8, b: u8| (a as i64 - b as i64).abs();
+    d(got.0, want.0).max(d(got.1, want.1)).max(d(got.2, want.2))
 }
 
 /// The bars in the order they were sent, and the ramp as a ramp, off one
@@ -127,10 +133,15 @@ fn reads_the_picture_it_was_sent(which: usize) {
     // half of the colour on each and a bug in one is invisible in the
     // other.
     for y in [30usize, 31] {
-        for (i, (name, _)) in BARS.iter().enumerate() {
+        for (i, (name, want)) in BARS.iter().enumerate() {
             let x = i * p.width / 7 + p.width / 14;
             let got = pixel(&p, x, y);
-            assert_eq!(nearest_bar(got), i, "{mode} line {y}: the {name} bar read as {got:?}");
+            // The value, not merely the nearest bar. Measured, the worst
+            // of these is three counts in every mode, Robot 36's
+            // half-width colour differences included; with the tone
+            // meter's old barycentric peak it was 41, and 86 on Robot 36.
+            let off = off_by(got, *want);
+            assert!(off <= 6, "{mode} line {y}: the {name} bar read as {got:?}, {off} out");
         }
     }
 

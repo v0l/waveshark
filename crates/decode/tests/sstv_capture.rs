@@ -14,10 +14,17 @@
 //! still catching anything structural: a shifted line, a swapped channel, a
 //! mode read at the wrong speed.
 //!
-//! In practice the two agree to about a count a block. What differs is the
-//! edge columns: the sampling window here is clipped to the scan it belongs
-//! to, where the reference lets it run past the end, which is what puts a
-//! green stripe down the right of a Robot picture.
+//! What the two do not share is the contrast. The reference places its peak
+//! between the bins by a parabola through the log magnitudes, which under a
+//! Hann window reads back about 0.72 of the distance from the bin centre, so
+//! its picture is squeezed towards mid grey; `dsp::tone` inverts the Hann
+//! kernel exactly and reads the tone that was sent. The blocks are therefore
+//! compared through the straight line between the two decoders rather than
+//! count for count, which still moves if a line drifts or a channel swaps.
+//!
+//! What else differs is the edge columns: the sampling window here is clipped
+//! to the scan it belongs to, where the reference lets it run past the end,
+//! which is what puts a green stripe down the right of a Robot picture.
 
 use decode::sstv;
 
@@ -92,16 +99,41 @@ fn the_recording_decodes_as_the_martin_1_picture_the_reference_gets() {
     assert_eq!(p.lines, 256, "lines decoded");
 
     let got = blocks(&p);
+    let mut pairs = Vec::new();
+    for (a, b) in got.iter().zip(REFERENCE.iter()) {
+        for (g, r) in a.iter().zip(b.iter()) {
+            pairs.push((r.0, g.0));
+            pairs.push((r.1, g.1));
+            pairs.push((r.2, g.2));
+        }
+    }
+    assert_eq!(pairs.len(), 192, "sixty-four blocks of three channels");
+
+    let n = pairs.len() as f32;
+    let mean_r = pairs.iter().map(|p| p.0).sum::<f32>() / n;
+    let mean_g = pairs.iter().map(|p| p.1).sum::<f32>() / n;
+    let cov = pairs.iter().map(|p| (p.0 - mean_r) * (p.1 - mean_g)).sum::<f32>();
+    let var = pairs.iter().map(|p| (p.0 - mean_r).powi(2)).sum::<f32>();
+    let gain = cov / var;
+    let lift = mean_g - gain * mean_r;
+    // Measured over the 192 block means: a gain of 1.390 and a lift of
+    // -46.7 counts, which is the reference's own 0.72 compression undone. A
+    // gain of 1.0 would mean this decoder had taken the compression back on.
+    assert!((1.34..=1.44).contains(&gain), "contrast against the reference is {gain:.3}");
+
     let mut worst = 0.0f32;
     for (y, (a, b)) in got.iter().zip(REFERENCE.iter()).enumerate() {
         for (x, (g, r)) in a.iter().zip(b.iter()).enumerate() {
             for (c, (gv, rv)) in [(g.0, r.0), (g.1, r.1), (g.2, r.2)].iter().enumerate() {
-                let d = (gv - rv).abs();
+                let want = gain * rv + lift;
+                let d = (gv - want).abs();
                 worst = worst.max(d);
-                assert!(d < 2.0, "block ({x},{y}) channel {c}: {gv:.1} against {rv:.1}");
+                assert!(d < 3.0, "block ({x},{y}) channel {c}: {gv:.1} against {want:.1}");
             }
         }
     }
+    // 2.2 counts measured; the blocks the reference and this decoder read
+    // through different end-of-scan windows are the ones that reach it.
     eprintln!("worst block difference from the reference picture: {worst:.1} counts");
 }
 

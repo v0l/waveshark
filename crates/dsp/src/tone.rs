@@ -5,8 +5,8 @@
 //! frequency of an audio tone wants this, which is SSTV today and weather fax
 //! or a tone-keyed telemetry link tomorrow.
 //!
-//! A Hann window, a real FFT, the largest bin, and a barycentric
-//! interpolation across its neighbours for the fraction of a bin. The
+//! A Hann window, a real FFT, the largest bin, and the three-point estimator
+//! the Hann kernel is exactly inverted by for the fraction of a bin. The
 //! interpolation is what makes a 4 ms window good enough to tell 1500 Hz from
 //! 1503 Hz, which is one shade of grey in an SSTV picture.
 
@@ -93,21 +93,29 @@ impl ToneMeter {
 
 /// The peak's position in bins, using the two neighbours to find where
 /// between them it really is.
+///
+/// A sinusoid δ bins off centre lands on the periodic Hann kernel's three
+/// non-zero lobes, whose magnitudes go as C/((1+δ)(2+δ)), C/((1-δ)(1+δ)) and
+/// C/((1-δ)(2-δ)), and those invert exactly to 2(R-L)/(L+2M+R). Dividing by
+/// the plain sum instead reads back about 0.7 of δ, which is a squeezed
+/// contrast on anything whose value is a frequency.
 fn interpolate(mags: &[f32], at: usize) -> f64 {
     let left = if at == 0 { mags[at] } else { mags[at - 1] };
     let right = if at + 1 >= mags.len() { mags[at] } else { mags[at + 1] };
-    let denom = left + mags[at] + right;
+    let denom = left + 2.0 * mags[at] + right;
     if denom == 0.0 {
         return 0.0;
     }
-    at as f64 + ((right - left) / denom) as f64
+    at as f64 + (2.0 * (right - left) / denom).clamp(-0.5, 0.5) as f64
 }
 
 fn hann(n: usize) -> Vec<f32> {
-    // The symmetric window, as every decoder this is checked against uses.
+    // Periodic rather than symmetric, because that is the kernel the
+    // estimator above inverts: symmetric reads the same 47 sample sweep
+    // 21.1 Hz out where this reads it 8.2.
     (0..n)
         .map(|i| {
-            let x = std::f64::consts::PI * i as f64 / (n - 1) as f64;
+            let x = std::f64::consts::PI * i as f64 / n as f64;
             (x.sin() * x.sin()) as f32
         })
         .collect()
@@ -275,10 +283,8 @@ mod tests {
     }
 
     /// A tone between two bins is found between them, which is the whole
-    /// reason for the interpolation: at these window lengths a bin is 50 Hz.
-    /// The barycentric estimate is biased towards the bin centre, so a tone
-    /// half way between two bins is the worst case and lands about 6 Hz low;
-    /// that bias is what the reference decoders have too.
+    /// reason for the interpolation: at these window lengths a bin is 50 Hz
+    /// and every one of these reads inside a hertz of what was sent.
     #[test]
     fn a_tone_off_the_bin_grid_is_still_read_closely() {
         let rate = 44_100.0;
@@ -286,8 +292,27 @@ mod tests {
         let mut m = ToneMeter::new(rate);
         for hz in [1200.0, 1500.0, 1900.0, 2300.0, 1723.0] {
             let got = m.peak_hz(&tone(hz, rate, n));
-            assert!((got - hz).abs() < 8.0, "{hz} Hz read as {got:.1}");
+            assert!((got - hz).abs() < 1.0, "{hz} Hz read as {got:.1}");
         }
+    }
+
+    /// The window an SSTV pixel is sampled with is 47 samples, a 938 Hz bin,
+    /// and both picture tones sit beside the same one, so the reading is all
+    /// interpolation. Swept across the 1500 to 2300 Hz picture range in 50 Hz
+    /// steps the worst is 8.2 Hz, where the barycentric estimate this
+    /// replaced was 127.0 Hz out, which is 40 of the 255 counts a pixel
+    /// carries.
+    #[test]
+    fn a_pixel_wide_window_reads_the_picture_tones_to_ten_hertz() {
+        let rate = 44_100.0;
+        let mut m = ToneMeter::new(rate);
+        let mut worst = 0.0f64;
+        for k in 0..=16 {
+            let hz = 1500.0 + f64::from(k) * 50.0;
+            let got = m.peak_hz(&tone(hz, rate, 47));
+            worst = worst.max((got - hz).abs());
+        }
+        assert!(worst < 10.0, "the worst of seventeen tones was {worst:.1} Hz out");
     }
 
     /// The window a picture is sampled with is a few hundred samples, and
@@ -299,7 +324,7 @@ mod tests {
         let mut m = ToneMeter::new(rate);
         for hz in [1500.0, 1800.0, 2300.0] {
             let got = m.peak_hz(&tone(hz, rate, n));
-            assert!((got - hz).abs() < 25.0, "{hz} Hz read as {got:.1}");
+            assert!((got - hz).abs() < 2.0, "{hz} Hz read as {got:.1}");
         }
     }
 
@@ -344,11 +369,10 @@ mod tests {
         r.process(&held(332.5, 3.0), &mut out);
         r.process(&silence(0.3), &mut out);
         assert_eq!(out.len(), 2, "{out:?}");
-        // A 25 ms window is a 40 Hz bin, and the barycentric peak is biased
-        // towards the bin centre: measured, 947.3 Hz reads 950.7 and 332.5
-        // reads 331.9, so a few hertz is as close as this window comes.
-        assert!((out[0].hz - 947.3).abs() < 5.0, "A read as {:.1}", out[0].hz);
-        assert!((out[1].hz - 332.5).abs() < 5.0, "B read as {:.1}", out[1].hz);
+        // A 25 ms window is a 40 Hz bin, and what a run reports is the mean
+        // of its windows, each of which lands within a hertz.
+        assert!((out[0].hz - 947.3).abs() < 2.0, "A read as {:.1}", out[0].hz);
+        assert!((out[1].hz - 332.5).abs() < 2.0, "B read as {:.1}", out[1].hz);
         // A window either side is the most the boundaries can cost.
         assert!((out[0].seconds - 1.0).abs() <= 0.05, "A ran {:.3} s", out[0].seconds);
         assert!((out[1].seconds - 3.0).abs() <= 0.05, "B ran {:.3} s", out[1].seconds);

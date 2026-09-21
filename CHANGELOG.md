@@ -169,6 +169,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- SSTV pictures came back washed out, with black read as dark grey and white
+  as light grey.
 - Comm-B and surveillance replies named an address that was not the
   aircraft's, so an altitude or a squawk was filed under a hex code no
   aircraft has.

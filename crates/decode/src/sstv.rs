@@ -943,13 +943,11 @@ mod tests {
         // transmission that a file ending at the picture does not have.
         assert_eq!(got.lines, mode.height - 1);
 
-        // What comes back is the right colour at the right place, but
-        // compressed toward mid grey: black reads 35 and white 215 rather
-        // than 0 and 255. That is the tone meter's peak estimator, which
-        // interpolates over three bins of a window only about a kilohertz
-        // wide, and it is why the off-air mode tests match a bar by which
-        // colour is nearest rather than by its value. Pinned here because it
-        // is measured from a picture whose every pixel is known.
+        // What comes back is the value that was sent, to three counts of
+        // 255. A Martin 2 pixel window is 47 samples at 44.1 kHz, so a bin
+        // is 938 Hz and both picture tones sit beside the same one: the
+        // whole reading is the interpolation between the bins, which is why
+        // this used to come back as 35 for black and 215 for white.
         let centre = |b: usize, y: usize| -> [u8; 3] {
             let x = b * mode.width / 8 + mode.width / 16;
             got.rgb[(y * mode.width + x) * 3..][..3].try_into().unwrap()
@@ -960,10 +958,9 @@ mod tests {
                 let px = centre(b, y);
                 for c in 0..3 {
                     let sent = f64::from(want[c]);
-                    let expect = 35.0 + sent * (215.0 - 35.0) / 255.0;
                     assert!(
-                        (f64::from(px[c]) - expect).abs() <= 6.0,
-                        "bar {b} at line {y} channel {c}: {} not near {expect:.0}",
+                        (f64::from(px[c]) - sent).abs() <= 3.0,
+                        "bar {b} at line {y} channel {c}: {} not near {sent:.0}",
                         px[c]
                     );
                 }
