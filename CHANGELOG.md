@@ -104,7 +104,7 @@ the code is in the commit log.
   counts as busy after the packets asked for.
 - Transmit for six protocols this receiver already reads, on a channel
   decoding one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements,
-  SSTV pictures and RDS station names.
+  SSTV pictures in Martin, Scottie and Robot modes, and RDS station names.
 - Recorded captures sent back out: pick a file on a channel and transmit it.
 - VOX: speech keys the transmit channel, with a tail, a roger beep and the
   receiver's own audio kept out of it.

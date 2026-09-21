@@ -427,15 +427,6 @@ impl Simple for SstvTxNode {
             MODE => {
                 let k = value.as_i64().unwrap_or(0).clamp(0, sstv::MODES.len() as i64 - 1);
                 let want = &sstv::MODES[k as usize];
-                // A mode this receiver can read and not send is refused
-                // rather than quietly swapped: an operator who picked Robot
-                // 36 is owed the reason it did not go out.
-                if sstv::encode(&[], want, AUDIO_HZ).is_none() {
-                    return Err(common::Error::other(format!(
-                        "sstv_tx: {} sends colour differences this cannot build",
-                        want.name
-                    )));
-                }
                 if want.vis != self.mode.vis {
                     self.mode = want;
                     self.load();
@@ -506,7 +497,7 @@ pub const DESC: StageDesc = StageDesc {
 
 pub const SSTV_TX: StageDesc = StageDesc {
     name: "sstv_tx",
-    summary: "Send a picture as SSTV: Martin and Scottie modes",
+    summary: "Send a picture as SSTV: Martin, Scottie and Robot modes",
     category: Category::Transmit,
     feeds_bus: false,
 };
@@ -577,7 +568,7 @@ mod tests {
         assert_eq!(audio_spec.kind, PortKind::Real);
         // The test card in Martin 2: 0.88 s of header and VIS, then 256
         // lines of 0.2268 s.
-        assert!((tx.seconds() - 58.94).abs() < 0.01, "{} s", tx.seconds());
+        assert!((tx.seconds() - 58.97).abs() < 0.01, "{} s", tx.seconds());
 
         let mut rx = SstvNode::new(14_230_000.0);
         rx.negotiate(&PortSpec { spec: audio_spec, latency: 0 }).unwrap();
@@ -601,21 +592,71 @@ mod tests {
             }
         }
         assert_eq!(mode.as_deref(), Some("Martin 2"), "the VIS code named the mode");
-        // Twelve seconds less the 0.88 s header, at 0.2268 s a line, is 49;
-        // the last two are still being read when the audio runs out, since a
-        // line is published once the one after it has started.
-        assert_eq!(rows, 47, "lines off the air");
+        // Twelve seconds less the 0.91 s of header and VIS, at 0.2268 s a
+        // line, is 48; the last is still being read when the audio runs
+        // out, since a line is published once the one after it has started.
+        assert_eq!(rows, 48, "lines off the air");
     }
 
-    /// A Robot mode is refused rather than sent as something no receiver
-    /// would show.
+    /// Every mode the receiver reads is a mode the transmitter sends, and
+    /// picking one builds a transmission as long as its table says.
     #[test]
-    fn a_mode_the_transmitter_cannot_send_is_refused_with_why() {
+    fn each_mode_is_keyed_at_the_length_its_timings_say() {
         use pipeline::param::ParamValue;
         let mut n = SstvTxNode::default();
-        let robot = sstv::MODES.iter().position(|m| m.name == "Robot 36").unwrap();
-        let e = n.set_param(MODE, ParamValue::Int(robot as i64)).unwrap_err();
-        assert!(e.to_string().contains("Robot 36"), "{e}");
-        assert_eq!(n.mode.name, "Martin 1", "the mode it was on is kept");
+        let want = [115.20, 58.97, 110.53, 72.00, 269.79, 36.91, 72.91];
+        for (k, mode) in sstv::MODES.iter().enumerate() {
+            let at = sstv::MODES.iter().position(|m| m.vis == mode.vis).unwrap();
+            n.set_param(MODE, ParamValue::Int(at as i64)).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(n.mode.name, mode.name);
+            assert!(
+                (n.seconds() - want[k]).abs() < 0.01,
+                "{}: {} s, not {}",
+                mode.name,
+                n.seconds(),
+                want[k]
+            );
+        }
+    }
+
+    /// A Robot 36 transmission keyed by the stage and read back by the
+    /// receive node: the alternating colour difference, the half-width scan
+    /// and the separators all agree with the decoder or the VIS code is the
+    /// only thing that comes back.
+    #[test]
+    fn a_robot_picture_this_receiver_sent_is_a_picture_this_receiver_reads() {
+        let rate = 44_100.0;
+        let robot = sstv::MODES.iter().find(|m| m.name == "Robot 36").unwrap();
+        let mut tx = SstvTxNode::new("", robot);
+        let mut spec = StreamSpec::iq(rate, Hz(0));
+        spec.kind = PortKind::Real;
+        let audio_spec = tx.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
+
+        let mut rx = SstvNode::new(14_230_000.0);
+        rx.negotiate(&PortSpec { spec: audio_spec, latency: 0 }).unwrap();
+        let ins = [PortSpec { spec, latency: 0 }];
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let (mut rows, mut mode) = (0usize, None);
+        for _ in 0..(6.0 * rate / 4096.0) as usize {
+            let mut audio = Payload::Real(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(&mut tx, &Payload::Real(vec![0.0; 4096]), &mut audio, &mut ctx)
+                .unwrap();
+            let mut video = Payload::Video(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Simple::process(&mut rx, &audio, &mut video, &mut ctx).unwrap();
+            if let Payload::Video(frames) = video {
+                for f in frames {
+                    mode = f.label.clone();
+                    rows += f.lines_seen;
+                }
+            }
+        }
+        assert_eq!(mode.as_deref(), Some("Robot 36"), "the VIS code named the mode");
+        // Six seconds less the 0.91 s of header and VIS, at 0.15 s a line,
+        // is 33; the last is still being read when the audio runs out, and
+        // Robot 36 publishes a line behind the scan because it borrows the
+        // colour difference from the line after.
+        assert_eq!(rows, 32, "lines off the air");
     }
 }

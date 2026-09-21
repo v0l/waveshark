@@ -383,14 +383,14 @@ fn align_sync(
 /// The audio that sends `rgb` in `mode`: the calibration header, the VIS
 /// code, then a line at a time.
 ///
-/// The inverse of [`decode`] for the modes that send three full-width
-/// channels, which is Martin and Scottie. A Robot mode sends luminance and
-/// two half-width colour differences and is refused rather than sent wrong.
+/// The inverse of [`decode`]: Martin and Scottie send three full-width
+/// channels of green, blue and red, and a Robot mode sends luminance at full
+/// width with its colour differences at half.
 ///
 /// `rgb` is row major, three bytes a pixel, `mode.width` by `mode.height`; a
 /// picture short of that is sent as far as it goes and the rest black.
 pub fn encode(rgb: &[u8], mode: &Mode, rate: f64) -> Option<Vec<f32>> {
-    if mode.colour != Colour::Gbr || mode.channels != 3 {
+    if !(2..=3).contains(&mode.channels) {
         return None;
     }
     let mut out =
@@ -425,29 +425,62 @@ pub fn encode(rgb: &[u8], mode: &Mode, rate: f64) -> Option<Vec<f32>> {
         tone(if one { 1100.0 } else { 1300.0 }, VIS_BIT, &mut out);
     }
     tone(if ones % 2 == 1 { 1100.0 } else { 1300.0 }, VIS_BIT, &mut out);
+    tone(1200.0, VIS_BIT, &mut out);
 
-    // The channel order is green, blue, red, and the offsets say when each
-    // goes out; anything between them is the separator tone.
+    // The channel order is green, blue, red for Martin and Scottie, and the
+    // offsets say when each goes out; anything between them is the separator
+    // tone.
     let plane = [1usize, 2, 0];
-    let pixel_time = mode.pixel_time();
     for y in 0..mode.height {
         tone(1200.0, mode.sync_pulse, &mut out);
         let mut at = mode.sync_pulse;
-        let mut order: Vec<usize> = (0..3).collect();
+        let mut order: Vec<usize> = (0..mode.channels).collect();
         order.sort_by(|a, b| mode.offsets[*a].total_cmp(&mode.offsets[*b]));
         for chan in order {
-            tone(1500.0, mode.offsets[chan] - at, &mut out);
-            for x in 0..mode.width {
-                let i = (y * mode.width + x) * 3 + plane[chan];
-                let v = f64::from(rgb.get(i).copied().unwrap_or(0));
-                tone(1500.0 + 800.0 * v / 255.0, pixel_time, &mut out);
+            let half = mode.half_scan && chan > 0;
+            let (scan_time, pixel_time) = match half {
+                true => (mode.half_scan_time, mode.half_pixel_time()),
+                false => (mode.scan_time, mode.pixel_time()),
+            };
+            let gap = mode.offsets[chan] - at;
+            match mode.colour {
+                Colour::Gbr => tone(1500.0, gap, &mut out),
+                Colour::Yuv => {
+                    if chan > 0 {
+                        let cr = (mode.channels == 3 && chan == 1) || y.is_multiple_of(2);
+                        tone(if cr { 1500.0 } else { 2300.0 }, gap - ROBOT_PORCH, &mut out);
+                        tone(1900.0, ROBOT_PORCH, &mut out);
+                    } else {
+                        tone(1900.0, gap, &mut out);
+                    }
+                }
             }
-            at = mode.offsets[chan] + mode.scan_time;
+            for x in 0..mode.width {
+                let v = match mode.colour {
+                    Colour::Gbr => {
+                        rgb.get((y * mode.width + x) * 3 + plane[chan]).copied().unwrap_or(0)
+                    }
+                    Colour::Yuv => {
+                        let i = (y * mode.width + x) * 3;
+                        let px = rgb.get(i..i + 3).unwrap_or(&[0, 0, 0]);
+                        let (luma, cr, cb) = ycbcr(px[0], px[1], px[2]);
+                        match (chan, mode.channels, y.is_multiple_of(2)) {
+                            (0, _, _) => luma,
+                            (1, 3, _) | (1, 2, true) => cr,
+                            _ => cb,
+                        }
+                    }
+                };
+                tone(1500.0 + 800.0 * f64::from(v) / 255.0, pixel_time, &mut out);
+            }
+            at = mode.offsets[chan] + scan_time;
         }
         tone(1500.0, mode.line_time - at, &mut out);
     }
     Some(out)
 }
+
+const ROBOT_PORCH: f64 = 0.0015;
 
 /// Decode the first picture in `audio`, or `None` where there is no header.
 ///
@@ -592,6 +625,14 @@ fn convert_row(mode: &'static Mode, planes: &[Vec<Vec<u8>>], y: usize, out: &mut
         out[x * 3 + 1] = px.1;
         out[x * 3 + 2] = px.2;
     }
+}
+
+fn ycbcr(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let (r, g, b) = (r as f32, g as f32, b as f32);
+    let y = 0.299 * r + 0.587 * g + 0.114 * b;
+    let cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+    let cr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+    (y.clamp(0.0, 255.0) as u8, cr.clamp(0.0, 255.0) as u8, cb.clamp(0.0, 255.0) as u8)
 }
 
 /// The conversion every SSTV decoder uses, which is JPEG's YCbCr.
@@ -909,39 +950,21 @@ mod tests {
         // Eight vertical bars of a flat colour each, which is a picture
         // whose every pixel has a known value and whose edges show a line
         // read at the wrong offset.
-        let bars: [[u8; 3]; 8] = [
-            [255, 255, 255],
-            [255, 255, 0],
-            [0, 255, 255],
-            [0, 255, 0],
-            [255, 0, 255],
-            [255, 0, 0],
-            [0, 0, 255],
-            [0, 0, 0],
-        ];
-        let mut rgb = vec![0u8; mode.width * mode.height * 3];
-        for y in 0..mode.height {
-            for x in 0..mode.width {
-                let bar = bars[x * 8 / mode.width];
-                rgb[(y * mode.width + x) * 3..][..3].copy_from_slice(&bar);
-            }
-        }
+        let bars = BARS;
+        let rgb = bar_picture(mode);
 
         let rate = 44_100.0;
         let audio = encode(&rgb, mode, rate).expect("a full width mode encodes");
         // Two leaders, a break, the VIS code, then 256 lines.
         let seconds = audio.len() as f64 / rate;
         assert!(
-            (seconds - (HDR_SIZE + 8.0 * VIS_BIT + 256.0 * mode.line_time)).abs() < 0.01,
+            (seconds - (HDR_SIZE + 9.0 * VIS_BIT + 256.0 * mode.line_time)).abs() < 0.01,
             "{seconds} s"
         );
 
         let got = decode(&audio, rate).expect("a picture");
         assert_eq!(got.mode.name, "Martin 2", "the VIS code named the mode");
-        // Every line but the last: the sampling window is several pixels
-        // wide, so reading the final line needs audio from after the
-        // transmission that a file ending at the picture does not have.
-        assert_eq!(got.lines, mode.height - 1);
+        assert_eq!(got.lines, mode.height);
 
         // What comes back is the value that was sent, to three counts of
         // 255. A Martin 2 pixel window is 47 samples at 44.1 kHz, so a bin
@@ -974,15 +997,156 @@ mod tests {
         assert!(centre(3, 128)[1] > centre(3, 128)[2], "the green bar has no blue");
     }
 
-    /// A Robot mode sends luminance and two half-width colour differences,
-    /// which this encoder does not build, so it refuses rather than sending
-    /// a picture no receiver would show.
+    /// The eight bars the round trips are sent as: every pixel a known
+    /// value, and the edges show a line read at the wrong offset.
+    const BARS: [[u8; 3]; 8] = [
+        [255, 255, 255],
+        [255, 255, 0],
+        [0, 255, 255],
+        [0, 255, 0],
+        [255, 0, 255],
+        [255, 0, 0],
+        [0, 0, 255],
+        [0, 0, 0],
+    ];
+
+    fn bar_picture(mode: &Mode) -> Vec<u8> {
+        let mut rgb = vec![0u8; mode.width * mode.height * 3];
+        for y in 0..mode.height {
+            for x in 0..mode.width {
+                rgb[(y * mode.width + x) * 3..][..3].copy_from_slice(&BARS[x * 8 / mode.width]);
+            }
+        }
+        rgb
+    }
+
+    /// Which of the eight bars a pixel is closest to.
+    fn nearest_bar(px: [u8; 3]) -> usize {
+        let mut best = (usize::MAX, f64::MAX);
+        for (i, bar) in BARS.iter().enumerate() {
+            let d: f64 = (0..3)
+                .map(|c| {
+                    let e = f64::from(px[c]) - (35.0 + f64::from(bar[c]) * (215.0 - 35.0) / 255.0);
+                    e * e
+                })
+                .sum();
+            if d < best.1 {
+                best = (i, d);
+            }
+        }
+        best.0
+    }
+
+    /// Both Robot modes sent and read back. The colour differences go out at
+    /// half the width in time and Robot 36 alternates which one a line
+    /// carries, so a bar coming back the right colour is the whole of that
+    /// arrangement agreeing with the decoder's.
+    ///
+    /// Matched by nearest bar rather than by value: the tone meter squeezes
+    /// what it reads toward mid grey (#63), and the luminance window is 7.7
+    /// pixels wide in Robot 36, so a bar edge smears over about ten pixels.
     #[test]
-    fn a_mode_the_encoder_cannot_send_is_refused() {
-        let robot = MODES.iter().find(|m| m.name == "Robot 36").unwrap();
-        assert!(encode(&[0; 320 * 240 * 3], robot, 11_025.0).is_none());
-        let robot72 = MODES.iter().find(|m| m.name == "Robot 72").unwrap();
-        assert!(encode(&[0; 320 * 240 * 3], robot72, 11_025.0).is_none());
+    fn a_robot_picture_this_encoder_sent_comes_back_off_the_tones() {
+        for (name, lines) in [("Robot 36", 239), ("Robot 72", 239)] {
+            let mode = MODES.iter().find(|m| m.name == name).unwrap();
+            let rate = 11_025.0;
+            let audio = encode(&bar_picture(mode), mode, rate).expect("a robot mode encodes");
+            let seconds = audio.len() as f64 / rate;
+            let want = HDR_SIZE + 9.0 * VIS_BIT + mode.height as f64 * mode.line_time;
+            assert!((seconds - want).abs() < 0.01, "{name}: {seconds} s, not {want}");
+
+            let got = decode(&audio, rate).expect("a picture");
+            assert_eq!(got.mode.name, name, "the VIS code named the mode");
+            assert_eq!(got.lines, lines, "{name} lines read");
+            assert_eq!((got.width, got.height), (320, 240));
+
+            let mut right = 0;
+            for y in [8, 120, 200] {
+                for b in 0..8 {
+                    let x = b * mode.width / 8 + mode.width / 16;
+                    let px: [u8; 3] = got.rgb[(y * mode.width + x) * 3..][..3].try_into().unwrap();
+                    if nearest_bar(px) == b {
+                        right += 1;
+                    }
+                }
+            }
+            assert_eq!(right, 24, "{name}: eight bars on three lines");
+        }
+    }
+
+    /// A grey ramp reads as a ramp: the luminance channel is monotonic in
+    /// what was sent, which is what the off-air mode tests check of a real
+    /// transmission.
+    #[test]
+    fn a_robot_ramp_comes_back_rising_left_to_right() {
+        let mode = MODES.iter().find(|m| m.name == "Robot 72").unwrap();
+        let mut rgb = vec![0u8; mode.width * mode.height * 3];
+        for y in 0..mode.height {
+            for x in 0..mode.width {
+                let v = (x * 255 / (mode.width - 1)) as u8;
+                rgb[(y * mode.width + x) * 3..][..3].copy_from_slice(&[v, v, v]);
+            }
+        }
+        let got = decode(&encode(&rgb, mode, 11_025.0).unwrap(), 11_025.0).expect("a picture");
+        let at = |x: usize| f64::from(got.rgb[(120 * mode.width + x) * 3]);
+        let mut rising = 0;
+        for x in (48..304).step_by(16) {
+            if at(x) > at(x - 16) {
+                rising += 1;
+            }
+        }
+        assert_eq!(rising, 16, "every step of the ramp rose");
+        assert!(at(288) - at(32) > 200.0, "{} to {} is not a ramp", at(32), at(288));
+    }
+
+    /// The tones between a Robot line's scans, which this decoder does not
+    /// read and a receiver that pairs its lines by the separator does: 4.5 ms
+    /// of 1500 Hz before R-Y and of 2300 Hz before B-Y, then a 1.5 ms porch
+    /// at 1900 Hz, measured out of the encoded audio at the offsets the mode
+    /// table gives.
+    #[test]
+    fn a_robot_line_says_which_colour_difference_follows() {
+        let mode = MODES.iter().find(|m| m.name == "Robot 36").unwrap();
+        let rate = 44_100.0;
+        let audio = encode(&bar_picture(mode), mode, rate).unwrap();
+        let mut meter = ToneMeter::new(rate);
+        let start = HDR_SIZE + 9.0 * VIS_BIT;
+        let at = |seconds: f64| (seconds * rate).round() as usize;
+        for y in 0..4 {
+            let line = start + y as f64 * mode.line_time;
+            let sep = line + mode.offsets[1] - 0.006;
+            let hz = meter.peak_hz(&audio[at(sep + 0.001)..at(sep + 0.0035)]);
+            let want = if y % 2 == 0 { 1500.0 } else { 2300.0 };
+            assert!((hz - want).abs() < 50.0, "line {y} separator read {hz:.0}, not {want}");
+            let porch = line + mode.offsets[1] - ROBOT_PORCH;
+            let hz = meter.peak_hz(&audio[at(porch)..at(porch + ROBOT_PORCH)]);
+            assert!((hz - 1900.0).abs() < 80.0, "line {y} porch read {hz:.0}, not 1900");
+        }
+    }
+
+    /// The VIS code's stop bit, which a receiver counts the first line from:
+    /// without it every picture this transmitter sent started a line late,
+    /// and a Robot 36 read its colour differences the wrong way round.
+    #[test]
+    fn the_vis_code_is_closed_by_its_stop_bit() {
+        let mode = MODES.iter().find(|m| m.name == "Martin 2").unwrap();
+        let rate = 44_100.0;
+        let audio = encode(&bar_picture(mode), mode, rate).unwrap();
+        let mut meter = ToneMeter::new(rate);
+        let stop = ((HDR_SIZE + 8.0 * VIS_BIT) * rate).round() as usize;
+        let bit = (VIS_BIT * rate).round() as usize;
+        let hz = meter.peak_hz(&audio[stop..stop + bit]);
+        assert!((hz - 1200.0).abs() < 50.0, "the stop bit read {hz:.0}, not 1200");
+        assert_eq!(decode(&audio, rate).unwrap().lines, mode.height, "every line arrived");
+    }
+
+    /// A mode with a channel count this encoder has no arrangement for is
+    /// refused rather than sent as something no receiver would show.
+    #[test]
+    fn a_mode_with_no_arrangement_is_refused() {
+        let mut odd = *MODES.iter().find(|m| m.name == "Robot 36").unwrap();
+        odd.channels = 1;
+        assert!(encode(&[0; 320 * 240 * 3], &odd, 11_025.0).is_none());
     }
 
     /// The VIS codes are what a receiver keys off, so a wrong one here is a
