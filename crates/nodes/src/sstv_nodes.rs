@@ -468,6 +468,11 @@ impl Protocol for Sstv {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// A picture on a sideband channel, which is how the calling
+    /// frequencies are tuned by ear.
+    fn audio_stage(&self, hz: f64) -> Option<NodeSpec> {
+        Some(NodeSpec::new(DESC.name).f(CHANNEL_HZ, hz))
+    }
     /// The picture into the FM modulator, at the deviation the receiving
     /// discriminator is scaled for.
     fn transmit(&self) -> Option<crate::protocol::TxChain> {

@@ -99,6 +99,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         bandwidth_hz: None,
         squelch_db: None,
         voice: false,
+        reads: None,
         agc: true,
         tx: None,
     }]));
@@ -168,6 +169,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
             bandwidth_hz: None,
             squelch_db: None,
             voice: false,
+            reads: None,
             agc: true,
             tx: None,
         }]));

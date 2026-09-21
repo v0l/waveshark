@@ -1212,6 +1212,7 @@ impl App {
             squelch_db: None,
             agc: true,
             voice: speaks(&ChanMode::Audio(demod)),
+            reads: None,
             tx: None,
             doppler: false,
         });
@@ -2741,6 +2742,7 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
         id,
         freq,
         voice: speaks(&mode),
+        reads: None,
         mode,
         bandwidth_hz: None,
         label: label.unwrap_or_else(|| format!("CH{id}")),
@@ -2783,6 +2785,7 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             squelch_db: c.squelch_db,
             agc: c.agc,
             voice: c.voice,
+            reads: c.reads.clone(),
             // Only what an operator changed about transmitting. Whether the
             // channel transmits at all is its mode's question, asked by the
             // receiver: see `ChannelSpec::spec_to_transmit`.
@@ -3786,6 +3789,7 @@ mod tests {
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: None,
             doppler: false,
         });
@@ -3975,6 +3979,7 @@ mod tests {
                 squelch_db: None,
                 agc: true,
                 voice: false,
+                reads: None,
                 tx: None,
                 doppler: false,
             });

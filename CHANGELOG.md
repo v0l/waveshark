@@ -12,6 +12,8 @@ the code is in the commit log.
 ### Added
 
 - MDC-1200 bursts damaged in the air are repaired from the parity the radio sent.
+- EAS, SSTV, APT and WEFAX read off a listening channel's audio, picked on the
+  strip.
 - Captures named outside the rtl_433 convention: a card asks the centre, rate
   and format, for replay and for transmit.
 - Trim card on the radio settings, cutting a replayed capture to its

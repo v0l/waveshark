@@ -206,6 +206,11 @@ impl Protocol for Wefax {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// A chart on a sideband channel, which is how an operator tuned by ear
+    /// will have it.
+    fn audio_stage(&self, hz: f64) -> Option<NodeSpec> {
+        Some(NodeSpec::new(DESC.name).f(CHANNEL_HZ, hz))
+    }
 }
 
 /// The carrier this stage is pointed at.

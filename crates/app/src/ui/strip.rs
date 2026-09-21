@@ -166,6 +166,7 @@ impl Strip<'_> {
                 changed = true;
             }
         });
+        changed |= Self::channel_reads(ui, ch);
         if let Some(default) = demod.default_squelch_db() {
             let (lo, hi, ratio) = demod.squelch_range();
             let mut db = ch.squelch_db.unwrap_or(default);
@@ -193,6 +194,48 @@ impl Strip<'_> {
                 theme::Line::new().note(format!("now {measured:.0} dB")).show(ui);
             });
         }
+        changed
+    }
+
+    /// A decoder on what the channel is playing.
+    ///
+    /// An alert relayed on a broadcast channel, a picture on the calling
+    /// frequency, a chart or a satellite pass are all in the audio of a
+    /// channel somebody has already tuned. The list is the registry's, so a
+    /// decoder that learns to read audio appears here the day it does.
+    fn channel_reads(ui: &mut egui::Ui, ch: &mut Channel) -> bool {
+        let mut changed = false;
+        let readers = nodes::protocol::audio_readers();
+        let selected = ch
+            .reads
+            .as_deref()
+            .and_then(nodes::protocol::by_id)
+            .map(|p| p.label().to_uppercase())
+            .unwrap_or_else(|| "OFF".into());
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("read").show(ui);
+            egui::ComboBox::from_id_salt(("chan-reads", ch.id))
+                .selected_text(selected)
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(ch.reads.is_none(), "OFF").clicked() {
+                        ch.reads = None;
+                        changed = true;
+                    }
+                    for p in readers {
+                        let on = ch.reads.as_deref() == Some(p.id());
+                        let r = ui.selectable_label(on, p.label().to_uppercase());
+                        if r.clicked() && !on {
+                            ch.reads = Some(p.id().to_string());
+                            changed = true;
+                        }
+                        r.on_hover_text(format!(
+                            "read {} off this channel's audio, without a second front end",
+                            p.label()
+                        ));
+                    }
+                });
+        });
         changed
     }
 

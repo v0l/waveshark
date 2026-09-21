@@ -282,6 +282,11 @@ impl Protocol for Eas {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// A station relaying an alert on its own FM channel: the header is in
+    /// the audio, so a channel already tuned there has it.
+    fn audio_stage(&self, hz: f64) -> Option<NodeSpec> {
+        Some(NodeSpec::new(DESC.name).f(CHANNEL_HZ, hz))
+    }
 }
 
 pub const DESC: StageDesc = StageDesc {

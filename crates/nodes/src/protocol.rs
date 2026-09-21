@@ -369,6 +369,20 @@ pub trait Protocol: Send + Sync {
     /// found source draw the same chain.
     fn chain(&self, at: Placed) -> Vec<NodeSpec>;
 
+    /// The one stage that reads this protocol off audio a listening channel
+    /// has already demodulated, or `None` for a protocol that needs the
+    /// samples themselves.
+    ///
+    /// `hz` is where the channel is tuned, and is carried only so a row says
+    /// where it was heard: the mixing and the discrimination happened in the
+    /// channel, and nothing is left for the stage to tune. A relayed alert, a
+    /// picture off a sideband channel and a satellite pass somebody is
+    /// already listening to are all read this way, without a second front end
+    /// cutting the same channel out of the span again.
+    fn audio_stage(&self, _hz: f64) -> Option<NodeSpec> {
+        None
+    }
+
     /// The stages that transmit this protocol: what supplies the payload and
     /// what modulates it, the transmit chain's mirror of [`Protocol::chain`].
     ///
@@ -547,6 +561,12 @@ pub fn channel_protocols() -> impl Iterator<Item = &'static dyn Protocol> {
     all().iter().copied().filter(|p| !p.shape().span_wide)
 }
 
+/// The protocols a listening channel's audio can be handed to, in the order
+/// the registry lists them.
+pub fn audio_readers() -> Vec<&'static dyn Protocol> {
+    all().iter().copied().filter(|p| p.audio_stage(p.default_hz()).is_some()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +732,41 @@ mod tests {
             ["ble", "sstv", "dvbt", "aprs", "pocsag", "rtty"],
             "what this build can key up"
         );
+    }
+
+    /// Every protocol that says a listening channel's audio is enough for it
+    /// names a stage that takes audio at the rate a strip channel produces
+    /// and puts out what the protocol declared.
+    ///
+    /// The strip takes a protocol at its word here: a stage that refused the
+    /// port would be a channel wired to nothing rather than a refusal the
+    /// operator could see.
+    #[test]
+    fn every_audio_reader_negotiates_a_channel_of_audio() {
+        let reg = crate::registry();
+        let mut read = Vec::new();
+        for p in audio_readers() {
+            read.push(p.id());
+            let hz = p.default_hz();
+            let spec = pipeline::port::StreamSpec {
+                kind: PortKind::Real,
+                rate: 48_000.0,
+                center: common::Hz(hz as u64),
+                channels: 1,
+                ..Default::default()
+            };
+            let stage = p.audio_stage(hz).expect("an audio stage");
+            let g = crate::build_chain(spec, std::slice::from_ref(&stage), &reg)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
+            let (tail, _) = g.order().last().expect("a tail");
+            let outs = g.node(tail).map(|n| n.num_outputs()).unwrap_or(0);
+            let kinds: Vec<PortKind> =
+                (0..outs).filter_map(|k| g.spec_of(tail.out(k)).map(|s| s.kind)).collect();
+            assert_eq!(kinds, p.outputs(), "{}", p.id());
+            let out = g.spec_of(tail.out(0)).expect("an output");
+            assert_eq!(out.center, common::Hz(hz as u64), "{} loses the dial", p.id());
+        }
+        assert_eq!(read, ["sstv", "apt", "wefax", "eas"], "what a channel's audio can be given to");
     }
 
     /// Nothing is left out of the frame walk, and everything whose spectrum

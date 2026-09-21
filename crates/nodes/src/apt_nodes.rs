@@ -215,6 +215,11 @@ impl Protocol for Apt {
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
     }
+    /// A pass somebody is already listening to on FM, whose audio is the
+    /// picture.
+    fn audio_stage(&self, hz: f64) -> Option<NodeSpec> {
+        Some(NodeSpec::new(DESC.name).f(CHANNEL_HZ, hz))
+    }
 }
 
 /// The carrier this stage is pointed at.

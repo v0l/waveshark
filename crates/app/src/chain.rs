@@ -3907,6 +3907,30 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
         if spec.mode.is_decode() && p.stage(tail).is_some_and(|s| feeds_bus(&s.kind)) {
             fronts.push(tail);
         }
+        // A protocol read off what the channel is playing. The samples were
+        // mixed down and discriminated by the chain above, so this is one
+        // stage on that audio rather than a second front end cutting the
+        // same channel out of the span again. Named for the protocol as well
+        // as the channel, so asking for a different one builds a different
+        // stage and the sweep below takes the old one away.
+        if let Some(proto) = spec.reads.as_deref().and_then(nodes::protocol::by_id)
+            && matches!(spec.mode, ChanMode::Audio(_))
+            && let Some(stage) = proto.audio_stage(plan.center.as_f64() + spec.offset_hz)
+        {
+            let id = chan_stage_id(&format!("chan_reads_{}", proto.id()), spec, rate);
+            let mut s = stage.settings;
+            s.insert("channel".into(), V::Int(spec.id as i64));
+            s.insert(
+                "label".into(),
+                V::Text(proto.stage_label(plan.center.as_f64() + spec.offset_hz)),
+            );
+            p.add_derived(id, &stage.kind, s);
+            p.connect(Source::Stage(tail, 0), (id, 0));
+            want.push(id);
+            if feeds_bus(&stage.kind) {
+                fronts.push(id);
+            }
+        }
     }
     // A stage left over from a channel that changed mode or went away.
     let stale: Vec<u64> = p
@@ -5816,6 +5840,7 @@ pub(crate) mod tests {
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: None,
         }
     }
@@ -5969,6 +5994,96 @@ pub(crate) mod tests {
         let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert_eq!(rx.channels().len(), 1);
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    /// A decoder asked for on a listening channel reads the audio the
+    /// operator is hearing, and nothing else is built for it.
+    ///
+    /// The whole point of the arrangement: an alert relayed on a broadcast
+    /// channel is in audio somebody already has, so it costs one stage on
+    /// the end of that chain. Reading it off the span instead is a second
+    /// mixer and a second channel filter cutting out a channel the receiver
+    /// had already cut.
+    #[test]
+    fn a_decoder_on_a_listening_channel_reads_the_audio_it_is_playing() {
+        use crate::patch::Source;
+        let mut p = plan(2_400_000.0, Hz::mhz(162));
+        p.fronts.clear();
+        let mut spec = chan(1, 400_000.0, Demod::Nfm);
+        spec.reads = Some("eas".into());
+        p.channels = vec![spec];
+        let patch = derived_patch(&p);
+
+        use pipeline::registry::SettingsExt;
+        let eas: Vec<&crate::patch::Stage> =
+            patch.stages().iter().filter(|s| s.kind == "eas").collect();
+        assert_eq!(eas.len(), 1, "one stage reads the alert");
+        assert_eq!(
+            eas[0].settings.f64_or("channel_hz", 0.0),
+            162_400_000.0,
+            "the alert is reported where the channel is tuned",
+        );
+        // It hangs off the end of the audio chain, which is the same source
+        // the channel's fader takes.
+        let feeding = patch
+            .links()
+            .iter()
+            .find(|l| l.to.0 == eas[0].id)
+            .map(|l| l.from)
+            .expect("something feeds it");
+        let to_fader =
+            patch.links().iter().find(|l| l.to.0 == fader_id(1)).map(|l| l.from).expect("a fader");
+        assert_eq!(feeding, to_fader, "the stage reads something other than the channel");
+        assert!(
+            patch.links().iter().any(|l| l.to.0 == derived::BUS
+                && matches!(l.from, Source::Stage(f, 0) if f == eas[0].id)),
+            "its alerts never reach the log",
+        );
+        // Two mixers and two channel filters is the second front end this
+        // exists to avoid: one of each, for the channel itself.
+        assert_eq!(patch.stages().iter().filter(|s| s.kind == "mixer").count(), 1);
+
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+        assert_eq!(rx.channels().len(), 1);
+
+        // Switched off again, the stage goes with it rather than being left
+        // reading a channel nobody asked it to.
+        p.channels[0].reads = None;
+        let patch = derived_patch(&p);
+        assert_eq!(patch.stages().iter().filter(|s| s.kind == "eas").count(), 0);
+
+        // And a different one is a different stage, not the old one under a
+        // new name.
+        p.channels[0].reads = Some("sstv".into());
+        let patch = derived_patch(&p);
+        assert_eq!(patch.stages().iter().filter(|s| s.kind == "eas").count(), 0);
+        assert_eq!(patch.stages().iter().filter(|s| s.kind == "sstv").count(), 1);
+        // A picture is not a packet, so it goes to the video bus instead.
+        let sstv = patch.stages().iter().find(|s| s.kind == "sstv").expect("the stage").id;
+        assert!(
+            patch
+                .links()
+                .iter()
+                .any(|l| l.to.0 == derived::VIDEO
+                    && matches!(l.from, Source::Stage(f, _) if f == sstv)),
+            "its pictures never reach the video bus",
+        );
+        assert!(
+            !patch
+                .links()
+                .iter()
+                .any(|l| l.to.0 == derived::BUS
+                    && matches!(l.from, Source::Stage(f, _) if f == sstv)),
+            "a picture was wired into the packet bus",
+        );
+
+        // A channel that is decoded rather than played has no audio of its
+        // own to give, so nothing is attached to one.
+        p.channels[0].mode = ChanMode::Decode("m17".into());
+        p.channels[0].reads = Some("eas".into());
+        let patch = derived_patch(&p);
+        assert_eq!(patch.stages().iter().filter(|s| s.kind == "eas").count(), 0);
     }
 
     /// Every protocol the auto node can place is a mode a strip channel can
@@ -7915,6 +8030,7 @@ mod refusal_tests {
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: None,
         }];
         // A stage that will not take anything, wired to the head, standing in
@@ -7969,6 +8085,7 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec { source, ..Default::default() }),
         }];
         p.tx = Some(TxPlan {
@@ -8157,6 +8274,7 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec::default()),
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
@@ -8222,6 +8340,7 @@ mod tx_in_graph_tests {
                 squelch_db: None,
                 agc: true,
                 voice: false,
+                reads: None,
                 tx: Some(TxSpec::default()),
             }];
             let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
@@ -8257,6 +8376,7 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec::default()),
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
@@ -8336,6 +8456,7 @@ vectors:
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec::default()),
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
@@ -8431,6 +8552,7 @@ vectors:
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec::default()),
         }];
         plan.tx = Some(TxPlan {
@@ -8531,6 +8653,7 @@ vectors:
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec::default()),
         }];
         plan.tx = Some(TxPlan {
@@ -9046,6 +9169,7 @@ vectors:
             squelch_db: None,
             agc: true,
             voice: false,
+            reads: None,
             tx: Some(TxSpec::default()),
         }];
         plan.tx = Some(TxPlan {

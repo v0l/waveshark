@@ -45,6 +45,9 @@ pub struct Channel {
     /// Treat what is heard here as speech: calls on the bus, a row in the
     /// call list, and a transcript where a model is installed.
     pub(super) voice: bool,
+    /// A protocol read off this channel's audio beside playing it, by
+    /// registry id, or `None` for a channel that is only listened to.
+    pub(super) reads: Option<String>,
     /// What this channel transmits when it is keyed, or `None` for a channel
     /// that only listens. Every channel starts that way.
     pub(super) tx: Option<crate::radio::TxSpec>,
