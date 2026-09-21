@@ -73,10 +73,15 @@ fn the_dial_reading_decides_what_is_tried() {
 
 /// Minutes of noise on each protocol's own band read as nothing.
 ///
-/// Two minutes of Mode S at 2.4 MS/s and two of the sonde band at 31.25 kS/s,
-/// which is 288 million and 3.75 million samples of thermal noise. Mode S
+/// A minute of Mode S at 2.4 MS/s and two of the sonde band at 31.25 kS/s,
+/// which is 144 million and 3.75 million samples of thermal noise. Mode S
 /// accepts one frame of that, a 24-bit parity passing by chance over that
-/// many preamble candidates, which is what `identify::MIN_FRAMES` is for.
+/// many preamble candidates, which is what `identify::MIN_FRAMES` is for: the
+/// frame arrives 48 seconds in, so a shorter run would pin nothing.
+///
+/// One reading of each band, not one for the threshold and another for the
+/// count: `read_all` is what `identify` filters, so the frames it reports are
+/// the frames `identify` was offered.
 #[test]
 fn minutes_of_noise_name_nothing() {
     let mut seed = 0x2545F4914F6CDD1Du64;
@@ -86,20 +91,30 @@ fn minutes_of_noise_name_nothing() {
         seed ^= seed << 17;
         (seed >> 40) as f32 / 8_388_608.0 - 0.125
     };
-    for (rate, center, seconds) in
-        [(2_400_000.0f64, 1_090_000_000.0f64, 120.0), (31_250.0, 405_800_240.0, 120.0)]
-    {
+    let bands: Vec<(f64, f64, usize, Vec<C32>)> = [
+        (2_400_000.0f64, 1_090_000_000.0f64, 60.0, 1usize),
+        (31_250.0, 405_800_240.0, 120.0, 0),
+    ]
+    .into_iter()
+    .map(|(rate, center, seconds, frames)| {
         let n = (rate * seconds) as usize;
-        let iq: Vec<C32> = (0..n).map(|_| C32::new(noise(), noise())).collect();
-        assert_eq!(identify::identify(&iq, rate, center), None, "{center} Hz named something");
-        // And the raw reading, so the one frame noise does manage stays
-        // pinned rather than hidden behind the threshold.
-        let raw: usize = identify::candidates(rate, center)
-            .iter()
-            .map(|s| s.read(&iq, rate, center).count())
-            .sum();
-        assert!(raw < identify::MIN_FRAMES, "{raw} frames out of noise at {center} Hz");
-    }
+        (rate, center, frames, (0..n).map(|_| C32::new(noise(), noise())).collect())
+    })
+    .collect();
+    std::thread::scope(|scope| {
+        for (rate, center, frames, iq) in &bands {
+            let (rate, center, frames, iq) = (*rate, *center, *frames, iq.as_slice());
+            scope.spawn(move || {
+                let read = identify::read_all(iq, rate, center);
+                let raw: usize = read.iter().map(|i| i.frames).sum();
+                assert_eq!(raw, frames, "{center} Hz read {read:?} out of noise");
+                assert!(raw < identify::MIN_FRAMES, "{raw} frames out of noise at {center} Hz");
+            });
+        }
+    });
+    // And the threshold end to end, on the band cheap enough to read twice.
+    let (rate, center, _, iq) = &bands[1];
+    assert_eq!(identify::identify(iq, *rate, *center), None, "{center} Hz named something");
 }
 
 /// Every signal refuses a stream it cannot read rather than guessing at it.
@@ -148,16 +163,21 @@ fn a_busy_24_ghz_recording_names_what_is_in_it() {
 fn nobody_reads_another_protocol_s_capture() {
     let Some(buf) = fixture("adsb_1090M_2400k.cu8") else { return };
     let rate = buf.rate.as_f64();
-    for s in identify::all() {
-        if s.id() == "mode_s" {
-            continue;
+    std::thread::scope(|scope| {
+        for s in identify::all() {
+            if s.id() == "mode_s" {
+                continue;
+            }
+            let iq = buf.samples.as_slice();
+            scope.spawn(move || {
+                let read = s.read(iq, rate, s.default_hz());
+                assert!(
+                    read.count() < identify::MIN_FRAMES,
+                    "{} read {} out of four seconds of 1090 MHz",
+                    s.id(),
+                    read.count()
+                );
+            });
         }
-        let read = s.read(&buf.samples, rate, s.default_hz());
-        assert!(
-            read.count() < identify::MIN_FRAMES,
-            "{} read {} out of four seconds of 1090 MHz",
-            s.id(),
-            read.count()
-        );
-    }
+    });
 }

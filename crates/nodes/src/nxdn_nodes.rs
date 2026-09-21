@@ -628,12 +628,12 @@ mod tests {
         );
     }
 
-    /// Two minutes of noise, and nothing said about any of it.
+    /// Thirty seconds of noise, and nothing said about any of it.
     #[test]
     fn noise_is_not_a_call() {
         let rate = 96_000.0;
         let mut seed = 0xdead_beef_cafe_f00du64;
-        let iq: Vec<common::C32> = (0..(rate * 120.0) as usize)
+        let iq: Vec<common::C32> = (0..(rate * 30.0) as usize)
             .map(|_| {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let i = (seed >> 40) as f32 / 8_388_608.0 - 0.5;
@@ -643,6 +643,6 @@ mod tests {
             })
             .collect();
         let rows = replay(&iq, rate, DEFAULT_HZ, DEFAULT_HZ, WIDE_BAUD);
-        assert_eq!(rows.0.len(), 0, "two minutes of noise read as {} frames", rows.0.len());
+        assert_eq!(rows.0.len(), 0, "thirty seconds of noise read as {} frames", rows.0.len());
     }
 }

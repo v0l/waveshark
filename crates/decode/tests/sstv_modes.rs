@@ -109,46 +109,65 @@ fn nearest_bar(got: (u8, u8, u8)) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-#[test]
-fn every_mode_reads_the_bars_in_the_order_they_were_sent() {
-    for (file, mode, lines) in MODES {
-        let Some(p) = picture(file) else { continue };
-        assert_eq!(p.mode.name, mode, "{file}: the VIS code named the wrong mode");
-        assert_eq!(p.lines, lines, "{mode}: lines decoded");
+/// The bars in the order they were sent, and the ramp as a ramp, off one
+/// decode of the transmission: the ramp says the tone scale is right and the
+/// lines are in step, since a picture built from the wrong neighbour shows it
+/// as a stair rather than a slope, and one read at the wrong rate shows it
+/// sheared.
+///
+/// One test per mode rather than one loop over all of them, so a mode is
+/// decoded once and the five run beside each other.
+fn reads_the_picture_it_was_sent(which: usize) {
+    let (file, mode, lines) = MODES[which];
+    let Some(p) = picture(file) else { return };
+    assert_eq!(p.mode.name, mode, "{file}: the VIS code named the wrong mode");
+    assert_eq!(p.lines, lines, "{mode}: lines decoded");
 
-        // An even line and an odd one, because Robot 36 carries a different
-        // half of the colour on each and a bug in one is invisible in the
-        // other.
-        for y in [30usize, 31] {
-            for (i, (name, _)) in BARS.iter().enumerate() {
-                let x = i * p.width / 7 + p.width / 14;
-                let got = pixel(&p, x, y);
-                assert_eq!(nearest_bar(got), i, "{mode} line {y}: the {name} bar read as {got:?}");
-            }
+    // An even line and an odd one, because Robot 36 carries a different
+    // half of the colour on each and a bug in one is invisible in the
+    // other.
+    for y in [30usize, 31] {
+        for (i, (name, _)) in BARS.iter().enumerate() {
+            let x = i * p.width / 7 + p.width / 14;
+            let got = pixel(&p, x, y);
+            assert_eq!(nearest_bar(got), i, "{mode} line {y}: the {name} bar read as {got:?}");
         }
+    }
+
+    let y = p.height * 3 / 4;
+    let left = pixel(&p, p.width / 16, y);
+    let mid = pixel(&p, p.width / 2, y);
+    let right = pixel(&p, p.width * 15 / 16, y);
+    assert!(left.0 < mid.0 && mid.0 < right.0, "{mode}: red rises {left:?} {mid:?} {right:?}");
+    assert!(left.1 > mid.1 && mid.1 > right.1, "{mode}: green falls {left:?} {mid:?} {right:?}");
+    for (at, px) in [("left", left), ("middle", mid), ("right", right)] {
+        assert!((px.2 as i32 - 128).abs() < 60, "{mode}: blue is constant, {at} read {}", px.2);
     }
 }
 
-/// The ramp says the tone scale is right and the lines are in step: a picture
-/// built from the wrong neighbour shows it as a stair rather than a slope,
-/// and one read at the wrong rate shows it sheared.
 #[test]
-fn every_mode_reads_the_ramp_as_a_ramp() {
-    for (file, mode, _) in MODES {
-        let Some(p) = picture(file) else { continue };
-        let y = p.height * 3 / 4;
-        let left = pixel(&p, p.width / 16, y);
-        let mid = pixel(&p, p.width / 2, y);
-        let right = pixel(&p, p.width * 15 / 16, y);
-        assert!(left.0 < mid.0 && mid.0 < right.0, "{mode}: red rises {left:?} {mid:?} {right:?}");
-        assert!(
-            left.1 > mid.1 && mid.1 > right.1,
-            "{mode}: green falls {left:?} {mid:?} {right:?}"
-        );
-        for (at, px) in [("left", left), ("middle", mid), ("right", right)] {
-            assert!((px.2 as i32 - 128).abs() < 60, "{mode}: blue is constant, {at} read {}", px.2);
-        }
-    }
+fn martin_2_reads_the_bars_and_the_ramp() {
+    reads_the_picture_it_was_sent(0);
+}
+
+#[test]
+fn scottie_1_reads_the_bars_and_the_ramp() {
+    reads_the_picture_it_was_sent(1);
+}
+
+#[test]
+fn scottie_2_reads_the_bars_and_the_ramp() {
+    reads_the_picture_it_was_sent(2);
+}
+
+#[test]
+fn scottie_dx_reads_the_bars_and_the_ramp() {
+    reads_the_picture_it_was_sent(3);
+}
+
+#[test]
+fn robot_36_reads_the_bars_and_the_ramp() {
+    reads_the_picture_it_was_sent(4);
 }
 
 /// A transmitter whose clock is not the receiver's.

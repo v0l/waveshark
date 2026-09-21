@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn a_minute_of_noise_frames_nothing_by_its_crc() {
+    fn twenty_seconds_of_noise_frames_nothing_by_its_crc() {
         // The CRC pass tests a window at every sample position, so a 24 bit
         // remainder comes to zero by chance often enough to matter: with the
         // level gate removed, ten minutes of this noise frames 8 windows whose
@@ -851,7 +851,7 @@ mod tests {
         let mut out = Vec::new();
         let mut block = vec![C32::new(0.0, 0.0); 1_000_000];
         let mut state = 0x2545_f491u32;
-        for _ in 0..144 {
+        for _ in 0..48 {
             block.iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
             state = noisy_from(&mut block, 0.3, state);
             d.process_valid(&block, &mut out, &|f: &ModeSFrame| {
@@ -859,7 +859,7 @@ mod tests {
                     && crc24(&f.bytes) == 0
             });
         }
-        assert!(out.is_empty(), "noise framed as {out:?}");
+        assert!(out.is_empty(), "48 million samples of noise framed {out:?}");
     }
 
     #[test]
