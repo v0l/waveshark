@@ -3201,12 +3201,15 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 // the samples mean was decided when they were recorded.
                 TxSource::Capture => {
                     let mut s = Settings::new();
-                    let (path, rate) = match &plan.tx_capture {
-                        Some(c) => (c.path.display().to_string(), c.rate.as_f64()),
-                        None => (String::new(), 0.0),
+                    let (path, rate, format) = match &plan.tx_capture {
+                        Some(c) => {
+                            (c.path.display().to_string(), c.rate.as_f64(), c.format.extension())
+                        }
+                        None => (String::new(), 0.0, ""),
                     };
                     s.insert("path".into(), pipeline::ParamValue::Text(path));
                     s.insert("rate_sps".into(), pipeline::ParamValue::Float(rate));
+                    s.insert("format".into(), pipeline::ParamValue::Text(format.into()));
                     ("iq_tx", s)
                 }
             };
@@ -8075,6 +8078,40 @@ mod tx_in_graph_tests {
         let quarter =
             tail.windows(2).all(|w| ((w[1] * w[0].conj()).im - power).abs() < 0.1 * power);
         assert!(quarter, "the shift never reached the air: {tail:?}");
+    }
+
+    /// A recording from another program is named for what it holds, so what
+    /// the operator typed has to reach the stage that reads the bytes: the
+    /// extension `.iq` says nothing and the stage would otherwise refuse it.
+    #[test]
+    fn a_capture_described_by_hand_reaches_the_air() {
+        let dir = std::env::temp_dir().join("sr_chain_tx_described");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("someone elses recording.iq");
+        std::fs::write(&path, [160u8, 128u8].repeat(200_000)).unwrap();
+        assert_eq!(crate::radio::TxCapture::open(&path), None, "the name says nothing");
+
+        let mut plan = plan_with_tx(TxSource::Capture);
+        plan.tx_capture = crate::radio::TxCapture::new(
+            &path,
+            Sps(2_000_000),
+            Some(Hz(446_050_000)),
+            common::SampleFormat::Cu8,
+        );
+        plan.tx.as_mut().unwrap().mode = TxMode::Iq;
+        plan.channels[0].tx.as_mut().unwrap().source = TxSource::Capture;
+
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())), "the capture channel was not keyed");
+        until("the described capture on the air", || radio.samples() > 1_000);
+        rx.unkey();
+
+        let air = radio.transmitted();
+        assert!(air.len() > 1_000, "{} samples reached the antenna", air.len());
+        let mid = air[air.len() / 2];
+        assert!((mid.re - 0.25 * 0.8).abs() < 0.02, "sent {mid:?}");
+        assert!(mid.im.abs() < 0.02, "sent {mid:?}");
     }
 
     /// A television channel keys up as a multiplex, not as a microphone.

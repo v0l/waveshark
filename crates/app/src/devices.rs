@@ -143,6 +143,9 @@ pub struct Capture {
     pub path: std::path::PathBuf,
     pub rate: Sps,
     pub center: Option<common::Hz>,
+    /// How the samples are laid out, which the extension usually says and an
+    /// operator says where it does not.
+    pub format: common::SampleFormat,
     /// How long it plays for, from the file's size and its rate.
     pub seconds: f64,
 }
@@ -175,22 +178,34 @@ impl Capture {
 /// the file dialog in the receiver list, and stays there until it is dropped.
 static CAPTURES: parking_lot::Mutex<Vec<Capture>> = parking_lot::Mutex::new(Vec::new());
 
-/// Offer this capture as a receiver, and say what it will deliver.
+/// What a capture's own name says about it, for filling in the card that
+/// asks: the rtl_433 convention is the common case and typing what is
+/// already in the name is not.
+pub fn describe_capture(path: &std::path::Path) -> sources::FileMeta {
+    sources::parse_filename(path)
+}
+
+/// Offer this capture as a receiver, as the operator describes it.
 ///
-/// `None` when the file cannot be replayed, which is nearly always a name
-/// that does not carry a sample rate and a format. The rate scales every
-/// pulse width downstream, so a guess is a receiver that decodes nothing for
-/// a reason nobody can see, and `sources::parse_filename` is the one place
-/// that convention lives.
-pub fn add_capture(path: impl Into<std::path::PathBuf>) -> Option<Capture> {
+/// The rate scales every pulse width downstream, so nothing here guesses one:
+/// the caller has either read it off the name with [`describe_capture`] or
+/// asked for it. `None` only when the path is not a file.
+pub fn add_capture(
+    path: impl Into<std::path::PathBuf>,
+    rate: Sps,
+    center: Option<common::Hz>,
+    format: common::SampleFormat,
+) -> Option<Capture> {
     let path = path.into();
-    let meta = sources::parse_filename(&path);
-    let (rate, format) = (meta.rate?, meta.format?);
     let len = std::fs::metadata(&path).ok().filter(|m| m.is_file())?.len();
+    if rate.0 == 0 {
+        return None;
+    }
     let c = Capture {
         path,
         rate,
-        center: meta.center,
+        center,
+        format,
         seconds: (len / format.bytes_per_sample() as u64) as f64 / rate.as_f64(),
     };
     let mut v = CAPTURES.lock();
@@ -209,6 +224,14 @@ pub fn remove_capture(path: &std::path::Path) {
 
 pub fn captures() -> Vec<Capture> {
     CAPTURES.lock().clone()
+}
+
+/// Offer a capture named in the rtl_433 convention, which is what the command
+/// line and the corpus have. `None` where the name does not say enough.
+pub fn add_named_capture(path: impl Into<std::path::PathBuf>) -> Option<Capture> {
+    let path = path.into();
+    let meta = describe_capture(&path);
+    add_capture(path, meta.rate?, meta.center, meta.format?)
 }
 
 /// Network tuners to offer alongside whatever is plugged in.
@@ -377,6 +400,18 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
         DriverKind::File => {
             let path = e.path.as_deref().ok_or(Error::NoDevice)?;
             let rate = *e.rates.end();
+            // What the operator said it holds, where the name did not say.
+            // Parsing it again here would refuse the file the receiver list
+            // is already offering.
+            let told = captures()
+                .into_iter()
+                .find(|c| c.path == path)
+                .map(|c| sources::FileMeta {
+                    center: c.center,
+                    rate: Some(c.rate),
+                    format: Some(c.format),
+                })
+                .unwrap_or_default();
             // Paced to the recorded rate, or the whole capture arrives in one
             // gulp and the detector sees a band that switched on and off
             // again between two frames. Looped, because a capture is seconds
@@ -388,7 +423,10 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
             // reads a second.
             let block = ((rate.as_f64() / 50.0) as usize).clamp(4096, 1 << 20);
             Ok(Box::new(
-                sources::FileSource::open(path)?.realtime(true).repeating(true).with_block(block),
+                sources::FileSource::open_as(path, told)?
+                    .realtime(true)
+                    .repeating(true)
+                    .with_block(block),
             ))
         }
         other => Err(Error::other(format!("{} cannot be opened live", other.as_str()))),
@@ -487,6 +525,7 @@ fn label(hz: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::SampleFormat::Cs16;
 
     #[test]
     fn spans_respect_what_the_device_can_do() {
@@ -595,8 +634,9 @@ mod tests {
         let path = dir.join("bench_433.92M_250k.cu8");
         std::fs::write(&path, vec![0u8; 500_000]).unwrap();
 
-        let c = add_capture(path.clone()).expect("a capture");
+        let c = add_named_capture(path.clone()).expect("a capture");
         assert_eq!(c.rate, Sps(250_000));
+        assert_eq!(c.format, common::SampleFormat::Cu8);
         assert_eq!(c.center, Some(common::Hz(433_920_000)));
         assert!((c.seconds - 1.0).abs() < 0.01, "{} s", c.seconds);
 
@@ -612,17 +652,52 @@ mod tests {
         assert!(spans_with_zoom(&e.rates).iter().any(|s| (s.rate - 250_000.0).abs() < 1.0));
 
         // Opening the same file again is the same receiver, not a second one.
-        add_capture(path.clone()).expect("a capture");
+        add_named_capture(path.clone()).expect("a capture");
         assert_eq!(captures().iter().filter(|x| x.path == path).count(), 1);
 
-        // A name that carries no sample rate is refused rather than guessed
-        // at: a wrong rate rescales every pulse width downstream.
+        // A name that carries no sample rate is not guessed at: a wrong rate
+        // rescales every pulse width downstream.
         let mystery = dir.join("mystery.cu8");
         std::fs::write(&mystery, vec![0u8; 1024]).unwrap();
-        assert!(add_capture(mystery).is_none());
+        assert!(add_named_capture(mystery).is_none());
 
         remove_capture(&path);
         assert!(!captures().iter().any(|x| x.path == path));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Somebody else's recording is named for what it holds, so what the
+    /// operator says about it is the only description there is, and it has to
+    /// reach the source that reads the bytes.
+    #[test]
+    fn a_capture_named_for_nothing_is_a_receiver_once_it_is_described() {
+        let dir = std::env::temp_dir().join("sr_capture_described");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("someone elses recording.iq");
+        // Two seconds of 1.024 MS/s, 16-bit signed: four bytes a sample.
+        std::fs::write(&path, vec![0u8; 8_192_000]).unwrap();
+        assert_eq!(describe_capture(&path), sources::FileMeta::default());
+
+        let c = add_capture(path.clone(), Sps(1_024_000), Some(common::Hz(868_300_000)), Cs16)
+            .expect("a capture");
+        assert_eq!(c.rate, Sps(1_024_000));
+        assert_eq!(c.format, Cs16);
+        assert!((c.seconds - 2.0).abs() < 0.01, "{} s", c.seconds);
+
+        let e = c.entry(0);
+        assert_eq!(e.rates, Sps(1_024_000)..=Sps(1_024_000));
+        assert_eq!(e.pinned, Some(common::Hz(868_300_000)));
+
+        // And what was typed reaches the file source, which would otherwise
+        // refuse the extension and refuse the name.
+        let dev = open(&e).expect("the described capture opens");
+        let info = dev.info();
+        assert_eq!(info.rate_range, Sps(1_024_000)..=Sps(1_024_000));
+        assert_eq!(info.native_format, Cs16);
+        drop(dev);
+
+        remove_capture(&path);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

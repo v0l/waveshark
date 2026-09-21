@@ -1069,13 +1069,12 @@ impl SubPick {
 ///
 /// The same shape as [`SubPick`] and for the same reason: the radio plays it
 /// and the strip has to say what is about to go on the air. What is held here
-/// is what the name resolved to, because a capture whose name does not carry
-/// its rate cannot be replayed at all and saying so at the dialog is the only
-/// place an operator can do anything about it.
+/// is what the name resolved to; a name that resolves to nothing goes to the
+/// card that asks what the file holds, since the operator knows the rate and
+/// the stage cannot guess one.
 #[derive(Default)]
 pub(super) struct CapturePick {
     pub file: Option<crate::radio::TxCapture>,
-    pub fault: Option<String>,
     picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
 }
 
@@ -1098,26 +1097,21 @@ impl CapturePick {
         }));
     }
 
-    pub fn poll(&mut self, cmds: &mut Vec<crate::radio::Cmd>) {
+    /// The file the dialog came back with, where its name does not say enough
+    /// to send it: the caller opens the card that asks. Nothing is returned
+    /// for a name in the convention, which needs no asking.
+    pub fn poll(&mut self, cmds: &mut Vec<crate::radio::Cmd>) -> Option<std::path::PathBuf> {
         if self.picking.as_ref().is_none_or(|p| p.ready().is_none()) {
-            return;
+            return None;
         }
-        let Some(path) = self.picking.take().and_then(|p| p.block_and_take()) else {
-            return;
-        };
+        let path = self.picking.take().and_then(|p| p.block_and_take())?;
         match crate::radio::TxCapture::open(&path) {
             Some(c) => {
-                self.fault = None;
                 self.file = Some(c.clone());
                 cmds.push(crate::radio::Cmd::TxCapture(Some(c)));
+                None
             }
-            None => {
-                self.fault = Some(format!(
-                    "{}: cannot tell its sample rate and format. Name it like \
-                     <what>_<centre>_<rate>.<format>, e.g. bench_433.92M_250k.cu8",
-                    path.display()
-                ))
-            }
+            None => Some(path),
         }
     }
 }

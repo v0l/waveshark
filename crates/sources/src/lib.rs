@@ -9,5 +9,5 @@ pub mod sink;
 
 pub use bench::FileRadio;
 pub use combine::Combined;
-pub use file::{FileMeta, FileSource, parse_filename};
+pub use file::{FileMeta, FileSource, parse_filename, parse_si};
 pub use sink::FileSink;

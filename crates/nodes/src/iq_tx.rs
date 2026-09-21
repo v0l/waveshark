@@ -21,6 +21,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 
 const PATH: &str = "path";
 const RATE_SPS: &str = "rate_sps";
+const FORMAT: &str = "format";
 const LEVEL: &str = "level";
 const REPEAT: &str = "repeat";
 
@@ -62,6 +63,10 @@ pub struct IqTxNode {
     /// silent rather than guessing. A guessed rate rescales every symbol in
     /// the recording and puts a signal of the wrong width on the air.
     file_rate: f64,
+    /// What the samples are, where the name does not say: a capture from
+    /// another program is named for what it holds and ends in `.iq` as often
+    /// as in `.cu8`. Empty to read it off the extension.
+    format: String,
     level: f32,
     repeat: bool,
     rate: f64,
@@ -77,6 +82,7 @@ impl Default for IqTxNode {
         Self {
             path: String::new(),
             file_rate: 0.0,
+            format: String::new(),
             level: DEFAULT_LEVEL,
             repeat: true,
             rate: 0.0,
@@ -120,9 +126,9 @@ impl IqTxNode {
             return;
         }
         let path = std::path::Path::new(&self.path);
-        let Some(format) =
-            path.extension().and_then(|e| e.to_str()).and_then(SampleFormat::from_extension)
-        else {
+        let named =
+            path.extension().and_then(|e| e.to_str()).and_then(SampleFormat::from_extension);
+        let Some(format) = SampleFormat::from_extension(&self.format).or(named) else {
             self.fault = Some(format!(
                 "{}: cannot tell its sample format from the name; expected cu8, cs8, cs16 or cf32",
                 self.path
@@ -293,6 +299,7 @@ impl Simple for IqTxNode {
         vec![
             Param::text(PATH, self.path.clone()).label("Capture"),
             Param::float(RATE_SPS, self.file_rate, 0.0..=100e6).label("Recorded at").unit("S/s"),
+            Param::text(FORMAT, self.format.clone()).label("Samples"),
             Param::float(LEVEL, self.level as f64, 0.0..=1.0).label("Level"),
             Param::bool(REPEAT, self.repeat).label("Loop"),
         ]
@@ -301,6 +308,7 @@ impl Simple for IqTxNode {
     fn configure(&mut self, s: &Settings) {
         self.path = s.str_or(PATH, "").to_string();
         self.file_rate = s.f64_or(RATE_SPS, 0.0);
+        self.format = s.str_or(FORMAT, "").to_string();
         self.level = s.f64_or(LEVEL, DEFAULT_LEVEL as f64).clamp(0.0, 1.0) as f32;
         self.repeat = s.bool_or(REPEAT, true);
         self.load();
@@ -317,6 +325,10 @@ impl Simple for IqTxNode {
             }
             RATE_SPS => {
                 self.file_rate = value.as_f64().unwrap_or(0.0).max(0.0);
+                self.load();
+            }
+            FORMAT => {
+                self.format = value.as_str().unwrap_or_default().to_string();
                 self.load();
             }
             LEVEL => self.level = value.as_f64().unwrap_or(0.0).clamp(0.0, 1.0) as f32,
@@ -387,6 +399,25 @@ mod tests {
         assert!((out[0].re - -DEFAULT_LEVEL).abs() < 0.01, "{:?}", out[0]);
         assert!(out[0].im.abs() < 0.01, "{:?}", out[0]);
         // A quarter of a 1024 sample file in one block of 256.
+        assert!((n.progress() - 0.25).abs() < 0.05, "played {}", n.progress());
+    }
+
+    /// A recording from another program is named for what it holds, so the
+    /// extension says nothing and the operator's answer has to reach the
+    /// stage that reads the bytes.
+    #[test]
+    fn a_file_whose_name_says_no_format_plays_at_the_one_it_is_told() {
+        let path = capture("someone_elses_recording.iq", 1024);
+        let mut n = IqTxNode::new(&path.display().to_string(), 250_000.0);
+        n.repeat = false;
+        Simple::negotiate(&mut n, &spec(250_000.0)).unwrap();
+        assert!(n.fault().is_some(), "an unknown extension is a fault until it is answered");
+
+        Simple::set_param(&mut n, FORMAT, ParamValue::Text("cu8".into())).unwrap();
+        assert!(n.fault().is_none(), "{:?}", n.fault());
+        let out = run(&mut n, 250_000.0, 256);
+        assert_eq!(out.len(), 256);
+        assert!((out[0].re - -DEFAULT_LEVEL).abs() < 0.01, "{:?}", out[0]);
         assert!((n.progress() - 0.25).abs() < 0.05, "played {}", n.progress());
     }
 

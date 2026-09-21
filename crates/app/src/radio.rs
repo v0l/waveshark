@@ -796,22 +796,40 @@ pub struct TxCapture {
     /// What it was recorded at, where the name says. The difference between
     /// this and where it is being sent is the operator's to set.
     pub center: Option<Hz>,
+    /// How the samples are laid out, which the extension usually says and an
+    /// operator says where it does not.
+    pub format: common::SampleFormat,
     pub seconds: f64,
 }
 
 impl TxCapture {
+    /// Take a capture as the operator describes it. `None` only when the path
+    /// is not a file: nothing here guesses a rate, because a rate guessed
+    /// wrong puts a signal of the wrong width on the air.
+    pub fn new(
+        path: &std::path::Path,
+        rate: Sps,
+        center: Option<Hz>,
+        format: common::SampleFormat,
+    ) -> Option<Self> {
+        let len = std::fs::metadata(path).ok().filter(|m| m.is_file())?.len();
+        if rate.0 == 0 {
+            return None;
+        }
+        Some(Self {
+            path: path.to_path_buf(),
+            rate,
+            center,
+            format,
+            seconds: (len / format.bytes_per_sample() as u64) as f64 / rate.as_f64(),
+        })
+    }
+
     /// Read what a capture's name says it holds, or nothing where it does not
     /// say enough to replay it.
     pub fn open(path: &std::path::Path) -> Option<Self> {
         let meta = sources::parse_filename(path);
-        let (rate, format) = (meta.rate?, meta.format?);
-        let len = std::fs::metadata(path).ok().filter(|m| m.is_file())?.len();
-        Some(Self {
-            path: path.to_path_buf(),
-            rate,
-            center: meta.center,
-            seconds: (len / format.bytes_per_sample() as u64) as f64 / rate.as_f64(),
-        })
+        Self::new(path, meta.rate?, meta.center, meta.format?)
     }
 
     /// What the strip calls it, which is the file's own name.

@@ -1462,7 +1462,7 @@ fn main() -> eframe::Result<()> {
         }
     }
     for c in &args.capture {
-        if devices::add_capture(c.clone()).is_none() {
+        if devices::add_named_capture(c.clone()).is_none() {
             eprintln!(
                 "--capture {}: name it like <what>_<centre>_<rate>.<format>, \
                  e.g. bench_433.92M_250k.cu8",

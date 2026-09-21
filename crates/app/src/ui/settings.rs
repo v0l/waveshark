@@ -2514,6 +2514,123 @@ impl App {
         }
     }
 
+    /// Ask what a capture holds, for a file whose name does not say.
+    ///
+    /// Refusing was right where a rate would be guessed, since a wrong rate
+    /// rescales every pulse width, and wrong where the operator knows the
+    /// rate and has nowhere to type it.
+    pub(super) fn capture_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.capture_edit.take() else {
+            return;
+        };
+        let (mut close, mut open) = (false, false);
+        let r = egui::containers::Modal::new(egui::Id::new("describe-capture"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                modal_title(ui, "What is in this capture");
+                let name = edit
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| edit.path.display().to_string());
+                section(ui, "capture", "the name does not say, so say it here", |ui| {
+                    reading(ui, "file", name);
+                    row_help(
+                        ui,
+                        "rate",
+                        "Samples per second, as the recording was made. k and M are \
+                         understood. A rate set wrong rescales every pulse width.",
+                        |ui| {
+                            let f = field(ui, &mut edit.rate, "250k");
+                            if f.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                open = true;
+                            }
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "centre",
+                        "Where the radio was tuned, in MHz. Empty for a recording at \
+                         baseband, which puts the dial at zero.",
+                        |ui| {
+                            field(ui, &mut edit.center, "433.92");
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "samples",
+                        "How a sample is written: unsigned bytes from an RTL-SDR, signed \
+                         bytes from a HackRF, 16-bit or float from most recorders.",
+                        |ui| {
+                            let opts = common::SampleFormat::ALL
+                                .iter()
+                                .map(|f| (*f, format!("{} ({})", f.extension(), f.label())));
+                            choice(ui, "capture-format", &mut edit.format, opts);
+                        },
+                    );
+                    match edit.resolve() {
+                        Err(e) => lamp(ui, false, &e),
+                        Ok(c) => lamp(
+                            ui,
+                            true,
+                            &format!(
+                                "{:.0} S/s, {}, {:.1} s",
+                                c.rate.as_f64(),
+                                match c.center {
+                                    Some(h) => format!("{:.3} MHz", h.as_f64() / 1e6),
+                                    None => "baseband".to_string(),
+                                },
+                                c.seconds
+                            ),
+                        ),
+                    }
+                });
+                footer(ui, |ui| {
+                    if ui.button(if edit.to_air { "SEND" } else { "OPEN" }).clicked() {
+                        open = true;
+                    }
+                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if open {
+            match edit.resolve() {
+                Err(_) => {}
+                Ok(c) => {
+                    close = true;
+                    match edit.to_air {
+                        true => {
+                            let tx =
+                                crate::radio::TxCapture::new(&c.path, c.rate, c.center, c.format);
+                            self.audio.capture_pick.file = tx.clone();
+                            self.cmds.push(crate::radio::Cmd::TxCapture(tx));
+                        }
+                        false => {
+                            crate::devices::add_capture(c.path.clone(), c.rate, c.center, c.format);
+                            self.devices = crate::devices::list();
+                            if let Some(e) = self
+                                .devices
+                                .iter()
+                                .find(|d| d.path.as_deref() == Some(c.path.as_path()))
+                                .cloned()
+                            {
+                                self.select_device(ctx, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !close {
+            self.capture_edit = Some(edit);
+        }
+    }
+
     /// Register the server, list it, and tune to it.
     ///
     /// The server is asked what it is streaming before it is kept, because a
@@ -2605,13 +2722,16 @@ impl App {
         let Some(path) = self.picking.take().and_then(|p| p.block_and_take()) else {
             return;
         };
-        let Some(c) = crate::devices::add_capture(path.clone()) else {
-            self.err = Some(format!(
-                "{}: cannot tell its sample rate and format. Name it like \
-                 <what>_<centre>_<rate>.<format>, e.g. bench_433.92M_250k.cu8",
-                path.display()
-            ));
-            self.err_at = Some(std::time::Instant::now());
+        // A recording from another program is named for what it holds, not
+        // in the rtl_433 convention, so the common case of somebody else's
+        // file is a card asking what it is rather than a refusal.
+        let meta = crate::devices::describe_capture(&path);
+        let Some(c) = meta
+            .rate
+            .zip(meta.format)
+            .and_then(|(r, f)| crate::devices::add_capture(path.clone(), r, meta.center, f))
+        else {
+            self.capture_edit = Some(CaptureEdit::new(path, false));
             return;
         };
         self.devices = crate::devices::list();
@@ -3105,6 +3225,71 @@ fn server_row(ui: &mut egui::Ui, server: &str) -> bool {
     open
 }
 
+/// A capture whose name does not say what it holds, while the card asking is
+/// open.
+///
+/// One card for both halves: the receiver list replays a capture and the
+/// strip's IQ source transmits one, and both read the same names off the same
+/// disc.
+#[derive(Clone)]
+pub struct CaptureEdit {
+    path: std::path::PathBuf,
+    /// Whether it is being sent rather than replayed.
+    to_air: bool,
+    /// Megahertz, empty for a baseband recording.
+    center: String,
+    /// Samples per second, k and M understood.
+    rate: String,
+    format: common::SampleFormat,
+}
+
+impl CaptureEdit {
+    /// Whatever the name did carry is filled in, because a capture named
+    /// `sdrsharp_20240110_433920kHz_IQ.wav` says its centre and not its rate
+    /// and retyping the half that was there is work nobody should do.
+    pub fn new(path: std::path::PathBuf, to_air: bool) -> Self {
+        let meta = crate::devices::describe_capture(&path);
+        Self {
+            center: meta.center.map(|c| format!("{:.6}", c.as_f64() / 1e6)).unwrap_or_default(),
+            rate: meta.rate.map(|r| r.0.to_string()).unwrap_or_default(),
+            format: meta.format.unwrap_or(common::SampleFormat::Cu8),
+            path,
+            to_air,
+        }
+    }
+
+    /// What the fields describe, or why they do not describe a capture yet.
+    fn resolve(&self) -> std::result::Result<crate::devices::Capture, String> {
+        let rate = sources::parse_si(self.rate.trim())
+            .filter(|r| *r >= 1.0)
+            .ok_or_else(|| "no sample rate, and a guessed one decodes nothing".to_string())?;
+        let center = match self.center.trim() {
+            "" => None,
+            t => Some(common::Hz(
+                (t.parse::<f64>().map_err(|_| format!("{t} is not a frequency in MHz"))? * 1e6)
+                    as u64,
+            )),
+        };
+        let c = crate::devices::Capture {
+            path: self.path.clone(),
+            rate: common::Sps(rate as u64),
+            center,
+            format: self.format,
+            seconds: 0.0,
+        };
+        let len = std::fs::metadata(&c.path)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .ok_or_else(|| format!("{} is not a file", c.path.display()))?;
+        let samples = len / c.format.bytes_per_sample() as u64;
+        if samples == 0 {
+            return Err(format!("{} holds no whole samples in that format", c.path.display()));
+        }
+        Ok(crate::devices::Capture { seconds: samples as f64 / c.rate.as_f64(), ..c })
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteEdit {
     over: Over,
@@ -3225,5 +3410,76 @@ fn key_of(s: &crate::session::Session, which: crate::data::Which, index: usize) 
         (crate::data::Which::Satellites(g), 0) if g.needs_login() => Some(&s.spacetrack_identity),
         (crate::data::Which::Satellites(g), _) if g.needs_login() => Some(&s.spacetrack_password),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wrote(name: &str, bytes: usize) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("sr_capture_card");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, vec![0u8; bytes]).unwrap();
+        path
+    }
+
+    /// The card is filled in from the name, because a capture from another
+    /// program usually says half of it: retyping the half that was there is
+    /// work nobody should do.
+    #[test]
+    fn a_half_named_capture_arrives_with_what_it_did_say_filled_in() {
+        // 433.92 MHz and 32-bit float from the name, no rate.
+        let path = wrote("sdrsharp_433.92M_IQ.cf32", 8 * 250_000);
+        let e = CaptureEdit::new(path.clone(), false);
+        assert_eq!(e.center, "433.920000");
+        assert_eq!(e.rate, "");
+        assert_eq!(e.format, common::SampleFormat::Cf32);
+        assert!(e.resolve().is_err(), "a card with no rate cannot be accepted");
+
+        let told = CaptureEdit { rate: "250k".into(), ..e };
+        let c = told.resolve().expect("a described capture");
+        assert_eq!(c.rate, common::Sps(250_000));
+        assert_eq!(c.center, Some(common::Hz(433_920_000)));
+        assert_eq!(c.format, common::SampleFormat::Cf32);
+        assert!((c.seconds - 1.0).abs() < 0.01, "{} s", c.seconds);
+
+        // A rate typed in full, and a centre left empty, which is a
+        // recording at baseband rather than a refusal.
+        let plain = CaptureEdit {
+            rate: "2048000".into(),
+            center: String::new(),
+            ..CaptureEdit::new(path.clone(), true)
+        };
+        let c = plain.resolve().expect("a baseband capture");
+        assert_eq!(c.rate, common::Sps(2_048_000));
+        assert_eq!(c.center, None);
+
+        // A file too short to hold one sample is refused, because the fault
+        // is the format rather than the rate and nothing downstream would
+        // say so.
+        let stub = wrote("stub.iq", 2);
+        let short = CaptureEdit { rate: "250k".into(), ..CaptureEdit::new(stub, false) };
+        let short = CaptureEdit { format: common::SampleFormat::Cf32, ..short };
+        let err = short.resolve().unwrap_err();
+        assert!(err.contains("no whole samples"), "unhelpful: {err}");
+    }
+
+    /// The same card serves the transmit side, which reads the same names off
+    /// the same disc.
+    #[test]
+    fn a_described_capture_becomes_something_the_transmitter_can_send() {
+        let path = wrote("recording.iq", 2 * 250_000);
+        let e = CaptureEdit { rate: "250k".into(), ..CaptureEdit::new(path.clone(), true) };
+        assert!(e.to_air);
+        let c = e.resolve().expect("a described capture");
+        let tx = crate::radio::TxCapture::new(&c.path, c.rate, c.center, c.format)
+            .expect("a capture to send");
+        assert_eq!(tx.rate, common::Sps(250_000));
+        assert_eq!(tx.format, common::SampleFormat::Cu8);
+        assert!((tx.seconds - 1.0).abs() < 0.01, "{} s", tx.seconds);
+        assert_eq!(tx.label(), "recording.iq");
+        assert_eq!(crate::radio::TxCapture::open(&path), None, "the name says no rate");
     }
 }

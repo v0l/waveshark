@@ -19,11 +19,33 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Metadata recovered from a capture filename.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FileMeta {
     pub center: Option<Hz>,
     pub rate: Option<Sps>,
     pub format: Option<SampleFormat>,
+}
+
+impl FileMeta {
+    pub fn rate(rate: Sps) -> Self {
+        Self { rate: Some(rate), ..Self::default() }
+    }
+
+    /// This metadata beneath `top`, so anything `top` says wins and this
+    /// fills the gaps.
+    pub fn under(self, top: Self) -> Self {
+        Self {
+            center: top.center.or(self.center),
+            rate: top.rate.or(self.rate),
+            format: top.format.or(self.format),
+        }
+    }
+
+    /// Whether it says enough to replay the file: a rate and a format. The
+    /// centre only decides what the dial reads.
+    pub fn complete(self) -> bool {
+        self.rate.is_some() && self.format.is_some()
+    }
 }
 
 /// Parse `<anything>_<freq>_<rate>.<format>`, for example
@@ -59,7 +81,10 @@ pub fn parse_filename(path: &Path) -> FileMeta {
     FileMeta { center, rate, format }
 }
 
-fn parse_si(tok: &str) -> Option<f64> {
+/// Read a number with an SI suffix, `250k`, `2.4M` or a bare count, which is
+/// how a capture's name quotes a rate and how somebody typing one into the
+/// interface expects to be able to write it.
+pub fn parse_si(tok: &str) -> Option<f64> {
     let (num, mult) = match tok.chars().last()? {
         'k' | 'K' => (&tok[..tok.len() - 1], 1e3),
         'M' | 'm' => (&tok[..tok.len() - 1], 1e6),
@@ -93,7 +118,19 @@ impl FileSource {
     /// Open a capture, taking centre frequency, rate and format from the
     /// filename where present.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(path.as_ref().to_path_buf(), None, false)
+        Self::open_inner(path.as_ref().to_path_buf(), FileMeta::default(), false)
+    }
+
+    /// Open a capture the caller can describe, for a name that carries
+    /// nothing.
+    ///
+    /// What is given wins over what the name says, because the caller here is
+    /// somebody who knows what the recording is: a capture from another
+    /// program is named for what it holds rather than in the rtl_433
+    /// convention, and a token in it that happens to parse as a rate is worse
+    /// evidence than an operator typing one.
+    pub fn open_as(path: impl AsRef<Path>, given: FileMeta) -> Result<Self> {
+        Self::open_inner(path.as_ref().to_path_buf(), given, true)
     }
 
     /// Open a capture whose filename carries no sample rate, supplying one.
@@ -102,7 +139,7 @@ impl FileSource {
     /// than an override: replaying a file at a rate its own name contradicts
     /// is never what the caller meant.
     pub fn open_with_rate(path: impl AsRef<Path>, rate: Sps) -> Result<Self> {
-        Self::open_inner(path.as_ref().to_path_buf(), Some(rate), false)
+        Self::open_inner(path.as_ref().to_path_buf(), FileMeta::rate(rate), false)
     }
 
     /// Open a capture at the rate given, whatever its filename says.
@@ -110,17 +147,21 @@ impl FileSource {
     /// For a caller who knows better than the name: a corpus recorded before
     /// the convention, or a file renamed by hand.
     pub fn open_at_rate(path: impl AsRef<Path>, rate: Sps) -> Result<Self> {
-        Self::open_inner(path.as_ref().to_path_buf(), Some(rate), true)
+        Self::open_inner(path.as_ref().to_path_buf(), FileMeta::rate(rate), true)
     }
 
-    fn open_inner(path: PathBuf, given_rate: Option<Sps>, rate_wins: bool) -> Result<Self> {
+    fn open_inner(path: PathBuf, given: FileMeta, given_wins: bool) -> Result<Self> {
         if !path.exists() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("{}", path.display()),
             )));
         }
-        let meta = parse_filename(&path);
+        let named = parse_filename(&path);
+        let meta = match given_wins {
+            true => named.under(given),
+            false => given.under(named),
+        };
         let format = meta.format.ok_or_else(|| {
             Error::other(format!(
                 "cannot tell the sample format of {}; expected an extension of \
@@ -128,8 +169,7 @@ impl FileSource {
                 path.display()
             ))
         })?;
-        let named = if rate_wins { None } else { meta.rate };
-        let rate = named.or(given_rate).ok_or_else(|| {
+        let rate = meta.rate.ok_or_else(|| {
             Error::other(format!(
                 "cannot tell the sample rate of {}; name it like \
                  <name>_<freq>_<rate>.<format>, e.g. capture_433.92M_250k.cu8, \
@@ -381,5 +421,61 @@ mod tests {
         let err = FileSource::open(&p).unwrap_err().to_string();
         assert!(err.contains("sample rate"), "unhelpful: {err}");
         assert!(err.contains("433.92M_250k"), "error lacks an example: {err}");
+    }
+
+    /// A recording from another program is named for what it holds, so what
+    /// the caller says about it has to be enough on its own.
+    #[test]
+    fn a_described_capture_opens_on_what_it_was_told() {
+        let dir = std::env::temp_dir().join("sr_file_described");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("someone elses recording.iq");
+        std::fs::write(&p, [0u8; 4096]).unwrap();
+        assert!(FileSource::open(&p).is_err(), "the name says neither rate nor format");
+
+        let told = FileMeta {
+            center: Some(Hz(868_300_000)),
+            rate: Some(Sps(1_024_000)),
+            format: Some(SampleFormat::Cs16),
+        };
+        let s = FileSource::open_as(&p, told).unwrap();
+        assert_eq!(s.rate, Sps(1_024_000));
+        assert_eq!(s.center, Hz(868_300_000));
+        assert_eq!(s.format, SampleFormat::Cs16);
+        assert_eq!(s.info.rates, vec![Sps(1_024_000)]);
+        assert_eq!(s.info.native_format, SampleFormat::Cs16);
+
+        // What the operator says wins over what the name says, because a
+        // token that happens to parse as a rate is worse evidence than
+        // somebody who knows what they recorded.
+        let named = dir.join("cap_433.92M_250k.cu8");
+        std::fs::write(&named, [0u8; 4096]).unwrap();
+        let s = FileSource::open_as(&named, FileMeta::rate(Sps(2_048_000))).unwrap();
+        assert_eq!(s.rate, Sps(2_048_000));
+        assert_eq!(s.format, SampleFormat::Cu8);
+        assert_eq!(s.center, Hz(433_920_000));
+
+        // And saying nothing is the name again, so one call serves both.
+        let s = FileSource::open_as(&named, FileMeta::default()).unwrap();
+        assert_eq!(s.rate, Sps(250_000));
+        let err = FileSource::open_as(&p, FileMeta::rate(Sps(250_000))).unwrap_err().to_string();
+        assert!(err.contains("sample format"), "unhelpful: {err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_a_name_carries_is_completed_by_what_it_is_told() {
+        let named = parse_filename(Path::new("sdr_868.3M_recording.cf32"));
+        assert_eq!(named.rate, None);
+        assert_eq!(named.complete(), false);
+        let full = named.under(FileMeta::rate(Sps(2_400_000)));
+        assert_eq!(full.rate, Sps(2_400_000).into());
+        assert_eq!(full.center, Some(Hz(868_300_000)));
+        assert_eq!(full.format, Some(SampleFormat::Cf32));
+        assert!(full.complete());
+        assert_eq!(parse_si("2.4M"), Some(2_400_000.0));
+        assert_eq!(parse_si("250k"), Some(250_000.0));
+        assert_eq!(parse_si("2048000"), Some(2_048_000.0));
+        assert_eq!(parse_si("fast"), None);
     }
 }

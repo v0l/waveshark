@@ -658,12 +658,6 @@ impl Strip<'_> {
                     );
                     theme::Line::new().value(name).size(11.0).elided(ui);
                 });
-                if let Some(f) = capture_pick.fault.as_deref() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(28.0);
-                        theme::Line::new().value(f).size(11.0).tint(theme::FAULT).wrapped(ui);
-                    });
-                }
                 // What is about to be radiated, said before the key is
                 // pressed: a recording is somebody else's transmission, and
                 // in most places sending it back out is an offence.

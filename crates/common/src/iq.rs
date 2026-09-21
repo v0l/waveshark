@@ -20,6 +20,20 @@ pub enum SampleFormat {
 }
 
 impl SampleFormat {
+    /// Every layout a capture can be read in, for a picker that has to offer
+    /// them to somebody describing a file whose name does not say.
+    pub const ALL: [Self; 4] = [Self::Cu8, Self::Cs8, Self::Cs16, Self::Cf32];
+
+    /// What the samples are, for an operator choosing between them.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cu8 => "unsigned 8-bit",
+            Self::Cs8 => "signed 8-bit",
+            Self::Cs16 => "signed 16-bit",
+            Self::Cf32 => "32-bit float",
+        }
+    }
+
     /// Bytes occupied by one complex sample.
     pub const fn bytes_per_sample(self) -> usize {
         match self {

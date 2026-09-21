@@ -198,6 +198,9 @@ pub struct App {
     feed_host: String,
     /// The remote radio being created, while that dialog is open.
     remote: Option<RemoteEdit>,
+    /// The capture being described, while the card asking what is in it is
+    /// open.
+    capture_edit: Option<settings::CaptureEdit>,
     /// Where the packet log writes, as typed, and the size limit in
     /// megabytes per day, or `None` for no limit.
     /// The scanner file as text, while it is being edited. Held apart from
@@ -662,6 +665,7 @@ impl Default for App {
             radio_dirty: false,
             feed_host: String::new(),
             remote: None,
+            capture_edit: None,
             feed_kind: nodes::FEED_KINDS[0],
             scanner_edit: None,
             scanners: crate::scanners::Scanners::default(),
@@ -2851,7 +2855,9 @@ impl eframe::App for App {
         self.pick_file.poll(&mut self.cmds);
         // The `.sub` dialog lands its file as a command like any other.
         self.audio.sub_pick.poll(&mut self.cmds);
-        self.audio.capture_pick.poll(&mut self.cmds);
+        if let Some(path) = self.audio.capture_pick.poll(&mut self.cmds) {
+            self.capture_edit = Some(settings::CaptureEdit::new(path, true));
+        }
         // And the save dialog writes the file it was given a name for.
         self.log.sub_save.poll();
         self.read_heard();
@@ -2916,6 +2922,7 @@ impl eframe::App for App {
         }
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
+        self.capture_modal(ui.ctx());
         self.wigle_modal(ui.ctx());
         self.beacondb_modal(ui.ctx());
         self.homeassistant_modal(ui.ctx());
