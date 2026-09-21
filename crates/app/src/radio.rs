@@ -251,7 +251,7 @@ fn key_up(
     tx: &TxSpec,
     center: Hz,
     gain_db: f32,
-    mic: &Option<audio::AudioCapture>,
+    mic: &Option<Arc<dyn audio::AudioSource>>,
     voice: &Option<std::sync::Arc<dyn audio::AudioSource>>,
     sub: &Option<SubFile>,
 ) -> common::Result<(crate::chain::TxPlan, crate::chain::TxSinks)> {
@@ -306,7 +306,7 @@ fn key_up(
         // would be refusing for no reason.
         _ if matches!(mode, TxMode::Digital(_)) => None,
         TxSource::Mic => {
-            Some(mic.as_ref().ok_or_else(|| common::Error::other("no microphone is open"))?.tap())
+            Some(mic.clone().ok_or_else(|| common::Error::other("no microphone is open"))?)
         }
         TxSource::Agent => {
             Some(voice.clone().ok_or_else(|| common::Error::other("the agent has no voice"))?)
@@ -1899,6 +1899,19 @@ impl Radio {
     /// test-only, which is the point.
     #[cfg(test)]
     pub fn on_device(dev: Box<dyn common::Device>, center: Hz, rate: Sps, fft: usize) -> Self {
+        Self::on_device_hearing(dev, center, rate, fft, None)
+    }
+
+    /// The same, with the microphone handed in rather than opened: a test
+    /// radio hears the speech it was given and never the room.
+    #[cfg(test)]
+    pub fn on_device_hearing(
+        dev: Box<dyn common::Device>,
+        center: Hz,
+        rate: Sps,
+        fft: usize,
+        mic: Option<Arc<dyn audio::AudioSource>>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = bounded(64);
         let (frame_tx, frame_rx) = bounded(2);
         let (dec_tx, dec_rx) = bounded(64);
@@ -1921,7 +1934,12 @@ impl Radio {
                     || {},
                 );
                 let ran = match built {
-                    Ok(t) => t.run(),
+                    Ok(mut t) => {
+                        if let Some(src) = mic {
+                            t.hand_microphone(src);
+                        }
+                        t.run()
+                    }
                     Err(e) => Err(e),
                 };
                 if let Err(e) = ran {
@@ -2138,6 +2156,7 @@ struct AudioIo {
     /// Open for as long as the receiver runs, so the strip's meter is live
     /// and anything that wants speech can take a tap.
     mic: Option<audio::AudioCapture>,
+    given: Option<Arc<dyn audio::AudioSource>>,
 }
 
 /// The radio thread: a device, the graph it feeds, and everything a command
@@ -2345,7 +2364,13 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             plan,
             rx,
             scanners,
-            audio: AudioIo { out: String::new(), input: String::new(), _player: player, mic: None },
+            audio: AudioIo {
+                out: String::new(),
+                input: String::new(),
+                _player: player,
+                mic: None,
+                given: None,
+            },
             tx: Tx {
                 gain_db: 0.0,
                 sub_file: None,
@@ -2807,7 +2832,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     /// nothing has asked for speech yet; keying a channel whose source is the
     /// microphone is what says so, and that says it there.
     fn open_mic(&mut self) {
-        if self.audio.mic.is_none() {
+        if self.audio.mic.is_none() && self.audio.given.is_none() && !cfg!(test) {
             let opened = match self.audio.input.is_empty() {
                 true => audio::AudioCapture::open(48_000),
                 false => audio::AudioCapture::open_named(&self.audio.input, 48_000),
@@ -2823,7 +2848,20 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 }
             }
         }
-        self.rx.set_microphone(self.audio.mic.as_ref().map(|m| m.tap()));
+        self.rx.set_microphone(self.mic_tap());
+    }
+
+    fn mic_tap(&self) -> Option<Arc<dyn audio::AudioSource>> {
+        match &self.audio.given {
+            Some(src) => Some(src.clone()),
+            None => self.audio.mic.as_ref().map(|m| m.tap()),
+        }
+    }
+
+    #[cfg(test)]
+    fn hand_microphone(&mut self, src: Arc<dyn audio::AudioSource>) {
+        self.audio.given = Some(src);
+        self.open_mic();
     }
 
     /// Move to the speaker and microphone the session asked for.
@@ -2895,13 +2933,14 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             return;
         };
         let tx = ch.spec_to_transmit();
+        let mic = self.mic_tap();
         let up = key_up(
             self.dev.as_mut(),
             &ch,
             &tx,
             self.plan.center,
             self.tx.gain_db,
-            &self.audio.mic,
+            &mic,
             &self.voice,
             &self.tx.sub_file,
         );
@@ -3963,6 +4002,105 @@ pub(crate) mod tests {
             // transmitting, and the mode decides.
             tx: None,
         }
+    }
+
+    fn vox_channel(id: u64, offset: f64) -> ChannelSpec {
+        let vox =
+            VoxSpec { on: true, threshold: 0.1, tail_ms: 100.0, anti_trip: true, roger_ms: 0.0 };
+        ChannelSpec {
+            tx: Some(TxSpec { source: TxSource::Mic, vox, ..Default::default() }),
+            ..strip_channel(id, offset)
+        }
+    }
+
+    fn speech_then_quiet(speaking: usize, quiet: usize) -> Arc<dyn audio::AudioSource> {
+        let mut pcm: Vec<f32> = (0..speaking)
+            .map(|i| 0.5 * (std::f32::consts::TAU * 400.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        pcm.extend(std::iter::repeat_n(0.0, quiet));
+        Arc::new(audio::Canned::new(pcm, 48_000.0, false))
+    }
+
+    /// A voice keys the radio and a quiet room lets it up, on the thread that
+    /// holds the device.
+    ///
+    /// The stage only says the key should be down; retuning a half duplex
+    /// radio and handing its stream to the transmitter is this thread's half,
+    /// and no test reached it until the microphone could be handed in.
+    #[test]
+    fn a_voice_on_the_microphone_keys_the_radio_and_a_quiet_room_lets_it_up() {
+        let center = Hz(446_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device_hearing(
+            Box::new(dev),
+            center,
+            rate,
+            1024,
+            Some(speech_then_quiet(24_000, 192_000)),
+        );
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+        radio.send(Cmd::Channels(vec![vox_channel(1, 50_000.0)]));
+
+        until("the voice to key the channel", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        assert!(radio.status.vox_open.load(Ordering::Relaxed), "it keyed with the vox shut");
+        assert!(watch.keyed(), "the key lit and the device was never asked to transmit");
+        until("a tenth of a second on the antenna", || watch.transmitted_len() > 240_000);
+
+        until("the key to come up when the room went quiet", || {
+            radio.status.keyed.load(Ordering::Relaxed) == 0
+        });
+        until("the device to be given back", || !watch.keyed());
+        let sent = watch.transmitted_len();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(watch.transmitted_len(), sent, "it went on transmitting after the vox let up");
+        assert_eq!(radio.status.error.lock().clone(), None, "the over went out and it complained");
+    }
+
+    /// A key pressed by hand is the operator's, and a vox that hears nothing
+    /// does not take it off them.
+    #[test]
+    fn a_hand_key_on_a_vox_channel_is_not_let_up_by_the_vox() {
+        let center = Hz(446_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device_hearing(
+            Box::new(dev),
+            center,
+            rate,
+            1024,
+            Some(speech_then_quiet(0, 480_000)),
+        );
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+        radio.send(Cmd::Channels(vec![vox_channel(1, 50_000.0)]));
+        until("the vox to have measured the quiet room", || {
+            !radio.status.vox_open.load(Ordering::Relaxed)
+                && f32::from_bits(radio.status.vox_level.load(Ordering::Relaxed)) < 0.1
+        });
+        assert_eq!(radio.status.keyed.load(Ordering::Relaxed), 0, "silence keyed the radio");
+
+        radio.send(Cmd::Key(Some(1)));
+        until("the hand key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        until("an over on the antenna", || watch.transmitted_len() > 240_000);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            radio.status.keyed.load(Ordering::Relaxed),
+            1,
+            "the vox let up a key the operator is holding"
+        );
+        assert!(watch.keyed(), "the device came off transmit under a hand key");
+
+        radio.send(Cmd::Key(None));
+        until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+        assert_eq!(radio.status.error.lock().clone(), None);
     }
 
     /// The settle window is the time the tuner asked for, so it is the same
