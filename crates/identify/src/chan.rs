@@ -62,3 +62,68 @@ impl Channel {
         common::Hz(self.center_hz as u64)
     }
 }
+
+/// The `most` of `channels` holding the most power, strongest first, so a
+/// raster is demodulated where a transmitter is rather than end to end.
+pub fn strongest(
+    iq: &[C32],
+    rate_hz: f64,
+    center_hz: f64,
+    channels: &[f64],
+    width_hz: f64,
+    most: usize,
+) -> Vec<f64> {
+    if channels.len() <= most {
+        return channels.to_vec();
+    }
+    let bins = ((rate_hz / width_hz * 4.0) as usize).clamp(16, 4096).next_power_of_two();
+    let cols = 64;
+    let grid = dsp::spectrum::spectrogram(iq, cols, bins, bins);
+    let lo_hz = center_hz - rate_hz / 2.0;
+    let bin_of = |hz: f64| ((hz - lo_hz) / rate_hz * bins as f64).round() as isize;
+    let mut ranked: Vec<(f32, f64)> = channels
+        .iter()
+        .map(|&hz| {
+            let (lo, hi) = (bin_of(hz - width_hz / 2.0), bin_of(hz + width_hz / 2.0));
+            let mut peak = f32::NEG_INFINITY;
+            for r in lo.max(0)..=hi.min(bins as isize - 1) {
+                let row = &grid[r as usize * cols..(r as usize + 1) * cols];
+                peak = row.iter().fold(peak, |a, &b| a.max(b));
+            }
+            (peak, hz)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.truncate(most);
+    ranked.into_iter().map(|(_, hz)| hz).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tone_names_its_own_channel() {
+        let (rate, center, width) = (1_000_000.0f64, 405_000_000.0f64, 10_000.0f64);
+        let tone_hz = 405_120_000.0;
+        let iq: Vec<C32> = (0..200_000)
+            .map(|i| {
+                let t = i as f64 / rate;
+                let phase = std::f64::consts::TAU * (tone_hz - center) * t;
+                C32::new(phase.cos() as f32, phase.sin() as f32)
+            })
+            .collect();
+        let channels: Vec<f64> =
+            (0..100).map(|i| 405_000_000.0 - 500_000.0 + 10_000.0 * i as f64).collect();
+        let got = strongest(&iq, rate, center, &channels, width, 4);
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[0], tone_hz);
+        assert!(got.iter().all(|hz| channels.contains(hz)), "{got:?}");
+    }
+
+    #[test]
+    fn a_narrow_span_keeps_every_channel() {
+        let chs = [405_790_000.0, 405_800_000.0, 405_810_000.0];
+        assert_eq!(strongest(&[], 31_250.0, 405_800_240.0, &chs, 9_600.0, 8), chs);
+    }
+}

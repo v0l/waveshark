@@ -26,6 +26,10 @@ pub const OCCUPIED_HZ: f64 = 9_600.0;
 /// beyond). Vaisala tunes an RS41 anywhere in it in 10 kHz steps.
 pub const BAND: (f64, f64) = (400_000_000.0, 406_000_000.0);
 
+/// Raster channels demodulated in one pass over a recording, however wide
+/// the span is.
+pub const MOST_CHANNELS: usize = 8;
+
 pub struct Rs41;
 
 impl Signal for Rs41 {
@@ -60,17 +64,20 @@ impl Signal for Rs41 {
         }
     }
 
-    /// Every raster channel in the span, and the one that read most frames.
+    /// The raster channels of the span holding power, and the one of those
+    /// that read most frames.
     ///
     /// A sonde is nowhere near the middle of a recording in general: in the
     /// corpus capture it sits 9.76 kHz above a centre 31.25 kHz wide, and the
     /// channel filter passes 4.8 kHz either side, so reading the span as
-    /// handed finds nothing at all. What makes the search cheap is that
-    /// Vaisala only tunes on the 10 kHz raster, so a span holds as many
-    /// candidates as it is wide in units of ten kilohertz and no more.
+    /// handed finds nothing at all. Vaisala tunes on the 10 kHz raster, so a
+    /// span holds as many candidates as it is wide in units of ten kilohertz;
+    /// a wide one holds more of them than there is time to demodulate, and
+    /// [`crate::strongest`] says which carry a transmitter.
     fn read(&self, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
         let mut best = Reading::default();
-        for hz in raster(rate_hz, center_hz) {
+        let raster = raster(rate_hz, center_hz);
+        for hz in crate::strongest(iq, rate_hz, center_hz, &raster, OCCUPIED_HZ, MOST_CHANNELS) {
             let rows = self.read_channel(iq, rate_hz, center_hz, hz);
             if rows.count() > best.count() {
                 best = rows;
@@ -144,5 +151,18 @@ mod tests {
         let wide = raster(20_000_000.0, 406_000_000.0);
         assert_eq!(wide.last(), Some(&406_000_000.0));
         assert_eq!(wide.len(), 601);
+    }
+
+    /// 2.4 MHz of the raster is 220 channels and eight passes, not 220.
+    #[test]
+    fn a_wide_span_is_read_on_the_strongest_channels_alone() {
+        let rate = 2_400_000.0;
+        let chs = raster(rate, 405_000_000.0);
+        assert_eq!(chs.len(), 220);
+        let iq = vec![C32::new(0.0, 0.0); 1 << 16];
+        assert_eq!(
+            crate::strongest(&iq, rate, 405_000_000.0, &chs, OCCUPIED_HZ, MOST_CHANNELS).len(),
+            MOST_CHANNELS
+        );
     }
 }

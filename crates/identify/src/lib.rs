@@ -47,7 +47,7 @@ pub mod mrz;
 pub mod nrf24;
 pub mod nxdn;
 pub mod p25;
-pub use chan::Channel;
+pub use chan::{Channel, strongest};
 mod place;
 pub mod pocsag;
 pub mod rs41;
@@ -277,6 +277,15 @@ pub const MIN_FRAMES: usize = 2;
 
 /// Every candidate that read something, most frames first.
 pub fn identify_all(iq: &[C32], rate_hz: f64, center_hz: f64) -> Vec<Ident> {
+    let mut found = read_all(iq, rate_hz, center_hz);
+    found.retain(|i| i.frames >= MIN_FRAMES);
+    found
+}
+
+/// What every candidate read, most frames first and before [`MIN_FRAMES`]
+/// is applied, so a caller measuring a decoder's false frames sees the ones
+/// the threshold is there to swallow.
+pub fn read_all(iq: &[C32], rate_hz: f64, center_hz: f64) -> Vec<Ident> {
     let mut found: Vec<Ident> = candidates(rate_hz, center_hz)
         .into_iter()
         .map(|s| {
@@ -284,7 +293,6 @@ pub fn identify_all(iq: &[C32], rate_hz: f64, center_hz: f64) -> Vec<Ident> {
             let at = read.center_hz.unwrap_or(center_hz);
             Ident::of(s, read, at)
         })
-        .filter(|i| i.frames >= MIN_FRAMES)
         .collect();
     found.sort_by(|a, b| b.frames.cmp(&a.frames));
     found
