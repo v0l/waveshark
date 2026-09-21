@@ -79,10 +79,17 @@ impl MdcNode {
         self.read
     }
 
-    /// Bursts that framed and then failed their CRC: a channel with MDC on
-    /// it that never reads is a different fault from a quiet channel.
+    /// Bursts that framed and then failed their CRC, the parity bytes
+    /// having failed to repair them: a channel with MDC on it that never
+    /// reads is a different fault from a quiet channel.
     pub fn refused(&self) -> u64 {
         self.framer.refused()
+    }
+
+    /// Bursts the parity bytes took back, which the CRC refused as they
+    /// arrived: how much of what is heard is arriving damaged.
+    pub fn repaired(&self) -> u64 {
+        self.framer.repaired()
     }
 }
 
@@ -389,5 +396,33 @@ mod tests {
         let frames = run(&mut n, &iq, DEFAULT_HZ);
         assert_eq!(frames.len(), 0, "noise made {} bursts", frames.len());
         assert_eq!(n.read(), 0);
+        assert_eq!(n.repaired(), 0, "the code voted a burst out of noise");
+    }
+
+    /// The carrier dropping out mid-burst is past the parity bytes, however
+    /// scattered the interleaver would have made it. The tone says whether
+    /// the data bit changed, so a fade that comes back on the other phase
+    /// complements every bit to the end of the block, and half a block is
+    /// not what a vote of four checks repairs. Measured over dead-carrier
+    /// gaps of 2, 4, 6, 8 and 10 ms at three places in the burst: 15
+    /// refused, none repaired, none read as another radio.
+    #[test]
+    fn a_dead_carrier_mid_burst_is_past_the_code() {
+        let (mut refused, mut repaired, mut read) = (0, 0, 0);
+        for ms in [2.0f64, 4.0, 6.0, 8.0, 10.0] {
+            for at in [0.35f64, 0.5, 0.65] {
+                let mut iq = keyed(0x01, 0x80, 0x0042, 0.0, 0.0);
+                let start = (iq.len() as f64 * at) as usize;
+                let end = (start + (RATE * ms / 1000.0) as usize).min(iq.len());
+                for s in &mut iq[start..end] {
+                    *s = C32::new(0.0, 0.0);
+                }
+                let mut n = node(DEFAULT_HZ);
+                read += run(&mut n, &iq, DEFAULT_HZ).len();
+                refused += n.refused();
+                repaired += n.repaired();
+            }
+        }
+        assert_eq!((read, refused, repaired), (0, 15, 0));
     }
 }

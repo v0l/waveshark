@@ -1017,6 +1017,76 @@ impl Ldpc {
     }
 }
 
+/// Parity of a systematic rate 1/2 convolutional code, bits taken least
+/// significant first within each byte and the register running across the
+/// whole message rather than restarting per byte.
+///
+/// `taps` are the delays summed into each parity bit, so {0, 2, 5, 6} gives
+/// `p[t] = u[t] ^ u[t-2] ^ u[t-5] ^ u[t-6]`, which is what MDC-1200 sends
+/// as its second seven bytes. Bits before the start of the message are
+/// zero.
+pub fn conv_parity_lsb(info: &[u8], taps: &[u32]) -> Vec<u8> {
+    let mut sr = 0u64;
+    let mut out = vec![0u8; info.len()];
+    for (i, &byte) in info.iter().enumerate() {
+        for bit in 0..8 {
+            sr = sr << 1 | u64::from(byte >> bit & 1);
+            let p = taps.iter().fold(0u64, |acc, &t| acc ^ sr >> t) & 1;
+            out[i] |= (p as u8) << bit;
+        }
+    }
+    out
+}
+
+/// Threshold decoder for the code [`conv_parity_lsb`] computes, correcting
+/// in place and returning how many information bits it flipped.
+///
+/// The taps have to be a perfect difference set, which is what makes the
+/// code self-orthogonal: information bit `t` enters syndrome bits `t + tap`
+/// and no two of those share a second error, so more than half of them set
+/// names bit `t` and nothing else. MDC's {0, 2, 5, 6} is such a set, so
+/// four checks vote and three carry it. A correction is fed back by
+/// clearing the syndrome positions the flipped bit entered, so a repaired
+/// error does not vote against its neighbours.
+///
+/// The last `max(taps)` information bits are left alone: their votes lie
+/// past the end of the parity that was sent, and taking the missing checks
+/// as zero flips bits on the strength of bits nobody transmitted. The
+/// reference decoder stops in the same place.
+pub fn conv_threshold_lsb(info: &mut [u8], parity: &[u8], taps: &[u32]) -> u32 {
+    let span = match taps.iter().max() {
+        Some(&m) if (m as usize) < 63 && !parity.is_empty() => m as usize,
+        _ => return 0,
+    };
+    let n = info.len().min(parity.len()) * 8;
+    if n <= span {
+        return 0;
+    }
+    let get = |b: &[u8], t: usize| b[t / 8] >> (t % 8) & 1 != 0;
+    let vote: u64 = taps.iter().fold(0, |acc, &t| acc | 1 << (span as u32 - t));
+    let need = (taps.len() as u32).div_ceil(2) + 1;
+
+    let mut fixed = 0;
+    let mut sr = 0u64;
+    let mut syn = 0u64;
+    for t in 0..n {
+        sr = sr << 1 | u64::from(get(info, t));
+        let p = taps.iter().fold(0u64, |acc, &k| acc ^ sr >> k) & 1;
+        syn = syn << 1 | (p ^ u64::from(get(parity, t)));
+        if t < span {
+            continue;
+        }
+        if (syn & vote).count_ones() >= need {
+            let at = t - span;
+            info[at / 8] ^= 1 << (at % 8);
+            sr ^= 1 << span;
+            syn ^= vote;
+            fixed += 1;
+        }
+    }
+    fixed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,6 +1363,69 @@ mod tests {
             honest += u32::from(placed.is_none() || padding_dirty || bad != code);
         }
         assert_eq!(honest, 200, "a quadruple was silently turned into a codeword");
+    }
+
+    /// The rate 1/2 code MDC-1200 carries. Its published vector: seven
+    /// information bytes `01 80 12 34 2E 3E 00` have the parity
+    /// `65 80 A8 62 DD 88 08`, which is what Matthew Kaufman's
+    /// `mdc-encode-decode` puts in the second half of a block.
+    #[test]
+    fn conv_parity_matches_the_published_mdc_vector() {
+        let info = [0x01u8, 0x80, 0x12, 0x34, 0x2E, 0x3E, 0x00];
+        assert_eq!(
+            conv_parity_lsb(&info, &[0, 2, 5, 6]),
+            [0x65, 0x80, 0xA8, 0x62, 0xDD, 0x88, 0x08]
+        );
+        assert_eq!(conv_parity_lsb(&[], &[0, 2, 5, 6]), Vec::<u8>::new());
+    }
+
+    /// Every single wrong bit in the 50 information positions the code can
+    /// still vote on comes back, over 64 random messages: 3200 of 3200. The
+    /// six above them have checks past the end of the parity that was sent,
+    /// so they are left alone, and a wrong parity bit never moves the
+    /// message.
+    #[test]
+    fn conv_threshold_corrects_every_single_bit_it_has_four_checks_for() {
+        let taps = [0u32, 2, 5, 6];
+        let mut seed = 0x51ed_2701_aa31_9f0du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut put_back, mut left, mut parity_safe) = (0, 0, 0);
+        for _ in 0..64 {
+            let info: Vec<u8> = (0..7).map(|_| next() as u8).collect();
+            let parity = conv_parity_lsb(&info, &taps);
+
+            let mut clean = info.clone();
+            assert_eq!(conv_threshold_lsb(&mut clean, &parity, &taps), 0);
+            assert_eq!(clean, info, "a clean message was voted on");
+
+            for at in 0..7 * 8 {
+                let mut bad = info.clone();
+                bad[at / 8] ^= 1 << (at % 8);
+                let fixed = conv_threshold_lsb(&mut bad, &parity, &taps);
+                match at < 7 * 8 - 6 {
+                    true => {
+                        put_back += u32::from(bad == info && fixed == 1);
+                    }
+                    false => {
+                        left += u32::from(bad != info && fixed == 0);
+                    }
+                }
+
+                let mut wrong = parity.clone();
+                wrong[at / 8] ^= 1 << (at % 8);
+                let mut held = info.clone();
+                conv_threshold_lsb(&mut held, &wrong, &taps);
+                parity_safe += u32::from(held == info);
+            }
+        }
+        assert_eq!(put_back, 64 * 50, "information bits with four checks");
+        assert_eq!(left, 64 * 6, "the six bits whose checks were never sent");
+        assert_eq!(parity_safe, 64 * 56, "a wrong parity bit moved the message");
     }
 
     /// Every nibble survives a round trip through the code, and every single

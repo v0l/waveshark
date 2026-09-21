@@ -21,8 +21,9 @@
 //! De-interleaved and packed least significant bit first, the first seven
 //! bytes are the operation, its argument, the unit id, the CRC of those four
 //! and a status byte; the last seven are the parity of a rate 1/2 code with
-//! taps {0, 2, 5, 6}, which this reads as a second check rather than using
-//! to correct.
+//! taps {0, 2, 5, 6}, which a threshold decoder votes on to repair the
+//! scattered single-bit errors a fade becomes once the interleaver has
+//! spread it.
 //!
 //! Checked against Matthew Kaufman's `mdc-encode-decode`, whose encoder
 //! produced the on-air blocks the tests carry.
@@ -184,25 +185,29 @@ pub fn deinterleave(air: &[bool]) -> Option<[u8; BLOCK_BYTES]> {
     Some(out)
 }
 
-/// The parity of the rate 1/2 code over the seven information bytes: taps
-/// {0, 2, 5, 6} of an eight-bit register that runs across the whole block
-/// rather than restarting per byte.
-///
-/// Used as a check and not as a correction: a burst whose CRC failed is
-/// thrown away here, where the reference decoder can repair three or four
-/// bits first. That is the obvious next thing to add, and it wants a
-/// recording to be worth measuring.
+/// The taps of the rate 1/2 code MDC carries, a perfect difference set so
+/// that the four checks on an information bit are orthogonal and can vote.
+pub const FEC_TAPS: [u32; 4] = [0, 2, 5, 6];
+
+/// The parity of the rate 1/2 code over the seven information bytes: an
+/// eight-bit register that runs across the whole block rather than
+/// restarting per byte.
 pub fn parity(info: &[u8; INFO_BYTES]) -> [u8; INFO_BYTES] {
-    let mut sr = 0u8;
     let mut out = [0u8; INFO_BYTES];
-    for (i, &byte) in info.iter().enumerate() {
-        for bit in 0..8 {
-            sr = (sr << 1) | (byte >> bit) & 1;
-            let p = (sr >> 6) ^ (sr >> 5) ^ (sr >> 2) ^ sr;
-            out[i] |= (p & 1) << bit;
-        }
-    }
+    out.copy_from_slice(&bits::conv_parity_lsb(info, &FEC_TAPS));
     out
+}
+
+/// Vote the parity bytes over the information bytes of a de-interleaved
+/// block, returning how many information bits were flipped.
+///
+/// The votes on the last six information bits lie past the end of the
+/// parity that was sent, so the top six bits of the status byte are left
+/// alone. The CRC covers the first four bytes, so nothing left there
+/// refuses a burst.
+pub fn correct(full: &mut [u8; BLOCK_BYTES]) -> u32 {
+    let (info, parity) = full.split_at_mut(INFO_BYTES);
+    bits::conv_threshold_lsb(info, parity, &FEC_TAPS)
 }
 
 /// Tone decisions in, bursts out.
@@ -218,8 +223,12 @@ pub struct Framer {
     filled: u32,
     block: Vec<bool>,
     hunting: bool,
-    /// Bursts whose block was collected and whose CRC then failed.
+    /// Bursts whose block was collected and whose CRC then failed, the code
+    /// having failed to repair it.
     refused: u64,
+    /// Bursts the parity bytes took back, which the CRC refused as they
+    /// arrived.
+    repaired: u64,
 }
 
 impl Default for Framer {
@@ -238,13 +247,15 @@ impl Framer {
             block: Vec::with_capacity(BLOCK_BITS),
             hunting: true,
             refused: 0,
+            repaired: 0,
         }
     }
 
     pub fn reset(&mut self) {
-        let refused = self.refused;
+        let (refused, repaired) = (self.refused, self.repaired);
         *self = Self::new();
         self.refused = refused;
+        self.repaired = repaired;
     }
 
     /// Blocks that reached the CRC and failed it, since the framer was
@@ -252,6 +263,12 @@ impl Framer {
     /// fault from a channel with nothing on it.
     pub fn refused(&self) -> u64 {
         self.refused
+    }
+
+    /// Blocks that failed their CRC as they arrived and passed it once the
+    /// parity bytes had voted, since the framer was built.
+    pub fn repaired(&self) -> u64 {
+        self.repaired
     }
 
     /// One tone decision. `Some` on the bit that completes a block whose
@@ -290,15 +307,20 @@ impl Framer {
         self.hunting = true;
         self.filled = 0;
         self.window = 0;
-        let block = deinterleave(&self.block)?;
+        let mut block = deinterleave(&self.block)?;
         let info: [u8; INFO_BYTES] = block[..INFO_BYTES].try_into().ok()?;
-        match parse(&info) {
-            Some(_) => Some(info),
-            None => {
-                self.refused += 1;
-                None
+        if parse(&info).is_some() {
+            return Some(info);
+        }
+        if correct(&mut block) > 0 {
+            let info: [u8; INFO_BYTES] = block[..INFO_BYTES].try_into().ok()?;
+            if parse(&info).is_some() {
+                self.repaired += 1;
+                return Some(info);
             }
         }
+        self.refused += 1;
+        None
     }
 }
 
@@ -490,13 +512,16 @@ mod tests {
         assert_eq!(parse(&read[1]).unwrap().unit, 0x1234);
     }
 
-    /// A block with bits knocked out of it is thrown away rather than
-    /// reported with a wrong unit id, and it is counted.
+    /// A block too far gone for the parity to vote on is thrown away rather
+    /// than reported with a wrong unit id, and it is counted. Forty tones
+    /// is twenty flipped data bits, which is past the code: a run of twenty
+    /// on-air bits repaired none of 92 positions where twelve repaired all
+    /// 100.
     #[test]
     fn a_corrupted_block_is_refused() {
         let mut tones = encode_tones(0x01, 0x80, 0x1234, 0x00, 3);
-        let at = tones.len() - 60;
-        for t in &mut tones[at..at + 12] {
+        let at = tones.len() - 80;
+        for t in &mut tones[at..at + 40] {
             *t = !*t;
         }
         let mut f = Framer::new();
@@ -506,6 +531,126 @@ mod tests {
         }
         assert_eq!(read.len(), 0);
         assert_eq!(f.refused(), 1);
+        assert_eq!(f.repaired(), 0);
+    }
+
+    /// A fade over twelve on-air bits is the shape the 16 by 7 interleaver
+    /// exists to make: scattered single errors, which the parity bytes take
+    /// back. The same burst before the code was voted on was counted in
+    /// `refused` and dropped.
+    #[test]
+    fn a_fade_of_twelve_bits_is_repaired_and_reads_the_same_unit() {
+        for at in 0..100 {
+            let mut tones = encode_tones(0x01, 0x80, 0x1234, 0x00, 3);
+            let start = tones.len() - 4 * 8 - BLOCK_BITS + at;
+            for t in &mut tones[start..start + 12] {
+                *t = !*t;
+            }
+            let mut f = Framer::new();
+            let mut read = Vec::new();
+            for t in tones {
+                read.extend(f.push(!t));
+            }
+            assert_eq!(read.len(), 1, "a fade at bit {at}");
+            let m = parse(&read[0]).expect("a burst");
+            assert_eq!(m.unit, 0x1234, "a fade at bit {at}");
+            assert_eq!(m.operation, Operation::PttIdPre, "a fade at bit {at}");
+            assert_eq!(f.repaired(), 1, "a fade at bit {at}");
+            assert_eq!(f.refused(), 0, "a fade at bit {at}");
+        }
+    }
+
+    /// The framer's order: the CRC first, and the code only where it
+    /// failed. Voting on a block that arrived whole can only break it, and
+    /// three wrong bits that all landed in the parity bytes is such a
+    /// block: correcting every block regardless reads 224258 of the 227920
+    /// triples where this reads 224566.
+    fn read_block(air: &[bool]) -> Option<Message> {
+        let mut full = deinterleave(air)?;
+        if let Some(m) = parse(&full[..INFO_BYTES]) {
+            return Some(m);
+        }
+        correct(&mut full);
+        parse(&full[..INFO_BYTES])
+    }
+
+    /// How much the code is worth, counted over every error pattern of one,
+    /// two and three wrong on-air bits in a block. None of the repaired
+    /// blocks came back as a different radio: a vote that lands wrong fails
+    /// the CRC rather than inventing a unit id.
+    #[test]
+    fn every_one_and_two_bit_error_is_repaired_and_224566_of_227920_triples() {
+        let clean = air_bits(&encode_block(0x01, 0x80, 0x1234, 0x00));
+        let (mut one, mut two, mut three, mut wrong) = (0, 0, 0, 0);
+        for a in 0..BLOCK_BITS {
+            let mut flip = |at: &[usize]| {
+                let mut bad = clean.clone();
+                for &k in at {
+                    bad[k] = !bad[k];
+                }
+                match read_block(&bad) {
+                    Some(m) if m.unit == 0x1234 && m.op == 0x01 && m.arg == 0x80 => 1,
+                    Some(_) => {
+                        wrong += 1;
+                        0
+                    }
+                    None => 0,
+                }
+            };
+            one += flip(&[a]);
+            for b in a + 1..BLOCK_BITS {
+                two += flip(&[a, b]);
+                for c in b + 1..BLOCK_BITS {
+                    three += flip(&[a, b, c]);
+                }
+            }
+        }
+        assert_eq!(one, 112, "one wrong bit");
+        assert_eq!(two, 6216, "two wrong bits");
+        assert_eq!(three, 224_566, "three wrong bits, of 227920");
+        assert_eq!(wrong, 0, "a repair reported another radio");
+    }
+
+    /// A clean block is left alone: the votes never carry on a burst that
+    /// arrived whole.
+    #[test]
+    fn a_clean_block_is_not_corrected() {
+        for (op, arg, unit) in [(0x01u8, 0x80u8, 0x1234u16), (0x63, 0x00, 0xABCD)] {
+            let mut full =
+                deinterleave(&air_bits(&encode_block(op, arg, unit, 0x00))).expect("112 bits");
+            let before = full;
+            assert_eq!(correct(&mut full), 0);
+            assert_eq!(full, before);
+        }
+    }
+
+    /// What correcting costs: of 200000 random blocks handed straight to the
+    /// parser, three passed the CRC by luck, and eight did once the code was
+    /// allowed to vote first. Five more false bursts in 200000 blocks that
+    /// framed, which is why the sync word is what keeps noise out and not
+    /// the CRC.
+    #[test]
+    fn correction_turns_five_more_random_blocks_in_200000_into_false_bursts() {
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut raw, mut voted) = (0, 0);
+        for _ in 0..200_000 {
+            let bits: Vec<bool> = (0..BLOCK_BITS).map(|_| next() & 1 != 0).collect();
+            let full = deinterleave(&bits).expect("112 bits");
+            if parse(&full[..INFO_BYTES]).is_some() {
+                raw += 1;
+            }
+            if read_block(&bits).is_some() {
+                voted += 1;
+            }
+        }
+        assert_eq!(raw, 3);
+        assert_eq!(voted, 8);
     }
 
     /// Random tones are not bursts. The sync word allows five wrong bits, so
@@ -526,5 +671,6 @@ mod tests {
             read.extend(f.push(rng()));
         }
         assert_eq!(read.len(), 0, "noise made {} bursts", read.len());
+        assert_eq!(f.repaired(), 0, "the code voted a burst out of noise");
     }
 }

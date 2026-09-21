@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- MDC-1200 bursts damaged in the air are repaired from the parity the radio sent.
 - Distress and emergency alerts on a map row, ahead of whatever else it says.
 - Open Drone ID aircraft on the map, gathered from the separate adverts that
   carry a drone's identity, position and height.
