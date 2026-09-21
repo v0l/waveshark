@@ -72,7 +72,7 @@ impl AeroNode {
             // All replaced at negotiation, when the real rate is known.
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(WORK_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
-            upmix: Mixer::new(-rate.baud() * CARRIER_RATIO, WORK_HZ),
+            upmix: Mixer::new(rate.baud() * CARRIER_RATIO, WORK_HZ),
             msk: MskDemod::new(WORK_HZ, config(rate)),
             framer: aero::Framer::new(rate),
             assembler: aero::Assembler::new(),
@@ -118,7 +118,7 @@ impl Simple for AeroNode {
         let work = rate / factor as f64;
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.upmix = Mixer::new(-self.rate.baud() * CARRIER_RATIO, work);
+        self.upmix = Mixer::new(self.rate.baud() * CARRIER_RATIO, work);
         self.msk = MskDemod::new(work, config(self.rate));
         self.framer.reset();
         self.assembler.reset();
@@ -300,6 +300,71 @@ mod tests {
         let who = d.subject.as_ref().expect("the aircraft");
         assert_eq!(who.id.to_string(), "EI-DEO");
         assert_eq!(who.name.as_deref(), Some("EIN123"));
+    }
+
+    /// A frame keyed on the channel and read back off it: the whole node,
+    /// from complex baseband through the audio carrier the demodulator wants
+    /// to the signal units, which is what the recording of a P channel would
+    /// otherwise be the only evidence of.
+    ///
+    /// Six units a frame, five of them the halves of one satellite ACARS
+    /// block, so the assembled message is the sixth row.
+    fn a_keyed_frame(rate: aero::Rate) -> (Vec<Vec<u8>>, u64, u64) {
+        let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
+        let mut user: Vec<u8> = vec![0xFF, 0xFF, 0x01];
+        user.extend(block.iter().copied());
+        let rest = user.len() - 2;
+        let follow = rest.div_ceil(8) as u8;
+        let last = rest - (follow as usize - 1) * 8;
+        let mut sus: Vec<[u8; aero::SU_BYTES]> = vec![aero::su_with_crc(&[
+            0x71,
+            0x40,
+            0x62,
+            0x1A,
+            0x2A,
+            0x35,
+            follow,
+            (last as u8) << 4,
+            user[0],
+            user[1],
+        ])];
+        for k in 0..follow as usize {
+            let from = 2 + k * 8;
+            let take = if k + 1 == follow as usize { last } else { 8 };
+            let mut ssu = vec![0xC0 | (follow - k as u8), 0x35];
+            ssu.extend_from_slice(&user[from..from + take]);
+            ssu.resize(10, 0);
+            sus.push(aero::su_with_crc(&ssu));
+        }
+        while sus.len() < 6 {
+            sus.push(aero::su_with_crc(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        }
+
+        let keyed = aero::encode_frame(rate, 0x1234, &sus);
+        let mut bits: Vec<bool> = vec![false; 32];
+        bits.extend(keyed.iter().map(|b| *b == 1));
+        bits.extend(std::iter::repeat_n(false, 32));
+        let iq = dsp::msk::modulate(&bits, FEED_HZ, config(rate), 0.0, 0.5);
+
+        let mut n = AeroNode::new(DEFAULT_HZ, rate);
+        let got = read(&mut n, FEED_HZ, &iq);
+        (got, n.units(), n.messages())
+    }
+
+    #[test]
+    fn a_frame_keyed_on_the_channel_is_read_back() {
+        for rate in [aero::Rate::P600, aero::Rate::P1200] {
+            let (rows, units, messages) = a_keyed_frame(rate);
+            assert_eq!(units, 6, "{rate:?}: signal units whose CRC agreed");
+            assert_eq!(messages, 1, "{rate:?}: messages assembled");
+            assert_eq!(rows.len(), 7, "{rate:?}: six units and the message they carry");
+            let who = aero_read(rows.last().expect("the message"))
+                .expect("a row")
+                .subject
+                .expect("the aircraft");
+            assert_eq!(who.id.to_string(), "EI-DEO");
+            assert_eq!(who.name.as_deref(), Some("EIN123"));
+        }
     }
 
     /// Ten minutes of noise on the channel, and nothing reaches the bus:

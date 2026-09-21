@@ -24,11 +24,13 @@
 //! decoder is the whole receiver, on its own recording, in
 //! `crates/decode/tests/acars_capture.rs`.
 //!
-//! There is no modulator here yet. A first attempt keyed the two tones with a
-//! continuous phase and was read by nothing, which is a modulator that is
-//! wrong rather than a transmitter, so it is left out until there is a
-//! receiver to check it against.
+//! [`modulate`] keys the same waveform. Turning the phase a quarter turn a
+//! bit is only half of it: the decision above is taken against an axis that
+//! turns with the symbol clock, so what comes back is the running parity of
+//! the turns rather than their direction, and a keyer that wants its own bits
+//! read back precodes for that.
 
+use common::C32;
 use std::f64::consts::TAU;
 
 /// A waveform: how fast, and where its two tones sit.
@@ -161,6 +163,35 @@ impl MskDemod {
     }
 }
 
+/// Key bits as MSK at `offset_hz` in a complex baseband, which is what a
+/// transmit chain hands a modulator and what a receiver's channel looks like
+/// before it is put on an audio carrier.
+///
+/// The bits handed in are the bits [`MskDemod`] reads back, so the phase turns
+/// where two neighbouring bits differ and runs straight on where they agree.
+pub fn modulate(
+    bits: &[bool],
+    rate: f64,
+    cfg: MskConfig,
+    offset_hz: f64,
+    amplitude: f32,
+) -> Vec<C32> {
+    let sps = rate / cfg.baud;
+    let n = (bits.len() as f64 * sps) as usize;
+    let quarter = TAU / 4.0;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = i as f64 / sps;
+        let k = (x as usize).min(bits.len() - 1);
+        let turn = if bits.get(k + 1).copied().unwrap_or(bits[k]) == bits[k] { 1.0 } else { -1.0 };
+        let mark = if bits[k] { 0.0 } else { TAU / 2.0 };
+        let phase = quarter * k as f64 + mark + turn * quarter * (x - k as f64);
+        let carrier = TAU * offset_hz * i as f64 / rate;
+        out.push(C32::from_polar(amplitude, (phase + carrier) as f32));
+    }
+    out
+}
+
 /// Bits of a byte stream, least significant bit first, which is the order
 /// every MSK protocol here sends them in.
 pub fn bits_of(bytes: &[u8]) -> Vec<bool> {
@@ -183,6 +214,110 @@ mod tests {
     #[test]
     fn bytes_become_bits_least_significant_first() {
         assert_eq!(bits_of(&[0x16]), [false, true, true, false, true, false, false, false]);
+    }
+
+    fn stream(n: usize, seed: u64) -> Vec<bool> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (s >> 33) & 1 != 0
+            })
+            .collect()
+    }
+
+    fn round_trip(rate: f64, cfg: MskConfig, bits: &[bool]) -> Vec<bool> {
+        let iq = modulate(bits, rate, cfg, cfg.carrier_hz, 0.5);
+        let audio: Vec<f32> = iq.iter().map(|s| s.re).collect();
+        let mut got = Vec::new();
+        MskDemod::new(rate, cfg).process(&audio, &mut got);
+        got
+    }
+
+    /// Five thousand bits keyed and read back with nothing wrong, at every
+    /// rate a protocol here keys: ACARS at 2400 baud and the two Aero P
+    /// channels at 1200 and 600. Nothing is skipped at the front, so the
+    /// first bit is read as well as the five thousandth.
+    #[test]
+    fn what_is_keyed_is_what_is_read_back() {
+        for (rate, baud) in
+            [(12_500.0, 2400.0), (38_400.0, 1200.0), (38_400.0, 600.0), (48_000.0, 2400.0)]
+        {
+            let cfg = MskConfig { baud, carrier_hz: baud * 0.75 };
+            let bits = stream(5000, 11);
+            let got = round_trip(rate, cfg, &bits);
+            assert_eq!(got.len(), 4999, "{baud} baud at {rate}");
+            let wrong = (0..got.len()).filter(|&i| got[i] != bits[i]).count();
+            assert_eq!(wrong, 0, "{wrong} bits wrong of 4999 at {baud} baud on {rate}");
+        }
+    }
+
+    /// A byte stream goes out and comes back as itself, which is the form a
+    /// protocol hands its frame over in.
+    #[test]
+    fn a_frame_of_bytes_comes_back_byte_for_byte() {
+        let cfg = MskConfig::ACARS;
+        let bytes = b"\x16\x16\x16\x02QU WAVESHARK\x7f";
+        let got = round_trip(12_500.0, cfg, &bits_of(bytes));
+        let read: Vec<u8> = got
+            .chunks_exact(8)
+            .map(|c| c.iter().enumerate().fold(0u8, |b, (i, &x)| b | u8::from(x) << i))
+            .collect();
+        assert_eq!(read.len(), 16);
+        assert_eq!(&read[..], &bytes[..16]);
+    }
+
+    /// The two tones are a quarter of the bit rate either side of the
+    /// carrier and the envelope never moves, which is what makes it MSK
+    /// rather than a keyer the demodulator happens to like: a run of ones
+    /// turns the phase one way and a run of alternating bits turns it the
+    /// other, both by a quarter turn a bit.
+    #[test]
+    fn a_run_of_bits_keys_one_of_two_tones() {
+        let cfg = MskConfig::ACARS;
+        let rate = 12_500.0;
+        let sps = rate / cfg.baud;
+        for (bits, want) in [
+            (vec![true; 64], cfg.carrier_hz + cfg.baud / 4.0),
+            (vec![false; 64], cfg.carrier_hz + cfg.baud / 4.0),
+            ((0..64).map(|i| i % 2 == 0).collect::<Vec<_>>(), cfg.carrier_hz - cfg.baud / 4.0),
+        ] {
+            let iq = modulate(&bits, rate, cfg, cfg.carrier_hz, 0.5);
+            assert_eq!(iq.len(), (64.0 * sps) as usize);
+            for s in &iq {
+                assert!((s.norm() - 0.5).abs() < 1e-6, "the envelope moved: {}", s.norm());
+            }
+            let run = &iq[..iq.len() - sps as usize];
+            let turned: f64 = run.windows(2).map(|w| (w[1] * w[0].conj()).arg() as f64).sum();
+            let hz = turned / TAU * rate / (run.len() - 1) as f64;
+            assert!((hz - want).abs() < 1.0, "keyed {hz:.1} Hz where {want:.1} was wanted");
+        }
+    }
+
+    /// A channel put on the audio carrier the wrong way round comes back as
+    /// every second bit flipped rather than as an inversion, which no sync
+    /// word survives: the two tones swap, and what this reads is the running
+    /// parity of the turns rather than their direction. So a node taking the
+    /// real part of a shifted channel shifts it up, not down.
+    #[test]
+    fn a_mirrored_channel_comes_back_with_every_second_bit_flipped() {
+        let rate = 9_600.0;
+        let cfg = MskConfig { baud: 1200.0, carrier_hz: 900.0 };
+        let bits = stream(2000, 3);
+        let base = modulate(&bits, rate, cfg, 0.0, 0.5);
+        for (shift, wanted_same, wanted_twisted) in
+            [(cfg.carrier_hz, 1999, 1000), (-cfg.carrier_hz, 1000, 1999)]
+        {
+            let mut shifted = Vec::new();
+            crate::Mixer::new(shift, rate).process(&base, &mut shifted);
+            let audio: Vec<f32> = shifted.iter().map(|s| s.re).collect();
+            let mut got = Vec::new();
+            MskDemod::new(rate, cfg).process(&audio, &mut got);
+            assert_eq!(got.len(), 1999);
+            let same = (0..1999).filter(|&i| got[i] == bits[i]).count();
+            let twisted = (0..1999).filter(|&i| got[i] == (bits[i] ^ (i % 2 == 1))).count();
+            assert_eq!((same, twisted), (wanted_same, wanted_twisted), "shifted by {shift} Hz");
+        }
     }
 
     /// The filter spans two bit periods, which is what an MSK symbol occupies

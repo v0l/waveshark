@@ -60,7 +60,7 @@ impl Aero {
             return Reading::default();
         };
         let mut msk = MskDemod::new(chan.rate_hz, decode::inmarsat::config(speed));
-        let mut upmix = dsp::Mixer::new(-decode::inmarsat::config(speed).carrier_hz, chan.rate_hz);
+        let mut upmix = dsp::Mixer::new(decode::inmarsat::config(speed).carrier_hz, chan.rate_hz);
         let mut framer = aero::Framer::new(speed);
         let (mut narrow, mut shifted, mut audio, mut bits, mut hard, mut frames) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -116,3 +116,47 @@ pub const FEED_HZ: f64 = 38_400.0;
 /// The audio rate the channel is read at: eight samples a bit at 1200,
 /// sixteen at 600.
 pub const WORK_HZ: f64 = 9_600.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame keyed on a P channel and found by the identifier, at both bit
+    /// rates: six channel assignments, so six rows, and the rate that was
+    /// keyed is the one that reads more.
+    #[test]
+    fn a_keyed_channel_reads_at_the_rate_it_was_keyed_at() {
+        for speed in [aero::Rate::P600, aero::Rate::P1200] {
+            let sus: Vec<[u8; aero::SU_BYTES]> = (0..6)
+                .map(|i| {
+                    aero::su_with_crc(&[0x34, 0x40, 0x62, 0x1A, 0x2A, 0x00, 0x11, 0x22, 0x33, i])
+                })
+                .collect();
+            let mut bits: Vec<bool> = vec![false; 32];
+            bits.extend(aero::encode_frame(speed, 0x1234, &sus).iter().map(|b| *b == 1));
+            bits.extend(std::iter::repeat_n(false, 32));
+            let iq: Vec<C32> =
+                dsp::msk::modulate(&bits, FEED_HZ, decode::inmarsat::config(speed), 0.0, 0.5);
+
+            let read = Aero.read(&iq, FEED_HZ, DEFAULT_HZ);
+            assert_eq!(read.count(), 6, "{speed:?}: the six units of the frame");
+            assert_eq!(read.center_hz, Some(DEFAULT_HZ));
+        }
+    }
+
+    /// A minute of noise on the channel and the identifier reads nothing.
+    #[test]
+    fn noise_reads_as_nothing() {
+        let mut s = 91u64;
+        let iq: Vec<C32> = (0..(FEED_HZ as usize * 60))
+            .map(|_| {
+                let mut next = || {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (s >> 33) as f32 / (1u64 << 30) as f32 - 1.0
+                };
+                C32::new(next(), next())
+            })
+            .collect();
+        assert_eq!(Aero.read(&iq, FEED_HZ, DEFAULT_HZ).count(), 0);
+    }
+}
