@@ -189,6 +189,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- Located transmitters drew a circle far smaller than the error, tighter the
+  longer the drive.
 - Home Assistant stopped publishing after the radio was restarted, and kept
   reconnecting without recovering.
 - rtl_tcp samples lost to a network stall now move the timebase on, instead of

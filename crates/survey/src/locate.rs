@@ -19,6 +19,12 @@
 //! it is the extent of the region the levels fit about as well as the best
 //! point does, and a long thin one is a drive that has not gone round the
 //! block yet.
+//!
+//! That region is measured against the places the receiver stood rather
+//! than the sightings it took, because fading along a drive is correlated
+//! over `DECORRELATION_M` and a hundred sightings off one road are not a
+//! hundred looks at the transmitter, and it is never tighter than the
+//! scatter of the levels buys at the range they were heard over.
 
 use crate::{MOVED_M, Sighting, metres};
 
@@ -27,9 +33,10 @@ use crate::{MOVED_M, Sighting, metres};
 pub struct Estimate {
     pub lat: f64,
     pub lon: f64,
-    /// How far from the point the levels fit nearly as well, in metres.
-    /// Read as "somewhere within this", not as a confidence interval with a
-    /// number on it.
+    /// How far from the point the levels fit nearly as well, in metres,
+    /// and never less than the scatter of those levels allows at the range
+    /// the drive worked at. Read as "somewhere within this", not as a
+    /// confidence interval with a number on it.
     pub radius_m: f64,
     /// How many positioned sightings with a level went into it.
     pub sightings: usize,
@@ -41,6 +48,14 @@ pub struct Estimate {
 
 /// Fewer positioned sightings than this and the fit is the sightings.
 pub const MIN_SIGHTINGS: usize = 4;
+
+/// The fit spends three parameters, two coordinates and the transmitter's
+/// own strength, so it needs this many independent places before anything
+/// is left over to say how well the levels agree.
+pub const MIN_PLACES: usize = FITTED + 1;
+
+/// Parameters the fit solves for: east, north and `P0`.
+const FITTED: usize = 3;
 
 /// The receiver has to have moved at least this far between its furthest
 /// two sightings, in metres, or every level was heard from one place and
@@ -77,6 +92,13 @@ const CHI2: f64 = 6.0;
 /// a drive whose fading happened to be small does not report a region
 /// smaller than fading allows.
 const NOISE_FLOOR_DB2: f64 = 4.0;
+
+/// How far apart two sightings have to be before their fading is a second
+/// look at the transmitter rather than the same one again. Measured off the
+/// residuals of the outdoor survey in `tests/locate_drive.rs`: their
+/// correlation is 0.79 within 25 m, falls through 1/e between 175 and 200 m
+/// and wanders about 0.1 to 0.2 beyond 350 m.
+const DECORRELATION_M: f64 = 200.0;
 
 /// The search: a coarse grid over the reach, then finer grids around the
 /// best cell, four times.
@@ -116,6 +138,30 @@ fn cost(points: &[Point], e: f64, n: f64) -> f64 {
     sum_sq / points.len() as f64
 }
 
+/// How many independent places the receiver stood: the number of cells of
+/// `DECORRELATION_M` the sightings fall in, never more than the sightings
+/// themselves and never fewer than one.
+fn independent(points: &[Point]) -> usize {
+    let mut cells: Vec<(i64, i64)> = points
+        .iter()
+        .map(|p| ((p.e / DECORRELATION_M).floor() as i64, (p.n / DECORRELATION_M).floor() as i64))
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells.len().max(1)
+}
+
+/// The least a level of this much scatter can pin a position to. A residual
+/// of `db` buys a distance ratio of `10^(db / 10n)` through the model, and
+/// the lever it acts on is how far the drive stood from the point, taken as
+/// the median of those distances.
+fn scatter_floor(points: &[Point], e: f64, n: f64, db: f64) -> f64 {
+    let mut d: Vec<f64> =
+        points.iter().map(|p| ((p.e - e).powi(2) + (p.n - n).powi(2)).sqrt()).collect();
+    d.sort_by(f64::total_cmp);
+    d[d.len() / 2] * (10f64.powf(db / (10.0 * EXPONENT)) - 1.0)
+}
+
 /// Where a device is, from its sightings, or None where they cannot say.
 pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
     let placed: Vec<(f64, f64, f64)> =
@@ -143,6 +189,10 @@ pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
     }
     let extent = ((hi_e - lo_e).powi(2) + (hi_n - lo_n).powi(2)).sqrt();
     if extent < MIN_SPREAD_M {
+        return None;
+    }
+    let places = independent(&points);
+    if places < MIN_PLACES {
         return None;
     }
 
@@ -173,8 +223,8 @@ pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
     // grid over the reach whose cost is within the tolerance of the best.
     // A drive along one road leaves a mirror image across it, and this is
     // what says so.
-    let noise = best_cost.max(NOISE_FLOOR_DB2);
-    let limit = best_cost + CHI2 * noise / points.len() as f64;
+    let noise = (best_cost * places as f64 / (places - FITTED) as f64).max(NOISE_FLOOR_DB2);
+    let limit = best_cost + CHI2 * noise / places as f64;
     let (ce, cn) = ((lo_e + hi_e) / 2.0, (lo_n + hi_n) / 2.0);
     let step = 2.0 * reach / REGION_GRID as f64;
     let mut radius: f64 = 0.0;
@@ -187,16 +237,19 @@ pub fn locate(sightings: &[Sighting]) -> Option<Estimate> {
             }
         }
     }
-    // Half a cell for what the grid cannot resolve, and never less than
-    // the distance two sightings are told apart by.
-    let radius = (radius + step / 2.0).max(MOVED_M);
+    // Half a cell for what the grid cannot resolve, never less than what
+    // the scatter of the levels allows, and never less than the distance
+    // two sightings are told apart by.
+    let residual_db = best_cost.sqrt();
+    let radius =
+        (radius + step / 2.0).max(scatter_floor(&points, be, bn, residual_db)).max(MOVED_M);
 
     Some(Estimate {
         lat: lat0 + bn / north_m,
         lon: lon0 + be / east_m,
         radius_m: radius,
         sightings: points.len(),
-        residual_db: best_cost.sqrt(),
+        residual_db,
     })
 }
 
@@ -217,11 +270,16 @@ mod tests {
     /// A sighting `e` metres east and `n` north of the origin, hearing a
     /// transmitter at `(te, tn)` through the model with a little fading.
     fn heard(e: f64, n: f64, te: f64, tn: f64, seed: &mut u32) -> Sighting {
+        fading(e, n, te, tn, seed, 6.0)
+    }
+
+    /// The same, with the fading spread across `span` decibels.
+    fn fading(e: f64, n: f64, te: f64, tn: f64, seed: &mut u32, span: f64) -> Sighting {
         let d = ((e - te).powi(2) + (n - tn).powi(2)).sqrt().max(1.0);
         *seed ^= *seed << 13;
         *seed ^= *seed >> 17;
         *seed ^= *seed << 5;
-        let fade = (*seed as f64 / u32::MAX as f64 - 0.5) * 6.0;
+        let fade = (*seed as f64 / u32::MAX as f64 - 0.5) * span;
         let east_m = 111_320.0 * LAT.to_radians().cos();
         Sighting {
             at_us: 0,
@@ -254,8 +312,66 @@ mod tests {
         let (lat, lon) = at(te, tn);
         let err = error_m(&est, lat, lon);
         assert!(err < 40.0, "{err} m off: {est:?}");
-        assert!(est.radius_m < 150.0, "{est:?}");
+        // 301 m: sixty-four sightings, but twelve places to stand in.
+        assert!((250.0..350.0).contains(&est.radius_m), "{est:?}");
         assert!(est.residual_db < 4.0, "{est:?}");
+    }
+
+    /// What the tolerance is divided by. A kilometre of road spoken from
+    /// every five metres is five places, one per decorrelation distance,
+    /// and a receiver that never moved is one however often it was heard.
+    #[test]
+    fn places_are_counted_by_the_decorrelation_distance() {
+        let road: Vec<Point> =
+            (0..200).map(|k| Point { e: f64::from(k) * 5.0, n: 0.0, db: -40.0 }).collect();
+        assert_eq!(independent(&road), 5);
+        let parked: Vec<Point> = (0..50).map(|_| Point { e: 10.0, n: -10.0, db: -40.0 }).collect();
+        assert_eq!(independent(&parked), 1);
+        let around: Vec<Point> = [(0.0, 0.0), (250.0, 0.0), (0.0, 250.0), (250.0, 250.0)]
+            .into_iter()
+            .map(|(e, n)| Point { e, n, db: -40.0 })
+            .collect();
+        assert_eq!(independent(&around), 4);
+    }
+
+    /// What the radius can never be smaller than. Ten decibels of scatter
+    /// buys a distance ratio of 10^(10/25) through the model, so from the
+    /// middle of a kilometre square, 707 m from each corner it was heard
+    /// at, nothing is pinned closer than 1069 m.
+    #[test]
+    fn the_scatter_floor_is_what_the_levels_buy_at_that_range() {
+        let points: Vec<Point> = [-500.0, 500.0, 500.0, -500.0]
+            .into_iter()
+            .zip([-500.0, -500.0, 500.0, 500.0])
+            .map(|(e, n)| Point { e, n, db: -40.0 })
+            .collect();
+        let floor = scatter_floor(&points, 0.0, 0.0, 10.0);
+        assert!((1060.0..1080.0).contains(&floor), "{floor} m");
+        assert!(scatter_floor(&points, 0.0, 0.0, 0.0) == 0.0);
+    }
+
+    /// Levels that wander further pin a transmitter less well: the same
+    /// drive with four times the fading reports 1329 m where it reported
+    /// 301 m.
+    #[test]
+    fn heavier_fading_is_a_larger_radius() {
+        let (te, tn) = (120.0, -40.0);
+        let block = |span: f64| {
+            let mut seed = 0x1234_5678;
+            let mut s = Vec::new();
+            for k in 0..16 {
+                let x = -200.0 + 25.0 * f64::from(k);
+                s.push(fading(x, -200.0, te, tn, &mut seed, span));
+                s.push(fading(200.0, x, te, tn, &mut seed, span));
+                s.push(fading(-x, 200.0, te, tn, &mut seed, span));
+                s.push(fading(-200.0, -x, te, tn, &mut seed, span));
+            }
+            locate(&s).expect("an estimate")
+        };
+        let (calm, rough) = (block(6.0), block(24.0));
+        assert!(rough.residual_db > 3.0 * calm.residual_db, "{calm:?} against {rough:?}");
+        assert!((250.0..350.0).contains(&calm.radius_m), "{calm:?}");
+        assert!((1250.0..1400.0).contains(&rough.radius_m), "{rough:?}");
     }
 
     /// A drive along one road cannot say which side the transmitter is on.
