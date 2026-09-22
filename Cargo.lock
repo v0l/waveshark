@@ -6783,6 +6783,8 @@ dependencies = [
  "rtlsdr",
  "serde_json",
  "sources",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

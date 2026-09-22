@@ -147,24 +147,33 @@ struct Args {
     #[arg(long, value_name = "RATIO", default_value_t = ModeSConfig::default().preamble_ratio)]
     preamble_ratio: f32,
 
-    /// Say nothing on standard output but what was asked for
+    /// Log only faults. The log goes to standard error, every five seconds
+    /// with what was read and who is connected; `RUST_LOG` sets it finer
     #[arg(long)]
     quiet: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let level = if args.quiet { "warn" } else { "info" };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .with_target(false)
+        .init();
 
     let ports = Ports {
-        avr: serve(&args, args.net_ro_port)?,
-        sbs: serve(&args, args.net_sbs_port)?,
-        beast: serve(&args, args.net_bo_port)?,
+        avr: serve(&args, "AVR", args.net_ro_port)?,
+        sbs: serve(&args, "SBS", args.net_sbs_port)?,
+        beast: serve(&args, "Beast", args.net_bo_port)?,
     };
-    if !args.quiet {
-        for (name, port) in [("AVR", &ports.avr), ("SBS", &ports.sbs), ("Beast", &ports.beast)] {
-            if let Some(p) = port {
-                println!("{name:<6} on {}", p.addr());
-            }
+    for (name, port) in [("AVR", &ports.avr), ("SBS", &ports.sbs), ("Beast", &ports.beast)] {
+        if let Some(p) = port {
+            tracing::info!("{name} on {}", p.addr());
         }
     }
 
@@ -175,9 +184,7 @@ fn main() -> Result<()> {
         .map(|port| {
             let rx = net::accept_frames(&args.net_bind_address, *port)
                 .with_context(|| format!("cannot serve port {port}"))?;
-            if !args.quiet {
-                println!("input  on {}:{port}", args.net_bind_address);
-            }
+            tracing::info!("input on {}:{port}", args.net_bind_address);
             Ok(rx)
         })
         .collect::<Result<_>>()?;
@@ -224,12 +231,12 @@ struct Ports {
     beast: Option<net::Fanout>,
 }
 
-fn serve(args: &Args, port: u16) -> Result<Option<net::Fanout>> {
+fn serve(args: &Args, name: &'static str, port: u16) -> Result<Option<net::Fanout>> {
     if port == 0 {
         return Ok(None);
     }
     Ok(Some(
-        net::Fanout::serve(&args.net_bind_address, port)
+        net::Fanout::serve(name, &args.net_bind_address, port)
             .with_context(|| format!("cannot serve port {port}"))?,
     ))
 }
@@ -261,9 +268,7 @@ fn listen(args: &Args, center_hz: u64, rate: f64) -> Result<Option<Fanned>> {
         },
     );
     let server = iqstream::Server::start(addr, cfg).context("cannot serve iqstream")?;
-    if !args.quiet {
-        println!("iqstream on {}", server.addr());
-    }
+    tracing::info!("iqstream on {}", server.addr());
     let tuner = server.default_stream().context("the server kept no tuner")?;
     Ok(Some(Fanned { server, tuner }))
 }
@@ -498,9 +503,13 @@ fn from_radio(
     }
     let rate = dev.rate().0 as f64;
     let center = dev.center().0;
-    if !args.quiet {
-        println!("{} at {:.4} MHz, {:.3} MS/s", dev.info().label, center as f64 / 1e6, rate / 1e6);
-    }
+    tracing::info!(
+        "{} at {:.4} MHz, {:.3} MS/s, preamble gate {}",
+        dev.info().label,
+        center as f64 / 1e6,
+        rate / 1e6,
+        args.preamble_ratio
+    );
     if (center as i64 - args.freq as i64).abs() > 1_000_000 {
         bail!("the radio is on {:.4} MHz, not 1090", center as f64 / 1e6);
     }
@@ -513,8 +522,7 @@ fn from_radio(
     reader.server = listen(args, center, rate)?;
     reader.track.here = station(args);
     reader.json = writer(args)?;
-    let began = std::time::Instant::now();
-    let mut said = began;
+    let mut stats = Stats::default();
     let mut heard = Silence::default();
     loop {
         let buf = match stream.read() {
@@ -553,17 +561,51 @@ fn from_radio(
                 reader.publish(&bytes, heard, &ports, chrono::Utc::now());
             }
         }
-        if !args.quiet && said.elapsed().as_secs() >= 10 {
-            said = std::time::Instant::now();
-            eprintln!(
-                "{} frames in {:.0} s, {:.1} a second, {} dropped, {} gaps",
-                reader.kept,
-                began.elapsed().as_secs_f64(),
-                reader.kept as f64 / began.elapsed().as_secs_f64(),
-                stream.dropped(),
-                reader.dropped
-            );
+        stats.tick(&reader, stream.dropped(), &ports);
+    }
+}
+
+/// What the receiver says about itself every five seconds.
+struct Stats {
+    said: std::time::Instant,
+    kept: u64,
+    dropped: u64,
+    gaps: u64,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self { said: std::time::Instant::now(), kept: 0, dropped: 0, gaps: 0 }
+    }
+}
+
+impl Stats {
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A line of what happened since the last one, once the interval is up.
+    fn tick(&mut self, reader: &Reader, dropped: u64, ports: &Ports) {
+        let since = self.said.elapsed();
+        if since < Self::EVERY {
+            return;
         }
+        let frames = reader.kept - self.kept;
+        let lost = dropped - self.dropped;
+        let gaps = reader.dropped - self.gaps;
+        let count = |p: &Option<net::Fanout>| p.as_ref().map_or(0, |p| p.clients());
+        let iq = reader.server.as_ref().map_or(0, |f| f.tuner.subscribers());
+        tracing::info!(
+            "{frames} frames, {:.0}/s, {} aircraft, {lost} samples dropped, {gaps} gaps; \
+             avr {} sbs {} beast {} iqstream {iq}",
+            frames as f64 / since.as_secs_f64(),
+            reader.book.len(),
+            count(&ports.avr),
+            count(&ports.sbs),
+            count(&ports.beast),
+        );
+        self.said = std::time::Instant::now();
+        self.kept = reader.kept;
+        self.dropped = dropped;
+        self.gaps = reader.dropped;
     }
 }
 
@@ -571,15 +613,14 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
     let src = sources::FileSource::open(path).with_context(|| format!("{}", path.display()))?;
     let buf = src.read_all().context("reading the capture")?;
     let rate = buf.rate.as_f64();
-    if !args.quiet {
-        println!(
-            "{} at {:.4} MHz, {:.3} MS/s, {:.1} s",
-            path.display(),
-            buf.center.as_f64() / 1e6,
-            rate / 1e6,
-            buf.samples.len() as f64 / rate
-        );
-    }
+    tracing::info!(
+        "{} at {:.4} MHz, {:.3} MS/s, {:.1} s, preamble gate {}",
+        path.display(),
+        buf.center.as_f64() / 1e6,
+        rate / 1e6,
+        buf.samples.len() as f64 / rate,
+        args.preamble_ratio
+    );
     let mut reader = Reader::new(rate, args.raw, args.parity_search.config(args.preamble_ratio));
     reader.server = listen(args, buf.center.0, rate)?;
     reader.track.here = station(args);
@@ -588,9 +629,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
         reader.block((n * 65_536) as u64, block, &ports);
     }
     reader.write_json(chrono::Utc::now(), true);
-    if !args.quiet {
-        println!("{} frames", reader.kept);
-    }
+    tracing::info!("{} frames, {} aircraft", reader.kept, reader.book.len());
     Ok(())
 }
 
@@ -641,7 +680,7 @@ mod tests {
         rate: f64,
         cfg: ModeSConfig,
     ) -> Vec<(u64, Vec<u8>)> {
-        let fanout = net::Fanout::serve("127.0.0.1", 0).expect("a port");
+        let fanout = net::Fanout::serve("test", "127.0.0.1", 0).expect("a port");
         let mut client = std::net::TcpStream::connect(fanout.addr()).expect("connect");
         client.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
         // The listener accepts on its own thread, so wait for it to hold the
@@ -734,8 +773,8 @@ mod tests {
             c
         };
         let (avr, beast) = (
-            net::Fanout::serve("127.0.0.1", 0).unwrap(),
-            net::Fanout::serve("127.0.0.1", 0).unwrap(),
+            net::Fanout::serve("test", "127.0.0.1", 0).unwrap(),
+            net::Fanout::serve("test", "127.0.0.1", 0).unwrap(),
         );
         let (mut avr_client, mut beast_client) = (read(&avr), read(&beast));
         std::thread::sleep(std::time::Duration::from_millis(100));

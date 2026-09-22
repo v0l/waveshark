@@ -18,6 +18,8 @@ clap.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 serde_json.workspace = true
 anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [[bin]]
 name = "wave1090"

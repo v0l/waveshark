@@ -35,8 +35,8 @@
 use crate::proto::{
     BitDepth, Codec, DATA_HEADER_LEN, DataHeader, Frame, MAX_DATAGRAM_PAYLOAD, MAX_FRAME_PAYLOAD,
     PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD, Setting, SettingValue, StreamDesc, Tlvs,
-    Transport, VERSION_MAJOR, decode_preamble, decode_punch, encode_inline, encode_preamble,
-    encode_probe, error_code, msg, now_ns, pack, put_streams, tag,
+    Transport, VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_punch, encode_inline,
+    encode_preamble, encode_probe, error_code, msg, now_ns, pack, put_streams, tag,
 };
 use common::{Error, Result};
 use std::collections::HashMap;
@@ -655,7 +655,7 @@ async fn accept_loop(
         let data = data.clone();
         tokio::spawn(async move {
             if let Err(e) = serve(sock, peer, shared, data).await {
-                tracing::debug!("iqstream: {peer} left: {e}");
+                tracing::debug!("iqstream: {peer}: {e}");
             }
         });
     }
@@ -697,8 +697,11 @@ async fn serve(
 
     let mut preamble = [0u8; PREAMBLE_LEN];
     rd.read_exact(&mut preamble).await.map_err(other)?;
-    let (major, _) = decode_preamble(&preamble)?;
+    let (major, minor) = decode_preamble(&preamble)?;
     wr.write_all(&encode_preamble()).await.map_err(other)?;
+    tracing::info!(
+        "iqstream: {peer} connected speaking {major}.{minor}, this server {VERSION_MAJOR}.{VERSION_MINOR}"
+    );
     if major != VERSION_MAJOR {
         let mut t = Tlvs::new();
         t.u16(tag::ERROR_CODE, error_code::UNSUPPORTED_VERSION)
@@ -714,7 +717,10 @@ async fn serve(
         let _ = wr.write_all(&Frame::new(msg::ERROR, &t).encode()).await;
         return Err(Error::other("no hello"));
     }
-    let who = hello.tlvs()?.str(tag::CLIENT_NAME).unwrap_or_else(|| peer.to_string());
+    let who = match hello.tlvs()?.str(tag::CLIENT_NAME) {
+        Some(name) => format!("{name} at {peer}"),
+        None => peer.to_string(),
+    };
 
     // Samples on their own queue, read second and never waited on, so a
     // reader taking them off the control connection cannot hold up a ping or
@@ -748,7 +754,10 @@ async fn serve(
     drop(out);
     drop(inline);
     let _ = writer.await;
-    tracing::info!("iqstream: {who} left");
+    match &result {
+        Ok(()) => tracing::info!("iqstream: {who} left"),
+        Err(e) => tracing::info!("iqstream: {who} left: {e}"),
+    }
     result
 }
 
@@ -1161,6 +1170,9 @@ async fn pump(
             }
         }
         let to = *dest.borrow_and_update();
+        if let Some(to) = to {
+            tracing::info!("iqstream: {} samples over UDP to {to}", stream.name());
+        }
         if let (Some(to), Some(token)) = (to, *token) {
             let mut probe = Vec::new();
             for size in PROBE_LADDER {

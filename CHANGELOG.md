@@ -174,6 +174,10 @@ the code is in the commit log.
 - Mode S demodulation a fifth cheaper on a Raspberry Pi 4 and a quarter on
   x86, and `wave1090 --preamble-ratio 1.75` spends that on 5% more frames,
   mostly the Comm-B and altitude replies.
+- `wave1090` logs a line every five seconds with its frame rate, aircraft,
+  dropped samples and who is connected, and every client's arrival on the
+  AVR, SBS, Beast and iqstream ports, with the iqstream version and
+  transport negotiated. `RUST_LOG` sets the level.
 - Mode S demodulation twice as fast on a Raspberry Pi 4, over three times on
   x86.
 - Stitched receivers open nothing across a tuner join, and a channel put on

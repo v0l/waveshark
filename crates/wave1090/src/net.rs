@@ -13,15 +13,17 @@ use std::sync::{Arc, Mutex};
 /// A port and everybody listening on it
 #[derive(Clone)]
 pub struct Fanout {
+    /// What the port carries, for the log: AVR, SBS, Beast.
+    name: &'static str,
     clients: Arc<Mutex<Vec<TcpStream>>>,
     addr: std::net::SocketAddr,
 }
 
 impl Fanout {
     /// Start listening, or return the error a caller should print and exit on.
-    pub fn serve(addr: &str, port: u16) -> std::io::Result<Self> {
+    pub fn serve(name: &'static str, addr: &str, port: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind((addr, port))?;
-        let out = Self { clients: Arc::default(), addr: listener.local_addr()? };
+        let out = Self { name, clients: Arc::default(), addr: listener.local_addr()? };
         let clients = out.clients.clone();
         std::thread::spawn(move || {
             for sock in listener.incoming().flatten() {
@@ -29,6 +31,10 @@ impl Fanout {
                 // Nothing is ever read from a client, and a write that would
                 // block is a client to drop rather than wait for.
                 let _ = sock.set_write_timeout(Some(std::time::Duration::from_millis(50)));
+                match sock.peer_addr() {
+                    Ok(peer) => tracing::info!("{name}: {peer} connected"),
+                    Err(_) => tracing::info!("{name}: a client connected and left"),
+                }
                 clients.lock().unwrap().push(sock);
             }
         });
@@ -40,10 +46,24 @@ impl Fanout {
         self.addr
     }
 
+    /// How many are reading it now.
+    pub fn clients(&self) -> usize {
+        self.clients.lock().unwrap().len()
+    }
+
     /// Write to every client, dropping the ones that fail.
     pub fn send(&self, bytes: &[u8]) {
         let mut clients = self.clients.lock().unwrap();
-        clients.retain_mut(|c| c.write_all(bytes).is_ok());
+        clients.retain_mut(|c| match c.write_all(bytes) {
+            Ok(()) => true,
+            Err(e) => {
+                match c.peer_addr() {
+                    Ok(peer) => tracing::info!("{}: {peer} dropped: {e}", self.name),
+                    Err(_) => tracing::info!("{}: a client dropped: {e}", self.name),
+                }
+                false
+            }
+        });
     }
 }
 
@@ -59,28 +79,35 @@ pub fn accept_frames(addr: &str, port: u16) -> std::io::Result<Receiver<Vec<u8>>
     std::thread::spawn(move || {
         for sock in listener.incoming().flatten() {
             let tx = tx.clone();
-            std::thread::spawn(move || read_frames(sock, tx));
+            std::thread::spawn(move || read_frames(sock, port, tx));
         }
     });
     Ok(rx)
 }
 
-fn read_frames(sock: TcpStream, tx: Sender<Vec<u8>>) {
+fn read_frames(sock: TcpStream, port: u16, tx: Sender<Vec<u8>>) {
     use std::io::Read;
     let mut sock = sock;
+    let peer = sock.peer_addr().map(|p| p.to_string()).unwrap_or_else(|_| "?".into());
+    tracing::info!("input {port}: {peer} connected");
     let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+    let mut frames = 0u64;
     loop {
         let n = match sock.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => {
+                tracing::info!("input {port}: {peer} left after {frames} frames");
+                return;
+            }
             Ok(n) => n,
         };
         buf.extend_from_slice(&chunk[..n]);
         while let Some((frame, used)) = next_frame(&buf) {
             buf.drain(..used);
-            if let Some(f) = frame
-                && tx.send(f).is_err()
-            {
-                return;
+            if let Some(f) = frame {
+                frames += 1;
+                if tx.send(f).is_err() {
+                    return;
+                }
             }
         }
         // A client sending nothing a frame recognises is a client to stop
