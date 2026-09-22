@@ -164,6 +164,294 @@ impl Beaming {
     }
 }
 
+/// Which way along the route a frame is travelling: out from the source to
+/// the destination, or back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Outbound,
+    Inbound,
+}
+
+impl Direction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Direction::Outbound => "outbound",
+            Direction::Inbound => "inbound",
+        }
+    }
+}
+
+/// The routing header a repeated frame carries between the destination and
+/// the command class: who is relaying it, which leg it is on, and whether
+/// it is an acknowledgement or a report that a leg failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub direction: Direction,
+    pub ack: bool,
+    pub error: bool,
+    /// Which repeater got no acknowledgement, on a routed error.
+    pub failed_hop: Option<u8>,
+    /// The leg being transmitted, counted from the source: 0 is source to
+    /// the first repeater, whichever way the frame is going.
+    pub hop: u8,
+    /// The relays, in the order the frame passes them going outbound.
+    pub repeaters: Vec<u8>,
+    /// The frame carries a routing header extension, which is the wakeup
+    /// type or the per repeater RSSI of a routed acknowledgement.
+    pub extended: bool,
+}
+
+impl Route {
+    /// The nodes the frame passes, in the order it passes them.
+    pub fn path(&self, source: u8, dest: u8) -> Vec<u8> {
+        let (first, last) = match self.direction {
+            Direction::Outbound => (source, dest),
+            Direction::Inbound => (dest, source),
+        };
+        let mut path = vec![first];
+        match self.direction {
+            Direction::Outbound => path.extend(self.repeaters.iter().copied()),
+            Direction::Inbound => path.extend(self.repeaters.iter().rev().copied()),
+        }
+        path.push(last);
+        path
+    }
+
+    /// The routing header as it goes on the air, for anything keying one.
+    pub fn header(&self) -> Vec<u8> {
+        let mut props1 = match self.direction {
+            Direction::Outbound => 0,
+            Direction::Inbound => 0b1,
+        };
+        if self.ack {
+            props1 |= 0b10;
+        }
+        if self.error {
+            props1 |= 0b100;
+        }
+        if self.extended {
+            props1 |= 0b1000;
+        }
+        if self.error {
+            props1 |= (self.failed_hop.unwrap_or(0) & 0xf) << 4;
+        }
+        let hop = match self.direction {
+            Direction::Outbound => self.hop,
+            Direction::Inbound => self.hop.wrapping_sub(1) & 0xf,
+        };
+        let mut h = vec![props1, ((self.repeaters.len() as u8) << 4) | (hop & 0xf)];
+        h.extend_from_slice(&self.repeaters);
+        h
+    }
+}
+
+/// Repeaters a routed frame may name, from G.9959 clause 8.1.3.
+const MAX_REPEATERS: usize = 4;
+
+/// Read the routing header that sits between the destination and the
+/// payload, and say where the payload starts.
+///
+/// Layout as `zwave-js` reads it in `RoutedZWaveMPDU`: a properties byte of
+/// direction, routed acknowledgement, routed error and an extension flag,
+/// with the failed hop in its high nibble on an error and the speed
+/// modified bit there otherwise; a second byte of repeater count and hop;
+/// then the repeater node ids. The three rates this reads are all two
+/// channel regions, which have no destination wakeup byte.
+fn read_route(after_dest: &[u8]) -> Option<(Route, bool, usize)> {
+    let (&props1, rest) = after_dest.split_first()?;
+    let (&props2, rest) = rest.split_first()?;
+    let direction = match props1 & 0b1 {
+        0 => Direction::Outbound,
+        _ => Direction::Inbound,
+    };
+    let error = props1 & 0b100 != 0;
+    let repeaters = (props2 >> 4) as usize;
+    if repeaters == 0 || repeaters > MAX_REPEATERS || rest.len() < repeaters {
+        return None;
+    }
+    let hop = props2 & 0xf;
+    let route = Route {
+        direction,
+        ack: props1 & 0b10 != 0,
+        error,
+        failed_hop: error.then_some(props1 >> 4),
+        hop: match direction {
+            Direction::Outbound => hop,
+            Direction::Inbound => (hop + 1) & 0xf,
+        },
+        repeaters: rest[..repeaters].to_vec(),
+        extended: props1 & 0b1000 != 0,
+    };
+    let mut at = 2 + repeaters;
+    if route.extended {
+        let &preamble = after_dest.get(at)?;
+        at += 1 + (preamble >> 4) as usize;
+        if at > after_dest.len() {
+            return None;
+        }
+    }
+    let speed_modified = !error && props1 & 0b10000 != 0;
+    Some((route, speed_modified, at))
+}
+
+/// What an explorer frame is for, from the low five bits of the byte after
+/// the destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorerCommand {
+    /// A frame flooded to find a route to a node.
+    Normal,
+    /// A node asking to be included in a network.
+    InclusionRequest,
+    /// The route a flooded frame took, sent back to whoever flooded it.
+    SearchResult,
+    Other(u8),
+}
+
+impl ExplorerCommand {
+    pub fn from_bits(v: u8) -> Self {
+        match v & 0x1f {
+            0x00 => ExplorerCommand::Normal,
+            0x01 => ExplorerCommand::InclusionRequest,
+            0x02 => ExplorerCommand::SearchResult,
+            other => ExplorerCommand::Other(other),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            ExplorerCommand::Normal => "normal".into(),
+            ExplorerCommand::InclusionRequest => "inclusion_request".into(),
+            ExplorerCommand::SearchResult => "search_result".into(),
+            ExplorerCommand::Other(v) => format!("command{v:#04x}"),
+        }
+    }
+}
+
+/// The route a search result reports back to the node that flooded for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchResult {
+    pub searching_node: u8,
+    /// The sequence number of the explorer frame being answered.
+    pub handle: u8,
+    pub ttl: u8,
+    pub repeaters: Vec<u8>,
+}
+
+/// The explorer header, which sits where a singlecast's payload would and
+/// carries the flood: how many more hops it may take and which nodes have
+/// already relayed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Explorer {
+    pub command: ExplorerCommand,
+    pub version: u8,
+    pub direction: Direction,
+    pub stop: bool,
+    pub source_routed: bool,
+    /// Hops left, counting down from four.
+    pub ttl: u8,
+    /// The nodes that have relayed it so far.
+    pub repeaters: Vec<u8>,
+    /// The home id of the node asking to be included, on an inclusion
+    /// request.
+    pub network_home_id: Option<u32>,
+    pub search: Option<SearchResult>,
+}
+
+/// The fixed part of the explorer header after the destination: four bytes
+/// of flood state and a four byte repeater list, whatever the repeater
+/// count says, as `zwave-js` reads it in `ExplorerZWaveMPDURaw`.
+const EXPLORER_HEADER: usize = 8;
+
+impl Explorer {
+    /// The nodes the frame has passed, in order.
+    pub fn path(&self, source: u8, dest: u8) -> Vec<u8> {
+        let mut path = vec![source];
+        path.extend(self.repeaters.iter().copied());
+        path.push(dest);
+        path
+    }
+
+    /// The header as it goes on the air, for anything keying one.
+    pub fn header(&self) -> Vec<u8> {
+        let command = match self.command {
+            ExplorerCommand::Normal => 0x00,
+            ExplorerCommand::InclusionRequest => 0x01,
+            ExplorerCommand::SearchResult => 0x02,
+            ExplorerCommand::Other(v) => v & 0x1f,
+        };
+        let flags = u8::from(self.stop) << 2
+            | u8::from(self.direction == Direction::Inbound) << 1
+            | u8::from(self.source_routed);
+        let mut h =
+            vec![self.version << 5 | command, flags, 0, self.ttl << 4 | self.repeaters.len() as u8];
+        h.extend_from_slice(&self.repeaters);
+        h.resize(EXPLORER_HEADER, 0);
+        if let Some(home) = self.network_home_id {
+            h.extend(home.to_be_bytes());
+        }
+        if let Some(s) = &self.search {
+            h.extend([s.searching_node, s.handle, s.ttl << 4 | s.repeaters.len() as u8]);
+            h.extend_from_slice(&s.repeaters);
+        }
+        h
+    }
+}
+
+/// Read the explorer header that sits between the destination and anything
+/// the flood is carrying, and say where that starts.
+fn read_explorer(after_dest: &[u8]) -> Option<(Explorer, usize)> {
+    if after_dest.len() < EXPLORER_HEADER {
+        return None;
+    }
+    let repeaters = (after_dest[3] & 0xf) as usize;
+    if repeaters > MAX_REPEATERS {
+        return None;
+    }
+    let command = ExplorerCommand::from_bits(after_dest[0]);
+    let mut at = EXPLORER_HEADER;
+    let mut network_home_id = None;
+    let mut search = None;
+    match command {
+        ExplorerCommand::InclusionRequest => {
+            let home = after_dest.get(at..at + 4)?;
+            network_home_id = Some(u32::from_be_bytes([home[0], home[1], home[2], home[3]]));
+            at += 4;
+        }
+        ExplorerCommand::SearchResult => {
+            let head = after_dest.get(at..at + 3)?;
+            let found = (head[2] & 0xf) as usize;
+            if found > MAX_REPEATERS {
+                return None;
+            }
+            search = Some(SearchResult {
+                searching_node: head[0],
+                handle: head[1],
+                ttl: head[2] >> 4,
+                repeaters: after_dest.get(at + 3..at + 3 + found)?.to_vec(),
+            });
+            at = after_dest.len();
+        }
+        _ => {}
+    }
+    Some((
+        Explorer {
+            command,
+            version: after_dest[0] >> 5,
+            direction: match after_dest[1] & 0b10 {
+                0 => Direction::Outbound,
+                _ => Direction::Inbound,
+            },
+            stop: after_dest[1] & 0b100 != 0,
+            source_routed: after_dest[1] & 0b1 != 0,
+            ttl: after_dest[3] >> 4,
+            repeaters: after_dest[4..4 + repeaters].to_vec(),
+            network_home_id,
+            search,
+        },
+        at,
+    ))
+}
+
 /// The node id every node accepts, so a frame addressed there is for the
 /// whole network.
 pub const NODE_BROADCAST: u8 = 0xff;
@@ -184,8 +472,13 @@ pub struct Frame {
     pub beaming: Beaming,
     pub sequence: u8,
     pub fcs: Fcs,
-    /// Everything after the destination and before the check: the command
-    /// class and its command, or ciphertext where the network is secured.
+    /// The repeaters a relayed frame passed through, where it was relayed.
+    pub route: Option<Route>,
+    /// The flood state, where the frame is an explorer frame.
+    pub explorer: Option<Explorer>,
+    /// Everything after the destination and any routing header, and before
+    /// the check: the command class and its command, or ciphertext where
+    /// the network is secured.
     pub payload: Vec<u8>,
     /// The frame as it was on the air, from the home id through the check.
     pub bytes: Vec<u8>,
@@ -237,6 +530,37 @@ impl Frame {
         ];
         if self.beaming != Beaming::None {
             f.push(("beam".into(), Value::Text(self.beaming.label().into())));
+        }
+        if let Some(r) = &self.route {
+            let path = r.path(self.source, self.dest);
+            let hops: Vec<String> = path.iter().map(|n| n.to_string()).collect();
+            f.push(("route".into(), Value::Text(hops.join(" > "))));
+            f.push(("repeaters".into(), Value::Int(r.repeaters.len() as i64)));
+            f.push(("direction".into(), Value::Text(r.direction.label().into())));
+            f.push(("hop".into(), Value::Int(i64::from(r.hop))));
+            if r.ack {
+                f.push(("routed_ack".into(), Value::Bool(true)));
+            }
+            if let Some(failed) = r.failed_hop {
+                f.push(("failed_hop".into(), Value::Int(i64::from(failed))));
+            }
+        }
+        if let Some(e) = &self.explorer {
+            f.push(("explorer".into(), Value::Text(e.command.label())));
+            f.push(("ttl".into(), Value::Int(i64::from(e.ttl))));
+            if !e.repeaters.is_empty() {
+                let path = e.path(self.source, self.dest);
+                let hops: Vec<String> = path.iter().map(|n| n.to_string()).collect();
+                f.push(("route".into(), Value::Text(hops.join(" > "))));
+                f.push(("repeaters".into(), Value::Int(e.repeaters.len() as i64)));
+            }
+            if let Some(home) = e.network_home_id {
+                f.push(("joining_home_id".into(), Value::Text(format!("{home:08x}"))));
+            }
+            if let Some(s) = &e.search {
+                f.push(("searching_node".into(), Value::Int(i64::from(s.searching_node))));
+                f.push(("found_repeaters".into(), Value::Int(s.repeaters.len() as i64)));
+            }
         }
         if let Some(cc) = self.command_class() {
             f.push(("command_class".into(), Value::Text(command_class(cc))));
@@ -307,19 +631,46 @@ pub fn parse(bytes: &[u8]) -> Option<Frame> {
         }
         let fc0 = frame[5];
         let fc1 = frame[6];
+        let header = HeaderType::from_bits(fc0);
+        let routed = fc0 & 0x80 != 0;
+        let body = &frame[9..len - fcs.bytes()];
+        let mut speed_modified = fc0 & 0x10 != 0;
+        let mut route = None;
+        let mut explorer = None;
+        let mut at = 0;
+        if header == HeaderType::Explorer {
+            match read_explorer(body) {
+                Some((e, offset)) => {
+                    explorer = Some(e);
+                    at = offset;
+                }
+                None => continue,
+            }
+        } else if routed || header == HeaderType::Routed {
+            match read_route(body) {
+                Some((r, speed, offset)) => {
+                    speed_modified = speed;
+                    route = Some(r);
+                    at = offset;
+                }
+                None => continue,
+            }
+        }
         return Some(Frame {
             home_id: u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]),
             source: frame[4],
             dest: frame[8],
-            header: HeaderType::from_bits(fc0),
-            speed_modified: fc0 & 0x10 != 0,
+            header,
+            speed_modified,
             low_power: fc0 & 0x20 != 0,
             ack_request: fc0 & 0x40 != 0,
-            routed: fc0 & 0x80 != 0,
+            routed,
             sequence: fc1 & 0xf,
             beaming: Beaming::from_bits(fc1 >> 5),
             fcs,
-            payload: frame[9..len - fcs.bytes()].to_vec(),
+            route,
+            explorer,
+            payload: body[at..].to_vec(),
             bytes: frame.to_vec(),
             start: 0,
         });
@@ -434,6 +785,51 @@ pub fn singlecast_control(sequence: u8, ack_request: bool) -> [u8; 2] {
     [0x1 | if ack_request { 0x40 } else { 0 }, sequence & 0xf]
 }
 
+/// The frame control bytes for a singlecast that is being relayed, which is
+/// the same with the routed bit set.
+pub fn routed_control(sequence: u8, ack_request: bool) -> [u8; 2] {
+    let [fc0, fc1] = singlecast_control(sequence, ack_request);
+    [fc0 | 0x80, fc1]
+}
+
+/// The frame control bytes for an explorer frame, which floods the network
+/// looking for a route.
+pub fn explorer_control(sequence: u8, ack_request: bool) -> [u8; 2] {
+    [0x5 | if ack_request { 0x40 } else { 0 }, sequence & 0xf]
+}
+
+/// A relayed frame as a repeater sends it: the routing header in front of
+/// the payload, and the rest as [`encode`] builds it.
+pub fn encode_routed(
+    fcs: Fcs,
+    home_id: u32,
+    source: u8,
+    dest: u8,
+    frame_control: [u8; 2],
+    route: &Route,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut body = route.header();
+    body.extend_from_slice(payload);
+    encode(fcs, home_id, source, dest, frame_control, &body)
+}
+
+/// An explorer frame as a node floods it: the explorer header in front of
+/// whatever the flood carries.
+pub fn encode_explorer(
+    fcs: Fcs,
+    home_id: u32,
+    source: u8,
+    dest: u8,
+    frame_control: [u8; 2],
+    explorer: &Explorer,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut body = explorer.header();
+    body.extend_from_slice(payload);
+    encode(fcs, home_id, source, dest, frame_control, &body)
+}
+
 /// What a frame off the bus says: which node spoke, and to which.
 ///
 /// The command class is the kind, so a row says what the frame was for
@@ -457,6 +853,9 @@ pub fn read(bytes: &[u8]) -> Option<Proto> {
 /// A frame's kind: the header, since the command class runs to hundreds and
 /// a row matches on a closed set
 fn frame_kind(f: &Frame) -> &'static str {
+    if f.route.is_some() {
+        return "routed";
+    }
     match f.header {
         HeaderType::Singlecast => "singlecast",
         HeaderType::Multicast => "multicast",
@@ -693,6 +1092,295 @@ mod tests {
         let second = decode(&bits, first.start + first.bits()).expect("the second frame");
         assert_eq!(second.source, 2);
         assert_eq!(second.header, HeaderType::Ack);
+    }
+
+    fn route_through(repeaters: &[u8], direction: Direction, hop: u8) -> Route {
+        Route {
+            direction,
+            ack: false,
+            error: false,
+            failed_hop: None,
+            hop,
+            repeaters: repeaters.to_vec(),
+            extended: false,
+        }
+    }
+
+    /// A frame relayed by two repeaters: the bytes after the destination
+    /// are the route, so the command class is the class and not a hop, and
+    /// the repeaters are named. Layout as `zwave-js`'s `RoutedZWaveMPDU`
+    /// reads it: a properties byte, then the repeater count in the high
+    /// nibble of the second with the hop in its low nibble.
+    #[test]
+    fn a_routed_frame_reports_its_repeaters_and_not_its_route_as_payload() {
+        let route = route_through(&[3, 5], Direction::Outbound, 1);
+        assert_eq!(route.header(), vec![0x00, 0x21, 0x03, 0x05], "two repeaters on hop 1");
+        let frame = encode_routed(
+            Fcs::Crc16,
+            0xd6b2_6208,
+            1,
+            7,
+            routed_control(3, true),
+            &route,
+            &[0x25, 0x01, 0xff],
+        );
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        assert!(f.routed);
+        assert_eq!(f.source, 1);
+        assert_eq!(f.dest, 7);
+        let r = f.route.as_ref().expect("a route");
+        assert_eq!(r.repeaters, vec![3, 5], "the relays, which map the network");
+        assert_eq!(r.direction, Direction::Outbound);
+        assert_eq!(r.hop, 1);
+        assert!(!r.ack);
+        assert_eq!(r.failed_hop, None);
+        assert_eq!(r.path(f.source, f.dest), vec![1, 3, 5, 7]);
+        assert_eq!(f.payload, vec![0x25, 0x01, 0xff], "the route is not payload");
+        assert_eq!(f.command_class(), Some(0x25), "0x03 is a repeater, not a class");
+        assert_eq!(command_class(f.command_class().unwrap()), "SWITCH_BINARY");
+        assert_eq!(read(&frame).expect("a decode").kind, "routed");
+        let fields = f.fields();
+        let field = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(field("route"), Some(Value::Text("1 > 3 > 5 > 7".into())));
+        assert_eq!(field("repeaters"), Some(Value::Int(2)));
+        assert_eq!(field("command_class"), Some(Value::Text("SWITCH_BINARY".into())));
+        assert_eq!(field("payload_len"), Some(Value::Int(3)));
+    }
+
+    /// Header type 8 carries the same routing header as a singlecast with
+    /// the routed bit set, so both are walked the same way.
+    #[test]
+    fn header_type_eight_carries_the_same_route() {
+        let route = route_through(&[9], Direction::Outbound, 0);
+        let frame =
+            encode_routed(Fcs::Crc16, 0x0161_f498, 2, 4, [0x08, 0x05], &route, &[0x31, 0x05]);
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        assert_eq!(f.header, HeaderType::Routed);
+        assert!(!f.routed, "the frame control bit is clear: the header type says it");
+        assert_eq!(f.route.as_ref().expect("a route").repeaters, vec![9]);
+        assert_eq!(f.payload, vec![0x31, 0x05]);
+        assert_eq!(f.command_class(), Some(0x31));
+    }
+
+    /// The hop counts from the source whichever way the frame is going, so
+    /// an inbound frame's field is one lower than the leg it is on, and the
+    /// path reads in the order the frame passes the nodes.
+    #[test]
+    fn an_inbound_route_counts_its_hops_from_the_source() {
+        let route = Route {
+            direction: Direction::Inbound,
+            ack: true,
+            error: false,
+            failed_hop: None,
+            hop: 1,
+            repeaters: vec![3, 5],
+            extended: false,
+        };
+        assert_eq!(route.header(), vec![0b11, 0x20, 0x03, 0x05], "hop 1 inbound goes out as 0");
+        let frame =
+            encode_routed(Fcs::Crc16, 0xd6b2_6208, 1, 7, routed_control(3, false), &route, &[]);
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        let r = f.route.as_ref().expect("a route");
+        assert_eq!(r.direction, Direction::Inbound);
+        assert_eq!(r.hop, 1, "normalised back to the leg from the source");
+        assert!(r.ack, "a routed acknowledgement");
+        assert_eq!(r.path(f.source, f.dest), vec![7, 5, 3, 1], "an ack travels the other way");
+        assert_eq!(f.payload.len(), 0);
+        assert_eq!(f.command_class(), None);
+    }
+
+    /// A routed error puts the failed hop where the speed modified bit sits
+    /// on every other routed frame.
+    #[test]
+    fn a_routed_error_names_the_hop_that_failed() {
+        let route = Route {
+            direction: Direction::Inbound,
+            ack: false,
+            error: true,
+            failed_hop: Some(1),
+            hop: 2,
+            repeaters: vec![3, 5, 8],
+            extended: false,
+        };
+        let frame =
+            encode_routed(Fcs::Crc16, 0xd6b2_6208, 1, 7, routed_control(4, false), &route, &[]);
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        let r = f.route.as_ref().expect("a route");
+        assert!(r.error);
+        assert_eq!(r.failed_hop, Some(1), "the link leaving repeater 1 is broken");
+        assert_eq!(r.repeaters, vec![3, 5, 8]);
+        assert!(!f.speed_modified, "the bit is the failed hop on an error");
+        let fields = f.fields();
+        assert!(fields.iter().any(|(n, v)| n == "failed_hop" && *v == Value::Int(1)));
+    }
+
+    /// A routing header extension is skipped by the length in its preamble
+    /// byte, so the payload behind one is still the payload. Four bytes of
+    /// per repeater RSSI on a routed acknowledgement is the common case.
+    #[test]
+    fn an_extended_routing_header_is_stepped_over() {
+        let route = Route {
+            direction: Direction::Inbound,
+            ack: true,
+            error: false,
+            failed_hop: None,
+            hop: 1,
+            repeaters: vec![3],
+            extended: true,
+        };
+        let mut body = route.header();
+        body.extend_from_slice(&[0x41, 0xa0, 0x7f, 0x7f, 0x7f]);
+        body.extend_from_slice(&[0x20, 0x03]);
+        let frame = encode(Fcs::Crc16, 0xd6b2_6208, 1, 7, routed_control(5, false), &body);
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        assert!(f.route.as_ref().expect("a route").extended);
+        assert_eq!(f.payload, vec![0x20, 0x03], "the extension is header, not payload");
+        assert_eq!(f.command_class(), Some(0x20));
+    }
+
+    /// The walk did not move for the frame everything else is: a singlecast
+    /// keeps its whole payload and carries no route.
+    #[test]
+    fn a_singlecast_is_read_exactly_as_it_was() {
+        let f = parse(&waving_z_switch_on()).expect("a frame");
+        assert_eq!(f.route, None);
+        assert_eq!(f.payload, vec![0x25, 0x01, 0xff]);
+        assert_eq!(f.command_class(), Some(0x25));
+        assert_eq!(read(&waving_z_switch_on()).expect("a decode").kind, "singlecast");
+    }
+
+    /// A routing header that does not fit, or that claims none or more than
+    /// the four repeaters G.9959 allows, is not a frame: the eight bit
+    /// check is weak enough that noise reaches here.
+    #[test]
+    fn a_route_that_does_not_fit_is_refused() {
+        let route = route_through(&[3, 5], Direction::Outbound, 1);
+        let good =
+            encode_routed(Fcs::Xor, 0xd6b2_6208, 1, 7, routed_control(3, true), &route, &[0x25]);
+        assert!(parse(&good).is_some(), "the frame it is a variation on");
+        assert_eq!(good[10], 0x21, "the repeater count and hop byte");
+        for (props2, why) in [
+            (0x51u8, "five repeaters, where four is the most"),
+            (0x01, "no repeaters at all"),
+            (0x41, "four repeaters, where the frame holds three bytes after them"),
+        ] {
+            let mut bad = good.clone();
+            bad[10] = props2;
+            bad.truncate(bad.len() - 1);
+            Fcs::Xor.append(&mut bad);
+            assert_eq!(parse(&bad), None, "{why}");
+        }
+    }
+
+    fn flood(command: ExplorerCommand, ttl: u8, repeaters: &[u8]) -> Explorer {
+        Explorer {
+            command,
+            version: 0,
+            direction: Direction::Outbound,
+            stop: false,
+            source_routed: false,
+            ttl,
+            repeaters: repeaters.to_vec(),
+            network_home_id: None,
+            search: None,
+        }
+    }
+
+    /// An explorer frame's eight byte header sits where a singlecast's
+    /// payload does, so the command class behind one is only found by
+    /// stepping over it. The repeater list is four bytes whatever the count
+    /// says, as `zwave-js` reads it in `ExplorerZWaveMPDURaw`.
+    #[test]
+    fn an_explorer_frame_carries_its_flood_state_before_its_payload() {
+        let e = flood(ExplorerCommand::Normal, 3, &[4]);
+        assert_eq!(e.header(), vec![0x00, 0x00, 0x00, 0x31, 0x04, 0x00, 0x00, 0x00]);
+        let frame = encode_explorer(
+            Fcs::Crc16,
+            0x0161_f498,
+            2,
+            NODE_BROADCAST,
+            explorer_control(7, false),
+            &e,
+            &[0x20, 0x01, 0xff],
+        );
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        assert_eq!(f.header, HeaderType::Explorer);
+        let x = f.explorer.as_ref().expect("a flood");
+        assert_eq!(x.command, ExplorerCommand::Normal);
+        assert_eq!(x.ttl, 3, "one of the four hops spent");
+        assert_eq!(x.repeaters, vec![4]);
+        assert_eq!(x.path(f.source, f.dest), vec![2, 4, NODE_BROADCAST]);
+        assert_eq!(f.payload, vec![0x20, 0x01, 0xff], "the header is not payload");
+        assert_eq!(f.command_class(), Some(0x20), "BASIC, not the version byte");
+        assert_eq!(read(&frame).expect("a decode").kind, "explorer");
+    }
+
+    /// An inclusion request carries the home id of the node asking to join
+    /// in front of its payload, and a search result carries the route it
+    /// found and no payload at all.
+    #[test]
+    fn the_two_other_explorer_commands_are_read_as_themselves() {
+        let mut join = flood(ExplorerCommand::InclusionRequest, 4, &[]);
+        join.network_home_id = Some(0xdead_beef);
+        let frame = encode_explorer(
+            Fcs::Crc16,
+            0x0161_f498,
+            0,
+            NODE_BROADCAST,
+            explorer_control(1, false),
+            &join,
+            &[0x01, 0x02],
+        );
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        let x = f.explorer.as_ref().expect("a flood");
+        assert_eq!(x.command, ExplorerCommand::InclusionRequest);
+        assert_eq!(x.network_home_id, Some(0xdead_beef));
+        assert_eq!(f.payload, vec![0x01, 0x02]);
+
+        let mut answer = flood(ExplorerCommand::SearchResult, 2, &[3]);
+        answer.search =
+            Some(SearchResult { searching_node: 9, handle: 7, ttl: 3, repeaters: vec![3, 5] });
+        let frame = encode_explorer(
+            Fcs::Crc16,
+            0x0161_f498,
+            5,
+            9,
+            explorer_control(2, false),
+            &answer,
+            &[],
+        );
+        let f = decode(&keyed(&frame, 25), 0).expect("a frame");
+        let s = f.explorer.as_ref().and_then(|x| x.search.clone()).expect("a result");
+        assert_eq!(s.searching_node, 9);
+        assert_eq!(s.handle, 7, "the explorer frame it answers");
+        assert_eq!(s.repeaters, vec![3, 5], "the route the flood found");
+        assert_eq!(f.payload.len(), 0, "a search result carries nothing else");
+        assert_eq!(f.command_class(), None);
+    }
+
+    /// A frame too short for the header it claims is not a frame.
+    #[test]
+    fn a_flood_that_does_not_fit_is_refused() {
+        let e = flood(ExplorerCommand::Normal, 3, &[4]);
+        let good = encode_explorer(
+            Fcs::Crc16,
+            0x0161_f498,
+            2,
+            NODE_BROADCAST,
+            explorer_control(7, false),
+            &e,
+            &[0x20],
+        );
+        assert!(parse(&good).is_some(), "the frame it is a variation on");
+        let mut five = good.clone();
+        five[12] = 0x35;
+        five.truncate(five.len() - 2);
+        Fcs::Crc16.append(&mut five);
+        assert_eq!(parse(&five), None, "five repeaters, where four is the most");
+        let mut short = good[..good.len() - 4].to_vec();
+        short[7] = short.len() as u8 + 2;
+        Fcs::Crc16.append(&mut short);
+        assert_eq!(parse(&short), None, "a frame ending inside the explorer header");
     }
 
     /// Ten million bits of noise, which is a hundred seconds at 100 kbit/s,

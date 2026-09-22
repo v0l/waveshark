@@ -331,6 +331,46 @@ mod tests {
         assert!(to.is_some_and(|t| t.ends_with(":1")), "{to:?}");
     }
 
+    /// A frame relayed by two repeaters, off the air and onto the bus: the
+    /// row names the relays and the class the command was, where before the
+    /// route was walked as payload and the class was a repeater node id.
+    #[test]
+    fn a_relayed_frame_becomes_a_row_naming_its_repeaters() {
+        let (rate, center) = (1_000_000.0, 868_420_000.0);
+        let route = zwave::Route {
+            direction: zwave::Direction::Outbound,
+            ack: false,
+            error: false,
+            failed_hop: None,
+            hop: 0,
+            repeaters: vec![3, 5],
+            extended: false,
+        };
+        let frame = zwave::encode_routed(
+            zwave::Fcs::Crc16,
+            0x0161_f498,
+            1,
+            7,
+            zwave::routed_control(6, true),
+            &route,
+            &[0x62, 0x01, 0x00],
+        );
+        let iq = burst(&frame, rate, 100_000.0, 29_000.0, false);
+        let mut node = ZWaveNode::new(center);
+        node.negotiate(&spec(rate, center)).unwrap();
+        let frames = run(&mut node, &iq, rate, center);
+        assert_eq!(frames.len(), 1, "{} frames of one transmission", frames.len());
+        let f = zwave::parse(&frames[0]).expect("a frame");
+        let r = f.route.as_ref().expect("a route");
+        assert_eq!(r.repeaters, vec![3, 5]);
+        assert_eq!(r.path(f.source, f.dest), vec![1, 3, 5, 7]);
+        assert_eq!(f.command_class(), Some(0x62), "DOOR_LOCK, not repeater 3");
+        assert_eq!(f.payload, vec![0x62, 0x01, 0x00]);
+        let d = read(&frames[0]).expect("a decode");
+        assert_eq!((d.id, d.kind), ("zwave", "routed"));
+        assert_eq!(d.parties(), (Some("0161f498:1"), Some("0161f498:7")));
+    }
+
     /// Ten seconds of noise produces nothing at any of the three rates.
     #[test]
     fn noise_produces_no_frames() {

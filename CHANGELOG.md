@@ -193,6 +193,8 @@ the code is in the commit log.
   reconnecting without recovering.
 - rtl_tcp samples lost to a network stall now move the timebase on, instead of
   being numbered as though the stream had been continuous.
+- Z-Wave routed and explorer frames named a repeater as their command class,
+  and never reported the route they took.
 - 802.15.4 frames from Thread and newer Zigbee stacks named wrong addresses,
   read with the older edition's rules.
 - SSTV pictures came back washed out, with black read as dark grey and white
