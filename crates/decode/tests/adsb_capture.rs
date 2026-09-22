@@ -70,7 +70,9 @@ fn decode(cfg: ModeSConfig) -> Option<Vec<String>> {
         block.extend(bytes.chunks_exact(2).map(|c| {
             common::C32::new((c[0] as f32 - 127.5) / 127.5, (c[1] as f32 - 127.5) / 127.5)
         }));
-        d.process_valid(&block, &mut frames, &|f: &ModeSFrame| book.borrow_mut().accept(&f.bytes));
+        d.process_valid(&block, &mut frames, &|f: &ModeSFrame| {
+            book.borrow_mut().accept(&f.bytes, f.preamble_ratio)
+        });
     }
     Some(
         frames
@@ -96,6 +98,37 @@ macro_rules! skip_without_fixture {
             }
         }
     };
+}
+
+/// Twenty seconds of noise names no aircraft.
+///
+/// The gate the preamble search runs at came down to 1.75 for the sake of the
+/// address-overlaid replies (#159), and the whole question that raises is
+/// whether a looser search invents traffic. Noise rather than a capture,
+/// because a capture can only show the aircraft that were there: here every
+/// frame reported would be one nobody transmitted.
+#[test]
+fn twenty_seconds_of_noise_reports_no_frame_and_no_aircraft() {
+    let rate = 2_400_000.0;
+    let mut d = ModeSDetector::new(rate, ModeSConfig::default());
+    let book = std::cell::RefCell::new(AddressBook::new());
+    let mut frames = Vec::new();
+    let mut block = vec![common::C32::new(0.0, 0.0); 1_200_000];
+    let mut state = 0x2545_f491u32;
+    for _ in 0..40 {
+        for s in block.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let n = |x: u32| (x % 2000) as f32 / 1000.0 - 1.0;
+            *s = common::C32::new(n(state) * 0.3, n(state >> 8) * 0.3);
+        }
+        d.process_valid(&block, &mut frames, &|f: &ModeSFrame| {
+            book.borrow_mut().accept(&f.bytes, f.preamble_ratio)
+        });
+    }
+    assert_eq!(frames.len(), 0, "48 million samples of noise read as {frames:?}");
+    assert_eq!(book.borrow().len(), 0, "noise named an aircraft");
 }
 
 #[test]
@@ -199,7 +232,10 @@ fn the_whole_read_costs_less_than_the_time_it_covers() {
     // 0.48 s and 0.40 s on a Cortex-X925, which pays almost nothing for the
     // saturating float to integer cast the change hoists out and so gains
     // least. The ceiling is real time, which the Pi meets with the parity
-    // search on at 3.24 s.
+    // search on at 3.24 s. The parity search's window edges stopped going
+    // through libm and the window sum was written out since, which is 0.50 s
+    // on x86 here against 0.63 s; the ten second radarpi file on that Pi
+    // went from 8.5 s to 6.7 s (#159).
     let t = std::time::Instant::now();
     skip_without_fixture!(decode(ModeSConfig::default()));
     let el = t.elapsed().as_secs_f64();

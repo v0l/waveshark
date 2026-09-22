@@ -131,12 +131,12 @@ impl Simple for ModeSNode {
     fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
         self.meter.feed(iq);
-        self.frames.clear();
-        let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
-        self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
-            book.borrow_mut().accept(&f.bytes)
+        let Self { det, book, frames, .. } = self;
+        frames.clear();
+        let book = std::cell::RefCell::new(book);
+        det.process_valid(iq, frames, &|f: &ModeSFrame| {
+            book.borrow_mut().accept(&f.bytes, f.preamble_ratio)
         });
-        self.book = book.into_inner();
 
         let center = c.inputs[0].spec.center;
         let out = o.packets_mut();

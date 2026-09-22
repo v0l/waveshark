@@ -26,7 +26,7 @@ fn main() {
         preamble_ratio: std::env::var("MODES_RATIO")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(3.0),
+            .unwrap_or(ModeSConfig::default().preamble_ratio),
         min_level: std::env::var("MODES_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.004),
         crc_framing: std::env::var("MODES_CRC").map(|v| v != "0").unwrap_or(true),
         phase_step: std::env::var("MODES_PHASE_STEP")
@@ -48,7 +48,7 @@ fn main() {
                 let hex: String = f.bytes.iter().map(|x| format!("{x:02x}")).collect();
                 eprintln!("cand {hex}");
             }
-            book.borrow_mut().accept(&f.bytes)
+            book.borrow_mut().accept(&f.bytes, f.preamble_ratio)
         });
     }
 

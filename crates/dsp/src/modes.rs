@@ -63,6 +63,15 @@ pub struct ModeSFrame {
     pub at_frac: f32,
     /// Level of the preamble pulses, referred to full scale.
     pub rssi_dbfs: f32,
+    /// How far the preamble's pulses stood above the slots that must be
+    /// quiet, or `None` for a window framed by its parity alone.
+    ///
+    /// The gate the search ran at is the floor of this, so what it says is
+    /// how much margin a frame had over it. A caller about to believe a
+    /// frame on nothing but its own word wants more margin than one checking
+    /// it against something it already knows, which is the difference
+    /// between reading a reply and inventing an aircraft (#159).
+    pub preamble_ratio: Option<f32>,
     /// Bits whose two halves were within a whisker of each other, and so were
     /// close to being called the other way. A frame that passes its CRC with
     /// several of these was lucky rather than clean.
@@ -73,6 +82,9 @@ pub struct ModeSFrame {
 pub struct ModeSConfig {
     /// How much stronger the preamble pulses must be than the quiet slots
     /// between them, as a ratio rather than in dB.
+    ///
+    /// Loosening it is how the address-overlaid replies are read, since no
+    /// CRC can frame those and the preamble is all they have.
     ///
     /// The quiet slots are the whole test. A carrier, a wideband burst or a
     /// patch of noise all put energy in the pulse windows; only a real Mode S
@@ -102,8 +114,24 @@ impl Default for ModeSConfig {
     fn default() -> Self {
         // Measured against a recorded band with dump1090 as the reference:
         // 3:1 finds 14 of its 40 frames, 2.5:1 finds 25, 2:1 finds 27, and
-        // below 2:1 nothing more appears. Looser costs only CPU, because the
-        // validator rejects what the CRC does not like, so 2:1 it is.
+        // below 2:1 nothing more appears on that four second file. On ten
+        // seconds of Dublin approach, where there is traffic to lose, it goes
+        // on paying: 1.75:1 reads 3926 frames to 2:1's 3725, the gain being
+        // mostly the replies that overlay their address, DF20 at 378 against
+        // 341 and DF21 at 364 against 341.
+        //
+        // It stays at 2:1 because of what 1.75:1 costs on the machine this
+        // runs on. The ten second file, after the parity search's edges,
+        // the dead downlink formats and the window sum were seen to: 1.18 s
+        // against 1.37 s on x86, and 6.7 s against 8.3 s on a Raspberry Pi 4,
+        // whose Cortex-A72 pays far more for each candidate the looser gate
+        // lets through to a decode. That Pi reads 1090 MHz at 105% of its
+        // one core on the release before this and 83% on this one; the
+        // looser gate would hand most of that back. It is a flag, and worth
+        // setting on anything faster: 1.5:1 reads 3990 for a third again of
+        // the time. What makes a loose gate safe at all is that a frame
+        // naming an aircraft nothing has proved is still held to 2:1 by
+        // `decode::adsb::AddressBook` (#159).
         Self { preamble_ratio: 2.0, min_level: 0.004, crc_framing: true, phase_step: 0.25 }
     }
 }
@@ -137,6 +165,15 @@ const DATA_US: f32 = 8.0;
 /// Longest frame, in microseconds of data.
 const LONG_BITS: usize = 112;
 const SHORT_BITS: usize = 56;
+
+/// What the preamble test measured where it passed.
+#[derive(Clone, Copy)]
+struct Preamble {
+    /// Mean energy in the four pulses.
+    high: f32,
+    /// That, over the mean of the eight slots that must be quiet.
+    over_quiet: f32,
+}
 
 /// Where a half-chip window sits, as sample offsets from the frame start.
 ///
@@ -173,6 +210,8 @@ pub struct ModeSDetector {
     /// rather than a loop. Kept across calls only to keep the allocation.
     sums: Vec<f64>,
     bits: Vec<bool>,
+    /// Where every half-chip window of the parity search opens and closes.
+    edges: Vec<u32>,
     /// Frames already reported, with where they started, so the overlap two
     /// calls scan twice does not report one frame twice.
     recent: Vec<(u64, Vec<u8>)>,
@@ -206,6 +245,7 @@ impl ModeSDetector {
             next_start: 0,
             sums: Vec::new(),
             bits: Vec::new(),
+            edges: Vec::new(),
             recent: Vec::new(),
         }
     }
@@ -248,6 +288,10 @@ impl ModeSDetector {
     /// is most of them. Handing the decision out to the caller keeps the CRC
     /// where it belongs, in the frame layer, while still letting it steer the
     /// search.
+    ///
+    /// A candidate reaches `valid` with `preamble_ratio` filled in, so a
+    /// validator can ask for more margin over the quiet slots before
+    /// believing a frame that names an aircraft nothing else has proved.
     pub fn process_valid(
         &mut self,
         iq: &[C32],
@@ -284,7 +328,7 @@ impl ModeSDetector {
                 i += 1;
                 continue;
             };
-            let start = self.peak(&mag, i, h);
+            let start = self.peak(&mag, i, h.high);
             let frac = self.refine(&mag, start);
             match self.frame_at(&mag, start, valid).filter(valid) {
                 Some(f) => {
@@ -356,8 +400,8 @@ impl ModeSDetector {
         let floor = median(mag);
         let sums = std::mem::take(&mut self.sums);
         let mean = |from: f64, to: f64| -> f32 {
-            let a = (from.ceil().max(0.0) as usize).min(mag.len());
-            let b = (to.ceil().max(1.0) as usize).min(mag.len());
+            let a = ceil_at(from.max(0.0)).min(mag.len());
+            let b = ceil_at(to.max(1.0)).min(mag.len());
             if a >= b {
                 return 0.0;
             }
@@ -371,25 +415,45 @@ impl ModeSDetector {
         let step = self.cfg.phase_step.clamp(0.05, spus);
         let offsets = (spus / step).ceil() as usize;
         let mut bits = std::mem::take(&mut self.bits);
+        let mut edges = std::mem::take(&mut self.edges);
         for o in 0..offsets {
             let offset = o as f64 * step;
             let count = ((mag.len() as f64 - offset) / spus).floor() as usize;
             let count = count.saturating_sub(1);
             bits.clear();
-            bits.reserve(count);
             // Which half holds the energy, without dividing either by its
             // width: the widths are positive, so cross-multiplying compares
             // the same two means.
             // No clamp: `count` stops a bit short of the buffer, so the last
             // window's closing index is inside `sums` by a whole bit.
-            let edge = |x: f64| x.ceil() as usize;
-            for k in 0..count {
+            //
+            // The edges first and the decisions after, rather than both in
+            // one loop: the closing edge of a bit is the opening edge of the
+            // next, and a loop that carries it has each decision waiting on
+            // the rounding before it. Laid out first they are three loads and
+            // a compare apiece with nothing between one bit and the next, and
+            // the ten second file reads in 1.47 s rather than 1.55 s on x86.
+            // Sized once and written through a slice rather than pushed,
+            // because a push can reallocate and so reloads the vector's
+            // pointer and length from the stack on every bit: `perf` on a
+            // Raspberry Pi 4 put a seventh of the whole read on those two
+            // instructions, and the slice takes it from 7.3 s to 6.7 s at
+            // the default gate. The compiler then vectorises the edges as
+            // well (#159).
+            edges.clear();
+            edges.resize(2 * count + 1, 0);
+            let (first, rest) = edges.split_first_mut().expect("at least one edge");
+            *first = ceil_at(offset) as u32;
+            for (k, pair) in rest.chunks_exact_mut(2).enumerate() {
                 let p = offset + k as f64 * spus;
-                let a = edge(p);
-                let m = edge(p + half);
-                let b = edge(p + spus);
+                pair[0] = ceil_at(p + half) as u32;
+                pair[1] = ceil_at(p + spus) as u32;
+            }
+            bits.resize(count, false);
+            for (bit, e) in bits.iter_mut().zip(edges.windows(3).step_by(2)) {
+                let (a, m, b) = (e[0] as usize, e[1] as usize, e[2] as usize);
                 let (wa, wb) = ((m - a) as f64, (b - m) as f64);
-                bits.push((sums[m] - sums[a]) * wb > (sums[b] - sums[m]) * wa);
+                *bit = (sums[m] - sums[a]) * wb > (sums[b] - sums[m]) * wa;
             }
             let mut long = crate::crcframe::SlidingCrc::new(CRC24_POLY, LONG_BITS);
             let mut short = crate::crcframe::SlidingCrc::new(CRC24_POLY, SHORT_BITS);
@@ -435,7 +499,9 @@ impl ModeSDetector {
             }
         }
         bits.clear();
+        edges.clear();
         self.bits = bits;
+        self.edges = edges;
         self.sums = sums;
     }
 
@@ -482,6 +548,7 @@ impl ModeSDetector {
             at_sample: 0,
             at_frac: 0.0,
             rssi_dbfs: dbfs(high),
+            preamble_ratio: None,
             weak_bits: weak,
         })
     }
@@ -497,13 +564,26 @@ impl ModeSDetector {
     /// even multiple of 2 MS/s: at 3.2 MS/s half a microsecond is 1.6 samples,
     /// a two sample window covers 0.625 us, and every window overlaps the next
     /// half-chip. The bits then come out of a smear of both halves.
+    ///
+    /// A window is one, two or three samples at any rate up to 6 MS/s, and
+    /// this is the innermost thing the preamble search does, so each of
+    /// those is written out rather than left to a loop whose length the
+    /// compiler cannot see: 1.47 s to 1.37 s on the ten second file, the
+    /// same sums in the same order (#159).
+    #[inline(always)]
     fn window(&self, mag: &[f32], start: usize, w: Win) -> f32 {
         let from = start + w.from as usize;
         let to = (start + w.to as usize).min(mag.len());
         if from >= to {
             return 0.0;
         }
-        mag[from..to].iter().sum::<f32>() / (to - from) as f32
+        let m = &mag[from..to];
+        match m.len() {
+            1 => m[0],
+            2 => (m[0] + m[1]) * 0.5,
+            3 => (m[0] + m[1] + m[2]) * (1.0 / 3.0),
+            n => m.iter().sum::<f32>() / n as f32,
+        }
     }
 
     /// Preamble strength at `start`, or `None` when this is not one.
@@ -514,7 +594,7 @@ impl ModeSDetector {
     /// second capture the weakest pulse settles 43% of the 9.95 M candidates
     /// for four window sums, the quiet sum another 53% before it is finished,
     /// and 3.4% reach a decode.
-    fn preamble(&self, mag: &[f32], start: usize) -> Option<f32> {
+    fn preamble(&self, mag: &[f32], start: usize) -> Option<Preamble> {
         let (mut sum, mut weakest) = (0.0f32, f32::INFINITY);
         for w in self.pulses {
             let w = self.window(mag, start, w);
@@ -539,7 +619,7 @@ impl ModeSDetector {
                 return None;
             }
         }
-        Some(high)
+        Some(Preamble { high, over_quiet: high * QUIET_US.len() as f32 / low })
     }
 
     /// Mean energy in the four preamble pulses at `start`, ungated
@@ -561,8 +641,8 @@ impl ModeSDetector {
         for i in from + 1..=limit.min(mag.len().saturating_sub(1)) {
             match self.preamble(mag, i) {
                 Some(h) => {
-                    if h > best {
-                        best = h;
+                    if h.high > best {
+                        best = h.high;
                         at = i;
                     }
                 }
@@ -620,7 +700,13 @@ impl ModeSDetector {
         let high = self.preamble(mag, start)?;
         let mut first: Option<ModeSFrame> = None;
         for phase in 0..Self::PHASES.len() {
-            let f = self.decode_at(mag, start, phase, high)?;
+            // A phase that reads no frame is not the end of the candidate:
+            // where the chip boundaries fall decides whether the first byte
+            // comes out as a downlink format at all, so the next phase is
+            // still worth trying.
+            let Some(f) = self.decode_at(mag, start, phase, high) else {
+                continue;
+            };
             if valid(&f) {
                 return Some(f);
             }
@@ -631,7 +717,14 @@ impl ModeSDetector {
         first
     }
 
-    fn decode_at(&self, mag: &[f32], start: usize, phase: usize, high: f32) -> Option<ModeSFrame> {
+    fn decode_at(
+        &self,
+        mag: &[f32],
+        start: usize,
+        phase: usize,
+        pre: Preamble,
+    ) -> Option<ModeSFrame> {
+        let high = pre.high;
         let (mut bytes, mut weak) = (Vec::with_capacity(LONG_BITS / 8), 0u16);
         let mut byte = 0u8;
         // The downlink format is in the first five bits and says how long the
@@ -648,7 +741,20 @@ impl ModeSDetector {
                 bytes.push(byte);
                 byte = 0;
                 if k == 7 {
-                    bits = if long_format(bytes[0] >> 3) { LONG_BITS } else { SHORT_BITS };
+                    // Nothing transmits the other twenty-two downlink
+                    // formats, so a candidate whose first five bits are one
+                    // of them is noise and the remaining 48 or 104 bits of
+                    // windows are work for a frame the caller will refuse
+                    // whatever they hold. Two thirds of the values are dead,
+                    // and dropping them pays for part of the looser preamble
+                    // gate: over ten seconds off radarpi at 1.75, 1.55 s to
+                    // read the file against 1.64 s, for the same 3926 frames
+                    // (#159).
+                    let df = bytes[0] >> 3;
+                    if !transmitted_format(df) {
+                        return None;
+                    }
+                    bits = if long_format(df) { LONG_BITS } else { SHORT_BITS };
                 }
             }
             if k + 1 == bits {
@@ -668,6 +774,7 @@ impl ModeSDetector {
             at_sample: 0,
             at_frac: 0.0,
             rssi_dbfs: dbfs(high),
+            preamble_ratio: Some(pre.over_quiet),
             weak_bits: weak,
         })
     }
@@ -704,6 +811,30 @@ fn median(mag: &[f32]) -> f32 {
 /// with DF24 (comm-D, the top three bits being 11) long as well.
 fn long_format(df: u8) -> bool {
     df >= 16
+}
+
+/// `x.ceil() as usize` for an `x` that cannot be negative.
+///
+/// `f64::ceil` is a call into libm on a baseline x86-64 build, because
+/// `roundsd` is SSE4.1 and a release binary has to start on a machine without
+/// it. The parity search asked for three of these a bit, 17% of the whole
+/// read by `perf`, where a truncating cast and a comparison are two
+/// instructions and give the same answer for a positive number. With the
+/// closing edge of a bit carried into the next as its opening edge, the ten
+/// second file went from 1.89 s to 1.64 s for the same 3926 frames (#159).
+#[inline(always)]
+fn ceil_at(x: f64) -> usize {
+    let t = x as usize;
+    t + (x > t as f64) as usize
+}
+
+/// Whether anything transmits this downlink format.
+///
+/// Ten of the thirty-two values are allocated (Annex 10 volume IV, and DF24 is
+/// the four values whose top two bits are set), and a window of noise lands on
+/// one of the other twenty-two two times in three.
+fn transmitted_format(df: u8) -> bool {
+    matches!(df, 0 | 4 | 5 | 11 | 16 | 17 | 18 | 19 | 20 | 21) || df >= 24
 }
 
 #[cfg(test)]
@@ -874,6 +1005,39 @@ mod tests {
         );
     }
 
+    /// A frame says how much margin its preamble had, and a parity-framed
+    /// window says it had none to measure.
+    ///
+    /// It is what lets the frame layer hold the frames that can name a new
+    /// aircraft to a tighter gate than the search ran at (#159). A clean
+    /// modulated frame in silence has no energy at all in the quiet slots,
+    /// so the ratio is infinite; with noise at a tenth of the pulses it is
+    /// finite and still far above any gate.
+    #[test]
+    fn a_frame_carries_how_far_its_preamble_stood_above_the_quiet_slots() {
+        let clean = demod(&modulate(&LONG, 2.4e6, 0.5, 20.0), 2.4e6);
+        assert_eq!(clean.len(), 1);
+        assert_eq!(clean[0].preamble_ratio, Some(f32::INFINITY), "silence between the pulses");
+
+        let mut iq = modulate(&LONG, 2.4e6, 0.5, 20.0);
+        noisy(&mut iq, 0.05);
+        let noisy_read = demod(&iq, 2.4e6);
+        assert_eq!(noisy_read.len(), 1);
+        let r = noisy_read[0].preamble_ratio.expect("a preamble the search found");
+        assert!((8.0..40.0).contains(&r), "ratio {r} off a frame 20 dB above the noise");
+
+        // Framed by its parity, with the preamble overwritten by another
+        // transmission, so there is nothing to measure.
+        let mut iq = modulate(&LONG, 2.4e6, 0.5, 20.0);
+        for s in iq.iter_mut().take((28.0 * 2.4) as usize).skip((19.0 * 2.4) as usize) {
+            *s = C32::new(0.5, 0.0);
+        }
+        let framed = demod(&iq, 2.4e6);
+        let by_parity: Vec<&ModeSFrame> = framed.iter().filter(|f| f.bytes == LONG).collect();
+        assert_eq!(by_parity.len(), 1, "the parity search lost the frame");
+        assert_eq!(by_parity[0].preamble_ratio, None, "no preamble was measured");
+    }
+
     #[test]
     fn a_steady_carrier_is_not_a_preamble() {
         // The quiet slots are what tells a preamble from anything else loud.
@@ -978,6 +1142,7 @@ mod tests {
             at_sample: 240_122,
             at_frac: 0.0,
             rssi_dbfs: -20.0,
+            preamble_ratio: Some(4.0),
             weak_bits: 0,
         };
         let other = ModeSFrame {

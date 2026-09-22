@@ -37,8 +37,8 @@ enum Search {
 }
 
 impl Search {
-    fn config(self) -> ModeSConfig {
-        let base = ModeSConfig::default();
+    fn config(self, preamble_ratio: f32) -> ModeSConfig {
+        let base = ModeSConfig { preamble_ratio, ..ModeSConfig::default() };
         match self {
             Search::Off => ModeSConfig { crc_framing: false, ..base },
             Search::Coarse => ModeSConfig { phase_step: 0.5, ..base },
@@ -139,6 +139,13 @@ struct Args {
     /// How often aircraft.json is rewritten, in seconds
     #[arg(long, value_name = "SECS", default_value_t = 1.0)]
     write_json_every: f64,
+
+    /// How far a preamble must stand above the quiet slots between its
+    /// pulses. Lower reads more of the replies that overlay their address on
+    /// the parity, and costs processor: 1.75 reads 5% more frames for 16% more
+    /// of a fast core and 23% of a Raspberry Pi 4's
+    #[arg(long, value_name = "RATIO", default_value_t = ModeSConfig::default().preamble_ratio)]
+    preamble_ratio: f32,
 
     /// Say nothing on standard output but what was asked for
     #[arg(long)]
@@ -318,9 +325,9 @@ struct Reader {
 }
 
 impl Reader {
-    fn new(rate: f64, raw: bool, search: Search) -> Self {
+    fn new(rate: f64, raw: bool, cfg: ModeSConfig) -> Self {
         Self {
-            det: ModeSDetector::new(rate, search.config()),
+            det: ModeSDetector::new(rate, cfg),
             book: AddressBook::new(),
             track: track::Tracker::default(),
             stats: stats::Stats::new(unix(chrono::Utc::now())),
@@ -362,12 +369,12 @@ impl Reader {
             fanned.tuner.push(&self.uc8);
             self.uc8.clear();
         }
-        self.frames.clear();
-        let book = std::cell::RefCell::new(std::mem::take(&mut self.book));
-        self.det.process_valid(iq, &mut self.frames, &|f: &ModeSFrame| {
-            book.borrow_mut().accept(&f.bytes)
+        let Self { det, book, frames, .. } = self;
+        frames.clear();
+        let book = std::cell::RefCell::new(book);
+        det.process_valid(iq, frames, &|f: &ModeSFrame| {
+            book.borrow_mut().accept(&f.bytes, f.preamble_ratio)
         });
-        self.book = book.into_inner();
 
         let now = chrono::Utc::now();
         // Taken out of the way, because publishing borrows the rest of the
@@ -502,7 +509,7 @@ fn from_radio(
     }
 
     let mut stream = dev.start_rx().context("the radio would not start")?;
-    let mut reader = Reader::new(rate, args.raw, args.parity_search);
+    let mut reader = Reader::new(rate, args.raw, args.parity_search.config(args.preamble_ratio));
     reader.server = listen(args, center, rate)?;
     reader.track.here = station(args);
     reader.json = writer(args)?;
@@ -573,7 +580,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
             buf.samples.len() as f64 / rate
         );
     }
-    let mut reader = Reader::new(rate, args.raw, args.parity_search);
+    let mut reader = Reader::new(rate, args.raw, args.parity_search.config(args.preamble_ratio));
     reader.server = listen(args, buf.center.0, rate)?;
     reader.track.here = station(args);
     reader.json = writer(args)?;
@@ -625,6 +632,15 @@ mod tests {
     /// Through the socket rather than around it, because a timestamp is only
     /// right if it survives the escaping as well as the arithmetic.
     fn beast_over_the_wire(blocks: &[(u64, Vec<common::C32>)], rate: f64) -> Vec<(u64, Vec<u8>)> {
+        beast_at(blocks, rate, ModeSConfig::default())
+    }
+
+    /// The same, with the detector set some other way.
+    fn beast_at(
+        blocks: &[(u64, Vec<common::C32>)],
+        rate: f64,
+        cfg: ModeSConfig,
+    ) -> Vec<(u64, Vec<u8>)> {
         let fanout = net::Fanout::serve("127.0.0.1", 0).expect("a port");
         let mut client = std::net::TcpStream::connect(fanout.addr()).expect("connect");
         client.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
@@ -643,7 +659,7 @@ mod tests {
         });
 
         let ports = Ports { avr: None, sbs: None, beast: Some(fanout) };
-        let mut rx = Reader::new(rate, false, Search::Fine);
+        let mut rx = Reader::new(rate, false, cfg);
         for (seq, iq) in blocks {
             rx.block(*seq, iq, &ports);
         }
@@ -725,7 +741,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let ports = Ports { avr: Some(avr), sbs: None, beast: Some(beast) };
-        let mut rx = Reader::new(2.4e6, false, Search::Fine);
+        let mut rx =
+            Reader::new(2.4e6, false, Search::Fine.config(ModeSConfig::default().preamble_ratio));
         let heard =
             |clock| Heard { clock, rssi_dbfs: -20.0, from: stats::Source::Air, corrected: 0 };
         rx.publish(&frame, heard(clock::UNTIMED), &ports, chrono::Utc::now());
@@ -812,6 +829,7 @@ mod tests {
     /// the shortfall is in the replies that overlay their address on the
     /// parity, which no CRC can frame. dump1090-rb 1.0.15 read 4091 frames,
     /// 1181 of them all-call replies, 825 of which answer a ground station.
+    ///
     #[test]
     fn all_call_replies_keep_up_with_dump1090_where_the_comm_b_replies_do_not() {
         let Some(buf) = busy() else { return };
@@ -823,25 +841,70 @@ mod tests {
         assert_eq!((count(&theirs, 11), count(&theirs, 17)), (1_181, 1_013));
 
         // Ahead on the squitters the parity search can frame.
-        assert!(count(&ours, 17) >= 1_050, "DF17: {} to their 1013", count(&ours, 17));
+        assert_eq!(count(&ours, 17), 1_109, "DF17, to their 1013");
         // Level on all-call replies, which needs the ones answering a ground
         // station: reading only the ones answering nobody gave 411.
-        assert!(count(&ours, 11) >= 1_100, "DF11: {} to their 1181", count(&ours, 11));
-        // And behind on Comm-B, which is #159. A floor, so closing the gap
-        // does not fail the test, and a ceiling nowhere near theirs so that
-        // closing it is visible as a failure worth updating.
-        assert!((300..500).contains(&count(&ours, 20)), "DF20: {}", count(&ours, 20));
+        assert_eq!(count(&ours, 11), 1_144, "DF11, to their 1181");
+        // And behind on Comm-B, which is what #159 is about: no CRC can frame
+        // a reply that overlays its address on the parity, so the preamble is
+        // all it has, and the gate decides how many are read. What a looser
+        // one buys is pinned in the test below.
+        assert_eq!((count(&ours, 20), count(&ours, 21)), (341, 341), "Comm-B, to their 514/472");
+        assert_eq!(ours.len(), 3_722, "frames on the wire, to their 4091");
 
         // No aircraft of our own invention: every frame names one the
         // reference also saw.
+        assert!(strangers(&theirs, &ours).is_empty(), "aircraft nobody else saw");
+    }
+
+    /// What `--preamble-ratio` buys, and that it invents nothing.
+    ///
+    /// The gate is 2.0 by default because of what 1.75 costs a Raspberry Pi
+    /// 4, which is the machine running this: 8.3 s against 6.7 s for these
+    /// ten seconds, on a core that has about 17% to spare. Anything faster
+    /// can afford it, so what it is worth is pinned rather than claimed:
+    /// 3923 frames against 3722, the gain almost all replies that overlay
+    /// their address, DF20 341 to 378 and DF21 341 to 364. It loses 4D2258,
+    /// two frames at the edge of the noise that the looser search blanks
+    /// under a reply it hears instead.
+    ///
+    /// The one thing a looser gate could do is invent an aeroplane. With the
+    /// second gate taken out, 1.75 reads a DF18 naming abcf1e and 1.5 reads
+    /// four aircraft no other receiver saw, 000000, 67694E, A6FC75 and
+    /// ABCF1E. They stay off the wire because a frame naming an aircraft
+    /// nothing has proved is held to 2.0 by `adsb::AddressBook` whatever the
+    /// search is set to, which is what makes the gate safe to move at all.
+    #[test]
+    fn a_looser_preamble_gate_reads_more_replies_and_never_another_aircraft() {
+        let Some(buf) = busy() else { return };
+        let theirs = reference();
+        let at = |ratio: f32| {
+            let cfg = ModeSConfig { preamble_ratio: ratio, ..ModeSConfig::default() };
+            beast_at(&blocks(&buf), buf.rate.as_f64(), cfg)
+        };
+        let count = |frames: &[(u64, Vec<u8>)], df: u8| {
+            frames.iter().filter(|(_, f)| f[0] >> 3 == df).count()
+        };
+
+        let loose = at(1.75);
+        assert_eq!(loose.len(), 3_923, "frames on the wire at 1.75, to their 4091");
+        assert_eq!((count(&loose, 20), count(&loose, 21)), (378, 364), "Comm-B, to their 514/472");
+        assert_eq!((count(&loose, 11), count(&loose, 17)), (1_196, 1_159));
+        assert!(strangers(&theirs, &loose).is_empty(), "aircraft nobody else saw");
+
+        let looser = at(1.5);
+        assert_eq!(looser.len(), 3_986, "frames on the wire at 1.5");
+        assert!(strangers(&theirs, &looser).is_empty(), "aircraft nobody else saw");
+    }
+
+    /// Frames naming an aircraft the reference decode never saw.
+    fn strangers(theirs: &[(u64, Vec<u8>)], ours: &[(u64, Vec<u8>)]) -> Vec<String> {
         let known: std::collections::HashSet<u32> =
             theirs.iter().filter_map(|(_, f)| names(f)).collect();
-        let strangers: Vec<String> = ours
-            .iter()
+        ours.iter()
             .filter(|(_, f)| !names(f).is_some_and(|a| known.contains(&a)))
             .map(|(_, f)| f.iter().map(|b| format!("{b:02x}")).collect())
-            .collect();
-        assert!(strangers.is_empty(), "aircraft nobody else saw: {strangers:?}");
+            .collect()
     }
 
     /// A directory of this test's own, emptied first.
@@ -863,7 +926,11 @@ mod tests {
         let Some(buf) = busy() else { return };
         let dir = scratch("aircraft");
         let ports = Ports { avr: None, sbs: None, beast: None };
-        let mut rx = Reader::new(buf.rate.as_f64(), false, Search::Fine);
+        let mut rx = Reader::new(
+            buf.rate.as_f64(),
+            false,
+            Search::Fine.config(ModeSConfig::default().preamble_ratio),
+        );
         for (seq, iq) in blocks(&buf) {
             rx.block(seq, &iq, &ports);
         }

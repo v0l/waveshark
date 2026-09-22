@@ -171,6 +171,9 @@ the code is in the commit log.
 - FSK transmit rests are keyed as no carrier, not as the lower tone held.
 - Mode S frames are also framed by their CRC, so a reply whose preamble
   another aircraft sat on is still read.
+- Mode S demodulation a fifth cheaper on a Raspberry Pi 4 and a quarter on
+  x86, and `wave1090 --preamble-ratio 1.75` spends that on 5% more frames,
+  mostly the Comm-B and altitude replies.
 - Mode S demodulation twice as fast on a Raspberry Pi 4, over three times on
   x86.
 - Stitched receivers open nothing across a tuner join, and a channel put on

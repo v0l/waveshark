@@ -234,6 +234,14 @@ pub fn syndrome(bytes: &[u8]) -> u32 {
     crc24(&bytes[..split]) ^ parity
 }
 
+/// How far above the quiet slots a preamble must stand before the frame
+/// behind it may name an aircraft nothing else has proved.
+///
+/// The value the whole search ran at until the address-overlaid replies were
+/// worth reading, and those cannot invent an aircraft because the address is
+/// 24 bits of check against a book of a few dozen.
+const PROVING_RATIO: f32 = 2.0;
+
 /// Addresses seen in frames that carried their own CRC.
 ///
 /// A short reply is accepted only when it names one of these. The window is in
@@ -259,6 +267,28 @@ impl AddressBook {
         self.seen.contains(&icao)
     }
 
+    /// Whether a frame with this preamble may put an aircraft on the map.
+    ///
+    /// A 24 bit parity comes out clean by chance once in 16.7 million, and a
+    /// search trying millions of windows a second meets that often enough to
+    /// matter: a frame that only names an aircraft already proved costs
+    /// nothing when it is wrong, where one that names a new aircraft puts an
+    /// aeroplane on a map and into an mlat solution.
+    ///
+    /// So the preamble gate is the demodulator's, and this is a second one on
+    /// top of it for the frames that can invent traffic. Measured over ten
+    /// seconds of Dublin approach: searching at 1.75 rather than 2.0 finds
+    /// 210 more frames and one DF18 naming abcf1e, an aircraft no other
+    /// receiver saw and the only one of the 53 aircraft dump1090 read there
+    /// with a single squitter. Holding the naming frames to 2.0 keeps 201 of
+    /// those 210 and drops that one.
+    fn may_name(&self, icao: u32, preamble_ratio: Option<f32>) -> bool {
+        // Framed by its parity, so there is no preamble to measure: that
+        // search has its own floor against the band's median and invents
+        // nothing over ten minutes of noise.
+        self.seen.contains(&icao) || preamble_ratio.is_none_or(|r| r >= PROVING_RATIO)
+    }
+
     pub fn len(&self) -> usize {
         self.seen.len()
     }
@@ -270,9 +300,14 @@ impl AddressBook {
     /// Whether this frame is worth believing, and remember it if it proves
     /// itself. Suitable as the validator a demodulator drives its search with.
     ///
+    /// `preamble_ratio` is how far the frame's preamble stood above the slots
+    /// that must be quiet, or `None` for a window the demodulator framed by
+    /// its parity alone.
+    ///
     /// Nothing here weighs how cleanly the bits were read: a frame either
-    /// proves itself by its CRC, or names an aircraft one already has.
-    pub fn accept(&mut self, bytes: &[u8]) -> bool {
+    /// proves itself by its CRC and a preamble nothing else could have made,
+    /// or names an aircraft one already has.
+    pub fn accept(&mut self, bytes: &[u8], preamble_ratio: Option<f32>) -> bool {
         let Some(df) = bytes.first().map(|b| b >> 3) else {
             return false;
         };
@@ -285,6 +320,9 @@ impl AddressBook {
                     return false;
                 };
                 let icao = ((fixed[1] as u32) << 16) | ((fixed[2] as u32) << 8) | fixed[3] as u32;
+                if !self.may_name(icao, preamble_ratio) {
+                    return false;
+                }
                 self.insert(icao);
                 true
             }
@@ -296,6 +334,9 @@ impl AddressBook {
                     // Nobody's interrogation: the frame proves itself, so it
                     // may name a new aircraft.
                     0 => {
+                        if !self.may_name(icao, preamble_ratio) {
+                            return false;
+                        }
                         self.insert(icao);
                         true
                     }
@@ -804,28 +845,55 @@ mod tests {
     #[test]
     fn an_all_call_answering_a_ground_station_needs_the_aircraft_known_first() {
         let mut book = AddressBook::new();
+        let clean = Some(4.0);
         assert_eq!(syndrome(&hex(IID)), 88, "the interrogator's id");
         // Seven bits is a one in 128 chance for noise, so an aircraft nothing
         // has verified stays out however often it is proposed.
-        assert!(!book.accept(&hex(IID)));
-        assert!(!book.accept(&hex(IID)));
-        assert!(!book.accept(&hex(IID)), "an unproved address got in by repetition");
+        assert!(!book.accept(&hex(IID), clean));
+        assert!(!book.accept(&hex(IID), clean));
+        assert!(!book.accept(&hex(IID), clean), "an unproved address got in by repetition");
 
         // A reply to nobody proves itself and names its aircraft.
         assert_eq!(syndrome(&hex(ZERO_IID)), 0);
-        assert!(book.accept(&hex(ZERO_IID)));
+        assert!(book.accept(&hex(ZERO_IID), clean));
         assert!(book.contains(0x4c_a624));
 
         // And once an ADS-B frame has proved that aircraft, its interrogated
         // replies are believed too.
         book.insert(0x3c_66b6);
-        assert!(book.accept(&hex(IID)));
+        assert!(book.accept(&hex(IID), clean));
 
         // A remainder too big to be an interrogator id is a frame read wrong.
         let mut damaged = hex(IID);
         damaged[4] ^= 0x40;
         assert!(syndrome(&damaged) >= 128);
-        assert!(!book.accept(&damaged));
+        assert!(!book.accept(&damaged, clean));
+    }
+
+    /// Naming a new aircraft takes a stronger preamble than reading a reply.
+    ///
+    /// The search runs at 1.75 so that the address-overlaid replies are read,
+    /// and those cannot invent anything: a reply is believed only where its
+    /// parity comes to an address something else proved. A frame carrying its
+    /// own address can invent one, and at 1.75 it does, so it is held to the
+    /// 2.0 the search used to run at (#159).
+    #[test]
+    fn a_weak_preamble_may_read_a_reply_but_not_name_a_new_aircraft() {
+        let mut book = AddressBook::new();
+        let squitter = hex(IDENT);
+        assert!(!book.accept(&squitter, Some(1.8)), "a weak preamble named an aircraft");
+        assert!(!book.contains(0x48_40d6));
+        assert!(book.accept(&squitter, Some(2.0)));
+        assert!(book.contains(0x48_40d6));
+        // And once it is known, the weak reading of the same aircraft is
+        // worth having: the address is 24 bits of check on its own.
+        assert!(book.accept(&squitter, Some(1.8)));
+
+        // A window the parity search framed has no preamble to measure, and
+        // its own floor against the band's median stands in for one.
+        let other = hex(POS_EVEN);
+        assert!(book.accept(&other, None));
+        assert!(book.contains(0x40_621d));
     }
 
     const IDENT: &str = "8D4840D6202CC371C32CE0576098";

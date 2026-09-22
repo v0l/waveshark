@@ -53,7 +53,7 @@ impl Signal for ModeS {
         let mut frames = Vec::new();
         for block in iq.chunks(BLOCK) {
             det.process_valid(block, &mut frames, &|f: &ModeSFrame| {
-                book.borrow_mut().accept(&f.bytes)
+                book.borrow_mut().accept(&f.bytes, f.preamble_ratio)
             });
         }
         frames
