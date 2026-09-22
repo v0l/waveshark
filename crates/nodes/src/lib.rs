@@ -9,6 +9,7 @@
 pub mod acars_nodes;
 pub mod aero_nodes;
 pub mod ais_nodes;
+mod ambe;
 pub mod aprs_nodes;
 pub mod apt_nodes;
 pub mod auto;

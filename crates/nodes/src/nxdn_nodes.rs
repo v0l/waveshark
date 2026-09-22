@@ -15,17 +15,20 @@
 //! then the slow channel's radio access number, then the voice call message
 //! off a stolen half frame or off four slow channels in a row.
 //!
-//! No speech: the AMBE+2 vocoder is not wired here, so a voice frame reaches
-//! the bus as a packet naming the call and the channel time it took, and the
-//! call list gets its airtime with no audio behind it.
+//! Speech is AMBE+2 at 3600 bit/s, four 72-bit channels to a frame and two to
+//! a half that was not stolen for signalling, which is the same vocoder rate
+//! DMR keys. The vocoder (`crates/mbe`) is behind the `ambe` feature, off by
+//! default, because AMBE is patent-encumbered: without it a voice frame still
+//! reaches the bus naming the call and the channel time it took, and the call
+//! list gets its airtime with no audio behind it.
 
 use crate::NodeSpec;
+use crate::ambe::Vocoder;
 use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::nxdn::CODEC;
 
-/// Rate the voice port is declared at. Nothing here decodes AMBE, so no
-/// samples travel on it; the rate is what the vocoder would produce.
+/// Rate the vocoder produces, and the rate the voice port is declared at.
 pub const VOICE_HZ: f64 = 8_000.0;
 
 const OUT_PACKETS: usize = 0;
@@ -93,6 +96,7 @@ pub struct NxdnNode {
     shaped: Vec<f32>,
     syms: Vec<f32>,
     meter: crate::FrameMeter,
+    vocoder: Vocoder,
     audio_rate: f64,
     accepted: u64,
     /// The call the last message named, so the voice frames after it
@@ -125,6 +129,7 @@ impl NxdnNode {
             syms: Vec::new(),
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, KEEP_S)
                 .keyed_as(common::Modulation::Fsk4),
+            vocoder: Vocoder::new(),
             audio_rate: AUDIO_HZ,
             accepted: 0,
             talking: None,
@@ -150,19 +155,36 @@ impl NxdnNode {
     /// What the frame carried of speech, not how long it held the channel: a
     /// frame with a half stolen for signalling is half a frame of talking.
     /// The parties come from the last message that named them, since the
-    /// frames between two call messages belong to the call they opened.
-    fn call(&mut self, frame: &nxdn::Frame) -> Option<common::Voice> {
-        if let Some(c) = frame.facch1.iter().find_map(|m| m.call) {
+    /// frames between two call messages belong to the call they opened, and
+    /// a call joined part way through is named by the superframe the slow
+    /// channel completes.
+    ///
+    /// The speech is the frame's own voice channels through the vocoder,
+    /// except where the network said they are enciphered, which is speech
+    /// nothing here can read.
+    fn call(&mut self, frame: &NxdnFrame) -> Option<common::Voice> {
+        let named = frame
+            .frame
+            .facch1
+            .iter()
+            .find_map(|m| m.call)
+            .or_else(|| frame.message.as_ref().and_then(|m| m.call));
+        if let Some(c) = named {
             self.talking = Some(c);
         }
-        if frame.voice_slots == 0 {
+        if frame.frame.voice_slots == 0 {
             return None;
         }
         let c = self.talking?;
-        let seconds = nxdn::frame_seconds(self.baud < WIDE_BAUD) * frame.voice_slots as f64 / 4.0;
+        let seconds =
+            nxdn::frame_seconds(self.baud < WIDE_BAUD) * frame.frame.voice_slots as f64 / 4.0;
         let secrecy = match c.cipher {
             nxdn::Cipher::Clear => common::Secrecy::Clear,
             other => common::Secrecy::Encrypted(Some(other.label().to_string())),
+        };
+        let pcm = match c.cipher {
+            nxdn::Cipher::Clear => self.vocoder.decode_channels(&frame.frame.voice),
+            _ => Vec::new(),
         };
         Some(common::Voice {
             system: "NXDN",
@@ -173,7 +195,7 @@ impl NxdnNode {
             over: Some(common::Over::new(Some(CODEC)).protected_by(secrecy).lasting(seconds)),
             rate: VOICE_HZ,
             channels: 1,
-            pcm: Vec::new(),
+            pcm,
         })
     }
 
@@ -223,9 +245,9 @@ impl Node for NxdnNode {
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = width;
         out.rate = 0.0;
-        // The call itself, on the port a call is stated on. Nothing here
-        // decodes AMBE, so no speech travels on it and the over carries what
-        // the network said about the transmission.
+        // The call itself, on the port a call is stated on: the speech the
+        // vocoder read, and the over carrying what the network said about
+        // the transmission.
         let mut voice = out.with_kind(PortKind::Voice);
         voice.rate = VOICE_HZ;
         voice.channels = 1;
@@ -269,7 +291,7 @@ impl Node for NxdnNode {
             if !f.frame.read_anything() {
                 continue;
             }
-            if let Some(v) = self.call(&f.frame) {
+            if let Some(v) = self.call(f) {
                 outputs[OUT_VOICE].voice_mut().push(v);
             }
             let p = self.packet(f);
@@ -286,6 +308,8 @@ impl Node for NxdnNode {
         self.clock.reset();
         self.framer.reset();
         self.meter.reset();
+        self.vocoder.reset();
+        self.talking = None;
     }
 }
 
@@ -462,6 +486,15 @@ mod tests {
             .collect()
     }
 
+    /// One voice channel of AMBE bits, told apart by its place in the call.
+    /// All zero is a well formed frame the Golay check passes, which is what
+    /// the vocoder has to be given to say anything at all.
+    fn speech(n: usize) -> [bool; decode::nxdn::VOICE_BITS] {
+        let mut bits = [false; decode::nxdn::VOICE_BITS];
+        bits[decode::nxdn::VOICE_BITS - 1] = n % 2 == 1;
+        bits
+    }
+
     /// A call as a radio sends it: a voice frame with the call message in a
     /// stolen half, then frames of speech with the message going out over the
     /// slow channel a quarter at a time.
@@ -478,10 +511,12 @@ mod tests {
             let steal = if n == 0 { Steal::First } else { Steal::None };
             let mut payload = sacch.air();
             for (half, stolen) in steal.stolen().iter().enumerate() {
-                let _ = half;
                 match stolen {
                     true => payload.extend(decode::nxdn::facch1_air(&message)),
-                    false => payload.extend(std::iter::repeat_n(false, 144)),
+                    false => payload.extend(decode::nxdn::voice_air(&[
+                        speech(n * 4 + half * 2),
+                        speech(n * 4 + half * 2 + 1),
+                    ])),
                 }
             }
             dibits.extend(decode::nxdn::keyed(decode::nxdn::rdch_lich(steal, true), &payload));
@@ -560,6 +595,31 @@ mod tests {
         assert!(voices.iter().all(|v| v.over.as_ref().is_some_and(|o| !o.encrypted())));
     }
 
+    /// The speech the frames carried, through the vocoder: thirty voice
+    /// channels over the eight frames, two in the opening frame and four in
+    /// each one after it, and 20 ms of 8 kHz audio out of every one.
+    #[test]
+    fn a_keyed_call_comes_out_as_speech() {
+        let rate = 96_000.0;
+        let iq = keyed(&call_frames(9, &group_call(), 8), rate, WIDE_BAUD, 0.0, 0.0);
+        let (_, voices) = replay(&iq, rate, DEFAULT_HZ, DEFAULT_HZ, WIDE_BAUD);
+        let samples: usize = voices.iter().map(|v| v.pcm.len()).sum();
+        if !cfg!(feature = "ambe") {
+            assert_eq!(samples, 0, "no vocoder is built in, so no speech is claimed");
+            return;
+        }
+        assert_eq!(voices[0].pcm.len(), 2 * 160, "two voice channels in the opening frame");
+        assert!(voices[1..].iter().all(|v| v.pcm.len() == 4 * 160), "four channels a frame after");
+        assert_eq!(samples, 30 * 160, "thirty voice channels, {samples} samples");
+        assert_eq!(samples as f64 / VOICE_HZ, 0.6, "0.6 s of speech off 0.32 s of channel");
+        assert!(
+            voices.iter().flat_map(|v| &v.pcm).all(|s| s.is_finite() && s.abs() <= 1.0),
+            "a sample the vocoder could not have produced"
+        );
+        assert!(voices.iter().flat_map(|v| &v.pcm).any(|s| *s != 0.0), "every sample was silence");
+        assert!(voices.iter().all(|v| v.rate == VOICE_HZ && v.channels == 1));
+    }
+
     /// Off frequency and in noise, which is what a receiver actually hands
     /// the node. Measured: 2.5 kHz off with noise at a tenth of the carrier
     /// still reads every frame.
@@ -621,11 +681,12 @@ mod tests {
                 .all(|d| d.facts.iter().any(|f| matches!(f, common::packet::Fact::Alert(_))))
         );
         // What protects the speech is the network's own word, said beside
-        // the audio it is about.
+        // the audio it is about, and nothing pretends to have read it.
         assert_eq!(
             voices.first().and_then(|v| v.over.as_ref()).map(|o| o.secrecy.clone()),
             Some(common::Secrecy::Encrypted(Some("AES".into())))
         );
+        assert_eq!(voices.iter().map(|v| v.pcm.len()).sum::<usize>(), 0, "enciphered speech");
     }
 
     /// Thirty seconds of noise, and nothing said about any of it.

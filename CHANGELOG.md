@@ -50,7 +50,7 @@ the code is in the commit log.
   `~/.config/waveshark/protocols` override it, and a receiver that has never
   fetched reads no ISM sensor until it does.
 - NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
-  whether the speech is enciphered. No sound yet.
+  the speech itself where it is not enciphered.
 - Iridium ring alerts at 1626 MHz: the satellite, its beam and its position,
   on the map.
 - DAB ensembles on band III: the ensemble name, its stations, their programme

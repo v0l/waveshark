@@ -337,6 +337,30 @@ pub fn facch1(air: &[bool]) -> Option<Vec<bool>> {
     check(&bits, 80, CRC12).then(|| bits[..80].to_vec())
 }
 
+/// One voice channel: an AMBE+2 enhanced half rate frame, 49 bits of speech
+/// under 23 of its own FEC, keyed into the frame as it stands (TS 1-A clause
+/// 5.3).
+pub const VOICE_BITS: usize = 72;
+
+/// The two voice channels a half frame carries, in the order they were sent.
+fn voice_channels(half: &[bool]) -> Vec<[bool; VOICE_BITS]> {
+    half.chunks_exact(VOICE_BITS)
+        .map(|c| {
+            let mut bits = [false; VOICE_BITS];
+            bits.copy_from_slice(c);
+            bits
+        })
+        .collect()
+}
+
+/// The 144 bits a transmitter keys for a half frame of speech: two AMBE+2
+/// frames, as they stand.
+pub fn voice_air(channels: &[[bool; VOICE_BITS]]) -> Vec<bool> {
+    let mut bits: Vec<bool> = channels.iter().flatten().copied().collect();
+    bits.resize(FACCH1_BITS, false);
+    bits
+}
+
 /// The 144 coded bits a transmitter keys for an 80 bit message.
 pub fn facch1_air(message: &[bool]) -> Vec<bool> {
     let mut bits = message.to_vec();
@@ -653,6 +677,9 @@ pub struct Frame {
     pub facch1: Vec<Message>,
     /// Voice channels the frame still carries, of four.
     pub voice_slots: usize,
+    /// Those channels as they came off the air, oldest first: one AMBE+2
+    /// frame of 72 bits each, its own FEC still on it.
+    pub voice: Vec<[bool; VOICE_BITS]>,
     /// Symbol the frame's sync word began at, in the stream it was read from.
     pub at: usize,
 }
@@ -716,21 +743,37 @@ pub fn frame(payload: &[u8]) -> Option<Frame> {
 
     // The control channel's CAC fills the frame from here and is not read.
     if !lich.rf.traffic() || lich.usc == Usc::Udch {
-        return Some(Frame { lich, sacch: None, facch1: Vec::new(), voice_slots: 0, at: 0 });
+        return Some(Frame {
+            lich,
+            sacch: None,
+            facch1: Vec::new(),
+            voice_slots: 0,
+            voice: Vec::new(),
+            at: 0,
+        });
     }
 
     let sacch = Sacch::read(&bits);
     let mut messages = Vec::new();
+    let mut voice = Vec::new();
     for (half, stolen) in lich.steal.stolen().iter().enumerate() {
+        let at = SACCH_BITS + half * FACCH1_BITS;
         if !stolen {
+            voice.extend(voice_channels(&bits[at..at + FACCH1_BITS]));
             continue;
         }
-        let at = SACCH_BITS + half * FACCH1_BITS;
         if let Some(m) = facch1(&bits[at..]).as_deref().and_then(message) {
             messages.push(m);
         }
     }
-    Some(Frame { lich, sacch, facch1: messages, voice_slots: lich.steal.voice_slots(), at: 0 })
+    Some(Frame {
+        lich,
+        sacch,
+        facch1: messages,
+        voice_slots: lich.steal.voice_slots(),
+        voice,
+        at: 0,
+    })
 }
 
 /// Key a frame: the sync word, the LICH, and the payload bits after it,
@@ -1269,14 +1312,47 @@ mod tests {
         let mut payload = sacch.air();
         let facch = facch1_air(&call_bits(kind, call));
         for (half, stolen) in steal.stolen().iter().enumerate() {
-            let _ = half;
             if *stolen {
                 payload.extend_from_slice(&facch);
             } else {
-                payload.extend(std::iter::repeat_n(false, FACCH1_BITS));
+                payload.extend(voice_air(&[speech(half as u8 * 2), speech(half as u8 * 2 + 1)]));
             }
         }
         keyed(rdch_lich(steal, true), &payload)
+    }
+
+    /// One voice channel's worth of bits, told apart by which channel it is.
+    fn speech(n: u8) -> [bool; VOICE_BITS] {
+        let mut bits = [false; VOICE_BITS];
+        let mut seed = 0x2f6f_2b39_0000_0001u64 ^ u64::from(n);
+        for b in bits.iter_mut() {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *b = seed >> 63 != 0;
+        }
+        bits
+    }
+
+    /// The speech a frame carried comes back as it was keyed, and only from
+    /// the halves that were not stolen for signalling.
+    #[test]
+    fn voice_channels_come_back_as_they_were_keyed() {
+        let whole =
+            super::frame(&voice_frame(Steal::None, MessageType::VCall, &group_call())[10..])
+                .expect("a frame");
+        assert_eq!(whole.voice.len(), 4, "four voice channels in an unstolen frame");
+        assert_eq!(whole.voice_slots, 4);
+        let keyed: Vec<[bool; VOICE_BITS]> = (0..4).map(speech).collect();
+        assert_eq!(whole.voice, keyed, "the AMBE bits are not the ones keyed");
+
+        let stolen =
+            super::frame(&voice_frame(Steal::First, MessageType::VCall, &group_call())[10..])
+                .expect("a frame");
+        assert_eq!(stolen.voice.len(), 2, "a stolen half is not speech");
+        assert_eq!(stolen.voice, keyed[2..], "the second half is the speech that is left");
+
+        let both = super::frame(&voice_frame(Steal::Both, MessageType::VCall, &group_call())[10..])
+            .expect("a frame");
+        assert_eq!(both.voice.len(), 0);
     }
 
     #[test]

@@ -39,7 +39,7 @@ use dsp::{FirDecim, FmDemod, Mixer};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 
-mod dmr_ambe;
+use crate::ambe::Vocoder;
 pub use decode::dmr::BODY_LEN;
 pub use decode::dmr::BURST_BYTES;
 pub use decode::dmr::CODEC;
@@ -60,7 +60,6 @@ pub use decode::dmr::SYM_SYNC;
 pub use decode::dmr::read;
 pub use decode::dmr::unpack_bits;
 pub use decode::dmr::{MAX_MISSES, lc_flags, pack_bits};
-use dmr_ambe::Vocoder;
 use identify::Signal;
 pub use identify::dmr::CHANNEL_WIDTH_HZ;
 pub use identify::dmr::DEFAULT_HZ;
