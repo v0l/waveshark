@@ -340,8 +340,8 @@ mod tests {
             label: "RF gain".into(),
             kind: iqstream::SettingKind::Gain,
             value: iqstream::SettingValue::Gain(db),
-            options: Vec::new(),
             range_db: Some((0.0, 49.6)),
+            ..Default::default()
         }
     }
 

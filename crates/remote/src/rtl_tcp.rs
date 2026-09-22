@@ -40,7 +40,15 @@ enum Cmd {
     Ppm = 0x05,
     /// The RTL2832U's own digital AGC, which is not the tuner's.
     RtlAgc = 0x08,
+    /// 0 off, 1 the I branch, 2 the Q branch. A v3 dongle wires HF to Q,
+    /// which is what the USB driver selects too.
+    DirectSampling = 0x09,
+    OffsetTuning = 0x0a,
+    BiasTee = 0x0e,
 }
+
+/// The Q branch, which is where a v3 dongle's HF input lands.
+const DIRECT_Q: u32 = 2;
 
 /// How long a read may block before the stream calls the server gone. Long
 /// enough that a quiet moment is not a disconnection: at the slowest rate
@@ -121,6 +129,12 @@ pub struct Device {
     center: Hz,
     rate: Sps,
     streaming: Arc<AtomicBool>,
+    /// What the far end was last told. rtl_tcp answers nothing and reads
+    /// nothing back, so this is the only record of it.
+    switches: rtl::Switches,
+    /// The switches this tuner takes, which is every one but offset tuning
+    /// unless the greeting named an E4000.
+    offered: Vec<rtl::Switch>,
 }
 
 impl Device {
@@ -163,6 +177,8 @@ impl Device {
             center: Hz::mhz(100),
             rate: Sps(2_048_000),
             streaming: Arc::new(AtomicBool::new(false)),
+            switches: rtl::Switches::default(),
+            offered: rtl::SWITCHES.into_iter().filter(|s| s.applies_to(tuner)).collect(),
         };
         // The same defaults the USB driver opens with: manual tuner gain,
         // because an AGC hunting moves the noise floor under wideband
@@ -170,7 +186,7 @@ impl Device {
         me.set_rate(Sps(2_048_000))?;
         me.set_center(Hz::mhz(100))?;
         me.set_gain("tuner", GainMode::Auto)?;
-        send(&mut me.sock, Cmd::RtlAgc, 0)?;
+        me.set_toggle(rtl::Switch::RtlAgc.name(), false)?;
         Ok(me)
     }
 
@@ -232,6 +248,32 @@ impl DeviceTrait for Device {
 
     fn set_ppm(&mut self, ppm: f64) -> Result<()> {
         send(&mut self.sock, Cmd::Ppm, (ppm.round() as i32) as u32)
+    }
+
+    fn toggles(&self) -> Vec<common::Toggle> {
+        self.switches.toggles(&self.offered)
+    }
+
+    /// Throw a switch at the far end. There is no reply and no readback, so a
+    /// socket that took the five bytes is the whole of the answer.
+    fn set_toggle(&mut self, name: &str, on: bool) -> Result<()> {
+        let which = rtl::Switch::from_name(name)
+            .filter(|s| self.offered.contains(s))
+            .ok_or_else(|| Error::other(format!("no setting named {name:?}")))?;
+        let cmd = match which {
+            rtl::Switch::RtlAgc => Cmd::RtlAgc,
+            rtl::Switch::BiasTee => Cmd::BiasTee,
+            rtl::Switch::DirectSampling => Cmd::DirectSampling,
+            rtl::Switch::OffsetTuning => Cmd::OffsetTuning,
+        };
+        let value = match (which, on) {
+            (rtl::Switch::DirectSampling, true) => DIRECT_Q,
+            (_, true) => 1,
+            (_, false) => 0,
+        };
+        send(&mut self.sock, cmd, value)?;
+        self.switches.set(which, on);
+        Ok(())
     }
 
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
@@ -443,6 +485,67 @@ mod tests {
         assert_eq!((seen[4][0], value(&seen[4])), (0x01, 1_090_000_000));
         assert_eq!((seen[5][0], value(&seen[5])), (0x03, 1));
         assert_eq!((seen[6][0], value(&seen[6])), (0x04, 496));
+    }
+
+    /// The three switches a dongle on USB has, spoken as the commands
+    /// `rtl_tcp.c` numbers them, and remembered here because the far end
+    /// reads nothing back.
+    #[test]
+    fn a_switch_goes_out_as_five_bytes_and_is_remembered() {
+        let (addr, cmds) = fake(5, 29);
+        let mut d = Device::open(&addr).unwrap();
+        let names: Vec<String> = d.toggles().iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["rtl_agc", "bias_tee", "direct_sampling"]);
+        assert!(d.toggles().iter().all(|t| !t.on), "all off until told otherwise");
+
+        d.set_toggle("bias_tee", true).unwrap();
+        d.set_toggle("direct_sampling", true).unwrap();
+        d.set_toggle("rtl_agc", true).unwrap();
+        d.set_toggle("direct_sampling", false).unwrap();
+
+        let mut seen = Vec::new();
+        while seen.len() < 8 {
+            seen.push(cmds.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        }
+        let value = |b: &[u8; 5]| u32::from_be_bytes([b[1], b[2], b[3], b[4]]);
+        // Four on open: rate, centre, automatic gain, RTL AGC off.
+        assert_eq!((seen[3][0], value(&seen[3])), (0x08, 0));
+        assert_eq!((seen[4][0], value(&seen[4])), (0x0e, 1), "bias tee");
+        // Direct sampling names the branch rather than being a flag, and the
+        // Q branch is where a v3 dongle's HF input is wired.
+        assert_eq!((seen[5][0], value(&seen[5])), (0x09, 2), "direct sampling on");
+        assert_eq!((seen[6][0], value(&seen[6])), (0x08, 1), "RTL AGC");
+        assert_eq!((seen[7][0], value(&seen[7])), (0x09, 0), "direct sampling off");
+
+        let now = d.toggles();
+        assert_eq!(now.len(), 3);
+        assert!(now.iter().find(|t| t.name == "bias_tee").unwrap().on);
+        assert!(now.iter().find(|t| t.name == "rtl_agc").unwrap().on);
+        assert!(!now.iter().find(|t| t.name == "direct_sampling").unwrap().on);
+
+        // An R820T ignores offset tuning, so it is not offered and not sent.
+        assert!(d.set_toggle("offset_tuning", true).is_err());
+        assert!(d.set_toggle("antenna", true).is_err());
+    }
+
+    /// Offset tuning is an E4000 register write, so only a greeting naming
+    /// that tuner offers it.
+    #[test]
+    fn an_e4000_at_the_far_end_offers_offset_tuning() {
+        let (addr, cmds) = fake(1, 14);
+        let mut d = Device::open(&addr).unwrap();
+        assert_eq!(d.info().tuner, "E4000");
+        assert_eq!(d.toggles().len(), 4);
+        d.set_toggle("offset_tuning", true).unwrap();
+        let mut seen = Vec::new();
+        while seen.len() < 5 {
+            seen.push(cmds.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        }
+        assert_eq!(
+            (seen[4][0], u32::from_be_bytes([seen[4][1], seen[4][2], seen[4][3], seen[4][4]])),
+            (0x0a, 1)
+        );
+        assert!(d.toggles().iter().find(|t| t.name == "offset_tuning").unwrap().on);
     }
 
     #[test]

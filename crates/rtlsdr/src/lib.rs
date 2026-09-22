@@ -35,11 +35,15 @@ pub struct RtlSdr {
     gains: Vec<f32>,
     streaming: Arc<AtomicBool>,
     tuner_gain: GainMode,
-    rtl_agc: bool,
-    bias_tee: bool,
-    direct_sampling: bool,
+    switches: rtl::Switches,
     ppm: f64,
 }
+
+/// What this driver can drive. Offset tuning is an E4000 register write that
+/// `rtlsdr-usb` does not make, so it is not offered here however the dongle
+/// answers.
+const OFFERED: [rtl::Switch; 3] =
+    [rtl::Switch::RtlAgc, rtl::Switch::BiasTee, rtl::Switch::DirectSampling];
 
 impl RtlSdr {
     pub fn open(index: u32) -> Result<Self> {
@@ -100,9 +104,7 @@ impl RtlSdr {
             gains,
             streaming: Arc::new(AtomicBool::new(false)),
             tuner_gain: GainMode::Manual(0.0),
-            rtl_agc: false,
-            bias_tee: false,
-            direct_sampling: false,
+            switches: rtl::Switches::default(),
             ppm: 0.0,
         };
 
@@ -122,20 +124,20 @@ impl RtlSdr {
 
     pub fn set_rtl_agc(&mut self, on: bool) -> Result<()> {
         self.dev.set_rtl_agc(on).map_err(map_err)?;
-        self.rtl_agc = on;
+        self.switches.set(rtl::Switch::RtlAgc, on);
         Ok(())
     }
 
     pub fn set_bias_tee(&mut self, on: bool) -> Result<()> {
         self.dev.set_bias_tee(on).map_err(map_err)?;
-        self.bias_tee = on;
+        self.switches.set(rtl::Switch::BiasTee, on);
         Ok(())
     }
 
     pub fn set_direct_sampling(&mut self, on: bool) -> Result<()> {
         let mode = if on { DirectSampling::Q } else { DirectSampling::Off };
         self.dev.set_direct_sampling_mode(mode).map_err(map_err)?;
-        self.direct_sampling = on;
+        self.switches.set(rtl::Switch::DirectSampling, on);
         Ok(())
     }
 
@@ -221,37 +223,17 @@ impl Device for RtlSdr {
     }
 
     fn toggles(&self) -> Vec<common::Toggle> {
-        vec![
-            common::Toggle {
-                name: "rtl_agc".into(),
-                label: "RTL2832U digital AGC".into(),
-                help: "Gain control in the demodulator chip, after the tuner. Recovers a weak signal on a quiet band, and ruins wideband work: the noise floor moves under you and every level measurement moves with it."
-                    .into(),
-                on: self.rtl_agc,
-            },
-            common::Toggle {
-                name: "bias_tee".into(),
-                label: "Bias tee".into(),
-                help: "Puts 4.5 V on the antenna socket to power a mast head amplifier. Leave it off unless you know what is on the other end of the cable, because a shorted or DC coupled antenna takes the current."
-                    .into(),
-                on: self.bias_tee,
-            },
-            common::Toggle {
-                name: "direct_sampling".into(),
-                label: "Direct sampling (HF)".into(),
-                help: "Bypasses the tuner and samples the Q branch directly, which reaches below the tuner's 24 MHz floor on a v3 dongle. Everything above about 14 MHz aliases, and the tuner gain does nothing while it is on."
-                    .into(),
-                on: self.direct_sampling,
-            },
-        ]
+        self.switches.toggles(&OFFERED)
     }
 
     fn set_toggle(&mut self, name: &str, on: bool) -> Result<()> {
-        match name {
-            "rtl_agc" => self.set_rtl_agc(on),
-            "bias_tee" => self.set_bias_tee(on),
-            "direct_sampling" => self.set_direct_sampling(on),
-            _ => Err(Error::other(format!("no setting named {name:?}"))),
+        match rtl::Switch::from_name(name).filter(|s| OFFERED.contains(s)) {
+            Some(rtl::Switch::RtlAgc) => self.set_rtl_agc(on),
+            Some(rtl::Switch::BiasTee) => self.set_bias_tee(on),
+            Some(rtl::Switch::DirectSampling) => self.set_direct_sampling(on),
+            Some(rtl::Switch::OffsetTuning) | None => {
+                Err(Error::other(format!("no setting named {name:?}")))
+            }
         }
     }
 

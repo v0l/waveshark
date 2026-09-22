@@ -452,6 +452,39 @@ impl DeviceTrait for Device {
         self.ask(name, SettingValue::Choice(value.to_string()))
     }
 
+    fn numbers(&self) -> Vec<common::device::Number> {
+        if !self.settable {
+            return Vec::new();
+        }
+        self.controls
+            .now
+            .lock()
+            .map(|now| {
+                now.iter()
+                    .filter_map(|s| match s.value {
+                        SettingValue::Number(v) => Some(common::device::Number {
+                            name: s.name.clone(),
+                            label: s.label.clone(),
+                            help: "on the radio at the far end".into(),
+                            // A far end that named no ends is given the one
+                            // it is already at, so a control cannot be drawn
+                            // that asks for somewhere it will not go.
+                            range: s.range.map(|(lo, hi)| lo..=hi).unwrap_or(v..=v),
+                            step: s.step,
+                            unit: s.unit.clone(),
+                            value: v,
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn set_number(&mut self, name: &str, value: f64) -> Result<()> {
+        self.ask(name, SettingValue::Number(value))
+    }
+
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
         if self.streaming.swap(true, Ordering::SeqCst) {
             return Err(Error::Busy);
@@ -626,6 +659,8 @@ fn describe(v: &iqstream::SettingValue) -> String {
             false => "off".into(),
         },
         V::Choice(name) => name.clone(),
+        V::Number(v) => format!("{v}"),
+        V::Unknown(v) => format!("{v} (a setting this build does not know)"),
     }
 }
 
@@ -731,8 +766,8 @@ mod tests {
             label: "RF gain".into(),
             kind: SettingKind::Gain,
             value: SettingValue::Gain(db),
-            options: Vec::new(),
             range_db: Some((0.0, 49.6)),
+            ..Default::default()
         }
     }
 
@@ -742,8 +777,7 @@ mod tests {
             label: "Bias tee".into(),
             kind: SettingKind::Switch,
             value: SettingValue::Switch(on),
-            options: Vec::new(),
-            range_db: None,
+            ..Default::default()
         }
     }
 

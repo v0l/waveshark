@@ -95,6 +95,10 @@ the code is in the commit log.
   dialog.
 - IQStream remote tuners can be tuned from here, gain and switches included,
   and a server carrying several is one receiver per tuner in the list.
+- rtl_tcp bias tee, direct sampling and RTL AGC, on the radio card, with
+  offset tuning where the far end is an E4000.
+- IQStream carries a plain number setting, so a served receiver's tuner trim
+  is set from the other end.
 - An IQStream server, so another machine can read the same span, with
   `--iqstream-tuner` handing out radios this receiver is not using as streams
   of their own on the same port.

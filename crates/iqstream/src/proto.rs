@@ -35,7 +35,12 @@ pub const VERSION_MAJOR: u16 = 1;
 /// tuner, [`tag::STREAM_ID`] says which one a subscribe, a tune or a tuned is
 /// about, and the data header carries it too. A 1.1 peer names no stream and
 /// gets the first one, which is the only stream a 1.1 server has.
-pub const VERSION_MINOR: u16 = 2;
+///
+/// 3: a setting that is a plain number, as [`SettingKind::Number`] with
+/// [`tag::SETTING_MIN`], [`tag::SETTING_MAX`], [`tag::SETTING_STEP`] and
+/// [`tag::SETTING_UNIT`]. A 1.2 reader sees a kind it does not know and
+/// leaves that one setting alone, keeping the rest of the tuner's list.
+pub const VERSION_MINOR: u16 = 3;
 
 pub const PREAMBLE_LEN: usize = 8;
 pub const FRAME_HEADER_LEN: usize = 4;
@@ -139,13 +144,23 @@ pub mod tag {
     /// Which of [`super::SettingKind`] this is.
     pub const SETTING_KIND: u16 = 0x0063;
     /// `auto` or tenths of a dB for a gain, `on` or `off` for a switch, the
-    /// option's own name for a choice.
+    /// option's own name for a choice, the figure itself for a number.
     pub const SETTING_VALUE: u16 = 0x0064;
     /// One option a choice offers, repeated.
     pub const SETTING_OPTION: u16 = 0x0065;
     /// How far a gain goes, in tenths of a dB.
     pub const SETTING_MIN_DDB: u16 = 0x0066;
     pub const SETTING_MAX_DDB: u16 = 0x0067;
+    /// How far a number goes, written out in its own unit rather than in a
+    /// fixed scale: a trim is hertz and a gain is decibels, and a tenth of a
+    /// dB field cannot hold either. Since 1.3.
+    pub const SETTING_MIN: u16 = 0x0068;
+    pub const SETTING_MAX: u16 = 0x0069;
+    /// The smallest change a number takes, and zero for a continuous one.
+    /// Since 1.3.
+    pub const SETTING_STEP: u16 = 0x006a;
+    /// What a number is measured in, shown after it: "Hz", "dB". Since 1.3.
+    pub const SETTING_UNIT: u16 = 0x006b;
     // Subscription parameters
     pub const UDP_PORT: u16 = 0x0020;
     pub const BIT_DEPTH: u16 = 0x0021;
@@ -405,6 +420,9 @@ pub enum SettingKind {
     Switch,
     /// One of a named set: an antenna port, a receive channel.
     Choice,
+    /// A plain figure in a unit of its own: a frequency trim in hertz, a
+    /// correction in parts per million.
+    Number,
     /// Something a later version of this protocol knows about and this build
     /// does not, kept so it can be shown rather than dropped.
     Unknown(u8),
@@ -416,6 +434,7 @@ impl SettingKind {
             Self::Gain => 0,
             Self::Switch => 1,
             Self::Choice => 2,
+            Self::Number => 3,
             Self::Unknown(c) => c,
         }
     }
@@ -425,6 +444,7 @@ impl SettingKind {
             0 => Self::Gain,
             1 => Self::Switch,
             2 => Self::Choice,
+            3 => Self::Number,
             other => Self::Unknown(other),
         }
     }
@@ -439,6 +459,11 @@ pub enum SettingValue {
     Switch(bool),
     /// The option's own name, as it appears in [`Setting::options`].
     Choice(String),
+    /// A figure in the setting's own unit, between [`Setting::range`].
+    Number(f64),
+    /// A kind this build does not know, kept as it arrived so it can be shown
+    /// and sent back unchanged rather than drawn as something it is not.
+    Unknown(String),
 }
 
 impl SettingValue {
@@ -451,6 +476,10 @@ impl SettingValue {
                 false => "off".into(),
             },
             Self::Choice(v) => v.clone(),
+            // Rust's shortest representation that reads back as the same
+            // number, so a trim of one hertz survives the round trip.
+            Self::Number(v) => format!("{v}"),
+            Self::Unknown(v) => v.clone(),
         }
     }
 
@@ -461,7 +490,11 @@ impl SettingValue {
                 "auto" => Self::Auto,
                 db => Self::Gain(db.parse().unwrap_or(0.0)),
             },
-            SettingKind::Choice | SettingKind::Unknown(_) => Self::Choice(text.to_string()),
+            SettingKind::Number => Self::Number(text.parse().unwrap_or(0.0)),
+            SettingKind::Choice => Self::Choice(text.to_string()),
+            // Not a choice: a reader drawing an unknown kind as one would
+            // offer an empty list of options and set it to nothing.
+            SettingKind::Unknown(_) => Self::Unknown(text.to_string()),
         }
     }
 }
@@ -485,6 +518,34 @@ pub struct Setting {
     pub options: Vec<String>,
     /// How far a gain goes, in dB, where the far end said.
     pub range_db: Option<(f32, f32)>,
+    /// How far a number goes, in its own unit.
+    pub range: Option<(f64, f64)>,
+    /// The smallest change a number takes, and zero for a continuous one.
+    pub step: f64,
+    /// What a number is measured in, and empty for anything else.
+    pub unit: String,
+}
+
+impl Default for Setting {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            label: String::new(),
+            kind: SettingKind::Switch,
+            value: SettingValue::Switch(false),
+            options: Vec::new(),
+            range_db: None,
+            range: None,
+            step: 0.0,
+            unit: String::new(),
+        }
+    }
+}
+
+/// One figure off a tag that holds it as text, and None where the tag is
+/// absent or is not a number.
+fn number(m: &TlvMap<'_>, tag: u16) -> Option<f64> {
+    m.str(tag).and_then(|s| s.parse().ok())
 }
 
 impl Setting {
@@ -500,6 +561,15 @@ impl Setting {
         if let Some((lo, hi)) = self.range_db {
             t.i16(tag::SETTING_MIN_DDB, (lo * 10.0) as i16)
                 .i16(tag::SETTING_MAX_DDB, (hi * 10.0) as i16);
+        }
+        if let Some((lo, hi)) = self.range {
+            t.str(tag::SETTING_MIN, &format!("{lo}")).str(tag::SETTING_MAX, &format!("{hi}"));
+        }
+        if self.step != 0.0 {
+            t.str(tag::SETTING_STEP, &format!("{}", self.step));
+        }
+        if !self.unit.is_empty() {
+            t.str(tag::SETTING_UNIT, &self.unit);
         }
         t.bytes().to_vec()
     }
@@ -521,6 +591,9 @@ impl Setting {
                 .i16(tag::SETTING_MIN_DDB)
                 .zip(m.i16(tag::SETTING_MAX_DDB))
                 .map(|(lo, hi)| (lo as f32 / 10.0, hi as f32 / 10.0)),
+            range: number(&m, tag::SETTING_MIN).zip(number(&m, tag::SETTING_MAX)),
+            step: number(&m, tag::SETTING_STEP).unwrap_or(0.0),
+            unit: m.str(tag::SETTING_UNIT).unwrap_or_default(),
         })
     }
 }
@@ -742,6 +815,55 @@ mod tests {
         }
     }
 
+    /// A number keeps its figure, its ends, its step and its unit across the
+    /// wire, and a kind this build has never heard of comes back as it went
+    /// rather than as an empty choice.
+    #[test]
+    fn a_number_and_an_unknown_kind_both_survive_a_round_trip() {
+        let n = Setting {
+            name: "trim1".into(),
+            label: "Tuner 2 trim".into(),
+            kind: SettingKind::Number,
+            value: SettingValue::Number(-1234.5),
+            range: Some((-960_000.0, 960_000.0)),
+            step: 1.0,
+            unit: "Hz".into(),
+            ..Default::default()
+        };
+        let back = Setting::decode(&n.encode()).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(back.value, SettingValue::Number(-1234.5));
+        assert_eq!(back.range, Some((-960_000.0, 960_000.0)));
+        assert_eq!(back.step, 1.0);
+        assert_eq!(back.unit, "Hz");
+
+        let future = Setting {
+            name: "shape".into(),
+            label: "Filter shape".into(),
+            kind: SettingKind::Unknown(9),
+            value: SettingValue::Unknown("raised".into()),
+            ..Default::default()
+        };
+        let back = Setting::decode(&future.encode()).unwrap();
+        assert_eq!(back, future);
+        assert_eq!(back.kind.code(), 9);
+        assert_eq!(SettingKind::Number.code(), 3);
+        // A gain is untouched by any of it.
+        let g = Setting {
+            name: "tuner".into(),
+            label: "RF gain".into(),
+            kind: SettingKind::Gain,
+            value: SettingValue::Gain(32.8),
+            range_db: Some((0.0, 49.6)),
+            ..Default::default()
+        };
+        let back = Setting::decode(&g.encode()).unwrap();
+        assert_eq!(back, g);
+        assert_eq!(back.range, None);
+        assert_eq!(back.step, 0.0);
+        assert!(back.unit.is_empty());
+    }
+
     #[test]
     fn tlv_roundtrip() {
         let mut t = Tlvs::new();
@@ -788,14 +910,14 @@ mod tests {
                         value: SettingValue::Gain(32.8),
                         options: Vec::new(),
                         range_db: Some((0.0, 49.6)),
+                        ..Default::default()
                     },
                     Setting {
                         name: "bias_t".into(),
                         label: "Bias tee".into(),
                         kind: SettingKind::Switch,
                         value: SettingValue::Switch(true),
-                        options: Vec::new(),
-                        range_db: None,
+                        ..Default::default()
                     },
                     Setting {
                         name: "antenna".into(),
@@ -803,7 +925,17 @@ mod tests {
                         kind: SettingKind::Choice,
                         value: SettingValue::Choice("LNAW".into()),
                         options: vec!["LNAH".into(), "LNAL".into(), "LNAW".into()],
-                        range_db: None,
+                        ..Default::default()
+                    },
+                    Setting {
+                        name: "trim1".into(),
+                        label: "Tuner 2 trim".into(),
+                        kind: SettingKind::Number,
+                        value: SettingValue::Number(-1234.5),
+                        range: Some((-960_000.0, 960_000.0)),
+                        step: 1.0,
+                        unit: "Hz".into(),
+                        ..Default::default()
                     },
                 ],
             },

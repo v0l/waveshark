@@ -246,8 +246,8 @@ pub fn settings_of(dev: &dyn Device) -> Vec<Setting> {
                 // driver's own choice, which is what it was left at.
                 _ => SettingValue::Auto,
             },
-            options: Vec::new(),
             range_db: Some((*stage.range.start(), *stage.range.end())),
+            ..Default::default()
         });
     }
     for t in dev.toggles() {
@@ -256,8 +256,7 @@ pub fn settings_of(dev: &dyn Device) -> Vec<Setting> {
             label: t.label,
             kind: SettingKind::Switch,
             value: SettingValue::Switch(t.on),
-            options: Vec::new(),
-            range_db: None,
+            ..Default::default()
         });
     }
     for c in dev.choices() {
@@ -267,7 +266,19 @@ pub fn settings_of(dev: &dyn Device) -> Vec<Setting> {
             kind: SettingKind::Choice,
             value: SettingValue::Choice(c.selected),
             options: c.options,
-            range_db: None,
+            ..Default::default()
+        });
+    }
+    for n in dev.numbers() {
+        out.push(Setting {
+            name: n.name,
+            label: n.label,
+            kind: SettingKind::Number,
+            value: SettingValue::Number(n.value),
+            range: Some((*n.range.start(), *n.range.end())),
+            step: n.step,
+            unit: n.unit,
+            ..Default::default()
         });
     }
     out
@@ -280,6 +291,13 @@ fn apply(dev: &mut dyn Device, ask: &iqstream::Ask) -> Result<()> {
         SettingValue::Gain(db) => dev.set_gain(&ask.name, GainMode::Manual(*db)),
         SettingValue::Switch(on) => dev.set_toggle(&ask.name, *on),
         SettingValue::Choice(v) => dev.set_choice(&ask.name, v),
+        SettingValue::Number(v) => dev.set_number(&ask.name, *v),
+        // A kind this build does not know, which it cannot have offered and
+        // so cannot be asked for.
+        SettingValue::Unknown(v) => Err(common::Error::other(format!(
+            "{}: {v:?} is not a setting this radio has",
+            ask.name
+        ))),
     }
 }
 
@@ -494,7 +512,7 @@ mod tests {
     fn a_radios_gains_switches_and_ports_become_settings() {
         let dev = Bench::default();
         let s = settings_of(&dev);
-        assert_eq!(s.len(), 4, "two gains, a switch and a port: {s:?}");
+        assert_eq!(s.len(), 5, "two gains, a switch, a port and a trim: {s:?}");
 
         assert_eq!(s[0].name, "lna");
         assert_eq!(s[0].label, "LNA");
@@ -510,6 +528,16 @@ mod tests {
         assert_eq!(s[3].kind, SettingKind::Choice);
         assert_eq!(s[3].value, SettingValue::Choice("LNAW".into()));
         assert_eq!(s[3].options, vec!["LNAH", "LNAL", "LNAW"]);
+
+        // A plain number carries its ends, its step and its unit, because a
+        // reader drawing a trim in hertz as a slider from nought to one has
+        // nothing to draw.
+        assert_eq!(s[4].name, "trim1");
+        assert_eq!(s[4].kind, SettingKind::Number);
+        assert_eq!(s[4].value, SettingValue::Number(-1234.0));
+        assert_eq!(s[4].range, Some((-960_000.0, 960_000.0)));
+        assert_eq!(s[4].step, 1.0);
+        assert_eq!(s[4].unit, "Hz");
     }
 
     /// A radio with nothing to say about itself says nothing, rather than a
@@ -520,6 +548,7 @@ mod tests {
         dev.info.gain_stages.clear();
         dev.toggles.clear();
         dev.choices.clear();
+        dev.numbers.clear();
         assert!(settings_of(&dev).is_empty());
     }
 
@@ -530,6 +559,7 @@ mod tests {
         gains: Vec<(String, GainMode)>,
         toggles: Vec<common::device::Toggle>,
         choices: Vec<common::device::Choice>,
+        numbers: Vec<common::device::Number>,
         tuning: common::Tuning,
     }
 
@@ -574,6 +604,15 @@ mod tests {
                     help: "which socket the cable is in".into(),
                     options: vec!["LNAH".into(), "LNAL".into(), "LNAW".into()],
                     selected: "LNAW".into(),
+                }],
+                numbers: vec![common::device::Number {
+                    name: "trim1".into(),
+                    label: "Tuner 2 trim".into(),
+                    help: "how far this tuner is above the first".into(),
+                    range: -960_000.0..=960_000.0,
+                    step: 1.0,
+                    unit: "Hz".into(),
+                    value: -1234.0,
                 }],
                 tuning: common::Tuning::default(),
             }
@@ -638,6 +677,18 @@ mod tests {
         fn choices(&self) -> Vec<common::device::Choice> {
             self.choices.clone()
         }
+        fn numbers(&self) -> Vec<common::device::Number> {
+            self.numbers.clone()
+        }
+        fn set_number(&mut self, name: &str, value: f64) -> Result<()> {
+            match self.numbers.iter_mut().find(|n| n.name == name) {
+                Some(n) => {
+                    n.value = value;
+                    Ok(())
+                }
+                None => Err(common::Error::other(format!("no {name} to set"))),
+            }
+        }
         fn start_rx(&mut self) -> Result<Box<dyn common::device::RxStream>> {
             Err(common::Error::other("not a real radio"))
         }
@@ -663,17 +714,40 @@ mod tests {
         )
         .unwrap();
 
+        apply(&mut dev, &iqstream::Ask { name: "trim1".into(), value: SettingValue::Number(96.0) })
+            .unwrap();
+
         let s = settings_of(&dev);
         assert_eq!(s[0].value, SettingValue::Gain(31.0));
         assert_eq!(s[1].value, SettingValue::Auto);
         assert_eq!(s[2].value, SettingValue::Switch(false));
         assert_eq!(s[3].value, SettingValue::Choice("LNAL".into()));
+        assert_eq!(s[4].value, SettingValue::Number(96.0));
 
         // What the driver will not do is a fault the caller logs, not a
         // stream that ends.
         assert!(
             apply(&mut dev, &iqstream::Ask { name: "if".into(), value: SettingValue::Gain(10.0) })
                 .is_err()
+        );
+        assert!(
+            apply(
+                &mut dev,
+                &iqstream::Ask { name: "trim9".into(), value: SettingValue::Number(1.0) }
+            )
+            .is_err()
+        );
+        // A kind this build does not know cannot have been offered, so it is
+        // refused rather than guessed at.
+        assert!(
+            apply(
+                &mut dev,
+                &iqstream::Ask {
+                    name: "shape".into(),
+                    value: SettingValue::Unknown("raised".into())
+                }
+            )
+            .is_err()
         );
     }
 }

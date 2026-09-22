@@ -407,8 +407,8 @@ fn gain(db: f32) -> iqstream::Setting {
         label: "RF gain".into(),
         kind: iqstream::SettingKind::Gain,
         value: iqstream::SettingValue::Gain(db),
-        options: Vec::new(),
         range_db: Some((0.0, 49.6)),
+        ..Default::default()
     }
 }
 
@@ -418,8 +418,7 @@ fn bias(on: bool) -> iqstream::Setting {
         label: "Bias tee".into(),
         kind: iqstream::SettingKind::Switch,
         value: iqstream::SettingValue::Switch(on),
-        options: Vec::new(),
-        range_db: None,
+        ..Default::default()
     }
 }
 
@@ -528,18 +527,31 @@ fn antenna(selected: &str) -> iqstream::Setting {
         kind: iqstream::SettingKind::Choice,
         value: iqstream::SettingValue::Choice(selected.into()),
         options: vec!["LNAH".into(), "LNAL".into(), "LNAW".into()],
-        range_db: None,
+        ..Default::default()
     }
 }
 
-/// A subscriber asks for a gain, a switch and a port; the owner of the radio
-/// carries them out and says what they became, which is not always what was
-/// asked for.
+fn trim(hz: f64) -> iqstream::Setting {
+    iqstream::Setting {
+        name: "trim1".into(),
+        label: "Tuner 2 trim".into(),
+        kind: iqstream::SettingKind::Number,
+        value: iqstream::SettingValue::Number(hz),
+        range: Some((-960_000.0, 960_000.0)),
+        step: 1.0,
+        unit: "Hz".into(),
+        ..Default::default()
+    }
+}
+
+/// A subscriber asks for a gain, a switch, a port and a number; the owner of
+/// the radio carries them out and says what they became, which is not always
+/// what was asked for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_setting_can_be_asked_of_a_tuner_that_was_offered() {
     let srv = server(true);
     let tuner = only(&srv);
-    tuner.set_settings(vec![gain(32.8), bias(false), antenna("LNAH")]);
+    tuner.set_settings(vec![gain(32.8), bias(false), antenna("LNAH"), trim(0.0)]);
 
     let mut asking = IqStream::connect(
         srv.addr().to_string().as_str(),
@@ -550,29 +562,38 @@ async fn a_setting_can_be_asked_of_a_tuner_that_was_offered() {
     asking.set_setting("tuner", iqstream::SettingValue::Gain(14.0)).await.unwrap();
     asking.set_setting("bias_t", iqstream::SettingValue::Switch(true)).await.unwrap();
     asking.set_setting("antenna", iqstream::SettingValue::Choice("LNAW".into())).await.unwrap();
+    asking.set_setting("trim1", iqstream::SettingValue::Number(-1234.5)).await.unwrap();
 
     // Nothing has moved yet: the requests are parked for whoever owns the
     // radio, exactly as a tune is.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut asked = Vec::new();
-    while asked.len() < 3 && tokio::time::Instant::now() < deadline {
+    while asked.len() < 4 && tokio::time::Instant::now() < deadline {
         asked.extend(tuner.asked());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(asked.len(), 3, "three requests, in the order they were made: {asked:?}");
+    assert_eq!(asked.len(), 4, "four requests, in the order they were made: {asked:?}");
     assert_eq!(asked[0].name, "tuner");
     assert_eq!(asked[0].value, iqstream::SettingValue::Gain(14.0));
     assert_eq!(asked[1].value, iqstream::SettingValue::Switch(true));
     assert_eq!(asked[2].value, iqstream::SettingValue::Choice("LNAW".into()));
+    assert_eq!(asked[3].name, "trim1");
+    assert_eq!(asked[3].value, iqstream::SettingValue::Number(-1234.5), "a half hertz survives");
     assert_eq!(asking.info().settings[0], gain(32.8), "not until the radio moved");
 
-    // The dongle snapped the gain to its nearest step, and says so.
-    tuner.set_settings(vec![gain(14.4), bias(true), antenna("LNAW")]);
+    // The dongle snapped the gain to its nearest step, and the trim to whole
+    // hertz, and says so.
+    tuner.set_settings(vec![gain(14.4), bias(true), antenna("LNAW"), trim(-1234.0)]);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while asking.info().settings[0] == gain(32.8) && tokio::time::Instant::now() < deadline {
         collect(&mut asking, &tuner, &ramp(256), 1).await;
     }
-    assert_eq!(asking.info().settings, vec![gain(14.4), bias(true), antenna("LNAW")]);
+    assert_eq!(
+        asking.info().settings,
+        vec![gain(14.4), bias(true), antenna("LNAW"), trim(-1234.0)]
+    );
+    assert_eq!(asking.info().settings[3].unit, "Hz");
+    assert_eq!(asking.info().settings[3].range, Some((-960_000.0, 960_000.0)));
 }
 
 /// A dial that was not offered is not a set of controls either, and a name
