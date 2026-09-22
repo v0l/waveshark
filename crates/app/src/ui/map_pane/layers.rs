@@ -23,7 +23,7 @@ impl Layer for RingLayer {
     }
 
     fn label(&self) -> &'static str {
-        "RINGS"
+        "RANGE RINGS"
     }
 
     fn draw(&mut self, c: &Canvas) {
@@ -115,7 +115,7 @@ impl Layer for SightingLayer<'_> {
     }
 
     fn label(&self) -> &'static str {
-        "HEARD"
+        "SIGHTINGS"
     }
 
     fn draw(&mut self, c: &Canvas) {
@@ -271,7 +271,7 @@ impl Layer for SondeLayer {
     }
 
     fn label(&self) -> &'static str {
-        "LAUNCH SITES"
+        "SONDES"
     }
 
     fn draw(&mut self, c: &Canvas) {
@@ -335,8 +335,8 @@ impl Layer for SondeLayer {
             .filter_map(|s| s.next_launch(now).map(|(d, _)| (d, s.name.as_str())))
             .min_by_key(|(d, _)| *d);
         let sites = |n: usize| match n {
-            1 => "1 launch site".to_string(),
-            n => format!("{n} launch sites"),
+            1 => "1 sonde site".to_string(),
+            n => format!("{n} sonde sites"),
         };
         match (self.shown.len(), next) {
             (0, _) => None,
@@ -392,7 +392,7 @@ fn site_card(p: &egui::Painter, rect: Rect, anchor: Pos2, s: &datasets::sondehub
     let text_max = (f64::from(rect.width()) - 2.0 * f64::from(pad) - 8.0).clamp(80.0, 260.0) as f32;
 
     let name = p.layout(s.name.clone(), font(13.0), theme::VALUE, text_max);
-    let mut meta = format!("LAUNCH SITE   {} M", s.alt_m.round());
+    let mut meta = format!("SONDE SITE   {} M", s.alt_m.round());
     if let Some(b) = s.burst_m {
         meta.push_str(&format!("   BURST {:.0} KM", b / 1000.0));
     }
@@ -554,7 +554,7 @@ impl Layer for CellLayer<'_> {
     }
 
     fn label(&self) -> &'static str {
-        "CELLS"
+        "CELL TOWERS"
     }
 
     fn draw(&mut self, c: &Canvas) {
@@ -1147,7 +1147,7 @@ impl Layer for SatLayer {
     }
 
     fn label(&self) -> &'static str {
-        "SATS"
+        "SATELLITES"
     }
 
     fn draw(&mut self, c: &Canvas) {
