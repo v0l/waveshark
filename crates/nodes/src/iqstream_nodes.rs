@@ -58,6 +58,14 @@ fn servers() -> &'static Mutex<HashMap<SocketAddr, Arc<iqstream::Server>>> {
     SERVERS.get_or_init(Default::default)
 }
 
+/// The server already running on this address, if there is one.
+///
+/// What the settings card reads: a pane asking what is being served must not
+/// open a listening socket nobody asked for.
+pub fn running(addr: SocketAddr) -> Option<Arc<iqstream::Server>> {
+    servers().lock().ok()?.get(&addr).cloned()
+}
+
 /// The server on this address, started if it is not running yet.
 ///
 /// A port of zero is never shared: it asks the kernel for a free port, so two

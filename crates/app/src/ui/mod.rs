@@ -1127,6 +1127,11 @@ impl App {
 
     /// Serve the span to network subscribers, from the command line.
     pub fn serve_iqstream(&mut self, serving: crate::chain::IqStreamPlan) {
+        self.settings.edit(|s| {
+            s.iqstream_addr = serving.addr.to_string();
+            s.iqstream_tunable = serving.tunable;
+            s.iqstream_on = true;
+        });
         self.send(crate::radio::Cmd::IqStream(Some(serving)));
     }
 
@@ -2681,6 +2686,8 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     );
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
     when(now.kiss() != was.kiss(), Cmd::Kiss(now.kiss()));
+    let serving = now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan { addr, tunable });
+    when(now.iqstream() != was.iqstream(), Cmd::IqStream(serving));
     when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
     when(now.heat_plan() != was.heat_plan(), Cmd::Heatmap(now.heat_plan()));
     let publish = now.publish();
@@ -3498,6 +3505,7 @@ mod tests {
             Cmd::Gps(_) => "gps",
             Cmd::Feeds(_) => "feeds",
             Cmd::Kiss(_) => "kiss",
+            Cmd::IqStream(_) => "iqstream",
             Cmd::Location(..) => "location",
             Cmd::Audio { .. } => "audio",
             Cmd::Wigle(_) => "wigle",
@@ -3549,6 +3557,7 @@ mod tests {
                 "gps",
                 "heatmap",
                 "homeassistant",
+                "iqstream",
                 "kiss",
                 "location",
                 "log_cap",
@@ -3644,6 +3653,62 @@ mod tests {
         a.stop_kiss();
         assert!(!a.setting(|s| s.kiss_on));
         assert_eq!(crate::session::Session::parse(&a.settings.get().render()).kiss(), None);
+    }
+
+    /// The IQ server is a switch on a card, not a flag the operator has to
+    /// restart the receiver to set. `--iqstream-listen` writes into the same
+    /// card, so where the span went is on screen either way.
+    #[test]
+    fn the_iq_server_switch_serves_where_the_card_says() {
+        let was = crate::session::Session::default();
+        assert_eq!(was.iqstream(), None, "a fresh install serves nothing");
+
+        let served = |cmds: Vec<Cmd>| -> Vec<Option<crate::chain::IqStreamPlan>> {
+            cmds.into_iter()
+                .map(|c| match c {
+                    Cmd::IqStream(p) => p,
+                    other => panic!("{} was sent, not the server", named(&other)),
+                })
+                .collect()
+        };
+
+        let mut now = was.clone();
+        now.iqstream_on = true;
+        assert_eq!(
+            served(settings_cmds(&now, Some(&was))),
+            [Some(crate::chain::IqStreamPlan {
+                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
+                tunable: false,
+            })],
+            "a port with no host is every interface, and nobody may retune it"
+        );
+
+        let mut tunable = now.clone();
+        tunable.iqstream_tunable = true;
+        assert_eq!(
+            served(settings_cmds(&tunable, Some(&now))),
+            [Some(crate::chain::IqStreamPlan {
+                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
+                tunable: true,
+            })]
+        );
+
+        let mut half = now.clone();
+        half.iqstream_addr = "0.0.0.0:".into();
+        assert_eq!(served(settings_cmds(&half, Some(&now))), [None], "half an address is none");
+
+        assert_eq!(served(settings_cmds(&was, Some(&now))), [None], "off stops the server");
+        assert!(settings_cmds(&now, Some(&now)).is_empty());
+
+        let mut a = app();
+        a.serve_iqstream(crate::chain::IqStreamPlan {
+            addr: "0.0.0.0:1299".parse().unwrap(),
+            tunable: true,
+        });
+        assert!(a.setting(|s| s.iqstream_on));
+        assert_eq!(a.setting(|s| s.iqstream_addr.clone()), "0.0.0.0:1299");
+        let back = crate::session::Session::parse(&a.settings.get().render());
+        assert_eq!(back.iqstream(), Some(("0.0.0.0:1299".parse().unwrap(), true)));
     }
 
     /// A feed with half an account typed into it cannot upload, and the

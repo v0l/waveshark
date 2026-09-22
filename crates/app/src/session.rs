@@ -361,6 +361,14 @@ pub struct Session {
     /// a client keys the transmitter.
     pub kiss_addr: String,
     pub kiss_on: bool,
+    /// Where the span is served over IQStream, as typed: a port, or host:port.
+    /// Off until it is asked for, because it hands the samples this receiver
+    /// is reading to anybody who can reach the socket.
+    pub iqstream_addr: String,
+    pub iqstream_on: bool,
+    /// Whether a subscriber may move the dial. There is one tuner, so
+    /// granting it retunes what is on the screen here.
+    pub iqstream_tunable: bool,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -503,6 +511,9 @@ impl Default for Session {
             ha_buses: true,
             kiss_addr: nodes::kiss_nodes::DEFAULT_PORT.to_string(),
             kiss_on: false,
+            iqstream_addr: nodes::iqstream_nodes::DEFAULT_PORT.to_string(),
+            iqstream_on: false,
+            iqstream_tunable: false,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -647,6 +658,26 @@ impl Session {
     /// and the address reads.
     pub fn kiss(&self) -> Option<std::net::SocketAddr> {
         self.kiss_on.then(|| self.kiss_address()).flatten()
+    }
+
+    /// Where the span is served, or `None` when the address is not one. A
+    /// port alone is every interface, unlike the TNC: a stream nothing
+    /// outside this machine can reach is not worth serving, which is what
+    /// `--iqstream-listen` decided.
+    pub fn iqstream_address(&self) -> Option<std::net::SocketAddr> {
+        let typed = self.iqstream_addr.trim();
+        if let Ok(port) = typed.parse::<u16>() {
+            return Some(std::net::SocketAddr::from(([0, 0, 0, 0], port)));
+        }
+        typed.parse().ok()
+    }
+
+    /// What the receiver is to serve, which is nothing until the switch is on
+    /// and the address reads.
+    pub fn iqstream(&self) -> Option<(std::net::SocketAddr, bool)> {
+        self.iqstream_on
+            .then(|| self.iqstream_address().map(|a| (a, self.iqstream_tunable)))
+            .flatten()
     }
 
     /// The GPS the operator named, or `None` for the local gpsd the reader
@@ -877,6 +908,12 @@ impl Session {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| d.kiss_addr.clone()),
             kiss_on: kv.get("kiss_on").map(|v| *v == "true").unwrap_or(false),
+            iqstream_addr: kv
+                .get("iqstream_addr")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| d.iqstream_addr.clone()),
+            iqstream_on: kv.get("iqstream_on").map(|v| *v == "true").unwrap_or(false),
+            iqstream_tunable: kv.get("iqstream_tunable").map(|v| *v == "true").unwrap_or(false),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -951,6 +988,7 @@ impl Session {
             ("ha_topic", &self.ha_topic),
             ("ha_spaces", &self.ha_spaces),
             ("kiss_addr", &self.kiss_addr),
+            ("iqstream_addr", &self.iqstream_addr),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -1021,6 +1059,12 @@ impl Session {
         s.push_str(&format!("ha_buses = {}\n", self.ha_buses));
         if self.kiss_on {
             s.push_str("kiss_on = true\n");
+        }
+        if self.iqstream_on {
+            s.push_str("iqstream_on = true\n");
+        }
+        if self.iqstream_tunable {
+            s.push_str("iqstream_tunable = true\n");
         }
         if self.ha_on {
             s.push_str("ha_on = true\n");
@@ -1198,6 +1242,9 @@ mod tests {
             ha_buses: true,
             kiss_addr: "0.0.0.0:8001".into(),
             kiss_on: true,
+            iqstream_addr: "0.0.0.0:1234".into(),
+            iqstream_on: true,
+            iqstream_tunable: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             heat_on: false,
@@ -1236,6 +1283,30 @@ mod tests {
             map_layers: vec![("rings".into(), true), ("airports".into(), false)],
         };
         assert_eq!(Session::parse(&s.render()), s);
+    }
+
+    /// A served span takes the port on every interface, where a TNC takes it
+    /// on loopback: a stream nothing outside this machine can reach is not
+    /// worth serving, and a socket that keys the transmitter is.
+    #[test]
+    fn a_served_span_is_offered_to_the_network() {
+        let at = |typed: &str| {
+            Session::parse(&format!("iqstream_addr = {typed}")).iqstream_address()
+        };
+        assert_eq!(at("1234"), Some("0.0.0.0:1234".parse().unwrap()));
+        assert_eq!(at("127.0.0.1:1234"), Some("127.0.0.1:1234".parse().unwrap()));
+        assert_eq!(at("nonsense"), None);
+
+        assert_eq!(Session::default().iqstream(), None, "off until it is asked for");
+        assert_eq!(
+            Session::parse("iqstream_on = true\niqstream_addr = 1234").iqstream(),
+            Some(("0.0.0.0:1234".parse().unwrap(), false)),
+            "and a subscriber may not retune it unless that was asked for too"
+        );
+        assert_eq!(
+            Session::parse("iqstream_on = true\niqstream_tunable = true").iqstream(),
+            Some(("0.0.0.0:1234".parse().unwrap(), true))
+        );
     }
 
     /// A port with no host is loopback, because the client on the other end

@@ -1439,6 +1439,57 @@ impl App {
         }
         ui.add_space(8.0);
         self.kiss_section(ui);
+        ui.add_space(8.0);
+        self.iqstream_section(ui);
+    }
+
+    /// The span served to the network, which is this receiver seen as a
+    /// tuner by another one.
+    ///
+    /// Beside the feeds and the TNC because it is the same socket from the
+    /// other end: those read somebody else's receiver, this hands out the
+    /// samples read here. Off until it is asked for, since it puts the whole
+    /// span on the network.
+    fn iqstream_section(&mut self, ui: &mut egui::Ui) {
+        let addr = self.setting(|s| s.iqstream_address());
+        let server = addr.and_then(nodes::iqstream_nodes::running);
+        section(ui, "iq server", "the span to another receiver, over IQStream", |ui| {
+            let mut on = self.setting(|s| s.iqstream_on);
+            let help = "Serves the samples this receiver is reading to anything speaking \
+                        IQStream, which is how another WaveShark adds this radio as a \
+                        remote tuner. The whole span goes out, so it costs bandwidth.";
+            if switch(ui, "serve", &mut on, "the span from this machine", help) {
+                self.settings.edit(|s| s.iqstream_on = on);
+            }
+            row_help(ui, "listen", "A port, or host:port. A port alone is every interface.", |ui| {
+                let mut text = self.setting(|s| s.iqstream_addr.clone());
+                if field(ui, &mut text, "1234, or 0.0.0.0:1234").changed() {
+                    self.settings.edit(|s| s.iqstream_addr = text.clone());
+                }
+            });
+            let mut tunable = self.setting(|s| s.iqstream_tunable);
+            let tune_help = "There is one tuner, so a subscriber moving the dial moves it \
+                             here too, and whatever is being listened to on this screen \
+                             goes with it.";
+            if switch(ui, "retuning", &mut tunable, "a subscriber may move the dial", tune_help) {
+                self.settings.edit(|s| s.iqstream_tunable = tunable);
+            }
+            if let Some(server) = &server {
+                let streams = server.streams();
+                let subscribers: usize = streams.iter().map(|s| s.subscribers()).sum();
+                reading(ui, "subscribers", subscribers.to_string());
+                reading(ui, "streams", streams.len().to_string());
+                if let Some(sent) = streams.iter().map(|s| s.blocks_sent()).max() {
+                    reading(ui, "sent", format!("{sent} blocks"));
+                }
+            }
+            match (on, addr, server.as_ref()) {
+                (false, _, _) => lamp(ui, false, "off: nothing is served"),
+                (true, None, _) => lamp(ui, false, "not a port or a host:port"),
+                (true, _, Some(s)) => lamp(ui, true, &format!("listening on {}", s.addr())),
+                (true, Some(a), None) => lamp(ui, false, &format!("{a} is not being served yet")),
+            }
+        });
     }
 
     /// The KISS TNC: where it listens, and what is connected to it.
@@ -2393,6 +2444,16 @@ impl App {
                                         format!(
                                             "{} readings: the broker was not keeping up",
                                             st.dropped
+                                        ),
+                                    );
+                                }
+                                if st.offline > 0 {
+                                    reading(
+                                        ui,
+                                        "missed",
+                                        format!(
+                                            "{} readings: nothing was connected",
+                                            st.offline
                                         ),
                                     );
                                 }
