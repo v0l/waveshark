@@ -284,16 +284,16 @@ fn key_up(
     // here: a HackRF has an amp and a TXVGA, a LimeSDR has one distributed
     // gain, and a driver added later will have its own.
     let want = (gain_db + tx.trim_db).max(0.0);
-    let stages: Vec<String> = dev
+    let stages: Vec<(String, bool)> = dev
         .info()
         .tx
         .as_ref()
-        .map(|t| t.gain_stages.iter().map(|s| s.name.clone()).collect())
+        .map(|t| t.gain_stages.iter().map(|s| (s.name.clone(), s.is_switch())).collect())
         .unwrap_or_default();
-    for name in stages {
+    for (name, switch) in stages {
         // The front end amp is a switch, not a level, and switching it in
         // because the gain was turned up is a 14 dB surprise.
-        let db = if name == "amp" { 0.0 } else { want };
+        let db = if switch { 0.0 } else { want };
         dev.set_tx_gain(&name, GainMode::Manual(db))?;
     }
 
@@ -3127,7 +3127,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     /// choice describes the stream rather than a setting on it: a LimeSDR's
     /// receive channel is a different stream entirely.
     fn set_choice(&mut self, name: &str, value: &str) -> Flow {
-        if self.dev.choice_needs_restart(name) {
+        if self.dev.choice_needs_restart(name, value) {
             self.release_stream();
             if let Err(e) = self.dev.set_choice(name, value) {
                 *self.status.error.lock() = Some(format!("{name}: {e}"));

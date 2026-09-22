@@ -79,6 +79,16 @@ impl GainStage {
         }
         db
     }
+
+    /// Whether this stage is a switch rather than a level: two positions and
+    /// nothing between them, as a front end amp is.
+    ///
+    /// A transmit chain has one stage the operator sets a level on and may
+    /// have a switch beside it, and which is which is a property of the
+    /// stage rather than of the name a driver gave it.
+    pub fn is_switch(&self) -> bool {
+        self.values.len() == 2
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +134,30 @@ mod gain_tests {
         // Exactly between two steps, which only a slider dragged to the
         // midpoint produces, goes up rather than staying put.
         assert_eq!(lna.quantise(20.0), 24.0);
+    }
+
+    /// A HackRF transmits through an amp and a level named `txvga`; a
+    /// LimeSDR through one level it calls `gain`. The level is the stage
+    /// with more than two positions, whatever the driver named it.
+    #[test]
+    fn a_two_position_stage_is_a_switch_and_the_rest_are_levels() {
+        let stage = |name: &str, hi: f32, values: Vec<f32>| GainStage {
+            name: name.into(),
+            label: name.into(),
+            range: 0.0..=hi,
+            values,
+            step: 1.0,
+            auto: false,
+        };
+        let hackrf = [stage("amp", 14.0, vec![0.0, 14.0]), stage("txvga", 47.0, Vec::new())];
+        let lime = [stage("gain", 64.0, Vec::new())];
+        let level = |s: &[GainStage]| {
+            s.iter().find(|s| !s.is_switch()).map(|s| s.name.clone()).unwrap_or_default()
+        };
+        assert_eq!(level(&hackrf), "txvga");
+        assert_eq!(level(&lime), "gain");
+        assert!(hackrf[0].is_switch(), "the front end amp is two positions");
+        assert!(!r820t().is_switch(), "an eleven step tuner gain is a level");
     }
 }
 
@@ -450,12 +484,15 @@ pub trait Device: Send {
         Ok(())
     }
 
-    /// Whether changing this setting needs the stream stopped and started.
+    /// Whether changing this setting to `value` needs the stream stopped and
+    /// started.
     ///
-    /// Switching a LimeSDR to its other receive channel is a different stream,
-    /// not a different setting on the running one, and the caller is the only
-    /// one holding the stream.
-    fn choice_needs_restart(&self, _name: &str) -> bool {
+    /// Moving a LimeSDR to a port on its other receiver is a different
+    /// stream, not a different setting on the running one, and the caller is
+    /// the only one holding the stream. The value decides it as much as the
+    /// setting does: the same port choice moves the receiver or does not,
+    /// depending which socket was picked.
+    fn choice_needs_restart(&self, _name: &str, _value: &str) -> bool {
         false
     }
 

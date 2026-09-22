@@ -3013,7 +3013,7 @@ impl App {
             // channel's own trim is added to it when that channel is keyed.
             // With the stages because it is one, and last because it is the
             // one that radiates.
-            if let Some(stage) = controls.tx_stages.iter().find(|s| s.name == "txvga") {
+            if let Some(stage) = controls.tx_stages.iter().find(|s| !s.is_switch()) {
                 let mut db = self.radio_settings.tx_gain_db;
                 let (lo, hi) = (*stage.range.start(), *stage.range.end());
                 row_help(

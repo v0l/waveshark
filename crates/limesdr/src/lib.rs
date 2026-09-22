@@ -226,7 +226,11 @@ impl Drop for Handle {
 #[derive(Clone, Debug)]
 struct Antenna {
     index: usize,
+    /// The receiver this path belongs to, since the list covers both.
+    chan: usize,
     name: String,
+    /// The connector this path comes in on, as the board is marked.
+    label: String,
 }
 
 /// A TX antenna port and the band LimeSuite recommends it for.
@@ -237,8 +241,35 @@ struct Antenna {
 #[derive(Clone, Debug)]
 struct TxPort {
     index: usize,
+    /// The transmitter this path belongs to, since the list covers both.
+    chan: usize,
     name: String,
+    /// The connector this switch position drives, as the board is marked.
+    label: String,
     band: std::ops::RangeInclusive<f64>,
+}
+
+/// What a signal path is called on the board, where the board marks its
+/// connectors one per path.
+///
+/// A LimeSDR-USB and a PCIe card bring each channel's paths out to their own
+/// SMA: RX1_H, RX1_L and RX1_W for the three receive inputs of the first
+/// channel, TX1_1 and TX1_2 for its two transmit outputs, and the same again
+/// as RX2 and TX2 for the second. A Mini has one connector each way for all
+/// of them, so there is no connector name to give and LimeSuite's own stands.
+fn connector(board: &str, chan: usize, port: &str) -> String {
+    let board = board.to_ascii_lowercase();
+    if !(board.contains("usb") || board.contains("pcie")) {
+        return port.to_string();
+    }
+    match port {
+        "BAND1" => format!("TX{}_1", chan + 1),
+        "BAND2" => format!("TX{}_2", chan + 1),
+        "LNAH" => format!("RX{}_H", chan + 1),
+        "LNAL" => format!("RX{}_L", chan + 1),
+        "LNAW" => format!("RX{}_W", chan + 1),
+        _ => port.to_string(),
+    }
 }
 
 pub struct LimeSdr {
@@ -251,7 +282,9 @@ pub struct LimeSdr {
     rate: Sps,
     gain_db: f32,
     antennas: Vec<Antenna>,
-    /// Port name to force, or `AUTO_ANTENNA` to follow the frequency.
+    /// LimeSuite's name for the port to force, or `AUTO_ANTENNA` to follow
+    /// the frequency. Kept as the path rather than the connector so that a
+    /// forced choice survives a change of channel.
     ///
     /// Which connector the cable is in is not something a driver can work out:
     /// a board wired to RX2_H alone hears nothing on the port the frequency
@@ -259,8 +292,6 @@ pub struct LimeSdr {
     antenna: String,
     /// RX channel in use. Each has its own H, L and W connectors.
     chan: usize,
-    /// How many RX channels this board has.
-    channels: usize,
     /// Whether to run the RX calibration after retuning.
     calibrate: bool,
     /// Whether the chip's internal test tone replaces the antenna.
@@ -274,10 +305,14 @@ pub struct LimeSdr {
     /// whatever the last session left behind puts power into whatever is on
     /// the port before the operator has looked at it.
     tx_gain_db: f32,
+    /// TX channel in use. Each has its own connectors and its own
+    /// synthesiser; the receive channel is a separate choice.
     tx_chan: usize,
-    /// The transmit ports the board has, with their bands.
+    /// The transmit ports of the channel in use, with their bands.
     tx_ports: Vec<TxPort>,
-    /// Port name to force, or `AUTO_ANTENNA` to follow the frequency.
+    /// LimeSuite's name for the port to force, or `AUTO_ANTENNA` to follow
+    /// the frequency. Kept as the switch position rather than the connector
+    /// so that a forced choice survives a change of channel.
     tx_antenna: String,
     transmitting: Arc<AtomicBool>,
 }
@@ -349,8 +384,6 @@ impl LimeSdr {
             }
         };
 
-        let antennas = rx_antennas(&handle);
-        let tx_ports = tx_ports(&handle);
         let channels =
             unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_RX) }.max(1) as usize;
         // A LimeSDR-USB is 2x2 and a Mini is 1x1, so this is asked rather
@@ -359,6 +392,8 @@ impl LimeSdr {
         // for it.
         let tx_channels =
             unsafe { ffi::LMS_GetNumChannels(handle.ptr(), ffi::LMS_CH_TX) }.max(1) as usize;
+        let antennas = rx_antennas(&handle, channels, &e.name);
+        let tx_ports = tx_ports(&handle, tx_channels, &e.name);
 
         let rate_max = e.rate_max().0.min(reported_rate_max(&handle).unwrap_or(u64::MAX));
         let info = DeviceInfo {
@@ -426,7 +461,6 @@ impl LimeSdr {
             antennas,
             antenna: AUTO_ANTENNA.to_string(),
             chan: DEFAULT_CHAN,
-            channels,
             calibrate: false,
             test_signal: false,
             streaming: Arc::new(AtomicBool::new(false)),
@@ -452,16 +486,30 @@ impl LimeSdr {
     /// which is why the choice can be pinned instead.
     fn antenna_for(&self, f: Hz) -> Option<&Antenna> {
         if self.antenna != AUTO_ANTENNA {
-            if let Some(a) = self.antennas.iter().find(|a| a.name == self.antenna) {
+            if let Some(a) =
+                self.antennas.iter().find(|a| a.name == self.antenna || a.label == self.antenna)
+            {
                 return Some(a);
             }
         }
         let want = if f.get() >= 1_500_000_000 { "LNAH" } else { "LNAL" };
+        let on = |a: &&Antenna| a.chan == self.chan;
         self.antennas
             .iter()
+            .filter(on)
             .find(|a| a.name == want)
-            .or_else(|| self.antennas.iter().find(|a| a.name == "LNAW"))
-            .or_else(|| self.antennas.first())
+            .or_else(|| self.antennas.iter().filter(on).find(|a| a.name == "LNAW"))
+            .or_else(|| self.antennas.iter().find(on))
+    }
+
+    /// The port named, whichever channel it is on.
+    fn port_named(&self, value: &str) -> Option<&Antenna> {
+        self.antennas.iter().find(|a| a.label == value || a.name == value)
+    }
+
+    /// The transmit port named, whichever channel it is on.
+    fn tx_port_named(&self, value: &str) -> Option<&TxPort> {
+        self.tx_ports.iter().find(|p| p.label == value || p.name == value)
     }
 
     /// Put a freshly selected channel into the state the old one was in.
@@ -510,7 +558,35 @@ impl LimeSdr {
 
     /// The TX port to use at a given frequency.
     fn tx_port_for(&self, f: Hz) -> Option<&TxPort> {
-        pick_tx_port(&self.tx_ports, &self.tx_antenna, f)
+        pick_tx_port(&self.tx_ports, &self.tx_antenna, f, self.tx_chan)
+    }
+
+    /// Put the transmit chain of the channel now in use where the settings
+    /// say, so a key pressed later finds it tuned and matched.
+    fn configure_tx_channel(&self) -> Result<()> {
+        check(
+            unsafe {
+                ffi::LMS_SetLOFrequency(
+                    self.handle.ptr(),
+                    ffi::LMS_CH_TX,
+                    self.tx_chan,
+                    self.tx_center.0 as f64,
+                )
+            },
+            "LMS_SetLOFrequency",
+        )?;
+        self.apply_tx_antenna(self.tx_center)?;
+        check(
+            unsafe {
+                ffi::LMS_SetGaindB(
+                    self.handle.ptr(),
+                    ffi::LMS_CH_TX,
+                    self.tx_chan,
+                    self.tx_gain_db.round() as u32,
+                )
+            },
+            "LMS_SetGaindB",
+        )
     }
 
     /// Point the transmit chain at a port.
@@ -593,21 +669,29 @@ impl LimeSdr {
     }
 }
 
-fn rx_antennas(handle: &Handle) -> Vec<Antenna> {
+/// Every receive connector the board has, across its channels.
+fn rx_antennas(handle: &Handle, channels: usize, board: &str) -> Vec<Antenna> {
+    (0..channels).flat_map(|c| rx_antennas_on(handle, c, board)).collect()
+}
+
+fn rx_antennas_on(handle: &Handle, chan: usize, board: &str) -> Vec<Antenna> {
     let n = unsafe {
-        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, DEFAULT_CHAN, std::ptr::null_mut())
+        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, chan, std::ptr::null_mut())
     };
     if n <= 0 {
         return Vec::new();
     }
     let mut list = vec![[0 as std::os::raw::c_char; 16]; n as usize];
-    let n = unsafe {
-        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, DEFAULT_CHAN, list.as_mut_ptr())
-    };
+    let n =
+        unsafe { ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_RX, chan, list.as_mut_ptr()) };
     list.iter()
         .take(n.max(0) as usize)
         .enumerate()
-        .map(|(i, s)| Antenna { index: i, name: cstr(s) })
+        .map(|(i, s)| {
+            let name = cstr(s);
+            let label = connector(board, chan, &name);
+            Antenna { index: i, chan, name, label }
+        })
         // Index 0 is "NONE", which disconnects the receiver from every port,
         // and LB1/LB2 are the loopback taps from the transmitter rather than
         // connectors. Offering either is offering a way to hear nothing.
@@ -615,17 +699,21 @@ fn rx_antennas(handle: &Handle) -> Vec<Antenna> {
         .collect()
 }
 
-fn tx_ports(handle: &Handle) -> Vec<TxPort> {
+/// Every transmit connector the board has, across its channels.
+fn tx_ports(handle: &Handle, channels: usize, board: &str) -> Vec<TxPort> {
+    (0..channels).flat_map(|c| tx_ports_on(handle, c, board)).collect()
+}
+
+fn tx_ports_on(handle: &Handle, chan: usize, board: &str) -> Vec<TxPort> {
     let n = unsafe {
-        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, std::ptr::null_mut())
+        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_TX, chan, std::ptr::null_mut())
     };
     if n <= 0 {
         return Vec::new();
     }
     let mut list = vec![[0 as std::os::raw::c_char; 16]; n as usize];
-    let n = unsafe {
-        ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, list.as_mut_ptr())
-    };
+    let n =
+        unsafe { ffi::LMS_GetAntennaList(handle.ptr(), ffi::LMS_CH_TX, chan, list.as_mut_ptr()) };
     list.iter()
         .take(n.max(0) as usize)
         .enumerate()
@@ -634,34 +722,42 @@ fn tx_ports(handle: &Handle) -> Vec<TxPort> {
         .filter(|(_, s)| cstr(*s).starts_with("BAND"))
         .map(|(i, s)| {
             let mut range = ffi::lms_range_t { min: 0.0, max: 0.0, step: 0.0 };
-            let rc = unsafe {
-                ffi::LMS_GetAntennaBW(handle.ptr(), ffi::LMS_CH_TX, DEFAULT_CHAN, i, &mut range)
-            };
+            let rc =
+                unsafe { ffi::LMS_GetAntennaBW(handle.ptr(), ffi::LMS_CH_TX, chan, i, &mut range) };
             let band = if rc == ffi::LMS_SUCCESS && range.max > range.min {
                 range.min..=range.max
             } else {
                 0.0..=0.0
             };
-            TxPort { index: i, name: cstr(s), band }
+            let name = cstr(s);
+            let label = connector(board, chan, &name);
+            TxPort { index: i, chan, name, label, band }
         })
         .collect()
 }
 
-fn pick_tx_port<'a>(ports: &'a [TxPort], forced: &str, f: Hz) -> Option<&'a TxPort> {
+/// The port a frequency should leave by, or the one pinned by name.
+///
+/// `chan` is the transmitter in use, which is what `Auto` chooses within: a
+/// pinned port names its own channel and moving to it moves the chain.
+fn pick_tx_port<'a>(ports: &'a [TxPort], forced: &str, f: Hz, chan: usize) -> Option<&'a TxPort> {
     if forced != AUTO_ANTENNA {
-        if let Some(p) = ports.iter().find(|p| p.name == forced) {
+        if let Some(p) = ports.iter().find(|p| p.name == forced || p.label == forced) {
             return Some(p);
         }
     }
     let hz = f.0 as f64;
+    let on = |p: &&TxPort| p.chan == chan;
     ports
         .iter()
+        .filter(on)
         .find(|p| p.band.contains(&hz))
         // Off the end of both bands (below 30 MHz, or in the gap between them)
         // the nearest one still radiates, where no band at all does not.
         .or_else(|| {
             ports
                 .iter()
+                .filter(on)
                 .min_by(|a, b| band_distance(&a.band, hz).total_cmp(&band_distance(&b.band, hz)))
         })
 }
@@ -846,38 +942,26 @@ impl Device for LimeSdr {
         let mut v = Vec::new();
         if !self.antennas.is_empty() {
             let mut options = vec![AUTO_ANTENNA.to_string()];
-            options.extend(self.antennas.iter().map(|a| a.name.clone()));
+            options.extend(self.antennas.iter().map(|a| a.label.clone()));
             v.push(common::Choice {
                 name: "antenna".into(),
-                label: "Antenna port".into(),
-                help: format!(
-                    "Which RX connector the cable is in. The board has three per channel and they are separately matched: on RX{ch} they are the H, L and W sockets. Auto follows the frequency, taking L below 1.5 GHz and H above, which is only right if the antenna is on that port. W is broadband and costs several dB of noise figure.",
-                    ch = self.chan + 1
-                ),
+                label: "Receive port".into(),
+                help: "Which socket the aerial is in, by the name printed beside it. The board has three inputs per receiver and they are separately matched: H is the high band, L the low one and W broadband, at several dB of noise figure. Picking a port on the other receiver moves the receiver, which stops and restarts the stream. Auto follows the frequency on the receiver in use, taking L below 1.5 GHz and H above, which is only right if the aerial is on that port."
+                    .into(),
                 options,
                 selected: self.antenna.clone(),
             });
         }
         if !self.tx_ports.is_empty() {
             let mut options = vec![AUTO_ANTENNA.to_string()];
-            options.extend(self.tx_ports.iter().map(|p| p.name.clone()));
+            options.extend(self.tx_ports.iter().map(|p| p.label.clone()));
             v.push(common::Choice {
                 name: "tx_antenna".into(),
                 label: "Transmit port".into(),
-                help: "Which TX connector the transmitter drives. Auto takes the port LimeSuite says is matched at the transmit frequency, which is BAND1 below 1.9 GHz on a LimeSDR-USB and BAND2 there on a Mini: the same two names are opposite switch positions on the two boards. A port that does not match the frequency radiates a fraction of the power."
+                help: "Which socket the transmitter drives, by the name printed beside it. The board has two outputs per transmitter, matched for the low and the high band, and a port that does not match the frequency radiates a fraction of the power. Picking a port on the other transmitter moves the transmitter, which is refused while a key is down. Auto takes the port LimeSuite says is matched at the transmit frequency."
                     .into(),
                 options,
                 selected: self.tx_antenna.clone(),
-            });
-        }
-        if self.channels > 1 {
-            v.push(common::Choice {
-                name: "channel".into(),
-                label: "Receive channel".into(),
-                help: "Which of the board's two receivers to stream, each with its own set of RF connectors. Changing it stops and restarts the stream."
-                    .into(),
-                options: (0..self.channels).map(|c| format!("RX{}", c + 1)).collect(),
-                selected: format!("RX{}", self.chan + 1),
             });
         }
         v
@@ -886,37 +970,24 @@ impl Device for LimeSdr {
     fn set_choice(&mut self, name: &str, value: &str) -> Result<()> {
         match name {
             "antenna" => {
-                if value != AUTO_ANTENNA && !self.antennas.iter().any(|a| a.name == value) {
-                    return Err(Error::other(format!("no antenna port named {value:?}")));
-                }
-                self.antenna = value.to_string();
-                let _g = self.handle.ctl.lock().unwrap();
-                self.apply_antenna(self.center)
-            }
-            "tx_antenna" => {
-                if value != AUTO_ANTENNA && !self.tx_ports.iter().any(|p| p.name == value) {
-                    return Err(Error::other(format!("no transmit port named {value:?}")));
-                }
-                self.tx_antenna = value.to_string();
-                let _g = self.handle.ctl.lock().unwrap();
-                self.apply_tx_antenna(self.tx_center)
-            }
-            "channel" => {
-                let chan = value
-                    .strip_prefix("RX")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| n.checked_sub(1))
-                    .filter(|c| *c < self.channels)
-                    .ok_or_else(|| Error::other(format!("no receive channel named {value:?}")))?;
-                if chan == self.chan {
-                    return Ok(());
-                }
+                let chan = match self.port_named(value) {
+                    Some(a) => a.chan,
+                    None if value == AUTO_ANTENNA => self.chan,
+                    None => {
+                        return Err(Error::other(format!("no antenna port named {value:?}")));
+                    }
+                };
                 let handle = self.handle.clone();
                 let _g = handle.ctl.lock().unwrap();
+                let was = std::mem::replace(&mut self.antenna, value.to_string());
+                if chan == self.chan {
+                    return self.apply_antenna(self.center);
+                }
                 let old = self.chan;
                 self.chan = chan;
                 if let Err(e) = self.configure_channel() {
                     self.chan = old;
+                    self.antenna = was;
                     return Err(e);
                 }
                 // Only after the new one is up, so a failure leaves a working
@@ -926,14 +997,49 @@ impl Device for LimeSdr {
                 };
                 Ok(())
             }
+            "tx_antenna" => {
+                let chan = match self.tx_port_named(value) {
+                    Some(p) => p.chan,
+                    None if value == AUTO_ANTENNA => self.tx_chan,
+                    None => {
+                        return Err(Error::other(format!("no transmit port named {value:?}")));
+                    }
+                };
+                // The channel is what the transmit stream was set up on, and
+                // moving it under a key that is down puts the samples on a
+                // chain that is no longer tuned or matched.
+                if chan != self.tx_chan && self.transmitting.load(Ordering::SeqCst) {
+                    return Err(Error::Busy);
+                }
+                let handle = self.handle.clone();
+                let _g = handle.ctl.lock().unwrap();
+                let was = std::mem::replace(&mut self.tx_antenna, value.to_string());
+                if chan == self.tx_chan {
+                    return self.apply_tx_antenna(self.tx_center);
+                }
+                let old = self.tx_chan;
+                self.tx_chan = chan;
+                if let Err(e) = self.configure_tx_channel() {
+                    self.tx_chan = old;
+                    self.tx_antenna = was;
+                    return Err(e);
+                }
+                let _ = unsafe {
+                    ffi::LMS_EnableChannel(self.handle.ptr(), ffi::LMS_CH_TX, old, false)
+                };
+                Ok(())
+            }
             _ => Err(Error::other(format!("no setting named {name:?}"))),
         }
     }
 
-    fn choice_needs_restart(&self, name: &str) -> bool {
+    fn choice_needs_restart(&self, name: &str, value: &str) -> bool {
         // The channel is a property of the stream LimeSuite set up, not a
-        // setting on it, so the stream has to be torn down around a change.
-        name == "channel"
+        // setting on it, so a port on the other receiver means tearing the
+        // stream down around the change. The transmit stream is a separate
+        // one the receiver is not holding, and a port that moves it is
+        // refused while a key is down instead.
+        name == "antenna" && self.port_named(value).is_some_and(|a| a.chan != self.chan)
     }
 
     fn rate_needs_restart(&self) -> bool {
@@ -1411,13 +1517,18 @@ mod tests {
     /// `LMS7_LimeSDR_mini`'s override of it.
     #[test]
     fn a_transmit_port_is_chosen_by_its_band_and_not_its_name() {
-        let port =
-            |i, n: &str, lo: f64, hi: f64| TxPort { index: i, name: n.into(), band: lo..=hi };
-        let usb = [port(1, "BAND1", 30e6, 1.9e9), port(2, "BAND2", 2e9, 2.6e9)];
-        let mini = [port(1, "BAND1", 2e9, 2.6e9), port(2, "BAND2", 30e6, 1.9e9)];
+        let port = |i, chan, n: &str, lo: f64, hi: f64| TxPort {
+            index: i,
+            chan,
+            name: n.into(),
+            label: connector("LimeSDR-USB", chan, n),
+            band: lo..=hi,
+        };
+        let usb = [port(1, 0, "BAND1", 30e6, 1.9e9), port(2, 0, "BAND2", 2e9, 2.6e9)];
+        let mini = [port(1, 0, "BAND1", 2e9, 2.6e9), port(2, 0, "BAND2", 30e6, 1.9e9)];
 
         let at = |ports: &[TxPort], hz: u64| {
-            pick_tx_port(ports, AUTO_ANTENNA, Hz(hz)).unwrap().name.clone()
+            pick_tx_port(ports, AUTO_ANTENNA, Hz(hz), 0).unwrap().name.clone()
         };
         assert_eq!(at(&usb, 145_500_000), "BAND1");
         assert_eq!(at(&mini, 145_500_000), "BAND2");
@@ -1430,9 +1541,67 @@ mod tests {
         assert_eq!(at(&usb, 10_000_000), "BAND1");
 
         // A pinned port wins at any frequency; an unknown name falls back.
-        assert_eq!(pick_tx_port(&usb, "BAND2", Hz::mhz(145)).unwrap().index, 2);
-        assert_eq!(pick_tx_port(&usb, "BAND9", Hz::mhz(145)).unwrap().index, 1);
-        assert!(pick_tx_port(&[], AUTO_ANTENNA, Hz::mhz(145)).is_none());
+        assert_eq!(pick_tx_port(&usb, "BAND2", Hz::mhz(145), 0).unwrap().index, 2);
+        assert_eq!(pick_tx_port(&usb, "BAND9", Hz::mhz(145), 0).unwrap().index, 1);
+        assert!(pick_tx_port(&[], AUTO_ANTENNA, Hz::mhz(145), 0).is_none());
+
+        // And the connector the board is marked with names the same port as
+        // the switch position behind it, so a setting written either way
+        // reaches it.
+        assert_eq!(pick_tx_port(&usb, "TX1_2", Hz::mhz(145), 0).unwrap().index, 2);
+    }
+
+    /// A pinned connector names its own transmitter; Auto stays on the one
+    /// in use rather than wandering to the other board half.
+    #[test]
+    fn a_transmit_port_carries_the_channel_it_is_on() {
+        let port = |i, chan, n: &str, lo: f64, hi: f64| TxPort {
+            index: i,
+            chan,
+            name: n.into(),
+            label: connector("LimeSDR-USB", chan, n),
+            band: lo..=hi,
+        };
+        let board = [
+            port(1, 0, "BAND1", 30e6, 1.9e9),
+            port(2, 0, "BAND2", 2e9, 2.6e9),
+            port(1, 1, "BAND1", 30e6, 1.9e9),
+            port(2, 1, "BAND2", 2e9, 2.6e9),
+        ];
+        let labels: Vec<&str> = board.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["TX1_1", "TX1_2", "TX2_1", "TX2_2"]);
+
+        let pinned = pick_tx_port(&board, "TX2_2", Hz::mhz(145), 0).expect("a port");
+        assert_eq!((pinned.chan, pinned.index), (1, 2), "a pinned port names its transmitter");
+
+        for chan in [0, 1] {
+            let auto = pick_tx_port(&board, AUTO_ANTENNA, Hz::mhz(145), chan).expect("a port");
+            assert_eq!((auto.chan, auto.name.as_str()), (chan, "BAND1"), "auto on TX{}", chan + 1);
+        }
+    }
+
+    /// What the operator reads on the socket, per board and per channel.
+    ///
+    /// A LimeSDR-USB is marked RX1_H, RX1_L, RX1_W and TX1_1, TX1_2, with
+    /// the same again for the second channel; a Mini brings every path out
+    /// on one socket each way, so there is nothing to rename and
+    /// LimeSuite's own name stands.
+    #[test]
+    fn a_port_is_offered_under_the_name_printed_on_the_board() {
+        assert_eq!(connector("LimeSDR-USB", 0, "BAND1"), "TX1_1");
+        assert_eq!(connector("LimeSDR-USB", 0, "BAND2"), "TX1_2");
+        assert_eq!(connector("LimeSDR-USB", 1, "BAND1"), "TX2_1");
+        assert_eq!(connector("LimeSDR-USB", 1, "BAND2"), "TX2_2");
+        assert_eq!(connector("LimeSDR-USB", 0, "LNAH"), "RX1_H");
+        assert_eq!(connector("LimeSDR-USB", 0, "LNAL"), "RX1_L");
+        assert_eq!(connector("LimeSDR-USB", 0, "LNAW"), "RX1_W");
+        assert_eq!(connector("LimeSDR-USB", 1, "LNAH"), "RX2_H");
+        assert_eq!(connector("LimeSDR-PCIe", 1, "BAND2"), "TX2_2");
+        assert_eq!(connector("LimeSDR-Mini", 0, "BAND1"), "BAND1");
+        assert_eq!(connector("LimeSDR-Mini", 0, "LNAW"), "LNAW");
+        // Whatever else the list holds is passed through untouched: NONE and
+        // the Mini's own Auto are not connectors.
+        assert_eq!(connector("LimeSDR-USB", 0, "NONE"), "NONE");
     }
 
     #[test]

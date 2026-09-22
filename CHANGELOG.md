@@ -32,6 +32,8 @@ the code is in the commit log.
 - `identify`, a crate naming what a recording holds from its samples and its
   tuning, reading every protocol the receiver does without the flow graph.
 - Tuner trim on a stitched receiver, in hertz per tuner, on the radio card.
+- LimeSDR ports picked by the name printed on the board, RX1_L through
+  TX2_2, each carrying the channel it is on.
 - Protocol descriptions read two more checksums: a sum that folds its own
   carry back in, and a nibble sum that starts or ends part way through a
   nibble.
