@@ -135,7 +135,12 @@ fn every_burst_is_marked_at_both_ends() {
     assert_eq!(start.len(), 1, "no start of burst tag");
     assert_eq!(end.len(), 1, "no end of burst tag");
     assert_eq!(start[0].index, 0);
-    assert_eq!(end[0].index as usize, iq.len() - 1);
+
+    assert_eq!(iq.len(), 120_000, "a 60 ms dot and the seven dot gap after it, at 250 kS/s");
+    let at = end[0].index as usize;
+    assert_eq!(at, 14_999, "the end of the dot, not the end of the 420 ms silence");
+    assert_eq!(iq[..=at].iter().filter(|s| s.norm() > 1e-6).count(), 14_998, "the dot, less edges");
+    assert_eq!(iq[at + 1..].iter().filter(|s| s.norm() > 0.0).count(), 0, "carrier after the end");
 }
 
 #[test]

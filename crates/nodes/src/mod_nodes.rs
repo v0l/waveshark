@@ -98,6 +98,11 @@ fn edge_samples(burst: &[Pulse], per_us: f64, silent_last: bool) -> Option<usize
     Some((((shortest as f64 * per_us) / 2.0).floor() as usize).max(1))
 }
 
+fn mark_burst(ctx: &mut NodeCtx<'_>, start: u64, carrier_end: u64) {
+    ctx.tag(Tag::marker(start, TAG_TX_START));
+    ctx.tag(Tag::marker(carrier_end.saturating_sub(1).max(start), TAG_TX_END));
+}
+
 /// Ramp a run down to nothing over its first `r` samples and hold it there.
 fn fade_out(run: &mut [C32], r: usize) {
     for (i, s) in run.iter_mut().enumerate() {
@@ -200,9 +205,10 @@ impl OokModNode {
 
     /// Key one burst into `out`, carrying the carrier phase across calls so
     /// consecutive blocks join without a discontinuity.
-    fn key(&mut self, burst: &[Pulse], out: &mut Vec<C32>) {
+    fn key(&mut self, burst: &[Pulse], out: &mut Vec<C32>) -> usize {
         let per_us = self.rate / 1e6;
         let ramp = ((self.ramp_us as f64 * per_us).round() as usize).max(1);
+        let mut carrier_end = out.len();
 
         for p in burst.iter() {
             let mark = ((p.mark as f64 * per_us).round() as usize).max(1);
@@ -223,6 +229,7 @@ impl OokModNode {
                 let c = self.carrier.step(self.offset_hz, self.rate);
                 out.push(c * (env * self.amplitude));
             }
+            carrier_end = out.len();
             for _ in 0..gap {
                 // The oscillator keeps running through the gap so the next
                 // mark starts where an unbroken carrier would have been.
@@ -230,6 +237,7 @@ impl OokModNode {
                 out.push(C32::new(0.0, 0.0));
             }
         }
+        carrier_end
     }
 }
 
@@ -272,13 +280,11 @@ impl Simple for OokModNode {
         for pkg in bursts {
             let pkg = pkg.clone();
             let start = self.produced + out.len() as u64;
-            self.key(&pkg, out);
-            let end = self.produced + out.len() as u64;
+            let carrier_end = self.key(&pkg, out);
             // What the radio keys on. Without these the stage that hands
             // samples over has to infer a burst from the samples going quiet,
             // which cannot tell a gap inside a transmission from its end.
-            ctx.tag(Tag::marker(start, TAG_TX_START));
-            ctx.tag(Tag::marker(end.saturating_sub(1), TAG_TX_END));
+            mark_burst(ctx, start, self.produced + carrier_end as u64);
         }
         self.produced += out.len() as u64;
         Ok(())
@@ -398,7 +404,7 @@ impl FskModNode {
         self
     }
 
-    fn key(&mut self, burst: &[Pulse], out: &mut Vec<C32>) {
+    fn key(&mut self, burst: &[Pulse], out: &mut Vec<C32>) -> usize {
         let per_us = self.rate / 1e6;
         let (hi, lo) = (self.offset_hz + self.shift_hz / 2.0, self.offset_hz - self.shift_hz / 2.0);
         let silent = self.rest == Rest::Silence;
@@ -446,7 +452,7 @@ impl FskModNode {
                 fade_out(&mut out[rest..], r);
                 fade_in(&mut out[start..head], ramp, self.resting);
                 self.resting = true;
-                return;
+                return rest + r;
             }
             for _ in 0..gap {
                 let c = self.carrier.step(lo, self.rate);
@@ -459,6 +465,7 @@ impl FskModNode {
             fade_in(&mut out[start..], ramp, self.resting);
             self.resting = false;
         }
+        out.len()
     }
 }
 
@@ -500,10 +507,8 @@ impl Simple for FskModNode {
         for pkg in bursts {
             let pkg = pkg.clone();
             let start = self.produced + out.len() as u64;
-            self.key(&pkg, out);
-            let end = self.produced + out.len() as u64;
-            ctx.tag(Tag::marker(start, TAG_TX_START));
-            ctx.tag(Tag::marker(end.saturating_sub(1), TAG_TX_END));
+            let carrier_end = self.key(&pkg, out);
+            mark_burst(ctx, start, self.produced + carrier_end as u64);
         }
         self.produced += out.len() as u64;
         Ok(())
@@ -1010,15 +1015,29 @@ mod tests {
     }
 
     fn run<N: Simple>(node: &mut N, input: Payload, spec: StreamSpec) -> Vec<C32> {
+        run_tagged(node, input, spec).0
+    }
+
+    fn run_tagged<N: Simple>(
+        node: &mut N,
+        input: Payload,
+        spec: StreamSpec,
+    ) -> (Vec<C32>, Vec<pipeline::Tag>) {
         let ins = [PortSpec { spec, latency: 0 }];
         let mut out = Payload::Iq(Vec::new());
         let (mut ev, mut tg) = (Vec::new(), Vec::new());
-        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        node.process(&input, &mut out, &mut ctx).unwrap();
+        {
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            node.process(&input, &mut out, &mut ctx).unwrap();
+        }
         match out {
-            Payload::Iq(v) => v,
+            Payload::Iq(v) => (v, tg),
             _ => unreachable!(),
         }
+    }
+
+    fn marks(tags: &[pipeline::Tag], key: &str) -> Vec<u64> {
+        tags.iter().filter(|t| t.key == key).map(|t| t.index).collect()
     }
 
     fn audio_spec(rate: f64) -> StreamSpec {
@@ -1129,6 +1148,40 @@ mod tests {
         // on, which is the same 50 us.
         let on = silent[..400].iter().filter(|s| (s.norm() - 0.5).abs() < 1e-3).count();
         assert_eq!(on, 351, "the burst itself, less the edge it starts on");
+    }
+
+    #[test]
+    fn the_end_tag_of_a_silenced_rest_is_the_last_sample_with_carrier() {
+        let rate = 1_000_000.0;
+        let spec = StreamSpec {
+            kind: PortKind::Timings,
+            rate,
+            center: common::Hz(433_920_000),
+            bandwidth: rate,
+            flow: Flow::Tx,
+            ..Default::default()
+        };
+        let pkg = vec![
+            Pulse { mark: 100, gap: 100 },
+            Pulse { mark: 100, gap: 100 },
+            Pulse { mark: 0, gap: 1_000 },
+        ];
+        let mut n = FskModNode::new(0.0, 250_000.0, 0.5).resting(Rest::Silence);
+        n.negotiate(&PortSpec { spec, latency: 0 }).unwrap();
+        let (iq, tags) = run_tagged(&mut n, Payload::Timings(vec![pkg.clone(), pkg]), spec);
+
+        assert_eq!(iq.len(), 2_800, "1.4 ms of package twice at 1 MS/s");
+        assert_eq!(marks(&tags, TAG_TX_START), vec![0, 1_400]);
+        assert_eq!(
+            marks(&tags, TAG_TX_END),
+            vec![449, 1_849],
+            "400 samples keyed, then the 50 sample fade into a 1 ms rest"
+        );
+        for end in [449usize, 1_849] {
+            assert!(iq[end].norm() > 0.0, "the end tag is on a silent sample");
+            let after = iq[end + 1..(end + 951).min(iq.len())].iter();
+            assert_eq!(after.filter(|s| s.norm() > 0.0).count(), 0, "carrier past the end tag");
+        }
     }
 
     /// What the edge is for, and by how much. A carrier switched off in one
