@@ -3,7 +3,8 @@
 //! Two layers of modulation, the same shape as APRS. The channel is ordinary
 //! narrowband FM, so the node mixes the channel down, filters it and
 //! discriminates it; the burst is then in the *audio* as fast FSK at 1200
-//! baud, which [`dsp::afsk`] reads and [`decode::mdc1200`] frames.
+//! baud, which is MSK, so [`dsp::msk`] reads the data off the phase and
+//! [`decode::mdc1200`] frames it.
 //!
 //! What reaches the bus is the seven information bytes, which carry their
 //! own CRC: a row is published only where that CRC passed, so a unit id on
@@ -19,7 +20,7 @@ use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};
 use common::Result;
 use decode::mdc1200;
 pub use decode::mdc1200::read;
-use dsp::afsk::{AfskBits, AfskConfig, FFSK1200};
+use dsp::msk::{MskConfig, MskDemod};
 use dsp::{FirDecim, FmDemod, Mixer};
 use identify::Signal;
 pub use identify::mdc::CHANNEL_WIDTH_HZ;
@@ -38,12 +39,12 @@ pub struct MdcNode {
     mixer: Mixer,
     decim: FirDecim,
     fm: FmDemod,
-    bits: AfskBits,
+    msk: MskDemod,
     framer: mdc1200::Framer,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
     audio: Vec<f32>,
-    symbols: Vec<dsp::afsk::Symbol>,
+    bits: Vec<bool>,
     meter: crate::FrameMeter,
     read: u64,
 }
@@ -62,12 +63,12 @@ impl MdcNode {
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(AUDIO_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             fm: FmDemod::new(AUDIO_HZ, DEVIATION_HZ),
-            bits: AfskBits::with_tones(AUDIO_HZ, FFSK1200, AfskConfig::default()),
+            msk: MskDemod::new(AUDIO_HZ, MskConfig::FFSK1200),
             framer: mdc1200::Framer::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
             audio: Vec::new(),
-            symbols: Vec::new(),
+            bits: Vec::new(),
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
                 .keyed_as(common::Modulation::Msk),
             read: 0,
@@ -108,13 +109,13 @@ impl Simple for MdcNode {
         }
         let factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
         let audio_rate = rate / factor as f64;
-        if audio_rate < 4.0 * FFSK1200.space_hz {
+        if audio_rate < 4.0 * (MskConfig::FFSK1200.carrier_hz + MskConfig::FFSK1200.baud / 4.0) {
             return Err(common::Error::other("mdc1200 needs room for the 1800 Hz tone"));
         }
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.fm = FmDemod::new(audio_rate, DEVIATION_HZ);
-        self.bits = AfskBits::with_tones(audio_rate, FFSK1200, AfskConfig::default());
+        self.msk = MskDemod::new(audio_rate, MskConfig::FFSK1200);
         self.framer.reset();
         // Measured on the channel rather than on the span: a level taken
         // before the mixer is a level of the band.
@@ -159,25 +160,18 @@ impl Simple for MdcNode {
         self.audio.clear();
         self.fm.process(&self.narrow, &mut self.audio);
 
-        let mut symbols = std::mem::take(&mut self.symbols);
-        symbols.clear();
+        let mut bits = std::mem::take(&mut self.bits);
+        bits.clear();
         let audio = std::mem::take(&mut self.audio);
-        self.bits.process(&audio, &mut symbols);
+        self.msk.process(&audio, &mut bits);
         self.audio = audio;
-        for sym in &symbols {
-            // A quiet channel still produces symbols, and clocking those
-            // into the framer is how a sync word gets invented.
-            if sym.quiet {
-                continue;
-            }
-            // The tone says whether the data bit changed: mark for no
-            // change, space for a change.
-            if let Some(info) = self.framer.push(!sym.mark) {
+        for &bit in &bits {
+            if let Some(info) = self.framer.push(bit) {
                 self.read += 1;
                 o.packets_mut().push(self.meter.packet_now(info.to_vec()));
             }
         }
-        self.symbols = symbols;
+        self.bits = bits;
         Ok(())
     }
 
@@ -185,7 +179,7 @@ impl Simple for MdcNode {
         self.mixer.reset();
         self.decim.reset();
         self.fm.reset();
-        self.bits.reset();
+        self.msk.reset();
         self.framer.reset();
         self.meter.reset();
     }
@@ -260,7 +254,7 @@ mod tests {
     fn keyed(op: u8, arg: u8, unit: u16, offset: f64, noise: f32) -> Vec<C32> {
         let tones = mdc1200::encode_tones(op, arg, unit, 0x00, 3);
         let audio_rate = 24_000.0;
-        let audio = dsp::afsk::modulate(&tones, audio_rate, FFSK1200);
+        let audio = dsp::afsk::modulate(&tones, audio_rate, dsp::afsk::FFSK1200);
         let mut seed = 0x1234_5678_9abc_def0u64;
         let mut rng = || {
             seed ^= seed << 13;
@@ -348,13 +342,14 @@ mod tests {
         assert!(d.subject.is_none(), "a call alert is not the sender's id");
     }
 
-    /// Nobody is tuned exactly, and a burst a little off the dial still
-    /// reads. Measured on this synthetic burst: to 1 kHz out it reads whole,
-    /// and at 1.5 kHz, which is more than half the narrowband deviation, it
-    /// is gone.
+    /// Nobody is tuned exactly, and a burst off the dial still reads.
+    /// Measured on this synthetic burst: every offset out to 6 kHz, the edge
+    /// of the 12.5 kHz channel, reads whole, because a mistuned FM channel
+    /// is a DC offset in the audio and the matched filter sits 1500 Hz away
+    /// from it. The tone correlator this replaced was gone by 1.5 kHz.
     #[test]
     fn a_mistuned_burst_still_reads() {
-        for offset in [-1_000.0, -500.0, 0.0, 500.0, 1_000.0] {
+        for offset in [-6_000.0, -2_500.0, -1_000.0, 0.0, 1_000.0, 2_500.0, 6_000.0] {
             let mut n = node(DEFAULT_HZ);
             let frames = run(&mut n, &keyed(0x01, 0x80, 0x0042, offset, 0.0), DEFAULT_HZ);
             assert_eq!(frames.len(), 1, "{offset} Hz off: {} bursts", frames.len());
@@ -364,8 +359,10 @@ mod tests {
 
     /// A burst under noise still reads, and the sync word is never invented
     /// out of the noise alone. Measured on this synthetic burst: noise of
-    /// 1.5 times the carrier amplitude across the 96 kS/s span still reads,
-    /// and twice it reads nothing rather than reading a wrong unit id.
+    /// twice the carrier amplitude across the 96 kS/s span still reads, and
+    /// at two and a half times the block is refused rather than read as a
+    /// wrong unit id. The tone correlator this replaced lost the burst at
+    /// 1.5.
     #[test]
     fn a_burst_under_noise_reads_and_a_worse_one_reads_nothing() {
         let read = |noise| {
@@ -373,10 +370,10 @@ mod tests {
             let frames = run(&mut n, &keyed(0x01, 0x80, 0x0042, 0.0, noise), DEFAULT_HZ);
             (frames.len(), n.refused(), frames.first().and_then(|b| mdc1200::parse(b)))
         };
-        let (count, refused, msg) = read(1.5);
+        let (count, refused, msg) = read(2.0);
         assert_eq!((count, refused), (1, 0));
         assert_eq!(msg.expect("a burst").unit, 0x0042);
-        assert_eq!(read(2.0).0, 0, "a burst was invented at twice the noise");
+        assert_eq!(read(2.5).0, 0, "a burst was invented at two and a half times the noise");
     }
 
     /// Two minutes of noise produces nothing. The sync word and the CRC are
@@ -399,16 +396,17 @@ mod tests {
         assert_eq!(n.repaired(), 0, "the code voted a burst out of noise");
     }
 
-    /// The carrier dropping out mid-burst is past the parity bytes, however
-    /// scattered the interleaver would have made it. The tone says whether
-    /// the data bit changed, so a fade that comes back on the other phase
-    /// complements every bit to the end of the block, and half a block is
-    /// not what a vote of four checks repairs. Measured over dead-carrier
-    /// gaps of 2, 4, 6, 8 and 10 ms at three places in the burst: 15
-    /// refused, none repaired, none read as another radio.
+    /// The carrier dropping out mid-burst costs the bits it covered and no
+    /// more, which is what the interleaver and the parity bytes were put
+    /// there for. Measured over dead-carrier gaps of 2, 4, 6, 8 and 10 ms at
+    /// three places in the burst: all 15 read as the radio that sent them,
+    /// 4 of them on the code's vote. Reading the tones and differencing them
+    /// instead, which is what a dropout turns into an inversion of the rest
+    /// of the block, read none of the 15.
     #[test]
-    fn a_dead_carrier_mid_burst_is_past_the_code() {
+    fn a_dead_carrier_mid_burst_still_reads_the_unit() {
         let (mut refused, mut repaired, mut read) = (0, 0, 0);
+        let mut units = Vec::new();
         for ms in [2.0f64, 4.0, 6.0, 8.0, 10.0] {
             for at in [0.35f64, 0.5, 0.65] {
                 let mut iq = keyed(0x01, 0x80, 0x0042, 0.0, 0.0);
@@ -418,11 +416,14 @@ mod tests {
                     *s = C32::new(0.0, 0.0);
                 }
                 let mut n = node(DEFAULT_HZ);
-                read += run(&mut n, &iq, DEFAULT_HZ).len();
+                let frames = run(&mut n, &iq, DEFAULT_HZ);
+                read += frames.len();
+                units.extend(frames.iter().filter_map(|b| mdc1200::parse(b)).map(|m| m.unit));
                 refused += n.refused();
                 repaired += n.repaired();
             }
         }
-        assert_eq!((read, refused, repaired), (0, 15, 0));
+        assert_eq!((read, refused, repaired), (15, 0, 4));
+        assert_eq!(units.iter().filter(|&&u| u == 0x0042).count(), 15, "{units:?}");
     }
 }

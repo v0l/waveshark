@@ -1103,7 +1103,7 @@ pub fn aero_read(bytes: &[u8]) -> Option<Proto> {
 }
 
 pub fn config(rate: aero::Rate) -> MskConfig {
-    MskConfig { baud: rate.baud(), carrier_hz: rate.baud() * CARRIER_RATIO }
+    MskConfig { baud: rate.baud(), carrier_hz: rate.baud() * CARRIER_RATIO, change_is_upper: false }
 }
 
 /// Where the two tones are centred, as a fraction of the bit rate.

@@ -5,7 +5,7 @@ use common::C32;
 use common::bands::Usage;
 use decode::mdc1200;
 use dsp::FmDemod;
-use dsp::afsk::{AfskBits, AfskConfig, FFSK1200};
+use dsp::msk::{MskConfig, MskDemod};
 
 pub struct Mdc;
 
@@ -48,23 +48,18 @@ impl Signal for Mdc {
             return Reading::default();
         };
         let mut fm = FmDemod::new(chan.rate_hz, DEVIATION_HZ);
-        let mut tones = AfskBits::with_tones(chan.rate_hz, FFSK1200, AfskConfig::default());
+        let mut msk = MskDemod::new(chan.rate_hz, MskConfig::FFSK1200);
         let mut framer = mdc1200::Framer::default();
-        let (mut narrow, mut audio, mut symbols) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut narrow, mut audio, mut bits) = (Vec::new(), Vec::new(), Vec::new());
         let mut rows = Vec::new();
         for b in iq.chunks(crate::BLOCK) {
             chan.process(b, &mut narrow);
             audio.clear();
             fm.process(&narrow, &mut audio);
-            symbols.clear();
-            tones.process(&audio, &mut symbols);
-            for sym in &symbols {
-                // A quiet channel still produces symbols, and clocking those
-                // into the framer is how a sync word gets invented.
-                if sym.quiet {
-                    continue;
-                }
-                if let Some(info) = framer.push(!sym.mark)
+            bits.clear();
+            msk.process(&audio, &mut bits);
+            for &bit in &bits {
+                if let Some(info) = framer.push(bit)
                     && let Some(d) = mdc1200::read(&info)
                 {
                     rows.push(d);

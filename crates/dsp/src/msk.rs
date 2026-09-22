@@ -33,18 +33,34 @@
 use common::C32;
 use std::f64::consts::TAU;
 
-/// A waveform: how fast, and where its two tones sit.
+/// A waveform: how fast, where its two tones sit, and which of them a
+/// change of bit is sent as.
 #[derive(Clone, Copy, Debug)]
 pub struct MskConfig {
     pub baud: f64,
     /// Midpoint of the two tones, which are `baud / 4` either side of it.
     pub carrier_hz: f64,
+    /// Whether the *upper* tone is the one sent where the bit changed. The
+    /// phase turns one way or the other either way, so this is which turn
+    /// the caller calls a change, and getting it wrong reads a stream that
+    /// alternates against the one that was sent.
+    pub change_is_upper: bool,
 }
 
 impl MskConfig {
     /// ACARS: 2400 bits a second on 1200 and 2400 Hz tones, in the audio of an
     /// AM aircraft channel.
-    pub const ACARS: Self = Self { baud: 2400.0, carrier_hz: 1800.0 };
+    pub const ACARS: Self = Self { baud: 2400.0, carrier_hz: 1800.0, change_is_upper: false };
+
+    /// CCIR fast FSK at 1200 baud: 1200 Hz and 1800 Hz about 1500, which is
+    /// MSK because the two tones are half the bit rate apart. MDC-1200 and
+    /// MPT1327 key it inside an FM voice channel, sending the upper tone
+    /// where the data bit changed.
+    ///
+    /// Reading it here rather than as a tone pair is what keeps a fade to
+    /// the bits it covered: the data is the phase the waveform is in, so a
+    /// wrong decision is one wrong bit and not every bit after it.
+    pub const FFSK1200: Self = Self { baud: 1200.0, carrier_hz: 1500.0, change_is_upper: true };
 }
 
 /// Loop gain and pole of the oscillator's filter.
@@ -156,9 +172,10 @@ impl MskDemod {
             // not its direction gives a stream that is right a quarter of the
             // time, which looks like a demodulator that nearly works.
             let value = if self.step & 2 != 0 { -value } else { value };
+            let swap = self.cfg.change_is_upper && self.step & 1 != 0;
             self.step += 1;
             self.offset = PLL_POLE * self.offset + (1.0 - PLL_POLE) * PLL_GAIN * error as f64;
-            bits.push(value > 0.0);
+            bits.push((value > 0.0) != swap);
         }
     }
 }
@@ -179,6 +196,10 @@ pub fn modulate(
     let sps = rate / cfg.baud;
     let n = (bits.len() as f64 * sps) as usize;
     let quarter = TAU / 4.0;
+    let bits: Vec<bool> = match cfg.change_is_upper {
+        true => bits.iter().enumerate().map(|(k, &b)| b != (k & 1 != 0)).collect(),
+        false => bits.to_vec(),
+    };
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let x = i as f64 / sps;
@@ -243,13 +264,77 @@ mod tests {
         for (rate, baud) in
             [(12_500.0, 2400.0), (38_400.0, 1200.0), (38_400.0, 600.0), (48_000.0, 2400.0)]
         {
-            let cfg = MskConfig { baud, carrier_hz: baud * 0.75 };
+            let cfg = MskConfig { baud, carrier_hz: baud * 0.75, change_is_upper: false };
             let bits = stream(5000, 11);
             let got = round_trip(rate, cfg, &bits);
             assert_eq!(got.len(), 4999, "{baud} baud at {rate}");
             let wrong = (0..got.len()).filter(|&i| got[i] != bits[i]).count();
             assert_eq!(wrong, 0, "{wrong} bits wrong of 4999 at {baud} baud on {rate}");
         }
+    }
+
+    /// Fast FSK keyed as two tones is the same waveform, and the data comes
+    /// back off the phase: the keyer sends the upper tone where the bit
+    /// changed, and nothing here differences anything. The reader runs one
+    /// bit behind the keyer and on whichever polarity its clock started on,
+    /// which is what the sync word above it resolves.
+    ///
+    /// Measured cold on a random stream: the last wrong bit is the
+    /// seventeenth, the loop having settled, and every one of the 482 after
+    /// it is right. A burst sends a leader for that reason.
+    #[test]
+    fn a_tone_keyed_ffsk_stream_is_read_off_the_phase() {
+        let (rate, cfg) = (24_000.0, MskConfig::FFSK1200);
+        let bits = stream(500, 3);
+        let audio = crate::afsk::modulate(&tones_of(&bits), rate, crate::afsk::FFSK1200);
+        let mut got = Vec::new();
+        MskDemod::new(rate, cfg).process(&audio, &mut got);
+        assert_eq!(got.len(), 499);
+        let wrong: Vec<usize> = (1..got.len()).filter(|&i| got[i] == bits[i - 1]).collect();
+        assert_eq!(wrong, [1, 4, 6, 12, 16], "the stream settled elsewhere");
+    }
+
+    /// And a dropout costs the bits it covered and nothing after them. This
+    /// is the whole reason the phase is read rather than the tones: a
+    /// receiver that differences tone decisions complements every bit to the
+    /// end of the stream when a fade lands on an odd number of them.
+    /// Measured against the same stream read whole: two, four and six bits
+    /// of dead audio each change one bit of the 500 and none after it.
+    #[test]
+    fn a_dropout_costs_the_bits_it_covered_and_no_more() {
+        let (rate, cfg) = (24_000.0, MskConfig::FFSK1200);
+        let bits = stream(500, 5);
+        let sps = (rate / cfg.baud) as usize;
+        let read = |audio: &[f32]| {
+            let mut got = Vec::new();
+            MskDemod::new(rate, cfg).process(audio, &mut got);
+            got
+        };
+        let keyed = crate::afsk::modulate(&tones_of(&bits), rate, crate::afsk::FFSK1200);
+        let clean = read(&keyed);
+        assert_eq!(clean.len(), 500);
+        for gap in [2usize, 4, 6] {
+            let mut audio = keyed.clone();
+            audio[200 * sps..(200 + gap) * sps].fill(0.0);
+            let got = read(&audio);
+            assert_eq!(got.len(), clean.len(), "a {gap} bit gap moved the clock");
+            let changed: Vec<usize> = (0..clean.len()).filter(|&i| got[i] != clean[i]).collect();
+            assert_eq!(changed, [201], "a {gap} bit gap changed {} bits", changed.len());
+        }
+    }
+
+    /// Tones for a stream keyed the way MDC-1200 and MPT1327 key it: the
+    /// mark tone where the bit did not change, the space tone where it did,
+    /// which is what [`crate::afsk::modulate`] takes.
+    fn tones_of(bits: &[bool]) -> Vec<bool> {
+        let mut prev = false;
+        bits.iter()
+            .map(|&b| {
+                let same = b == prev;
+                prev = b;
+                same
+            })
+            .collect()
     }
 
     /// A byte stream goes out and comes back as itself, which is the form a
@@ -302,7 +387,7 @@ mod tests {
     #[test]
     fn a_mirrored_channel_comes_back_with_every_second_bit_flipped() {
         let rate = 9_600.0;
-        let cfg = MskConfig { baud: 1200.0, carrier_hz: 900.0 };
+        let cfg = MskConfig { baud: 1200.0, carrier_hz: 900.0, change_is_upper: false };
         let bits = stream(2000, 3);
         let base = modulate(&bits, rate, cfg, 0.0, 0.5);
         for (shift, wanted_same, wanted_twisted) in

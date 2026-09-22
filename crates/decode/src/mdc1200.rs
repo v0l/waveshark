@@ -1,14 +1,17 @@
 //! MDC-1200, the data burst a Motorola radio sends when the key goes down.
 //!
 //! Bits in, a unit id and an operation out. The waveform above it is fast
-//! FSK at 1200 baud ([`dsp::afsk::FFSK1200`]), and what arrives here is the
-//! tone decisions: true for the 1800 Hz tone, false for the 1200 Hz one.
+//! FSK at 1200 baud, which is MSK ([`dsp::msk::MskConfig::FFSK1200`]), and
+//! what arrives here is the data bits it read off the phase.
 //!
 //! # The line code
 //!
 //! The transmitter sends 1800 Hz when the data bit changes and 1200 Hz when
-//! it does not, so the data is recovered by differencing: `d[i] = d[i-1] ^
-//! t[i]`. That leaves the polarity of the whole stream undecided, which is
+//! it does not, which is the XOR precoding Matthew Kaufman's encoder names
+//! in `mdc_encode.c`. The tones are half the bit rate apart, so the phase
+//! the waveform is in *is* the data bit and the differencing undoes itself
+//! in the waveform: a wrong decision costs one bit rather than complementing
+//! every bit after it. What the phase cannot say is the polarity, which is
 //! why the sync hunt looks for the sync word and for its complement and
 //! flips everything when it is the complement that matched. The 0x00 or 0x55
 //! leader comes out as a steady tone either way, which is what the receiver
@@ -210,13 +213,11 @@ pub fn correct(full: &mut [u8; BLOCK_BYTES]) -> u32 {
     bits::conv_threshold_lsb(info, parity, &FEC_TAPS)
 }
 
-/// Tone decisions in, bursts out.
+/// Data bits in, bursts out.
 ///
-/// True is the 1800 Hz tone. The framer differences the stream, hunts the
-/// sync word in either polarity and collects the block behind it.
+/// The framer hunts the sync word in either polarity and collects the block
+/// behind it.
 pub struct Framer {
-    /// The previous data bit, which is what the differencing is against.
-    prev: bool,
     /// Whether the polarity was found flipped, so every bit is complemented.
     inverted: bool,
     window: u64,
@@ -240,7 +241,6 @@ impl Default for Framer {
 impl Framer {
     pub fn new() -> Self {
         Self {
-            prev: false,
             inverted: false,
             window: 0,
             filled: 0,
@@ -271,13 +271,9 @@ impl Framer {
         self.repaired
     }
 
-    /// One tone decision. `Some` on the bit that completes a block whose
-    /// CRC passed, carrying its seven information bytes.
-    pub fn push(&mut self, space: bool) -> Option<[u8; INFO_BYTES]> {
-        // The tone says whether the data bit changed, so the data is the
-        // running difference of the tones.
-        let data = self.prev ^ space;
-        self.prev = data;
+    /// One data bit. `Some` on the bit that completes a block whose CRC
+    /// passed, carrying its seven information bytes.
+    pub fn push(&mut self, data: bool) -> Option<[u8; INFO_BYTES]> {
         let bit = data ^ self.inverted;
 
         if self.hunting {
@@ -291,8 +287,8 @@ impl Framer {
                 self.hunting = false;
                 self.block.clear();
             } else if wrong >= SYNC_BITS - SYNC_SLACK {
-                // The sync word arrived complemented, so the differencing
-                // started on the wrong phase: flip from here on.
+                // The sync word arrived complemented, because nothing in
+                // the waveform says which phase is a one: flip from here on.
                 self.inverted = !self.inverted;
                 self.hunting = false;
                 self.block.clear();
@@ -354,9 +350,10 @@ pub fn encode_block(op: u8, arg: u8, unit: u16, status: u8) -> [u8; BLOCK_BYTES]
     air
 }
 
-/// The tones a burst is sent as: leader, sync, block, differenced. True is
-/// the mark tone, which is what [`dsp::afsk::modulate`] takes.
-pub fn encode_tones(op: u8, arg: u8, unit: u16, status: u8, leader_bytes: usize) -> Vec<bool> {
+/// The data bits a burst is sent as: leader, sync word, block and the
+/// post-preamble behind it. What [`Framer::push`] reads, and what the
+/// waveform is keyed from.
+pub fn encode_bits(op: u8, arg: u8, unit: u16, status: u8, leader_bytes: usize) -> Vec<bool> {
     let mut data: Vec<bool> = vec![false; leader_bytes * 8];
     for i in 0..SYNC_BITS {
         data.push(SYNC >> (SYNC_BITS - 1 - i) & 1 == 1);
@@ -369,6 +366,14 @@ pub fn encode_tones(op: u8, arg: u8, unit: u16, status: u8, leader_bytes: usize)
     // zeros, which is a steady tone. Without it the last information bit is
     // the last sample and a receiver's bit clock never reaches it.
     data.resize(data.len() + 4 * 8, false);
+    data
+}
+
+/// The tones those bits are sent as, precoded: the mark tone where the data
+/// bit did not change and the space tone where it did. True is the mark
+/// tone, which is what [`dsp::afsk::modulate`] takes.
+pub fn encode_tones(op: u8, arg: u8, unit: u16, status: u8, leader_bytes: usize) -> Vec<bool> {
+    let data = encode_bits(op, arg, unit, status, leader_bytes);
     let mut prev = false;
     data.iter()
         .map(|&d| {
@@ -467,27 +472,23 @@ mod tests {
         assert_eq!(encode_block(0x63, 0x00, 0xABCD, 0x00), REFERENCE_2);
     }
 
-    /// Tones in, the burst out, whichever phase the differencing started on.
+    /// Bits in, the burst out, on either polarity.
     ///
-    /// The receiver has no idea what the data bit before the first tone it
-    /// heard was, and an odd number of transitions in the noise ahead of the
-    /// burst complements everything that follows. One click before the
-    /// leader is that case, and the sync hunt has to see through it.
+    /// Nothing in the waveform says which phase of it is a one, so a burst
+    /// arrives as itself or as its complement depending on where the bit
+    /// clock started, and the sync hunt has to see through it.
     #[test]
-    fn a_burst_is_framed_on_either_phase() {
-        for click in [false, true] {
+    fn a_burst_is_framed_on_either_polarity() {
+        for flipped in [false, true] {
             let mut f = Framer::new();
             let mut read = Vec::new();
-            if click {
-                read.extend(f.push(true));
-            }
             for _ in 0..40 {
-                read.extend(f.push(false));
+                read.extend(f.push(flipped));
             }
-            for t in encode_tones(0x40, 0x80, 0x0042, 0x00, 3) {
-                read.extend(f.push(!t));
+            for b in encode_bits(0x40, 0x80, 0x0042, 0x00, 3) {
+                read.extend(f.push(b != flipped));
             }
-            assert_eq!(read.len(), 1, "a click before it: {click}");
+            assert_eq!(read.len(), 1, "complemented: {flipped}");
             let m = parse(&read[0]).expect("a burst");
             assert_eq!(m.unit, 0x0042);
             assert_eq!(m.operation, Operation::Emergency);
@@ -502,8 +503,8 @@ mod tests {
         let mut f = Framer::new();
         let mut read = Vec::new();
         for (op, arg) in [(0x01u8, 0x80u8), (0x00, 0x80)] {
-            for t in encode_tones(op, arg, 0x1234, 0x00, 3) {
-                read.extend(f.push(!t));
+            for b in encode_bits(op, arg, 0x1234, 0x00, 3) {
+                read.extend(f.push(b));
             }
         }
         assert_eq!(read.len(), 2);
@@ -513,21 +514,20 @@ mod tests {
     }
 
     /// A block too far gone for the parity to vote on is thrown away rather
-    /// than reported with a wrong unit id, and it is counted. Forty tones
-    /// is twenty flipped data bits, which is past the code: a run of twenty
-    /// on-air bits repaired none of 92 positions where twelve repaired all
-    /// 100.
+    /// than reported with a wrong unit id, and it is counted. Measured over
+    /// every start in the block: a run of twenty wrong bits reads 5 of 100
+    /// and a run of sixteen reads 59, where twelve reads all 100.
     #[test]
     fn a_corrupted_block_is_refused() {
-        let mut tones = encode_tones(0x01, 0x80, 0x1234, 0x00, 3);
-        let at = tones.len() - 80;
-        for t in &mut tones[at..at + 40] {
-            *t = !*t;
+        let mut bits = encode_bits(0x01, 0x80, 0x1234, 0x00, 3);
+        let at = bits.len() - 80;
+        for b in &mut bits[at..at + 20] {
+            *b = !*b;
         }
         let mut f = Framer::new();
         let mut read = Vec::new();
-        for t in tones {
-            read.extend(f.push(!t));
+        for b in bits {
+            read.extend(f.push(b));
         }
         assert_eq!(read.len(), 0);
         assert_eq!(f.refused(), 1);
@@ -541,15 +541,15 @@ mod tests {
     #[test]
     fn a_fade_of_twelve_bits_is_repaired_and_reads_the_same_unit() {
         for at in 0..100 {
-            let mut tones = encode_tones(0x01, 0x80, 0x1234, 0x00, 3);
-            let start = tones.len() - 4 * 8 - BLOCK_BITS + at;
-            for t in &mut tones[start..start + 12] {
-                *t = !*t;
+            let mut bits = encode_bits(0x01, 0x80, 0x1234, 0x00, 3);
+            let start = bits.len() - 4 * 8 - BLOCK_BITS + at;
+            for b in &mut bits[start..start + 12] {
+                *b = !*b;
             }
             let mut f = Framer::new();
             let mut read = Vec::new();
-            for t in tones {
-                read.extend(f.push(!t));
+            for b in bits {
+                read.extend(f.push(b));
             }
             assert_eq!(read.len(), 1, "a fade at bit {at}");
             let m = parse(&read[0]).expect("a burst");
