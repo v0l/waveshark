@@ -431,6 +431,64 @@ pub fn modal_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(10.0);
 }
 
+/// The tabs a modal holding more than one subject wears, under its title.
+///
+/// A dialog is a column of cards, and a column long enough to scroll is a
+/// dialog nobody reads to the end of. Tabs split the subjects it holds
+/// without splitting it into two places to look.
+///
+/// Silkscreened legends over an etched rule, the chosen one marked in amber
+/// where the rule breaks for it: the panel's own grammar, where amber is
+/// what the operator set. Not a row of keys, because a key is pressed and
+/// does something and a tab is where you are.
+pub fn tabs<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, options: &[(T, &str)]) -> bool {
+    const TAB_H: f32 = 20.0;
+    const MARK_H: f32 = 2.0;
+    const GAP: f32 = 20.0;
+
+    let width = ui.available_width();
+    let (strip, _) = ui.allocate_exact_size(Vec2::new(width, TAB_H + MARK_H), Sense::hover());
+    let mut changed = false;
+    let mut marks = Vec::with_capacity(options.len());
+    let mut x = strip.left();
+    for (i, (value, label)) in options.iter().enumerate() {
+        let galley = ui.painter().layout_job(theme::legend_job(label));
+        let w = galley.size().x;
+        let hit = Rect::from_min_size(Pos2::new(x, strip.top()), Vec2::new(w, TAB_H));
+        let r = ui.interact(hit, ui.id().with(("tab", i)), Sense::click());
+        let on = *current == *value;
+        if r.clicked() && !on {
+            *current = *value;
+            changed = true;
+        }
+        let colour = match (on, r.hovered()) {
+            (true, _) => theme::VALUE,
+            (false, true) => theme::VALUE,
+            (false, false) => theme::LEGEND,
+        };
+        let at = Pos2::new(x, strip.top() + (TAB_H - galley.size().y) * 0.5);
+        ui.painter().galley(at, galley, colour);
+        marks.push((x, w, on));
+        x += w + GAP;
+    }
+    let rule = Rect::from_min_size(
+        Pos2::new(strip.left(), strip.bottom() - MARK_H),
+        Vec2::new(width, 1.0),
+    );
+    ui.painter().rect_filled(rule, 0.0, theme::ETCH);
+    for (x, w, on) in marks {
+        if on {
+            let mark = Rect::from_min_size(
+                Pos2::new(x, strip.bottom() - MARK_H),
+                Vec2::new(w, MARK_H),
+            );
+            ui.painter().rect_filled(mark, 0.0, theme::READOUT);
+        }
+    }
+    ui.add_space(10.0);
+    changed
+}
+
 /// Width of the legend column in a settings modal, and where what it labels
 /// begins.
 pub const LABEL_W: f32 = 90.0;

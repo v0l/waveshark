@@ -85,6 +85,8 @@ pub(super) enum Action {
     Tune(f64),
     /// Throw the list away.
     Clear,
+    /// Open the recorder's settings.
+    Open(super::Settings),
     /// Read everything the model heard on one conversation, in the
     /// transcript view.
     Transcript(common::ConversationKey),
@@ -138,6 +140,14 @@ impl CallList<'_> {
                 ui.add_space(12.0);
                 if ui.add_enabled(!calls.is_empty(), egui::Button::new("Clear calls")).clicked() {
                     act = Some(Action::Clear);
+                }
+                ui.add_space(12.0);
+                if ui
+                    .button("SETTINGS")
+                    .on_hover_text("What is recorded, and where it is written")
+                    .clicked()
+                {
+                    act = Some(Action::Open(super::Settings::Calls));
                 }
                 ui.add_space(12.0);
                 // The way into what was recorded. Off by default: the pane's

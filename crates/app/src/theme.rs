@@ -181,6 +181,18 @@ pub fn legend(text: &str) -> RichText {
         .color(LEGEND)
 }
 
+/// A silkscreened label as a layout job, for a caller painting it itself.
+///
+/// The colour is the painter's, since a legend under the pointer or on the
+/// tab being read is brighter than one beside a control.
+pub fn legend_job(text: &str) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let mut f = Line::face(LEGEND_FONT, LEGEND_SIZE, LEGEND);
+    f.extra_letter_spacing = 1.6;
+    job.append(&text.to_uppercase(), 0.0, f);
+    job
+}
+
 /// A value shown next to a legend.
 pub fn value(text: impl Into<String>) -> RichText {
     RichText::new(text).font(FontId::new(13.0, FontFamily::Name(READOUT_FONT.into()))).color(VALUE)

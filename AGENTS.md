@@ -197,7 +197,7 @@ A modal or a settings pane is a column of cards, and nothing else:
 Check a modal by looking at it: `waveshark --settings agent --shot
 /tmp/agent.png --shot-after 5` writes the window, and the name can be any
 dialog (`radio`, `spectrum`, `waterfall`, `log`, `scanners`, `memory`,
-`data`, `app`).
+`data`, `calls`, `app`).
 
 ## Every HTTP request goes out under the same name
 

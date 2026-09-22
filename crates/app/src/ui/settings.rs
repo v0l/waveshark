@@ -7,7 +7,7 @@ use super::*;
 use crate::agent::config::{Reading, Speech};
 use crate::ui::widgets::{
     card, choice, field, field_then, footer, hint, lamp, prose, reading, row, row_help, secret,
-    section, switch,
+    section, switch, tabs,
 };
 
 /// Ask every USB serial port whether a sub-ghz-modem is on it.
@@ -107,6 +107,7 @@ impl App {
             Settings::BandWalk => "Band walk",
             Settings::Memory => "Memory bank",
             Settings::Data => crate::i18n::t("settings.data"),
+            Settings::Calls => "Calls",
             Settings::Agent => "Agent",
             Settings::App => crate::i18n::t("settings.title"),
         };
@@ -129,6 +130,7 @@ impl App {
                     Settings::BandWalk => self.band_walk(ui),
                     Settings::Memory => self.memory_pane(ui),
                     Settings::Data => self.data_settings(ui),
+                    Settings::Calls => self.calls_settings(ui),
                     Settings::Agent => self.agent_settings(ui),
                     Settings::App => self.app_settings(ui),
                 }
@@ -1345,39 +1347,6 @@ impl App {
         });
         ui.add_space(8.0);
 
-        // The call log, beside the packet log: the same decision about the
-        // same disc, for speech rather than packets. Off until asked for.
-        let rec = self.radio.as_ref().and_then(|r| r.status.recorder.lock().clone());
-        section(ui, "calls", "every over heard, kept as Opus", |ui| {
-            let Some(rec) = rec else {
-                lamp(ui, false, "no receiver running");
-                return;
-            };
-            let mut on = rec.on;
-            let help = "Every transmission on a voice channel or a voice front end, as it \
-                        was heard, before any fader: about 2 kB a second of speech. The \
-                        Recordings table in the Calls view plays them back.";
-            if switch(ui, "record", &mut on, "every over", help) {
-                self.cmds.push(Cmd::StageParam(
-                    crate::chain::derived::CALL_LOG,
-                    "enabled".into(),
-                    pipeline::param::ParamValue::Bool(on),
-                ));
-            }
-            reading(ui, "folder", rec.dir.clone());
-            reading(ui, "folder holds", human_bytes(rec.bytes));
-            reading(ui, "this session", format!("{} calls", rec.calls));
-            match (rec.full, rec.on, rec.recording) {
-                (true, ..) => lamp(ui, false, "stopped: the folder is at its limit"),
-                (_, true, 0) => lamp(ui, true, "recording, nobody talking"),
-                (_, true, n) => {
-                    lamp(ui, true, &format!("recording {n} over{}", if n == 1 { "" } else { "s" }))
-                }
-                (_, false, _) => lamp(ui, false, "off: nothing is kept"),
-            }
-        });
-        ui.add_space(8.0);
-
         let status = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
         let mut remove = None;
         let feeds = self.setting(|s| s.feeds.clone());
@@ -1437,19 +1406,103 @@ impl App {
                 s.feeds.remove(i);
             });
         }
+    }
+
+    /// What is kept of the speech heard, beside the list that plays it back.
+    ///
+    /// Its own dialog rather than a card under the packet log: a recording is
+    /// a decision about the same disc, but nobody looking for what happened
+    /// to an over goes to the packet list to find it.
+    fn calls_settings(&mut self, ui: &mut egui::Ui) {
+        let rec = self.radio.as_ref().and_then(|r| r.status.recorder.lock().clone());
+        section(ui, "calls", "every over heard, kept as Opus", |ui| {
+            let mut on = self.setting(|s| s.calls_on);
+            let help = "Every transmission on a voice channel or a voice front end, as it \
+                        was heard, before any fader: about 2 kB a second of speech. The \
+                        Recordings table in the Calls view plays them back.";
+            if switch(ui, "record", &mut on, "every over", help) {
+                self.settings.edit(|s| s.calls_on = on);
+            }
+            row_help(ui, "folder", "Where the overs go. Enter or SET applies it.", |ui| {
+                let mut set = false;
+                let text = self.calls_dir_edit.get_or_insert_with(|| {
+                    crate::calllog::calls_dir().display().to_string()
+                });
+                let r = field_then(ui, text, "where the overs go", 44.0, |ui| {
+                    set = ui.small_button("SET").clicked();
+                });
+                let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (typed || set) && !text.trim().is_empty() {
+                    let dir = text.trim().to_string();
+                    self.settings.edit(|s| s.calls_dir = dir);
+                }
+            });
+            let Some(rec) = rec else {
+                lamp(ui, false, "no receiver running, so nothing is being kept");
+                return;
+            };
+            reading(ui, "folder holds", human_bytes(rec.bytes));
+            reading(ui, "this session", format!("{} calls", rec.calls));
+            match (rec.full, rec.on, rec.recording) {
+                (true, ..) => lamp(ui, false, "stopped: the folder is at its limit"),
+                (_, true, 0) => lamp(ui, true, "recording, nobody talking"),
+                (_, true, n) => {
+                    lamp(ui, true, &format!("recording {n} over{}", if n == 1 { "" } else { "s" }))
+                }
+                (_, false, _) => lamp(ui, false, "off: nothing is kept"),
+            }
+        });
         ui.add_space(8.0);
-        self.kiss_section(ui);
-        ui.add_space(8.0);
-        self.iqstream_section(ui);
+        self.reading_section(ui);
+    }
+
+    /// Speech into words, beside the recording it is read from.
+    ///
+    /// The model, what it runs on and how it is getting on are on the
+    /// Transcript view, where the words are; this is the switch and the two
+    /// choices, so somebody setting up recording does not have to go and
+    /// find them.
+    fn reading_section(&mut self, ui: &mut egui::Ui) {
+        let engine = self.radio.as_ref().and_then(|r| r.status.transcriber.lock().clone());
+        section(ui, "reading", "speech heard on the air, read back as words", |ui| {
+            let mut on = self.setting(|s| s.transcribe_on);
+            let help = "Every over the recorder keeps is read by a model here, and the \
+                        words appear on the Transcript view and against the call.";
+            if switch(ui, "read", &mut on, "what was said", help) {
+                self.settings.edit(|s| s.transcribe_on = on);
+            }
+            let Some(e) = engine else {
+                lamp(ui, false, "no receiver running, so the model is not loaded");
+                return;
+            };
+            row_help(ui, "model", "Bigger reads better and slower.", |ui| {
+                let mut id = e.model.clone();
+                let opts = e.models.iter().map(|m| (m.id.clone(), m.label.clone()));
+                if choice(ui, "calls-read-model", &mut id, opts) {
+                    self.settings.edit(|s| s.transcribe_model = id.clone());
+                }
+            });
+            row_help(ui, "run on", "Auto takes the fastest that will hold the weights.", |ui| {
+                let mut device = e.device_choice.clone();
+                let opts = e.devices.iter().cloned();
+                if choice(ui, "calls-read-device", &mut device, opts) {
+                    self.settings.edit(|s| s.transcribe_device = device.clone());
+                }
+            });
+            match (&e.reading_on, on) {
+                (Some(where_), _) => lamp(ui, true, where_),
+                (None, true) => lamp(ui, true, &format!("{} on {}", e.label, e.device_choice)),
+                (None, false) => lamp(ui, false, "off: nothing is read"),
+            }
+        });
     }
 
     /// The span served to the network, which is this receiver seen as a
     /// tuner by another one.
     ///
-    /// Beside the feeds and the TNC because it is the same socket from the
-    /// other end: those read somebody else's receiver, this hands out the
-    /// samples read here. Off until it is asked for, since it puts the whole
-    /// span on the network.
+    /// Beside the TNC because it is the same decision: who on this network
+    /// may read what this radio hears. Off until it is asked for, since it
+    /// puts the whole span on the wire.
     fn iqstream_section(&mut self, ui: &mut egui::Ui) {
         let addr = self.setting(|s| s.iqstream_address());
         let server = addr.and_then(nodes::iqstream_nodes::running);
@@ -1494,10 +1547,8 @@ impl App {
 
     /// The KISS TNC: where it listens, and what is connected to it.
     ///
-    /// Beside the feeds because it is the same socket seen from the other
-    /// end: those are packets from another receiver, this is packets to
-    /// somebody else's software. Off until it is asked for, since it opens a
-    /// listening port and a client on it can key the transmitter.
+    /// Off until it is asked for, since it opens a listening port and a
+    /// client on it can key the transmitter.
     fn kiss_section(&mut self, ui: &mut egui::Ui) {
         let addr = self.setting(|s| s.kiss_address());
         let tnc = addr.and_then(nodes::kiss_nodes::running);
@@ -1548,6 +1599,19 @@ impl App {
     /// the session: they survive changing radio, they are asked once, and
     /// none of them belong under a cog on the spectrum.
     fn app_settings(&mut self, ui: &mut egui::Ui) {
+        let mut tab = self.setup_tab;
+        if tabs(ui, &mut tab, &[(SetupTab::General, "GENERAL"), (SetupTab::Network, "NETWORK")]) {
+            self.setup_tab = tab;
+        }
+        match tab {
+            SetupTab::General => self.setup_general(ui),
+            SetupTab::Network => self.setup_network(ui),
+        }
+    }
+
+    /// What this installation is: where it is, what it sounds through, and
+    /// what it opens on.
+    fn setup_general(&mut self, ui: &mut egui::Ui) {
         let t = crate::i18n::t;
 
         section(ui, "here", "the language, the country and the band plan the dial names", |ui| {
@@ -1678,6 +1742,17 @@ impl App {
         ui.add_space(8.0);
 
         Self::version_settings(ui);
+    }
+
+    /// What this receiver hands to other machines.
+    ///
+    /// A listening socket is an installation's decision rather than the
+    /// packet list's, and all of them are the same decision: who, on this
+    /// network, may read what this radio hears.
+    fn setup_network(&mut self, ui: &mut egui::Ui) {
+        self.kiss_section(ui);
+        ui.add_space(8.0);
+        self.iqstream_section(ui);
     }
 
     /// What this build is, what the newest published release is, and the one

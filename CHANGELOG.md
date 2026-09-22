@@ -38,7 +38,7 @@ the code is in the commit log.
 - `wave1090`, a Mode S receiver of its own, serving dump1090's AVR, BaseStation
   and Beast ports off a dongle or an iqstream server, taking mlat results back
   and passing the samples on over iqstream itself.
-- KISS TNC on `--kiss-listen` or the packet log card: packet software reads
+- KISS TNC on `--kiss-listen` or the setup card: packet software reads
   what the radio heard and keys AX.25 through it.
 - FT8 and FT4 on the HF dials: every station in the passband, with their grid
   squares on the map.
@@ -99,9 +99,9 @@ the code is in the commit log.
   offset tuning where the far end is an E4000.
 - IQStream carries a plain number setting, so a served receiver's tuner trim
   is set from the other end.
-- An IQStream server, on `--iqstream-listen` or the packet log card, so
-  another machine can read the same span, with `--iqstream-tuner` handing out
-  radios this receiver is not using as streams of their own on the same port.
+- An IQStream server, on `--iqstream-listen` or the setup card, so another
+  machine can read the same span, with `--iqstream-tuner` handing out radios
+  this receiver is not using as streams of their own on the same port.
 - Several matching tuners offered as one wider receiver, with the drift
   between them measured on the band they share and taken out.
 - Heatmap export: the span kept as readings and written as a page that zooms
@@ -155,6 +155,8 @@ the code is in the commit log.
 
 ### Changed
 
+- Setup holds what this receiver serves, under a NETWORK tab, and call
+  recording has its own card off the call list.
 - Map layers moved onto the map, on a panel in its corner, and the station
   position row dropped from the pane.
 - FSK transmit rests are keyed as no carrier, not as the lower tone held.

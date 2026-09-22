@@ -133,6 +133,8 @@ pub struct App {
 
     dial: Dial,
     open: Option<Settings>,
+    /// Which half of the setup dialog is showing.
+    setup_tab: SetupTab,
     devices: Vec<crate::devices::Entry>,
     /// The open-a-capture dialog, while it is up. It runs on its own thread
     /// so the receiver keeps painting behind it.
@@ -226,6 +228,8 @@ pub struct App {
     /// The station position being typed, while it is being typed. Kept apart
     /// from the real one so a half-finished latitude does not move the map.
     station_edit: Option<String>,
+    /// Where the recorder writes, while it is being typed.
+    calls_dir_edit: Option<String>,
     /// What an agent has asked for, whether it came over MCP or from the
     /// chat in the Agent view. One queue: both front ends hold the same desk.
     agent: crossbeam_channel::Receiver<crate::agent::Ask>,
@@ -269,6 +273,8 @@ pub enum Settings {
     Memory,
     /// The dataset cache: what is held on disc, how old it is, and refresh.
     Data,
+    /// What is kept of the speech heard: the recorder and where it writes.
+    Calls,
     /// Which model the Agent view talks to.
     Agent,
     /// Everything about where this receiver is rather than what it is doing:
@@ -288,11 +294,20 @@ impl Settings {
             "walk" | "band_walk" => Self::BandWalk,
             "memory" => Self::Memory,
             "data" => Self::Data,
+            "calls" => Self::Calls,
             "agent" => Self::Agent,
             "app" => Self::App,
             _ => return None,
         })
     }
+}
+
+/// The two subjects the setup dialog holds: what this installation is, and
+/// what it serves to other machines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupTab {
+    General,
+    Network,
 }
 
 const FFTS: [usize; 6] = [512, 1024, 2048, 4096, 8192, 16384];
@@ -679,7 +694,9 @@ impl Default for App {
             memory_io: None,
             memory_note: String::new(),
             log_dir_edit: String::new(),
+            calls_dir_edit: None,
             station_edit: None,
+            setup_tab: SetupTab::General,
             agent: asks,
             desk,
             desk_rung: false,
@@ -1882,6 +1899,7 @@ impl App {
         match act {
             Some(calls_pane::Action::Tune(hz)) => self.set_center(hz / 1e6),
             Some(calls_pane::Action::Clear) => self.calls.list.clear(),
+            Some(calls_pane::Action::Open(which)) => self.open = Some(which),
             Some(calls_pane::Action::Transcript(key)) => self.show_transcript(Some(key)),
             None => {}
         }
