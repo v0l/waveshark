@@ -145,6 +145,9 @@ fn slice_pwm(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
         // Reject anything shorter than both symbols rather than forcing it to
         // the nearer one; a wildly wrong width means the package is not this
         // protocol, and guessing would manufacture plausible-looking rubbish.
+        // The exception is a runt before the first bit or after the last: the
+        // detector triggers partway into a mark and lets go partway out of
+        // one, so a package of whole frames arrives with a sliver at each end.
         //
         // A mark *longer* than both is the preamble, but only for a protocol
         // that says it has one. Its width varies far more between rebrands of
@@ -171,6 +174,9 @@ fn slice_pwm(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
             return Err(SliceError::BadWidth { index: i, width_us: p.mark });
         }
         if p.mark < lo {
+            if b.is_empty() || i + 1 == pulses.len() {
+                continue;
+            }
             return Err(SliceError::BadWidth { index: i, width_us: p.mark });
         }
         b.push(p.mark < mid);
@@ -470,6 +476,36 @@ mod tests {
             Err(SliceError::BadWidth { index, width_us }) => {
                 assert_eq!(index, 3);
                 assert_eq!(width_us, 9000);
+            }
+            other => panic!("expected BadWidth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pwm_keeps_the_frames_around_a_runt_at_each_end_of_the_package() {
+        // The detector triggers partway into the first mark and lets go
+        // partway out of the last, which is how rtl_433's ActivLink
+        // recording arrives: a 24 us sliver, nineteen whole 48 bit frames,
+        // and another sliver. Rejecting the package on the first bad width
+        // read none of them.
+        let t = Timing::pwm(168, 328, 480);
+        let mut p = pkg(&[(24, 316)]);
+        p.extend(pkg(&[(168, 316); 16]));
+        p.extend(pkg(&[(20, 0)]));
+        let b = slice(&p, &t).unwrap();
+        assert_eq!(b.len(), 16, "a runt at either end must not cost a bit");
+        assert_eq!(b.as_bytes(), &[0xff, 0xff]);
+    }
+
+    #[test]
+    fn pwm_rejects_a_runt_inside_the_frame() {
+        let t = Timing::pwm(168, 328, 480);
+        let mut p = pkg(&[(168, 316); 16]);
+        p[7].mark = 24;
+        match slice(&p, &t) {
+            Err(SliceError::BadWidth { index, width_us }) => {
+                assert_eq!(index, 7);
+                assert_eq!(width_us, 24);
             }
             other => panic!("expected BadWidth, got {other:?}"),
         }

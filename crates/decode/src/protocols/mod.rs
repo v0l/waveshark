@@ -131,14 +131,25 @@ pub(crate) fn find_frame_bits(
         // Another copy at another row start, which noise does not produce and
         // a misread row cannot fake.
         let corroborated = rows.iter().any(|&at| at != start && bits.slice(at, want) == frame);
-        // Or the rows themselves repeating at this frame's own period, which
-        // is the same evidence without needing the copies to be identical.
+        // Or a second row a frame's length away that reads as well, which is
+        // the same evidence without needing the copies to be identical.
         // Acurite's weather stations number their repeats, so no two copies in
         // a burst are ever the same and the test above cannot see a
         // transmission that is plainly periodic. The slack is for the sync
         // mark between repeats, which leaves the copies a bit further apart
-        // than the frame is long.
-        let periodic = rows.iter().any(|&at| at != start && at.abs_diff(start).abs_diff(want) <= 2);
+        // than the frame is long. The second row has to pass the check too:
+        // band noise cuts rows at every spacing, and a bare period against a
+        // byte-wide sum read a doorbell recording as an Acurite 609TXC.
+        let mut periodic = false;
+        for &at in &rows {
+            if at != start
+                && at.abs_diff(start).abs_diff(want) <= 2
+                && ok(bits.slice(at, want).as_padded_bytes())
+            {
+                periodic = true;
+                break;
+            }
+        }
         if alone || corroborated || periodic {
             return Some(frame.as_padded_bytes().to_vec());
         }

@@ -384,6 +384,14 @@ reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f
 description = "RE208 wire-to-air repeater on a Honeywell channel, and so the other CRC polynomial"
 
 [[sample]]
+name = "honeywell_activlink_868.428M_250k.cu8"
+sha256 = "e46326d22935e6ccbcbd59cb764e78ea2217f026a5d74634e3fb93da1802c079"
+url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell_activlink/01/one-press_868.428M_250k.cu8"
+reference_sha256 = "d4bc8d515751548d817a66341236a53d2627ce6b4f5c0987153b6682874475d4"
+reference_url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell_activlink/01/one-press_868.428M_250k.json"
+description = "ActivLink doorbell at 868 MHz: nineteen copies of the frame run back to back behind one sync mark each, so a slicer that throws a package away on its first malformed width reads none of them"
+
+[[sample]]
 name = "honeywell_5816_a_344.975M_250k.cu8"
 sha256 = "6b5a4f6b3e538ba11d5b0a31e8450f690d361e79b523db19e62d7b28ccbe4d05"
 url = "https://raw.githubusercontent.com/merbanan/rtl_433_tests/93e23f3b367d6f268a975493182fd51bf47c4be4/tests/honeywell_5816/g001_344.975M_250k.cu8"

@@ -207,6 +207,8 @@ the code is in the commit log.
 - Receiver froze on a rebuild while a DVB-T channel had fallen behind.
 - A strip channel whose decoder refused its input stopped the receiver, an
   AIS channel away from the pair it reads being the easy way in.
+- PWM sensors and remotes read nothing where the detector clipped the first or
+  last pulse, which is most Honeywell ActivLink doorbells and door contacts.
 - Located transmitters drew a circle far smaller than the error, tighter the
   longer the drive.
 - Home Assistant stopped publishing after the radio was restarted, and kept
