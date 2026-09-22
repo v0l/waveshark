@@ -68,10 +68,19 @@ measured, the test it says would settle it. An issue that reads as though it
 were thought through is still a proposal, and the previous agent that filed it
 had no more standing to decide this than you do.
 
+Most of the open list was filed by an agent that had just finished neighbouring
+work and wrote down the part it did not do. That is where the pointless ones
+are: a refinement of something nobody has run, a second packet form of a
+protocol with no transmitters, a measurement with no reader. They are concrete,
+they name a file, and they are still not work anybody wants. Concreteness is
+not a reason to build something, and neither is the list being long.
+
 Close it rather than building it when it is one of these:
 
 - Nobody would use the result. A knob for a thing the receiver decides better
   itself, a pane nobody asked to look at, a format with no transmitters left.
+- It is the last few percent of a feature nobody has asked for more of. The
+  common case already reads; the remainder is polish on something unused.
 - The receiver already does it, by another name or from another angle. Say
   which node, pane or test does it, and close as a duplicate of the code.
 - It wants a shape the design forbids: state only one stage can produce,
@@ -124,6 +133,38 @@ to move before doing any work in it.
 Work in the tree you created and nowhere else. Never commit to `master`, never
 read or write another worktree's files, and never run a build in one.
 
+## Scope is yours to set
+
+The issue is a description, not a work order, and it was written by somebody
+with less of the file in front of them than you have now. Once the file is
+open and the test is written, the second and third case usually cost minutes,
+where coming back for them costs another read, another worktree, another
+review. So when the issue is narrower than the work it sits in, widen it and
+say in one line in the report that you did.
+
+The question is always the cost of finishing it now against the cost of a
+second visit, and the second visit is dearer than it looks. If the issue names
+one packet form and the decoder has four, read four. If it fixes one caller of
+a broken helper, fix the helper and every caller. If the fix is obvious two
+functions further out, go there.
+
+Stop where the work stops being the same work: a different protocol, a
+different pane, a capture nobody has recorded, a decision about what the
+receiver is for. That is the line, not the wording of the issue.
+
+## How finished a thing has to be
+
+Ask who reads the result and how often before deciding how much of it to
+build. A protocol with a handful of transmitters left, a pane an operator
+opens once, a format kept for one capture: those are finished when the common
+case reads and the uncommon one is ignored, and the remainder is not work that
+was left, it is work that is not wanted. Spend the effort where the receiver
+is actually pointed.
+
+What you decide not to build under this rule does not become an issue. Writing
+it down is the same claim that it should be done, made again where it is
+harder to refuse. Leave it out of the tree and out of the list.
+
 ## Build it
 
 Put each piece at the layer it belongs to: the waveform in `crates/dsp` named
@@ -166,24 +207,41 @@ git commit -m "<imperative subject under 70 characters>" -m "Closes #N"
 No trailers, no body beyond the `Closes` line unless there is a measured number
 the diff cannot show. Do not push unless asked.
 
-## File what you left behind
+## Filing is the last resort, and the list must not grow
 
-Work that was deliberately not done is an issue, not a sentence in the report
-nobody will read again: the correction the decoder computes and does not
-apply, the second packet form it drops, the fault in somebody else's file you
-walked past. File each one with `gh issue create` before reporting, labelled
-as the thing it is (`enhancement`, `bug`, `protocol`, `testing`).
+The expected number of issues filed by a run of this prompt is zero. Every
+issue filed is a claim on somebody's afternoon, and a list of a hundred of
+them is worth less than a list of ten because nobody reads to the end of it.
+A run that closes one issue and files three has made the receiver worse.
 
-An issue says where it stands in the code, naming the file and the function
-that would change; what a reader would have to know that is not in the code,
-with its source; and what would settle it, including the capture or the
-hardware it needs where it needs one. No plan of work and no design nobody
-has measured. One issue per thing, and nothing that the commit just made
-untrue.
+So the run is net negative on the count or it is level. Before filing
+anything, read the open list around what you touched and close what the work
+just settled, duplicated or made pointless, by the rules in "Judge it" above.
+If you want to file one, you have to close one first, and if nothing on the
+list deserves closing then the thing you wanted to file probably did not
+deserve filing either.
 
-Do not file a wish. Something you merely did not get to, or that would be
-nice, belongs nowhere: an issue is a thing somebody could pick up and finish
-with what is written in it.
+What you did not do is a line in the report and nothing else, unless it passes
+every one of these:
+
+- It is a fault in behaviour somebody could be running now, or a thing an
+  operator would notice missing. Not a piece of your own work you chose to
+  leave, which belongs in the scope you just set.
+- It is blocked on something you cannot supply and named: a capture nobody has
+  recorded, hardware that is not here, a decision about what the receiver is
+  for.
+- It is larger than the work you just did. If it is smaller, you should have
+  done it.
+- Somebody would pick it up and finish it with what is written in it.
+
+An issue that passes says where it stands in the code, naming the file and the
+function that would change; what a reader would have to know that is not in
+the code, with its source; and what would settle it, including the capture or
+the hardware it needs. No plan of work and no design nobody has measured. One
+issue per thing, and nothing the commit just made untrue.
+
+Do not file a wish, a refinement, a second angle on a protocol nobody has
+heard, or a measurement with no reader. Those are how this list got long.
 
 Say where it came from and what it sits next to. An issue that arrives with no
 history reads like a wish however concrete it is, so end it with a line naming
@@ -200,6 +258,7 @@ this work found, not a second issue with a different title.
 
 ## Report
 
-Say what layer each piece landed at, the numbers the tests pin, and the issue
-numbers you filed. An issue closed unbuilt is reported the same way, in one
-line saying which and why. Keep it to a few lines.
+Say what layer each piece landed at, the numbers the tests pin, where you
+widened the issue beyond its wording, and the count of issues closed against
+issues filed. An issue closed unbuilt is reported the same way, in one line
+saying which and why. Keep it to a few lines.
