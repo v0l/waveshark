@@ -33,10 +33,10 @@
 //! and only the owner knows that.
 
 use crate::proto::{
-    BitDepth, Codec, DATA_HEADER_LEN, DataHeader, Frame, MAX_DATAGRAM_PAYLOAD, MAX_FRAME_PAYLOAD,
-    PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD, Setting, SettingValue, StreamDesc, Tlvs,
-    Transport, VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_punch, encode_inline,
-    encode_preamble, encode_probe, error_code, msg, now_ns, pack, put_streams, tag,
+    BitDepth, Codec, DATA_HEADER_LEN, DATAGRAM_OVERHEAD, DataHeader, Frame, MAX_DATAGRAM_PAYLOAD,
+    MAX_FRAME_PAYLOAD, PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD, Setting, SettingValue,
+    StreamDesc, Tlvs, Transport, VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_punch,
+    encode_inline, encode_preamble, encode_probe, error_code, msg, now_ns, pack, put_streams, tag,
 };
 use common::{Error, Result};
 use std::collections::HashMap;
@@ -883,13 +883,21 @@ async fn converse(
                         let t = frame.tlvs()?;
                         let sub = shared.pick(named).and_then(|s| subs.get(&s.id()));
                         if let (Some(size), Some(sub)) = (t.u16(tag::PROBE_SIZE), sub) {
-                            sub.payload.send_if_modified(|held| match size as usize > *held {
-                                true => {
-                                    *held = size as usize;
-                                    true
+                            let raised = sub.payload.send_if_modified(|held| {
+                                match size as usize > *held {
+                                    true => {
+                                        *held = size as usize;
+                                        true
+                                    }
+                                    false => false,
                                 }
-                                false => false,
                             });
+                            if raised {
+                                tracing::info!(
+                                    "iqstream: {who} takes {size} byte payloads, {} on the wire",
+                                    size as usize + DATAGRAM_OVERHEAD
+                                );
+                            }
                         }
                     }
                     msg::TUNE => tune(&frame, shared, named, out).await?,
