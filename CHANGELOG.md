@@ -155,6 +155,8 @@ the code is in the commit log.
 
 ### Changed
 
+- Map layers moved onto the map, on a panel in its corner, and the station
+  position row dropped from the pane.
 - FSK transmit rests are keyed as no carrier, not as the lower tone held.
 - Mode S frames are also framed by their CRC, so a reply whose preamble
   another aircraft sat on is still read.

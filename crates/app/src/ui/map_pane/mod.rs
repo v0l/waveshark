@@ -67,9 +67,6 @@ pub(super) struct Map<'a> {
     pub home: Option<(f64, f64)>,
     /// How far out that is, in metres, when the fix that set it said.
     pub accuracy_m: Option<f64>,
-    /// The position being typed, while it is being typed. Kept apart from the
-    /// real one so a half-finished latitude does not move the map.
-    pub edit: &'a mut Option<String>,
     /// The sightings of the device selected in the device list, if one is.
     pub trail: Trail<'a>,
     /// Devices the survey holds, for the layers that draw what was heard
@@ -102,7 +99,6 @@ impl Map<'_> {
         self.st.map.poll(ui.ctx());
         let mut place = None;
         let mut sat_hit = None;
-        let mut edit = self.edit.take();
         let mut split = self.st.map_frac;
         let splitting = &mut self.st.splitting;
         {
@@ -114,9 +110,6 @@ impl Map<'_> {
             let selected_sat = self.sat;
             let sat_group = self.sat_group;
             let body = |ui: &mut egui::Ui| {
-                place = Self::station_row(ui, home, &mut edit);
-                ui.add_space(4.0);
-
                 // Built fresh each frame around what they draw from, so a
                 // layer borrows the live data instead of the map holding a
                 // copy somebody has to remember to update. Order is what the
@@ -151,8 +144,6 @@ impl Map<'_> {
                     &mut tracks,
                 ];
 
-                map.switches(ui, &layers);
-                ui.add_space(6.0);
                 // The table is the tracks layer read as text, so it goes
                 // with it: switching the layer off and leaving half the pane
                 // to a table of what is no longer drawn is a pane arguing
@@ -169,7 +160,7 @@ impl Map<'_> {
                 };
                 let fallback = home.or_else(|| mean_position(&active));
                 let drawn = map.show(ui, usable * frac, fallback, rt, &mut layers);
-                place = place.or(drawn.picked);
+                place = drawn.picked;
                 // A satellite clicked on the map is the same selection the
                 // pass table makes, so picking one here shows its track and
                 // its footprint and highlights its card.
@@ -184,10 +175,6 @@ impl Map<'_> {
         }
         self.st.map_frac = split;
         self.st.sat_hit = sat_hit;
-        *self.edit = edit;
-        if place.is_some() {
-            *self.edit = None;
-        }
         place
     }
 
@@ -196,45 +183,6 @@ impl Map<'_> {
         split_divider(ui, top, usable, frac, splitting, MAP_FRAC_RANGE, DEFAULT_MAP_FRAC)
     }
 
-    /// The station position, shown and editable.
-    ///
-    /// Worth a control rather than only a command line flag: it is what makes
-    /// a single position frame resolve instead of waiting for a matching
-    /// pair, and it is the point the range rings are drawn around. Anything
-    /// within a couple of hundred miles of the truth does the job.
-    pub(super) fn station_row(
-        ui: &mut egui::Ui,
-        home: Option<(f64, f64)>,
-        edit: &mut Option<String>,
-    ) -> Option<(f64, f64)> {
-        let mut set = None;
-        ui.horizontal(|ui| {
-            ui.label(legend("station"));
-            let text = edit.get_or_insert_with(|| match home {
-                Some((lat, lon)) => format!("{lat:.4}, {lon:.4}"),
-                None => String::new(),
-            });
-            let r = ui.add(
-                egui::TextEdit::singleline(text)
-                    .desired_width(150.0)
-                    .hint_text("lat, lon")
-                    .font(FontId::new(12.0, FontFamily::Name(theme::READOUT_FONT.into()))),
-            );
-            let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if typed || ui.small_button("SET").clicked() {
-                if let Ok(p) = crate::parse_location(text) {
-                    set = Some(p);
-                }
-            }
-            ui.add_space(8.0);
-            ui.label(legend(if home.is_some() {
-                "right-click the map to move it"
-            } else {
-                "type it, or right-click the map"
-            }));
-        });
-        set
-    }
     fn track_rows(ui: &mut egui::Ui, active: &[&crate::tracks::Track], now: std::time::Instant) {
         use crate::tracks::Kind;
         let count = |k: Kind| active.iter().filter(|t| t.kind() == k).count();

@@ -1778,7 +1778,6 @@ impl App {
 
     /// Draw the map, and take the station position it was given.
     fn map_view(&mut self, ui: &mut egui::Ui) {
-        let mut edit = self.station_edit.take();
         // Cloned rather than borrowed, so holding the runtime does not hold
         // the application while the pane borrows its own state out of it.
         let rt = self.rt.handle().clone();
@@ -1800,7 +1799,6 @@ impl App {
             st: &mut self.map,
             home,
             accuracy_m: self.accuracy_m,
-            edit: &mut edit,
             trail,
             heard: &self.survey.rows,
             sat: self.sats.selected,
@@ -1808,7 +1806,6 @@ impl App {
             rt,
         }
         .show(ui);
-        self.station_edit = edit;
         // Clicking a satellite selects it, and clicking it again lets it go:
         // the selection is what draws its ground track and its footprint,
         // and there has to be a way to stop drawing them.

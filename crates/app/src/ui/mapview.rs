@@ -126,6 +126,47 @@ pub(super) struct MapView {
     tiles: crate::map::Tiles,
 }
 
+/// One row of the layer list, laid out before anything is drawn.
+struct Switch {
+    at: Rect,
+    label: &'static str,
+    on: bool,
+    hover: bool,
+}
+
+/// Height of a row in the layer list, and the padding inside its plate.
+const SWITCH_ROW: f32 = 17.0;
+const SWITCH_PAD: f32 = 6.0;
+/// How far the control sits in from the corner of the map.
+const SWITCH_INSET: f32 = 8.0;
+
+/// Where the layer control sits: the button, and the panel under it.
+///
+/// Free of the map so the geometry can be tested. A panel that opens off the
+/// bottom of a short map is a set of layers nobody can reach, so it rises to
+/// stay inside the tiles.
+fn switch_rects(map: Rect, button_w: f32, panel_w: f32, rows: usize) -> (Rect, Rect) {
+    let button = Rect::from_min_size(
+        Pos2::new(map.right() - SWITCH_INSET - button_w, map.top() + SWITCH_INSET),
+        Vec2::new(button_w, SWITCH_ROW + 3.0),
+    );
+    let h = rows as f32 * SWITCH_ROW + SWITCH_PAD * 2.0;
+    let top = (button.bottom() + 4.0).min((map.bottom() - SWITCH_INSET - h).max(map.top() + 4.0));
+    let panel = Rect::from_min_size(
+        Pos2::new(map.right() - SWITCH_INSET - panel_w, top),
+        Vec2::new(panel_w, h),
+    );
+    (button, panel)
+}
+
+/// The `i`th row of an open layer panel.
+fn switch_row(panel: Rect, i: usize) -> Rect {
+    Rect::from_min_size(
+        Pos2::new(panel.left(), panel.top() + SWITCH_PAD + i as f32 * SWITCH_ROW),
+        Vec2::new(panel.width(), SWITCH_ROW),
+    )
+}
+
 /// What a frame of the map did that the caller may care about.
 pub(super) struct Drawn {
     /// Where a right-click landed, in degrees.
@@ -138,24 +179,6 @@ impl MapView {
     /// so a map that is not being looked at still finishes what it started.
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.tiles.poll(ctx);
-    }
-
-    /// The switch per layer that has one.
-    ///
-    /// Beside the map rather than in a settings panel: which layer is worth
-    /// seeing changes with what is being watched, and a switch two panes away
-    /// is one nobody flicks.
-    pub fn switches(&mut self, ui: &mut egui::Ui, layers: &[&mut dyn Layer]) {
-        ui.horizontal(|ui| {
-            theme::Line::new().legend("layers").show(ui);
-            for l in layers.iter().filter(|l| l.switchable()) {
-                self.layers.note(l.key());
-                let on = self.layers.on(l.key());
-                if ui.selectable_label(on, l.label()).clicked() {
-                    self.layers.set(l.key(), !on);
-                }
-            }
-        });
     }
 
     /// Draw the map and everything switched on, in the order given.
@@ -220,6 +243,48 @@ impl MapView {
         let clip = p.with_clip_rect(rect);
         Self::draw_tiles(&clip, &mut self.tiles, rect, (cx, cy), z, scale, rt);
 
+        // The layer control, over the tiles in the corner rather than on a
+        // row above them: the row cost the map its height and read as a
+        // toolbar, and every mapping application puts its layers here.
+        // Placed before the layers draw so the pointer over it is the
+        // control's and not the map's.
+        let legend_font = FontId::new(10.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let width =
+            |s: &str| p.layout_no_wrap(s.to_string(), legend_font.clone(), theme::LEGEND).size().x;
+        let named: Vec<(&'static str, &'static str)> =
+            layers.iter().filter(|l| l.switchable()).map(|l| (l.key(), l.label())).collect();
+        for (key, _) in &named {
+            self.layers.note(key);
+        }
+        let button_w = width("LAYERS") + 18.0;
+        let widest = named.iter().map(|(_, l)| width(l)).fold(0.0, f32::max);
+        let (button, panel) =
+            switch_rects(rect, button_w, (widest + 34.0).max(button_w), named.len());
+        // Open while the pointer is on it, shut the moment it leaves: a
+        // panel held open by a click is one more thing to put away, and it
+        // covers the corner of the map until somebody does.
+        let reach = button.union(panel);
+        let open = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| reach.contains(p));
+        let mut switches = Vec::new();
+        if open {
+            for (i, (key, label)) in named.iter().enumerate() {
+                let at = switch_row(panel, i);
+                let r = ui.interact(at, ui.id().with(("map-layer", *key)), Sense::click());
+                if r.clicked() {
+                    let on = self.layers.on(key);
+                    self.layers.set(key, !on);
+                }
+                switches.push(Switch { at, label, on: self.layers.on(key), hover: r.hovered() });
+            }
+        }
+        if switches.iter().any(|s| s.hover) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // A click on the control is not a click on the map: without this a
+        // layer under the panel is picked through it, and a right-click moves
+        // the station to wherever the switch happens to be.
+        let taken = move |pos: &Pos2| button.contains(*pos) || (open && panel.contains(*pos));
+
         let canvas = Canvas {
             p: clip,
             rect,
@@ -229,11 +294,15 @@ impl MapView {
             nm_px: crate::map::nm_px(center.0, zoom),
             // Nothing is hovered while the map is being dragged: the pointer
             // is moving the world, not pointing at it.
-            hover: resp.hover_pos().filter(|_| !resp.dragged()),
+            hover: resp.hover_pos().filter(|p| !resp.dragged() && !taken(p)),
             // A press that did not turn into a drag. A layer that draws
             // things worth picking reads this; the map itself has no use for
             // a left click, which is why one is free to mean "that one".
-            click: resp.clicked().then(|| resp.interact_pointer_pos()).flatten(),
+            click: resp
+                .clicked()
+                .then(|| resp.interact_pointer_pos())
+                .flatten()
+                .filter(|p| !taken(p)),
         };
 
         let mut status = format!(
@@ -254,6 +323,7 @@ impl MapView {
         }
 
         canvas.label(Pos2::new(rect.left() + 8.0, rect.top() + 10.0), &status, theme::LEGEND, 1.0);
+        Self::draw_switches(&canvas.p, &legend_font, button, panel, &switches);
 
         // The tiles are somebody's, and so is anything a layer drew over
         // them. Both licences ask to be named where the map is seen.
@@ -302,8 +372,62 @@ impl MapView {
             .secondary_clicked()
             .then(|| resp.interact_pointer_pos())
             .flatten()
+            .filter(|p| !taken(p))
             .map(|pos| crate::map::screen_to_ll(center, zoom, offset(pos)));
         Drawn { picked }
+    }
+
+    /// The layer control: one button shut, the list of layers open.
+    ///
+    /// Drawn last of everything over the tiles, so a track passing under it
+    /// does not come out on top of the switch being reached for.
+    fn draw_switches(
+        p: &egui::Painter,
+        font: &FontId,
+        button: Rect,
+        panel: Rect,
+        switches: &[Switch],
+    ) {
+        let plate = |r: Rect| {
+            p.rect_filled(r, 3.0, Color32::from_black_alpha(205));
+            p.rect_stroke(r, 3.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
+        };
+        plate(button);
+        let lit = match switches.is_empty() {
+            true => theme::VALUE,
+            false => theme::READOUT,
+        };
+        p.text(button.center(), Align2::CENTER_CENTER, "LAYERS", font.clone(), lit);
+        if switches.is_empty() {
+            return;
+        }
+        plate(panel);
+        for s in switches {
+            let box_at = Rect::from_center_size(
+                Pos2::new(panel.left() + SWITCH_PAD + 5.0, s.at.center().y),
+                Vec2::splat(9.0),
+            );
+            match s.on {
+                true => {
+                    p.rect_filled(box_at, 2.0, theme::READOUT);
+                }
+                false => {
+                    p.rect_stroke(box_at, 2.0, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
+                }
+            }
+            let col = match (s.on, s.hover) {
+                (_, true) => theme::READOUT,
+                (true, false) => theme::VALUE,
+                (false, false) => theme::LEGEND,
+            };
+            p.text(
+                Pos2::new(box_at.right() + 7.0, s.at.center().y),
+                Align2::LEFT_CENTER,
+                s.label,
+                font.clone(),
+                col,
+            );
+        }
     }
 
     /// Who the map belongs to, along the bottom right.
@@ -539,6 +663,66 @@ mod tests {
         let a = nearest_copy(179.5, 179.0);
         let b = nearest_copy(-179.5, 179.0);
         assert!((a - b).abs() < 1.5, "{a} to {b}");
+    }
+
+    /// What the map pane hands over: eight layers, of which the station is
+    /// always drawn and gets no switch.
+    const LAYERS: usize = 7;
+
+    #[test]
+    fn the_open_layer_panel_stays_on_the_map() {
+        let map = Rect::from_min_size(Pos2::new(40.0, 60.0), Vec2::new(900.0, 520.0));
+        let (button, panel) = switch_rects(map, 60.0, 130.0, LAYERS);
+        assert!(map.contains_rect(button), "{button:?} left {map:?}");
+        assert!(map.contains_rect(panel), "{panel:?} left {map:?}");
+        // Under the button, not over it, when there is room.
+        assert!(panel.top() >= button.bottom(), "{} over {}", panel.top(), button.bottom());
+        // One row each, all of them inside the plate.
+        for i in 0..LAYERS {
+            let row = switch_row(panel, i);
+            assert!(panel.contains_rect(row), "row {i} at {row:?} left {panel:?}");
+        }
+        assert_eq!(switch_row(panel, 1).top() - switch_row(panel, 0).top(), SWITCH_ROW);
+        // What the pointer has to be inside for the list to be open: the
+        // button, the list, and the gap between them, so crossing from one
+        // to the other does not shut it.
+        let reach = button.union(panel);
+        assert!(reach.contains(button.center()));
+        assert!(reach.contains(switch_row(panel, LAYERS - 1).center()));
+        assert!(reach.contains(Pos2::new(button.center().x, button.bottom() + 2.0)));
+        assert!(!reach.contains(map.center()), "the map itself is not the control");
+    }
+
+    /// The table takes more than half the pane, and the map under a narrow
+    /// window is shorter than eight rows of switches: the panel rises rather
+    /// than opening off the bottom edge, where nothing can be reached.
+    #[test]
+    fn a_panel_taller_than_a_short_map_rises_to_stay_on_it() {
+        let map = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(600.0, 140.0));
+        let (button, panel) = switch_rects(map, 60.0, 130.0, LAYERS);
+        assert!(map.contains_rect(panel), "{panel:?} left {map:?}");
+        assert!(panel.top() < button.bottom(), "a 140 px map has room it has not");
+        assert_eq!(switch_row(panel, LAYERS - 1).bottom(), panel.bottom() - SWITCH_PAD);
+    }
+
+    #[test]
+    fn a_layer_switched_off_is_the_only_one_saved_off() {
+        let mut set = LayerSet::default();
+        for key in ["rings", "cells", "airports", "tracks"] {
+            set.note(key);
+        }
+        assert_eq!(set.saved().len(), 4);
+        assert_eq!(set.saved().iter().filter(|(_, on)| *on).count(), 4);
+        set.set("cells", false);
+        assert_eq!(set.saved().iter().filter(|(_, on)| !*on).count(), 1);
+        assert!(!set.on("cells"));
+        assert!(set.on("tracks"));
+
+        let mut second = LayerSet::default();
+        second.restore(&set.saved());
+        assert_eq!(second.saved(), set.saved());
+        second.set("cells", true);
+        assert_eq!(second.saved().iter().filter(|(_, on)| *on).count(), 4);
     }
 
     /// Zoomed out, the whole world is narrower than the pane, so a line that
