@@ -159,6 +159,8 @@ the code is in the commit log.
 
 ### Changed
 
+- Channels and front ends in the span's rolloff are named, where the radio
+  hears little.
 - Scanner channels landing on a join between two tuners are dropped, and a
   block written on one is named.
 - Setup holds what this receiver serves, under a NETWORK tab, and call

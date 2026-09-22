@@ -1357,11 +1357,19 @@ impl Receiver {
                 }
                 continue;
             }
-            if (hz - plan.center.as_f64()).abs() > plan.eff_rate() / 2.0 - shape.widths[0] {
+            let edge = (hz - plan.center.as_f64()).abs() + shape.widths[0];
+            if edge > plan.eff_rate() / 2.0 {
                 refused = Some(format!(
                     "{:.4} MHz is too near the span edge for {}",
                     hz / 1e6,
                     proto.label()
+                ));
+            } else if edge > plan.usable_rate() / 2.0 {
+                refused = Some(format!(
+                    "{} at {:.4} MHz is in the span's rolloff, outside the {:.2} MS/s this radio hears",
+                    proto.label(),
+                    hz / 1e6,
+                    plan.usable_rate() / 1e6
                 ));
             }
             // A block written on a join of a stitched receiver is built and
@@ -1398,6 +1406,16 @@ impl Receiver {
             // as nothing.
             let at = plan.center.as_f64() + spec.offset_hz;
             let half = spec.bandwidth() / 2.0;
+            if plan.usable_rate() < plan.eff_rate()
+                && spec.fits_rate(plan.eff_rate())
+                && spec.offset_hz.abs() + half > plan.usable_rate() / 2.0
+            {
+                refused = Some(format!(
+                    "{} is in the span's rolloff, outside the {:.2} MS/s this radio hears",
+                    spec.label,
+                    plan.usable_rate() / 1e6
+                ));
+            }
             if let Some(hz) = plan.seams.iter().find(|h| (at - half..=at + half).contains(h)) {
                 refused = Some(format!(
                     "{} sits across the join at {:.4} MHz, where neither tuner hears it whole",
@@ -7405,6 +7423,52 @@ pub(crate) mod tests {
         let marks = scan_marks_of(&p);
         let ScanMark::Band { lo, hi, .. } = &marks[0] else { panic!("{marks:?}") };
         assert!((lo - 433.17e6).abs() < 1.0 && (hi - 434.67e6).abs() < 1.0, "{lo} to {hi}");
+    }
+
+    #[test]
+    fn a_channel_in_the_rolloff_is_reported_and_still_built() {
+        let mut p = plan(2_000_000.0, Hz::mhz(433));
+        p.usable_ratio = 0.75;
+        p.channels = vec![chan(1, 800_000.0, Demod::Nfm)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let said = rx.refused.clone().expect("0.4 of the span is outside a 0.75 radio");
+        assert_eq!(said, "CH1 is in the span's rolloff, outside the 1.50 MS/s this radio hears");
+        assert_eq!(rx.channels().len(), 1, "said, not refused: the ratio is pessimistic");
+
+        p.channels = vec![chan(1, 600_000.0, Demod::Nfm)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.refused.is_none(), "0.3 of the span is inside it: {:?}", rx.refused);
+        assert_eq!(rx.channels().len(), 1);
+
+        p.usable_ratio = 1.0;
+        p.channels = vec![chan(1, 800_000.0, Demod::Nfm)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    #[test]
+    fn a_front_end_in_the_rolloff_is_reported_rather_than_silently_dropped() {
+        let mut p = plan(2_400_000.0, Hz(144_400_000));
+        p.usable_ratio = 0.75;
+        p.fronts = vec![anywhere(Front::protocol("pocsag", 145_300_000.0))];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(running(&rx, "pocsag"), "inside the span, so it is built");
+        let said = rx.refused.clone().expect("0.9 MHz out on a 0.9 MHz usable half");
+        assert_eq!(
+            said,
+            "pager at 145.3000 MHz is in the span's rolloff, outside the 1.80 MS/s this radio hears"
+        );
+
+        p.fronts = vec![anywhere(Front::protocol("pocsag", 144_800_000.0))];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(running(&rx, "pocsag"));
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+
+        p.fronts = vec![anywhere(Front::protocol("pocsag", 153_350_000.0))];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(!running(&rx, "pocsag"), "nine megahertz away, so not built at all");
+        let said = rx.refused.clone().expect("nine megahertz away");
+        assert!(said.contains("too near the span edge"), "{said}");
     }
 
     #[test]
