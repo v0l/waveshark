@@ -305,6 +305,13 @@ pub struct Session {
     /// indistinguishable from one that has stopped working.
     pub audio_out: String,
     pub audio_in: String,
+    /// The station a keyed WFM channel identifies itself as: whether the
+    /// subcarrier goes out at all, the PI code as four hex digits, the eight
+    /// characters a receiver shows and the message under them.
+    pub rds_on: bool,
+    pub rds_pi: String,
+    pub rds_name: String,
+    pub rds_text: String,
     /// What the packet log folder and the raw capture folder may take, in
     /// megabytes, or `None` for no limit. Absent from an older file means
     /// the default, and a limit set once should not need setting again.
@@ -483,6 +490,10 @@ impl Default for Session {
             dashboard: true,
             audio_out: String::new(),
             audio_in: String::new(),
+            rds_on: false,
+            rds_pi: format!("{:04X}", crate::radio::DEFAULT_PI),
+            rds_name: crate::radio::RdsStation::default().name,
+            rds_text: String::new(),
             log_cap_mb: Some(crate::wspkt::DEFAULT_MAX_BYTES >> 20),
             capture_cap_mb: Some(nodes::capture_nodes::DEFAULT_BUDGET >> 20),
             gps: String::new(),
@@ -624,6 +635,19 @@ impl Session {
             token: self.wigle_token.trim().to_string(),
             donate: self.wigle_donate,
         }
+    }
+
+    /// The station a keyed WFM channel identifies itself as, or nothing
+    /// where the switch is off or the PI code is not four hex digits: a code
+    /// half typed is not a code, and transmitting what parsed of it would
+    /// put a different station on the air than the one on the screen.
+    pub fn rds(&self) -> Option<crate::radio::RdsStation> {
+        let pi = crate::radio::RdsStation::parse_pi(&self.rds_pi)?;
+        self.rds_on.then(|| crate::radio::RdsStation {
+            pi,
+            name: self.rds_name.trim().to_string(),
+            radiotext: self.rds_text.trim().to_string(),
+        })
     }
 
     /// What is typed, as somewhere to publish. The port falls back to 1883
@@ -874,6 +898,10 @@ impl Session {
                 .clamp(1, 4096),
             audio_out: kv.get("audio_out").map(|v| v.to_string()).unwrap_or_default(),
             audio_in: kv.get("audio_in").map(|v| v.to_string()).unwrap_or_default(),
+            rds_on: kv.get("rds_on").map(|v| *v == "true").unwrap_or(false),
+            rds_pi: kv.get("rds_pi").map(|v| v.to_string()).unwrap_or(d.rds_pi),
+            rds_name: kv.get("rds_name").map(|v| v.to_string()).unwrap_or(d.rds_name),
+            rds_text: kv.get("rds_text").map(|v| v.to_string()).unwrap_or_default(),
             log_cap_mb: cap(kv.get("log_cap_mb").copied(), d.log_cap_mb),
             capture_cap_mb: cap(kv.get("capture_cap_mb").copied(), d.capture_cap_mb),
             gps: kv.get("gps").map(|v| v.to_string()).unwrap_or_default(),
@@ -975,6 +1003,9 @@ impl Session {
             ("spacetrack_password", &self.spacetrack_password),
             ("audio_out", &self.audio_out),
             ("audio_in", &self.audio_in),
+            ("rds_pi", &self.rds_pi),
+            ("rds_name", &self.rds_name),
+            ("rds_text", &self.rds_text),
             ("gps", &self.gps),
             ("log_dir", &self.log_dir),
             ("survey_path", &self.survey_path),
@@ -1041,6 +1072,9 @@ impl Session {
         }
         if self.wigle_on {
             s.push_str("wigle_on = true\n");
+        }
+        if self.rds_on {
+            s.push_str("rds_on = true\n");
         }
         if self.beacondb_on {
             s.push_str("beacondb_on = true\n");
@@ -1222,6 +1256,10 @@ mod tests {
             wigle_on: true,
             beacondb_on: true,
             beacondb_lookup: true,
+            rds_on: true,
+            rds_pi: "C479".into(),
+            rds_name: "WAVESHRK".into(),
+            rds_text: "A TEST OF THE RDS TRANSMITTER".into(),
             scan_on: true,
             scan_lo_mhz: 144.0,
             scan_hi_mhz: 146.0,
@@ -1305,6 +1343,30 @@ mod tests {
         assert_eq!(
             Session::parse("iqstream_on = true\niqstream_tunable = true").iqstream(),
             Some(("0.0.0.0:1234".parse().unwrap(), true))
+        );
+    }
+
+    /// A PI code is four hex digits or it is not a code: a station sent on
+    /// half of one is a different station from the one on the screen.
+    #[test]
+    fn a_station_goes_out_only_with_a_whole_pi_code() {
+        assert_eq!(Session::default().rds(), None, "off until it is asked for");
+        let at = |typed: &str| Session::parse(&format!("rds_on = true\nrds_pi = {typed}")).rds();
+        assert_eq!(at("C479").map(|s| s.pi), Some(0xC479));
+        assert_eq!(at("0xC479").map(|s| s.pi), Some(0xC479));
+        assert_eq!(at("c479").map(|s| s.pi), Some(0xC479));
+        assert_eq!(at("C47"), None, "three digits");
+        assert_eq!(at("C4790"), None, "five");
+        assert_eq!(at("WXYZ"), None, "not hex");
+        let s = Session::parse("rds_on = true\nrds_name = Radio Waveshark\n").rds().unwrap();
+        assert_eq!(s.pi, crate::radio::DEFAULT_PI, "the default code until one is typed");
+        // Eight characters is what the standard carries, and what a receiver
+        // shows: the rest is cut here rather than halfway through a group.
+        assert_eq!(s.label(), "Radio Wa");
+        assert_eq!(
+            Session::parse("rds_on = true\nrds_name = BBC 1\n").rds().unwrap().label(),
+            "BBC 1   ",
+            "padded to the four pairs it is sent as"
         );
     }
 

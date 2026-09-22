@@ -555,6 +555,9 @@ pub enum Cmd {
     /// a path is something a stage's settings can carry, so the chain view
     /// says which file is loaded and a rebuild does not lose it.
     TxCapture(Option<TxCapture>),
+    /// The station a WFM channel identifies itself as, or `None` for a
+    /// carrier with no data on it.
+    Rds(Option<RdsStation>),
     /// Key a channel by id, or unkey with `None`.
     ///
     /// One command for the whole receiver rather than one per channel: every
@@ -865,6 +868,55 @@ impl TxCapture {
     }
 }
 
+/// What a broadcast station says about itself on the 57 kHz subcarrier.
+///
+/// In the plan beside the capture a channel replays, and for the same
+/// reason: all three fields are things a stage's settings can carry, so the
+/// chain view says what is being transmitted and a rebuild keeps it. It
+/// belongs to the receiver rather than to a channel because a transmitter is
+/// one station however many channels are set to WFM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RdsStation {
+    /// The programme identification code, which is how a receiver tells two
+    /// transmitters of the same programme apart.
+    pub pi: u16,
+    /// The eight characters a receiver shows as the station.
+    pub name: String,
+    /// The scrolling message under it, or empty for none.
+    pub radiotext: String,
+}
+
+impl Default for RdsStation {
+    fn default() -> Self {
+        Self { pi: DEFAULT_PI, name: "WAVESHRK".into(), radiotext: String::new() }
+    }
+}
+
+/// The country and programme this receiver identifies itself with until
+/// somebody sets one: 0x5343 is what `rds_tx` is built with.
+pub const DEFAULT_PI: u16 = 0x5343;
+
+impl RdsStation {
+    /// A PI code as it is published and as every receiver shows one: four
+    /// hex digits. Nothing else is a code, so the field says so rather than
+    /// transmitting whatever half of it parsed.
+    pub fn parse_pi(text: &str) -> Option<u16> {
+        let t = text.trim().trim_start_matches("0x").trim_start_matches("0X");
+        (t.len() == 4).then(|| u16::from_str_radix(t, 16).ok()).flatten()
+    }
+
+    /// The eight characters that go out, which is what a receiver shows:
+    /// longer is cut and shorter is padded, because the name is sent as four
+    /// pairs whatever was typed.
+    pub fn label(&self) -> String {
+        let mut s: String = self.name.chars().take(8).collect();
+        while s.chars().count() < 8 {
+            s.push(' ');
+        }
+        s
+    }
+}
+
 /// How a keyed channel is modulated.
 ///
 /// Not a setting: it follows the channel's own mode, because a channel is one
@@ -1045,6 +1097,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         seams: Vec::new(),
         tx: None,
         tx_capture: None,
+        rds: None,
         scan: Default::default(),
         heat: Default::default(),
         edits: Default::default(),
@@ -2091,6 +2144,7 @@ impl Audio {
             seams: Vec::new(),
             tx: None,
             tx_capture: None,
+            rds: None,
             scan: Default::default(),
             settings: Default::default(),
         };
@@ -2395,6 +2449,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             seams: Vec::new(),
             tx: None,
             tx_capture: None,
+            rds: None,
             scan: Default::default(),
             settings: Default::default(),
         };
@@ -2594,6 +2649,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // yet, and the stage is built from the plan either way.
             Cmd::TxCapture(c) => {
                 self.plan.tx_capture = c;
+                self.needs_rebuild = true;
+            }
+            Cmd::Rds(s) => {
+                self.plan.rds = s;
                 self.needs_rebuild = true;
             }
             Cmd::TxGain(db) => {
@@ -3948,6 +4007,7 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         seams: Vec::new(),
         tx: None,
         tx_capture: None,
+        rds: None,
         settings: Default::default(),
     }
 }

@@ -2703,6 +2703,7 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
         Cmd::Wigle(now.wigle_on.then(|| account.clone())),
     );
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
+    when(now.rds() != was.rds(), Cmd::Rds(now.rds()));
     when(now.kiss() != was.kiss(), Cmd::Kiss(now.kiss()));
     let serving =
         now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan { addr, tunable });
@@ -3529,6 +3530,7 @@ mod tests {
             Cmd::Audio { .. } => "audio",
             Cmd::Wigle(_) => "wigle",
             Cmd::BeaconDb(_) => "beacondb",
+            Cmd::Rds(_) => "rds",
             Cmd::BandScan(_) => "band_scan",
             Cmd::Heatmap(_) => "heatmap",
             Cmd::ExportHeatmap { .. } => "export_heatmap",
@@ -3582,6 +3584,7 @@ mod tests {
                 "log_cap",
                 "manual",
                 "packet_log",
+                "rds",
                 "record_calls",
                 "refresh",
                 "smoothing",

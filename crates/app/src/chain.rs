@@ -400,6 +400,9 @@ pub struct Plan {
     /// it is a path and a rate and a stage's settings can carry those: the
     /// chain view then says which file is loaded and a rebuild keeps it.
     pub tx_capture: Option<crate::radio::TxCapture>,
+    /// The station a keyed WFM channel identifies itself as on the 57 kHz
+    /// subcarrier, or `None` for a carrier with no data on it.
+    pub rds: Option<crate::radio::RdsStation>,
     /// The walk over a band, if one was asked for: where it goes, how long
     /// it waits and what it does with what it hears.
     ///
@@ -3084,8 +3087,11 @@ pub mod derived {
     /// The courtesy tone at the end of an over, between what is modulated
     /// and the modulator, so every way of letting the key up reaches it.
     pub const ROGER: u64 = Patch::DERIVED_BASE + 36;
+    /// The broadcast multiplex: the programme goes in and a pilot, a 57 kHz
+    /// subcarrier and the station's own identity come out.
+    pub const RDS: u64 = Patch::DERIVED_BASE + 37;
     /// The stages that transmit, which are run on a thread of their own.
-    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, ROGER, TX_MOD, TX_RADIO];
+    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, ROGER, RDS, TX_MOD, TX_RADIO];
     /// What is going out, drawn on the span the receiver is deaf to while it
     /// goes out. In front of the head, so everything downstream sees it.
     pub const TX_MONITOR: u64 = Patch::DERIVED_BASE + 19;
@@ -3344,6 +3350,19 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 p.add_derived(derived::ROGER, "roger", s);
                 p.connect(modulates, (derived::ROGER, 0));
                 modulates = Source::Stage(derived::ROGER, 0);
+            }
+
+            if let Some(station) = plan.rds.as_ref().filter(|_| tx.mode == TxMode::Wfm)
+                && plan.eff_rate() >= nodes::RDS_STATION_MIN_RATE_HZ
+            {
+                let mut s = Settings::new();
+                s.insert("pi".into(), pipeline::ParamValue::Text(format!("{:04X}", station.pi)));
+                s.insert("name".into(), pipeline::ParamValue::Text(station.label()));
+                s.insert("radiotext".into(), pipeline::ParamValue::Text(station.radiotext.clone()));
+                p.add_derived(derived::RDS, "rds_tx", s);
+                p.connect(Source::Stage(derived::TX_CLOCK, 0), (derived::RDS, 0));
+                p.connect(modulates, (derived::RDS, 1));
+                modulates = Source::Stage(derived::RDS, 0);
             }
 
             // A recording needs no modulator at all: what stands in its place
@@ -4700,6 +4719,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
             Some(n) => format!("Replay {}", n.to_string_lossy()),
             None => "Replay a capture".into(),
         },
+        "rds_tx" => format!("RDS station {}", settings.str_or("name", "").trim()),
         "fm_mod" => "FM modulator".into(),
         "am_mod" => "AM modulator".into(),
         "ook_mod" => "OOK keyer".into(),
@@ -5294,6 +5314,7 @@ pub(crate) mod tests {
             iqstream: None,
             iqstream_tuners: Vec::new(),
             tx_capture: None,
+            rds: None,
             dc_block: true,
             refresh_hz: 30.0,
             smoothing: DEFAULT_SMOOTHING,
@@ -8486,6 +8507,158 @@ mod tx_in_graph_tests {
         for want in ["tx_clock", "tone", "fm_mod", "radio_tx"] {
             assert!(kinds.contains(&want), "{want} missing from {kinds:?}");
         }
+    }
+
+    /// A WFM channel with a station to be, at a rate the subcarrier fits in.
+    fn plan_with_station(rate: f64) -> Plan {
+        let mut p = tests::plan(rate, Hz(98_000_000));
+        // Nothing to receive: this is about what goes out.
+        p.fronts.clear();
+        p.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Audio(Demod::Wfm),
+            bandwidth_hz: None,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            reads: None,
+            tx: Some(TxSpec { source: TxSource::Tone, ..Default::default() }),
+            tone: None,
+        }];
+        p.tx = Some(TxPlan {
+            spec: TxSpec { source: TxSource::Tone, ..Default::default() },
+            mode: TxMode::Wfm,
+            on_air: Hz(98_000_000),
+        });
+        p.rds = Some(crate::radio::RdsStation {
+            pi: 0xC479,
+            name: "WAVESHRK".into(),
+            radiotext: "WAVESHARK ON AIR".into(),
+        });
+        p
+    }
+
+    fn tx_kinds(rx: &Receiver) -> Vec<String> {
+        rx.tx_topology().expect("a transmit chain").nodes.iter().map(|n| n.kind.clone()).collect()
+    }
+
+    /// A station is a stage in the chain the mode draws, so picking WFM and
+    /// switching the station on is the whole of reaching it: the programme
+    /// goes into the multiplex and the multiplex into the modulator.
+    #[test]
+    fn a_wfm_channel_with_a_station_transmits_a_multiplex() {
+        let mut plan = plan_with_station(320_000.0);
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert_eq!(tx_kinds(&rx), ["tx_clock", "tone", "rds_tx", "fm_mod", "radio_tx"]);
+        // The programme reaches it, rather than a station announcing itself
+        // over silence: the tone is on the second port.
+        let topo = rx.tx_topology().unwrap();
+        let station = topo.nodes.iter().find(|n| n.kind == "rds_tx").unwrap();
+        assert_eq!(station.inputs.len(), 2, "the clock and the programme");
+
+        plan.rds = None;
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert_eq!(tx_kinds(&rx), ["tx_clock", "tone", "fm_mod", "radio_tx"]);
+    }
+
+    /// A carrier deviating 75 kHz with data out at 58 kHz occupies 266 kHz,
+    /// so a 250 kS/s span carries the programme and no station: the
+    /// modulator refuses a multiplex that does not fit, and what it takes
+    /// with it is the whole transmit chain rather than the station alone.
+    #[test]
+    fn a_span_too_narrow_for_the_subcarrier_transmits_without_one() {
+        let plan = plan_with_station(250_000.0);
+        let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert_eq!(tx_kinds(&rx), ["tx_clock", "tone", "fm_mod", "radio_tx"]);
+    }
+
+    /// What the station puts on the air, read back by this receiver's own
+    /// broadcast demodulator: the name, the code and the message, with the
+    /// programme still audible underneath.
+    ///
+    /// A station that announces itself over silence is not a station
+    /// anybody would leave running, so the tone matters as much as the
+    /// name: the multiplex leaves the programme 0.87 of what went in, the
+    /// pilot and the data taking the rest.
+    ///
+    /// At 1.92 MS/s, which is a span a radio transmitting this would run
+    /// at. The same transmission read at 320 kS/s gives 19 groups in three
+    /// seconds against the 34 the bit rate allows and never completes the
+    /// name, which is this demodulator under a programme deviating 52 kHz
+    /// rather than anything the station does.
+    #[test]
+    fn a_station_this_receiver_keys_is_one_this_receiver_reads() {
+        let rate = 1_920_000.0;
+        let plan = plan_with_station(rate);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())), "the WFM channel was not keyed");
+        // Four groups spell the name and four more the sixteen character
+        // message, which is eight groups of 104 bits at 1187.5 bit/s: 0.7 s
+        // a round, and the first is the one the synchroniser is still
+        // hunting through. The name is read a second in and the message by
+        // two; this waits for two and a half.
+        let want = (2.5 * rate) as u64;
+        until("the station on the air", || radio.samples() > want);
+        rx.unkey();
+
+        let air = radio.transmitted();
+        assert!(air.len() as u64 > want, "{} samples reached the antenna", air.len());
+        let (station, heard, (groups, errors, synced)) = read_back(&air[..want as usize], rate);
+        assert!(synced, "the block synchroniser never framed on what went out");
+        // 2.5 seconds at 1187.5 bit/s is 28 groups, which is the ceiling,
+        // and 21 of them are read with 11 blocks rejected. The floor is
+        // half of the ceiling: under that the name takes longer to arrive
+        // than this waits.
+        assert!(
+            (14..=28).contains(&groups),
+            "{groups} groups and {errors} rejected blocks in 2.5 seconds, floor 14 ceiling 28"
+        );
+        assert_eq!(station.pi, Some(0xC479));
+        assert_eq!(station.name.as_deref(), Some("WAVESHRK"));
+        assert_eq!(station.radiotext.as_deref(), Some("WAVESHARK ON AIR"));
+
+        // The test tone at the level the source sends it, less what the
+        // pilot and the subcarrier take: 0.8 of full scale comes back at
+        // 0.87 of that.
+        let at = amplitude_at(&heard, 1_000.0, rate);
+        assert!((0.66..=0.72).contains(&at), "a 0.8 tone came back at {at:.4}, wanted 0.696");
+    }
+
+    /// What a receiver tuned to this transmission would make of it: the
+    /// station it names itself and the programme underneath, in mono.
+    fn read_back(air: &[C32], rate: f64) -> (dsp::rds::Station, Vec<f32>, (u64, u64, bool)) {
+        use pipeline::node::{Node, NodeCtx, PortSpec};
+        use pipeline::port::Payload;
+        let mut rx = WfmDemodNode::new().mono();
+        let ins = [PortSpec { spec: StreamSpec::iq(rate, Hz(98_000_000)), latency: 0 }];
+        rx.negotiate(&ins).expect("a broadcast demodulator");
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let mut heard = Vec::new();
+        for block in air.chunks(8192) {
+            let iq = Payload::Iq(block.to_vec());
+            let mut audio = Payload::Real(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            rx.process(&[&iq], std::slice::from_mut(&mut audio), &mut ctx).unwrap();
+            if let Payload::Real(a) = audio {
+                heard.extend(a.chunks_exact(2).map(|f| f[0]));
+            }
+        }
+        (rx.station().clone(), heard, rx.rds_stats())
+    }
+
+    /// One frequency's amplitude in a real block, by Goertzel.
+    fn amplitude_at(audio: &[f32], hz: f64, rate: f64) -> f32 {
+        let w = std::f64::consts::TAU * hz / rate;
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (n, s) in audio.iter().enumerate() {
+            let p = w * n as f64;
+            re += f64::from(*s) * p.cos();
+            im += f64::from(*s) * p.sin();
+        }
+        (2.0 * (re * re + im * im).sqrt() / audio.len() as f64) as f32
     }
 
     /// A recorded span goes back out as it stands.

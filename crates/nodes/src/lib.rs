@@ -156,7 +156,7 @@ pub use tx_nodes::{
 };
 pub use vdl2_nodes::Vdl2Node;
 pub use video_nodes::VideoNode;
-pub use wfm::WfmDemodNode;
+pub use wfm::{RDS_STATION_MIN_RATE_HZ, RDS_TX_MIN_RATE_HZ, WfmDemodNode};
 pub use wifi_nodes::WifiNode;
 pub use wigle_nodes::{Account, WigleNode, WigleStatus};
 pub use wmbus_nodes::WmbusNode;

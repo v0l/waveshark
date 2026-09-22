@@ -3110,6 +3110,9 @@ impl App {
         });
         ui.add_space(8.0);
 
+        self.rds_station(ui);
+        ui.add_space(8.0);
+
         self.raw_capture(ui);
         ui.add_space(8.0);
         self.trim_capture(ui);
@@ -3117,6 +3120,60 @@ impl App {
         if changed {
             self.apply_radio_settings();
         }
+    }
+
+    /// What a keyed WFM channel says about itself on the 57 kHz subcarrier.
+    ///
+    /// With the radio rather than on the strip because it is one station for
+    /// the receiver however many channels are set to WFM, and because a name
+    /// and a message are typed once and left alone.
+    fn rds_station(&mut self, ui: &mut egui::Ui) {
+        section(ui, "rds", "what a keyed WFM channel calls itself", |ui| {
+            let mut on = self.setting(|s| s.rds_on);
+            let why = "A broadcast station names itself on a subcarrier above the \
+                       programme, and a receiver shows that name instead of the \
+                       frequency. Off transmits the programme alone.";
+            if switch(ui, "identify", &mut on, "as a station", why) {
+                self.settings.edit(|s| s.rds_on = on);
+            }
+            let pi_help = "The programme identification code, four hex digits, which is \
+                           how a receiver tells two transmitters of one programme apart. \
+                           The first digit is the country.";
+            row_help(ui, "pi code", pi_help, |ui| {
+                let mut text = self.setting(|s| s.rds_pi.clone());
+                if field(ui, &mut text, "C479").changed() {
+                    self.settings.edit(|s| s.rds_pi = text.clone());
+                }
+            });
+            row_help(ui, "station", "Eight characters, which is all the standard carries.", |ui| {
+                let mut text = self.setting(|s| s.rds_name.clone());
+                if field(ui, &mut text, "WAVESHRK").changed() {
+                    self.settings.edit(|s| s.rds_name = text.clone());
+                }
+            });
+            let text_help = "The message under the name, up to 64 characters. Every four \
+                             characters is another group, so a long one takes longer to \
+                             arrive and the name is repeated less often.";
+            row_help(ui, "radiotext", text_help, |ui| {
+                let mut text = self.setting(|s| s.rds_text.clone());
+                if field(ui, &mut text, "nothing").changed() {
+                    self.settings.edit(|s| s.rds_text = text.clone());
+                }
+            });
+            let station = self.setting(|s| s.rds());
+            let pi = self.setting(|s| s.rds_pi.clone());
+            match (on, station) {
+                (false, _) => lamp(ui, true, "the programme alone, with no data on it"),
+                (true, Some(s)) => lamp(
+                    ui,
+                    true,
+                    &format!("{:04X} \"{}\" on a WFM channel", s.pi, s.label().trim_end()),
+                ),
+                (true, None) => {
+                    lamp(ui, false, &format!("{pi:?} is not four hex digits, so nothing is sent"))
+                }
+            }
+        });
     }
 
     /// Cutting the capture being replayed down to what is in it.

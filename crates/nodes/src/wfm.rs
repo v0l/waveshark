@@ -24,6 +24,18 @@ use pipeline::registry::{Category, Settings, StageDesc};
 /// Peak deviation of broadcast FM.
 const DEVIATION_HZ: f64 = 75_000.0;
 
+/// Twice the subcarrier and its sidebands, which is the slowest stream the
+/// multiplex can be built at: below this the 57 kHz data folds back over the
+/// audio.
+pub const RDS_TX_MIN_RATE_HZ: f64 = 130_000.0;
+
+/// The narrowest span a station can be transmitted in: Carson's rule on
+/// 75 kHz of deviation with the data sidebands at the top of the multiplex.
+/// Below this the modulator refuses the multiplex, so a chain drawn here
+/// leaves the station out rather than losing the transmitter with it.
+pub const RDS_STATION_MIN_RATE_HZ: f64 =
+    2.0 * (DEVIATION_HZ + dsp::rds::demod::CARRIER_HZ + dsp::rds::demod::BAUD);
+
 /// The top of a broadcast programme. Above this the audio walks into the
 /// 19 kHz pilot, and a pilot with programme on it is a station a receiver
 /// hears as mono with no data.
@@ -378,11 +390,10 @@ impl Node for RdsTxNode {
         if i.spec.rate <= 0.0 {
             return Err(common::Error::other("rds_tx needs a clock to run against"));
         }
-        // Twice the subcarrier and its sidebands: below this the 57 kHz data
-        // folds back over the audio.
-        if i.spec.rate < 130_000.0 {
+        if i.spec.rate < RDS_TX_MIN_RATE_HZ {
             return Err(common::Error::other(format!(
-                "rds_tx needs at least 130 kHz to carry the 57 kHz subcarrier, got {:.0}",
+                "rds_tx needs at least {RDS_TX_MIN_RATE_HZ:.0} Hz to carry the 57 kHz \
+                 subcarrier, got {:.0}",
                 i.spec.rate
             )));
         }
