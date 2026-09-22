@@ -577,11 +577,12 @@ mod tests {
         // bank is choosing an arm and the synchroniser is finding the
         // offset words. Every block after that passes its syndrome.
         assert_eq!(groups, 44, "groups in four seconds");
-        // One rejected block, while the synchroniser was still hunting.
-        // Two measurements got it there: shaping the biphase to the 2.4 kHz
-        // the specification allows took 26 rejects down to 4, and carrying
-        // the differential level across the repeat took 4 down to 1.
-        assert_eq!(errors, 1, "blocks rejected");
+        // Nothing rejected at all. Three measurements got it there: shaping
+        // the biphase to the 2.4 kHz the specification allows took 26
+        // rejects down to 4, carrying the differential level across the
+        // repeat took 4 down to 1, and holding the modulation axis through
+        // the branch cut a quadrature subcarrier sits on took 1 down to 0.
+        assert_eq!(errors, 0, "blocks rejected");
         assert_eq!(rx.station().pi, Some(0xC479));
         assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"));
         assert_eq!(rx.station().radiotext.as_deref(), Some("A TEST OF THE RDS TRANSMITTER"));
@@ -659,10 +660,10 @@ mod tests {
 
         let (groups, errors, synced) = rx.rds_stats();
         assert!(synced, "the block synchroniser never framed under a programme");
-        // The same 44 groups and one reject the silent station reads, so the
-        // programme costs the data nothing at this level.
-        assert_eq!(groups, 43, "groups in four seconds with a tone underneath");
-        assert_eq!(errors, 1, "blocks rejected");
+        // The same 44 groups the silent station reads, and nothing rejected,
+        // so the programme costs the data nothing.
+        assert_eq!(groups, 44, "groups in four seconds with a tone underneath");
+        assert_eq!(errors, 0, "blocks rejected");
         assert_eq!(rx.station().pi, Some(0xC479));
         assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"));
         assert_eq!(rx.station().radiotext.as_deref(), Some("A TEST OF THE RDS TRANSMITTER"));
@@ -704,8 +705,8 @@ mod tests {
     ///
     /// Measured through this receiver at 320 kS/s with a full scale tone on
     /// the programme input: at 19.5 kHz unfiltered the station reads zero
-    /// groups and never gives its name, and through this filter it reads 32
-    /// of the 44 and names itself. 10 kHz passes untouched either way.
+    /// groups and never gives its name, and through this filter it reads all
+    /// 44 and names itself. 10 kHz passes untouched either way.
     #[test]
     fn a_programme_above_fifteen_kilohertz_is_cut_before_it_reaches_the_pilot() {
         let rate = 320_000.0;
@@ -713,13 +714,13 @@ mod tests {
         let at = amplitude_at(&heard, 19_500.0, rate);
         assert!(at < 1e-4, "19.5 kHz reached the multiplex at {at:.6}");
         let (groups, _, _) = rx.rds_stats();
-        assert_eq!(groups, 32, "groups under a full scale tone on the pilot");
+        assert_eq!(groups, 44, "groups under a full scale tone on the pilot");
         assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"), "unfiltered this reads nothing");
 
         let (rx, heard) = station_over(&tone(10_000.0, 0.2, rate, 8192 * 157), 1, rate);
         let at = amplitude_at(&heard, 10_000.0, rate);
         assert!((0.173..=0.175).contains(&at), "10 kHz came back at {at:.5}, wanted 0.174");
-        assert_eq!(rx.rds_stats().0, 43, "groups under a 10 kHz programme");
+        assert_eq!(rx.rds_stats().0, 44, "groups under a 10 kHz programme");
     }
 
     /// The taps are what decides where the programme stops, and the cost is
@@ -763,6 +764,28 @@ mod tests {
         // Nothing connected is a station carrying its identity over silence.
         let silent = PortSpec { spec: StreamSpec::silence(), latency: 0 };
         assert!(tx.negotiate(&[spec(320_000.0), silent]).is_ok());
+    }
+
+    /// What the programme is does not change what the data reads.
+    ///
+    /// Measured through this receiver at 320 kS/s over four seconds. With the
+    /// modulation axis free to flip at the branch cut, a tone at 0.8 of full
+    /// deviation read 24 groups with 51 blocks rejected at 100 Hz, 28 with 44
+    /// at 1 kHz, 43 with 1 at 5 kHz and 34 with 25 at 12 kHz, and the 100 Hz
+    /// station never gave its name. Every one of them now reads the full 44
+    /// with nothing rejected.
+    #[test]
+    fn no_programme_tone_or_level_costs_the_station_a_group() {
+        let rate = 320_000.0;
+        for level in [0.2f32, 0.8] {
+            for hz in [100.0f64, 1_000.0, 5_000.0, 12_000.0] {
+                let (rx, _) = station_over(&tone(hz, level, rate, 8192 * 157), 1, rate);
+                let (groups, errors, _) = rx.rds_stats();
+                assert_eq!(groups, 44, "{hz} Hz at {level}: groups in four seconds");
+                assert_eq!(errors, 0, "{hz} Hz at {level}: blocks rejected");
+                assert_eq!(rx.station().name.as_deref(), Some("WAVESHRK"), "{hz} Hz at {level}");
+            }
+        }
     }
 
     /// The subcarrier is at 57 kHz, so a stream that cannot reach it is

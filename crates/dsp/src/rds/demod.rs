@@ -76,6 +76,7 @@ struct Arm {
     /// ambiguity that squaring removes, so the argument of this is twice the
     /// carrier phase offset.
     carrier: (f64, f64),
+    axis: (f64, f64),
     prev_sym: Option<u8>,
 }
 
@@ -90,6 +91,7 @@ impl Arm {
             n2: 0,
             energy: 0.0,
             carrier: (0.0, 0.0),
+            axis: (1.0, 0.0),
             prev_sym: None,
         }
     }
@@ -343,6 +345,12 @@ impl RdsDemod {
 
                         let theta = 0.5 * arm.carrier.1.atan2(arm.carrier.0);
                         let (st, ct) = theta.sin_cos();
+                        let (ct, st) = if ct * arm.axis.0 + st * arm.axis.1 < 0.0 {
+                            (-ct, -st)
+                        } else {
+                            (ct, st)
+                        };
+                        arm.axis = (ct, st);
                         // Rotate onto the estimated axis and take its sign.
                         let proj = sx * ct + sy * st;
                         let sym = if proj >= 0.0 { 1u8 } else { 0u8 };
@@ -531,6 +539,81 @@ mod tests {
                 rot.to_degrees()
             );
         }
+    }
+
+    /// This receiver's own transmitter puts the pilot on a sine and the data
+    /// on a cosine, so the subcarrier is in quadrature with the pilot's third
+    /// harmonic, which the standard allows and a broadcaster uses.
+    ///
+    /// Quadrature is where the branch cut of the axis estimate sits, and a
+    /// loud low programme is what tips it over: measured over four seconds at
+    /// 320 kS/s with a 100 Hz tone at 0.8 of full deviation, the axis flipped
+    /// between symbols and 23 of the 44 groups framed with 72 blocks
+    /// rejected. A 5 kHz tone at the same level read 44 with 1 rejected,
+    /// which is what made it look like a symbol clock pulled off the pilot.
+    #[test]
+    fn a_loud_low_programme_does_not_cost_the_quadrature_subcarrier_its_groups() {
+        let rate = 320_000.0;
+        let station = crate::rds::tx::Station {
+            pi: 0xC479,
+            name: "WAVESHRK".into(),
+            radiotext: "A TEST OF THE RDS TRANSMITTER".into(),
+            ..Default::default()
+        };
+        let bits = crate::rds::tx::bits(&station.groups());
+        for hz in [100.0f64, 1_000.0, 5_000.0] {
+            let mut mpx = crate::rds::tx::Multiplex::new(&bits, rate);
+            let mut stereo = crate::StereoDecoder::new(rate);
+            let mut demod = RdsDemod::new(rate);
+            let mut sync = crate::rds::BlockSync::new();
+            let mut groups = crate::rds::GroupDecoder::new();
+            let (mut audio, mut block, mut bits_out) = (Vec::new(), Vec::new(), Vec::new());
+            for b in 0..(4.0 * rate / 8192.0) as usize {
+                let programme: Vec<f32> = (0..8192)
+                    .map(|i| 0.8 * (TAU * hz * (b * 8192 + i) as f64 / rate).sin() as f32)
+                    .collect();
+                block.clear();
+                mpx.push(&programme, 8192, &mut block);
+                stereo.process_mono(&block, &mut audio);
+                bits_out.clear();
+                demod.process(&block, stereo.phases(), &mut bits_out);
+                for bit in &bits_out {
+                    if let Some(g) = sync.push(*bit) {
+                        groups.push(&g);
+                    }
+                }
+            }
+            assert_eq!(sync.groups, 44, "{hz} Hz programme: groups in four seconds");
+            assert_eq!(sync.errors, 0, "{hz} Hz programme: blocks rejected");
+            assert_eq!(groups.station().name.as_deref(), Some("WAVESHRK"), "{hz} Hz programme");
+        }
+    }
+
+    /// Noise carries no data, so nothing may come off it that a block
+    /// synchroniser would frame.
+    #[test]
+    fn noise_produces_no_framed_groups() {
+        let n = (RATE * 60.0) as usize;
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut rand = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let mpx: Vec<f32> = (0..n).map(|_| 0.3 * rand()).collect();
+        let ph: Vec<f64> = (0..n).map(|i| TAU * 19_000.0 * i as f64 / RATE % TAU).collect();
+        let mut d = RdsDemod::new(RATE);
+        let mut bits = Vec::new();
+        let mut sync = crate::rds::BlockSync::new();
+        for (m, p) in mpx.chunks(8192).zip(ph.chunks(8192)) {
+            bits.clear();
+            d.process(m, p, &mut bits);
+            for b in &bits {
+                sync.push(*b);
+            }
+        }
+        assert_eq!(sync.groups, 0, "a minute of noise framed groups");
     }
 
     #[test]
