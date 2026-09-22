@@ -64,14 +64,13 @@ fn wideband(base: &[C32], bank: &ChannelBank) -> Vec<C32> {
     out
 }
 
-/// The published descriptions, installed for this test binary: nothing
-/// is built in, so an ISM chain reads nothing until they are
-fn descriptions() {
-    assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
+/// The published descriptions, installed for this test: nothing is built in,
+/// so an ISM chain reads nothing until they are, and a fresh clone has none
+fn descriptions() -> bool {
+    decode::script::install_fetched()
 }
 
 fn ook_chain() -> Vec<NodeSpec> {
-    descriptions();
     vec![
         NodeSpec::new("envelope"),
         NodeSpec::new("pulse_detect").f("reset_us", 10_000.0).i("min_pulses", 20),
@@ -85,6 +84,9 @@ fn make_bank() -> ChannelBank {
 
 #[test]
 fn decodes_four_simultaneous_transmitters_in_one_pass() {
+    if !descriptions() {
+        return;
+    }
     let buf = need_fixture!(fixture());
     let mut bank = make_bank();
     bank.set_all_chains(&ook_chain(), &registry()).expect("build chains");
@@ -119,6 +121,9 @@ fn decodes_four_simultaneous_transmitters_in_one_pass() {
 
 #[test]
 fn empty_channels_stay_silent() {
+    if !descriptions() {
+        return;
+    }
     // Channel isolation: a transmitter must not leak into its neighbours and
     // produce phantom decodes. With 90 dB of stopband it should not come
     // close.
@@ -143,6 +148,9 @@ fn empty_channels_stay_silent() {
 
 #[test]
 fn a_single_transmitter_lands_on_the_channel_its_frequency_implies() {
+    if !descriptions() {
+        return;
+    }
     let buf = need_fixture!(fixture());
     let mut bank = make_bank();
     bank.set_all_chains(&ook_chain(), &registry()).unwrap();
@@ -165,6 +173,9 @@ fn a_single_transmitter_lands_on_the_channel_its_frequency_implies() {
 
 #[test]
 fn detection_gating_finds_the_occupied_channels() {
+    if !descriptions() {
+        return;
+    }
     let buf = need_fixture!(fixture());
     let mut bank = make_bank();
     bank.set_gating(Gating::OnDetection);
@@ -189,6 +200,9 @@ fn detection_gating_finds_the_occupied_channels() {
 
 #[test]
 fn results_are_deterministic_despite_parallel_execution() {
+    if !descriptions() {
+        return;
+    }
     // Rayon schedules channels in whatever order it likes; the output must not
     // depend on that, or logs become undiffable and tests flaky.
     let buf = need_fixture!(fixture());
@@ -227,6 +241,9 @@ fn said(e: &Event) -> String {
 
 #[test]
 fn channels_without_a_chain_are_skipped() {
+    if !descriptions() {
+        return;
+    }
     let buf = need_fixture!(fixture());
     let mut bank = make_bank();
     // Only channel 2 gets a chain, though four channels carry signal.
@@ -251,7 +268,9 @@ fn channels_without_a_chain_are_skipped() {
 #[test]
 fn the_automatic_chain_decodes_without_being_told_the_modulation() {
     use common::packet::Packet;
-    descriptions();
+    if !descriptions() {
+        return;
+    }
     let base = need_fixture!(fixture());
     let mut bank = make_bank();
     // Exactly what the app runs: gated on detection, both modulations, every

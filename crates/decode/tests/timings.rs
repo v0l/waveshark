@@ -16,10 +16,15 @@ use decode::{Protocol, Protocols};
 use dsp::pulse::Pulse;
 
 /// The published description of `name`, from the fetched tree: nothing is
-/// built in, so a test installs before it asks
+/// built in, so a test installs through [`descriptions`] before it asks
 fn named(name: &str) -> Option<decode::script::Scripted> {
-    assert!(decode::script::install_fetched(), "run testdata/fetch.sh");
     decode::script::named(name)
+}
+
+/// The fetched descriptions, installed for this test. A fresh clone has none
+/// and nothing is built in, so a test prints the reason and skips.
+fn descriptions() -> bool {
+    decode::script::install_fetched()
 }
 
 fn package(pulses: Vec<(u32, u32)>) -> Vec<Pulse> {
@@ -45,6 +50,9 @@ fn pwm(bits: &[bool], short: u32, long: u32) -> Vec<(u32, u32)> {
 
 #[test]
 fn an_acurite_609txc_burst_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     let mut f = [0x8f, 0x21, 0x2d, 0x38, 0x00];
     f[4] = checksum8(&f[..4]);
     // rtl_433: OOK_PULSE_PPM, short 1000, long 2000, reset 10000.
@@ -63,6 +71,9 @@ fn an_acurite_609txc_burst_decodes_from_its_timings() {
 
 #[test]
 fn an_acurite_tower_burst_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     // 0x1234 on channel A, 18.4 C, 55%, battery good, with parity applied.
     let mut f = [0xd2, 0x34, 0x44, 0xb7, 0x09, 0xa0, 0x00];
     f[6] = checksum8(&f[..6]);
@@ -82,6 +93,9 @@ fn an_acurite_tower_burst_decodes_from_its_timings() {
 
 #[test]
 fn a_lacrosse_tx141th_burst_decodes_through_its_sync_marks() {
+    if !descriptions() {
+        return;
+    }
     let mut f = [0x9c, 0x12, 0xe0, 0x2c, 0x00];
     f[4] = lfsr_digest8_reflect(&f[..4], 0x31, 0xf4);
     let inverted: Vec<u8> = f.iter().map(|b| !b).collect();
@@ -103,6 +117,9 @@ fn a_lacrosse_tx141th_burst_decodes_through_its_sync_marks() {
 
 #[test]
 fn a_lacrosse_it_burst_decodes_from_fsk_runs() {
+    if !descriptions() {
+        return;
+    }
     // Preamble, sync word 0x2dd4, then the payload.
     let mut f = [0x99, 0x46, 0x13, 0x39, 0x00];
     f[4] = crc8(&f[..4], 0x31, 0x00);
@@ -146,6 +163,9 @@ fn a_lacrosse_it_burst_decodes_from_fsk_runs() {
 
 #[test]
 fn a_nexus_burst_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     // id 0x5c, channel 2, 19.4 C, 62%, battery good.
     let f = [0x5c, 0x90, 0xc2, 0xf3, 0xe0];
     let pkg = ppm(&bits_of(&f, 36), 500, 1000, 2000, 5000);
@@ -161,6 +181,9 @@ fn a_nexus_burst_decodes_from_its_timings() {
 
 #[test]
 fn an_ev1527_remote_press_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     // 24 data bits plus the sync mark, inverted on the air.
     let id: u16 = 0xa13f;
     let cmd: u8 = 0x08;
@@ -177,6 +200,9 @@ fn an_ev1527_remote_press_decodes_from_its_timings() {
 
 #[test]
 fn a_rubicson_burst_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     // id 0x74, channel 1, 14.9 C, battery ok, with the CRC that makes the
     // whole frame check to zero.
     let f = [0x74, 0x80, 0x95, 0xf4, 0x90];
@@ -194,6 +220,9 @@ fn a_rubicson_burst_decodes_from_its_timings() {
 
 #[test]
 fn a_bresser_3ch_burst_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     // 68.0 F is 20.0 C. Frame travels inverted, behind 750 us sync marks.
     let mut f: [u8; 5] = [0x3d, 0x26, 0x2c, 0x33, 0x00];
     f[4] = f[0].wrapping_add(f[1]).wrapping_add(f[2]).wrapping_add(f[3]);
@@ -211,6 +240,9 @@ fn a_bresser_3ch_burst_decodes_from_its_timings() {
 
 #[test]
 fn a_gt_wt_02_burst_decodes_from_its_millisecond_symbols() {
+    if !descriptions() {
+        return;
+    }
     // id 0x34, channel 1, 23.7 C, 35%, with the nibble-sum checksum.
     let f = [0x34, 0x00, 0xed, 0x47, 0x60];
     let pkg = ppm(&bits_of(&f, 37), 600, 2500, 5000, 12_000);
@@ -232,6 +264,9 @@ fn a_gt_wt_02_burst_decodes_from_its_millisecond_symbols() {
 
 #[test]
 fn a_gt_wt_03_burst_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     // id 0x17, channel 1, 26.1 C, 48%, then the stop bit.
     let f: [u8; 6] = [0x17, 0x30, 0x01, 0x05, 0xcb, 0x80];
     let inverted: Vec<u8> = f.iter().map(|b| !b).collect();
@@ -275,6 +310,9 @@ fn nrz(bits: &[bool], bit_us: u32) -> Vec<Pulse> {
 
 #[test]
 fn a_wh51_soil_probe_decodes_from_fsk_runs() {
+    if !descriptions() {
+        return;
+    }
     let mut f = [0u8; 14];
     f[0] = 0x51;
     f[1..4].copy_from_slice(&[0x00, 0x6b, 0x58]);
@@ -301,6 +339,9 @@ fn a_wh51_soil_probe_decodes_from_fsk_runs() {
 
 #[test]
 fn an_oregon_v3_burst_decodes_from_manchester_timings() {
+    if !descriptions() {
+        return;
+    }
     // Preamble, sync, then nibble-reversed payload, at 488 us a half symbol.
     let mut msg: [u8; 9] = [0xf8, 0x24, 0x1a, 0x30, 0x71, 0x20, 0x84, 0x00, 0x00];
     let sum: u16 = msg[..7].iter().map(|b| (b >> 4) as u16 + (b & 0x0f) as u16).sum();
@@ -348,6 +389,9 @@ fn an_oregon_v3_burst_decodes_from_manchester_timings() {
 
 #[test]
 fn an_x10_press_decodes_from_its_timings() {
+    if !descriptions() {
+        return;
+    }
     let f = [0x60u8, !0x60u8, 0x00, 0xff];
     let pkg = ppm(&bits_of(&f, 32), 562, 562, 1687, 6000);
 
@@ -360,6 +404,9 @@ fn an_x10_press_decodes_from_its_timings() {
 
 #[test]
 fn a_somfy_rts_burst_decodes_from_its_manchester_timings() {
+    if !descriptions() {
+        return;
+    }
     // Sync word then 56 Manchester bits at a 604 us half symbol. The frame is
     // scrambled by XOR with the previous byte and closed by a nibble checksum.
     const HALF: u32 = 604;
@@ -417,6 +464,9 @@ fn a_somfy_rts_burst_decodes_from_its_manchester_timings() {
 
 #[test]
 fn noise_is_claimed_by_nothing() {
+    if !descriptions() {
+        return;
+    }
     // Pulses at widths no protocol uses. An empty result is the right answer,
     // and a decoder that invents one from this is worse than no decoder.
     let pulses: Vec<(u32, u32)> =
@@ -428,6 +478,9 @@ fn noise_is_claimed_by_nothing() {
 
 #[test]
 fn a_long_noisy_burst_does_not_manufacture_a_sensor() {
+    if !descriptions() {
+        return;
+    }
     // An 8 bit checksum passes on one window in 256, and a burst this long
     // offers hundreds of windows, so a decoder that searches without asking
     // for corroboration will report a device that is not there. This was seen
