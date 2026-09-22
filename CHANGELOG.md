@@ -185,6 +185,8 @@ the code is in the commit log.
 
 ### Fixed
 
+- Home Assistant stopped publishing after the radio was restarted, and kept
+  reconnecting without recovering.
 - rtl_tcp samples lost to a network stall now move the timebase on, instead of
   being numbered as though the stream had been continuous.
 - 802.15.4 frames from Thread and newer Zigbee stacks named wrong addresses,

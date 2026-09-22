@@ -282,7 +282,7 @@ pub struct Receiver {
     transcript: crate::transcripts::SharedLog,
     /// The connection to the house, owned here for the same reason as the
     /// transcript: the node that publishes on it is rebuilt with the graph.
-    homeassistant: std::sync::Arc<nodes::HomeAssistantPublisher>,
+    homeassistant: nodes::HomeAssistantFeed,
 }
 
 /// What the receiver should be doing, as opposed to what it is.
@@ -760,7 +760,7 @@ impl Receiver {
             patch_spectra: Vec::new(),
             refused: None,
             transcript: Default::default(),
-            homeassistant: nodes::HomeAssistantPublisher::running(),
+            homeassistant: nodes::HomeAssistantFeed::running(),
         };
         // Nothing is in the pool to be reused, so whether the span moved is
         // not a question anything asks of this build.
@@ -2590,7 +2590,7 @@ impl Receiver {
         // A broker short of an address is no broker: the feed would announce
         // devices into a connection that cannot be made.
         let publish = want.homeassistant.clone().filter(|p| p.broker.is_complete());
-        let publisher = self.homeassistant.clone();
+        let publisher = self.homeassistant.publisher();
         if let Some(n) = self.homeassistant_node_mut() {
             n.set_publisher(publisher);
             n.set_spaces(publish.as_ref().map(|p| p.spaces.as_str()).unwrap_or(""));

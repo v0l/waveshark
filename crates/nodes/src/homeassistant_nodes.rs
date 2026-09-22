@@ -188,12 +188,18 @@ pub struct HomeAssistantStatus {
     /// Readings thrown away because the queue to the broker was full, which
     /// is a broker that cannot keep up rather than a decoder that failed.
     pub dropped: u64,
+    /// Readings there was no connection to offer at all, which is a link
+    /// that is down rather than a broker that is slow.
+    pub offline: u64,
     /// Why the connection is not up, when it is not.
     pub error: Option<String>,
 }
 
 /// The thread that holds the connection, and everything it reports.
 pub struct Publisher {
+    /// Which publisher this is in this process, which is what keeps two of
+    /// them apart at the broker.
+    instance: u64,
     broker: Mutex<Option<Broker>>,
     client: Mutex<Option<rumqttc::Client>>,
     /// Bumped on every connection, so a node re-announces its devices to a
@@ -202,8 +208,13 @@ pub struct Publisher {
     connected: AtomicBool,
     published: AtomicU64,
     dropped: AtomicU64,
+    offline: AtomicU64,
     error: Mutex<Option<String>>,
     started: AtomicBool,
+    /// Set when the receiver that owns this publisher goes away, so the
+    /// thread lets go of the broker rather than reconnecting for the life of
+    /// the process.
+    stopped: AtomicBool,
     /// Woken when the broker changes, so the thread does not sleep out a
     /// retry before trying the address it was just given.
     wake: std::sync::Condvar,
@@ -218,15 +229,19 @@ impl Publisher {
     /// A publisher with no thread behind it, which is what a test wants: the
     /// messages are testable, the network is not.
     pub fn inert() -> Arc<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         Arc::new(Publisher {
+            instance: NEXT.fetch_add(1, Ordering::Relaxed),
             broker: Mutex::new(None),
             client: Mutex::new(None),
             generation: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             published: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            offline: AtomicU64::new(0),
             error: Mutex::new(None),
             started: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             wake: std::sync::Condvar::new(),
             #[cfg(test)]
             said: Mutex::new(Vec::new()),
@@ -244,6 +259,27 @@ impl Publisher {
         let p = Self::inert();
         p.start();
         p
+    }
+
+    /// Let go of the broker for good.
+    ///
+    /// The thread holds an `Arc` of this, so nothing else can end it: a
+    /// publisher left running after its receiver was dropped keeps its
+    /// broker, and two of them connect under the same client id, which a
+    /// broker answers by closing whichever connected first.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.disconnect();
+        self.wake.notify_all();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Whether the thread behind this publisher is still there.
+    pub fn is_running(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
     }
 
     fn start(self: &Arc<Self>) {
@@ -300,6 +336,7 @@ impl Publisher {
             devices: 0,
             published: self.published.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            offline: self.offline.load(Ordering::Relaxed),
             error: self.error.lock().ok().and_then(|e| e.clone()),
         }
     }
@@ -319,7 +356,7 @@ impl Publisher {
             Err(_) => None,
         };
         let Some(client) = client else {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.offline.fetch_add(1, Ordering::Relaxed);
             return;
         };
         let sent = client.try_publish(topic, rumqttc::QoS::AtMostOnce, retain, payload);
@@ -332,6 +369,10 @@ impl Publisher {
     fn run(&self) {
         let mut wait = RETRY;
         loop {
+            if self.is_stopped() {
+                self.started.store(false, Ordering::SeqCst);
+                return;
+            }
             let Some(broker) = self.broker() else {
                 self.pause(RETRY);
                 continue;
@@ -360,7 +401,11 @@ impl Publisher {
     /// Hold one connection until it fails, which is what the loop above
     /// treats as a reason to wait and try again.
     fn connect(&self, broker: &Broker) -> std::result::Result<(), String> {
-        let id = format!("waveshark-{}", std::process::id());
+        // One id per publisher, not one per process: a broker closes the
+        // connection it already has when a second arrives under the same id,
+        // so two publishers in one process take turns throwing each other
+        // off and neither of them ever settles.
+        let id = format!("waveshark-{}-{}", std::process::id(), self.instance);
         let mut opts = rumqttc::MqttOptions::new(id, broker.host.trim(), broker.port);
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_max_packet_size(64 * 1024, 64 * 1024);
@@ -409,15 +454,39 @@ impl Publisher {
                     return Err(e.to_string());
                 }
             }
-            // The operator changed the address, so this connection is to the
-            // wrong place whatever it is doing.
-            if self.broker().as_ref() != Some(broker) {
+            // The operator changed the address, or this publisher is done,
+            // so this connection is to the wrong place whatever it is doing.
+            if self.is_stopped() || self.broker().as_ref() != Some(broker) {
                 self.disconnect();
                 return Ok(());
             }
         }
         self.disconnect();
         Ok(())
+    }
+}
+
+/// A publisher and the right to end it, held by the receiver it belongs to.
+///
+/// The nodes hold `Arc<Publisher>`s and the thread holds one of its own, so
+/// dropping a receiver cannot on its own end the connection it opened. This
+/// is the one owner, and the receiver keeps it.
+pub struct Feed(Arc<Publisher>);
+
+impl Feed {
+    pub fn running() -> Self {
+        Self(Publisher::running())
+    }
+
+    /// A handle for a node to publish through, which does not own the thread.
+    pub fn publisher(&self) -> Arc<Publisher> {
+        self.0.clone()
+    }
+}
+
+impl Drop for Feed {
+    fn drop(&mut self) {
+        self.0.stop();
     }
 }
 
@@ -1337,6 +1406,37 @@ mod tests {
     use common::Hz;
     use common::packet::Packet;
 
+    /// A feed whose receiver has been dropped stops connecting.
+    ///
+    /// The thread holds an `Arc` of the publisher, so it outlived every
+    /// receiver that ever started one: a second radio start left the first
+    /// thread reconnecting under the same client id, and the broker answered
+    /// each connection by closing the other one, for the life of the process.
+    #[test]
+    fn a_feed_dropped_with_its_receiver_ends_its_thread() {
+        let feed = Feed::running();
+        let publisher = feed.publisher();
+        publisher.set_broker(Some(Broker::new("127.0.0.1")));
+        assert!(publisher.is_running(), "the thread is up");
+
+        drop(feed);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while publisher.is_running() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(publisher.is_stopped(), "the publisher was told to stop");
+        assert!(!publisher.is_running(), "and the thread ended rather than holding the broker");
+    }
+
+    /// Two publishers in one process do not connect under one client id,
+    /// which a broker answers by closing whichever connected first.
+    #[test]
+    fn two_publishers_take_different_client_ids() {
+        let a = Publisher::inert();
+        let b = Publisher::inert();
+        assert_ne!(a.instance, b.instance);
+    }
+
     fn packet(bytes: Vec<u8>, center_hz: u64) -> Packet {
         let mut p = crate::measured(center_hz, 2_000_000, bytes, -46.0, 20.0);
         p.carrier.at_us = 1_000_000;
@@ -1447,11 +1547,11 @@ mod tests {
         assert_eq!(n.status().devices, 1);
         // Three receptions, one publication of state and one announcement per
         // field. The publisher has no client, so every message is counted as
-        // dropped rather than sent; what is being asserted is how many were
+        // missed rather than sent; what is being asserted is how many were
         // offered at all.
         let known = n.known.values().next().unwrap();
         let announced = known.announced.len() as u64;
-        assert_eq!(n.publisher.status().dropped, announced + 1 + BUS_ANNOUNCEMENTS);
+        assert_eq!(n.publisher.status().offline, announced + 1 + BUS_ANNOUNCEMENTS);
     }
 
     /// A burst nothing identified is not a device. The bus carries every
@@ -1464,7 +1564,7 @@ mod tests {
         assert_eq!(n.status().devices, 0);
         // The buses are announced whatever is on the air; the burst itself
         // said nothing.
-        assert_eq!(n.publisher.status().dropped, BUS_ANNOUNCEMENTS);
+        assert_eq!(n.publisher.status().offline, BUS_ANNOUNCEMENTS);
     }
 
     /// Nothing is published at all until somebody has said where to.

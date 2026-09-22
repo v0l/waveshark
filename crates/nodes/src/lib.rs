@@ -111,8 +111,8 @@ pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
 pub use flex_nodes::FlexNode;
 pub use frame_meter::{FrameMeter, locked, measured, off_audio};
 pub use homeassistant_nodes::{
-    Broker, HomeAssistantNode, HomeAssistantStatus, Publish, Publisher as HomeAssistantPublisher,
-    mqtt_packet,
+    Broker, Feed as HomeAssistantFeed, HomeAssistantNode, HomeAssistantStatus, Publish,
+    Publisher as HomeAssistantPublisher, mqtt_packet,
 };
 pub use imet_nodes::ImetNode;
 pub use keyed::{Keyed, keyed, keyed_mut};
