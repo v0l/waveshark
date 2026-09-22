@@ -7,6 +7,12 @@ reads is in its own module and in the tests beside it. The one page outside
 the code is [`docs/references.md`](docs/references.md), which holds the terms
 each data publisher requires; read it before adding a data source.
 
+The rules below about wording are for commit subjects and changelog lines,
+which are one line each and read by scanning. Everything else you write,
+issues, documentation, comments on a pull request and replies in chat, is
+plain English in ordinary sentences. Do not copy the voice of this file into
+them.
+
 Do not write comments. A measurement or a trap that explains a shape is
 pinned by the test that measured it, in its name and in what it asserts, and
 that is where a later reader finds it. Comments already in the tree stay as
