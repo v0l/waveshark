@@ -350,6 +350,7 @@ impl pipeline::node::Node for VideoNode {
                 // nothing once they stop arriving.
                 update: common::Update::Whole,
                 cadence: common::Cadence::Live,
+                sent_at_us: None,
             });
         }
         Ok(())

@@ -31,6 +31,25 @@ pub const LAST_IMAGE_APID: u16 = 69;
 /// Where the spacecraft's own housekeeping goes, which is not a picture.
 pub const TELEMETRY_APID: u16 = 70;
 
+/// Where the time of day sits in a housekeeping packet's payload: hours,
+/// minutes, seconds, then the milliseconds in units of four.
+const TIME_AT: usize = 16;
+
+/// The spacecraft clock a housekeeping packet carries, in milliseconds since
+/// midnight UTC. `None` for a packet too short to hold one, or one whose
+/// fields are not a time, which is what a frame corrected wrongly looks like.
+pub fn time_of_day_ms(packet: &SpacePacket) -> Option<u32> {
+    if packet.apid != TELEMETRY_APID || packet.payload.len() < TIME_AT + 4 {
+        return None;
+    }
+    let f = &packet.payload[TIME_AT..TIME_AT + 4];
+    let (h, m, s, ticks) = (u32::from(f[0]), u32::from(f[1]), u32::from(f[2]), u32::from(f[3]));
+    if h > 23 || m > 59 || s > 59 || ticks > 249 {
+        return None;
+    }
+    Some(((h * 60 + m) * 60 + s) * 1000 + ticks * 4)
+}
+
 /// Blocks in one packet.
 pub const MCUS_PER_PACKET: usize = 14;
 
@@ -68,6 +87,10 @@ pub struct Strip {
     pub blocks: usize,
     /// The quality factor the last packet of it was quantised with.
     pub quality: u8,
+    /// The spacecraft clock when the strip started, in milliseconds since
+    /// midnight UTC, from the housekeeping packet that went with it.
+    /// `None` until one has been read.
+    pub time_ms: Option<u32>,
 }
 
 impl Strip {
@@ -86,6 +109,8 @@ struct Pane {
     quality: u8,
     /// Which strip down the picture is being painted.
     index: usize,
+    /// The spacecraft clock when the strip being painted started.
+    started_ms: Option<u32>,
     /// The packet counter the current strip started at.
     started_at: u16,
     /// Packets between the starts of two strips, as measured: the smallest
@@ -103,6 +128,7 @@ impl Pane {
             blocks: 0,
             quality: 0,
             index: 0,
+            started_ms: None,
             started_at: 0,
             cadence: None,
             last_mcu: 0,
@@ -120,6 +146,7 @@ impl Pane {
             gray: std::mem::replace(&mut self.strip, vec![0; STRIP_ROWS * WIDTH]),
             blocks: self.blocks,
             quality: self.quality,
+            time_ms: self.started_ms,
         };
         self.blocks = 0;
         Some(strip)
@@ -136,6 +163,8 @@ pub struct Receiver {
     /// Packets whose blocks would not read, which is what a frame the
     /// Reed-Solomon corrected wrongly looks like.
     broken: u64,
+    /// The last spacecraft clock read off a housekeeping packet.
+    time_ms: Option<u32>,
 }
 
 impl Default for Receiver {
@@ -146,7 +175,13 @@ impl Default for Receiver {
 
 impl Receiver {
     pub fn new() -> Self {
-        Self { panes: Vec::new(), blocks: jpeg::Blocks::new(), broken: 0 }
+        Self { panes: Vec::new(), blocks: jpeg::Blocks::new(), broken: 0, time_ms: None }
+    }
+
+    /// The spacecraft clock as the last housekeeping packet gave it, in
+    /// milliseconds since midnight UTC.
+    pub fn time_ms(&self) -> Option<u32> {
+        self.time_ms
     }
 
     /// Packets that were an image packet and did not decode.
@@ -156,6 +191,7 @@ impl Receiver {
 
     pub fn reset(&mut self) {
         self.panes.clear();
+        self.time_ms = None;
     }
 
     /// Whatever is half painted, for the end of a pass.
@@ -167,6 +203,9 @@ impl Receiver {
     /// one. A strip is finished when the next one starts, since nothing in
     /// the stream says a strip is over.
     pub fn push(&mut self, packet: &SpacePacket) -> Option<Strip> {
+        if let Some(ms) = time_of_day_ms(packet) {
+            self.time_ms = Some(ms);
+        }
         let channel = channel_of(packet.apid)?;
         if packet.payload.len() <= DATA_AT {
             self.broken += 1;
@@ -195,6 +234,7 @@ impl Receiver {
             packet.sequence.wrapping_sub((mcu / MCUS_PER_PACKET) as u16) % SEQUENCE_MODULO as u16;
 
         let mut done = None;
+        let now_ms = self.time_ms;
         let pane = &mut self.panes[at];
         let new_strip = pane.blocks > 0 && mcu <= pane.last_mcu;
         if new_strip {
@@ -215,6 +255,7 @@ impl Receiver {
         }
         if pane.blocks == 0 {
             pane.started_at = began;
+            pane.started_ms = now_ms;
         }
         pane.last_mcu = mcu;
         pane.quality = quality;
@@ -303,6 +344,14 @@ mod tests {
         SpacePacket { apid, sequence, payload }
     }
 
+    /// The housekeeping packet the satellite sends with every strip, with
+    /// the spacecraft clock in it.
+    fn telemetry(sequence: u16, h: u8, m: u8, s: u8, ticks: u8) -> SpacePacket {
+        let mut payload = vec![0u8; 32];
+        payload[TIME_AT..TIME_AT + 4].copy_from_slice(&[h, m, s, ticks]);
+        SpacePacket { apid: TELEMETRY_APID, sequence, payload }
+    }
+
     /// The level a flat block of `dc` steps comes out at: the transform's DC
     /// gain is eight and the level shift is 128.
     fn level(dc: i32, quality: u8) -> u8 {
@@ -349,6 +398,64 @@ mod tests {
         assert_eq!(want, 193, "a level of 40 steps at quality 60");
         assert!(s.gray.iter().all(|&p| p.abs_diff(want) <= 1), "the strip is not flat");
         assert_eq!(rx.broken(), 0);
+    }
+
+    /// The spacecraft clock off application 70, as `mlrpt`'s
+    /// `met_packet.c::Parse_70` reads it: hours, minutes, seconds and four
+    /// millisecond ticks at bytes 16 to 19 of the payload.
+    #[test]
+    fn the_housekeeping_packet_carries_the_spacecraft_clock() {
+        assert_eq!(time_of_day_ms(&telemetry(0, 9, 30, 15, 125)), Some(34_215_500));
+        assert_eq!(time_of_day_ms(&telemetry(0, 0, 0, 0, 0)), Some(0));
+        assert_eq!(time_of_day_ms(&telemetry(0, 23, 59, 59, 249)), Some(86_399_996));
+        // An image packet carries no clock, and neither does a housekeeping
+        // packet whose fields are not a time.
+        assert_eq!(time_of_day_ms(&mcu_packet(64, 0, 0, 60, 40)), None);
+        assert_eq!(time_of_day_ms(&telemetry(0, 24, 0, 0, 0)), None);
+        assert_eq!(time_of_day_ms(&telemetry(0, 9, 60, 0, 0)), None);
+        assert_eq!(time_of_day_ms(&telemetry(0, 9, 0, 0, 250)), None);
+        let short = SpacePacket { apid: TELEMETRY_APID, sequence: 0, payload: vec![0u8; 19] };
+        assert_eq!(time_of_day_ms(&short), None);
+    }
+
+    /// A strip carries the clock as it stood when the strip started, not as
+    /// it stood when the strip was handed over a scan later.
+    #[test]
+    fn a_strip_carries_the_clock_its_own_scan_started_at() {
+        let mut rx = Receiver::new();
+        let mut strips = Vec::new();
+        let mut sequence = 0u16;
+        for (strip, (h, m, s)) in [(9u8, 30u8, 0u8), (9, 30, 7), (9, 30, 14)].iter().enumerate() {
+            strips.extend(rx.push(&telemetry(sequence, *h, *m, *s, 0)));
+            sequence += 1;
+            for mcu in (0..MCU_COLUMNS).step_by(MCUS_PER_PACKET) {
+                strips.extend(rx.push(&mcu_packet(64, sequence, mcu, 60, 40)));
+                sequence += 1;
+            }
+            let _ = strip;
+        }
+        strips.extend(rx.flush());
+        assert_eq!(strips.len(), 3);
+        let times: Vec<Option<u32>> = strips.iter().map(|s| s.time_ms).collect();
+        assert_eq!(times, vec![Some(34_200_000), Some(34_207_000), Some(34_214_000)]);
+        assert_eq!(rx.time_ms(), Some(34_214_000));
+        rx.reset();
+        assert_eq!(rx.time_ms(), None);
+    }
+
+    /// A pass with no housekeeping packet read yet still paints: the clock
+    /// is evidence the picture may not have, not a thing it waits for.
+    #[test]
+    fn a_strip_with_no_housekeeping_packet_has_no_clock() {
+        let mut rx = Receiver::new();
+        let mut strips = Vec::new();
+        for (k, mcu) in (0..MCU_COLUMNS).step_by(MCUS_PER_PACKET).enumerate() {
+            strips.extend(rx.push(&mcu_packet(64, k as u16, mcu, 60, 40)));
+        }
+        strips.extend(rx.flush());
+        assert_eq!(strips.len(), 1);
+        assert_eq!(strips[0].time_ms, None);
+        assert_eq!(strips[0].blocks, MCU_COLUMNS);
     }
 
     /// Three channels through one receiver: each keeps its own picture, and

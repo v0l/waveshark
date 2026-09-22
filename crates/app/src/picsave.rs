@@ -157,10 +157,18 @@ impl Simple for PictureSaveNode {
     }
 }
 
-/// What a picture is called on disk: when it arrived, what sent it, and where
-/// it was received, so a directory of them sorts by time and reads as a log.
+/// What a picture is called on disk: when it was taken, what sent it, and
+/// where it was received, so a directory of them sorts by time and reads as a
+/// log.
+///
+/// The sender's own clock where the transmission carried one, because a
+/// picture is written when it ends: a satellite pass is a quarter of an hour
+/// long, and the file's own time is the time it stopped arriving.
 fn name_of(f: &VideoFrame, now: std::time::SystemTime) -> String {
-    let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = match f.sent_at_us {
+        Some(us) => us / 1_000_000,
+        None => now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    };
     let stamp = stamp(secs);
     let what = f.label.clone().unwrap_or_else(|| f.system.to_string());
     let what: String = what
@@ -239,6 +247,7 @@ mod tests {
             sequence: 1,
             update: Update::Whole,
             cadence: Cadence::Still,
+            sent_at_us: None,
         }
     }
 
@@ -316,8 +325,18 @@ mod tests {
         // 2023-11-14 22:13:20 UTC.
         let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let name = name_of(&f, when);
-        assert!(name.starts_with("20231114-"), "{name}");
-        assert!(name.contains("Martin-1"), "{name}");
-        assert!(name.ends_with("144.500MHz.png"), "{name}");
+        assert_eq!(name, "20231114-221320_Martin-1_144.500MHz.png");
+    }
+
+    /// A transmission that carried its own clock is filed under that rather
+    /// than under the moment the receiver finished writing it: a satellite
+    /// pass ends a quarter of an hour after it began.
+    #[test]
+    fn a_picture_is_filed_under_the_clock_the_sender_sent() {
+        let mut f = still(8, 8);
+        f.sent_at_us = Some(1_700_000_000_000_000 - 900 * 1_000_000);
+        let written = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let name = name_of(&f, written);
+        assert_eq!(name, "20231114-215820_Martin-1_144.500MHz.png");
     }
 }

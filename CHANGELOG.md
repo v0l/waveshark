@@ -79,7 +79,7 @@ the code is in the commit log.
 - Ford and Renault tyre pressure sensors, with pressure, temperature and
   whether the wheel is moving.
 - Meteor-M LRPT passes: the three MSU-MR channels on the video pane, a strip
-  of eight rows at a time.
+  of eight rows at a time, saved under the satellite's own clock.
 - NOAA APT passes and HF weather fax charts, drawn on the video pane as they
   are received.
 - Analogue FPV video named from its line rate, with its channel: R1, F4, A5.

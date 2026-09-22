@@ -646,10 +646,18 @@ mod tests {
         }
     }
 
-    /// How far down the demodulator holds on, in synthesis: every bit at
-    /// 9 dB Es/N0 and the lock gone by 6.
+    /// How far down the demodulator holds on, in synthesis: the bits read to
+    /// 8 dB Es/N0 and the constellation slips a quadrant by 7.
+    ///
+    /// The wall at 7 dB is a slip rather than a loop losing its grip: the
+    /// bits go to half, which is what reading a quarter turn out gives, not
+    /// to a gentle decline. Quartering the loop gains once the error is
+    /// under [`LOCKED_ERROR`], which is what `mlrpt` does, was measured here
+    /// and moved the agreement at 9 dB from 0.9934 to 0.9940 and nothing
+    /// below 8 dB at all, because the error never falls that far for the
+    /// narrowing to engage.
     #[test]
-    fn the_lock_holds_to_nine_db() {
+    fn the_bits_read_to_eight_db_and_slip_by_seven() {
         let cfg = QpskConfig::LRPT;
         let bits = bits_of(3, 120_000);
         let iq = modulate(&bits, cfg);
@@ -665,7 +673,9 @@ mod tests {
             (-2.0 * a.ln()).sqrt() * (std::f32::consts::TAU * b).cos()
         };
         let power: f32 = iq.iter().map(|s| s.norm_sqr()).sum::<f32>() / iq.len() as f32;
-        for (esn0_db, floor) in [(12.0f32, 0.999), (9.0, 0.99)] {
+        for (esn0_db, floor, ceiling) in
+            [(12.0f32, 0.999, 1.01), (9.0, 0.99, 1.01), (8.0, 0.98, 1.01), (7.0, 0.0, 0.7)]
+        {
             let sigma = (power * cfg.sps as f32 / (2.0 * 10f32.powf(esn0_db / 10.0))).sqrt();
             let noisy: Vec<C32> =
                 iq.iter().map(|s| *s + C32::new(gauss() * sigma, gauss() * sigma)).collect();
@@ -673,8 +683,17 @@ mod tests {
             let mut out = Vec::new();
             d.process(&noisy, &mut out);
             let read = agreement(&bits, &out[out.len() - 20_000..]);
-            assert!(read > floor, "read {read:.4} at {esn0_db} dB Es/N0");
-            assert!(d.locked(), "no lock at {esn0_db} dB, error {}", d.phase_error());
+            assert!(read > floor, "read {read:.4} at {esn0_db} dB Es/N0, the floor is {floor}");
+            assert!(read < ceiling, "read {read:.4} at {esn0_db} dB, the ceiling is {ceiling}");
+            // The lock measure is stricter than the bits are: at 8 dB every
+            // bit but one in seventy reads and the loop already says it is
+            // hunting.
+            assert_eq!(
+                d.locked(),
+                esn0_db >= 9.0,
+                "lock at {esn0_db} dB, error {}",
+                d.phase_error()
+            );
         }
     }
 }

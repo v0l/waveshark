@@ -116,6 +116,7 @@ impl SstvNode {
             sequence: lines.picture,
             update: Update::Rows { first: lines.first },
             cadence: Cadence::Still,
+            sent_at_us: None,
         });
     }
 }

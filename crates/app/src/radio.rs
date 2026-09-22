@@ -4093,8 +4093,7 @@ pub(crate) mod tests {
     }
 
     fn vox_channel(id: u64, offset: f64) -> ChannelSpec {
-        let vox =
-            VoxSpec { on: true, threshold: 0.1, tail_ms: 100.0, anti_trip: true };
+        let vox = VoxSpec { on: true, threshold: 0.1, tail_ms: 100.0, anti_trip: true };
         ChannelSpec {
             tx: Some(TxSpec { source: TxSource::Mic, vox, ..Default::default() }),
             ..strip_channel(id, offset)
@@ -5067,6 +5066,7 @@ pub(crate) mod tests {
             sequence: 1,
             update: common::Update::Whole,
             cadence: common::Cadence::Still,
+            sent_at_us: None,
         };
         status.set_video(Some(frame(1)));
         assert_eq!(status.video().map(|f| f.lines_seen), Some(1));

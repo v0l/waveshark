@@ -458,6 +458,7 @@ mod tests {
             sequence: 1,
             update: common::Update::Whole,
             cadence: common::Cadence::Live,
+            sent_at_us: None,
         }
     }
 
@@ -476,6 +477,7 @@ mod tests {
             sequence: picture,
             update: common::Update::Rows { first },
             cadence: common::Cadence::Still,
+            sent_at_us: None,
         }
     }
 

@@ -17,6 +17,11 @@
 //!
 //! Which way up the picture is depends on which way the satellite was going,
 //! and nothing here turns it over.
+//!
+//! Which way the downlink is keyed is found rather than asked for: the two
+//! operating satellites key offset QPSK and the first Meteor-M2 keyed plain,
+//! so the node starts offset and reads the stream the other way if a second
+//! of it produces no frame.
 
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape};
@@ -48,6 +53,16 @@ const SYSTEMS: [&str; 6] = ["LRPT 1", "LRPT 2", "LRPT 3", "LRPT 4", "LRPT 5", "L
 /// over the first.
 const CANVAS_ROWS: usize = 1_536;
 
+/// Symbols a channel is given to produce one frame before the node reads it
+/// the other way up.
+///
+/// Measured on the synthesised pass: the right keying takes 24510 symbols to
+/// the first frame, which is the carrier loop, the timing loop and the sync
+/// search in series, and the wrong one never locks at all. A second of
+/// symbols is nearly three times the acquisition and is a second off the
+/// front of a fifteen minute pass.
+const SWAP_AFTER_SYMBOLS: u64 = 72_000;
+
 pub struct LrptNode {
     channel_hz: f64,
     cfg: QpskConfig,
@@ -66,6 +81,14 @@ pub struct LrptNode {
     frames: Vec<ccsds::Frame>,
     packet_buf: Vec<ccsds::SpacePacket>,
     strips: u64,
+    /// When each channel's picture being painted started, as the spacecraft
+    /// clock had it, so every strip of a picture is stamped with the moment
+    /// the picture began rather than the moment its own rows arrived.
+    starts: Vec<((u8, usize), u64)>,
+    /// Symbols the demodulator has produced on this keying while the
+    /// deframer has found nothing, which is what says the wrong one was
+    /// picked.
+    tried: u64,
 }
 
 impl Default for LrptNode {
@@ -94,6 +117,8 @@ impl LrptNode {
             frames: Vec::new(),
             packet_buf: Vec::new(),
             strips: 0,
+            starts: Vec::new(),
+            tried: 0,
         }
     }
 
@@ -112,6 +137,44 @@ impl LrptNode {
         self.demod.locked()
     }
 
+    /// How the downlink is being read, which is found rather than set.
+    pub fn keying(&self) -> dsp::qpsk::Keying {
+        self.cfg.keying
+    }
+
+    /// Give up on this keying and read the stream the other way.
+    ///
+    /// A stream producing no frame is either keyed the other way or is not
+    /// LRPT at all, and nothing tells those apart except reading it: the
+    /// node alternates until a frame is found and then stays where it is,
+    /// so an empty channel costs a rebuilt demodulator a second and a pass
+    /// costs one swap at the most.
+    fn swap_keying(&mut self) {
+        self.cfg = match self.cfg.keying {
+            dsp::qpsk::Keying::Offset => QpskConfig::LRPT,
+            dsp::qpsk::Keying::Coherent => QpskConfig::LRPT_OFFSET,
+        };
+        self.tried = 0;
+        self.demod = QpskDemod::new(self.cfg);
+        self.deframer.reset();
+        self.packets.reset();
+        self.rx.reset();
+        self.starts.clear();
+    }
+
+    /// When the picture this strip belongs to started, by the spacecraft's
+    /// own clock, placed on the receiver's calendar.
+    fn started_at(&mut self, picture: usize, strip: &lrpt::Strip) -> Option<u64> {
+        let key = (strip.channel, picture);
+        if let Some((_, at)) = self.starts.iter().find(|(k, _)| *k == key) {
+            return Some(*at);
+        }
+        let at = common::packet::dated(u64::from(strip.time_ms?) * 1_000, common::packet::now_us());
+        self.starts.retain(|((c, _), _)| *c != strip.channel);
+        self.starts.push((key, at));
+        Some(at)
+    }
+
     /// Which satellite this channel is, where it is one of them.
     fn satellite(&self) -> Option<&'static str> {
         SATELLITES
@@ -125,6 +188,7 @@ impl LrptNode {
         let picture = strip.first_row / CANVAS_ROWS;
         let first = strip.first_row % CANVAS_ROWS;
         let channel = usize::from(strip.channel).clamp(1, SYSTEMS.len()) - 1;
+        let sent_at_us = self.started_at(picture, &strip);
         out.push(VideoFrame {
             system: SYSTEMS[channel],
             channel_hz: self.channel_hz,
@@ -140,6 +204,7 @@ impl LrptNode {
             sequence: picture as u64,
             update: Update::Rows { first },
             cadence: Cadence::Still,
+            sent_at_us,
         });
     }
 
@@ -195,6 +260,8 @@ impl Simple for LrptNode {
         self.deframer.reset();
         self.packets.reset();
         self.rx.reset();
+        self.starts.clear();
+        self.tried = 0;
 
         let mut out = i.spec.with_kind(PortKind::Video);
         out.center = common::Hz(self.channel_hz as u64);
@@ -227,6 +294,10 @@ impl Simple for LrptNode {
         if !pictures.is_empty() {
             o.video_mut().extend(pictures);
         }
+        self.tried += self.symbols.len() as u64;
+        if self.deframer.found() == 0 && self.tried >= SWAP_AFTER_SYMBOLS {
+            self.swap_keying();
+        }
         Ok(())
     }
 
@@ -237,6 +308,8 @@ impl Simple for LrptNode {
         self.deframer.reset();
         self.packets.reset();
         self.rx.reset();
+        self.starts.clear();
+        self.tried = 0;
     }
 }
 
@@ -279,10 +352,6 @@ impl Protocol for Lrpt {
 /// The carrier this stage is pointed at.
 const CHANNEL_HZ: &str = "channel_hz";
 
-/// Whether the downlink is keyed offset, which both operating satellites
-/// are, or plain.
-const OFFSET: &str = "offset";
-
 pub const DESC: StageDesc = StageDesc {
     name: "lrpt",
     summary: "One Meteor-M LRPT downlink: the pass as three pictures, a strip at a time",
@@ -291,11 +360,11 @@ pub const DESC: StageDesc = StageDesc {
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let cfg = match s.bool_or(OFFSET, true) {
-        true => QpskConfig::LRPT_OFFSET,
-        false => QpskConfig::LRPT,
-    };
-    Ok(Box::new(LrptNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), cfg)))
+    // Where the node starts, not where it stays: both operating satellites
+    // key offset, and a channel that turns out to be keyed the other way is
+    // read the other way within a second of carrier.
+    let node = LrptNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), QpskConfig::LRPT_OFFSET);
+    Ok(Box::new(node))
 }
 
 #[cfg(test)]
@@ -308,6 +377,33 @@ mod tests {
 
     fn spec(rate: f64, center: u64) -> PortSpec {
         PortSpec { spec: StreamSpec::iq(rate, Hz(center)), latency: 0 }
+    }
+
+    /// 09:30:00, the spacecraft clock the synthesised pass starts at.
+    const TELEMETRY_FIRST_S: u32 = 9 * 3600 + 30 * 60;
+
+    /// A whole pass through the node, as the radio hands it over.
+    fn run(node: &mut LrptNode, iq: &[common::C32], rate: f64, center: f64) -> Vec<VideoFrame> {
+        let ins = [spec(rate, center as u64)];
+        let tags = Vec::new();
+        let mut frames = Vec::new();
+        for block in iq.chunks(65_536) {
+            let input = Payload::Iq(block.to_vec());
+            let mut out = Payload::Video(Vec::new());
+            let mut events = Vec::new();
+            let mut new_tags = Vec::new();
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            node.process(&input, &mut out, &mut ctx).unwrap();
+            if let Payload::Video(v) = out {
+                frames.extend(v);
+            }
+        }
+        frames
+    }
+
+    /// The seconds past midnight a picture is stamped with.
+    fn clock_of(f: &VideoFrame) -> Option<u64> {
+        f.sent_at_us.map(|us| us / 1_000_000 % 86_400)
     }
 
     /// A run of bits, most significant first, as a transmitter writes them.
@@ -371,7 +467,7 @@ mod tests {
         // one channel's whole scan, then the next.
         let mut stream = Vec::new();
         let mut sequence = 0u16;
-        for _ in 0..strips {
+        for strip in 0..strips {
             for (channel, apid) in [64u16, 65, 66].iter().enumerate() {
                 for mcu in (0..lrpt::MCU_COLUMNS).step_by(lrpt::MCUS_PER_PACKET) {
                     let dc = 20 + 10 * channel as i32;
@@ -380,12 +476,22 @@ mod tests {
                 }
             }
             // The housekeeping packet that goes with every strip, which is
-            // what makes the cadence 43 packets rather than 42.
+            // what makes the cadence 43 packets rather than 42, carrying the
+            // spacecraft clock: the pass starts at 09:30:00 and a strip is
+            // seven seconds of scanning.
             let mut telemetry = Vec::new();
             telemetry.extend(((1u16 << 11) | lrpt::TELEMETRY_APID).to_be_bytes());
             telemetry.extend((0xc000u16 | sequence).to_be_bytes());
             telemetry.extend(31u16.to_be_bytes());
-            telemetry.extend(vec![0u8; 32]);
+            let mut body = vec![0u8; 32];
+            let clock = TELEMETRY_FIRST_S + 7 * strip as u32;
+            body[16..20].copy_from_slice(&[
+                (clock / 3600) as u8,
+                (clock % 3600 / 60) as u8,
+                (clock % 60) as u8,
+                0,
+            ]);
+            telemetry.extend(body);
             stream.extend(telemetry);
             sequence = sequence.wrapping_add(1);
         }
@@ -468,22 +574,10 @@ mod tests {
         let mut node = LrptNode::new(DEFAULT_HZ, cfg);
         node.negotiate(&spec(rate, center as u64)).expect("a channel in the span");
 
-        let ins = [spec(rate, center as u64)];
-        let tags = Vec::new();
-        let mut frames: Vec<VideoFrame> = Vec::new();
-        for block in iq.chunks(65_536) {
-            let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Video(Vec::new());
-            let mut events = Vec::new();
-            let mut new_tags = Vec::new();
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Video(v) = out {
-                frames.extend(v);
-            }
-        }
+        let frames = run(&mut node, &iq, rate, center);
 
         assert!(node.locked(), "the demodulator never locked");
+        assert_eq!(node.keying(), Keying::Offset, "the keying it was given read the pass");
         let (found, failed) = node.frames();
         // Ten frames of the pass, none of which needed correcting, and the
         // tail of the stream is short of the two frames the sync search
@@ -548,20 +642,7 @@ mod tests {
             .collect();
         let mut node = LrptNode::new(DEFAULT_HZ, QpskConfig::LRPT_OFFSET);
         node.negotiate(&spec(rate, center as u64)).expect("a channel in the span");
-        let ins = [spec(rate, center as u64)];
-        let tags = Vec::new();
-        let mut frames: Vec<VideoFrame> = Vec::new();
-        for block in noise.chunks(65_536) {
-            let input = Payload::Iq(block.to_vec());
-            let mut out = Payload::Video(Vec::new());
-            let mut events = Vec::new();
-            let mut new_tags = Vec::new();
-            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-            node.process(&input, &mut out, &mut ctx).unwrap();
-            if let Payload::Video(v) = out {
-                frames.extend(v);
-            }
-        }
+        let frames = run(&mut node, &noise, rate, center);
         // Three and a half seconds of noise at 576 kS/s.
         assert_eq!(frames.len(), 0, "{} pictures out of noise", frames.len());
         assert_eq!(node.frames(), (0, 0));
@@ -604,15 +685,67 @@ mod tests {
         assert_eq!(LrptNode::new(137_500_000.0, QpskConfig::LRPT_OFFSET).satellite(), None);
     }
 
-    /// The stage is built either way up the keying can be, since the first
-    /// Meteor keyed plain QPSK where the two operating satellites key
-    /// offset.
+    /// A pass keyed plain, read by a node built the other way: the node
+    /// finds the keying rather than being told it, so a satellite that is
+    /// not the one the default was chosen for still paints.
     #[test]
-    fn the_keying_is_a_setting() {
+    fn the_keying_is_found_rather_than_set() {
+        let (rate, center) = (576_000.0, 137_150_000.0);
+        let iq = downlink(24, rate, center, QpskConfig::LRPT);
+        let mut node = LrptNode::new(DEFAULT_HZ, QpskConfig::LRPT_OFFSET);
+        node.negotiate(&spec(rate, center as u64)).expect("a channel in the span");
+        let frames = run(&mut node, &iq, rate, center);
+
+        assert_eq!(node.keying(), Keying::Coherent, "the node stayed on the wrong keying");
+        let (found, failed) = node.frames();
+        // Twenty-four of the pass's frames read after the swap; the one
+        // that failed is the frame the rebuild landed in the middle of.
+        assert_eq!((found, failed), (24, 1), "{found} frames read, {failed} failed");
+        assert_eq!(node.strips(), 43);
+        assert_eq!(frames.len(), 43, "strips on the bus");
+        let mut systems: Vec<&str> = frames.iter().map(|f| f.system).collect();
+        systems.sort_unstable();
+        systems.dedup();
+        assert_eq!(systems, vec!["LRPT 1", "LRPT 2", "LRPT 3"]);
+    }
+
+    /// The clock Meteor sends on application 70 reaches the bus, so a
+    /// picture is stamped with when the satellite scanned it rather than
+    /// with when the pass ended.
+    #[test]
+    fn a_picture_carries_the_spacecraft_clock() {
+        let (rate, center) = (576_000.0, 137_150_000.0);
+        let cfg = QpskConfig::LRPT_OFFSET;
+        let iq = downlink(8, rate, center, cfg);
+        let mut node = LrptNode::new(DEFAULT_HZ, cfg);
+        node.negotiate(&spec(rate, center as u64)).expect("a channel in the span");
+        let frames = run(&mut node, &iq, rate, center);
+
+        assert_eq!(frames.len(), 16);
+        // Every strip of a picture is stamped with the moment the picture
+        // began, not with the moment its own rows arrived: picsave keeps
+        // whichever copy is fullest, so the two would not agree.
+        // The strip painted before any housekeeping packet had been read
+        // carries no clock at all, which is what a picture whose first strip
+        // arrived before the satellite said the time looks like.
+        let stamps: Vec<Option<u64>> = frames.iter().map(clock_of).collect();
+        assert_eq!(stamps[0], None, "{stamps:?}");
+        let want = Some(u64::from(TELEMETRY_FIRST_S));
+        assert!(stamps[1..].iter().all(|s| *s == want), "{stamps:?}");
+        // And it is a date as well as a time: the pass is being heard now,
+        // so 09:30 is the nearest 09:30 to the receiver's own clock.
+        let now = common::packet::now_us();
+        let at = frames[1].sent_at_us.expect("a clock");
+        assert!(at.abs_diff(now) < 12 * 3600 * 1_000_000, "{at} is not near {now}");
+    }
+
+    /// The two shapes the downlink comes in: the first Meteor-M2 keyed
+    /// plain QPSK where the two operating satellites key offset, and the
+    /// stage takes no setting saying which.
+    #[test]
+    fn the_downlink_comes_in_two_shapes() {
         let mut s = Settings::new();
         s.insert(CHANNEL_HZ.into(), pipeline::param::ParamValue::Float(137_900_000.0));
-        assert!(build(&s).is_ok());
-        s.insert(OFFSET.into(), pipeline::param::ParamValue::Bool(false));
         assert!(build(&s).is_ok());
         assert_eq!(QpskConfig::LRPT.keying, Keying::Coherent);
         assert_eq!(QpskConfig::LRPT.coding, Coding::Direct);

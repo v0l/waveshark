@@ -333,6 +333,7 @@ mod tests {
             sequence,
             update: common::Update::Whole,
             cadence: common::Cadence::Still,
+            sent_at_us: None,
         }
     }
 

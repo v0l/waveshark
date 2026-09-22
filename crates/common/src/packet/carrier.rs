@@ -23,6 +23,27 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
+/// Microseconds in a day, which is what a clock with no date wraps on.
+const DAY_US: i64 = 86_400 * 1_000_000;
+
+/// A transmitter's time of day placed on the receiver's calendar, in
+/// microseconds since the epoch.
+///
+/// A sender keying hours, minutes and seconds and no date leaves the day to
+/// whoever hears it, and the receiver knows one thing about that: it is
+/// hearing the transmission now. So the date is whichever of yesterday,
+/// today and tomorrow puts the two clocks closest together, which is what
+/// carries a transmission across midnight in either direction.
+pub fn dated(time_of_day_us: u64, now_us: u64) -> u64 {
+    let (day, now) = (time_of_day_us as i64 % DAY_US, now_us as i64);
+    let today = now.div_euclid(DAY_US) * DAY_US + day;
+    [today - DAY_US, today, today + DAY_US]
+        .into_iter()
+        .min_by_key(|at| (at - now).abs())
+        .unwrap_or(today)
+        .max(0) as u64
+}
+
 /// Mean power of a run of samples, against a full scale sample
 pub fn mean_power(samples: &[C32]) -> f32 {
     match samples.is_empty() {
@@ -222,6 +243,24 @@ mod tests {
         assert_eq!((c.center_hz, c.bandwidth_hz, c.source), (868_300_000, 250_000, SourceId(2)));
         assert_eq!(c.duration_us, 1_000);
         assert!((c.rssi_dbfs + 6.02).abs() < 0.05);
+    }
+
+    /// A clock with no date lands on the day that puts it nearest the
+    /// receiver's, so a transmission heard either side of midnight is dated
+    /// the day it was actually sent.
+    #[test]
+    fn a_time_of_day_takes_the_nearest_date() {
+        // 2023-11-14 22:13:20 UTC, which is 80_000 seconds into the day.
+        let now = 1_700_000_000_000_000u64;
+        assert_eq!(dated(80_000_000_000, now), now);
+        assert_eq!(dated(79_999_000_000, now), now - 1_000_000);
+        // Ten seconds past midnight, heard two hours before it: tomorrow.
+        assert_eq!(dated(10_000_000, now), now + 6_410_000_000);
+        // And the mirror: a receiver two hours past midnight hearing a clock
+        // at ten to midnight dates it yesterday.
+        let after = 1_700_000_000_000_000u64 + 14_000_000_000;
+        assert_eq!(dated(86_390_000_000, after), after - 7_610_000_000);
+        assert_eq!(dated(0, 0), 0);
     }
 
     #[test]

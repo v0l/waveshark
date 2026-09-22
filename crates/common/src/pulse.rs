@@ -819,6 +819,15 @@ pub struct VideoFrame {
     pub update: Update,
     /// How it arrives, and so how long it is kept.
     pub cadence: Cadence,
+    /// When the sender said the picture was taken, in microseconds since the
+    /// epoch, for a transmission that carries a clock of its own.
+    ///
+    /// `None` for the many that do not, and then the only time there is is
+    /// the receiver's own. A picture is written when it ends rather than
+    /// when it began, so on a fifteen minute satellite pass the two are a
+    /// quarter of an hour apart and only this one matches a set of orbital
+    /// elements.
+    pub sent_at_us: Option<u64>,
 }
 
 impl VideoFrame {

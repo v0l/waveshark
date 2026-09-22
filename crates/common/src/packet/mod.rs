@@ -36,7 +36,7 @@ mod fact;
 mod frame;
 mod keying;
 
-pub use carrier::{Carrier, Heard, SILENCE_DBFS, dbfs, mean_power, now_us};
+pub use carrier::{Carrier, Heard, SILENCE_DBFS, dated, dbfs, mean_power, now_us};
 pub use detect::Detection;
 pub use entity::{Entity, Id, Link, Party, PartyKind, Stability};
 pub use fact::{

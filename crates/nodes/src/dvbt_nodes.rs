@@ -572,6 +572,7 @@ impl DvbtNode {
             // Twenty-five a second off a broadcast, each superseding the
             // last.
             cadence: common::Cadence::Live,
+            sent_at_us: None,
         }
     }
 
