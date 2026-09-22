@@ -8,15 +8,16 @@
 //! CRC-14 behind it are [`decode::ft8`], and what reaches the bus is a
 //! transmission that satisfied both.
 //!
-//! # The clock
+//! # The grid
 //!
-//! Nothing else the receiver reads is aligned to the wall clock. A station
-//! keys at the start of a fifteen-second slot (seven and a half for FT4) and
-//! stops 12.6 seconds later, so the slot boundary is where the decoder cuts
-//! and the wall clock is the only thing that says where that is. The node
-//! throws away whatever it is handed until the next boundary and then works
-//! in whole slots. A station keyed up to two seconds late is still read,
-//! because the sync search covers every offset the slot leaves.
+//! A station keys at the start of a fifteen-second slot (seven and a half for
+//! FT4) and stops 12.6 seconds later, so the slot boundary is where the
+//! decoder cuts and a cut in the wrong place loses every transmission that
+//! straddles it. Nothing else the receiver reads is aligned to a clock and
+//! this is not either: [`decode::ft8::Slots`] finds the grid in the air, so a
+//! replayed capture is cut where the recording was keyed rather than where
+//! the machine's clock happens to be, and a live receiver reads a band its
+//! own clock is minutes wrong about.
 
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape, Stickiness};
@@ -26,7 +27,6 @@ pub use decode::ft8::Mode;
 pub use decode::ft8::PASSBAND_HZ;
 pub use decode::ft8::read;
 pub use decode::ft8::unpack_bits;
-use dsp::mfsk::Slot;
 use dsp::{FirDecim, Mixer};
 use identify::Signal;
 pub use identify::ft8::Ft8;
@@ -45,15 +45,11 @@ pub struct Ft8Node {
     factor: usize,
     mixer: Mixer,
     decim: FirDecim,
-    slot: Slot,
+    slots: ft8::Slots,
     mixed: Vec<common::C32>,
     audio: Vec<common::C32>,
-    /// Samples still to be thrown away before the next slot boundary.
-    skip: usize,
-    /// What has come in since the last boundary.
-    buffer: Vec<common::C32>,
+    heard: Vec<ft8::Transmission>,
     meter: crate::FrameMeter,
-    slots: u64,
     read: u64,
 }
 
@@ -65,25 +61,21 @@ impl Default for Ft8Node {
 
 impl Ft8Node {
     pub fn new(dial_hz: f64, mode: Mode) -> Self {
-        let mut n = Self {
+        Self {
             dial_hz,
             mode,
             rate: AUDIO_HZ,
             factor: 1,
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(AUDIO_HZ, 1, PASSBAND_HZ + 500.0, 60.0),
-            slot: Slot::new(AUDIO_HZ, mode.waveform()),
+            slots: ft8::Slots::new(AUDIO_HZ, mode),
             mixed: Vec::new(),
             audio: Vec::new(),
-            skip: 0,
-            buffer: Vec::new(),
+            heard: Vec::new(),
             meter: crate::FrameMeter::new(AUDIO_HZ, dial_hz as u64, 1.0)
                 .keyed_as(common::Modulation::Fsk8),
-            slots: 0,
             read: 0,
-        };
-        n.align_to_clock();
-        n
+        }
     }
 
     /// Transmissions read since the node was built.
@@ -91,9 +83,10 @@ impl Ft8Node {
         self.read
     }
 
-    /// Slots looked at since the node was built.
-    pub fn slots(&self) -> u64 {
-        self.slots
+    /// Windows looked at since the node was built: whole slots once the grid
+    /// is known, double-length searches before that.
+    pub fn windows(&self) -> u64 {
+        self.slots.windows()
     }
 
     fn audio_rate(&self) -> f64 {
@@ -103,23 +96,9 @@ impl Ft8Node {
     fn rebuild(&mut self) {
         let audio = self.audio_rate();
         self.decim = FirDecim::design_hz(self.rate, self.factor, PASSBAND_HZ + 500.0, 60.0);
-        self.slot = Slot::new(audio, self.mode.waveform());
+        self.slots = ft8::Slots::new(audio, self.mode);
         self.meter = crate::FrameMeter::new(audio, self.dial_hz as u64, 1.0)
             .keyed_as(common::Modulation::Fsk8);
-        self.buffer.clear();
-        self.align_to_clock();
-    }
-
-    /// Throw away everything until the next slot boundary, which is a whole
-    /// number of slots since the hour by definition of both modes.
-    fn align_to_clock(&mut self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        let slot_s = self.mode.waveform().slot_s;
-        let into = now.rem_euclid(slot_s);
-        self.skip = ((slot_s - into) * self.audio_rate()).round() as usize;
     }
 }
 
@@ -132,7 +111,15 @@ impl Simple for Ft8Node {
     }
 
     fn readings(&self) -> Vec<(String, String)> {
-        vec![("slots".into(), self.slots.to_string()), ("read".into(), self.read.to_string())]
+        let grid = match self.slots.grid_s() {
+            Some(s) => format!("{s:.1} s"),
+            None => "searching".into(),
+        };
+        vec![
+            ("windows".into(), self.windows().to_string()),
+            ("read".into(), self.read.to_string()),
+            ("grid".into(), grid),
+        ]
     }
 
     fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
@@ -166,40 +153,28 @@ impl Simple for Ft8Node {
         self.meter.feed(&self.audio);
 
         let audio = std::mem::take(&mut self.audio);
-        let mut rest = audio.as_slice();
-        if self.skip > 0 {
-            let drop = self.skip.min(rest.len());
-            self.skip -= drop;
-            rest = &rest[drop..];
-        }
-        self.buffer.extend_from_slice(rest);
+        let mut heard = std::mem::take(&mut self.heard);
+        self.slots.push(&audio, &mut heard);
         self.audio = audio;
-
-        let want = self.slot.slot_samples();
-        while self.buffer.len() >= want {
-            let slot: Vec<common::C32> = self.buffer.drain(..want).collect();
-            let heard = ft8::read_slot(&mut self.slot, &slot, self.mode);
-            self.slots += 1;
-            self.read += heard.len() as u64;
-            for (bytes, freq_hz, snr_db) in heard {
-                let center = (self.dial_hz + freq_hz).round().max(0.0) as u64;
-                // The decoder measured this signal against the slot's own
-                // noise, which is a better number than the channel's mean,
-                // and the tone it was found on is where it was heard.
-                let mut p = self.meter.packet_now(bytes).at_center(center);
-                p.carrier.snr_db = snr_db;
-                o.packets_mut().push(p);
-            }
+        self.read += heard.len() as u64;
+        for t in heard.drain(..) {
+            let center = (self.dial_hz + t.freq_hz).round().max(0.0) as u64;
+            // The decoder measured this signal against the slot's own
+            // noise, which is a better number than the channel's mean,
+            // and the tone it was found on is where it was heard.
+            let mut p = self.meter.packet_now(t.bytes).at_center(center);
+            p.carrier.snr_db = t.snr_db;
+            o.packets_mut().push(p);
         }
+        self.heard = heard;
         Ok(())
     }
 
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
-        self.buffer.clear();
+        self.slots.reset();
         self.meter.reset();
-        self.align_to_clock();
     }
 
     fn params(&self) -> Vec<Param> {
@@ -425,13 +400,20 @@ mod tests {
         frames
     }
 
-    /// A node reading from the start of the stream, which is what the wall
-    /// clock does for it on the air.
-    fn at_slot_start(dial: f64, mode: Mode) -> Ft8Node {
+    /// A node tuned to a dial, reading a stream that starts wherever it
+    /// starts: nothing tells it where the grid is.
+    fn tuned(dial: f64, mode: Mode) -> Ft8Node {
         let mut node = Ft8Node::new(dial, mode);
         node.negotiate(&spec(AUDIO_HZ, dial)).unwrap();
-        node.skip = 0;
         node
+    }
+
+    /// Silence enough to finish the search window, which is two slots: with
+    /// no grid the node reads double-length windows, and a stream of one
+    /// slot never fills one.
+    fn padded(mode: Mode, mut iq: Vec<C32>) -> Vec<C32> {
+        iq.resize(2 * (AUDIO_HZ * mode.waveform().slot_s) as usize, C32::default());
+        iq
     }
 
     /// The whole path: a station calling CQ, keyed 1 kHz up the passband,
@@ -439,12 +421,18 @@ mod tests {
     #[test]
     fn a_cq_is_read_off_a_slot() {
         let payload = ft8::pack_standard("CQ", "MI0ABC", "IO74").unwrap();
-        let iq = keyed(Mode::Ft8, payload, AUDIO_HZ, 1_000.0, 0.5, 1.0);
-        let mut node = at_slot_start(DEFAULT_HZ, Mode::Ft8);
+        let iq = padded(Mode::Ft8, keyed(Mode::Ft8, payload, AUDIO_HZ, 1_000.0, 0.5, 1.0));
+        let mut node = tuned(DEFAULT_HZ, Mode::Ft8);
         let frames = run(&mut node, &iq, AUDIO_HZ, DEFAULT_HZ);
 
         assert_eq!(frames.len(), 1, "{} transmissions", frames.len());
-        assert_eq!(node.slots(), 1);
+        assert_eq!(node.windows(), 1, "one search window read");
+        let grid = node.slots.grid_s().expect("the grid, found in the air");
+        assert!(
+            (grid - 0.25).abs() < 0.1,
+            "the cut is 0.25 s before the station, which keyed 0.5 s in, so the grid is at \
+             0.25 s and not {grid:.2} s"
+        );
         let f = &frames[0];
         // The frame is heard where the station was: the dial plus where it
         // sat in the passband, to within a tone.
@@ -479,7 +467,7 @@ mod tests {
             ("EI7DEF", "DL1GHI", "JO31"),
             ("DL1GHI", "EI7DEF", "73"),
         ];
-        let mut iq = vec![C32::default(); (AUDIO_HZ * mfsk::FT8.slot_s) as usize];
+        let mut iq = vec![C32::default(); 2 * (AUDIO_HZ * mfsk::FT8.slot_s) as usize];
         for (k, (to, from, extra)) in sent.iter().enumerate() {
             let payload = ft8::pack_standard(to, from, extra).expect(from);
             // Spread across the passband, each starting at its own moment
@@ -490,7 +478,7 @@ mod tests {
                 *a += b;
             }
         }
-        let mut node = at_slot_start(DEFAULT_HZ, Mode::Ft8);
+        let mut node = tuned(DEFAULT_HZ, Mode::Ft8);
         let frames = run(&mut node, &iq, AUDIO_HZ, DEFAULT_HZ);
         assert_eq!(frames.len(), 8, "{} of 8 stations read", frames.len());
         assert_eq!(node.read_count(), 8);
@@ -510,8 +498,8 @@ mod tests {
     #[test]
     fn an_ft4_exchange_is_read() {
         let payload = ft8::pack_standard("G4XYZ", "MI0ABC", "R+05").unwrap();
-        let iq = keyed(Mode::Ft4, payload, AUDIO_HZ, 1_500.0, 0.4, 1.0);
-        let mut node = at_slot_start(FT4_DEFAULT_HZ, Mode::Ft4);
+        let iq = padded(Mode::Ft4, keyed(Mode::Ft4, payload, AUDIO_HZ, 1_500.0, 0.4, 1.0));
+        let mut node = tuned(FT4_DEFAULT_HZ, Mode::Ft4);
         let frames = run(&mut node, &iq, AUDIO_HZ, FT4_DEFAULT_HZ);
         assert_eq!(frames.len(), 1, "{} transmissions", frames.len());
         let d = read(&frames[0].bytes()).expect("a decode");
@@ -541,11 +529,12 @@ mod tests {
         // a station down to about -15 dB in 2500 Hz and loses it by -18,
         // where WSJT-X is still reading to around -21.
         for (amplitude, want, snr) in [(0.10f32, 1, -10.0), (0.05, 1, -15.2), (0.035, 0, 0.0)] {
-            let mut iq = keyed(Mode::Ft8, payload, AUDIO_HZ, 1_000.0, 0.5, amplitude);
+            let mut iq =
+                padded(Mode::Ft8, keyed(Mode::Ft8, payload, AUDIO_HZ, 1_000.0, 0.5, amplitude));
             for s in iq.iter_mut() {
                 *s += C32::new(rng(), rng());
             }
-            let mut node = at_slot_start(DEFAULT_HZ, Mode::Ft8);
+            let mut node = tuned(DEFAULT_HZ, Mode::Ft8);
             let frames = run(&mut node, &iq, AUDIO_HZ, DEFAULT_HZ);
             assert_eq!(frames.len(), want, "at an amplitude of {amplitude}");
             if let Some(f) = frames.first() {
@@ -562,9 +551,14 @@ mod tests {
         }
     }
 
-    /// A minute of noise, which is four slots, and nothing comes off it:
-    /// the code has to converge and the CRC-14 has to pass, and noise does
-    /// neither.
+    /// A minute of noise, and nothing comes off it: the code has to
+    /// converge and the CRC-14 has to pass, and noise does neither.
+    ///
+    /// A band with nothing on it is searched for ever, which costs no more
+    /// than cutting it into slots did: this minute takes 0.16 s of one core
+    /// as two search windows and took 0.23 s as four slots, because the
+    /// transform over the samples is the work and the sync search over the
+    /// offsets a longer window adds is not.
     #[test]
     fn noise_produces_no_transmissions() {
         let mut seed = 0x0123_4567_89ab_cdefu64;
@@ -576,10 +570,89 @@ mod tests {
         };
         let iq: Vec<C32> =
             (0..(AUDIO_HZ * 60.0) as usize).map(|_| C32::new(rng(), rng())).collect();
-        let mut node = at_slot_start(DEFAULT_HZ, Mode::Ft8);
+        let mut node = tuned(DEFAULT_HZ, Mode::Ft8);
         let frames = run(&mut node, &iq, AUDIO_HZ, DEFAULT_HZ);
-        assert_eq!(node.slots(), 4, "four slots of noise");
+        assert_eq!(
+            node.windows(),
+            2,
+            "noise never says where the grid is, so a minute of it is two search windows \
+             rather than four slots"
+        );
+        assert_eq!(node.slots.grid_s(), None, "noise is not a grid");
         assert_eq!(frames.len(), 0, "{} transmissions out of noise", frames.len());
+    }
+
+    /// The point of the search: the same stream started at any moment of the
+    /// slot reads the same transmissions.
+    ///
+    /// A replayed capture is the case that matters. The wall clock says
+    /// nothing about samples recorded minutes or years ago, and cutting at
+    /// where it happens to be loses every transmission that straddles the
+    /// cut: a station is on the air for 12.64 of the 15 seconds, so a cut
+    /// more than 2.36 seconds into the slot takes part of one.
+    ///
+    /// Seven slots, five of them keyed: the first is empty so that a phase
+    /// anywhere inside it still hands over every transmission whole, and
+    /// the last gives the fifth slot room to finish.
+    #[test]
+    fn a_stream_is_read_at_any_phase_of_the_slot() {
+        let sent = [
+            ("CQ", "MI0ABC", "IO74"),
+            ("MI0ABC", "G4XYZ", "IO91"),
+            ("G4XYZ", "MI0ABC", "-12"),
+            ("MI0ABC", "G4XYZ", "R-08"),
+            ("CQ", "EI7DEF", "IO53"),
+        ];
+        let slot = (AUDIO_HZ * mfsk::FT8.slot_s) as usize;
+        let mut iq = vec![C32::default(); 7 * slot];
+        for (k, (to, from, extra)) in sent.iter().enumerate() {
+            let payload = ft8::pack_standard(to, from, extra).expect(from);
+            let at = (k + 1) * slot;
+            let one = keyed(Mode::Ft8, payload, AUDIO_HZ, 1_000.0 + 200.0 * k as f64, 0.4, 1.0);
+            for (a, b) in iq[at..].iter_mut().zip(one) {
+                *a += b;
+            }
+        }
+        for phase_s in [0.0, 1.5, 3.7, 7.0, 11.2, 14.5] {
+            let from = (phase_s * AUDIO_HZ) as usize;
+            let mut node = tuned(DEFAULT_HZ, Mode::Ft8);
+            let frames = run(&mut node, &iq[from..], AUDIO_HZ, DEFAULT_HZ);
+            let mut read: Vec<String> = frames
+                .iter()
+                .map(|f| read(f.bytes()).expect("a decode").wrote().unwrap().to_string())
+                .collect();
+            read.sort();
+            let mut want: Vec<String> =
+                sent.iter().map(|(a, b, c)| format!("{a} {b} {c}")).collect();
+            want.sort();
+            assert_eq!(read, want, "started {phase_s} s into the slot");
+            // The grid is where the stations keyed, which is 0.4 seconds in
+            // less the quarter second the cut is placed before them, seen
+            // from wherever the stream was cut into.
+            let grid = node.slots.grid_s().expect("the grid");
+            let want = (0.15 - phase_s).rem_euclid(mfsk::FT8.slot_s);
+            assert!((grid - want).abs() < 0.2, "the grid is at {grid:.2} s, wanted {want:.2} s");
+        }
+    }
+
+    /// A grid found once is not kept for ever: a stream that stops saying
+    /// where it is, because the band went quiet or the replay moved, is
+    /// searched again after a minute of slots with nothing in them.
+    #[test]
+    fn a_quiet_minute_sends_the_node_looking_for_the_grid_again() {
+        let payload = ft8::pack_standard("CQ", "MI0ABC", "IO74").unwrap();
+        let slot = (AUDIO_HZ * mfsk::FT8.slot_s) as usize;
+        let mut iq = vec![C32::default(); 7 * slot];
+        for (a, b) in iq.iter_mut().zip(keyed(Mode::Ft8, payload, AUDIO_HZ, 1_000.0, 0.4, 1.0)) {
+            *a += b;
+        }
+        let mut node = tuned(DEFAULT_HZ, Mode::Ft8);
+        let frames = run(&mut node, &iq, AUDIO_HZ, DEFAULT_HZ);
+        assert_eq!(frames.len(), 1, "the one station that keyed");
+        // One search window, then four empty slots, and the fourth gives the
+        // grid up: what is left is under a window and is not read at all.
+        assert_eq!(node.windows(), 5, "a search window and four slots");
+        assert_eq!(node.slots.grid_s(), None, "the grid was given up");
     }
 
     /// A frame off the bus is claimed by the mode that keyed it and by

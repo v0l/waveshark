@@ -121,10 +121,11 @@ impl Signal for Ft4 {
 /// One dial's passband, cut into slots and read.
 ///
 /// The recording is not aligned to the fifteen-second grid and nothing in it
-/// says where the grid is, so every slot-length window is read at four
-/// offsets through the slot. A station keyed at the top of a slot lands in
-/// one of them, and a duplicate reading is dropped by its bytes.
-fn read_ftx(mode: decode::ft8::Mode, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
+/// says where the grid is, so [`decode::ft8::Slots`] finds the grid in the
+/// air: a window two slots long holds one whole transmission whatever phase
+/// the recording started at, and where that decodes is where the cut goes
+/// for the rest of the file. A duplicate reading is dropped by its bytes.
+fn read_ftx(mode: decode::ft8::Mode, iq: &[C32], rate_hz: f64, _center_hz: f64) -> Reading {
     if rate_hz / (rate_hz / AUDIO_HZ).round().max(1.0) < 2.0 * PASSBAND_HZ {
         return Reading::default();
     }
@@ -138,34 +139,123 @@ fn read_ftx(mode: decode::ft8::Mode, iq: &[C32], rate_hz: f64, center_hz: f64) -
         mixer.process(b, &mut mixed);
         decim.process(&mixed, &mut audio);
     }
-    let mut slot = dsp::mfsk::Slot::new(audio_rate, mode.waveform());
-    let want = slot.slot_samples();
-    if want == 0 || audio.len() < want {
+    let mut slots = decode::ft8::Slots::new(audio_rate, mode);
+    if audio.len() < (mode.waveform().duration_s() * audio_rate) as usize {
         return Reading::default();
     }
-    let center = common::Hz(center_hz as u64);
+    let mut heard = Vec::new();
+    slots.push(&audio, &mut heard);
+    slots.finish(&mut heard);
     let mut rows: Vec<common::packet::Proto> = Vec::new();
     let mut seen: Vec<Vec<u8>> = Vec::new();
-    // Four offsets through a slot: a transmission split across two windows
-    // is read by neither, and a quarter slot is 3.75 seconds of the 12.6 a
-    // station is on the air for.
-    for start in (0..4).map(|k| k * want / 4) {
-        let mut at = start;
-        while at + want <= audio.len() {
-            for (bytes, _freq_hz, _snr) in
-                decode::ft8::read_slot(&mut slot, &audio[at..at + want], mode)
-            {
-                if seen.contains(&bytes) {
-                    continue;
-                }
-                seen.push(bytes.clone());
-                if let Some(d) = decode::ft8::read(&bytes) {
-                    rows.push(d);
-                }
-            }
-            at += want;
+    for t in heard {
+        if seen.contains(&t.bytes) {
+            continue;
+        }
+        seen.push(t.bytes.clone());
+        if let Some(d) = decode::ft8::read(&t.bytes) {
+            rows.push(d);
         }
     }
-    let _ = center;
     rows.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::TAU;
+
+    /// One transmission keyed as tones, `at_s` into a stream of `slots`
+    /// slots: the payload checked, coded, gray mapped and keyed at
+    /// `audio_hz` above the dial. Here rather than shared with the node's
+    /// tests because a reader synthesising its own input is how this crate
+    /// is tested at all.
+    fn keyed(
+        mode: decode::ft8::Mode,
+        to: &str,
+        from: &str,
+        extra: &str,
+        audio_hz: f64,
+        at_s: f64,
+        into: &mut [C32],
+    ) {
+        let wf = mode.waveform();
+        let mut payload = decode::ft8::pack_standard(to, from, extra).expect(from);
+        if mode == decode::ft8::Mode::Ft4 {
+            decode::ft8::scramble_ft4(&mut payload);
+        }
+        let word = decode::ft8::encode(&payload);
+        let mut tones = vec![0u8; wf.symbols];
+        for group in wf.sync {
+            tones[group.at..group.at + group.tones.len()].copy_from_slice(group.tones);
+        }
+        let per = wf.bits_per_symbol();
+        let mut taken = 0usize;
+        for (a, b) in wf.data {
+            for tone in tones.iter_mut().take(*b).skip(*a) {
+                let pattern =
+                    (0..per).fold(0usize, |acc, k| acc << 1 | usize::from(word[taken + k]));
+                taken += per;
+                *tone = wf.gray[pattern];
+            }
+        }
+        let symbol = (AUDIO_HZ / wf.baud).round() as usize;
+        let start = (at_s * AUDIO_HZ) as usize;
+        let mut phase = 0.0f64;
+        for (s, tone) in tones.iter().enumerate() {
+            let f = audio_hz + *tone as f64 * wf.baud;
+            for k in 0..symbol {
+                let at = start + s * symbol + k;
+                if at >= into.len() {
+                    break;
+                }
+                phase += TAU * f / AUDIO_HZ;
+                into[at] += C32::new(phase.cos() as f32, phase.sin() as f32);
+            }
+        }
+    }
+
+    /// A recording is not cut on the fifteen-second grid, so this is the
+    /// case that decides whether a capture names its stations: four slots
+    /// of a passband handed over from nine seconds into one of them.
+    ///
+    /// Reading a slot-length window at four fixed offsets, which is what
+    /// this did before, covers 9.4 seconds of the 15 a station may key in,
+    /// and at this phase it named none of the three.
+    #[test]
+    fn a_recording_cut_into_a_slot_still_names_its_stations() {
+        let slot = (AUDIO_HZ * decode::ft8::Mode::Ft8.waveform().slot_s) as usize;
+        let mut iq = vec![C32::default(); 5 * slot];
+        let sent =
+            [("CQ", "MI0ABC", "IO74"), ("MI0ABC", "G4XYZ", "IO91"), ("G4XYZ", "MI0ABC", "-12")];
+        for (k, (to, from, extra)) in sent.iter().enumerate() {
+            let at = (k + 1) as f64 * 15.0 + 0.4;
+            keyed(decode::ft8::Mode::Ft8, to, from, extra, 1_000.0 + 300.0 * k as f64, at, &mut iq);
+        }
+        let from = (9.3 * AUDIO_HZ) as usize;
+        let reading = Ft8.read(&iq[from..], AUDIO_HZ, DEFAULT_HZ);
+        let mut read: Vec<String> =
+            reading.rows.iter().map(|r| r.wrote().unwrap_or_default().to_string()).collect();
+        read.sort();
+        let mut want: Vec<String> = sent.iter().map(|(a, b, c)| format!("{a} {b} {c}")).collect();
+        want.sort();
+        assert_eq!(read, want, "{} of 3 stations named", read.len());
+    }
+
+    /// Two minutes of noise names nothing: the grid is never found in it,
+    /// so every window is a search and none of them reads a transmission.
+    #[test]
+    fn noise_names_nothing() {
+        let mut seed = 0x5eed_1234_9876_4321u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let iq: Vec<C32> =
+            (0..(AUDIO_HZ * 120.0) as usize).map(|_| C32::new(rng(), rng())).collect();
+        assert_eq!(Ft8.read(&iq, AUDIO_HZ, DEFAULT_HZ).rows.len(), 0);
+        assert_eq!(Ft4.read(&iq, AUDIO_HZ, FT4_DEFAULT_HZ).rows.len(), 0);
+    }
 }

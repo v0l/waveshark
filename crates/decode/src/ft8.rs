@@ -825,8 +825,8 @@ pub fn read_slot(
     slot: &mut dsp::mfsk::Slot,
     samples: &[common::C32],
     mode: Mode,
-) -> Vec<(Vec<u8>, f64, f32)> {
-    let mut out: Vec<(Vec<u8>, f64, f32)> = Vec::new();
+) -> Vec<Transmission> {
+    let mut out: Vec<Transmission> = Vec::new();
     for heard in slot.read(samples, BAND) {
         let (bits, failed) = code().decode(&heard.llr, LDPC_PASSES);
         if failed != 0 {
@@ -851,12 +851,181 @@ pub fn read_slot(
         }
         let mut bytes = vec![mode.tag()];
         bytes.extend(pack(message));
-        if out.iter().any(|(b, _, _)| *b == bytes) {
+        if out.iter().any(|t| t.bytes == bytes) {
             continue;
         }
-        out.push((bytes, heard.freq_hz, heard.snr_db));
+        out.push(Transmission {
+            bytes,
+            freq_hz: heard.freq_hz,
+            snr_db: heard.snr_db,
+            at_s: heard.at_s,
+        });
     }
     out
+}
+
+/// One transmission read out of a window: what goes on the bus, where in the
+/// passband it sat, what it was heard at, and how far into the window it
+/// started.
+#[derive(Clone, Debug)]
+pub struct Transmission {
+    pub bytes: Vec<u8>,
+    pub freq_hz: f64,
+    pub snr_db: f32,
+    pub at_s: f64,
+}
+
+/// Where the cut is placed against the earliest station heard, in seconds.
+///
+/// The earliest station in a window is the best estimate of the boundary it
+/// keyed against, and it is never early: a station keys when its own clock
+/// says the slot began, which is at the boundary or after it. Cutting a
+/// quarter second before it buys that much room for a station whose clock is
+/// ahead, out of the 2.36 seconds an FT8 slot has spare, and leaves the rest
+/// for the ones that are late.
+const CUT_EARLY_S: f64 = 0.25;
+
+/// Slots reading nothing before the grid is looked for again, which at both
+/// modes is around a minute of silence.
+const QUIET_SLOTS: u32 = 4;
+
+/// A stream cut into slots, against a grid measured in the air.
+///
+/// A station keys at the start of a slot and stops
+/// [`dsp::mfsk::Waveform::duration_s`] later, so the slot is where the
+/// decoder cuts and a cut in the wrong place loses every transmission that
+/// straddles it. Nothing in a recording says where that grid is, and a live
+/// receiver's own clock says where it is only for as long as somebody keeps
+/// the clock right, so this measures it: with no grid it reads windows two
+/// slots long, which hold one whole transmission at whatever phase the
+/// stream started, and a transmission that decodes says where the grid is.
+/// After that it reads whole slots, and looks again when [`QUIET_SLOTS`] in
+/// a row read nothing.
+pub struct Slots {
+    slot: dsp::mfsk::Slot,
+    mode: Mode,
+    rate: f64,
+    buffer: Vec<common::C32>,
+    /// Where in a slot the cut sits, in seconds, once the grid is known.
+    grid_s: Option<f64>,
+    /// How much of the next window has already been read, in seconds.
+    ///
+    /// A search window ends in the middle of a transmission as often as not,
+    /// and that one is the station the grid was just found from, keying
+    /// again, so the window hands back the slot it opened rather than
+    /// throwing it away. What it read of that slot itself is this, and a
+    /// transmission that finished inside it is not reported twice.
+    already_s: f64,
+    quiet: u32,
+    windows: u64,
+}
+
+impl Slots {
+    pub fn new(rate: f64, mode: Mode) -> Self {
+        Self {
+            slot: dsp::mfsk::Slot::new(rate, mode.waveform()),
+            mode,
+            rate,
+            buffer: Vec::new(),
+            grid_s: None,
+            already_s: 0.0,
+            quiet: 0,
+            windows: 0,
+        }
+    }
+
+    /// Where in a slot the cut sits, in seconds, or nothing while the grid
+    /// is still being looked for.
+    pub fn grid_s(&self) -> Option<f64> {
+        self.grid_s
+    }
+
+    /// Windows read since this was built: whole slots once the grid is
+    /// known, double-length searches before that.
+    pub fn windows(&self) -> u64 {
+        self.windows
+    }
+
+    /// Samples the next window wants: a slot, or two while searching.
+    fn window_samples(&self) -> usize {
+        let one = self.slot.slot_samples();
+        match self.grid_s {
+            Some(_) => one,
+            None => 2 * one,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.buffer.clear();
+        self.grid_s = None;
+        self.already_s = 0.0;
+        self.quiet = 0;
+    }
+
+    /// Read whatever complete windows these samples finish.
+    pub fn push(&mut self, samples: &[common::C32], out: &mut Vec<Transmission>) {
+        let mut rest = samples;
+        loop {
+            let want = self.window_samples();
+            let take = want.saturating_sub(self.buffer.len()).min(rest.len());
+            self.buffer.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+            if want == 0 || self.buffer.len() < want {
+                return;
+            }
+            self.read_window(out);
+        }
+    }
+
+    /// Read what is left over, for a caller whose stream has ended: a
+    /// recording shorter than the search window still holds transmissions,
+    /// and the sync search covers every offset in whatever it is given.
+    pub fn finish(&mut self, out: &mut Vec<Transmission>) {
+        let least = (self.mode.waveform().duration_s() * self.rate) as usize;
+        if self.buffer.len() >= least {
+            self.read_window(out);
+        }
+    }
+
+    fn read_window(&mut self, out: &mut Vec<Transmission>) {
+        let window = std::mem::take(&mut self.buffer);
+        let mut heard = read_slot(&mut self.slot, &window, self.mode);
+        self.windows += 1;
+        let window_s = window.len() as f64 / self.rate;
+        let mut keep = window.len();
+        let duration_s = self.mode.waveform().duration_s();
+        let already = std::mem::take(&mut self.already_s);
+        heard.retain(|t| t.at_s + duration_s > already);
+
+        let earliest = heard.iter().map(|t| t.at_s).fold(f64::INFINITY, f64::min);
+        match self.grid_s {
+            None if earliest.is_finite() => {
+                let slot_s = self.mode.waveform().slot_s;
+                let cut = earliest - CUT_EARLY_S;
+                let mut last = cut;
+                while last + slot_s <= window_s {
+                    last += slot_s;
+                }
+                keep = ((last.max(0.0) * self.rate) as usize).min(window.len());
+                self.already_s = window_s - keep as f64 / self.rate;
+                self.grid_s = Some(cut.rem_euclid(slot_s));
+                self.quiet = 0;
+            }
+            None => {}
+            Some(_) => match heard.is_empty() {
+                true => {
+                    self.quiet += 1;
+                    if self.quiet >= QUIET_SLOTS {
+                        self.reset();
+                    }
+                }
+                false => self.quiet = 0,
+            },
+        }
+        self.buffer.clear();
+        self.buffer.extend_from_slice(&window[keep..]);
+        out.extend(heard);
+    }
 }
 
 #[cfg(test)]

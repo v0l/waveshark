@@ -40,8 +40,8 @@ the code is in the commit log.
   and passing the samples on over iqstream itself.
 - KISS TNC on `--kiss-listen` or the setup card: packet software reads
   what the radio heard and keys AX.25 through it.
-- FT8 and FT4 on the HF dials: every station in the passband, with their grid
-  squares on the map.
+- FT8 and FT4 on the HF dials, live or replayed: every station in the
+  passband, with their grid squares on the map.
 - Protocol descriptions: sensors, remotes and FSK links as YAML files
   fetched from github.com/v0l/waveshark-protocols, so a fixed or added
   layout arrives without a new build, each stating its fields' types and
