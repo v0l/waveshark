@@ -178,6 +178,15 @@ pub fn band_of(settings: &Settings) -> Option<(f64, f64)> {
     (hi > lo).then_some((lo, hi))
 }
 
+/// The joins of a stitched receiver inside a stage's band, as the comma
+/// separated `seams_hz` setting carries them.
+///
+/// Read here for the same reason as [`band_of`]: the detector and the channel
+/// bank are both handed the list and both have to read it the same way.
+pub fn seams_of(settings: &Settings) -> Vec<f64> {
+    settings.str_or("seams_hz", "").split(',').filter_map(|s| s.trim().parse().ok()).collect()
+}
+
 /// Where a sink spools what it has to send, as its description carries it,
 /// or the folder that sink keeps its own spool in.
 ///

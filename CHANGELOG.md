@@ -157,6 +157,8 @@ the code is in the commit log.
 
 ### Changed
 
+- Scanner channels landing on a join between two tuners are dropped, and a
+  block written on one is named.
 - Setup holds what this receiver serves, under a NETWORK tab, and call
   recording has its own card off the call list.
 - Map layers moved onto the map, on a panel in its corner, and the station

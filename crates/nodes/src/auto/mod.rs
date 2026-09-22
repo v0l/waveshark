@@ -526,8 +526,7 @@ impl Node for AutoNode {
         self.set_band(crate::band_of(settings));
         let spur = settings.f64_or("spur_hz", 0.0);
         self.set_spur((spur > 0.0).then_some(spur));
-        let seams = settings.str_or("seams_hz", "");
-        self.set_seams(seams.split(',').filter_map(|s| s.trim().parse().ok()).collect());
+        self.set_seams(crate::seams_of(settings));
         let step = settings.f64_or("raster_hz", 0.0);
         self.set_raster((step > 0.0).then(|| (settings.f64_or("raster_origin_hz", 0.0), step)));
     }

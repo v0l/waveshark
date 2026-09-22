@@ -1364,6 +1364,19 @@ impl Receiver {
                     proto.label()
                 ));
             }
+            // A block written on a join of a stitched receiver is built and
+            // demodulates out of two slices that slip against each other, so
+            // it is said rather than dropped: the frequency is written down
+            // in the scanner table and an operator can move it.
+            let half = shape.widths[0] / 2.0;
+            if let Some(join) = plan.seams.iter().find(|h| (hz - half..=hz + half).contains(h)) {
+                refused = Some(format!(
+                    "{} at {:.4} MHz sits across the join at {:.4} MHz",
+                    proto.label(),
+                    hz / 1e6,
+                    join / 1e6
+                ));
+            }
         }
         // The same for a channel on the strip. A channel the dial has left
         // behind is not a fault, because moving the dial back fixes it, but
@@ -3540,6 +3553,11 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     s.insert("channel_hz".into(), pipeline::ParamValue::Float(width));
                     s.insert("band_lo_hz".into(), pipeline::ParamValue::Float(band.0));
                     s.insert("band_hi_hz".into(), pipeline::ParamValue::Float(band.1));
+                    // The joins inside this band, whose grid channels are
+                    // made of two slices and demodulate a guess.
+                    if let Some(list) = seams_in(&plan.seams, band.0, band.1) {
+                        s.insert("seams_hz".into(), pipeline::ParamValue::Text(list));
+                    }
                     let id = p.add_derived(derived::at("bank", sub.key(), width as u64), "bank", s);
                     p.connect(src, (id, 0));
                 }
@@ -6324,6 +6342,52 @@ pub(crate) mod tests {
         let patch = derived_patch(&p);
         assert!(!patch.stages().iter().any(|s| s.settings.contains_key("seams_hz")));
         let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    /// The other two front ends on a stitched span: a bank's grid channels
+    /// over a join lose their decoders, and a block written on one is said.
+    #[test]
+    fn a_bank_over_a_stitched_span_drops_the_channels_on_the_join() {
+        use pipeline::registry::SettingsExt;
+        let seam = 433_920_000.0;
+        let mut p = ism_at(433.92, 2_400_000.0);
+        let whole = Receiver::build(&p, Sinks::default()).unwrap().bank_channels();
+        assert_eq!(whole, vec![58], "one bank decoding 58 channels over the ISM band");
+
+        p.seams = vec![seam];
+        let patch = derived_patch(&p);
+        let bank = patch.stages().iter().find(|s| s.kind == "bank").expect("the bank");
+        assert_eq!(bank.settings.str_or("seams_hz", ""), "433920000");
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert_eq!(rx.bank_channels(), vec![57], "the channel on the join keeps its decoder");
+
+        // A join outside the block's band costs the bank nothing.
+        p.seams = vec![434_900_000.0];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert_eq!(rx.bank_channels(), whole);
+    }
+
+    #[test]
+    fn a_scanner_block_written_on_a_join_is_named() {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts = vec![anywhere(Front::named("pocsag").expect("POCSAG is registered"))];
+        let hz = match p.fronts[0].front {
+            Front::Protocol { hz, .. } => hz,
+            _ => unreachable!(),
+        };
+        p.center = Hz(hz as u64);
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+
+        p.seams = vec![hz + 2_000.0];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let said = rx.refused.clone().expect("the operator is told about the join");
+        assert!(said.contains("sits across the join"), "{said}");
+
+        // Half a megahertz away it is a different channel's problem.
+        p.seams = vec![hz + 500_000.0];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 

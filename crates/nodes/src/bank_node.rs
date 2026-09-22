@@ -52,6 +52,14 @@ pub struct BankNode {
     /// decoders on them, so without this the receiver reports sensors from
     /// outside the band a scanner block declared, and spends the CPU to do it.
     band: Option<(f64, f64)>,
+    /// Dial frequencies where one tuner's span ends and the next begins, as
+    /// `sources::Combined::seams` places them.
+    ///
+    /// A grid channel covering one is made of two slices that each carry
+    /// their own DC spike and rolloff and slip against each other by whole
+    /// blocks, so whatever it demodulates is a guess. Empty on a receiver
+    /// that is one tuner.
+    seams: Vec<f64>,
 }
 
 impl BankNode {
@@ -74,6 +82,7 @@ impl BankNode {
             center: Hz(0),
             detect: crate::ism_detector_config(),
             band: None,
+            seams: Vec::new(),
         }
     }
 
@@ -81,7 +90,7 @@ impl BankNode {
     pub fn set_band(&mut self, band: Option<(f64, f64)>) {
         if self.band != band {
             self.band = band;
-            self.apply_band();
+            self.apply_mask();
         }
     }
 
@@ -89,17 +98,34 @@ impl BankNode {
         self.band
     }
 
-    /// Drop the decoders on channels the wanted band does not reach.
+    /// The joins of a stitched receiver inside the bank's input.
+    pub fn set_seams(&mut self, seams: Vec<f64>) {
+        if self.seams != seams {
+            self.seams = seams;
+            self.apply_mask();
+        }
+    }
+
+    pub fn seams(&self) -> &[f64] {
+        &self.seams
+    }
+
+    /// Drop the decoders on channels the wanted band does not reach, and on
+    /// channels covering a join between two tuners.
     ///
     /// Their samples are still channelized, because the channelizer produces
     /// every channel at once whether or not anything reads them, but nothing
     /// downstream runs and nothing they hear is reported.
-    fn apply_band(&mut self) {
-        let Some((lo, hi)) = self.band else { return };
+    fn apply_mask(&mut self) {
+        if self.band.is_none() && self.seams.is_empty() {
+            return;
+        }
         let half = self.bank.channel_bandwidth() / 2.0;
         for ch in 0..self.bank.channels() {
             let c = self.bank.channel_center(ch).as_f64();
-            if c + half <= lo || c - half >= hi {
+            let outside = self.band.is_some_and(|(lo, hi)| c + half <= lo || c - half >= hi);
+            let on_join = self.seams.iter().any(|h| (c - half..=c + half).contains(h));
+            if outside || on_join {
                 self.bank.clear_chain(ch);
             }
         }
@@ -114,7 +140,7 @@ impl BankNode {
     /// Put a decoder back on every channel, then mask again.
     fn rebuild_graphs(&mut self) -> Result<()> {
         self.bank.set_all_graphs(&self.make)?;
-        self.apply_band();
+        self.apply_mask();
         Ok(())
     }
 
@@ -225,7 +251,7 @@ impl BankNode {
         self.bank = bank;
         self.rate = rate;
         self.center = center;
-        self.apply_band();
+        self.apply_mask();
         Ok(())
     }
 }
@@ -255,6 +281,7 @@ impl Simple for BankNode {
     /// since it was last built.
     fn configure(&mut self, settings: &Settings) {
         self.set_band(crate::band_of(settings));
+        self.set_seams(crate::seams_of(settings));
     }
 
     /// The decoders on the channels that have one, so something asked of
@@ -451,6 +478,52 @@ mod tests {
         Node::negotiate(&mut b, &[moved]).unwrap();
         assert_eq!(b.channels(), before, "a retune is not a rebuild");
         assert!(!Node::subgraphs(&b).is_empty(), "the chains survived");
+    }
+
+    #[test]
+    fn a_join_between_two_tuners_takes_the_decoders_off_the_channels_on_it() {
+        let rate = 2_400_000.0;
+        let seam = 433_920_000.0 + 400_000.0;
+        let mut plain = bank();
+        Node::negotiate(&mut plain, &[spec(rate)]).unwrap();
+        assert_eq!(plain.active_channels(), 78, "every channel decodes on one tuner");
+
+        let mut stitched = bank();
+        let mut s = Settings::new();
+        s.insert("seams_hz".into(), ParamValue::Text(format!("{seam}")));
+        Simple::configure(&mut stitched, &s);
+        assert_eq!(stitched.seams(), [seam]);
+        Node::negotiate(&mut stitched, &[spec(rate)]).unwrap();
+        assert_eq!(stitched.active_channels(), 77, "the channel on the join still has a decoder");
+        let half = stitched.channel_hz() / 2.0;
+        let dropped: Vec<f64> = (0..stitched.channels())
+            .filter(|c| stitched.bank.graph(*c).is_none())
+            .map(|c| stitched.bank.channel_center(c).as_f64())
+            .collect();
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert!((dropped[0] - seam).abs() <= half, "{dropped:?} is not the channel on {seam}");
+    }
+
+    #[test]
+    fn a_join_outside_the_wanted_band_costs_no_channel() {
+        let rate = 2_400_000.0;
+        let mut b = bank();
+        b.set_band(Some((433_800_000.0, 434_000_000.0)));
+        Node::negotiate(&mut b, &[spec(rate)]).unwrap();
+        let banded = b.active_channels();
+        assert_eq!(banded, 8, "200 kHz of 31 kHz channels, with the edges");
+
+        let mut inside = bank();
+        inside.set_band(Some((433_800_000.0, 434_000_000.0)));
+        inside.set_seams(vec![433_900_000.0]);
+        Node::negotiate(&mut inside, &[spec(rate)]).unwrap();
+        assert_eq!(inside.active_channels(), banded - 1);
+
+        let mut outside = bank();
+        outside.set_band(Some((433_800_000.0, 434_000_000.0)));
+        outside.set_seams(vec![434_500_000.0]);
+        Node::negotiate(&mut outside, &[spec(rate)]).unwrap();
+        assert_eq!(outside.active_channels(), banded);
     }
 
     #[test]
