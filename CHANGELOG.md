@@ -93,6 +93,8 @@ the code is in the commit log.
   next release from each.
 - IQStream and rtl_tcp as remote tuners, added beside packet feeds in one
   dialog.
+- SpyServer as a remote tuner, so any public Airspy or dongle on the internet
+  is a receiver here.
 - IQStream remote tuners can be tuned from here, gain and switches included,
   and a server carrying several is one receiver per tuner in the list.
 - rtl_tcp bias tee, direct sampling and RTL AGC, on the radio card, with

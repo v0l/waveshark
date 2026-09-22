@@ -13,6 +13,7 @@
 pub mod gaps;
 pub mod iqstream;
 pub mod rtl_tcp;
+pub mod spyserver;
 
 use common::{Error, Hz, Result, Sps};
 use std::time::Duration;
@@ -29,10 +30,11 @@ pub(crate) const QUEUE_DEPTH: usize = 64;
 pub enum Proto {
     IqStream,
     RtlTcp,
+    SpyServer,
 }
 
 impl Proto {
-    pub const ALL: &'static [Proto] = &[Proto::IqStream, Proto::RtlTcp];
+    pub const ALL: &'static [Proto] = &[Proto::IqStream, Proto::RtlTcp, Proto::SpyServer];
 
     /// The name used on the wire-facing side of the receiver: the session
     /// file, the command line and the device id.
@@ -40,6 +42,7 @@ impl Proto {
         match self {
             Self::IqStream => "iqstream",
             Self::RtlTcp => "rtl_tcp",
+            Self::SpyServer => "spyserver",
         }
     }
 
@@ -57,6 +60,7 @@ impl Proto {
             // Both, which is the whole reason an address alone cannot say
             // which server is listening.
             Self::IqStream | Self::RtlTcp => 1234,
+            Self::SpyServer => spyserver::DEFAULT_PORT,
         }
     }
 
@@ -67,6 +71,7 @@ impl Proto {
             // many readers and no reader may move it.
             Self::IqStream => false,
             Self::RtlTcp => true,
+            Self::SpyServer => true,
         }
     }
 
@@ -76,6 +81,7 @@ impl Proto {
         match self {
             Self::IqStream => "iqstreamd",
             Self::RtlTcp => "rtl_tcp, shipped with librtlsdr",
+            Self::SpyServer => "spyserver, from the Airspy people",
         }
     }
 
@@ -83,6 +89,7 @@ impl Proto {
         match self {
             Self::IqStream => "https://github.com/v0l/iqstream",
             Self::RtlTcp => "https://github.com/osmocom/rtl-sdr",
+            Self::SpyServer => "https://airspy.com/directory/",
         }
     }
 
@@ -98,6 +105,12 @@ impl Proto {
                  are set from here. Anything else already reading that dongle is turned away \
                  while this is connected."
             }
+            Self::SpyServer => {
+                "An Airspy or a dongle served to several listeners at once, and the protocol \
+                 most public receivers on the internet speak. The rate is picked from the \
+                 stages the far end offers; how far the dial travels is the server's to \
+                 grant, and a shared one lets it move only inside the span it is already on."
+            }
         }
     }
 
@@ -105,6 +118,7 @@ impl Proto {
         match self {
             Self::IqStream => "host, or host:port (1234)",
             Self::RtlTcp => "host, or host:port (1234)",
+            Self::SpyServer => "host, or host:port (5555)",
         }
     }
 
@@ -119,6 +133,7 @@ impl Proto {
         match self {
             Self::IqStream => iqstream::probe(addr),
             Self::RtlTcp => rtl_tcp::probe(addr),
+            Self::SpyServer => spyserver::probe(addr),
         }
     }
 
@@ -131,6 +146,7 @@ impl Proto {
         match self {
             Self::IqStream => iqstream::probe_all(addr),
             Self::RtlTcp => rtl_tcp::probe(addr).map(|p| vec![p]),
+            Self::SpyServer => spyserver::probe(addr).map(|p| vec![p]),
         }
     }
 
@@ -138,6 +154,7 @@ impl Proto {
         match self {
             Self::IqStream => Ok(Box::new(iqstream::Device::open(addr)?)),
             Self::RtlTcp => Ok(Box::new(rtl_tcp::Device::open(addr)?)),
+            Self::SpyServer => Ok(Box::new(spyserver::Device::open(addr)?)),
         }
     }
 }
@@ -233,11 +250,12 @@ pub struct Probe {
 ///
 /// rtl_tcp goes first because it greets an unopened connection with four
 /// magic bytes, so recognising it costs one read and mistaking anything else
-/// for it is not possible. iqstream is asked second and only then, because
-/// its handshake has to be spoken before the server says anything at all.
+/// for it is not possible. iqstream and spyserver are asked after it and only
+/// then, because each has a handshake that has to be spoken before the server
+/// says anything at all.
 pub fn identify(addr: &str) -> Result<Probe> {
     let mut last = None;
-    for p in [Proto::RtlTcp, Proto::IqStream] {
+    for p in [Proto::RtlTcp, Proto::IqStream, Proto::SpyServer] {
         match p.probe(addr) {
             Ok(found) => return Ok(found),
             Err(e) => last = Some(e),
@@ -282,7 +300,12 @@ mod tests {
         // A bare address is iqstream, which is what the setting meant before
         // there was anything else to mean.
         assert_eq!(parse_spec("radarpi"), Some((Proto::IqStream, "radarpi:1234".to_string())));
-        assert_eq!(parse_spec("spyserver://radarpi"), None);
+        assert_eq!(
+            parse_spec("spyserver://radarpi"),
+            Some((Proto::SpyServer, "radarpi:5555".to_string())),
+            "and it takes its own port, not the one the other two share"
+        );
+        assert_eq!(parse_spec("sdruno://radarpi"), None);
     }
 
     /// rtl_tcp is recognised on the port it shares with iqstream, without
@@ -311,7 +334,9 @@ mod tests {
     fn only_one_of_them_takes_a_retune() {
         assert!(!Proto::IqStream.tunable());
         assert!(Proto::RtlTcp.tunable());
-        assert_eq!(Proto::ALL.len(), 2);
+        assert!(Proto::SpyServer.tunable());
+        assert_eq!(Proto::ALL.len(), 3);
+        assert_eq!(Proto::SpyServer.default_port(), 5555);
         for p in Proto::ALL {
             assert_eq!(Proto::parse(p.name()), Some(*p));
             assert!(p.url().starts_with("https://"));
