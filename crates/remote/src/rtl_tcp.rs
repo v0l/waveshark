@@ -10,6 +10,7 @@
 //! settings rather than readings, and the server turns away a second client
 //! for as long as this one holds the socket.
 
+use crate::gaps::Gaps;
 use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};
 use common::device::{
     Device as DeviceTrait, DeviceInfo, DriverKind, GainMode, GainStage, RxStream,
@@ -330,7 +331,9 @@ fn pump(
     let pairs = ((rate.as_f64() / 50.0) as usize).clamp(2048, 1 << 18);
     let mut raw = vec![0u8; pairs * 2];
     let mut samples = Vec::with_capacity(pairs);
-    let mut seq = 0u64;
+    // rtl_tcp numbers nothing and reports nothing, so what went missing is
+    // read off when the blocks arrived.
+    let mut gaps = Gaps::new(rate);
     while !stop.load(Ordering::Relaxed) {
         match sock.read_exact(&mut raw) {
             Ok(()) => {}
@@ -344,9 +347,18 @@ fn pump(
         samples.clear();
         SampleFormat::Cu8.convert(&raw, &mut samples);
         let n = samples.len() as u64;
-        let buf = IqBuf::new(std::mem::take(&mut samples), center, rate, seq);
+        let lost = gaps.arrived(n);
+        if lost > 0 {
+            dropped.fetch_add(lost, Ordering::Relaxed);
+            tracing::warn!(
+                "rtl_tcp: {lost} samples ({:.0} ms) never arrived",
+                lost as f64 * 1000.0 / rate.as_f64()
+            );
+        }
+        // The gap is counted before this block, so the timebase carries the
+        // hole rather than closing it up.
+        let buf = IqBuf::new(std::mem::take(&mut samples), center, rate, gaps.counted() - n);
         samples = Vec::with_capacity(pairs);
-        seq += n;
         match tx.try_send(buf) {
             Ok(()) => {}
             // A consumer that cannot keep up loses the oldest samples rather
@@ -564,6 +576,106 @@ mod tests {
         // converter and nothing falls outside it.
         assert!(b.samples.iter().all(|c| c.re.abs() <= 1.01 && c.im.abs() <= 1.01));
         assert_eq!(s.dropped(), 0);
+        s.stop();
+    }
+
+    /// A server that sends at the rate it was asked for, and stops for a
+    /// while part way through. `catches_up` says whether the samples it could
+    /// not send are still sent afterwards, which is what a held TCP
+    /// connection does, or thrown away, which is what its own overrun does.
+    fn stalling(rate: u64, stall: std::time::Duration, catches_up: bool) -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let (mut sock, _) = l.accept().unwrap();
+            let mut hello = [0u8; GREETING];
+            hello[..4].copy_from_slice(&MAGIC);
+            hello[4..8].copy_from_slice(&5u32.to_be_bytes());
+            hello[8..12].copy_from_slice(&29u32.to_be_bytes());
+            sock.write_all(&hello).unwrap();
+            // A fifth of the receiver's block, so the stream is not paced in
+            // step with the reads it is measured by.
+            let block = (rate / 250) as usize;
+            let period = std::time::Duration::from_secs_f64(block as f64 / rate as f64);
+            let bytes = vec![127u8; block * 2];
+            let start = std::time::Instant::now();
+            let mut next = start + period;
+            let mut stalled = false;
+            loop {
+                if !stalled && start.elapsed() > std::time::Duration::from_millis(1200) {
+                    stalled = true;
+                    std::thread::sleep(stall);
+                    if !catches_up {
+                        next = std::time::Instant::now() + period;
+                    }
+                }
+                let now = std::time::Instant::now();
+                if next > now {
+                    std::thread::sleep(next - now);
+                }
+                next += period;
+                if sock.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+        });
+        addr
+    }
+
+    /// Read blocks for this long, and say by how much the sequence number
+    /// jumped beyond the samples that were handed over.
+    fn seq_jumps(s: &mut dyn RxStream, how_long: std::time::Duration) -> Vec<u64> {
+        let start = std::time::Instant::now();
+        let mut last: Option<(u64, u64)> = None;
+        let mut jumps = Vec::new();
+        while start.elapsed() < how_long {
+            let b = s.read().unwrap();
+            if let Some((seq, len)) = last {
+                let step = b.seq - seq;
+                if step != len {
+                    jumps.push(step - len);
+                }
+            }
+            last = Some((b.seq, b.len() as u64));
+        }
+        jumps
+    }
+
+    /// A held connection is not a loss: TCP kept the samples and sends them
+    /// in a burst, so the stream is late for a moment and then complete.
+    /// Calling that a gap would put a hole in a recording that has every
+    /// sample in it.
+    #[test]
+    fn a_stall_that_catches_up_leaves_the_numbering_alone() {
+        let addr = stalling(240_000, std::time::Duration::from_millis(400), true);
+        let mut d = Device::open(&addr).unwrap();
+        d.set_rate(Sps(240_000)).unwrap();
+        let mut s = d.start_rx().unwrap();
+        let jumps = seq_jumps(s.as_mut(), std::time::Duration::from_secs(4));
+        assert_eq!(jumps, Vec::<u64>::new(), "nothing was lost, so nothing is counted");
+        assert_eq!(s.dropped(), 0);
+        s.stop();
+    }
+
+    /// A server that stopped sending and carried on from the present is short
+    /// by the length of the stall, and nothing later makes it up: the samples
+    /// after it belong 400 ms further on than counting would put them.
+    #[test]
+    fn a_stall_that_never_catches_up_moves_the_numbering_on() {
+        let addr = stalling(240_000, std::time::Duration::from_millis(400), false);
+        let mut d = Device::open(&addr).unwrap();
+        d.set_rate(Sps(240_000)).unwrap();
+        let mut s = d.start_rx().unwrap();
+        let jumps = seq_jumps(s.as_mut(), std::time::Duration::from_secs(4));
+        assert_eq!(jumps.len(), 1, "one gap, declared once: {jumps:?}");
+        // 400 ms at 240 kS/s is 96000 samples; the ends are the window's own
+        // resolution either side of it.
+        assert!(
+            (90_000..=102_000).contains(&jumps[0]),
+            "{} samples is not the 96000 the server held back",
+            jumps[0]
+        );
+        assert_eq!(s.dropped(), jumps[0], "and the same figure is what the stream reports");
         s.stop();
     }
 

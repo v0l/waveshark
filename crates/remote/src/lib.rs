@@ -10,6 +10,7 @@
 //! accepts a retune, and the name of the program that serves it, which is
 //! what an operator has to install at the far end.
 
+pub mod gaps;
 pub mod iqstream;
 pub mod rtl_tcp;
 
