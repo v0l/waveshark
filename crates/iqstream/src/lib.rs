@@ -9,6 +9,22 @@
 //! subscription's lifetime: a reader that stops answering keepalives is
 //! dropped.
 //!
+//! # Getting to a client the server cannot address
+//!
+//! A subscriber behind NAT cannot say where it is, so it punches: a datagram
+//! to the server's data port carrying [`proto::tag::PUNCH_TOKEN`], and the
+//! server sends the samples back to the address that arrived on. The size of
+//! those datagrams is measured rather than assumed, with probes the client
+//! answers only for the sizes that reached it, because a 1500 byte datagram
+//! is dropped outright on an ordinary PPPoE path.
+//!
+//! Where no datagram arrives at all the client asks again for
+//! [`proto::Transport::Tcp`] and reads the samples off the control
+//! connection. That costs head of line blocking, so a subscriber not taking
+//! them has its blocks dropped rather than its keepalives held up.
+//!
+//! docs/iqstream-nat.md draws the whole exchange.
+//!
 //! # Several tuners on one port
 //!
 //! A server offers a [`server::Stream`] per tuner and says so in its welcome;
@@ -33,6 +49,6 @@ pub mod client;
 pub mod proto;
 pub mod server;
 
-pub use client::{Block, ClientConfig, IqStream, StreamInfo, list};
-pub use proto::{Codec, Setting, SettingKind, SettingValue, StreamDesc};
+pub use client::{Block, ClientConfig, IqStream, Prefer, StreamInfo, list};
+pub use proto::{Codec, Setting, SettingKind, SettingValue, StreamDesc, Transport};
 pub use server::{Ask, Server, ServerConfig, Stream, StreamConfig, Tune};

@@ -34,8 +34,9 @@
 
 use crate::proto::{
     BitDepth, Codec, DATA_HEADER_LEN, DataHeader, Frame, MAX_DATAGRAM_PAYLOAD, MAX_FRAME_PAYLOAD,
-    PREAMBLE_LEN, Setting, SettingValue, StreamDesc, Tlvs, VERSION_MAJOR, decode_preamble,
-    encode_preamble, error_code, msg, now_ns, pack, put_streams, tag,
+    PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD, Setting, SettingValue, StreamDesc, Tlvs,
+    Transport, VERSION_MAJOR, decode_preamble, decode_punch, encode_inline, encode_preamble,
+    encode_probe, error_code, msg, now_ns, pack, put_streams, tag,
 };
 use common::{Error, Result};
 use std::collections::HashMap;
@@ -62,6 +63,16 @@ const IDLE_TIMEOUT_S: u64 = 45;
 
 /// How often the server pings a quiet subscriber.
 const PING_INTERVAL_S: u64 = 15;
+
+/// Blocks held for a subscriber reading its samples off the control
+/// connection. A full queue drops the block rather than waiting, because the
+/// keepalives and the unsubscribe share that socket and a stalled reader must
+/// not be able to hold them up.
+const INLINE_DEPTH: usize = 8;
+
+/// How long the probe of each candidate size is repeated, so a single lost
+/// datagram does not cost the path its real size.
+const PROBE_TRIES: usize = 2;
 
 /// One tuner, as the welcome describes it.
 #[derive(Clone, Debug, Default)]
@@ -148,6 +159,7 @@ pub struct Stream {
     asks: Mutex<Vec<Ask>>,
     subscribers: AtomicUsize,
     blocks_sent: AtomicU64,
+    blocks_dropped: AtomicU64,
     /// The server's own, so a setting moving reaches every connection and not
     /// only this tuner's readers.
     changed: broadcast::Sender<Change>,
@@ -176,6 +188,7 @@ impl Stream {
             asks: Mutex::new(Vec::new()),
             subscribers: AtomicUsize::new(0),
             blocks_sent: AtomicU64::new(0),
+            blocks_dropped: AtomicU64::new(0),
             changed,
         })
     }
@@ -260,6 +273,14 @@ impl Stream {
 
     pub fn blocks_sent(&self) -> u64 {
         self.blocks_sent.load(Ordering::Relaxed)
+    }
+
+    /// Blocks thrown away because a subscriber was not taking them fast
+    /// enough: it fell behind the fan-out, or it reads them off the control
+    /// connection and its queue there was full. The alternative for the
+    /// second is holding up its keepalives behind its own sample data.
+    pub fn blocks_dropped(&self) -> u64 {
+        self.blocks_dropped.load(Ordering::Relaxed)
     }
 
     pub fn center_hz(&self) -> u64 {
@@ -379,6 +400,72 @@ struct Streams {
     /// Poked when a stream is added, removed or changed, so every connection
     /// can pass it on.
     changed: broadcast::Sender<Change>,
+    /// The port punches arrive on and samples leave from, told to every
+    /// client in the welcome. Zero where the port could not be had for UDP,
+    /// which leaves a client naming its own port as a 1.3 one does.
+    data_port: u16,
+    /// Where each subscription's punch is expected, by the token it carries.
+    /// A pump waits on its entry until a datagram arrives from the address
+    /// the client's NAT gave it.
+    punches: Mutex<HashMap<u64, tokio::sync::watch::Sender<Option<SocketAddr>>>>,
+    /// Punches that arrived before the subscribe naming them, which is the
+    /// order a client opening its hole first sends them in.
+    early: Mutex<HashMap<u64, (SocketAddr, std::time::Instant)>>,
+}
+
+/// How long a punch is held for a subscribe that has not arrived yet. Long
+/// enough for a connection that punched first, short enough that a token
+/// nobody subscribes with is forgotten.
+const EARLY_PUNCH_S: u64 = 30;
+
+/// Holds a subscription's place in the punch table for as long as its pump
+/// runs, and gives it up however the pump ends.
+struct Punched {
+    shared: Arc<Streams>,
+    token: u64,
+}
+
+impl Drop for Punched {
+    fn drop(&mut self) {
+        if let Ok(mut p) = self.shared.punches.lock() {
+            p.remove(&self.token);
+        }
+    }
+}
+
+/// One datagram off the server's data port: a punch, and nothing else is
+/// expected there. Told to the subscription that named the token, which is
+/// how a client behind NAT is reached at all.
+async fn punch_loop(data: Arc<UdpSocket>, shared: Arc<Streams>) {
+    let mut buf = [0u8; 2048];
+    loop {
+        let Ok((n, from)) = data.recv_from(&mut buf).await else {
+            continue;
+        };
+        let Some(token) = decode_punch(&buf[..n]) else {
+            continue;
+        };
+        let waiting = shared.punches.lock().ok().and_then(|p| p.get(&token).cloned());
+        match waiting {
+            Some(tx) => {
+                tx.send_if_modified(|held| match *held == Some(from) {
+                    true => false,
+                    false => {
+                        *held = Some(from);
+                        true
+                    }
+                });
+            }
+            // The subscribe naming this token has not been read yet.
+            None => {
+                if let Ok(mut early) = shared.early.lock() {
+                    let now = std::time::Instant::now();
+                    early.retain(|_, (_, at)| at.elapsed().as_secs() < EARLY_PUNCH_S);
+                    early.insert(token, (from, now));
+                }
+            }
+        }
+    }
 }
 
 impl Streams {
@@ -414,16 +501,6 @@ impl Server {
     /// A port of zero asks the kernel for a free one, which is what a test
     /// wants; [`Server::addr`] then says which it got.
     pub fn start(addr: SocketAddr, cfg: ServerConfig) -> Result<Arc<Self>> {
-        let inner = Arc::new(Streams {
-            name: cfg.name,
-            streams: Mutex::new(Vec::new()),
-            next_id: AtomicU32::new(0),
-            changed: broadcast::channel(8).0,
-        });
-        for s in cfg.streams {
-            add(&inner, s);
-        }
-
         // Bound with std so a port already in use is an error the caller sees,
         // rather than a log line from a thread it has already left. Doing it
         // through the runtime would need a block_on, which panics when start
@@ -434,6 +511,30 @@ impl Server {
         })?;
         listener.set_nonblocking(true).map_err(other)?;
         let bound = listener.local_addr().map_err(other)?;
+
+        // The same port for the samples, so a client has one address to punch
+        // to and the datagrams come back from the address it punched: a NAT
+        // that mapped the control connection will pass those and nothing
+        // else. A port that cannot be had for UDP leaves the server unable to
+        // be punched, which is a server a client names its own port to.
+        let data = std::net::UdpSocket::bind(bound).ok();
+        let data_port = data.as_ref().and_then(|d| d.local_addr().ok()).map_or(0, |a| a.port());
+        if let Some(d) = &data {
+            d.set_nonblocking(true).map_err(other)?;
+        }
+
+        let inner = Arc::new(Streams {
+            name: cfg.name,
+            streams: Mutex::new(Vec::new()),
+            next_id: AtomicU32::new(0),
+            changed: broadcast::channel(8).0,
+            data_port,
+            punches: Mutex::new(HashMap::new()),
+            early: Mutex::new(HashMap::new()),
+        });
+        for s in cfg.streams {
+            add(&inner, s);
+        }
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -449,8 +550,12 @@ impl Server {
                 // from_std registers with the reactor, so it has to happen
                 // inside the runtime rather than on the way in.
                 rt.block_on(async move {
+                    let data = data.and_then(|d| UdpSocket::from_std(d).ok()).map(Arc::new);
+                    if let Some(d) = data.clone() {
+                        tokio::spawn(punch_loop(d, shared.clone()));
+                    }
                     match TcpListener::from_std(listener) {
-                        Ok(l) => accept_loop(l, shared, stopping).await,
+                        Ok(l) => accept_loop(l, shared, data, stopping).await,
                         Err(e) => tracing::error!("iqstream: {e}"),
                     }
                 });
@@ -533,7 +638,12 @@ impl Drop for Server {
     }
 }
 
-async fn accept_loop(listener: TcpListener, shared: Arc<Streams>, stop: Arc<AtomicBool>) {
+async fn accept_loop(
+    listener: TcpListener,
+    shared: Arc<Streams>,
+    data: Option<Arc<UdpSocket>>,
+    stop: Arc<AtomicBool>,
+) {
     loop {
         let Ok((sock, peer)) = listener.accept().await else {
             continue;
@@ -542,18 +652,23 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Streams>, stop: Arc<Atom
             return;
         }
         let shared = shared.clone();
+        let data = data.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve(sock, peer, shared).await {
+            if let Err(e) = serve(sock, peer, shared, data).await {
                 tracing::debug!("iqstream: {peer} left: {e}");
             }
         });
     }
 }
 
-/// One subscription on one connection: the task pumping it, and the switch
-/// that ends it.
+/// One subscription on one connection: the task pumping it, the sizes the
+/// client has said its path takes, and the switch that ends it.
 struct Subscription {
     stop: tokio::sync::watch::Sender<bool>,
+    /// The largest payload a probe got through with. Raised as the client
+    /// answers, so the first blocks leave at the size any path takes and the
+    /// rest at the size this one does.
+    payload: tokio::sync::watch::Sender<usize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -571,7 +686,12 @@ impl Subscription {
 /// socket goes through `out`, because several tasks have something to say on
 /// it and a half-written frame from two of them at once is an unreadable
 /// stream.
-async fn serve(sock: TcpStream, peer: SocketAddr, shared: Arc<Streams>) -> Result<()> {
+async fn serve(
+    sock: TcpStream,
+    peer: SocketAddr,
+    shared: Arc<Streams>,
+    data: Option<Arc<UdpSocket>>,
+) -> Result<()> {
     sock.set_nodelay(true).map_err(other)?;
     let (mut rd, mut wr) = sock.into_split();
 
@@ -596,26 +716,49 @@ async fn serve(sock: TcpStream, peer: SocketAddr, shared: Arc<Streams>) -> Resul
     }
     let who = hello.tlvs()?.str(tag::CLIENT_NAME).unwrap_or_else(|| peer.to_string());
 
+    // Samples on their own queue, read second and never waited on, so a
+    // reader taking them off the control connection cannot hold up a ping or
+    // an unsubscribe behind a megabyte of its own samples.
     let (out, mut outbox) = mpsc::channel::<Vec<u8>>(64);
+    let (inline, mut inbox) = mpsc::channel::<Vec<u8>>(INLINE_DEPTH);
     let writer = tokio::spawn(async move {
-        while let Some(bytes) = outbox.recv().await {
+        let mut inline_open = true;
+        loop {
+            let bytes = tokio::select! {
+                biased;
+                frame = outbox.recv() => match frame {
+                    Some(b) => b,
+                    None => return,
+                },
+                block = inbox.recv(), if inline_open => match block {
+                    Some(b) => b,
+                    None => {
+                        inline_open = false;
+                        continue;
+                    }
+                },
+            };
             if wr.write_all(&bytes).await.is_err() {
                 return;
             }
         }
     });
 
-    let result = converse(&mut rd, &out, &shared, peer, &who).await;
+    let result = converse(&mut rd, &out, &inline, &shared, data, peer, &who).await;
     drop(out);
+    drop(inline);
     let _ = writer.await;
     tracing::info!("iqstream: {who} left");
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn converse(
     rd: &mut tokio::net::tcp::OwnedReadHalf,
     out: &mpsc::Sender<Vec<u8>>,
+    inline: &mpsc::Sender<Vec<u8>>,
     shared: &Arc<Streams>,
+    data: Option<Arc<UdpSocket>>,
     peer: SocketAddr,
     who: &str,
 ) -> Result<()> {
@@ -685,7 +828,11 @@ async fn converse(
                         if let Some(old) = subs.remove(&stream.id()) {
                             old.end().await;
                         }
-                        match subscribe(&frame, &stream, out, peer, who).await? {
+                        let started = subscribe(
+                            &frame, &stream, out, inline, shared, data.clone(), peer, who,
+                        )
+                        .await?;
+                        match started {
                             Some(sub) => {
                                 subs.insert(stream.id(), sub);
                             }
@@ -720,6 +867,22 @@ async fn converse(
                         send(out, Frame::new(msg::PONG, &t)).await?;
                     }
                     msg::PONG => {}
+                    // A datagram of that size reached the client, so the
+                    // path takes it: the pump reads this before every block
+                    // and the stream widens as the sizes are confirmed.
+                    msg::PROBED => {
+                        let t = frame.tlvs()?;
+                        let sub = shared.pick(named).and_then(|s| subs.get(&s.id()));
+                        if let (Some(size), Some(sub)) = (t.u16(tag::PROBE_SIZE), sub) {
+                            sub.payload.send_if_modified(|held| match size as usize > *held {
+                                true => {
+                                    *held = size as usize;
+                                    true
+                                }
+                                false => false,
+                            });
+                        }
+                    }
                     msg::TUNE => tune(&frame, shared, named, out).await?,
                     msg::SET_SETTING => set_setting(&frame, shared, named, out).await?,
                     _ => {}
@@ -793,10 +956,14 @@ async fn set_setting(
 }
 
 /// Take one subscribe and start the task that feeds it, or answer why not.
+#[allow(clippy::too_many_arguments)]
 async fn subscribe(
     frame: &Frame,
     stream: &Arc<Stream>,
     out: &mpsc::Sender<Vec<u8>>,
+    inline: &mpsc::Sender<Vec<u8>>,
+    shared: &Arc<Streams>,
+    data: Option<Arc<UdpSocket>>,
     peer: SocketAddr,
     who: &str,
 ) -> Result<Option<Subscription>> {
@@ -816,33 +983,86 @@ async fn subscribe(
         }
     };
     let level = s.u8(tag::CODEC_LEVEL).unwrap_or(1) as i32;
-    let Some(udp_port) = s.u16(tag::UDP_PORT) else {
-        fault(out, error_code::BAD_REQUEST, "subscribe named no port").await?;
-        return Ok(None);
+    let transport = match Transport::from_code(s.u8(tag::TRANSPORT).unwrap_or(0)) {
+        Ok(t) => t,
+        Err(e) => {
+            fault(out, error_code::UNSUPPORTED_TRANSPORT, &e.to_string()).await?;
+            return Ok(None);
+        }
+    };
+    let token = s.u64(tag::PUNCH_TOKEN);
+
+    // Where the samples go over UDP. The port a client names is where a 1.3
+    // one is served and where a punch that never arrives leaves this; a punch
+    // replaces it with the address the client's NAT really gave it, which is
+    // the only address that reaches a client behind one.
+    let named_port = s.u16(tag::UDP_PORT).map(|port| {
+        let mut dest = peer;
+        dest.set_port(port);
+        dest
+    });
+    let route = match transport {
+        Transport::Tcp => Route::Tcp(inline.clone()),
+        Transport::Udp => {
+            let Some(data) = data else {
+                fault(out, error_code::UNSUPPORTED_TRANSPORT, "this server has no data port")
+                    .await?;
+                return Ok(None);
+            };
+            if named_port.is_none() && token.is_none() {
+                fault(out, error_code::BAD_REQUEST, "subscribe named no port and no token").await?;
+                return Ok(None);
+            }
+            // A client that punched before it subscribed has already said
+            // where it is, and waiting for it to say so again would cost the
+            // subscription its first second of samples.
+            let punched = token.and_then(|token| {
+                let mut early = shared.early.lock().ok()?;
+                let (addr, at) = early.remove(&token)?;
+                (at.elapsed().as_secs() < EARLY_PUNCH_S).then_some(addr)
+            });
+            let (dest_tx, dest_rx) = tokio::sync::watch::channel(punched.or(named_port));
+            let held = token.map(|token| {
+                if let Ok(mut p) = shared.punches.lock() {
+                    p.insert(token, dest_tx);
+                }
+                Punched { shared: shared.clone(), token }
+            });
+            Route::Udp { data, dest: dest_rx, token, _held: held }
+        }
     };
 
-    // The samples go to the address the control connection came from, on the
-    // port the subscriber named. Taking the port alone is what lets a client
-    // behind a NAT be reached at all: it has no way to know its own address.
-    let mut dest = peer;
-    dest.set_port(udp_port);
-
     let mut r = Tlvs::new();
-    r.u16(tag::STREAM_ID, stream.id()).u8(tag::BIT_DEPTH, bits.0).u8(tag::CODEC, codec.code());
+    r.u16(tag::STREAM_ID, stream.id())
+        .u8(tag::BIT_DEPTH, bits.0)
+        .u8(tag::CODEC, codec.code())
+        .u8(tag::TRANSPORT, transport.code());
     send(out, Frame::new(msg::SUBSCRIBED, &r)).await?;
-    tracing::info!("iqstream: {who} subscribed to {} at {} bit {codec:?}", stream.name(), bits.0);
+    tracing::info!(
+        "iqstream: {who} subscribed to {} at {} bit {codec:?} over {transport:?}",
+        stream.name(),
+        bits.0
+    );
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    // A client that can be probed starts at the size any path takes and is
+    // widened by what it answers; one that cannot be gets what every client
+    // got before there were probes.
+    let (payload_tx, payload_rx) = tokio::sync::watch::channel(match token {
+        Some(_) => SAFE_DATAGRAM_PAYLOAD,
+        None => MAX_DATAGRAM_PAYLOAD,
+    });
     let task = tokio::spawn({
         let stream = stream.clone();
         let out = out.clone();
         async move {
-            if let Err(e) = pump(&stream, &out, dest, bits, codec, level, stop_rx).await {
+            let feed = Feed { bits, codec, level, route, payload: payload_rx };
+            if let Err(e) = pump(&stream, &out, feed, stop_rx).await {
                 tracing::debug!("iqstream: {} stopped: {e}", stream.name());
             }
         }
     });
-    Ok(Some(Subscription { stop: stop_tx, task }))
+    Ok(Some(Subscription { stop: stop_tx, payload: payload_tx, task }))
 }
 
 fn welcome(shared: &Arc<Streams>) -> Frame {
@@ -865,6 +1085,11 @@ fn welcome(shared: &Arc<Streams>) -> Frame {
     }
     w.put(tag::SUPPORTED_BIT_DEPTHS, &BitDepth::SUPPORTED)
         .put(tag::SUPPORTED_CODECS, &[Codec::None.code(), Codec::Zstd.code()]);
+    // Where to punch. A server that could not have the port for UDP says
+    // nothing, and is then a server a client names its own port to.
+    if shared.data_port != 0 {
+        w.u16(tag::DATA_PORT, shared.data_port);
+    }
     put_streams(&mut w, &descs);
     Frame::new(msg::WELCOME, &w)
 }
@@ -885,24 +1110,67 @@ async fn fault(out: &mpsc::Sender<Vec<u8>>, code: u16, message: &str) -> Result<
     send(out, Frame::new(msg::ERROR, &t)).await
 }
 
-/// One subscription's samples, until it is ended or the tuner goes away.
-#[allow(clippy::too_many_arguments)]
-async fn pump(
-    stream: &Arc<Stream>,
-    out: &mpsc::Sender<Vec<u8>>,
-    dest: SocketAddr,
+/// Where one subscription's samples go, and how big they may be when they
+/// get there.
+enum Route {
+    Udp {
+        data: Arc<UdpSocket>,
+        /// Where the client really is, which is what its punch said and not
+        /// what it thinks its own address is. None until it has punched, and
+        /// a pump with nothing here has nowhere to send.
+        dest: tokio::sync::watch::Receiver<Option<SocketAddr>>,
+        token: Option<u64>,
+        _held: Option<Punched>,
+    },
+    /// The samples on the control connection, for a client no datagram
+    /// reached.
+    Tcp(mpsc::Sender<Vec<u8>>),
+}
+
+/// What one subscription asked for.
+struct Feed {
     bits: BitDepth,
     codec: Codec,
     level: i32,
+    route: Route,
+    payload: tokio::sync::watch::Receiver<usize>,
+}
+
+/// One subscription's samples, until it is ended or the tuner goes away.
+async fn pump(
+    stream: &Arc<Stream>,
+    out: &mpsc::Sender<Vec<u8>>,
+    mut feed: Feed,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let udp = UdpSocket::bind(if dest.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
-        .await
-        .map_err(other)?;
     let mut blocks = stream.blocks.subscribe();
     let mut retunes = stream.retunes.subscribe();
     stream.subscribers.fetch_add(1, Ordering::Relaxed);
     let _count = Counted(stream.clone());
+    let (bits, codec, level) = (feed.bits, feed.codec, feed.level);
+
+    // Nothing can be sent to a client that has not been heard from, so the
+    // pump waits for the punch rather than sending to an address that is only
+    // the client's guess at itself. A client that gave up on UDP meanwhile
+    // subscribes again over TCP, which replaces this subscription.
+    if let Route::Udp { data, dest, token, .. } = &mut feed.route {
+        while dest.borrow_and_update().is_none() {
+            tokio::select! {
+                _ = stop.changed() => return Ok(()),
+                changed = dest.changed() => if changed.is_err() { return Ok(()) },
+            }
+        }
+        let to = *dest.borrow_and_update();
+        if let (Some(to), Some(token)) = (to, *token) {
+            let mut probe = Vec::new();
+            for size in PROBE_LADDER {
+                encode_probe(token, size as u16, &mut probe);
+                for _ in 0..PROBE_TRIES {
+                    let _ = data.send_to(&probe, to).await;
+                }
+            }
+        }
+    }
 
     let mut seq: u32 = 0;
     let mut sample_index: u64 = 0;
@@ -927,6 +1195,7 @@ async fn pump(
                     // at the far end as padding rather than as a jump.
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::debug!("iqstream: subscriber lagged {n} blocks");
+                        stream.blocks_dropped.fetch_add(n, Ordering::Relaxed);
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -937,8 +1206,40 @@ async fn pump(
                     Codec::None => std::mem::take(&mut packed),
                     Codec::Zstd => zstd::bulk::compress(&packed, level).map_err(other)?,
                 };
-                send_block(&udp, dest, &mut datagram, &body, seq, sample_index,
-                           samples as u32, bits, codec, stream.id()).await?;
+                let head = |frag_index, frag_count| DataHeader {
+                    version: VERSION_MAJOR as u8,
+                    sample_index,
+                    block_seq: seq,
+                    frag_index,
+                    frag_count,
+                    bit_depth: bits.0,
+                    codec,
+                    decimation: 1,
+                    block_samples: samples as u32,
+                    stream_id: stream.id(),
+                };
+                match &feed.route {
+                    Route::Udp { data, dest, .. } => {
+                        let Some(to) = *dest.borrow() else { continue };
+                        let cap = (*feed.payload.borrow_and_update()).min(MAX_DATAGRAM_PAYLOAD);
+                        send_block(data, to, &mut datagram, &body, cap, head).await;
+                    }
+                    // Nothing is cut up here: one record carries the block
+                    // whatever its size, because the stream under it is
+                    // already in order and will not lose a piece of it.
+                    Route::Tcp(inline) => {
+                        let mut whole = [0u8; DATA_HEADER_LEN];
+                        head(0, 1).encode(&mut whole);
+                        let mut with_head = whole.to_vec();
+                        with_head.extend_from_slice(&body);
+                        let mut record = Vec::new();
+                        encode_inline(&with_head, &mut record);
+                        if inline.try_send(record).is_err() {
+                            stream.blocks_dropped.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
+                }
                 seq = seq.wrapping_add(1);
                 sample_index += samples as u64;
                 stream.blocks_sent.fetch_add(1, Ordering::Relaxed);
@@ -956,47 +1257,30 @@ impl Drop for Counted {
     }
 }
 
-/// One block as one or more datagrams.
+/// One block as one or more datagrams, none larger than the path was measured
+/// to take.
 ///
 /// A block at a wide span is far larger than an MTU, so it is cut into
 /// fragments that each carry the whole header: a receiver can then tell a lost
 /// fragment from a lost block without keeping the two apart itself.
-#[allow(clippy::too_many_arguments)]
 async fn send_block(
     udp: &UdpSocket,
     dest: SocketAddr,
     datagram: &mut [u8; DATA_HEADER_LEN + MAX_DATAGRAM_PAYLOAD],
     body: &[u8],
-    seq: u32,
-    sample_index: u64,
-    block_samples: u32,
-    bits: BitDepth,
-    codec: Codec,
-    stream_id: u16,
-) -> Result<()> {
-    let frag_count = body.len().div_ceil(MAX_DATAGRAM_PAYLOAD).max(1) as u16;
-    for (i, chunk) in body.chunks(MAX_DATAGRAM_PAYLOAD).enumerate() {
-        let header = DataHeader {
-            version: VERSION_MAJOR as u8,
-            sample_index,
-            block_seq: seq,
-            frag_index: i as u16,
-            frag_count,
-            bit_depth: bits.0,
-            codec,
-            decimation: 1,
-            block_samples,
-            stream_id,
-        };
-        let mut head = [0u8; DATA_HEADER_LEN];
-        header.encode(&mut head);
-        datagram[..DATA_HEADER_LEN].copy_from_slice(&head);
+    cap: usize,
+    head: impl Fn(u16, u16) -> DataHeader,
+) {
+    let frag_count = body.len().div_ceil(cap).max(1) as u16;
+    for (i, chunk) in body.chunks(cap).enumerate() {
+        let mut header = [0u8; DATA_HEADER_LEN];
+        head(i as u16, frag_count).encode(&mut header);
+        datagram[..DATA_HEADER_LEN].copy_from_slice(&header);
         datagram[DATA_HEADER_LEN..DATA_HEADER_LEN + chunk.len()].copy_from_slice(chunk);
         // A refused datagram is one lost block, not a dead subscriber: the
         // receiver pads the gap and carries on.
         let _ = udp.send_to(&datagram[..DATA_HEADER_LEN + chunk.len()], dest).await;
     }
-    Ok(())
 }
 
 async fn read_frame(sock: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Option<Frame>> {

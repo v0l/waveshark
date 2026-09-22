@@ -20,6 +20,22 @@ macro_rules! bail {
 
 pub const CONTROL_MAGIC: [u8; 4] = *b"IQSC";
 pub const DATA_MAGIC: [u8; 4] = *b"IQSD";
+/// A client's first datagram, which opens a hole in its NAT and tells the
+/// server the address the hole is on. Since 1.4.
+pub const PUNCH_MAGIC: [u8; 4] = *b"IQSH";
+/// A datagram of a candidate size, which is worth nothing except that it
+/// arrived. Since 1.4.
+pub const PROBE_MAGIC: [u8; 4] = *b"IQSP";
+/// A whole datagram carried on the control connection, length prefixed. Tells
+/// itself apart from a control frame by its first byte, which is not a
+/// protocol version. Since 1.4.
+pub const INLINE_MAGIC: [u8; 4] = *b"IQSI";
+pub const PUNCH_LEN: usize = 12;
+pub const PROBE_HEADER_LEN: usize = 14;
+pub const INLINE_HEADER_LEN: usize = 8;
+/// The largest inline record a reader will take, which is far above any block
+/// a receiver pushes and stops a corrupt length from asking for a gigabyte.
+pub const MAX_INLINE_RECORD: usize = 1 << 21;
 
 /// Bumped for an incompatible change. Both ends must agree.
 pub const VERSION_MAJOR: u16 = 1;
@@ -40,7 +56,15 @@ pub const VERSION_MAJOR: u16 = 1;
 /// [`tag::SETTING_MIN`], [`tag::SETTING_MAX`], [`tag::SETTING_STEP`] and
 /// [`tag::SETTING_UNIT`]. A 1.2 reader sees a kind it does not know and
 /// leaves that one setting alone, keeping the rest of the tuner's list.
-pub const VERSION_MINOR: u16 = 3;
+///
+/// 4: reaching a client behind NAT. The welcome carries [`tag::DATA_PORT`],
+/// a subscribe carries [`tag::PUNCH_TOKEN`] and [`tag::TRANSPORT`], the
+/// server learns where to send from the punch datagram rather than from
+/// [`tag::UDP_PORT`], sizes its datagrams from the probes the client answers
+/// with [`msg::PROBED`], and a client that never gets a datagram asks for
+/// [`Transport::Tcp`] and reads the samples off the control connection. A 1.3
+/// client names a port and is served exactly as before.
+pub const VERSION_MINOR: u16 = 4;
 
 pub const PREAMBLE_LEN: usize = 8;
 pub const FRAME_HEADER_LEN: usize = 4;
@@ -56,6 +80,19 @@ pub const DATA_HEADER_LEN_1_1: usize = 32;
 
 /// Fits inside a 1500 byte MTU alongside IPv6 and UDP headers.
 pub const MAX_DATAGRAM_PAYLOAD: usize = 1400;
+
+/// What a datagram costs on the wire beyond its payload: this header, the UDP
+/// header and an IPv6 one, which is the larger of the two network headers.
+pub const DATAGRAM_OVERHEAD: usize = DATA_HEADER_LEN + 8 + 40;
+
+/// The payload a path of 1280 bytes takes, which is the least any IPv6 path
+/// may be and so the largest datagram that needs no measuring at all.
+pub const SAFE_DATAGRAM_PAYLOAD: usize = 1280 - DATAGRAM_OVERHEAD;
+
+/// Payloads worth asking about, each the largest that fits one MTU a real
+/// path has: 1312 for PPPoE over a tagged link, 1500 for plain Ethernet.
+/// Anything the client does not answer for is not used.
+pub const PROBE_LADDER: [usize; 2] = [1312 - DATAGRAM_OVERHEAD, MAX_DATAGRAM_PAYLOAD];
 
 pub mod msg {
     pub const HELLO: u8 = 0x01;
@@ -103,6 +140,11 @@ pub mod msg {
     /// What it was actually set to comes back as [`STREAM_CHANGED`], because
     /// a driver snaps a gain to its own step. Since 1.2.
     pub const SET_SETTING: u8 = 0x11;
+    /// A datagram of [`super::tag::PROBE_SIZE`] bytes of payload reached the
+    /// client, so the path takes that size. Sent for each probe that
+    /// arrived, and for nothing else: a size the server never hears about is
+    /// a size it does not use. Since 1.4.
+    pub const PROBED: u8 = 0x12;
 }
 
 pub mod tag {
@@ -169,6 +211,19 @@ pub mod tag {
     pub const DECIMATION: u16 = 0x0024;
     pub const MAX_PAYLOAD: u16 = 0x0025;
     pub const BLOCK_SAMPLES: u16 = 0x0026;
+    /// Which of [`super::Transport`] the samples should travel on. Absent
+    /// means UDP, which is what every client before 1.4 meant. Since 1.4.
+    pub const TRANSPORT: u16 = 0x0027;
+    /// The port a client punches to, in the welcome. A server that does not
+    /// send it cannot be punched, so a client names its port instead. Since
+    /// 1.4.
+    pub const DATA_PORT: u16 = 0x0028;
+    /// What a subscriber's punch datagram will carry, so the server can tell
+    /// which subscription the address it learns belongs to. Since 1.4.
+    pub const PUNCH_TOKEN: u16 = 0x0029;
+    /// The payload size a probe datagram carried, echoed back in a
+    /// [`super::msg::PROBED`]. Since 1.4.
+    pub const PROBE_SIZE: u16 = 0x002a;
     // Counters
     pub const BLOCKS_SENT: u16 = 0x0030;
     pub const BYTES_SENT: u16 = 0x0031;
@@ -204,6 +259,87 @@ pub mod error_code {
     pub const NO_SUCH_STREAM: u16 = 8;
     /// Named a setting this tuner does not offer.
     pub const NO_SUCH_SETTING: u16 = 9;
+    /// Asked for the samples on something this server cannot send them over.
+    pub const UNSUPPORTED_TRANSPORT: u16 = 10;
+}
+
+/// What the samples travel on.
+///
+/// UDP is the default and the better transport where it reaches: a lost block
+/// is a padded gap rather than a stall. TCP carries them on the control
+/// connection instead, which reaches anywhere the control connection already
+/// did, and is what a client asks for when nothing arrives over UDP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Udp,
+    Tcp,
+}
+
+impl Transport {
+    pub fn code(self) -> u8 {
+        match self {
+            Transport::Udp => 0,
+            Transport::Tcp => 1,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(Transport::Udp),
+            1 => Ok(Transport::Tcp),
+            other => bail!("unknown transport {other}"),
+        }
+    }
+}
+
+/// The datagram a client sends first, so that a NAT in front of it opens a
+/// mapping and the server learns which address that mapping is on.
+pub fn encode_punch(token: u64) -> [u8; PUNCH_LEN] {
+    let mut out = [0u8; PUNCH_LEN];
+    out[0..4].copy_from_slice(&PUNCH_MAGIC);
+    out[4..12].copy_from_slice(&token.to_le_bytes());
+    out
+}
+
+pub fn decode_punch(buf: &[u8]) -> Option<u64> {
+    if buf.len() < PUNCH_LEN || buf[0..4] != PUNCH_MAGIC {
+        return None;
+    }
+    Some(u64::from_le_bytes(buf[4..12].try_into().ok()?))
+}
+
+/// A datagram the size one of [`PROBE_LADDER`] would make, padded to exactly
+/// what a data block of that payload weighs.
+pub fn encode_probe(token: u64, payload: u16, out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(&PROBE_MAGIC);
+    out.extend_from_slice(&token.to_le_bytes());
+    out.extend_from_slice(&payload.to_le_bytes());
+    out.resize(DATA_HEADER_LEN + payload as usize, 0);
+}
+
+/// The token and the payload size a probe stands for, and None for anything
+/// else. The length is checked against what it claims, because a probe that
+/// arrived short is a probe for a size the path did not take.
+pub fn decode_probe(buf: &[u8]) -> Option<(u64, u16)> {
+    if buf.len() < PROBE_HEADER_LEN || buf[0..4] != PROBE_MAGIC {
+        return None;
+    }
+    let token = u64::from_le_bytes(buf[4..12].try_into().ok()?);
+    let payload = u16::from_le_bytes([buf[12], buf[13]]);
+    match buf.len() == DATA_HEADER_LEN + payload as usize {
+        true => Some((token, payload)),
+        false => None,
+    }
+}
+
+/// One whole datagram written into the control stream.
+pub fn encode_inline(datagram: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.reserve(INLINE_HEADER_LEN + datagram.len());
+    out.extend_from_slice(&INLINE_MAGIC);
+    out.extend_from_slice(&(datagram.len() as u32).to_le_bytes());
+    out.extend_from_slice(datagram);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -996,6 +1132,85 @@ mod tests {
         assert_eq!(back.sample_index, 4096);
         assert_eq!(back.block_samples, 2048);
         assert_eq!(body, &[1, 2, 3, 4]);
+    }
+
+    /// Every size the server offers to measure fits the path it was chosen
+    /// for, once the data header, the UDP header and an IPv6 header are on
+    /// it, and the floor fits the smallest path IPv6 allows.
+    #[test]
+    fn every_probe_size_fits_the_mtu_it_stands_for() {
+        assert_eq!(DATAGRAM_OVERHEAD, 84, "36 byte data header, 8 UDP, 40 IPv6");
+        assert_eq!(SAFE_DATAGRAM_PAYLOAD, 1196);
+        assert_eq!(SAFE_DATAGRAM_PAYLOAD + DATAGRAM_OVERHEAD, 1280, "the IPv6 minimum");
+        assert_eq!(PROBE_LADDER, [1228, 1400]);
+        assert_eq!(PROBE_LADDER[0] + DATAGRAM_OVERHEAD, 1312, "PPPoE over a tagged link");
+        assert_eq!(PROBE_LADDER[1] + DATAGRAM_OVERHEAD, 1484);
+        assert!(PROBE_LADDER[1] + DATAGRAM_OVERHEAD <= 1500, "plain Ethernet");
+        assert!(PROBE_LADDER.iter().all(|p| *p > SAFE_DATAGRAM_PAYLOAD), "nothing below the floor");
+    }
+
+    /// A punch says which subscription it belongs to and nothing else, and a
+    /// probe is exactly as heavy as the block it stands for.
+    #[test]
+    fn a_punch_and_a_probe_say_what_they_are() {
+        let punch = encode_punch(0x0123_4567_89ab_cdef);
+        assert_eq!(punch.len(), 12);
+        assert_eq!(decode_punch(&punch), Some(0x0123_4567_89ab_cdef));
+        assert_eq!(decode_punch(&punch[..11]), None, "a truncated punch is not one");
+        assert_eq!(decode_punch(&DATA_MAGIC), None);
+
+        let mut probe = Vec::new();
+        encode_probe(7, 1400, &mut probe);
+        assert_eq!(probe.len(), DATA_HEADER_LEN + 1400);
+        assert_eq!(decode_probe(&probe), Some((7, 1400)));
+        assert_eq!(decode_punch(&probe), None, "a probe is not a punch");
+        // A path that cut it short is a path that did not take that size.
+        probe.truncate(probe.len() - 1);
+        assert_eq!(decode_probe(&probe), None);
+    }
+
+    /// An inline record and a control frame are told apart by their first
+    /// byte, which is a magic on one and a protocol version on the other.
+    #[test]
+    fn an_inline_record_is_not_a_control_frame() {
+        let mut head = [0u8; DATA_HEADER_LEN];
+        DataHeader {
+            version: 1,
+            sample_index: 0,
+            block_seq: 0,
+            frag_index: 0,
+            frag_count: 1,
+            bit_depth: 8,
+            codec: Codec::None,
+            decimation: 1,
+            block_samples: 2,
+            stream_id: 0,
+        }
+        .encode(&mut head);
+        let mut datagram = head.to_vec();
+        datagram.extend_from_slice(&[1, 2, 3, 4]);
+        let mut record = Vec::new();
+        encode_inline(&datagram, &mut record);
+        assert_eq!(record.len(), INLINE_HEADER_LEN + DATA_HEADER_LEN + 4);
+        assert_eq!(record[..4], INLINE_MAGIC);
+        assert_eq!(
+            u32::from_le_bytes(record[4..8].try_into().unwrap()) as usize,
+            DATA_HEADER_LEN + 4
+        );
+        assert_ne!(record[0], VERSION_MAJOR as u8, "a frame starts with its version");
+        assert_eq!(Frame::empty(msg::PING).encode()[0], VERSION_MAJOR as u8);
+        let (back, body) = DataHeader::decode(&record[INLINE_HEADER_LEN..]).unwrap();
+        assert_eq!(back.frag_count, 1, "inline carries a whole block");
+        assert_eq!(body, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_transport_is_one_of_two_and_an_unknown_one_is_refused() {
+        assert_eq!(Transport::Udp.code(), 0);
+        assert_eq!(Transport::Tcp.code(), 1);
+        assert_eq!(Transport::from_code(0).unwrap(), Transport::Udp);
+        assert_eq!(Transport::from_code(1).unwrap(), Transport::Tcp);
+        assert!(Transport::from_code(2).is_err());
     }
 
     #[test]

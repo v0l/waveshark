@@ -104,6 +104,8 @@ the code is in the commit log.
 - An IQStream server, on `--iqstream-listen` or the setup card, so another
   machine can read the same span, with `--iqstream-tuner` handing out radios
   this receiver is not using as streams of their own on the same port.
+- IQStream through NAT: punched datagrams sized to the path, and the samples
+  on the control connection where none get through.
 - Several matching tuners offered as one wider receiver, with the drift
   between them measured on the band they share and taken out.
 - Heatmap export: the span kept as readings and written as a page that zooms

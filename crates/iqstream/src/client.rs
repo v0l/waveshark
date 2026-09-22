@@ -9,14 +9,32 @@
 //! fragment when a newer block completes is abandoned rather than waited for:
 //! a late block is worth nothing to a demodulator, and the gap it leaves is
 //! reported in [`Block::padded_before`] so the timebase stays true.
+//!
+//! # Getting the samples through a NAT
+//!
+//! A client behind NAT has no idea what address the world reaches it on, so
+//! it punches: a datagram to the server's data port, repeated until samples
+//! arrive and then at the keepalive interval to hold the mapping open. The
+//! server sends to the address that punch came from, which is the only
+//! address that works. It then probes the path with datagrams of a few sizes
+//! and only the ones that arrive are answered, so a path that will not carry
+//! a 1500 byte datagram gets smaller ones rather than nothing.
+//!
+//! Where no datagram arrives at all, which is a symmetric NAT or a firewall
+//! that drops UDP outright, the client asks again for the samples on the
+//! control connection ([`crate::proto::Transport::Tcp`]) and reads them off
+//! the socket it already has.
 
 use crate::proto::{
-    BitDepth, Codec, DataHeader, Frame, MAX_FRAME_PAYLOAD, PREAMBLE_LEN, Setting, SettingValue,
-    StreamDesc, Tlvs, VERSION_MAJOR, VERSION_MINOR, decode_preamble, encode_preamble, msg, now_ns,
-    read_streams, tag, unpack,
+    BitDepth, Codec, DATA_HEADER_LEN, DataHeader, Frame, INLINE_MAGIC, MAX_FRAME_PAYLOAD,
+    MAX_INLINE_RECORD, PREAMBLE_LEN, Setting, SettingValue, StreamDesc, Tlvs, Transport,
+    VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_probe, encode_preamble, encode_punch,
+    msg, now_ns, read_streams, tag, unpack,
 };
 use common::{Error, Result};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -45,6 +63,29 @@ pub struct ClientConfig {
     /// scale, so the output keeps real time alignment.
     pub pad_gaps: bool,
     pub ping_interval: Duration,
+    /// What the samples should travel on.
+    pub transport: Prefer,
+    /// How long [`Prefer::Auto`] waits for a datagram before asking for the
+    /// samples on the control connection instead. A punch is one round trip
+    /// and is sent six times inside this, so a path that carries datagrams
+    /// at all has delivered one by then.
+    pub udp_timeout: Duration,
+}
+
+/// What an operator wants the samples carried on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Prefer {
+    /// UDP, and the control connection where no datagram arrives. What a
+    /// client over the internet wants, since it cannot know in advance
+    /// whether the path carries datagrams at all.
+    #[default]
+    Auto,
+    /// UDP only. A stream that cannot be got through is no stream, which is
+    /// what a reader wanting the live edge or nothing asks for.
+    Udp,
+    /// The control connection from the start, for a path already known to
+    /// drop datagrams.
+    Tcp,
 }
 
 impl Default for ClientConfig {
@@ -58,6 +99,8 @@ impl Default for ClientConfig {
             local_port: 0,
             pad_gaps: true,
             ping_interval: Duration::from_secs(10),
+            transport: Prefer::Auto,
+            udp_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -116,9 +159,29 @@ pub struct Stats {
 }
 
 pub struct IqStream {
-    udp: UdpSocket,
+    /// None where UDP was never on the table: the port would not bind, or the
+    /// samples were asked for on the control connection from the start.
+    udp: Option<UdpSocket>,
+    /// Where the punches go, which is the server's data port at the address
+    /// the control connection reached. None from a server too old to be
+    /// punched, which is served the port this client bound instead.
+    punch_to: Option<SocketAddr>,
+    /// What this subscription's punches and probes carry, so the far end can
+    /// tell which subscription an address it learns belongs to.
+    token: u64,
+    transport: Transport,
+    /// Set until the first block arrives, after which a stream that has not
+    /// heard anything over UDP asks for it over TCP instead.
+    fallback_at: Option<tokio::time::Instant>,
+    /// Cleared until a block has arrived, which is what the punching is for
+    /// and what stops it.
+    heard: bool,
+    punching: tokio::time::Interval,
     control: OwnedWriteHalf,
     frames: mpsc::Receiver<Frame>,
+    /// Blocks carried on the control connection, for a subscription that gave
+    /// up on datagrams.
+    inline: mpsc::Receiver<Vec<u8>>,
     info: StreamInfo,
     /// Every tuner the server offered, kept so a caller can show the others
     /// without connecting again.
@@ -141,6 +204,24 @@ struct Greeting {
     write_half: OwnedWriteHalf,
     welcome: Frame,
     streams: Vec<StreamDesc>,
+    /// Where to punch, and the sign that this server knows how to be: a
+    /// server that named no data port is a 1.3 one, and is told a port.
+    punch_to: Option<SocketAddr>,
+}
+
+/// A token no other subscription on this server will be using.
+///
+/// The clock and a counter, mixed, which is enough: it is not a secret and
+/// nothing turns on guessing it, only on two subscriptions of one client not
+/// colliding.
+fn token() -> u64 {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let mut v =
+        now_ns() ^ (COUNT.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    v ^= v >> 30;
+    v = v.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    v ^= v >> 27;
+    v.wrapping_mul(0x94d0_49bb_1331_11eb)
 }
 
 /// Connect, say hello, and take the welcome.
@@ -151,6 +232,7 @@ struct Greeting {
 async fn greet<A: ToSocketAddrs + std::fmt::Debug>(server: A, name: &str) -> Result<Greeting> {
     let control = TcpStream::connect(&server).await.map_err(other)?;
     control.set_nodelay(true).map_err(other)?;
+    let peer = control.peer_addr().map_err(other)?;
     let (mut read_half, mut write_half) = control.into_split();
 
     write_half.write_all(&encode_preamble()).await.map_err(other)?;
@@ -186,8 +268,38 @@ async fn greet<A: ToSocketAddrs + std::fmt::Debug>(server: A, name: &str) -> Res
             settings: Vec::new(),
         });
     }
+    let punch_to = w.u16(tag::DATA_PORT).map(|port| {
+        let mut to = peer;
+        to.set_port(port);
+        to
+    });
     drop(w);
-    Ok(Greeting { read_half, write_half, welcome, streams })
+    Ok(Greeting { read_half, write_half, welcome, streams, punch_to })
+}
+
+/// One subscribe, which says the same things whichever transport it asks for.
+fn subscribe_frame(
+    config: &ClientConfig,
+    bits: BitDepth,
+    stream_id: u16,
+    transport: Transport,
+    token: u64,
+    udp_port: Option<u16>,
+) -> Frame {
+    let mut sub = Tlvs::new();
+    sub.u16(tag::STREAM_ID, stream_id)
+        .u8(tag::BIT_DEPTH, bits.0)
+        .u8(tag::CODEC, config.codec.code())
+        .u8(tag::CODEC_LEVEL, config.level as u8)
+        .u16(tag::DECIMATION, 1)
+        .u8(tag::TRANSPORT, transport.code());
+    if transport == Transport::Udp {
+        sub.u64(tag::PUNCH_TOKEN, token);
+    }
+    if let Some(port) = udp_port {
+        sub.u16(tag::UDP_PORT, port);
+    }
+    Frame::new(msg::SUBSCRIBE, &sub)
 }
 
 /// What tuners a server has, without subscribing to any of them.
@@ -208,10 +320,15 @@ impl IqStream {
     ) -> Result<Self> {
         let bit_depth = BitDepth::new(config.bits)?;
 
-        let udp = UdpSocket::bind(("0.0.0.0", config.local_port)).await.map_err(other)?;
-        let local_port = udp.local_addr().map_err(other)?.port();
+        // A port that will not bind is a machine that is not going to carry
+        // datagrams, so it is the same answer as a path that drops them: ask
+        // for the samples on the connection that already works.
+        let udp = match config.transport {
+            Prefer::Tcp => None,
+            _ => UdpSocket::bind(("0.0.0.0", config.local_port)).await.ok(),
+        };
 
-        let Greeting { mut read_half, mut write_half, welcome, streams } =
+        let Greeting { mut read_half, mut write_half, welcome, streams, punch_to } =
             greet(server, &config.name).await?;
         let w = welcome.tlvs()?;
         if let Some(depths) = w.get(tag::SUPPORTED_BIT_DEPTHS)
@@ -233,14 +350,25 @@ impl IqStream {
         }
         .clone();
 
-        let mut sub = Tlvs::new();
-        sub.u16(tag::STREAM_ID, wanted.id)
-            .u16(tag::UDP_PORT, local_port)
-            .u8(tag::BIT_DEPTH, bit_depth.0)
-            .u8(tag::CODEC, config.codec.code())
-            .u8(tag::CODEC_LEVEL, config.level as u8)
-            .u16(tag::DECIMATION, 1);
-        write_half.write_all(&Frame::new(msg::SUBSCRIBE, &sub).encode()).await.map_err(other)?;
+        // A server that can be punched is told nothing about this client's
+        // own port: behind a NAT it is not the port anything arrives on, and
+        // a server sending there is sending at some other machine on the same
+        // network. Where the punch does not get through, nothing does, and
+        // that is what the fallback is for.
+        let token = token();
+        let transport = match udp.is_some() {
+            true => Transport::Udp,
+            false => Transport::Tcp,
+        };
+        let local_port = match (&udp, punch_to) {
+            (Some(udp), None) => Some(udp.local_addr().map_err(other)?.port()),
+            _ => None,
+        };
+        if transport == Transport::Tcp && punch_to.is_none() {
+            return Err(Error::other("this server cannot carry samples on the control connection"));
+        }
+        let sub = subscribe_frame(&config, bit_depth, wanted.id, transport, token, local_port);
+        write_half.write_all(&sub.encode()).await.map_err(other)?;
         let reply = read_frame(&mut read_half)
             .await?
             .ok_or_else(|| Error::other("server closed during subscribe"))?;
@@ -263,12 +391,19 @@ impl IqStream {
             block_samples: r.u32(tag::BLOCK_SAMPLES).unwrap_or(0),
         };
 
-        // read_exact is not cancellation safe, so frames are read by their own
-        // task and handed over a channel that select! can poll safely.
+        // read_exact is not cancellation safe, so the socket is read by its
+        // own task and what comes off it is handed over channels that select!
+        // can poll safely. Samples travel on their own, because a block is
+        // worth dropping where a control frame is not.
         let (frame_tx, frames) = mpsc::channel::<Frame>(8);
+        let (data_tx, inline) = mpsc::channel::<Vec<u8>>(8);
         tokio::spawn(async move {
-            while let Ok(Some(frame)) = read_frame(&mut read_half).await {
-                if frame_tx.send(frame).await.is_err() {
+            while let Ok(Some(inbound)) = read_inbound(&mut read_half).await {
+                let sent = match inbound {
+                    Inbound::Control(frame) => frame_tx.send(frame).await.is_ok(),
+                    Inbound::Data(bytes) => data_tx.send(bytes).await.is_ok(),
+                };
+                if !sent {
                     return;
                 }
             }
@@ -276,11 +411,30 @@ impl IqStream {
 
         let mut ping = tokio::time::interval(config.ping_interval);
         ping.tick().await;
+        // Often enough that the whole ladder of punches is spent inside the
+        // fallback timeout, and cheap: twelve bytes each.
+        let mut punching =
+            tokio::time::interval((config.udp_timeout / 6).max(Duration::from_millis(50)));
+        punching.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        Ok(IqStream {
+        let fallback_at = match (transport, config.transport, punch_to) {
+            (Transport::Udp, Prefer::Auto, Some(_)) => {
+                Some(tokio::time::Instant::now() + config.udp_timeout)
+            }
+            _ => None,
+        };
+
+        let mut stream = IqStream {
             udp,
+            punch_to,
+            token,
+            transport,
+            fallback_at,
+            heard: false,
+            punching,
             control: write_half,
             frames,
+            inline,
             info,
             available: streams,
             config,
@@ -290,7 +444,40 @@ impl IqStream {
             ping,
             buf: vec![0u8; 65536],
             decoded: Vec::new(),
-        })
+        };
+        stream.punch().await;
+        Ok(stream)
+    }
+
+    /// Open the hole, and keep it open. Costs twelve bytes and is what makes
+    /// the server able to reach a client it cannot address.
+    async fn punch(&mut self) {
+        if let (Transport::Udp, Some(udp), Some(to)) = (self.transport, &self.udp, self.punch_to) {
+            let _ = udp.send_to(&encode_punch(self.token), to).await;
+        }
+    }
+
+    /// Ask for the samples on the control connection instead, because none
+    /// arrived over UDP.
+    ///
+    /// A fresh subscribe rather than a message of its own: the server already
+    /// replaces a subscription to the same tuner, and everything the first
+    /// one asked for has to be said again anyway.
+    async fn fall_back(&mut self) -> Result<()> {
+        tracing::info!(
+            "iqstream: nothing over UDP in {:?}, asking for the samples on the control connection",
+            self.config.udp_timeout
+        );
+        self.transport = Transport::Tcp;
+        self.fallback_at = None;
+        self.udp = None;
+        // The new subscription counts from zero, and what the old one was
+        // waiting on will never arrive.
+        self.assembler = Assembler::default();
+        let bits = BitDepth::new(self.info.bit_depth)?;
+        let sub =
+            subscribe_frame(&self.config, bits, self.info.id, Transport::Tcp, self.token, None);
+        self.control.write_all(&sub.encode()).await.map_err(other)
     }
 
     pub fn info(&self) -> &StreamInfo {
@@ -307,7 +494,13 @@ impl IqStream {
     }
 
     pub fn local_port(&self) -> u16 {
-        self.udp.local_addr().map(|a| a.port()).unwrap_or(0)
+        self.udp.as_ref().and_then(|u| u.local_addr().ok()).map(|a| a.port()).unwrap_or(0)
+    }
+
+    /// What the samples are travelling on now, which is not always what was
+    /// asked for: a stream that heard nothing over UDP is on TCP.
+    pub fn transport(&self) -> Transport {
+        self.transport
     }
 
     /// Ask the server to move its tuner.
@@ -367,48 +560,66 @@ impl IqStream {
                     let mut t = Tlvs::new();
                     t.u64(tag::TIMESTAMP_NS, now_ns());
                     self.control.write_all(&Frame::new(msg::PING, &t).encode()).await.map_err(other)?;
+                    // The mapping the punch opened closes on a NAT that has
+                    // seen nothing go out of it for a minute or two.
+                    self.punch().await;
+                }
+                // Only while nothing has arrived: the first punches are the
+                // ones that matter, and after that the keepalive carries it.
+                _ = self.punching.tick(), if !self.heard => self.punch().await,
+                _ = sleep_until(self.fallback_at), if self.fallback_at.is_some() => {
+                    self.fall_back().await?;
                 }
                 frame = self.frames.recv() => match frame {
                     None => return Ok(None),
                     Some(frame) => self.handle_control(frame).await?,
                 },
-                received = self.udp.recv(&mut self.buf) => {
+                // A whole block off the control connection, which is where a
+                // subscription that gave up on datagrams reads them.
+                record = self.inline.recv() => {
+                    let Some(bytes) = record else { return Ok(None) };
+                    self.stats.datagrams += 1;
+                    self.heard = true;
+                    self.fallback_at = None;
+                    if let Some(block) = take_datagram(
+                        &bytes,
+                        &self.info,
+                        &self.config,
+                        &mut self.assembler,
+                        &mut self.stats,
+                        &mut self.decoded,
+                    )? {
+                        return Ok(Some(block));
+                    }
+                }
+                received = recv(self.udp.as_ref(), &mut self.buf), if self.udp.is_some() => {
                     let n = received.map_err(other)?;
-                    let Ok((header, payload)) = DataHeader::decode(&self.buf[..n]) else {
-                        continue;
-                    };
-                    // Another tuner on the same server, reaching this port
-                    // because a subscription was replaced and the old pump
-                    // had a datagram already in flight.
-                    if header.stream_id != self.info.id {
+                    // A probe is worth nothing except that it arrived: the
+                    // server sizes its datagrams by which of them are
+                    // answered, so this says so and reads on.
+                    if let Some((token, size)) = decode_probe(&self.buf[..n]) {
+                        if token == self.token {
+                            let mut t = Tlvs::new();
+                            t.u16(tag::STREAM_ID, self.info.id).u16(tag::PROBE_SIZE, size);
+                            let probed = Frame::new(msg::PROBED, &t).encode();
+                            self.control.write_all(&probed).await.map_err(other)?;
+                        }
                         continue;
                     }
                     self.stats.datagrams += 1;
-                    let Some(body) = self.assembler.push(&header, payload, &mut self.stats) else {
-                        continue;
-                    };
-                    decode_block(&header, &body, &mut self.decoded)?;
-                    self.stats.blocks += 1;
-
-                    let padded = self.assembler.take_pending_gap().unwrap_or(0);
-                    let pad = self.config.pad_gaps && padded > 0;
-                    let mut samples = Vec::with_capacity(
-                        self.decoded.len() + if pad { padded as usize * 2 } else { 0 },
-                    );
-                    if pad {
-                        self.stats.padded_samples += padded;
-                        // 0x80 is mid scale for UC8: silence, not a full scale
-                        // step that a demodulator would see as a pulse.
-                        samples.resize(padded as usize * 2, 0x80);
+                    // The hole is open and the samples are coming through it.
+                    self.heard = true;
+                    self.fallback_at = None;
+                    if let Some(block) = take_datagram(
+                        &self.buf[..n],
+                        &self.info,
+                        &self.config,
+                        &mut self.assembler,
+                        &mut self.stats,
+                        &mut self.decoded,
+                    )? {
+                        return Ok(Some(block));
                     }
-                    samples.extend_from_slice(&self.decoded);
-                    return Ok(Some(Block {
-                        sample_index: header.sample_index,
-                        samples,
-                        padded_before: padded,
-                        center_hz: self.info.center_hz,
-                        stream_id: header.stream_id,
-                    }));
                 }
             }
         }
@@ -492,6 +703,64 @@ impl IqStream {
         let mut t = Tlvs::new();
         t.u16(tag::STREAM_ID, self.info.id);
         self.control.write_all(&Frame::new(msg::UNSUBSCRIBE, &t).encode()).await.map_err(other)
+    }
+}
+
+/// A datagram, however it arrived: one block of samples once every fragment
+/// of it is in, and nothing until then.
+fn take_datagram(
+    datagram: &[u8],
+    info: &StreamInfo,
+    config: &ClientConfig,
+    assembler: &mut Assembler,
+    stats: &mut Stats,
+    decoded: &mut Vec<u8>,
+) -> Result<Option<Block>> {
+    let Ok((header, payload)) = DataHeader::decode(datagram) else {
+        return Ok(None);
+    };
+    // Another tuner on the same server, reaching this port because a
+    // subscription was replaced and the old pump had a datagram already in
+    // flight.
+    if header.stream_id != info.id {
+        return Ok(None);
+    }
+    let Some(body) = assembler.push(&header, payload, stats) else {
+        return Ok(None);
+    };
+    decode_block(&header, &body, decoded)?;
+    stats.blocks += 1;
+
+    let padded = assembler.take_pending_gap().unwrap_or(0);
+    let pad = config.pad_gaps && padded > 0;
+    let mut samples = Vec::with_capacity(decoded.len() + if pad { padded as usize * 2 } else { 0 });
+    if pad {
+        stats.padded_samples += padded;
+        // 0x80 is mid scale for UC8: silence, not a full scale step that a
+        // demodulator would see as a pulse.
+        samples.resize(padded as usize * 2, 0x80);
+    }
+    samples.extend_from_slice(decoded);
+    Ok(Some(Block {
+        sample_index: header.sample_index,
+        samples,
+        padded_before: padded,
+        center_hz: info.center_hz,
+        stream_id: header.stream_id,
+    }))
+}
+
+async fn recv(sock: Option<&UdpSocket>, buf: &mut [u8]) -> std::io::Result<usize> {
+    match sock {
+        Some(sock) => sock.recv(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn sleep_until(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -586,12 +855,32 @@ pub fn describe_error(frame: &Frame) -> String {
     }
 }
 
-pub async fn read_frame(sock: &mut OwnedReadHalf) -> Result<Option<Frame>> {
+/// What comes off the control connection: a frame, or a whole datagram where
+/// the samples are travelling on it.
+enum Inbound {
+    Control(Frame),
+    Data(Vec<u8>),
+}
+
+/// One frame or one inline record, told apart by the first four bytes: a
+/// frame opens with a protocol version, which the magic cannot be.
+async fn read_inbound(sock: &mut OwnedReadHalf) -> Result<Option<Inbound>> {
     let mut head = [0u8; 4];
     match sock.read_exact(&mut head).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(other(e)),
+    }
+    if head == INLINE_MAGIC {
+        let mut len = [0u8; 4];
+        sock.read_exact(&mut len).await.map_err(other)?;
+        let len = u32::from_le_bytes(len) as usize;
+        if !(DATA_HEADER_LEN..=MAX_INLINE_RECORD).contains(&len) {
+            return Err(Error::other(format!("inline record of {len} bytes")));
+        }
+        let mut datagram = vec![0u8; len];
+        sock.read_exact(&mut datagram).await.map_err(other)?;
+        return Ok(Some(Inbound::Data(datagram)));
     }
     let len = u16::from_le_bytes([head[2], head[3]]) as usize;
     if len > MAX_FRAME_PAYLOAD {
@@ -599,5 +888,13 @@ pub async fn read_frame(sock: &mut OwnedReadHalf) -> Result<Option<Frame>> {
     }
     let mut payload = vec![0u8; len];
     sock.read_exact(&mut payload).await.map_err(other)?;
-    Ok(Some(Frame { version: head[0], msg_type: head[1], payload }))
+    Ok(Some(Inbound::Control(Frame { version: head[0], msg_type: head[1], payload })))
+}
+
+pub async fn read_frame(sock: &mut OwnedReadHalf) -> Result<Option<Frame>> {
+    match read_inbound(sock).await? {
+        Some(Inbound::Control(frame)) => Ok(Some(frame)),
+        Some(Inbound::Data(_)) => Err(Error::other("samples before a subscription")),
+        None => Ok(None),
+    }
 }
