@@ -6781,6 +6781,7 @@ dependencies = [
  "iqstream",
  "remote",
  "rtlsdr",
+ "serde_json",
  "sources",
 ]
 

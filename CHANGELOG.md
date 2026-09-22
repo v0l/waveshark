@@ -37,7 +37,8 @@ the code is in the commit log.
   nibble.
 - `wave1090`, a Mode S receiver of its own, serving dump1090's AVR, BaseStation
   and Beast ports off a dongle or an iqstream server, taking mlat results back
-  and passing the samples on over iqstream itself.
+  and passing the samples on over iqstream itself. `--write-json` feeds tar1090
+  and graphs1090 the aircraft, receiver, history and statistics files.
 - KISS TNC on `--kiss-listen` or the setup card: packet software reads
   what the radio heard and keys AX.25 through it.
 - FT8 and FT4 on the HF dials, live or replayed: every station in the

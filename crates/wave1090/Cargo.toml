@@ -16,6 +16,7 @@ remote.workspace = true
 iqstream.workspace = true
 clap.workspace = true
 chrono = { workspace = true, features = ["clock"] }
+serde_json.workspace = true
 anyhow.workspace = true
 
 [[bin]]

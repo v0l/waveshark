@@ -11,8 +11,11 @@
 //! several receivers.
 
 mod clock;
+mod json;
 mod net;
 mod sbs;
+mod stats;
+mod track;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -127,6 +130,16 @@ struct Args {
     #[arg(long, value_name = "HOW", default_value = "fine")]
     parity_search: Search,
 
+    /// Write tar1090's JSON into this directory: the aircraft, receiver,
+    /// history and statistics files a web map reads. Somewhere in RAM,
+    /// as dump1090's own packages use /run
+    #[arg(long, value_name = "DIR")]
+    write_json: Option<std::path::PathBuf>,
+
+    /// How often aircraft.json is rewritten, in seconds
+    #[arg(long, value_name = "SECS", default_value_t = 1.0)]
+    write_json_every: f64,
+
     /// Say nothing on standard output but what was asked for
     #[arg(long)]
     quiet: bool,
@@ -180,6 +193,21 @@ fn main() -> Result<()> {
 /// Where the aerial is, for the cheap half of CPR.
 fn station(args: &Args) -> Option<(f64, f64)> {
     args.lat.zip(args.lon)
+}
+
+/// The web map's files, where an operator asked for them.
+fn writer(args: &Args) -> Result<Option<json::Writer>> {
+    let Some(dir) = &args.write_json else { return Ok(None) };
+    if !args.write_json_every.is_finite() || args.write_json_every <= 0.0 {
+        bail!("--write-json-every wants a positive number of seconds");
+    }
+    let every = std::time::Duration::from_secs_f64(args.write_json_every);
+    let out = json::Writer::new(dir, every, station(args))
+        .with_context(|| format!("cannot write JSON into {}", dir.display()))?;
+    if !args.quiet {
+        println!("JSON   in {} every {:.3} s", dir.display(), every.as_secs_f64());
+    }
+    Ok(Some(out))
 }
 
 /// Where a decoded frame goes
@@ -274,7 +302,9 @@ impl Silence {
 struct Reader {
     det: ModeSDetector,
     book: AddressBook,
-    sbs: sbs::Sbs,
+    track: track::Tracker,
+    stats: stats::Stats,
+    json: Option<json::Writer>,
     frames: Vec<ModeSFrame>,
     clock: clock::Clock,
     raw: bool,
@@ -292,7 +322,9 @@ impl Reader {
         Self {
             det: ModeSDetector::new(rate, search.config()),
             book: AddressBook::new(),
-            sbs: sbs::Sbs::default(),
+            track: track::Tracker::default(),
+            stats: stats::Stats::new(unix(chrono::Utc::now())),
+            json: None,
             frames: Vec::new(),
             clock: clock::Clock::new(rate),
             raw,
@@ -311,12 +343,15 @@ impl Reader {
     /// time rather than count what happened to arrive.
     fn block(&mut self, seq: u64, iq: &[common::C32], ports: &Ports) {
         self.read += iq.len() as u64;
+        let mut lost = 0;
         if let clock::Step::Broke(n) = self.clock.block(seq, iq.len()) {
             // What the demodulator is carrying ended before the break, and a
             // splice between two bursts frames as a preamble nobody sent.
             self.det.reset();
             self.dropped += n;
+            lost = n;
         }
+        self.stats.samples(iq.len() as u64, lost);
         // Before the decoding, so a subscriber's copy is not delayed by it,
         // and only where somebody is connected: packing costs a pass over
         // every sample.
@@ -343,15 +378,40 @@ impl Reader {
             // Correcting a flipped bit is arithmetic on the frame rather than
             // signal processing, so it happens here, as it does in the
             // receiver's own Mode S node.
-            let bytes = match f.bytes[0] >> 3 {
-                17 | 18 => adsb::fix_single_bit(&f.bytes).unwrap_or_else(|| f.bytes.clone()),
-                _ => f.bytes.clone(),
+            let fixed = match f.bytes[0] >> 3 {
+                17 | 18 => adsb::fix_single_bit(&f.bytes),
+                _ => None,
             };
+            let corrected = fixed.as_ref().is_some_and(|b| *b != f.bytes) as usize;
+            let bytes = fixed.unwrap_or_else(|| f.bytes.clone());
             let at = self.clock.at(f.at_sample, f.at_frac);
-            self.publish(&bytes, at, f.rssi_dbfs, ports, now);
+            let heard =
+                Heard { clock: at, rssi_dbfs: f.rssi_dbfs, from: stats::Source::Air, corrected };
+            self.publish(&bytes, heard, ports, now);
         }
         self.frames = frames;
-        self.sbs.expire();
+        let at = std::time::Instant::now();
+        let single = self.track.expire(at);
+        self.stats.expired(single);
+        self.write_json(now, false);
+    }
+
+    /// The web map's files, where one is due or the run is ending.
+    fn write_json(&mut self, now: chrono::DateTime<chrono::Utc>, ending: bool) {
+        let unix = unix(now);
+        let at = std::time::Instant::now();
+        let rolled = self.stats.tick(unix, at);
+        let Some(w) = &mut self.json else { return };
+        if rolled {
+            w.minute();
+        }
+        let wrote = match ending {
+            true => w.flush(&self.track, &self.stats, unix, at),
+            false => w.tick(&self.track, &self.stats, unix, at),
+        };
+        if let Err(e) = wrote {
+            eprintln!("cannot write the JSON: {e}");
+        }
     }
 
     /// One frame out on every port, whether it was heard here or handed back
@@ -359,13 +419,17 @@ impl Reader {
     fn publish(
         &mut self,
         bytes: &[u8],
-        clock: u64,
-        rssi_dbfs: f32,
+        heard: Heard,
         ports: &Ports,
         now: chrono::DateTime<chrono::Utc>,
     ) {
         let Ok(frame) = adsb::parse(bytes) else { return };
         self.kept += 1;
+        let Heard { clock, rssi_dbfs, from, corrected } = heard;
+        self.stats.frame(frame.df, rssi_dbfs, from, corrected);
+        if let Some(seen) = self.track.accept(&frame, rssi_dbfs) {
+            self.stats.seen(&seen);
+        }
         if self.raw || ports.avr.is_some() {
             let line = net::avr(bytes);
             if self.raw {
@@ -386,11 +450,24 @@ impl Reader {
             p.send(&net::beast(bytes, clock, rssi_dbfs));
         }
         if let Some(p) = &ports.sbs {
-            for line in self.sbs.lines(&frame, now) {
+            for line in sbs::lines(&self.track, &frame, now) {
                 p.send(format!("{line}\r\n").as_bytes());
             }
         }
     }
+}
+
+/// What a frame arrived as, beside the bytes
+struct Heard {
+    clock: u64,
+    rssi_dbfs: f32,
+    from: stats::Source,
+    corrected: usize,
+}
+
+/// The time a file's readers count in: seconds since the epoch.
+fn unix(now: chrono::DateTime<chrono::Utc>) -> f64 {
+    now.timestamp_millis() as f64 / 1000.0
 }
 
 fn from_radio(
@@ -427,7 +504,8 @@ fn from_radio(
     let mut stream = dev.start_rx().context("the radio would not start")?;
     let mut reader = Reader::new(rate, args.raw, args.parity_search);
     reader.server = listen(args, center, rate)?;
-    reader.sbs.here = station(args);
+    reader.track.here = station(args);
+    reader.json = writer(args)?;
     let began = std::time::Instant::now();
     let mut said = began;
     let mut heard = Silence::default();
@@ -459,13 +537,13 @@ fn from_radio(
         // untimed and a client leaves it out of its clock fit.
         for rx in &incoming {
             while let Ok(bytes) = rx.try_recv() {
-                reader.publish(
-                    &bytes,
-                    clock::UNTIMED,
-                    f32::NEG_INFINITY,
-                    &ports,
-                    chrono::Utc::now(),
-                );
+                let heard = Heard {
+                    clock: clock::UNTIMED,
+                    rssi_dbfs: f32::NEG_INFINITY,
+                    from: stats::Source::Network,
+                    corrected: 0,
+                };
+                reader.publish(&bytes, heard, &ports, chrono::Utc::now());
             }
         }
         if !args.quiet && said.elapsed().as_secs() >= 10 {
@@ -497,10 +575,12 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
     }
     let mut reader = Reader::new(rate, args.raw, args.parity_search);
     reader.server = listen(args, buf.center.0, rate)?;
-    reader.sbs.here = station(args);
+    reader.track.here = station(args);
+    reader.json = writer(args)?;
     for (n, block) in buf.samples.chunks(65_536).enumerate() {
         reader.block((n * 65_536) as u64, block, &ports);
     }
+    reader.write_json(chrono::Utc::now(), true);
     if !args.quiet {
         println!("{} frames", reader.kept);
     }
@@ -510,6 +590,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Read;
 
     const CAPTURE: &str = "../../testdata/adsb_1090M_2400k.cu8";
@@ -645,8 +726,10 @@ mod tests {
 
         let ports = Ports { avr: Some(avr), sbs: None, beast: Some(beast) };
         let mut rx = Reader::new(2.4e6, false, Search::Fine);
-        rx.publish(&frame, clock::UNTIMED, -20.0, &ports, chrono::Utc::now());
-        rx.publish(&frame, 5_000, -20.0, &ports, chrono::Utc::now());
+        let heard =
+            |clock| Heard { clock, rssi_dbfs: -20.0, from: stats::Source::Air, corrected: 0 };
+        rx.publish(&frame, heard(clock::UNTIMED), &ports, chrono::Utc::now());
+        rx.publish(&frame, heard(5_000), &ports, chrono::Utc::now());
         drop(ports);
 
         let mut got = Vec::new();
@@ -759,6 +842,96 @@ mod tests {
             .map(|(_, f)| f.iter().map(|b| format!("{b:02x}")).collect())
             .collect();
         assert!(strangers.is_empty(), "aircraft nobody else saw: {strangers:?}");
+    }
+
+    /// A directory of this test's own, emptied first.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wave1090-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn read_json(dir: &std::path::Path, name: &str) -> serde_json::Value {
+        let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{name} is not JSON: {e}"))
+    }
+
+    /// What tar1090 would draw off ten seconds of Dublin approach.
+    #[test]
+    fn aircraft_json_holds_the_aircraft_the_capture_named() {
+        let Some(buf) = busy() else { return };
+        let dir = scratch("aircraft");
+        let ports = Ports { avr: None, sbs: None, beast: None };
+        let mut rx = Reader::new(buf.rate.as_f64(), false, Search::Fine);
+        for (seq, iq) in blocks(&buf) {
+            rx.block(seq, &iq, &ports);
+        }
+        rx.json = Some(json::Writer::new(&dir, std::time::Duration::ZERO, None).unwrap());
+        rx.write_json(chrono::Utc::now(), true);
+
+        let doc = read_json(&dir, "aircraft.json");
+        let list = doc["aircraft"].as_array().expect("an array");
+        assert_eq!(list.len(), 53, "aircraft on the list");
+        assert_eq!(doc["messages"], 3_722, "messages since the receiver started");
+        let with = |key: &str| list.iter().filter(|a| a.get(key).is_some()).count();
+        assert_eq!((with("flight"), with("lat")), (36, 47), "callsigns and positions");
+        assert_eq!((with("alt_baro"), with("gs"), with("squawk")), (51, 51, 45), "fields");
+
+        // A named aircraft, whole: the same Ryanair flight dump1090-rb read
+        // off this file, at the same place and height.
+        let ryr = list.iter().find(|a| a["hex"] == "4ca242").expect("4ca242");
+        assert_eq!(ryr["flight"], "RYR1AA");
+        assert_eq!(ryr["alt_baro"], 27_000);
+        assert_eq!(ryr["squawk"], "1254");
+        assert_eq!((ryr["lat"].as_f64(), ryr["lon"].as_f64()), (Some(53.55202), Some(-5.6763)));
+        assert_eq!((ryr["gs"].as_f64(), ryr["track"].as_f64()), (Some(467.5), Some(98.0)));
+        assert_eq!(ryr["messages"], 65, "frames from 4ca242");
+
+        // Nothing on the list that a map cannot draw: every entry is an
+        // address, a count and a level, and no key carries a null where a
+        // number could not be made.
+        for a in list {
+            let hex = a["hex"].as_str().expect("a hex address");
+            assert_eq!(hex.len(), 6, "{hex}");
+            assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{hex}");
+            assert!(a["messages"].as_u64().is_some_and(|n| n >= 1), "{hex} has no messages");
+            assert!(a["seen"].as_f64().is_some_and(|s| s < 60.0), "{hex} is stale");
+            // The detector measures the peak of a complex magnitude, which
+            // a strong frame carries past full scale where dump1090's
+            // squared and clamped level cannot go.
+            let rssi = a["rssi"].as_f64().expect("a level");
+            assert!((-60.0..3.1).contains(&rssi), "{hex} at {rssi} dBFS");
+            assert!(a.as_object().unwrap().values().all(|v| !v.is_null()), "{a} has a null");
+        }
+
+        // receiver.json is what tells the map how often to come back, and
+        // how many history files it may ask for.
+        let recv = read_json(&dir, "receiver.json");
+        assert_eq!(recv["refresh"], 0, "the interval this test wrote at");
+        assert_eq!(recv["history"], 1, "one copy taken");
+        assert_eq!(recv["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(read_json(&dir, "history_0.json"), doc, "the first copy is the file");
+
+        // And graphs1090 reads these, by these names.
+        let stats = read_json(&dir, "stats.json");
+        let total = &stats["total"];
+        assert_eq!(total["messages"], 3_722);
+        assert_eq!(total["cpr"]["global_ok"], 302);
+        assert_eq!(total["cpr"]["local_ok"], 0, "no station was given, so no cheap fix");
+        assert_eq!(total["tracks"]["all"], 53);
+        assert_eq!(total["local"]["samples_processed"], 24_000_000);
+        assert_eq!(total["local"]["samples_dropped"], 0);
+        let by_df = total["messages_by_df"].as_array().expect("an array of 32");
+        assert_eq!(by_df.len(), 32);
+        assert_eq!(
+            (&by_df[11], &by_df[17], &by_df[20]),
+            (&json!(1_144), &json!(1_109), &json!(341))
+        );
+        let signal = total["local"]["signal"].as_f64().expect("a mean level");
+        assert!((-8.0..0.0).contains(&signal), "{signal} dBFS mean");
+        assert!(stats["last1min"]["local"].is_object(), "the minute the plugin reads");
+        assert!(total["cpu"].as_object().is_some_and(|c| c.is_empty()), "nothing timed the CPU");
     }
 
     /// The aircraft a frame names, from its address field or over its parity
