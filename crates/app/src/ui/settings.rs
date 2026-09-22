@@ -3200,7 +3200,7 @@ impl App {
             }
             self.trim.said = Some(done);
         }
-        let meta = sources::parse_filename(&path);
+        let meta = crate::devices::described(&path);
         let running = self.trimming.is_some();
         let mut cut = false;
         card(
@@ -3277,9 +3277,9 @@ impl App {
                 row_help(ui, "called", name_help, |ui| {
                     field(ui, &mut self.trim.tag, "clip");
                 });
-                match (meta.center, meta.rate) {
-                    (Some(c), Some(r)) => {
-                        let name = sources::clip::output_name(&path, c, r, self.trim.tag.trim());
+                match (meta.center, meta.rate.zip(meta.format)) {
+                    (Some(c), Some((r, f))) => {
+                        let name = sources::clip::output_name(&path, c, r, f, self.trim.tag.trim());
                         reading(
                             ui,
                             "writes",
@@ -3287,7 +3287,7 @@ impl App {
                         );
                     }
                     _ => {
-                        lamp(ui, false, "this capture's name carries no centre and rate");
+                        lamp(ui, false, "this capture has no centre and rate to write");
                     }
                 }
                 if running {
@@ -3312,14 +3312,15 @@ impl App {
         if !cut {
             return;
         }
-        let (Some(center), Some(rate)) = (meta.center, meta.rate) else {
-            self.trim.said = Some(Err("this capture's name carries no centre and rate".into()));
+        let (Some(center), Some((rate, format))) = (meta.center, meta.rate.zip(meta.format)) else {
+            self.trim.said = Some(Err("this capture has no centre and rate to write".into()));
             return;
         };
         let out = sources::clip::free_name(sources::clip::output_name(
             &path,
             center,
             rate,
+            format,
             self.trim.tag.trim(),
         ));
         let cut = match self.trim.bursts {
@@ -3339,7 +3340,7 @@ impl App {
         // seconds of work, and a window that does not paint is a window the
         // compositor puts a "not responding" dialog over.
         self.trimming = Some(poll_promise::Promise::spawn_thread("trim capture", move || {
-            let r = sources::clip_file(&path, &out, &cut).map_err(|e| e.to_string());
+            let r = sources::clip_file_as(&path, &out, &cut, meta).map_err(|e| e.to_string());
             ctx.request_repaint();
             r
         }));

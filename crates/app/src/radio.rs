@@ -1208,7 +1208,15 @@ pub fn scan_with_recorder(
 /// for a device to transmit, so replay has to go through the same code the
 /// receiver does, not a simplified copy of it.
 pub fn replay(path: impl AsRef<std::path::Path>) -> anyhow::Result<Vec<crate::row::Reception>> {
-    let src = sources::FileSource::open(path.as_ref())?;
+    replay_as(path, sources::FileMeta::default())
+}
+
+/// The same, for a recording whose name does not say what it holds.
+pub fn replay_as(
+    path: impl AsRef<std::path::Path>,
+    given: sources::FileMeta,
+) -> anyhow::Result<Vec<crate::row::Reception>> {
+    let src = sources::FileSource::open_as(path.as_ref(), given)?;
     let buf = src.read_all()?;
     let mut rx = replay_receiver(&buf, None)?;
     Ok(replay_blocks(&mut rx, &buf))

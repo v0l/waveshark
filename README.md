@@ -181,6 +181,14 @@ waveshark --replay captures
 Capture a band once, then replay after every change: no radio, same answer
 every time. A capture that decodes is a test fixture.
 
+A recording made by another program is named for what it holds rather than in
+the rtl_433 convention, so `--capture`, `--replay` and `--bench-iq` take the
+rate, the sample format and the centre frequency beside the path:
+
+```sh
+waveshark --capture "session.iq,rate=2.4M,format=cs16,centre=433.92M"
+```
+
 ## Letting an agent drive
 
 Every run serves the receiver over the Model Context Protocol at
@@ -210,6 +218,8 @@ somewhere else. The default reaches no further than this machine.
 --location <lat,lon>   your position, for aircraft positions from a single frame
 --record [dir]         write every burst that decodes to a directory of captures
 --capture-iq           write the raw span from the moment the radio starts
+--capture <file>       open a recording as the receiver, with rate=, format=
+                       and centre= where its name does not say
 --replay [path]        decode a capture, a directory, or a packet log
 --headless             run with no window, scanning and logging as it would
 --ha-broker <broker>   publish every device heard to Home Assistant over MQTT

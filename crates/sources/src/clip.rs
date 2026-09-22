@@ -163,7 +163,18 @@ pub fn spans(bytes: &[u8], format: SampleFormat, rate: f64, cut: &Cut) -> Vec<(u
 
 /// Cut `input` into `output`, and say what survived.
 pub fn clip_file(input: &Path, output: &Path, cut: &Cut) -> Result<Clipped> {
-    let meta = crate::parse_filename(input);
+    clip_file_as(input, output, cut, crate::FileMeta::default())
+}
+
+/// The same, for a recording whose name does not say what it holds: what the
+/// operator described it as wins, as it does when the file is played.
+pub fn clip_file_as(
+    input: &Path,
+    output: &Path,
+    cut: &Cut,
+    given: crate::FileMeta,
+) -> Result<Clipped> {
+    let meta = crate::parse_filename(input).under(given);
     let format = meta
         .format
         .ok_or_else(|| Error::other(format!("no sample format in {}", input.display())))?;
@@ -184,15 +195,23 @@ pub fn clip_file(input: &Path, output: &Path, cut: &Cut) -> Result<Clipped> {
     Ok(Clipped { path: output.to_path_buf(), spans, kept, total: bytes.len() / bps })
 }
 
-/// A name for the cut beside the original, carrying the centre and the rate
-/// so [`parse_filename`](crate::parse_filename) reads them back.
+/// A name for the cut beside the original, carrying the centre, the rate and
+/// the format so [`parse_filename`](crate::parse_filename) reads them back.
 ///
 /// The tokens the name already spent on a centre or a rate are dropped and
 /// written again from the values given, so a tuned output says what it now
-/// holds rather than what the input held.
-pub fn output_name(input: &Path, center: Hz, rate: Sps, tag: &str) -> PathBuf {
+/// holds rather than what the input held. The extension comes from the format
+/// rather than from the input, or a cut of somebody else's `.iq` is as
+/// undescribable as the recording it came from.
+pub fn output_name(
+    input: &Path,
+    center: Hz,
+    rate: Sps,
+    format: SampleFormat,
+    tag: &str,
+) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("capture");
-    let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("cu8");
+    let ext = format.extension();
     let named = crate::parse_filename(input);
     let mut base: Vec<&str> = stem
         .split('_')
@@ -346,7 +365,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let input = dir.join("bench_433.92M_250k.cu8");
         std::fs::write(&input, write(&three_bursts(250_000.0))).unwrap();
-        let out = output_name(&input, Hz(433_920_000), Sps(250_000), "clip");
+        let out = output_name(&input, Hz(433_920_000), Sps(250_000), SampleFormat::Cu8, "clip");
         assert_eq!(out.file_name().unwrap(), "bench-clip_433.92M_250k.cu8");
         let got = clip_file(&input, &out, &Cut::Bursts { skip_s: 0.0, how: Bursts::default() })
             .expect("clip");
@@ -364,7 +383,7 @@ mod tests {
     #[test]
     fn a_tuned_output_is_named_for_the_channel_it_now_holds() {
         let p = Path::new("/tmp/drone_2450M_61440k.cu8");
-        let out = output_name(p, Hz(2_414_500_000), Sps(15_360_000), "tuned");
+        let out = output_name(p, Hz(2_414_500_000), Sps(15_360_000), SampleFormat::Cu8, "tuned");
         assert_eq!(out.file_name().unwrap(), "drone-tuned_2414.5M_15360k.cu8");
         let back = crate::parse_filename(&out);
         assert_eq!(back.center, Some(Hz(2_414_500_000)));
@@ -374,7 +393,7 @@ mod tests {
     #[test]
     fn a_cut_of_a_capture_the_receiver_wrote_is_still_a_capture() {
         let p = Path::new("/tmp/capture_20260912-214251_131.6000M_1024k.cs8");
-        let out = output_name(p, Hz(131_600_000), Sps(1_024_000), "clip");
+        let out = output_name(p, Hz(131_600_000), Sps(1_024_000), SampleFormat::Cs8, "clip");
         assert_eq!(out.file_name().unwrap(), "capture_20260912-214251-clip_131.6M_1024k.cs8");
         let back = crate::parse_filename(&out);
         assert_eq!(back.center, Some(Hz(131_600_000)));
@@ -384,8 +403,49 @@ mod tests {
 
     #[test]
     fn a_name_that_was_only_its_numbers_keeps_a_word() {
-        let out =
-            output_name(Path::new("/tmp/433.92M_250k.cu8"), Hz(433_920_000), Sps(250_000), "");
+        let out = output_name(
+            Path::new("/tmp/433.92M_250k.cu8"),
+            Hz(433_920_000),
+            Sps(250_000),
+            SampleFormat::Cu8,
+            "",
+        );
         assert_eq!(out.file_name().unwrap(), "capture_433.92M_250k.cu8");
+    }
+
+    /// Somebody else's recording is cut on what the operator said it holds,
+    /// and the cut says it in its own name so nothing has to be told twice.
+    #[test]
+    fn a_cut_of_a_described_recording_carries_the_description_into_its_name() {
+        let dir = std::env::temp_dir().join("sr_clip_described");
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("someone elses recording.iq");
+        std::fs::write(&input, write(&three_bursts(250_000.0))).unwrap();
+        let told = crate::FileMeta {
+            center: Some(Hz(433_920_000)),
+            rate: Some(Sps(250_000)),
+            format: Some(SampleFormat::Cu8),
+        };
+
+        let bare =
+            clip_file(&input, &dir.join("x.cu8"), &Cut::Window { skip_s: 0.0, seconds: 0.1 })
+                .unwrap_err()
+                .to_string();
+        assert!(bare.contains("no sample format"), "unhelpful: {bare}");
+
+        let out = output_name(&input, Hz(433_920_000), Sps(250_000), SampleFormat::Cu8, "clip");
+        assert_eq!(out.file_name().unwrap(), "someone elses recording-clip_433.92M_250k.cu8");
+        let got =
+            clip_file_as(&input, &out, &Cut::Bursts { skip_s: 0.0, how: Bursts::default() }, told)
+                .expect("a described clip");
+        assert_eq!(got.spans.len(), 3);
+        assert_eq!(got.total, 50_000);
+        assert_eq!(std::fs::metadata(&out).unwrap().len() as usize, got.kept * 2);
+
+        let back = crate::parse_filename(&out);
+        assert_eq!(back.center, Some(Hz(433_920_000)));
+        assert_eq!(back.rate, Some(Sps(250_000)));
+        assert_eq!(back.format, Some(SampleFormat::Cu8), "the cut needs no describing again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

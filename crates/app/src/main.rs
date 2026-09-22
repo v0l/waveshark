@@ -370,8 +370,11 @@ fn bench_audio() {
 /// them are the whole of the answer. The graph is the one the scanner table
 /// puts on the capture's frequency, the same as `--replay`, so what is timed
 /// is what the live receiver runs.
-fn bench_iq(path: &str, block: usize) -> anyhow::Result<()> {
-    let src = sources::FileSource::open(std::path::Path::new(path))?;
+fn bench_iq(spec: &str, block: usize) -> anyhow::Result<()> {
+    let (path, given) =
+        sources::parse_spec(spec).map_err(|e| anyhow::anyhow!("--bench-iq: {e}"))?;
+    let path = path.display().to_string();
+    let src = sources::FileSource::open_as(std::path::Path::new(&path), given)?;
     let buf = src.read_all()?;
     if buf.samples.is_empty() {
         anyhow::bail!("{path} holds no samples");
@@ -847,8 +850,9 @@ fn list_calls(path: &std::path::Path, wavs: Option<&std::path::Path>) -> anyhow:
     Ok(())
 }
 
-fn replay(path: &str) -> anyhow::Result<()> {
-    let path = std::path::Path::new(path);
+fn replay(spec: &str) -> anyhow::Result<()> {
+    let (path, given) = sources::parse_spec(spec).map_err(|e| anyhow::anyhow!("--replay: {e}"))?;
+    let path = path.as_path();
     if path.extension().and_then(|s| s.to_str()) == Some("wspkt") {
         return replay_log(path);
     }
@@ -873,7 +877,7 @@ fn replay(path: &str) -> anyhow::Result<()> {
     let (mut decoded, mut unknown) = (0, 0);
     for f in &files {
         let name = f.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        match radio::replay(f) {
+        match radio::replay_as(f, given) {
             Ok(recs) if recs.is_empty() => println!("{name}: nothing decoded"),
             Ok(recs) => {
                 for r in &recs {
@@ -1009,6 +1013,27 @@ impl std::str::FromStr for Serve {
     }
 }
 
+/// A recording to open as a receiver, and what its name does not say.
+///
+/// `x.cu8`, `x.iq,rate=250k,format=cs16`, `x.iq,rate=2.4M,centre=433.92M`: a
+/// capture from another program is named for what it holds rather than in the
+/// rtl_433 convention, and a soak run or a script has no file dialog to
+/// describe it in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureSpec {
+    pub path: PathBuf,
+    pub meta: sources::FileMeta,
+}
+
+impl std::str::FromStr for CaptureSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (path, meta) = sources::parse_spec(s)?;
+        Ok(Self { path, meta })
+    }
+}
+
 /// A radio this receiver is not listening to, handed out beside the span.
 ///
 /// `1`, `RTL2838`, `1,2.4M`, `1,2.4M,433.92`: which radio, then optionally the
@@ -1106,9 +1131,11 @@ struct Args {
     stream: Vec<String>,
 
     /// Open a recorded capture as the receiver and replay it at the rate it
-    /// was recorded at, which is what the receiver list's file dialog does
+    /// was recorded at, which is what the receiver list's file dialog does.
+    /// A name that does not say adds what it holds:
+    /// `x.iq,rate=250k,format=cs16,centre=433.92M`
     #[arg(long, value_name = "FILE")]
-    capture: Vec<PathBuf>,
+    capture: Vec<CaptureSpec>,
 
     /// Write a PNG of the interface and exit
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "/tmp/shot.png")]
@@ -1262,7 +1289,9 @@ struct Args {
     #[arg(long, value_name = "MB")]
     record_mb: Option<u64>,
 
-    /// Decode a capture, or a directory of them, and print what came out
+    /// Decode a capture, or a directory of them, and print what came out. A
+    /// name that does not say adds what it holds:
+    /// `x.iq,rate=250k,format=cs16`
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "captures")]
     replay: Option<String>,
 
@@ -1466,11 +1495,13 @@ fn main() -> eframe::Result<()> {
         }
     }
     for c in &args.capture {
-        if devices::add_named_capture(c.clone()).is_none() {
+        if devices::add_described_capture(c.path.clone(), c.meta).is_none() {
             eprintln!(
                 "--capture {}: name it like <what>_<centre>_<rate>.<format>, \
-                 e.g. bench_433.92M_250k.cu8",
-                c.display()
+                 e.g. bench_433.92M_250k.cu8, or say what it holds as \
+                 {},rate=250k,format=cs16",
+                c.path.display(),
+                c.path.display()
             );
             std::process::exit(1);
         }
@@ -1764,6 +1795,74 @@ mod tests {
         assert!(ServeTuner::from_str("").is_err());
         assert!(ServeTuner::from_str("0,fast").is_err());
         assert!(ServeTuner::from_str("0,2.4M,here").is_err());
+    }
+
+    /// What a script opens a recording another program made with, and what a
+    /// capture named in the rtl_433 convention still needs, which is nothing.
+    #[test]
+    fn a_capture_argument_takes_the_rate_and_format_a_name_does_not_carry() {
+        let named = CaptureSpec::from_str("fineoffset_433.92M_250k.cu8").unwrap();
+        assert_eq!(named.path, PathBuf::from("fineoffset_433.92M_250k.cu8"));
+        assert_eq!(named.meta, sources::FileMeta::default(), "the name says it all");
+
+        let told = CaptureSpec::from_str("/tmp/x.iq,rate=250k,format=cs16,centre=433.92M").unwrap();
+        assert_eq!(told.path, PathBuf::from("/tmp/x.iq"));
+        assert_eq!(told.meta.rate, Some(common::Sps(250_000)));
+        assert_eq!(told.meta.format, Some(common::SampleFormat::Cs16));
+        assert_eq!(told.meta.center, Some(common::Hz(433_920_000)));
+
+        assert!(CaptureSpec::from_str("/tmp/x.iq,rate=fast").is_err());
+        assert!(CaptureSpec::from_str("/tmp/x.iq,depth=8").is_err());
+
+        let args = Args::parse_from([
+            "waveshark",
+            "--capture",
+            "a_433.92M_250k.cu8",
+            "--capture",
+            "b.iq,rate=2.4M,format=cu8",
+        ]);
+        assert_eq!(args.capture.len(), 2);
+        assert_eq!(args.capture[0].meta.rate, None);
+        assert_eq!(args.capture[1].path, PathBuf::from("b.iq"));
+        assert_eq!(args.capture[1].meta.rate, Some(common::Sps(2_400_000)));
+        assert_eq!(args.capture[1].meta.format, Some(common::SampleFormat::Cu8));
+    }
+
+    /// The short decoder loop over somebody else's recording: refused while
+    /// nothing says what it holds, read once the argument does, and reading
+    /// nothing out of noise either way.
+    #[test]
+    fn a_replay_reads_a_recording_named_for_nothing_once_the_argument_describes_it() {
+        let dir = std::env::temp_dir().join("sr_replay_spec");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("someone elses recording.iq");
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<u8> = (0..500_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 56) as u8
+            })
+            .collect();
+        std::fs::write(&path, &noise).unwrap();
+
+        let bare = radio::replay(&path).unwrap_err().to_string();
+        assert!(bare.contains("sample format"), "unhelpful: {bare}");
+
+        protocols::load();
+        let told = sources::FileMeta {
+            rate: Some(common::Sps(250_000)),
+            center: Some(common::Hz(433_920_000)),
+            format: Some(common::SampleFormat::Cu8),
+        };
+        let recs = radio::replay_as(&path, told).expect("a described replay");
+        assert_eq!(recs.len(), 0, "one second of noise is no receptions");
+
+        let spec = format!("{},rate=250k,centre=433.92M,format=cu8", path.display());
+        replay(&spec).expect("a described replay from the command line");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A port is every interface and a tuner goes with it, which is what

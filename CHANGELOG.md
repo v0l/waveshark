@@ -18,8 +18,8 @@ the code is in the commit log.
 - MDC-1200 bursts damaged in the air still name their radio, from the parity it sent.
 - EAS, SSTV, APT and WEFAX read off a listening channel's audio, picked on the
   strip.
-- Captures named outside the rtl_433 convention: a card asks the centre, rate
-  and format, for replay and for transmit.
+- Captures named outside the rtl_433 convention: a card or `--capture` takes the
+  centre, rate and format, for replay, trimming and transmit.
 - Trim card on the radio settings, cutting a replayed capture to its
   transmissions or a window.
 - Distress and emergency alerts on a map row, ahead of whatever else it says.

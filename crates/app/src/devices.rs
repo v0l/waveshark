@@ -226,11 +226,35 @@ pub fn captures() -> Vec<Capture> {
     CAPTURES.lock().clone()
 }
 
+/// What this file holds, as the operator described it when it was opened and
+/// as its name says otherwise.
+///
+/// Anything reading a capture back asks here rather than parsing the name
+/// again, or a recording from another program is a receiver that plays and a
+/// file that cannot be cut.
+pub fn described(path: &std::path::Path) -> sources::FileMeta {
+    match CAPTURES.lock().iter().find(|c| c.path == path) {
+        Some(c) => {
+            sources::FileMeta { center: c.center, rate: Some(c.rate), format: Some(c.format) }
+        }
+        None => describe_capture(path),
+    }
+}
+
 /// Offer a capture named in the rtl_433 convention, which is what the command
 /// line and the corpus have. `None` where the name does not say enough.
 pub fn add_named_capture(path: impl Into<std::path::PathBuf>) -> Option<Capture> {
+    add_described_capture(path, sources::FileMeta::default())
+}
+
+/// Offer a capture the caller can describe, filling in from the name what
+/// `given` leaves out. `None` where neither says a rate and a format.
+pub fn add_described_capture(
+    path: impl Into<std::path::PathBuf>,
+    given: sources::FileMeta,
+) -> Option<Capture> {
     let path = path.into();
-    let meta = describe_capture(&path);
+    let meta = describe_capture(&path).under(given);
     add_capture(path, meta.rate?, meta.center, meta.format?)
 }
 
@@ -403,15 +427,7 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
             // What the operator said it holds, where the name did not say.
             // Parsing it again here would refuse the file the receiver list
             // is already offering.
-            let told = captures()
-                .into_iter()
-                .find(|c| c.path == path)
-                .map(|c| sources::FileMeta {
-                    center: c.center,
-                    rate: Some(c.rate),
-                    format: Some(c.format),
-                })
-                .unwrap_or_default();
+            let told = described(path);
             // Paced to the recorded rate, or the whole capture arrives in one
             // gulp and the detector sees a band that switched on and off
             // again between two frames. Looped, because a capture is seconds
@@ -659,7 +675,27 @@ mod tests {
         // rescales every pulse width downstream.
         let mystery = dir.join("mystery.cu8");
         std::fs::write(&mystery, vec![0u8; 1024]).unwrap();
-        assert!(add_named_capture(mystery).is_none());
+        assert!(add_named_capture(mystery.clone()).is_none());
+
+        let c = add_described_capture(mystery.clone(), sources::FileMeta::rate(Sps(1_000_000)))
+            .expect("a described capture");
+        assert_eq!(c.rate, Sps(1_000_000));
+        assert_eq!(c.format, common::SampleFormat::Cu8, "the extension still says the format");
+        assert_eq!(c.center, None);
+        assert_eq!(described(&mystery).rate, Some(Sps(1_000_000)), "what the trim card cuts by");
+        remove_capture(&mystery);
+        assert_eq!(described(&mystery), describe_capture(&mystery), "a file nobody opened");
+
+        let told = sources::FileMeta {
+            rate: Some(Sps(2_048_000)),
+            center: Some(common::Hz(868_300_000)),
+            format: Some(Cs16),
+        };
+        let c = add_described_capture(path.clone(), told).expect("a described capture");
+        assert_eq!(c.rate, Sps(2_048_000));
+        assert_eq!(c.center, Some(common::Hz(868_300_000)));
+        assert_eq!(c.format, Cs16);
+        add_named_capture(path.clone()).expect("a capture");
 
         remove_capture(&path);
         assert!(!captures().iter().any(|x| x.path == path));

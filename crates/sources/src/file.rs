@@ -81,6 +81,48 @@ pub fn parse_filename(path: &Path) -> FileMeta {
     FileMeta { center, rate, format }
 }
 
+/// Split `path,rate=250k,format=cs16,centre=433.92M` into the file and what
+/// the operator says is in it.
+///
+/// A recording from another program is named for what it holds rather than in
+/// the rtl_433 convention, so the command line has to be able to say what the
+/// name does not. Everything after the path is optional and in any order, and
+/// what is said here wins over the name through [`FileMeta::under`].
+pub fn parse_spec(s: &str) -> std::result::Result<(PathBuf, FileMeta), String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    let first = parts.iter().position(|p| p.contains('=')).unwrap_or(parts.len());
+    let path = parts[..first].join(",");
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("name a file before the rate and the format".into());
+    }
+    let mut meta = FileMeta::default();
+    for part in &parts[first..] {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("{:?} is not rate=, format= or centre=", part.trim()))?;
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "rate" => {
+                let hz = parse_si(value).filter(|v| *v >= 1.0);
+                meta.rate = Some(Sps(hz.ok_or_else(|| format!("{value:?} is not a rate"))? as u64));
+            }
+            "centre" | "center" | "freq" => {
+                let hz = parse_si(value).ok_or_else(|| format!("{value:?} is not a frequency"))?;
+                meta.center = Some(Hz(hz as u64));
+            }
+            "format" | "fmt" => {
+                meta.format = Some(
+                    SampleFormat::from_extension(value)
+                        .ok_or_else(|| format!("{value:?} is not cu8, cs8, cs16 or cf32"))?,
+                );
+            }
+            other => return Err(format!("{other:?} is not rate, format or centre")),
+        }
+    }
+    Ok((PathBuf::from(path), meta))
+}
+
 /// Read a number with an SI suffix, `250k`, `2.4M` or a bare count, which is
 /// how a capture's name quotes a rate and how somebody typing one into the
 /// interface expects to be able to write it.
@@ -477,5 +519,45 @@ mod tests {
         assert_eq!(parse_si("250k"), Some(250_000.0));
         assert_eq!(parse_si("2048000"), Some(2_048_000.0));
         assert_eq!(parse_si("fast"), None);
+    }
+
+    /// What a script writes for a recording another program made, and what a
+    /// name in the rtl_433 convention still needs after it, which is nothing.
+    #[test]
+    fn a_capture_spec_says_what_the_name_does_not() {
+        let (path, meta) = parse_spec("fineoffset_433.92M_250k.cu8").unwrap();
+        assert_eq!(path, PathBuf::from("fineoffset_433.92M_250k.cu8"));
+        assert_eq!(meta, FileMeta::default());
+
+        let (path, meta) = parse_spec("/tmp/x.iq,rate=250k,format=cs16,centre=433.92M").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/x.iq"));
+        assert_eq!(meta.rate, Some(Sps(250_000)));
+        assert_eq!(meta.format, Some(SampleFormat::Cs16));
+        assert_eq!(meta.center, Some(Hz(433_920_000)));
+        assert!(meta.complete());
+
+        let (_, meta) = parse_spec("/tmp/x.iq, format = CU8 , center=868300000").unwrap();
+        assert_eq!(meta.format, Some(SampleFormat::Cu8));
+        assert_eq!(meta.center, Some(Hz(868_300_000)));
+        assert_eq!(meta.rate, None, "nothing said is nothing filled in");
+
+        let comma = "a comma with no `=` after it is part of the path";
+        assert_eq!(parse_spec("/tmp/a,b.cu8").unwrap().0, PathBuf::from("/tmp/a,b.cu8"), "{comma}");
+        assert_eq!(
+            parse_spec("/tmp/a,b.cu8,rate=1M").unwrap().0,
+            PathBuf::from("/tmp/a,b.cu8"),
+            "{comma}"
+        );
+        assert_eq!(
+            parse_spec("x.iq,rat=250k").unwrap_err(),
+            "\"rat\" is not rate, format or centre"
+        );
+        assert_eq!(parse_spec("x.iq,rate=fast,format=cu8").unwrap_err(), "\"fast\" is not a rate");
+        assert_eq!(parse_spec("x.iq,rate=0").unwrap_err(), "\"0\" is not a rate");
+        assert_eq!(
+            parse_spec("x.iq,format=wav").unwrap_err(),
+            "\"wav\" is not cu8, cs8, cs16 or cf32"
+        );
+        assert!(parse_spec("rate=250k").is_err(), "a spec with no file is an error");
     }
 }
