@@ -338,15 +338,29 @@ const SUB_TAIL: std::time::Duration = std::time::Duration::from_millis(120);
 /// quiet bins and a ceiling over the loud ones, or `None` for readings with
 /// nothing finite in them.
 fn window_for(db: &[f32]) -> Option<(f32, f32)> {
+    let v = sorted_finite(db)?;
+    let lo = percentile(&v, 0.10) - 6.0;
+    let hi = (percentile(&v, 0.999) + PEAK_HEADROOM_DB).max(lo + MIN_SPAN_DB);
+    Some((lo, hi))
+}
+
+fn waterfall_window_for(db: &[f32]) -> Option<(f32, f32)> {
+    let v = sorted_finite(db)?;
+    let lo = percentile(&v, 0.10) - 6.0;
+    Some((lo, lo + WATERFALL_SPAN_DB))
+}
+
+fn sorted_finite(db: &[f32]) -> Option<Vec<f32>> {
     let mut v: Vec<f32> = db.iter().copied().filter(|x| x.is_finite()).collect();
     if v.is_empty() {
         return None;
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let pct = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
-    let lo = pct(0.10) - 6.0;
-    let hi = (pct(0.999) + PEAK_HEADROOM_DB).max(lo + MIN_SPAN_DB);
-    Some((lo, hi))
+    Some(v)
+}
+
+fn percentile(sorted: &[f32], p: f32) -> f32 {
+    sorted[((sorted.len() - 1) as f32 * p) as usize]
 }
 
 /// What the main pane shows.
@@ -597,6 +611,7 @@ const VU_W: f32 = 130.0;
 /// keeps the grass at a tenth of the ramp and gives a signal the rest.
 const PEAK_HEADROOM_DB: f32 = 12.0;
 const MIN_SPAN_DB: f32 = 50.0;
+const WATERFALL_SPAN_DB: f32 = 50.0;
 
 /// How long a fault stays over the spectrum.
 const ERR_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(8);
@@ -1647,7 +1662,7 @@ impl App {
     /// and applies to both; what the receiver works out for itself is one
     /// window each.
     fn rescale_waterfall(&mut self, db: &[f32]) {
-        let Some((lo, hi)) = window_for(db) else { return };
+        let Some((lo, hi)) = waterfall_window_for(db) else { return };
         self.scope.wf_floor += (lo - self.scope.wf_floor) * 0.05;
         self.scope.wf_ceil += (hi - self.scope.wf_ceil) * 0.05;
     }
@@ -4379,6 +4394,24 @@ mod tests {
         assert!((a.scope.floor + 91.0).abs() < 1.0, "floor {}", a.scope.floor);
         let span = a.scope.ceil - a.scope.floor;
         assert!((span - MIN_SPAN_DB).abs() < 1.0, "span {span}");
+    }
+
+    #[test]
+    fn waterfall_auto_scale_ranges_from_the_noise_not_the_loudest_carrier() {
+        let mut a = app();
+        let mut db = vec![-95.0f32; 1024];
+        for x in db[400..480].iter_mut() {
+            *x = -10.0;
+        }
+        for _ in 0..400 {
+            a.rescale_waterfall(&db);
+        }
+        assert!((a.scope.wf_floor + 101.0).abs() < 0.5, "floor {}", a.scope.wf_floor);
+        assert!(
+            (a.scope.wf_ceil - a.scope.wf_floor - WATERFALL_SPAN_DB).abs() < 0.5,
+            "a carrier 85 dB up stretched the ramp to {} dB",
+            a.scope.wf_ceil - a.scope.wf_floor
+        );
     }
 
     #[test]

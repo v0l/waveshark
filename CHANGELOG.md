@@ -212,6 +212,7 @@ the code is in the commit log.
 - A saved patch naming a stage this build was not compiled with emptied the
   whole graph.
 - Receiver froze on a rebuild while a DVB-T channel had fallen behind.
+- Waterfall auto scale stretched by a strong carrier, washing out everything weaker.
 - A strip channel whose decoder refused its input stopped the receiver, an
   AIS channel away from the pair it reads being the easy way in.
 - PWM sensors and remotes read nothing where the detector clipped the first or
