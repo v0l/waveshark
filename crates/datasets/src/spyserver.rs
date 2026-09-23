@@ -1,6 +1,16 @@
 use crate::cache::{Cache, Error, Source, When};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+pub const WORKERS: usize = 10;
+
+pub const ANSWERED_FOR: u64 = 60 * 60;
+
+pub const SILENT_FOR: u64 = 4 * 60 * 60;
 
 pub fn source() -> Source {
     Source::http(
@@ -48,6 +58,137 @@ impl Server {
     pub fn has_slot(&self) -> bool {
         self.clients < self.max_clients
     }
+
+    pub fn as_heard(&self, heard: Option<Heard>) -> Server {
+        let mut s = self.clone();
+        if let Some(Heard::Answered { control, center_hz }) = heard {
+            s.full_control = control;
+            s.center_hz = center_hz;
+        }
+        s
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Heard {
+    Answered { control: bool, center_hz: u64 },
+    Silent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Probed {
+    pub at: u64,
+    pub heard: Heard,
+}
+
+impl Probed {
+    pub fn stale(&self, now: u64) -> bool {
+        let lasts = match self.heard {
+            Heard::Answered { .. } => ANSWERED_FOR,
+            Heard::Silent => SILENT_FOR,
+        };
+        now.saturating_sub(self.at) >= lasts
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Probes(HashMap<String, Probed>);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub listed: usize,
+    pub checked: usize,
+    pub answering: usize,
+}
+
+impl Probes {
+    pub fn path(cache: &Cache) -> PathBuf {
+        cache.dir().join("spyservers-probed.json")
+    }
+
+    pub fn read(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn write(&self, path: &Path) -> std::io::Result<()> {
+        let raw = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        let part = path.with_extension("json.part");
+        std::fs::write(&part, raw)?;
+        std::fs::rename(&part, path)
+    }
+
+    pub fn get(&self, s: &Server) -> Option<Probed> {
+        self.0.get(&s.addr()).copied()
+    }
+
+    pub fn heard(&self, s: &Server) -> Option<Heard> {
+        self.get(s).map(|p| p.heard)
+    }
+
+    pub fn insert(&mut self, s: &Server, probed: Probed) {
+        self.0.insert(s.addr(), probed);
+    }
+
+    pub fn due<'a>(&self, servers: &'a [Server], now: u64) -> Vec<&'a Server> {
+        servers.iter().filter(|s| s.online && self.get(s).is_none_or(|p| p.stale(now))).collect()
+    }
+
+    pub fn tally(&self, servers: &[Server]) -> Tally {
+        servers.iter().filter(|s| s.online).fold(Tally::default(), |mut t, s| {
+            t.listed += 1;
+            match self.heard(s) {
+                Some(Heard::Answered { .. }) => {
+                    t.checked += 1;
+                    t.answering += 1;
+                }
+                Some(Heard::Silent) => t.checked += 1,
+                None => {}
+            }
+            t
+        })
+    }
+
+    fn keep_listed(&mut self, servers: &[Server]) {
+        self.0.retain(|addr, _| servers.iter().any(|s| s.addr() == *addr));
+    }
+}
+
+pub fn sweep(
+    probes: &Mutex<Probes>,
+    servers: &[Server],
+    now: u64,
+    workers: usize,
+    probe: impl Fn(&Server) -> Heard + Sync,
+) -> usize {
+    let due = {
+        let mut held = probes.lock().unwrap_or_else(|e| e.into_inner());
+        held.keep_listed(servers);
+        held.due(servers, now)
+    };
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..workers.min(due.len()) {
+            scope.spawn(|| {
+                while let Some(s) = due.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let heard = probe(s);
+                    probes
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(s, Probed { at: now, heard });
+                }
+            });
+        }
+    });
+    due.len()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    pub server: Server,
+    pub heard: Option<Heard>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -58,11 +199,25 @@ pub struct Filter {
 }
 
 impl Filter {
-    pub fn keeps(&self, s: &Server) -> bool {
+    pub fn keeps(&self, s: &Server, heard: Option<Heard>) -> bool {
         s.online
+            && heard != Some(Heard::Silent)
             && self.hz.is_none_or(|hz| s.tunes(hz))
             && (!self.full_control || s.full_control)
             && (!self.free || s.has_slot())
+    }
+
+    pub fn list(&self, servers: &[Server], probes: &Probes) -> Vec<Listed> {
+        let mut out: Vec<Listed> = servers
+            .iter()
+            .map(|s| {
+                let heard = probes.heard(s);
+                Listed { server: s.as_heard(heard), heard }
+            })
+            .filter(|l| self.keeps(&l.server, l.heard))
+            .collect();
+        out.sort_by_key(|l| l.heard.is_none());
+        out
     }
 }
 
@@ -282,7 +437,7 @@ mod tests {
     }
 
     fn kept(f: Filter) -> Vec<String> {
-        servers().into_iter().filter(|s| f.keeps(s)).map(|s| s.description).collect()
+        servers().into_iter().filter(|s| f.keeps(s, None)).map(|s| s.description).collect()
     }
 
     #[test]
@@ -308,6 +463,112 @@ mod tests {
         assert_eq!(kept(f), ["Airspy R2 - Ottawa, Canada", "John Doe L8ZEE"]);
         let f = Filter { full_control: true, free: true, ..Filter::default() };
         assert_eq!(kept(f), ["Airspy R2 - Ottawa, Canada"]);
+    }
+
+    fn heard_by_name(s: &Server) -> Heard {
+        match s.description.as_str() {
+            "John Doe L8ZEE" => Heard::Answered { control: true, center_hz: 145_800_000 },
+            _ => Heard::Silent,
+        }
+    }
+
+    fn swept(now: u64) -> (Mutex<Probes>, Vec<Server>) {
+        let (probes, v) = (Mutex::new(Probes::default()), servers());
+        assert_eq!(
+            sweep(&probes, &v, now, WORKERS, heard_by_name),
+            3,
+            "the offline one is not asked"
+        );
+        (probes, v)
+    }
+
+    #[test]
+    fn of_one_answering_and_two_silent_exactly_the_one_that_answered_is_kept() {
+        let (probes, v) = swept(1000);
+        let listed = Filter::default().list(&v, &probes.lock().unwrap());
+        let names: Vec<&str> = listed.iter().map(|l| l.server.description.as_str()).collect();
+        assert_eq!(names, ["John Doe L8ZEE"]);
+        assert_eq!(probes.lock().unwrap().tally(&v), Tally { listed: 3, checked: 3, answering: 1 });
+    }
+
+    #[test]
+    fn what_the_server_said_overrides_what_the_directory_said() {
+        let (probes, v) = swept(1000);
+        let f = Filter { full_control: true, ..Filter::default() };
+        let listed = f.list(&v, &probes.lock().unwrap());
+        assert_eq!(listed.len(), 1, "the directory says John Doe grants no control");
+        assert!(listed[0].server.full_control);
+        assert_eq!(listed[0].server.center_hz, 145_800_000);
+        assert_eq!(named(&v, "John Doe L8ZEE").center_hz, 808_712_500);
+    }
+
+    #[test]
+    fn a_server_that_answered_is_listed_above_those_not_yet_asked() {
+        let v = servers();
+        let mut probes = Probes::default();
+        let hf = named(&v, "HF in Saigon");
+        probes.insert(hf, Probed { at: 0, heard: Heard::Answered { control: true, center_hz: 1 } });
+        let names: Vec<String> =
+            Filter::default().list(&v, &probes).into_iter().map(|l| l.server.description).collect();
+        assert_eq!(names, ["HF in Saigon", "Airspy R2 - Ottawa, Canada", "John Doe L8ZEE"]);
+        assert_eq!(probes.tally(&v), Tally { listed: 3, checked: 1, answering: 1 });
+    }
+
+    #[test]
+    fn a_second_sweep_asks_again_only_what_has_gone_stale() {
+        let (probes, v) = swept(1000);
+        let asked = AtomicUsize::new(0);
+        let count = |s: &Server| {
+            asked.fetch_add(1, Ordering::Relaxed);
+            heard_by_name(s)
+        };
+        assert_eq!(sweep(&probes, &v, 1000 + ANSWERED_FOR - 1, WORKERS, count), 0);
+        assert_eq!(sweep(&probes, &v, 1000 + SILENT_FOR - 1, WORKERS, count), 1, "the live one");
+        assert_eq!(sweep(&probes, &v, 1000 + SILENT_FOR, WORKERS, count), 2, "the silent two");
+        assert_eq!(asked.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn ten_servers_are_asked_at_a_time() {
+        let v: Vec<Server> = (0..30u16)
+            .map(|i| Server { port: 5000 + i, ..named(&servers(), "John Doe L8ZEE").clone() })
+            .collect();
+        let (now, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let started = std::time::Instant::now();
+        let probes = Mutex::new(Probes::default());
+        let asked = sweep(&probes, &v, 0, WORKERS, |_| {
+            peak.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(100));
+            now.fetch_sub(1, Ordering::SeqCst);
+            Heard::Silent
+        });
+        assert_eq!((asked, peak.load(Ordering::SeqCst)), (30, 10));
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(300), "floor, three rounds of ten: {took:?}");
+        assert!(took < Duration::from_millis(900), "ceiling, not one at a time: {took:?}");
+    }
+
+    #[test]
+    fn the_probes_are_kept_on_disk_and_a_torn_file_reads_as_none() {
+        let dir = std::env::temp_dir().join(format!("spyprobe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("spyservers-probed.json");
+        let (probes, v) = swept(1000);
+        probes.lock().unwrap().write(&path).unwrap();
+        let back = Probes::read(&path);
+        assert_eq!(back, *probes.lock().unwrap());
+        assert_eq!(back.tally(&v), Tally { listed: 3, checked: 3, answering: 1 });
+        std::fs::write(&path, b"{\"torn").unwrap();
+        assert_eq!(Probes::read(&path), Probes::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_server_gone_from_the_directory_is_forgotten_at_the_next_sweep() {
+        let (probes, mut v) = swept(1000);
+        v.retain(|s| s.description != "HF in Saigon");
+        assert_eq!(sweep(&probes, &v, 1000, WORKERS, heard_by_name), 0);
+        assert_eq!(probes.lock().unwrap().0.len(), 2);
     }
 
     #[test]

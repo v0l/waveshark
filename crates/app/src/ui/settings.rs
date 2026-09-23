@@ -2788,8 +2788,14 @@ impl App {
         let (hz, bad_hz) = edit.hz();
         let filter =
             datasets::spyserver::Filter { hz, full_control: edit.full_control, free: edit.free };
-        let kept: Vec<&datasets::spyserver::Server> =
-            servers.iter().flat_map(|v| v.iter()).filter(|s| filter.keeps(s)).collect();
+        crate::data::probe_spyservers();
+        let (kept, tally) = match &servers {
+            Some(v) => {
+                let probes = crate::data::spyserver_probes();
+                (filter.list(v, &probes), probes.tally(v))
+            }
+            None => Default::default(),
+        };
         let (mut close, mut tune) = (false, None);
         let connecting = self.joining.as_ref().map(|j| j.host.clone());
         let r = egui::containers::Modal::new(egui::Id::new("find-spyserver"))
@@ -2821,10 +2827,16 @@ impl App {
                         }
                         (None, Some(e), _, _) => panel::status(ui, false, e),
                         (None, None, Some(e), _) => panel::status(ui, false, e),
-                        (None, None, None, Some(v)) => panel::status(
+                        (None, None, None, Some(_)) => panel::status(
                             ui,
                             true,
-                            &format!("{} of {} servers", kept.len(), v.len()),
+                            &format!(
+                                "{} of {} checked, {} answering, {} shown",
+                                tally.checked,
+                                tally.listed,
+                                tally.answering,
+                                kept.len()
+                            ),
                         ),
                         (None, None, None, None) => match crate::data::failed(which) {
                             Some(e) => panel::status(ui, false, &e),
@@ -2838,9 +2850,9 @@ impl App {
                     .max_height(share_of_screen(ui, 0.55, 240.0, 520.0))
                     .show(ui, |ui| {
                         ui.set_max_width(w);
-                        for s in &kept {
-                            if server_card(ui, s, connecting.is_none()) {
-                                tune = Some((*s).clone());
+                        for l in &kept {
+                            if server_card(ui, l, connecting.is_none()) {
+                                tune = Some(l.server.clone());
                             }
                             ui.add_space(6.0);
                         }
@@ -3828,7 +3840,10 @@ fn listed_row(ui: &mut egui::Ui) -> bool {
     let mut open = false;
     ui.horizontal(|ui| {
         let said = match crate::data::spyservers() {
-            Some(v) => format!("{} in the Airspy directory", v.len()),
+            Some(v) => match crate::data::spyserver_probes().tally(&v) {
+                t if t.checked == 0 => format!("{} in the Airspy directory", v.len()),
+                t => format!("{} answering of {} in the Airspy directory", t.answering, v.len()),
+            },
             None => "the Airspy directory".to_string(),
         };
         Line::new().value(said).size(13.0).show(ui);
@@ -3844,9 +3859,11 @@ fn bare_mhz(hz: u64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server, idle: bool) -> bool {
+fn server_card(ui: &mut egui::Ui, l: &datasets::spyserver::Listed, idle: bool) -> bool {
     let mut tune = false;
-    let rail = s.has_slot().then_some(theme::TRACE);
+    let s = &l.server;
+    let answered = matches!(l.heard, Some(datasets::spyserver::Heard::Answered { .. }));
+    let rail = (answered && s.has_slot()).then_some(theme::TRACE);
     let mhz = |hz: u64| format!("{:.3}", hz as f64 / 1e6);
     card(
         ui,
@@ -3895,7 +3912,11 @@ fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server, idle: bool) -
                 true => String::new(),
                 false => format!(", {}", s.antenna),
             };
-            hint(ui, &format!("{}, {dial}{session}{antenna}", s.addr()));
+            let checked = match answered {
+                true => "",
+                false => ", not yet checked",
+            };
+            hint(ui, &format!("{}, {dial}{session}{antenna}{checked}", s.addr()));
         },
     );
     tune

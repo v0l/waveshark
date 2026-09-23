@@ -293,15 +293,17 @@ fn setting(sock: &mut TcpStream, which: Set, value: u32) -> Result<()> {
     command(sock, Cmd::SetSetting, &body)
 }
 
-fn connect(addr: &str) -> Result<(TcpStream, Info, Sync)> {
+fn connect(addr: &str, within: Duration) -> Result<(TcpStream, Info, Sync)> {
+    let until = Instant::now() + within;
     let resolved = addr
         .to_socket_addrs()
         .map_err(|e| Error::other(format!("{addr}: {e}")))?
         .next()
         .ok_or_else(|| Error::other(format!("{addr} resolves to nothing")))?;
-    let mut sock = TcpStream::connect_timeout(&resolved, CONNECT_TIMEOUT)
+    let mut sock = TcpStream::connect_timeout(&resolved, within.min(CONNECT_TIMEOUT))
         .map_err(|e| Error::other(format!("{addr}: {e}")))?;
-    sock.set_read_timeout(Some(CONNECT_TIMEOUT)).map_err(other)?;
+    let left = until.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+    sock.set_read_timeout(Some(left.min(CONNECT_TIMEOUT))).map_err(other)?;
     let _ = sock.set_nodelay(true);
 
     let mut hello = Vec::new();
@@ -309,7 +311,6 @@ fn connect(addr: &str) -> Result<(TcpStream, Info, Sync)> {
     hello.extend_from_slice(b"waveshark");
     command(&mut sock, Cmd::Hello, &hello)?;
 
-    let until = Instant::now() + CONNECT_TIMEOUT * 2;
     let mut body = Vec::new();
     let (mut info, mut sync) = (None, None);
     while info.is_none() || sync.is_none() {
@@ -327,9 +328,15 @@ fn connect(addr: &str) -> Result<(TcpStream, Info, Sync)> {
     Ok((sock, info, sync))
 }
 
+const HANDSHAKE: Duration = Duration::from_secs(9);
+
 pub fn probe(addr: &str) -> Result<Probe> {
+    probe_within(addr, HANDSHAKE)
+}
+
+pub fn probe_within(addr: &str, within: Duration) -> Result<Probe> {
     let addr = Proto::SpyServer.parse_addr(addr).ok_or(Error::NoDevice)?;
-    let (sock, info, sync) = connect(&addr)?;
+    let (sock, info, sync) = connect(&addr, within)?;
     drop(sock);
     tracing::debug!(
         "spyserver {addr}: {} at {} MS/s, {} decimation stages",
@@ -373,7 +380,7 @@ pub struct Device {
 impl Device {
     pub fn open(addr: &str) -> Result<Self> {
         let addr = Proto::SpyServer.parse_addr(addr).ok_or(Error::NoDevice)?;
-        let (sock, server, sync) = connect(&addr)?;
+        let (sock, server, sync) = connect(&addr, HANDSHAKE)?;
         let landed = Arc::new(Landed::default());
         landed.take(&sync);
         let rates = server.rates();
@@ -765,6 +772,27 @@ mod tests {
             }
         });
         (addr, rx)
+    }
+
+    #[test]
+    fn a_server_that_accepts_and_says_nothing_is_given_up_on_within_the_window() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let held = std::thread::spawn(move || l.accept().map(|(s, _)| s));
+        let started = Instant::now();
+        assert!(probe_within(&addr, Duration::from_millis(300)).is_err());
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(300), "floor: gave up after {took:?}");
+        assert!(took < Duration::from_millis(600), "ceiling: gave up after {took:?}");
+        drop(held.join());
+    }
+
+    #[test]
+    fn a_refused_connection_fails_at_once() {
+        let addr = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        let started = Instant::now();
+        assert!(probe_within(&addr, Duration::from_secs(3)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
     }
 
     #[test]

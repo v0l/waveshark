@@ -20,7 +20,7 @@ use common::{Error, Hz, Result, Sps};
 use std::time::Duration;
 
 /// How long to wait for a server to answer before calling it unreachable.
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Blocks queued for the consumer. A block is tens of milliseconds, so this is
 /// a couple of seconds of slack before the oldest are dropped.

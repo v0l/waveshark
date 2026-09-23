@@ -17,6 +17,7 @@ use datasets::gateways::{Gateway, HostFile};
 use datasets::git;
 use datasets::radioid::{Repeater, Users};
 use datasets::sigid;
+use datasets::spyserver::{Heard, Probes};
 use datasets::tle;
 use datasets::{Cache, When};
 use parking_lot::RwLock;
@@ -159,6 +160,58 @@ pub fn launch_sites() -> Option<Arc<Vec<datasets::sondehub::Site>>> {
 
 pub fn spyservers() -> Option<Arc<Vec<datasets::spyserver::Server>>> {
     on_demand(Which::SpyServers, &SPYSERVERS)
+}
+
+static SPYSERVER_PROBES: LazyLock<std::sync::Mutex<Probes>> = LazyLock::new(|| {
+    std::sync::Mutex::new(cache().map(|c| Probes::read(&Probes::path(c))).unwrap_or_default())
+});
+static SWEEPING: AtomicBool = AtomicBool::new(false);
+
+pub fn spyserver_probes() -> std::sync::MutexGuard<'static, Probes> {
+    SPYSERVER_PROBES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn sweeping_spyservers() -> bool {
+    SWEEPING.load(Ordering::Acquire)
+}
+
+pub fn probe_spyservers() {
+    let Some(servers) = SPYSERVERS.read().clone() else {
+        return;
+    };
+    if sweeping_spyservers() || spyserver_probes().due(&servers, now()).is_empty() {
+        return;
+    }
+    if SWEEPING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let started = std::thread::Builder::new().name("spyserver-probe".into()).spawn(move || {
+        let asked = datasets::spyserver::sweep(
+            &SPYSERVER_PROBES,
+            &servers,
+            now(),
+            datasets::spyserver::WORKERS,
+            |s| heard(&s.addr(), remote::CONNECT_TIMEOUT),
+        );
+        let t = spyserver_probes().tally(&servers);
+        tracing::info!(asked, answering = t.answering, "spyserver directory probed");
+        if let Some(c) = cache()
+            && let Err(e) = spyserver_probes().write(&Probes::path(c))
+        {
+            tracing::warn!("spyserver probes not saved: {e}");
+        }
+        SWEEPING.store(false, Ordering::Release);
+    });
+    if started.is_err() {
+        SWEEPING.store(false, Ordering::Release);
+    }
+}
+
+fn heard(addr: &str, within: std::time::Duration) -> Heard {
+    match remote::spyserver::probe_within(addr, within) {
+        Ok(p) => Heard::Answered { control: p.tunable, center_hz: p.center.map_or(0, |c| c.0) },
+        Err(_) => Heard::Silent,
+    }
 }
 
 pub fn check(which: Which) {
@@ -1205,6 +1258,106 @@ pub fn fmt_ago(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
+
+    fn spyserver_message(kind: u32, body: &[u32]) -> Vec<u8> {
+        [(2 << 24) | 1921, kind, 0, 0, (body.len() * 4) as u32]
+            .iter()
+            .chain(body)
+            .flat_map(|w| w.to_le_bytes())
+            .collect()
+    }
+
+    fn fake_spyserver(answers: bool) -> (String, Arc<AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counted = accepted.clone();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for mut sock in l.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                if answers {
+                    let mut hello = [0u8; 8 + 13];
+                    let _ = sock.read_exact(&mut hello);
+                    let info = [
+                        1,
+                        7,
+                        3_000_000,
+                        2_400_000,
+                        10,
+                        0,
+                        21,
+                        24_000_000,
+                        1_800_000_000,
+                        12,
+                        0,
+                        0,
+                    ];
+                    let sync = [1, 0, 145_800_000, 145_800_000, 0, 144_600_000, 147_000_000, 0, 0];
+                    let _ = sock.write_all(&spyserver_message(0, &info));
+                    let _ = sock.write_all(&spyserver_message(1, &sync));
+                }
+                held.push(sock);
+            }
+        });
+        (addr, accepted)
+    }
+
+    fn listed_at(description: &str, addr: &str) -> datasets::spyserver::Server {
+        let (host, port) = addr.rsplit_once(':').unwrap();
+        datasets::spyserver::Server {
+            host: host.into(),
+            port: port.parse().unwrap(),
+            description: description.into(),
+            device: "AirspyOne".into(),
+            antenna: String::new(),
+            min_hz: 24_000_000,
+            max_hz: 1_800_000_000,
+            center_hz: 93_600_000,
+            bandwidth_hz: 2_000_000,
+            clients: 0,
+            max_clients: 5,
+            full_control: false,
+            online: true,
+            session_limit: None,
+            location: None,
+        }
+    }
+
+    #[test]
+    fn of_three_listed_servers_only_the_one_that_answers_is_kept_and_asked_once() {
+        let (answering, answered) = fake_spyserver(true);
+        let (silent, held) = fake_spyserver(false);
+        let refusing = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        let servers = [
+            listed_at("answers", &answering),
+            listed_at("refuses", &refusing),
+            listed_at("says nothing", &silent),
+        ];
+        let probes = std::sync::Mutex::new(Probes::default());
+        let within = Duration::from_millis(400);
+        let started = Instant::now();
+        let ask = |s: &datasets::spyserver::Server| heard(&s.addr(), within);
+        assert_eq!(datasets::spyserver::sweep(&probes, &servers, 0, 10, ask), 3);
+        assert!(started.elapsed() < within * 2, "ceiling: {:?}", started.elapsed());
+        let p = probes.lock().unwrap();
+        let kept = datasets::spyserver::Filter::default().list(&servers, &p);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].server.description, "answers");
+        assert_eq!(kept[0].heard, Some(Heard::Answered { control: true, center_hz: 145_800_000 }));
+        assert!(kept[0].server.full_control, "the server grants what the directory denied");
+        drop(p);
+        assert_eq!(datasets::spyserver::sweep(&probes, &servers, 60, 10, ask), 0);
+        assert_eq!(
+            (answered.load(Ordering::SeqCst), held.load(Ordering::SeqCst)),
+            (1, 1),
+            "the second sweep read the cache and connected to nothing"
+        );
+    }
 
     #[test]
     fn sizes_round_to_something_readable() {
