@@ -17,9 +17,16 @@ struct FrameStep {
     seed: bool,
     settled: bool,
     completing: bool,
+    learn: bool,
     stored: usize,
     head: usize,
     bias: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Clipping {
+    since: u64,
+    until: u64,
 }
 
 /// Bins per task of the floor pass, and per chunk of [`Rows`].
@@ -173,6 +180,7 @@ fn ratios(
     cap: &[f32],
     bias: f32,
     stored: bool,
+    learn: bool,
     floor: &mut [f32],
     ratio: &mut [f32],
     raw_ratio: &mut [f32],
@@ -181,10 +189,12 @@ fn ratios(
     let w = power.len();
     let load = |v: &[f32], i: usize| f32x8::from(<[f32; 8]>::try_from(&v[i..i + 8]).unwrap());
     let (zero, inf, b) = (f32x8::ZERO, f32x8::splat(f32::INFINITY), f32x8::splat(bias));
+    let unseen = if learn { 0.0 } else { f32::INFINITY };
+    let hide = f32x8::splat(unseen);
     let mut i = 0;
     while i + 8 <= w {
         let p = load(power, i);
-        let c = load(current, i).min(p);
+        let c = load(current, i).min(p.max(hide));
         current[i..i + 8].copy_from_slice(&c.to_array());
         let m = if stored { load(min, i).min(c) } else { c };
         let fl = m.min(load(cap, i)) * b;
@@ -197,7 +207,7 @@ fn ratios(
         i += 8;
     }
     while i < w {
-        current[i] = current[i].min(power[i]);
+        current[i] = current[i].min(power[i].max(unseen));
         let m = if stored { min[i].min(current[i]) } else { current[i] };
         write_ratio(
             m.min(cap[i]) * bias,
@@ -446,6 +456,8 @@ pub struct SourceDetector {
     settle_at: u64,
     /// Whether every frame so far was silent, so the first real one seeds.
     silent_so_far: bool,
+    clipping: Option<Clipping>,
+    heard_unclipped: bool,
     hang_frames: usize,
     next_id: u64,
     tracks: Vec<Track>,
@@ -517,6 +529,8 @@ impl SourceDetector {
             frame: 0,
             settle_at: 0,
             silent_so_far: true,
+            clipping: None,
+            heard_unclipped: false,
             hang_frames,
             next_id: 1,
             tracks: Vec::new(),
@@ -653,6 +667,8 @@ impl SourceDetector {
         self.frame = 0;
         self.settle_at = 0;
         self.silent_so_far = true;
+        self.clipping = None;
+        self.heard_unclipped = false;
         self.tracks.clear();
         self.events.clear();
     }
@@ -739,7 +755,7 @@ impl SourceDetector {
         let mut steps: Vec<FrameStep> = Vec::with_capacity(count);
         let mut run_start = 0usize;
         for f in 0..count {
-            let (step, caps_due) = self.plan_frame(silent[f]);
+            let (step, caps_due) = self.plan_frame(silent[f], saturated[f]);
             if caps_due {
                 if f > run_start {
                     self.floor_run(&spectra, run_start, &steps[run_start..f]);
@@ -802,7 +818,7 @@ impl SourceDetector {
 
     /// The scalars of one frame's floor pass, stepping the shared counters
     /// past it, and whether the caps are due before it.
-    fn plan_frame(&mut self, silent: bool) -> (FrameStep, bool) {
+    fn plan_frame(&mut self, silent: bool, clipped: bool) -> (FrameStep, bool) {
         // The smoother is seeded from the first frame and the floor waits
         // for it to settle. Starting the smoother from zero puts a run of
         // near-zero frames into every bin's minimum, and for the whole of
@@ -817,6 +833,24 @@ impl SourceDetector {
         // up from that fade is a floor learned low, which every later frame
         // then clears.
         let settled = self.frame >= self.settle_at + SETTLE_FRAMES;
+        let tail = (SATURATION_SMEAR + self.cfg.integrate_frames.max(1)) as u64;
+        let frame = self.frame;
+        self.clipping = match self.clipping {
+            _ if clipped => Some(Clipping {
+                since: self.clipping.map_or(frame, |c| c.since),
+                until: frame + tail,
+            }),
+            Some(c) if frame <= c.until => Some(c),
+            _ => None,
+        };
+        let memory = (self.floor.sub_len * self.floor.sub_count) as u64;
+        let learn = match self.clipping {
+            None => true,
+            Some(c) => !self.heard_unclipped || frame - c.since >= memory,
+        };
+        if settled && !silent && self.clipping.is_none() {
+            self.heard_unclipped = true;
+        }
         let seed = self.frame == self.settle_at;
         let measure = settled && !silent;
         let completing = measure && self.floor.completing();
@@ -831,6 +865,7 @@ impl SourceDetector {
             seed,
             settled,
             completing,
+            learn,
             stored,
             head: self.floor.head,
             bias: if measure { floor_bias(self.alpha, self.floor.frames_after()) } else { 1.0 },
@@ -911,7 +946,7 @@ impl SourceDetector {
                     if step.completing {
                         for i in 0..w {
                             let m = floor_update(
-                                power[i],
+                                if step.learn { power[i] } else { f32::INFINITY },
                                 &mut current[i],
                                 &mut mins[i * sc..(i + 1) * sc],
                                 &mut min[i],
@@ -938,6 +973,7 @@ impl SourceDetector {
                         cap,
                         step.bias,
                         step.stored > 0,
+                        step.learn,
                         floor,
                         ratio,
                         raw_ratio,

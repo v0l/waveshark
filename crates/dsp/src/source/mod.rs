@@ -1161,6 +1161,29 @@ mod tests {
     }
 
     #[test]
+    fn a_clipped_carrier_does_not_teach_the_floor_the_quiet_it_clipped() {
+        let mut d = SourceDetector::new(RATE, RATE, cfg());
+        let (start, len) = (600_000usize, 8_000usize);
+        let mut x = noise(900_000, 0.05, 53);
+        let carrier = tone(len, -300_000.0, RATE, 3.0);
+        let rail = |v: f32| v.clamp(-1.0, 1.0);
+        for (i, c) in carrier.iter().enumerate() {
+            let s = x[start + i] * 0.4 + *c;
+            x[start + i] = C32::new(rail(s.re), rail(s.im));
+        }
+        let mut opened = Vec::new();
+        for chunk in x.chunks(8192) {
+            opened.extend(d.process(chunk).iter().filter_map(|e| match e {
+                SourceEvent::Opened(s) => Some(*s),
+                _ => None,
+            }));
+        }
+        let widths: Vec<f64> = opened.iter().map(|s| s.bandwidth_hz()).collect();
+        assert_eq!(opened.len(), 1, "opened {widths:?}");
+        assert!(widths[0] < 50_000.0, "the carrier opened {} Hz wide", widths[0]);
+    }
+
+    #[test]
     fn floor_bias_is_modest_for_smoothed_power() {
         // Sanity on the derivation: a few frames of smoothing over a few
         // hundred frames of window is a correction of a few dB, not ten.

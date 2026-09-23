@@ -214,6 +214,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- Auto mode opened sources across the whole band after a transmitter clipped the receiver.
 - Call list airtime climbing with no channel open, and calls that never ended.
 - Network radio dialog froze the window while ADD waited for the server.
 - AIS missed most frames on weak signals, and all of them with the DC block on.
