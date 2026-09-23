@@ -4,6 +4,7 @@
 //! Rust sysroot crate. Nothing in here does DSP or I/O: it defines sample
 //! buffers, the device abstraction, tuning units, and errors.
 
+pub mod addr;
 pub mod bands;
 pub mod decode;
 pub mod demod;

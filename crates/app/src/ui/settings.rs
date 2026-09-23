@@ -1398,15 +1398,21 @@ impl App {
                 self.feed_kind = kind;
                 if add {
                     match parse_feed(&self.feed_host, self.feed_kind) {
-                        Some(spec) if !feeds.contains(&spec) => {
+                        Ok(spec) if !feeds.contains(&spec) => {
                             self.settings.edit(|s| s.feeds.push(spec));
                             self.feed_host.clear();
                         }
-                        Some(_) => self.err = Some("that feed is already attached".into()),
-                        None => self.err = Some("expected host or host:port".into()),
+                        Ok(_) => self.err = Some("that feed is already attached".into()),
+                        Err(e) => self.err = Some(e.to_string()),
                     }
                 }
             });
+            if !self.feed_host.trim().is_empty() {
+                match parse_feed(&self.feed_host, self.feed_kind) {
+                    Ok(spec) => panel::status(ui, true, &format!("adds {}", spec.address())),
+                    Err(e) => panel::status(ui, false, &e.to_string()),
+                }
+            }
         });
         if let Some(i) = remove {
             self.settings.edit(|s| {
@@ -1516,7 +1522,7 @@ impl App {
     /// puts the whole span on the wire.
     fn iqstream_section(&mut self, ui: &mut egui::Ui) {
         let addr = self.setting(|s| s.iqstream_address());
-        let server = addr.and_then(nodes::iqstream_nodes::running);
+        let server = addr.clone().ok().and_then(nodes::iqstream_nodes::running);
         section(ui, "iq server", "the span to another receiver, over IQStream", |ui| {
             let mut on = self.setting(|s| s.iqstream_on);
             let help = "Serves the samples this receiver is reading to anything speaking \
@@ -1554,11 +1560,11 @@ impl App {
             }
             match (on, addr, server.as_ref()) {
                 (false, _, _) => panel::status(ui, false, "off: nothing is served"),
-                (true, None, _) => panel::status(ui, false, "not a port or a host:port"),
+                (true, Err(e), _) => panel::status(ui, false, &e.to_string()),
                 (true, _, Some(s)) => {
                     panel::status(ui, true, &format!("listening on {}", s.addr()))
                 }
-                (true, Some(a), None) => {
+                (true, Ok(a), None) => {
                     panel::status(ui, false, &format!("{a} is not being served yet"))
                 }
             }
@@ -1571,7 +1577,7 @@ impl App {
     /// client on it can key the transmitter.
     fn kiss_section(&mut self, ui: &mut egui::Ui) {
         let addr = self.setting(|s| s.kiss_address());
-        let tnc = addr.and_then(nodes::kiss_nodes::running);
+        let tnc = addr.clone().ok().and_then(nodes::kiss_nodes::running);
         section(ui, "tnc", "AX.25 to packet software here, over KISS", |ui| {
             let mut on = self.setting(|s| s.kiss_on);
             let help = "Serves every AX.25 frame heard on the packet band to anything \
@@ -1600,13 +1606,13 @@ impl App {
             }
             match (on, addr, tnc.as_ref()) {
                 (false, _, _) => panel::status(ui, false, "off: nothing is served"),
-                (true, None, _) => panel::status(ui, false, "not a port or a host:port"),
+                (true, Err(e), _) => panel::status(ui, false, &e.to_string()),
                 (true, _, Some(t)) => match (t.error(), t.bound()) {
                     (Some(e), _) => panel::status(ui, false, &e),
                     (None, Some(b)) => panel::status(ui, true, &format!("listening on {b}")),
                     (None, None) => panel::status(ui, false, "not listening"),
                 },
-                (true, Some(a), None) => {
+                (true, Ok(a), None) => {
                     panel::status(ui, false, &format!("{a} is not being served yet"))
                 }
             }
@@ -1750,6 +1756,11 @@ impl App {
                     self.station_edit = None;
                 }
             });
+            if let Some(typed) = self.station_edit.as_deref().filter(|t| !t.trim().is_empty())
+                && let Err(e) = crate::parse_location(typed)
+            {
+                panel::status(ui, false, &e);
+            }
             reading(
                 ui,
                 "or",
@@ -2498,6 +2509,10 @@ impl App {
                             secret(ui, &mut ha.password);
                         },
                     );
+                    match crate::session::broker_address(&ha.host, &ha.port) {
+                        Ok(at) => panel::status(ui, true, &format!("publishes to {at}")),
+                        Err(e) => panel::status(ui, false, &e.to_string()),
+                    }
                 });
                 ui.add_space(8.0);
                 section(
@@ -2732,11 +2747,19 @@ impl App {
                             panel::status(ui, false, "no address")
                         }
                         (None, None) => {
-                            let what = match edit.over {
-                                Over::Samples => edit.proto.name(),
-                                Over::Frames => edit.feed.name,
+                            let (what, at) = match edit.over {
+                                Over::Samples => {
+                                    (edit.proto.name(), edit.proto.check_addr(&edit.host))
+                                }
+                                Over::Frames => (
+                                    edit.feed.name,
+                                    super::parse_feed(&edit.host, edit.feed).map(|f| f.address()),
+                                ),
                             };
-                            panel::status(ui, true, &format!("{what} at {}", edit.host.trim()))
+                            match at {
+                                Ok(a) => panel::status(ui, true, &format!("{what} at {a}")),
+                                Err(e) => panel::status(ui, false, &e.to_string()),
+                            }
                         }
                     }
                 });
@@ -3044,8 +3067,7 @@ impl App {
     /// Attach the feed, which is a setting rather than a radio: the receiver
     /// keeps running on whatever it is tuned to and the frames join the bus.
     fn add_feed(&mut self, edit: &RemoteEdit) -> std::result::Result<(), String> {
-        let spec = super::parse_feed(&edit.host, edit.feed)
-            .ok_or_else(|| "expected host or host:port".to_string())?;
+        let spec = super::parse_feed(&edit.host, edit.feed).map_err(|e| e.to_string())?;
         if self.setting(|s| s.feeds.clone()).contains(&spec) {
             return Err("that feed is already attached".into());
         }
@@ -3962,10 +3984,7 @@ impl CaptureEdit {
             .ok_or_else(|| "no sample rate, and a guessed one decodes nothing".to_string())?;
         let center = match self.center.trim() {
             "" => None,
-            t => Some(common::Hz(
-                (t.parse::<f64>().map_err(|_| format!("{t} is not a frequency in MHz"))? * 1e6)
-                    as u64,
-            )),
+            t => Some(common::Hz::parse_mhz(t)?),
         };
         let c = crate::devices::Capture {
             path: self.path.clone(),
@@ -4063,9 +4082,9 @@ impl FindEdit {
     fn hz(&self) -> (Option<u64>, Option<String>) {
         match self.mhz.trim() {
             "" => (None, None),
-            t => match t.parse::<f64>() {
-                Ok(m) if m >= 0.0 => (Some((m * 1e6).round() as u64), None),
-                _ => (None, Some(format!("{t} is not a frequency in MHz"))),
+            t => match common::Hz::parse_mhz(t) {
+                Ok(hz) => (Some(hz.0), None),
+                Err(e) => (None, Some(e)),
             },
         }
     }

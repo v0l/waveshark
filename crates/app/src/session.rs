@@ -650,13 +650,21 @@ impl Session {
         })
     }
 
-    /// What is typed, as somewhere to publish. The port falls back to 1883
-    /// rather than refusing a field somebody cleared.
+    pub fn broker_address(&self) -> Result<common::addr::HostPort, common::addr::AddrError> {
+        broker_address(&self.ha_host, &self.ha_port)
+    }
+
+    /// What is typed, as somewhere to publish. An address that does not read
+    /// has no port, so the broker is incomplete and nothing connects.
     pub fn publish(&self) -> nodes::Publish {
+        let (host, port) = match self.broker_address() {
+            Ok(at) => (at.host, at.port),
+            Err(_) => (self.ha_host.trim().to_string(), 0),
+        };
         nodes::Publish {
             broker: nodes::Broker {
-                host: self.ha_host.trim().to_string(),
-                port: self.ha_port.trim().parse().unwrap_or(1883),
+                host,
+                port,
                 username: self.ha_user.trim().to_string(),
                 password: self.ha_password.clone(),
                 prefix: self.ha_prefix.trim().to_string(),
@@ -670,37 +678,29 @@ impl Session {
     /// Where the TNC listens, or `None` when it is off or the address is not
     /// one. A port alone is loopback: a socket that keys the transmitter is
     /// not opened to the network because a port was typed without a host.
-    pub fn kiss_address(&self) -> Option<std::net::SocketAddr> {
-        let typed = self.kiss_addr.trim();
-        if let Ok(port) = typed.parse::<u16>() {
-            return Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
-        }
-        typed.parse().ok()
+    pub fn kiss_address(&self) -> Result<std::net::SocketAddr, common::addr::AddrError> {
+        common::addr::listen(&self.kiss_addr, std::net::Ipv4Addr::LOCALHOST.into())
     }
 
     /// Where the TNC is to be served, which is nowhere until the switch is on
     /// and the address reads.
     pub fn kiss(&self) -> Option<std::net::SocketAddr> {
-        self.kiss_on.then(|| self.kiss_address()).flatten()
+        self.kiss_on.then(|| self.kiss_address().ok()).flatten()
     }
 
     /// Where the span is served, or `None` when the address is not one. A
     /// port alone is every interface, unlike the TNC: a stream nothing
     /// outside this machine can reach is not worth serving, which is what
     /// `--iqstream-listen` decided.
-    pub fn iqstream_address(&self) -> Option<std::net::SocketAddr> {
-        let typed = self.iqstream_addr.trim();
-        if let Ok(port) = typed.parse::<u16>() {
-            return Some(std::net::SocketAddr::from(([0, 0, 0, 0], port)));
-        }
-        typed.parse().ok()
+    pub fn iqstream_address(&self) -> Result<std::net::SocketAddr, common::addr::AddrError> {
+        common::addr::listen(&self.iqstream_addr, std::net::Ipv4Addr::UNSPECIFIED.into())
     }
 
     /// What the receiver is to serve, which is nothing until the switch is on
     /// and the address reads.
     pub fn iqstream(&self) -> Option<(std::net::SocketAddr, bool)> {
         self.iqstream_on
-            .then(|| self.iqstream_address().map(|a| (a, self.iqstream_tunable)))
+            .then(|| self.iqstream_address().ok().map(|a| (a, self.iqstream_tunable)))
             .flatten()
     }
 
@@ -1148,13 +1148,26 @@ fn render_cap(c: Option<u64>) -> String {
     c.map(|mb| mb.to_string()).unwrap_or_else(|| "none".into())
 }
 
+/// The broker as typed. A cleared port is 1883 rather than a fault, and a
+/// host may carry its own port.
+pub fn broker_address(
+    host: &str,
+    port: &str,
+) -> Result<common::addr::HostPort, common::addr::AddrError> {
+    let port = match port.trim() {
+        "" => 1883,
+        typed => common::addr::port(typed)?,
+    };
+    common::addr::HostPort::parse(host, port)
+}
+
 /// `beast host:port`, as written by `render`. An unknown kind is dropped
 /// rather than fatal: a session written by a later version has to load.
 fn parse_feed(v: &str) -> Option<nodes::FeedSpec> {
     let (kind, addr) = v.split_once(char::is_whitespace)?;
     let kind = nodes::feed_kind(kind.trim())?;
-    let (host, port) = addr.trim().rsplit_once(':')?;
-    Some(nodes::FeedSpec::new(host, port.parse().ok()?, kind))
+    let at = common::addr::HostPort::parse(addr, kind.default_port).ok()?;
+    Some(nodes::FeedSpec::new(at.host, at.port, kind))
 }
 
 /// `rtl_tcp host:port name of the receiver`, as written by `render`.
@@ -1196,6 +1209,7 @@ fn render_gain(m: GainMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::addr::AddrError;
 
     #[test]
     fn a_session_round_trips_through_the_file_format() {
@@ -1330,9 +1344,10 @@ mod tests {
     fn a_served_span_is_offered_to_the_network() {
         let at =
             |typed: &str| Session::parse(&format!("iqstream_addr = {typed}")).iqstream_address();
-        assert_eq!(at("1234"), Some("0.0.0.0:1234".parse().unwrap()));
-        assert_eq!(at("127.0.0.1:1234"), Some("127.0.0.1:1234".parse().unwrap()));
-        assert_eq!(at("nonsense"), None);
+        assert_eq!(at("1234"), Ok("0.0.0.0:1234".parse().unwrap()));
+        assert_eq!(at("127.0.0.1:1234"), Ok("127.0.0.1:1234".parse().unwrap()));
+        assert_eq!(at("localhost:1234"), Ok("127.0.0.1:1234".parse().unwrap()));
+        assert_eq!(at("nonsense"), Err(AddrError::NotAnAddress("nonsense".into())));
 
         assert_eq!(Session::default().iqstream(), None, "off until it is asked for");
         assert_eq!(
@@ -1375,20 +1390,55 @@ mod tests {
     #[test]
     fn a_tnc_address_is_a_port_or_a_host_and_port() {
         let at = |typed: &str| Session::parse(&format!("kiss_addr = {typed}")).kiss_address();
-        assert_eq!(at("8001"), Some("127.0.0.1:8001".parse().unwrap()));
-        assert_eq!(at("0.0.0.0:8010"), Some("0.0.0.0:8010".parse().unwrap()));
-        assert_eq!(at("[::1]:8001"), Some("[::1]:8001".parse().unwrap()));
-        assert_eq!(at("banana"), None);
-        assert_eq!(at("8001 "), Some("127.0.0.1:8001".parse().unwrap()), "trimmed");
+        assert_eq!(at("8001"), Ok("127.0.0.1:8001".parse().unwrap()));
+        assert_eq!(at("0.0.0.0:8010"), Ok("0.0.0.0:8010".parse().unwrap()));
+        assert_eq!(at("[::1]:8001"), Ok("[::1]:8001".parse().unwrap()));
+        assert_eq!(at("localhost:8001"), Ok("127.0.0.1:8001".parse().unwrap()));
+        assert_eq!(at("banana"), Err(AddrError::NotAnAddress("banana".into())));
+        assert_eq!(at("8001 "), Ok("127.0.0.1:8001".parse().unwrap()), "trimmed");
+        assert_eq!(at("0.0.0.0:99999"), Err(AddrError::Port("99999".into())));
         // A host with no port is not an address: a listener bound to a port
         // the kernel chose is one nothing can be told to connect to.
-        assert_eq!(at("0.0.0.0"), None);
+        assert_eq!(at("0.0.0.0"), Err(AddrError::NoPort));
+        assert_eq!(at("::1"), Err(AddrError::NoPort));
         // A default install serves nothing, whatever the address says.
         assert_eq!(Session::default().kiss(), None);
         assert_eq!(
             Session::parse("kiss_on = true").kiss(),
             Some("127.0.0.1:8001".parse().unwrap())
         );
+    }
+
+    /// A mistyped broker port is no broker at all, where it used to connect
+    /// to 1883 without a word; a cleared one is still 1883.
+    #[test]
+    fn a_broker_port_that_does_not_read_is_no_broker() {
+        let at = |host: &str, port: &str| {
+            Session::parse(&format!("ha_host = {host}\nha_port = {port}\n")).broker_address()
+        };
+        let hp = |host: &str, port| Ok(common::addr::HostPort { host: host.into(), port });
+        assert_eq!(at("homeassistant.local", "1883"), hp("homeassistant.local", 1883));
+        assert_eq!(at("homeassistant.local", ""), hp("homeassistant.local", 1883));
+        assert_eq!(at("pi.local:1884", ""), hp("pi.local", 1884));
+        assert_eq!(at("::1", "1883"), hp("::1", 1883));
+        assert_eq!(at("[::1]:8001", ""), hp("::1", 8001));
+        assert_eq!(at("pi.local", "99999"), Err(AddrError::Port("99999".into())));
+        assert_eq!(at("pi.local", "188 3"), Err(AddrError::Space));
+        assert_eq!(at("", "1883"), Err(AddrError::Empty));
+        let typo = Session::parse("ha_host = pi.local\nha_port = 1883x\n").publish();
+        assert_eq!(typo.broker.port, 0);
+        assert!(!typo.broker.is_complete(), "so the switch goes off rather than trying 1883");
+    }
+
+    /// A feed on an IPv6 address is written bracketed and read back whole,
+    /// where splitting on the last colon made `::1` a host of `:` on port 1.
+    #[test]
+    fn a_feed_on_an_ipv6_address_survives_the_file() {
+        let s = Session::parse("feed = beast [::1]:30005\nfeed = avr ::1\nfeed = beast pi:99999\n");
+        let feeds: Vec<(String, u16)> = s.feeds.iter().map(|f| (f.host.clone(), f.port)).collect();
+        assert_eq!(feeds, vec![("::1".into(), 30005), ("::1".into(), 30002)]);
+        assert_eq!(s.feeds[0].address(), "[::1]:30005");
+        assert_eq!(Session::parse(&s.render()).feeds, s.feeds);
     }
 
     /// A stitched receiver's per-tuner trim is a driver setting like a
@@ -1410,14 +1460,14 @@ mod tests {
     #[test]
     fn a_stream_line_without_a_protocol_is_iqstream() {
         let s = Session::parse("stream = radarpi:1234 Loft dongle\nstream = rtl_tcp://ignored\n");
-        assert_eq!(s.streams.len(), 2);
+        assert_eq!(
+            s.streams.len(),
+            1,
+            "a scheme is not the session file's spelling, and rtl_tcp://ignored is not an address"
+        );
         assert_eq!(s.streams[0].proto, remote::Proto::IqStream);
         assert_eq!(s.streams[0].addr, "radarpi:1234");
         assert_eq!(s.streams[0].label, "Loft dongle");
-        // A scheme is not the session file's spelling: the protocol is the
-        // first word, so this one keeps its default and the whole string is
-        // the address.
-        assert_eq!(s.streams[1].proto, remote::Proto::IqStream);
 
         let s = Session::parse("stream = rtl_tcp mast:1234\nstream = iqstream loft:1234 Loft\n");
         assert_eq!(s.streams.len(), 2);

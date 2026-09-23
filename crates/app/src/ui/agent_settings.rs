@@ -677,8 +677,7 @@ impl super::App {
                 let have: Vec<&str> = nodes::FEED_KINDS.iter().map(|k| k.name).collect();
                 format!("no feed kind {:?}. One of {have:?}", a.kind)
             })?;
-        let spec = super::parse_feed(&a.host, kind)
-            .ok_or_else(|| format!("{:?} is not a host or a host:port", a.host))?;
+        let spec = super::parse_feed(&a.host, kind).map_err(|e| format!("{:?}: {e}", a.host))?;
         if self.setting(|s| s.feeds.contains(&spec)) {
             return Err(format!("{} is already attached", spec.address()));
         }

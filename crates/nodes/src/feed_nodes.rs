@@ -97,7 +97,7 @@ impl FeedSpec {
     }
 
     pub fn address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        common::addr::join(&self.host, self.port)
     }
 }
 

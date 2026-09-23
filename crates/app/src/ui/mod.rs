@@ -570,20 +570,12 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// `host` or `host:port`, with the format's usual port when none is given.
-fn parse_feed(text: &str, kind: &'static nodes::FeedKind) -> Option<nodes::FeedSpec> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let (host, port) = match text.rsplit_once(':') {
-        Some((h, p)) => (h, p.parse().ok()?),
-        None => (text, kind.default_port),
-    };
-    let host = host.trim();
-    if host.is_empty() {
-        return None;
-    }
-    Some(nodes::FeedSpec::new(host, port, kind))
+fn parse_feed(
+    text: &str,
+    kind: &'static nodes::FeedKind,
+) -> Result<nodes::FeedSpec, common::addr::AddrError> {
+    let at = common::addr::HostPort::parse(text, kind.default_port)?;
+    Ok(nodes::FeedSpec::new(at.host, at.port, kind))
 }
 
 /// The average of the positions known, for opening the map somewhere useful

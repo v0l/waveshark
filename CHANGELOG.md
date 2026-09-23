@@ -285,6 +285,7 @@ the code is in the commit log.
   transcriber, with the weights and the device it runs on, are in that record
   too, so they stay as they were left.
 - Flipper `.sub` transmit sent the file once, whatever its Passes setting said.
+- Address fields for feeds, the TNC and Home Assistant misread IPv6 and took typos silently.
 
 ### Removed
 

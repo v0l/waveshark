@@ -933,13 +933,8 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
         Some((c, h)) => (Some(c), h),
         None => (None, rest),
     };
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (h, p.parse().map_err(|_| format!("{p:?} is not a port"))?),
-        None => (hostport, 1883u16),
-    };
-    if host.is_empty() {
-        return Err("no host in the broker address".into());
-    }
+    let common::addr::HostPort { host, port } =
+        common::addr::HostPort::parse(hostport, 1883).map_err(|e| e.to_string())?;
     let (username, password) = match creds {
         Some(c) => match c.split_once(':') {
             Some((u, p)) => (u.to_string(), p.to_string()),
@@ -947,7 +942,7 @@ fn parse_broker(s: &str) -> Result<nodes::Publish, String> {
         },
         None => (String::new(), String::new()),
     };
-    let broker = nodes::Broker { port, username, password, ..nodes::Broker::new(host) };
+    let broker = nodes::Broker { port, username, password, ..nodes::Broker::new(&host) };
     Ok(nodes::Publish { broker, spaces: session::DEFAULT_HA_SPACES.into(), buses: true })
 }
 
@@ -970,12 +965,9 @@ impl std::str::FromStr for Listen {
         if matches!(s.trim().to_ascii_lowercase().as_str(), "off" | "no" | "none") {
             return Ok(Self(None));
         }
-        if let Ok(port) = s.parse::<u16>() {
-            return Ok(Self(Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)))));
-        }
-        s.parse()
+        common::addr::listen(s, std::net::Ipv4Addr::LOCALHOST.into())
             .map(|a| Self(Some(a)))
-            .map_err(|_| format!("{s:?} is not a port, a host:port, or off"))
+            .map_err(|e| format!("{s:?}: {e}"))
     }
 }
 
@@ -1004,12 +996,8 @@ impl std::str::FromStr for Serve {
             "tune" | "tunable" => true,
             other => return Err(format!("{other:?} is not `tune`")),
         };
-        let addr = match addr.parse::<u16>() {
-            Ok(port) => std::net::SocketAddr::from(([0, 0, 0, 0], port)),
-            Err(_) => {
-                addr.parse().map_err(|_| format!("{addr:?} is not a port, a host:port, or off"))?
-            }
-        };
+        let addr = common::addr::listen(addr, std::net::Ipv4Addr::UNSPECIFIED.into())
+            .map_err(|e| format!("{addr:?}: {e}"))?;
         Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable })))
     }
 }
@@ -1058,10 +1046,7 @@ impl std::str::FromStr for ServeTuner {
             None => None,
         };
         let center = match parts.next().filter(|p| !p.is_empty()) {
-            Some(c) => {
-                let mhz: f64 = c.parse().map_err(|_| format!("{c:?} is not a frequency in MHz"))?;
-                Some(common::Hz((mhz * 1e6) as u64))
-            }
+            Some(c) => Some(common::Hz::parse_mhz(c)?),
             None => None,
         };
         Ok(Self(crate::chain::TunerServePlan {
@@ -1078,16 +1063,7 @@ impl std::str::FromStr for ServeTuner {
 
 /// `2.4M`, `2400k` or `2400000`, all of which mean the same rate.
 fn parse_rate(s: &str) -> Result<f64, String> {
-    let (digits, scale) = match s.chars().last() {
-        Some('M') | Some('m') => (&s[..s.len() - 1], 1e6),
-        Some('k') | Some('K') => (&s[..s.len() - 1], 1e3),
-        _ => (s, 1.0),
-    };
-    let n: f64 = digits.parse().map_err(|_| format!("{s:?} is not a sample rate"))?;
-    match n > 0.0 {
-        true => Ok(n * scale),
-        false => Err(format!("{s:?} is not a sample rate")),
-    }
+    sources::parse_si(s).filter(|n| *n > 0.0).ok_or_else(|| format!("{s:?} is not a sample rate"))
 }
 
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
@@ -1882,5 +1858,36 @@ mod tests {
         assert!(Serve::from_str("1234,tune").unwrap().0.is_some_and(|s| s.tunable));
         assert_eq!(Serve::from_str("off").unwrap().0, None);
         assert!(Serve::from_str("1234,nope").is_err());
+        assert_eq!(
+            Serve::from_str("localhost:1234").unwrap().0.map(|s| s.addr),
+            Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1234)))
+        );
+        assert_eq!(
+            Serve::from_str("0.0.0.0:99999").unwrap_err(),
+            "\"0.0.0.0:99999\": \"99999\" is not a port, which is 1 to 65535"
+        );
+    }
+
+    #[test]
+    fn an_agent_listens_on_loopback_unless_told_an_address() {
+        let at = |s: &str| Listen::from_str(s).map(|l| l.0);
+        assert_eq!(at("8931"), Ok(Some(std::net::SocketAddr::from(([127, 0, 0, 1], 8931)))));
+        assert_eq!(at("[::1]:8931"), Ok(Some("[::1]:8931".parse().unwrap())));
+        assert_eq!(at("localhost:8931"), Ok(Some("127.0.0.1:8931".parse().unwrap())));
+        assert_eq!(at("off"), Ok(None));
+        assert_eq!(at("::1"), Err("\"::1\": no port".into()));
+    }
+
+    #[test]
+    fn a_broker_is_a_host_with_1883_unless_it_says_otherwise() {
+        let at = |s: &str| parse_broker(s).map(|p| (p.broker.host, p.broker.port));
+        assert_eq!(at("homeassistant.local"), Ok(("homeassistant.local".into(), 1883)));
+        assert_eq!(at("mqtt://u:p@pi:1884"), Ok(("pi".into(), 1884)));
+        assert_eq!(at("::1"), Ok(("::1".into(), 1883)));
+        assert_eq!(at("[::1]:1884"), Ok(("::1".into(), 1884)));
+        assert_eq!(at("pi:99999"), Err("\"99999\" is not a port, which is 1 to 65535".into()));
+        assert_eq!(at("u:p@:1883"), Err("no host before the port".into()));
+        let creds = parse_broker("mqtt://u:p@pi").unwrap().broker;
+        assert_eq!((creds.username.as_str(), creds.password.as_str()), ("u", "p"));
     }
 }

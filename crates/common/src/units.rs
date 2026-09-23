@@ -84,6 +84,16 @@ impl std::ops::Sub for Hz {
     }
 }
 
+impl Hz {
+    pub fn parse_mhz(s: &str) -> Result<Self, String> {
+        let t = s.trim();
+        match t.parse::<f64>() {
+            Ok(mhz) if mhz.is_finite() && mhz >= 0.0 => Ok(Self((mhz * 1e6).round() as u64)),
+            _ => Err(format!("{t:?} is not a frequency in MHz")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +103,16 @@ mod tests {
         assert_eq!(Hz::mhz(433).to_string(), "433.0000 MHz");
         assert_eq!(Sps::mhz(20).to_string(), "20.0000 MS/s");
         assert_eq!(Hz::hz(700).to_string(), "700 Hz");
+    }
+
+    #[test]
+    fn a_frequency_is_typed_in_megahertz() {
+        assert_eq!(Hz::parse_mhz(" 433.92 "), Ok(Hz(433_920_000)));
+        assert_eq!(Hz::parse_mhz("145.8"), Ok(Hz(145_800_000)), "rounded, not truncated");
+        assert_eq!(Hz::parse_mhz("0"), Ok(Hz(0)));
+        assert_eq!(Hz::parse_mhz("-1"), Err("\"-1\" is not a frequency in MHz".into()));
+        assert_eq!(Hz::parse_mhz("inf"), Err("\"inf\" is not a frequency in MHz".into()));
+        assert_eq!(Hz::parse_mhz("433 MHz"), Err("\"433 MHz\" is not a frequency in MHz".into()));
     }
 
     #[test]

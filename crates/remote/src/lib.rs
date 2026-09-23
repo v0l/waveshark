@@ -140,11 +140,15 @@ impl Proto {
     /// Add this protocol's default port to a bare host, and reject what is not
     /// an address.
     pub fn parse_addr(self, s: &str) -> Option<String> {
+        self.check_addr(s).ok()
+    }
+
+    pub fn check_addr(self, s: &str) -> std::result::Result<String, common::addr::AddrError> {
         let s = match self {
             Self::KiwiSdr => s.trim().trim_start_matches("http://").trim_end_matches('/'),
             _ => s,
         };
-        parse_addr(s, self.default_port())
+        check_addr(s, self.default_port())
     }
 
     /// Ask what is at an address, without keeping the connection.
@@ -204,28 +208,17 @@ pub fn split_stream(s: &str) -> (&str, Option<u16>) {
 
 /// Add a default port to a bare host, and reject what is not an address.
 pub fn parse_addr(s: &str, port: u16) -> Option<String> {
+    check_addr(s, port).ok()
+}
+
+pub fn check_addr(s: &str, port: u16) -> std::result::Result<String, common::addr::AddrError> {
     let s = s.trim();
-    if s.is_empty() || s.contains(char::is_whitespace) {
-        return None;
-    }
     // The tuner a multi-tuner server is being asked for travels with the
     // address and is not part of it.
     if let (head, Some(id)) = split_stream(s) {
-        return parse_addr(head, port).map(|a| format!("{a}#{id}"));
+        return check_addr(head, port).map(|a| format!("{a}#{id}"));
     }
-    // A bracketed IPv6 literal already carries its own colons.
-    if s.starts_with('[') {
-        return Some(if s.ends_with(']') { format!("{s}:{port}") } else { s.to_string() });
-    }
-    // More than one colon and no brackets is a bare IPv6 address, whose last
-    // group would otherwise read as a port.
-    if s.matches(':').count() > 1 {
-        return Some(format!("[{s}]:{port}"));
-    }
-    match s.rsplit_once(':') {
-        Some((host, p)) if !host.is_empty() && p.parse::<u16>().is_ok() => Some(s.to_string()),
-        _ => Some(format!("{s}:{port}")),
-    }
+    common::addr::HostPort::parse(s, port).map(|h| h.to_string())
 }
 
 /// Read `proto://host:port`, or a bare address as iqstream.
@@ -299,6 +292,11 @@ mod tests {
         assert_eq!(parse_addr(" radarpi:9000 ", 1234).as_deref(), Some("radarpi:9000"));
         assert_eq!(parse_addr("", 1234), None);
         assert_eq!(parse_addr("two words", 1234), None);
+        assert_eq!(
+            check_addr("radarpi:99999", 1234),
+            Err(common::addr::AddrError::Port("99999".into()))
+        );
+        assert_eq!(check_addr("radarpi:1234#2", 5555).as_deref(), Ok("radarpi:1234#2"));
     }
 
     #[test]
