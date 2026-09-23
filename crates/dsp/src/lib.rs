@@ -38,6 +38,7 @@ pub mod flex;
 pub mod fourlevel;
 pub mod fsk;
 pub mod gate;
+pub mod gmsk;
 pub mod gsm;
 pub mod hdlc;
 pub mod level;

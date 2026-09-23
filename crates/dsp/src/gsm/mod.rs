@@ -1124,50 +1124,7 @@ pub fn modulate(bits: &[u8], sps: usize) -> Vec<C32> {
         })
         .collect();
 
-    let pulse = gaussian_pulse(sps);
-    let span = pulse.len() / sps;
-    let mut freq = vec![0.0f32; (alpha.len() + span) * sps];
-    for (i, &a) in alpha.iter().enumerate() {
-        for (j, &p) in pulse.iter().enumerate() {
-            freq[i * sps + j] += a * p;
-        }
-    }
-
-    let mut phase = 0.0f64;
-    freq.iter()
-        .map(|&f| {
-            // Half a turn per unit of pulse area, which is the h = 1/2 of
-            // GMSK: a symbol moves the phase a quarter turn.
-            phase += std::f64::consts::FRAC_PI_2 * f64::from(f);
-            C32::new(phase.cos() as f32, phase.sin() as f32)
-        })
-        .collect()
-}
-
-/// The frequency pulse: a rectangle a symbol wide through a Gaussian filter
-/// with BT = 0.3, sampled and normalised so one symbol's samples sum to one
-/// and therefore turn the phase by exactly the quarter turn GMSK asks for.
-fn gaussian_pulse(sps: usize) -> Vec<f32> {
-    let span = 4;
-    let n = span * sps;
-    let sigma = (2f64.ln()).sqrt() / (TAU * BT);
-    let mut p = vec![0.0f64; n];
-    for (i, v) in p.iter_mut().enumerate() {
-        // Integrate the Gaussian over the symbol the rectangle covers, which
-        // is the difference of two error functions; approximated by sampling
-        // the Gaussian finely, since this runs once per test and not per
-        // sample.
-        let t = (i as f64 + 0.5) / sps as f64 - span as f64 / 2.0;
-        let steps = 32;
-        let mut acc = 0.0;
-        for k in 0..steps {
-            let u = t - 0.5 + (k as f64 + 0.5) / steps as f64;
-            acc += (-u * u / (2.0 * sigma * sigma)).exp();
-        }
-        *v = acc / steps as f64;
-    }
-    let area: f64 = p.iter().sum();
-    p.iter().map(|&v| (v / area) as f32).collect()
+    crate::gmsk::modulate(&alpha, sps, BT)
 }
 
 #[cfg(test)]
