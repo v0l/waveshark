@@ -487,7 +487,11 @@ impl ModeSDetector {
                 // 2.4 MS/s: 0.69 samples early before, 0.12 after, which is
                 // 0.29 us of jitter removed from a Beast timestamp that mixes
                 // frames from both searches.
-                let exact = (data - DATA_US as f64 * spus + step * 0.5).max(0.0);
+                let begun = data - DATA_US as f64 * spus;
+                if begun < 0.0 {
+                    continue;
+                }
+                let exact = begun + step * 0.5;
                 let start = base + exact as u64;
                 let f = ModeSFrame { at_sample: start, at_frac: exact.fract() as f32, ..f };
                 if self.already(&f) || found.iter().any(|g| same_frame(g, &f, spus)) {
@@ -1160,6 +1164,42 @@ mod tests {
         assert!(!same_frame(&one, &short, 2.4));
         let later = ModeSFrame { at_sample: one.at_sample + 300, ..one.clone() };
         assert!(!same_frame(&one, &later, 2.4));
+    }
+
+    #[test]
+    fn a_frame_starting_before_the_carried_tail_is_not_read_again_late_off_it() {
+        let (rate, spus) = (2.4e6, 2.4f32);
+        let first_call = 4_000usize;
+        let tail_at = first_call - ((DATA_US + LONG_BITS as f32 + 2.0) * spus).ceil() as usize;
+        let (mut once, mut late) = (0, 0);
+        for blind in [false, true] {
+            for k in 0..60 {
+                let lead = (tail_at as f32 - 25.0 + k as f32 * 0.5) / spus;
+                let mut iq = modulate(&LONG, rate, 0.5, lead);
+                if blind {
+                    let from = (lead * spus) as usize;
+                    let to = ((lead + DATA_US) * spus) as usize;
+                    iq[from..to].iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
+                }
+                iq.resize(8_000, C32::new(0.0, 0.0));
+                let mut d = ModeSDetector::new(rate, ModeSConfig::default());
+                let mut out = Vec::new();
+                let is_long = |f: &ModeSFrame| f.bytes == LONG;
+                d.process_valid(&iq[..first_call], &mut out, &is_long);
+                d.process_valid(&iq[first_call..], &mut out, &is_long);
+                once += (out.len() == 1) as usize;
+                let truth = (lead * spus) as f64;
+                late += out
+                    .iter()
+                    .filter(|f| (f.at_sample as f64 + f.at_frac as f64 - truth).abs() > 1.0)
+                    .count();
+            }
+        }
+        assert_eq!(
+            once, 120,
+            "of 120 positions either side of the tail, read exactly once; 68 before #156"
+        );
+        assert_eq!(late, 0, "frames timed more than a sample from their preamble");
     }
 
     /// A reset is what a caller does when its samples stopped arriving, so

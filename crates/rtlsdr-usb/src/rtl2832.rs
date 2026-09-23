@@ -18,6 +18,7 @@ use std::time::Duration;
 pub const RX_ENDPOINT: u8 = 0x81;
 /// Librtlsdr's transfer size, about 3.4 ms a buffer at 2.4 MS/s
 const XFER_BYTES: usize = 16 * 1024;
+const TRANSFERS: usize = 32;
 const BULK_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// 28.8 MHz, the crystal of every RTL2832U
@@ -694,10 +695,13 @@ impl RtlSdr {
             return Err(Error::Busy);
         }
         self.reset_buffer()?;
-        let ep = self.t.interface().endpoint::<Bulk, In>(RX_ENDPOINT).map_err(|e| {
+        let mut ep = self.t.interface().endpoint::<Bulk, In>(RX_ENDPOINT).map_err(|e| {
             self.streaming.store(false, Ordering::SeqCst);
             Error::usb("open endpoint", e)
         })?;
+        for _ in 0..TRANSFERS {
+            ep.submit(nusb::transfer::Buffer::new(XFER_BYTES));
+        }
         let dropped = Arc::new(AtomicU64::new(0));
         let streaming = Arc::new(AtomicBool::new(true));
         self.streaming.store(true, Ordering::SeqCst);
@@ -725,7 +729,6 @@ impl Reader {
         if self.stop.load(Ordering::SeqCst) {
             return Err(Error::Usb("stopped".into()));
         }
-        self.ep.submit(nusb::transfer::Buffer::new(XFER_BYTES));
         loop {
             let completion = match self.ep.wait_next_complete(BULK_TIMEOUT) {
                 Some(c) => c,
@@ -738,7 +741,10 @@ impl Reader {
                 }
             };
             match completion.status {
-                Ok(()) => return Ok(completion.buffer.into_vec()),
+                Ok(()) => {
+                    self.ep.submit(nusb::transfer::Buffer::new(XFER_BYTES));
+                    return Ok(completion.buffer.into_vec());
+                }
                 // A cancelled transfer is what a stop looks like.
                 Err(_e) if self.stop.load(Ordering::SeqCst) => {
                     self.streaming.store(false, Ordering::SeqCst);

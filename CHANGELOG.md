@@ -213,6 +213,8 @@ the code is in the commit log.
 - RDS lost half its groups on a station whose subcarrier is in quadrature with
   the pilot.
 - `--device` opened the saved radio first, claiming a receiver nobody named.
+- RTL-SDR lost samples between USB transfers, throwing mlat timing off.
+- Mode S frames across a block edge were sent twice, the second copy late.
 - Located transmitters drew a circle far smaller than the error, tighter the
   longer the drive.
 - Home Assistant stopped publishing after the radio was restarted, and kept
