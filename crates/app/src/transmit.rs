@@ -323,6 +323,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                     over_began(&mut g);
                 }
                 arm(&mut g, &mut waiting);
+                *readings.topo.lock() = Some(g.topology());
                 graph = Some(g);
                 idle = runs_idle;
                 clock = Clock::default();

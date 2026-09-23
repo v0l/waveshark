@@ -9755,6 +9755,7 @@ vectors:
             std::sync::Arc::new(audio::Canned::new(vec![0.0; 4_800], 48_000.0, true));
         rx.set_transmitter(Some(TxSinks { stream: None, mic: Some(src), sub: None }));
         rx.rebuild(&plan).unwrap();
+        assert!(rx.tx_settled());
         assert!(mic(&rx), "the microphone stage did not appear");
         assert!(
             rx.tx_node_of_stage(derived::TX_RADIO).is_some(),
