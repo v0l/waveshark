@@ -205,6 +205,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- Network radio dialog froze the window while ADD waited for the server.
 - A saved patch naming a stage this build was not compiled with emptied the
   whole graph.
 - Receiver froze on a rebuild while a DVB-T channel had fallen behind.

@@ -2583,6 +2583,7 @@ impl App {
         };
         let (mut close, mut add, mut find) = (false, false, false);
         let mut link = None;
+        let connecting = self.joining.as_ref().map(|j| j.host.clone());
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -2676,10 +2677,13 @@ impl App {
                     {
                         f.request_focus();
                     }
-                    match &edit.err {
-                        Some(e) => lamp(ui, false, e),
-                        None if edit.host.trim().is_empty() => lamp(ui, false, "no address"),
-                        None => {
+                    match (&connecting, &edit.err) {
+                        (Some(h), _) => lamp(ui, false, &format!("connecting to {h}")),
+                        (None, Some(e)) => lamp(ui, false, e),
+                        (None, None) if edit.host.trim().is_empty() => {
+                            lamp(ui, false, "no address")
+                        }
+                        (None, None) => {
                             let what = match edit.over {
                                 Over::Samples => edit.proto.name(),
                                 Over::Frames => edit.feed.name,
@@ -2689,7 +2693,11 @@ impl App {
                     }
                 });
                 footer(ui, |ui| {
-                    if ui.button("ADD").clicked() {
+                    let label = match connecting {
+                        Some(_) => "CONNECTING",
+                        None => "ADD",
+                    };
+                    if ui.add_enabled(connecting.is_none(), egui::Button::new(label)).clicked() {
                         add = true;
                     }
                     if ui.button(crate::i18n::t("ui.close")).clicked() {
@@ -2707,13 +2715,15 @@ impl App {
             close = true;
         }
         if add {
-            let done = match edit.over {
-                Over::Samples => self.add_remote(ctx, &mut edit),
-                Over::Frames => self.add_feed(&edit),
-            };
-            match done {
-                Ok(()) => close = true,
-                Err(e) => edit.err = Some(e),
+            match edit.over {
+                Over::Samples => {
+                    edit.err = None;
+                    self.add_remote(ctx, &edit);
+                }
+                Over::Frames => match self.add_feed(&edit) {
+                    Ok(()) => close = true,
+                    Err(e) => edit.err = Some(e),
+                },
             }
         }
         if !close {
@@ -2733,6 +2743,7 @@ impl App {
         let kept: Vec<&datasets::spyserver::Server> =
             servers.iter().flat_map(|v| v.iter()).filter(|s| filter.keeps(s)).collect();
         let (mut close, mut tune) = (false, None);
+        let connecting = self.joining.as_ref().map(|j| j.host.clone());
         let r = egui::containers::Modal::new(egui::Id::new("find-spyserver"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -2756,13 +2767,14 @@ impl App {
                         "only servers with a listener slot free",
                         FREE_HELP,
                     );
-                    match (&edit.err, &bad_hz, &servers) {
-                        (Some(e), _, _) => lamp(ui, false, e),
-                        (None, Some(e), _) => lamp(ui, false, e),
-                        (None, None, Some(v)) => {
+                    match (&connecting, &edit.err, &bad_hz, &servers) {
+                        (Some(h), _, _, _) => lamp(ui, false, &format!("connecting to {h}")),
+                        (None, Some(e), _, _) => lamp(ui, false, e),
+                        (None, None, Some(e), _) => lamp(ui, false, e),
+                        (None, None, None, Some(v)) => {
                             lamp(ui, true, &format!("{} of {} servers", kept.len(), v.len()))
                         }
-                        (None, None, None) => match crate::data::failed(which) {
+                        (None, None, None, None) => match crate::data::failed(which) {
                             Some(e) => lamp(ui, false, &e),
                             None => lamp(ui, false, "reading the directory"),
                         },
@@ -2775,7 +2787,7 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_max_width(w);
                         for s in &kept {
-                            if server_card(ui, s) {
+                            if server_card(ui, s, connecting.is_none()) {
                                 tune = Some((*s).clone());
                             }
                             ui.add_space(6.0);
@@ -2802,13 +2814,8 @@ impl App {
             let mut remote = RemoteEdit::spyserver();
             remote.host = s.addr();
             remote.label = s.description.clone();
-            match self.add_remote(ctx, &mut remote) {
-                Ok(()) => {
-                    self.remote = None;
-                    close = true;
-                }
-                Err(e) => edit.err = Some(format!("{}: {e}", s.addr())),
-            }
+            edit.err = None;
+            self.add_remote(ctx, &remote);
         }
         if !close {
             self.find = Some(edit);
@@ -2942,32 +2949,32 @@ impl App {
     /// What answered decides the protocol, whatever was picked: iqstreamd and
     /// rtl_tcp both listen on 1234, so an address alone cannot say which is
     /// there and the picker is a guess until something replies.
-    fn add_remote(
-        &mut self,
-        ctx: &egui::Context,
-        edit: &mut RemoteEdit,
-    ) -> std::result::Result<(), String> {
-        let found = match edit.proto.probe(&edit.host) {
-            Ok(p) => p,
-            Err(chosen) => match remote::identify(&edit.host) {
-                Ok(other) => {
-                    edit.proto = other.proto;
-                    other
+    fn add_remote(&mut self, ctx: &egui::Context, edit: &RemoteEdit) {
+        if self.joining.is_none() {
+            self.joining = Some(Joining::start(ctx, edit.proto, &edit.host, &edit.label));
+        }
+    }
+
+    pub(super) fn poll_remote(&mut self, ctx: &egui::Context) {
+        if self.joining.as_ref().is_none_or(|j| j.answer.ready().is_none()) {
+            return;
+        }
+        let Joining { host, answer } = self.joining.take().expect("a join that is ready");
+        match answer.block_and_take() {
+            Ok(Joined { devices, entry }) => {
+                self.devices = devices;
+                if self.remote.is_some() || self.find.is_some() {
+                    self.remote = None;
+                    self.find = None;
+                    self.select_device(ctx, entry);
                 }
-                Err(_) => return Err(chosen.to_string()),
+            }
+            Err(e) => match (&mut self.find, &mut self.remote) {
+                (Some(find), _) => find.err = Some(format!("{host}: {e}")),
+                (None, Some(remote)) => remote.err = Some(e),
+                (None, None) => {}
             },
-        };
-        let addr = crate::devices::add_stream(found.proto, &edit.host, &edit.label)
-            .ok_or_else(|| "expected host or host:port".to_string())?;
-        self.devices = crate::devices::list();
-        let found = self
-            .devices
-            .iter()
-            .find(|d| d.addr.as_deref().is_some_and(|a| crate::devices::same_server(a, &addr)))
-            .cloned()
-            .ok_or_else(|| format!("{addr} did not answer"))?;
-        self.select_device(ctx, found);
-        Ok(())
+        }
     }
 
     /// Attach the feed, which is a setting rather than a radio: the receiver
@@ -3782,7 +3789,7 @@ fn bare_mhz(hz: u64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server) -> bool {
+fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server, idle: bool) -> bool {
     let mut tune = false;
     let rail = s.has_slot().then_some(theme::TRACE);
     let mhz = |hz: u64| format!("{:.3}", hz as f64 / 1e6);
@@ -3791,7 +3798,7 @@ fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server) -> bool {
         rail,
         |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                tune = ui.button("TUNE").clicked();
+                tune = ui.add_enabled(idle, egui::Button::new("TUNE")).clicked();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     theme::Line::new()
                         .value(&s.description)
@@ -3902,6 +3909,45 @@ impl CaptureEdit {
         }
         Ok(crate::devices::Capture { seconds: samples as f64 / c.rate.as_f64(), ..c })
     }
+}
+
+pub struct Joining {
+    host: String,
+    answer: poll_promise::Promise<std::result::Result<Joined, String>>,
+}
+
+struct Joined {
+    devices: Vec<crate::devices::Entry>,
+    entry: crate::devices::Entry,
+}
+
+impl Joining {
+    fn start(ctx: &egui::Context, proto: remote::Proto, host: &str, label: &str) -> Self {
+        let ctx = ctx.clone();
+        let (h, l) = (host.to_string(), label.to_string());
+        let answer = poll_promise::Promise::spawn_thread("join remote", move || {
+            let joined = join(proto, &h, &l);
+            ctx.request_repaint();
+            joined
+        });
+        Self { host: host.to_string(), answer }
+    }
+}
+
+fn join(proto: remote::Proto, host: &str, label: &str) -> std::result::Result<Joined, String> {
+    let found = match proto.probe(host) {
+        Ok(p) => p,
+        Err(chosen) => remote::identify(host).map_err(|_| chosen.to_string())?,
+    };
+    let addr = crate::devices::add_stream(found.proto, host, label)
+        .ok_or_else(|| "expected host or host:port".to_string())?;
+    let devices = crate::devices::list();
+    let entry = devices
+        .iter()
+        .find(|d| d.addr.as_deref().is_some_and(|a| crate::devices::same_server(a, &addr)))
+        .cloned()
+        .ok_or_else(|| format!("{addr} did not answer"))?;
+    Ok(Joined { devices, entry })
 }
 
 #[derive(Clone)]
@@ -4155,5 +4201,44 @@ mod tests {
         assert!((tx.seconds - 1.0).abs() < 0.01, "{} s", tx.seconds);
         assert_eq!(tx.label(), "recording.iq");
         assert_eq!(crate::radio::TxCapture::open(&path), None, "the name says no rate");
+    }
+
+    #[test]
+    fn a_spyserver_that_never_answers_leaves_the_window_painting() {
+        use std::time::{Duration, Instant};
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = silent.local_addr().unwrap().to_string();
+        let ctx = egui::Context::default();
+        let mut a = App::default();
+        let mut edit = RemoteEdit::spyserver();
+        edit.host = host.clone();
+        a.remote = Some(edit.clone());
+        a.find = Some(FindEdit::default());
+
+        let asked = Instant::now();
+        a.add_remote(&ctx, &edit);
+        a.poll_remote(&ctx);
+        let took = asked.elapsed();
+        assert!(took < Duration::from_millis(50), "the frame waited {took:?} on the server");
+
+        std::thread::sleep(Duration::from_millis(500));
+        a.poll_remote(&ctx);
+        assert_eq!(a.joining.as_ref().map(|j| j.host.as_str()), Some(host.as_str()));
+        assert!(a.find.is_some() && a.remote.is_some(), "a modal closed before any answer");
+
+        drop(silent);
+        let until = Instant::now() + Duration::from_secs(30);
+        while a.joining.is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+            a.poll_remote(&ctx);
+        }
+        assert!(a.joining.is_none(), "still connecting 30 s after the server went away");
+        assert_eq!(
+            a.find.as_ref().and_then(|f| f.err.clone()),
+            Some(format!("{host}: spyserver: Connection reset by peer (os error 104)"))
+        );
+        assert_eq!(a.remote.as_ref().and_then(|r| r.err.clone()), None);
+        assert_eq!(a.device, None);
+        assert_eq!(crate::devices::streams().iter().filter(|r| r.addr == host).count(), 0);
     }
 }

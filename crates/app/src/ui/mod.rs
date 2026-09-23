@@ -204,6 +204,7 @@ pub struct App {
     /// The remote radio being created, while that dialog is open.
     remote: Option<RemoteEdit>,
     find: Option<settings::FindEdit>,
+    joining: Option<settings::Joining>,
     /// The capture being described, while the card asking what is in it is
     /// open.
     capture_edit: Option<settings::CaptureEdit>,
@@ -687,6 +688,7 @@ impl Default for App {
             feed_host: String::new(),
             remote: None,
             find: None,
+            joining: None,
             capture_edit: None,
             feed_kind: nodes::FEED_KINDS[0],
             scanner_edit: None,
@@ -2966,6 +2968,7 @@ impl eframe::App for App {
         // is open. Both used to be read only under --soak, so the call list
         // and the transcript filled in a soak run and stayed empty in use.
         self.poll_capture(ui.ctx());
+        self.poll_remote(ui.ctx());
         self.poll_memory_io();
         self.pick_file.poll(&mut self.cmds);
         // The `.sub` dialog lands its file as a command like any other.
