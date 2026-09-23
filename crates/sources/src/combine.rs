@@ -1040,11 +1040,10 @@ mod tests {
         // slices share, and the signal being looked for 1.2 MHz up.
         let lower = tone(rate, 905_000.0, span);
         let upper = tones(rate, &[-845_000.0 + err, 325_000.0 + err], span);
-        let mut dev = combine(
-            vec![radio(Hz(100_000_000), rate, lower), radio(Hz(100_000_000), rate, upper)],
-            rate,
-        )
-        .unwrap();
+        let paced = |samples| -> Box<dyn Device> {
+            Box::new(FileRadio::hearing(Hz(100_000_000), rate, samples).with_block(4096))
+        };
+        let mut dev = combine(vec![paced(lower), paced(upper)], rate).unwrap();
         dev.set_center(Hz(433_000_000)).unwrap();
 
         // Uncorrected first, which is what the operator would see without the
