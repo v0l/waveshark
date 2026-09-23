@@ -32,7 +32,15 @@ const SLOP: usize = 2;
 /// time, and it is what lets the burst detector split a repeat train into
 /// frame-aligned packages.
 pub fn pwm(short_us: u32, long_us: u32, reset_us: u32) -> Timing {
-    Timing { coding: Coding::Pwm, short_us, long_us, sync_us: 0, tolerance_us: 0, reset_us }
+    Timing {
+        coding: Coding::Pwm,
+        short_us,
+        long_us,
+        sync_us: 0,
+        tolerance_us: 0,
+        reset_us,
+        gap_us: 0,
+    }
 }
 
 /// Find a `frame_bits`-wide frame that `parse` accepts, then return what

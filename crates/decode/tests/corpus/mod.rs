@@ -910,6 +910,37 @@ pub static SPECS: &[ModelSpec] = &[
         ours: "Generic-Remote",
         fields: &[("id", "id", Num), ("cmd", "cmd", Num), ("tristate", "tristate", Text)],
     },
+    ModelSpec {
+        rtl: "Chrysler-CarRemote",
+        ours: "Chrysler-CarRemote",
+        fields: &[("id", "id", Text), ("button_code", "button_code", Num)],
+    },
+    ModelSpec {
+        rtl: "EcoEye",
+        ours: "EcoEye",
+        fields: &[("current_pv_A", "current_pv_a", Num), ("current_used_A", "current_used_a", Num)],
+    },
+    ModelSpec {
+        rtl: "Abarth-124Spider",
+        ours: "Abarth-124Spider",
+        fields: &[
+            ("id", "id", Text),
+            ("flags", "flags", Text),
+            ("pressure_kPa", "pressure_kpa", Num),
+            ("temperature_C", "temperature_c", Num),
+            ("status", "status", Num),
+        ],
+    },
+    ModelSpec {
+        rtl: "Sharp-SPC775",
+        ours: "Sharp-SPC775",
+        fields: &[
+            ("id", "id", Num),
+            ("battery_ok", "battery_ok", Bool),
+            ("temperature_C", "temperature_c", Num),
+            ("humidity", "humidity_pct", Num),
+        ],
+    },
 ];
 
 // ---------------------------------------------------------------------------

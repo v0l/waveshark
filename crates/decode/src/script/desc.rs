@@ -100,6 +100,8 @@ pub struct TimingDesc {
     pub tolerance_us: u32,
     /// The gap that ends a package
     pub reset_us: u32,
+    #[serde(default)]
+    pub gap_us: u32,
 }
 
 impl TimingDesc {
@@ -129,6 +131,7 @@ impl TimingDesc {
             sync_us: self.sync_us,
             tolerance_us: self.tolerance_us,
             reset_us: self.reset_us,
+            gap_us: self.gap_us,
         })
     }
 }
@@ -266,6 +269,7 @@ pub struct Check {
     pub odd: bool,
     /// Only every `step`th covered bit counts, for an interleaved parity
     pub step: Option<usize>,
+    pub reduce: Option<Reduce>,
     /// The check applies only when these fields read so
     pub when: Option<Cond>,
     pub unless: Option<Cond>,
@@ -281,6 +285,13 @@ impl Check {
     pub fn applies(&self, holds: impl Fn(&Cond) -> bool) -> bool {
         self.when.as_ref().is_none_or(&holds) && self.unless.as_ref().is_none_or(|c| !holds(c))
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Reduce {
+    Xor8,
+    Sum8,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -312,6 +323,25 @@ pub enum CheckKind {
 }
 
 impl CheckKind {
+    pub fn digests_bytes(self) -> bool {
+        match self {
+            Self::Crc8
+            | Self::Crc8Le
+            | Self::Crc16
+            | Self::Crc16Le
+            | Self::Sum8
+            | Self::Xor8
+            | Self::Lfsr8
+            | Self::Lfsr8Reflect
+            | Self::Roll8 => true,
+            Self::EvenParity
+            | Self::Complement
+            | Self::NibbleSum
+            | Self::NibbleXor
+            | Self::Parity => false,
+        }
+    }
+
     /// Width of the stored value; none for a check that stores nothing
     pub fn width(self, over: [usize; 2]) -> Option<usize> {
         Some(match self {
@@ -798,6 +828,12 @@ impl Desc {
                 && (c.over[1] - c.over[0]) % 8 != 0
             {
                 return Err(format!("{name}: a {:?} check covers whole bytes", c.kind));
+            }
+            if c.reduce.is_some() && !c.kind.digests_bytes() {
+                return Err(format!("{name}: a {:?} check reads bits, not a reduced byte", c.kind));
+            }
+            if c.reduce.is_some() && (c.over[1] - c.over[0]) % 8 != 0 {
+                return Err(format!("{name}: a reduced check covers whole bytes"));
             }
             if c.fold && c.kind != CheckKind::Sum8 {
                 return Err(format!("{name}: only a sum folds its carry"));

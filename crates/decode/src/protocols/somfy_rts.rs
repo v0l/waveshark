@@ -82,6 +82,7 @@ impl Protocol for SomfyRts {
             sync_us: 0,
             tolerance_us: 0,
             reset_us: 4000,
+            gap_us: 0,
         }
     }
 

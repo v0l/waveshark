@@ -27,6 +27,9 @@ const FSK_CAPTURES: &[&str] = &[
     "tpms_toyota",
     "tpms_ford",
     "tpms_renault",
+    "abarth124_tpms",
+    "ecoeye",
+    "sharp_spc775",
 ];
 
 /// Captures the classifier is known to read wrong, with the reason.
@@ -104,6 +107,24 @@ const KNOWN_MISSES: &[(&str, &str)] = &[
          merge into one window. A window inside the burst reads Fsk2",
     ),
     ("tpms_renault_b_433.92M_250k.cu8", "as the Renault capture above"),
+    (
+        "abarth124_tpms_433.92M_250k.cu8",
+        "the verdict is Ask, from three of eight windows, on a sensor that \
+         sends three 10 ms transmissions in half a second. The decoder reads \
+         all three to rtl_433's values",
+    ),
+    (
+        "chrysler_car_remote_315.1M_920k.cu8",
+        "both windows read NoiseLike: a 0.3 or 0.65 ms mark in every 4.16 ms \
+         period, recorded at 920 kS/s. The decoder reads the button rtl_433 \
+         reports",
+    ),
+    (
+        "ecoeye_432.5M_250k.cu8",
+        "one of three windows reads Ofdm and none reads a frequency family, \
+         and the burst detector itself hears the space tone as the carrier. \
+         The decoder reads both currents to rtl_433's values",
+    ),
     (
         "tpms_toyota_b_433.92M_250k.cu8",
         "one strong spike sets the upper envelope level for the whole window, \

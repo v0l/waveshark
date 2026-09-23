@@ -49,6 +49,7 @@ fn oregon_timing() -> Timing {
         sync_us: 0,
         tolerance_us: 0,
         reset_us: 2400,
+        gap_us: 0,
     }
 }
 

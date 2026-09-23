@@ -42,9 +42,10 @@ the code is in the commit log.
 - Tuner trim on a stitched receiver, in hertz per tuner, on the radio card.
 - LimeSDR ports picked by the name printed on the board, RX1_L through
   TX2_2, each carrying the channel it is on.
-- Protocol descriptions read two more checksums: a sum that folds its own
-  carry back in, and a nibble sum that starts or ends part way through a
-  nibble.
+- Protocol descriptions read three more checksums: a sum that folds its own
+  carry back in, a nibble sum that starts or ends part way through a nibble,
+  and a digest of the bytes exclusive-ored or summed first.
+- Chrysler key fobs, Eco-Eye Smart PV clamps and Sharp SPC775 thermometers.
 - `wave1090`, a Mode S receiver of its own, serving dump1090's AVR, BaseStation
   and Beast ports off a dongle or an iqstream server, taking mlat results back
   and passing the samples on over iqstream itself. `--write-json` feeds tar1090
@@ -228,6 +229,8 @@ the code is in the commit log.
 - RDS lost half its groups on a station whose subcarrier is in quadrature with
   the pilot.
 - `--device` opened the saved radio first, claiming a receiver nobody named.
+- Captures named with a sequence number before the rate, as
+  `01_FR_1_433.92M_250k.cu8`, replayed at 1 S/s.
 - RTL-SDR lost samples between USB transfers, throwing mlat timing off.
 - RTL-SDR direct sampling hung when switched with nothing tuned, and switching
   it off lost the tuner's rate and gain.

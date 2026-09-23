@@ -50,15 +50,32 @@ pub struct Timing {
     pub tolerance_us: u32,
     /// Gap that ends a packet.
     pub reset_us: u32,
+    pub gap_us: u32,
 }
 
 impl Timing {
     pub fn pwm(short_us: u32, long_us: u32, reset_us: u32) -> Self {
-        Self { coding: Coding::Pwm, short_us, long_us, sync_us: 0, tolerance_us: 0, reset_us }
+        Self {
+            coding: Coding::Pwm,
+            short_us,
+            long_us,
+            sync_us: 0,
+            tolerance_us: 0,
+            reset_us,
+            gap_us: 0,
+        }
     }
 
     pub fn ppm(short_us: u32, long_us: u32, reset_us: u32) -> Self {
-        Self { coding: Coding::Ppm, short_us, long_us, sync_us: 0, tolerance_us: 0, reset_us }
+        Self {
+            coding: Coding::Ppm,
+            short_us,
+            long_us,
+            sync_us: 0,
+            tolerance_us: 0,
+            reset_us,
+            gap_us: 0,
+        }
     }
 
     /// PWM with a sync mark, which several protocols put before every frame.
@@ -67,12 +84,24 @@ impl Timing {
     /// package, so a burst of repeats slices into one long buffer and the
     /// decoder finds its frame in there by checksum.
     pub fn pwm_sync(short_us: u32, long_us: u32, sync_us: u32, reset_us: u32) -> Self {
-        Self { coding: Coding::Pwm, short_us, long_us, sync_us, tolerance_us: 0, reset_us }
+        Self {
+            coding: Coding::Pwm,
+            short_us,
+            long_us,
+            sync_us,
+            tolerance_us: 0,
+            reset_us,
+            gap_us: 0,
+        }
     }
 
     pub fn with_tolerance(mut self, us: u32) -> Self {
         self.tolerance_us = us;
         self
+    }
+
+    fn row_break(&self, otherwise: u32) -> u32 {
+        if self.gap_us > 0 { self.gap_us } else { otherwise }
     }
 
     fn tol(&self) -> u32 {
@@ -136,7 +165,7 @@ fn slice_pwm(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
     // In PWM the gap is fixed, so one much longer than the symbol it should be
     // is the space between repeats. Fine Offset sends its gaps at 1 ms and
     // leaves 8 ms between copies.
-    let row_break = t.long_us * 2 + t.tol();
+    let row_break = t.row_break(t.long_us * 2 + t.tol());
     let mut b = BitBuffer::with_capacity(pulses.len());
     for (i, p) in pulses.iter().enumerate() {
         if i > 0 && pulses[i - 1].gap > row_break {
@@ -198,7 +227,7 @@ fn slice_ppm(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
     // `find_frame_bits`, since every copy then sat a bit further along than the
     // frame length and a burst of twelve identical frames corroborated none of
     // them.
-    let row_break = t.long_us + t.tol() * 2;
+    let row_break = t.row_break(t.long_us + t.tol() * 2);
     let mut b = BitBuffer::with_capacity(pulses.len());
     // The final gap is the terminating timeout and carries no bit.
     for p in &pulses[..pulses.len() - 1] {
@@ -395,12 +424,26 @@ fn manchester_halves(width_us: u32, half: u32) -> usize {
     (width_us as f32 / half as f32).round() as usize
 }
 
+fn nrz_symbol(pulses: &[Pulse], nominal: f32, reset_us: u32) -> f32 {
+    let inside = &pulses[..pulses.len().saturating_sub(1)];
+    let periods: Vec<u32> =
+        inside.iter().map(|p| p.mark + p.gap).filter(|&w| w < reset_us).collect();
+    let span: u32 = periods.iter().sum();
+    let refine = |sym: f32| {
+        let symbols: f32 = periods.iter().map(|&w| (w as f32 / sym).round()).sum();
+        if symbols > 0.0 { span as f32 / symbols } else { sym }
+    };
+    refine(refine(nominal))
+}
+
 fn slice_nrz(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
-    let sym = t.short_us.max(1);
-    let max_zeros = (t.reset_us / sym).max(1) as usize;
+    let nominal = t.short_us.max(1);
+    let max_zeros = (t.reset_us / nominal).max(1) as usize;
+    let reset = if t.reset_us == 0 { u32::MAX } else { t.reset_us };
+    let sym = nrz_symbol(pulses, nominal as f32, reset);
     let mut b = BitBuffer::with_capacity(64);
     for p in pulses.iter() {
-        let m = (p.mark as f32 / sym as f32).round() as usize;
+        let m = (p.mark as f32 / sym).round() as usize;
         for _ in 0..m {
             b.push(true);
         }
@@ -411,7 +454,7 @@ fn slice_nrz(pulses: &[Pulse], t: &Timing) -> Result<BitBuffer, SliceError> {
         // trailing gap hands the checksum a frame one bit short. Seen on
         // Honeywell door sensors, where the missing bit is the bottom bit of
         // the CRC.
-        let g = ((p.gap as f32 / sym as f32).round() as usize).min(max_zeros);
+        let g = ((p.gap as f32 / sym).round() as usize).min(max_zeros);
         for _ in 0..g {
             b.push(false);
         }
@@ -660,5 +703,44 @@ mod tests {
         let b = slice(&p, &t).unwrap();
         assert_eq!(b.len(), 7);
         assert_eq!(b.extract(0, 7), Some(0b1101000));
+    }
+
+    fn ecoeye_sync_run(chip_us: u32) -> Vec<Pulse> {
+        let mut p: Vec<(u32, u32)> = vec![(chip_us, chip_us); 12];
+        p.extend([(13 * chip_us, 5 * chip_us), (8 * chip_us, chip_us), (chip_us, 20 * chip_us)]);
+        pkg(&p)
+    }
+
+    #[test]
+    fn nrz_counts_a_run_on_the_senders_clock_not_the_published_one() {
+        let t = Timing { coding: Coding::Nrz, ..Timing::pwm(200, 200, 8100) };
+        let on_time = slice(&ecoeye_sync_run(200), &t).unwrap();
+        let slow = slice(&ecoeye_sync_run(208), &t).unwrap();
+        assert_eq!(on_time.len(), 24 + 18 + 9 + 1 + 20);
+        assert_eq!(slow.len(), on_time.len(), "a 4% slow chip miscounted a thirteen chip run");
+        assert_eq!(slow.as_bytes(), on_time.as_bytes());
+    }
+
+    #[test]
+    fn pwm_gap_us_holds_a_long_fixed_period_in_one_row() {
+        let mut t = Timing::pwm_sync(350, 700, 7350, 17500);
+        let chrysler = pkg(&[
+            (7370, 4135),
+            (320, 3839),
+            (646, 3515),
+            (317, 3841),
+            (643, 3517),
+            (646, 3515),
+            (320, 3839),
+            (317, 3841),
+            (643, 3517),
+            (320, 17500),
+        ]);
+        assert_eq!(slice(&chrysler, &t).unwrap().rows().len(), 9, "every bit its own row");
+        t.gap_us = 4200;
+        let b = slice(&chrysler, &t).unwrap();
+        assert_eq!(b.rows().len(), 1);
+        assert_eq!(b.len(), 9);
+        assert_eq!(b.extract(0, 9), Some(0b101001101));
     }
 }

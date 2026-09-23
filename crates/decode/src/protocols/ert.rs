@@ -66,6 +66,7 @@ fn keying(reset_us: u32) -> Timing {
         sync_us: 0,
         tolerance_us: 0,
         reset_us,
+        gap_us: 0,
     }
 }
 

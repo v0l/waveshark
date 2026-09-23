@@ -84,6 +84,7 @@ impl Protocol for Hanshow {
             sync_us: 0,
             tolerance_us: 0,
             reset_us: self.bit_us * 64,
+            gap_us: 0,
         }
     }
 

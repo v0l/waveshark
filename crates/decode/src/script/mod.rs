@@ -29,7 +29,7 @@ use crate::protocols::keyfob::shared::{find_and_parse, plausible};
 use crate::slicer::{Coding, Timing, differential_manchester_decode, manchester_decode, slice};
 use common::pulse::Pulse;
 pub use desc::Desc;
-use desc::{Check, CheckKind, Convert, Decode, Field, Find, Item, Kind, Transform};
+use desc::{Check, CheckKind, Convert, Decode, Field, Find, Item, Kind, Reduce, Transform};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -1044,9 +1044,18 @@ fn covered(c: &Check, frame: &BitBuffer) -> Vec<u8> {
     frame.slice(c.over[0], c.over[1] - c.over[0]).as_padded_bytes().to_vec()
 }
 
+fn digested(c: &Check, frame: &BitBuffer) -> Vec<u8> {
+    let d = covered(c, frame);
+    match c.reduce {
+        None => d,
+        Some(Reduce::Xor8) => vec![bits::xor8(&d)],
+        Some(Reduce::Sum8) => vec![bits::checksum8(&d)],
+    }
+}
+
 /// What a check computes over the frame, for the kinds that store a value
 fn check_value(c: &Check, frame: &BitBuffer) -> Option<u64> {
-    let d = covered(c, frame);
+    let d = digested(c, frame);
     let v: u64 = match c.kind {
         CheckKind::Crc8 => bits::crc8(&d, c.poly as u8, c.init as u8) as u64,
         CheckKind::Crc8Le => bits::crc8le(&d, c.poly as u8, c.init as u8) as u64,
@@ -1861,5 +1870,38 @@ fields:
         )
         .unwrap();
         check(&Scripted::new(d)).unwrap();
+    }
+    fn sharp(reduce: &str) -> Desc {
+        Desc::parse(&format!(
+            "name: X\ntiming: {{pwm: [225, 425], reset_us: 10000}}\nframe: {{bits: 48}}\n\
+             check: {{kind: lfsr8_reflect, {reduce} gen: 0x31, key: 0x31, over: [0, 40], at: 40}}\n\
+             fields:\n  - {{name: a, bits: 40, data: text, type: hex}}\n  - {{bits: 8, hidden: true}}\n\
+             vectors: [{{hex: \"a5 c0 01 4e 10 1e\", fields: {{a: \"a5c0014e10\"}}}}]\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_digest_of_the_bytes_exclusive_ored_reads_the_sharp_spc775() {
+        check(&Scripted::new(sharp("reduce: xor8,"))).unwrap();
+        assert!(check(&Scripted::new(sharp(""))).is_err());
+        let frame = BitBuffer::from_bytes(&[0xa5, 0xc0, 0x01, 0x3b, 0x15, 0xe6]);
+        let d = sharp("reduce: xor8,");
+        let c = d.check.iter().next().unwrap();
+        assert_eq!(check_value(c, &frame), Some(0xe6));
+    }
+
+    #[test]
+    fn only_a_byte_wise_check_is_reduced() {
+        let e = parse_err(
+            "frame: {bits: 16}\ncheck: {kind: parity, reduce: xor8, over: [0, 8], at: 8}\n\
+             fields:\n  - {name: a, bits: 8, data: int}\n  - {bits: 8, hidden: true}\n",
+        );
+        assert!(e.contains("reads bits, not a reduced byte"), "{e}");
+        let e = parse_err(
+            "frame: {bits: 16}\ncheck: {kind: crc8, poly: 0x31, reduce: sum8, over: [0, 4], at: 8}\n\
+             fields:\n  - {name: a, bits: 8, data: int}\n  - {bits: 8, hidden: true}\n",
+        );
+        assert!(e.contains("covers whole bytes"), "{e}");
     }
 }

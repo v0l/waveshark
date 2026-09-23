@@ -50,6 +50,8 @@ impl FileMeta {
 
 /// Parse `<anything>_<freq>_<rate>.<format>`, for example
 /// `fineoffset_433.92M_250k.cu8`. Every part is optional.
+const LOWEST_RATE: f64 = 1_000.0;
+
 pub fn parse_filename(path: &Path) -> FileMeta {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -73,7 +75,7 @@ pub fn parse_filename(path: &Path) -> FileMeta {
             // none is sampled above 100 MS/s.
             if v >= 1e6 && center.is_none() && tok.ends_with(['M', 'm', 'G', 'g']) {
                 center = Some(Hz(v as u64));
-            } else if v > 0.0 && rate.is_none() {
+            } else if v >= LOWEST_RATE && rate.is_none() {
                 rate = Some(Sps(v as u64));
             }
         }
@@ -438,6 +440,13 @@ mod tests {
         assert_eq!(m.center, Some(Hz(433_920_000)));
         assert_eq!(m.rate, Some(Sps(250_000)));
         assert_eq!(m.format, Some(SampleFormat::Cu8));
+    }
+
+    #[test]
+    fn a_sequence_number_is_not_a_rate() {
+        let m = parse_filename(Path::new("01_FR_1_433.92M_250k.cu8"));
+        assert_eq!(m.center, Some(Hz(433_920_000)));
+        assert_eq!(m.rate, Some(Sps(250_000)));
     }
 
     #[test]

@@ -206,6 +206,7 @@ pub fn analyze(pulses: &[Pulse]) -> Option<Analysis> {
         // away the only look anyone will get at an unknown device.
         tolerance_us: (long_us / 2).max(tol),
         reset_us: pulses.last().map(|p| p.gap).unwrap_or(0),
+        gap_us: 0,
     };
     let bits = slice(pulses, &t).ok()?;
     if bits.is_empty() {

@@ -73,6 +73,7 @@ fn the_fsk_chain_recovers_the_transmitted_bits() {
         sync_us: 0,
         tolerance_us: 30,
         reset_us: 2_000,
+        gap_us: 0,
     };
     let got = slice(pkgs[0].pulses(), &t).expect("slice");
 
