@@ -278,6 +278,7 @@ the code is in the commit log.
 ### Removed
 
 - Packet log (+) button for adding a row's frequency as a channel.
+- ISM868-Link decoder for an unidentified 868 MHz link.
 
 ## [0.4.0-rc2] - 2026-09-22
 

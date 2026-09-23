@@ -238,7 +238,6 @@ impl Protocols {
         p.add(Box::new(KeeLoq));
         p.add(Box::new(SomfyRts));
         p.add(Box::new(InterlogixSecurity));
-        p.add(Box::new(Ism868Link));
         p.add(Box::new(Esl::sub_ghz_38k()));
         p.add(Box::new(Esl::sub_ghz_250k()));
         p.add(Box::new(ErtScm));
