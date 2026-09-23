@@ -12,6 +12,7 @@
 
 pub mod gaps;
 pub mod iqstream;
+pub mod kiwisdr;
 pub mod rtl_tcp;
 pub mod spyserver;
 
@@ -31,10 +32,12 @@ pub enum Proto {
     IqStream,
     RtlTcp,
     SpyServer,
+    KiwiSdr,
 }
 
 impl Proto {
-    pub const ALL: &'static [Proto] = &[Proto::IqStream, Proto::RtlTcp, Proto::SpyServer];
+    pub const ALL: &'static [Proto] =
+        &[Proto::IqStream, Proto::RtlTcp, Proto::SpyServer, Proto::KiwiSdr];
 
     /// The name used on the wire-facing side of the receiver: the session
     /// file, the command line and the device id.
@@ -43,6 +46,7 @@ impl Proto {
             Self::IqStream => "iqstream",
             Self::RtlTcp => "rtl_tcp",
             Self::SpyServer => "spyserver",
+            Self::KiwiSdr => "kiwisdr",
         }
     }
 
@@ -61,6 +65,7 @@ impl Proto {
             // which server is listening.
             Self::IqStream | Self::RtlTcp => 1234,
             Self::SpyServer => spyserver::DEFAULT_PORT,
+            Self::KiwiSdr => kiwisdr::DEFAULT_PORT,
         }
     }
 
@@ -72,6 +77,7 @@ impl Proto {
             Self::IqStream => false,
             Self::RtlTcp => true,
             Self::SpyServer => true,
+            Self::KiwiSdr => true,
         }
     }
 
@@ -82,6 +88,7 @@ impl Proto {
             Self::IqStream => "iqstreamd",
             Self::RtlTcp => "rtl_tcp, shipped with librtlsdr",
             Self::SpyServer => "spyserver, from the Airspy people",
+            Self::KiwiSdr => "a KiwiSDR, which serves itself",
         }
     }
 
@@ -90,6 +97,7 @@ impl Proto {
             Self::IqStream => "https://github.com/v0l/iqstream",
             Self::RtlTcp => "https://github.com/osmocom/rtl-sdr",
             Self::SpyServer => "https://airspy.com/directory/",
+            Self::KiwiSdr => "http://rx.linkfanel.net/",
         }
     }
 
@@ -111,6 +119,12 @@ impl Proto {
                  stages the far end offers; how far the dial travels is the server's to \
                  grant, and a shared one lets it move only inside the span it is already on."
             }
+            Self::KiwiSdr => {
+                "A shortwave receiver somebody has put on the internet, and there are hundreds. \
+                 It covers 0 to 30 MHz and hands each listener 12 kHz of it, which is room for \
+                 one voice channel or a few narrow data signals; the dial moves it anywhere \
+                 in the band. Receivers that want a password cannot be opened from here."
+            }
         }
     }
 
@@ -119,12 +133,17 @@ impl Proto {
             Self::IqStream => "host, or host:port (1234)",
             Self::RtlTcp => "host, or host:port (1234)",
             Self::SpyServer => "host, or host:port (5555)",
+            Self::KiwiSdr => "host, host:port (8073), or its http:// address",
         }
     }
 
     /// Add this protocol's default port to a bare host, and reject what is not
     /// an address.
     pub fn parse_addr(self, s: &str) -> Option<String> {
+        let s = match self {
+            Self::KiwiSdr => s.trim().trim_start_matches("http://").trim_end_matches('/'),
+            _ => s,
+        };
         parse_addr(s, self.default_port())
     }
 
@@ -134,6 +153,7 @@ impl Proto {
             Self::IqStream => iqstream::probe(addr),
             Self::RtlTcp => rtl_tcp::probe(addr),
             Self::SpyServer => spyserver::probe(addr),
+            Self::KiwiSdr => kiwisdr::probe(addr),
         }
     }
 
@@ -147,6 +167,7 @@ impl Proto {
             Self::IqStream => iqstream::probe_all(addr),
             Self::RtlTcp => rtl_tcp::probe(addr).map(|p| vec![p]),
             Self::SpyServer => spyserver::probe(addr).map(|p| vec![p]),
+            Self::KiwiSdr => kiwisdr::probe(addr).map(|p| vec![p]),
         }
     }
 
@@ -155,6 +176,7 @@ impl Proto {
             Self::IqStream => Ok(Box::new(iqstream::Device::open(addr)?)),
             Self::RtlTcp => Ok(Box::new(rtl_tcp::Device::open(addr)?)),
             Self::SpyServer => Ok(Box::new(spyserver::Device::open(addr)?)),
+            Self::KiwiSdr => Ok(Box::new(kiwisdr::Device::open(addr)?)),
         }
     }
 }
@@ -255,7 +277,7 @@ pub struct Probe {
 /// says anything at all.
 pub fn identify(addr: &str) -> Result<Probe> {
     let mut last = None;
-    for p in [Proto::RtlTcp, Proto::IqStream, Proto::SpyServer] {
+    for p in [Proto::RtlTcp, Proto::IqStream, Proto::SpyServer, Proto::KiwiSdr] {
         match p.probe(addr) {
             Ok(found) => return Ok(found),
             Err(e) => last = Some(e),
@@ -306,6 +328,22 @@ mod tests {
             "and it takes its own port, not the one the other two share"
         );
         assert_eq!(parse_spec("sdruno://radarpi"), None);
+        assert_eq!(
+            parse_spec("kiwisdr://kiwisdr.areg.org.au"),
+            Some((Proto::KiwiSdr, "kiwisdr.areg.org.au:8073".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_kiwisdr_is_added_by_the_address_its_page_is_on() {
+        assert_eq!(
+            Proto::KiwiSdr.parse_addr("http://sdr.ironstonerange.com:8074/").as_deref(),
+            Some("sdr.ironstonerange.com:8074")
+        );
+        assert_eq!(
+            Proto::KiwiSdr.parse_addr(" http://kiwisdr.areg.org.au ").as_deref(),
+            Some("kiwisdr.areg.org.au:8073")
+        );
     }
 
     /// rtl_tcp is recognised on the port it shares with iqstream, without
@@ -335,11 +373,13 @@ mod tests {
         assert!(!Proto::IqStream.tunable());
         assert!(Proto::RtlTcp.tunable());
         assert!(Proto::SpyServer.tunable());
-        assert_eq!(Proto::ALL.len(), 3);
+        assert!(Proto::KiwiSdr.tunable());
+        assert_eq!(Proto::ALL.len(), 4);
         assert_eq!(Proto::SpyServer.default_port(), 5555);
+        assert_eq!(Proto::KiwiSdr.default_port(), 8073);
         for p in Proto::ALL {
             assert_eq!(Proto::parse(p.name()), Some(*p));
-            assert!(p.url().starts_with("https://"));
+            assert!(p.url().starts_with("http"), "{}", p.url());
             assert!(!p.server().is_empty());
         }
     }

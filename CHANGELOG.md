@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
 - SpyServer directory: public servers listed by frequency and free slot, opened with TUNE.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
 - Compiled features listed under the version in Setup, ffmpeg among them.

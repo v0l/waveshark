@@ -1125,8 +1125,8 @@ struct Args {
     rf_gain: Option<f32>,
 
     /// Offer a network tuner as a radio, as host, host:port, or
-    /// rtl_tcp://host:port. Repeatable, and added to whatever the session
-    /// already holds
+    /// rtl_tcp://, spyserver:// or kiwisdr://host:port. Repeatable, and added
+    /// to whatever the session already holds
     #[arg(long, value_name = "HOST")]
     stream: Vec<String>,
 
@@ -1490,7 +1490,9 @@ fn main() -> eframe::Result<()> {
                 devices::add_stream(proto, &addr, "");
             }
             None => {
-                eprintln!("--stream {s}: expected host, host:port, or rtl_tcp://host:port");
+                eprintln!(
+                    "--stream {s}: expected host, host:port, or rtl_tcp://, spyserver:// or kiwisdr://host:port"
+                );
                 std::process::exit(1);
             }
         }

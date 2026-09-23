@@ -1358,6 +1358,15 @@ impl App {
         }
     }
 
+    fn follow_rate(&mut self, rate: f64) {
+        let pinned = self.device.as_ref().is_some_and(|e| e.rates.start() == e.rates.end());
+        let listed = self.spans.iter().any(|s| (s.effective() - rate).abs() < 1.0);
+        if pinned && !listed && self.zoom == 1 {
+            let r = Sps(rate.round() as u64);
+            self.spans = crate::devices::spans_with_zoom(&(r..=r));
+        }
+    }
+
     fn send(&self, c: Cmd) {
         if let Some(r) = &self.radio {
             r.send(c);
@@ -1508,6 +1517,7 @@ impl App {
             // pointer every time one landed.
             self.scope.db_center = f.center;
             self.rate = f.rate;
+            self.follow_rate(f.rate);
             if self.scope.auto_scale {
                 self.rescale(&f.db);
                 let wf = if f.wf.len() == f.db.len() { &f.wf } else { &f.db };
@@ -4171,6 +4181,34 @@ mod tests {
         apply_locale(&mut s);
         assert_eq!(crate::bands::plan(), crate::bands::Plan::AsiaPacific);
         crate::bands::set_plan(crate::bands::Plan::Europe);
+    }
+
+    #[test]
+    fn a_pinned_radio_is_listed_at_the_rate_it_delivers() {
+        let mut a = app();
+        let kiwi = crate::devices::Entry {
+            kind: common::device::DriverKind::Network,
+            index: 0,
+            label: "kiwi".into(),
+            rates: Sps(12_000)..=Sps(12_000),
+            addr: Some("kiwi.test:8073".into()),
+            proto: Some(remote::Proto::KiwiSdr),
+            path: None,
+            pinned: None,
+            parts: Vec::new(),
+        };
+        a.adopt_device(kiwi.clone());
+        assert_eq!(a.spans.iter().map(|s| s.effective()).collect::<Vec<_>>(), vec![12_000.0]);
+        a.follow_rate(11_999.0);
+        assert_eq!(a.spans.iter().map(|s| s.effective()).collect::<Vec<_>>(), vec![11_999.0]);
+        assert_eq!(a.device.as_ref(), Some(&kiwi), "the entry is still the one in the list");
+
+        let mut rtl = kiwi.clone();
+        rtl.rates = Sps(225_000)..=Sps(3_200_000);
+        a.adopt_device(rtl);
+        let offered = a.spans.len();
+        a.follow_rate(1_000_000.0);
+        assert_eq!(a.spans.len(), offered, "a radio with a range keeps its list mid span change");
     }
 
     #[test]
