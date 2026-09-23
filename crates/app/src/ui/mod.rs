@@ -1892,28 +1892,8 @@ impl App {
             match a {
                 packets::Action::Decode(on) => self.settings.edit(|s| s.decode_on = on),
                 packets::Action::Open(w) => self.open = Some(w),
-                packets::Action::Pin { freq, model } => self.pin_channel(freq, &model),
             }
         }
-    }
-
-    /// Put a decode channel on the strip from a packet, the (+) on a log row:
-    /// the frequency it arrived on, and the front end that reads it.
-    ///
-    /// This used to prefill a scanner block, which was a heavier answer than
-    /// the question. A block sweeps the span it covers whether or not anything
-    /// else in it is wanted, so keeping one frequency meant keeping the search
-    /// that found it. A channel is the front end alone, at a fixed centre and
-    /// width, and it runs with the scanner switched off.
-    fn pin_channel(&mut self, freq: f64, model: &str) {
-        let Some(kind) = front_for(model) else {
-            // Nothing here reads it on its own, so the search that found it is
-            // the only thing that can: leave the scanner table to say so.
-            self.open = Some(Settings::Scanners);
-            return;
-        };
-        let label = format!("{} {:.4}", crate::chain::front_label(kind), freq / 1e6);
-        self.push_channel(freq, ChanMode::Decode(kind.to_string()), Some(label));
     }
 
     /// Draw the call list, then do what its buttons asked for.
@@ -2855,12 +2835,6 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             tone: c.tone,
         })
         .collect()
-}
-
-fn front_for(model: &str) -> Option<&'static str> {
-    let system = model.split('-').next().unwrap_or(model).to_ascii_lowercase();
-    let system = if system == "ax25" { "aprs" } else { system.as_str() };
-    crate::chain::channel_fronts().iter().map(|(k, _)| *k).find(|k| *k == system)
 }
 
 /// What to build for a downlink, from what SatNOGS says its mode is.

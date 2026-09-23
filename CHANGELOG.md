@@ -275,6 +275,10 @@ the code is in the commit log.
   too, so they stay as they were left.
 - Flipper `.sub` transmit sent the file once, whatever its Passes setting said.
 
+### Removed
+
+- Packet log (+) button for adding a row's frequency as a channel.
+
 ## [0.4.0-rc2] - 2026-09-22
 
 ### Added
