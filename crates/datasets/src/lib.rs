@@ -22,6 +22,7 @@ pub mod satnogs;
 pub mod sigid;
 pub mod sondehub;
 pub mod spacetrack;
+pub mod spyserver;
 pub mod tle;
 
 pub use cache::{Cache, Error, Source, Status, When};

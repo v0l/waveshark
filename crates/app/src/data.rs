@@ -62,6 +62,7 @@ static SATS: LazyLock<Vec<SatSlot>> =
 type SatSlot = RwLock<Option<Arc<datasets::tle::Sats>>>;
 static TRANSMITTERS: RwLock<Option<Arc<datasets::satnogs::Transmitters>>> = RwLock::new(None);
 static LAUNCH_SITES: RwLock<Option<Arc<Vec<datasets::sondehub::Site>>>> = RwLock::new(None);
+static SPYSERVERS: RwLock<Option<Arc<Vec<datasets::spyserver::Server>>>> = RwLock::new(None);
 static OPERATORS: RwLock<Option<Arc<Operators>>> = RwLock::new(None);
 static CELLS: RwLock<Option<Arc<Cells>>> = RwLock::new(None);
 /// The two halves of the wiki, held apart because they are two files from
@@ -148,6 +149,22 @@ pub fn transmitters() -> Option<Arc<datasets::satnogs::Transmitters>> {
 /// the map layer being switched on or the sonde band being tuned.
 pub fn launch_sites() -> Option<Arc<Vec<datasets::sondehub::Site>>> {
     on_demand(Which::LaunchSites, &LAUNCH_SITES)
+}
+
+pub fn spyservers() -> Option<Arc<Vec<datasets::spyserver::Server>>> {
+    on_demand(Which::SpyServers, &SPYSERVERS)
+}
+
+pub fn check(which: Which) {
+    load(which, When::IfDue);
+}
+
+pub fn busy(which: Which) -> bool {
+    work_slot(which).busy.load(Ordering::Acquire)
+}
+
+pub fn failed(which: Which) -> Option<String> {
+    work_slot(which).error.read().clone()
 }
 
 /// Now, as the launch schedule is written: UTC off the system clock.
@@ -293,6 +310,7 @@ pub enum Which {
     Transmitters,
     /// Where weather balloons are released, and when.
     LaunchSites,
+    SpyServers,
     /// One repository of scripts, as a tree in the cache. A row each, like
     /// the gateways: each repository is published, refreshed and credited
     /// on its own.
@@ -318,7 +336,7 @@ impl Which {
             v.extend(datasets::gateways::HOST_FILES.iter().copied().map(Which::Gateway));
             v.extend([Which::CellOperators, Which::CellTowers, Which::Artemis, Which::SigIdUnid]);
             v.extend(datasets::tle::GROUPS.iter().copied().map(Which::Satellites));
-            v.extend([Which::Transmitters, Which::LaunchSites]);
+            v.extend([Which::Transmitters, Which::LaunchSites, Which::SpyServers]);
             v.extend(
                 git::REPOS
                     .iter()
@@ -349,6 +367,7 @@ impl Which {
             Which::Satellites(g) => format!("satellites-{}", slug(g.name)),
             Which::Transmitters => "satellite-transmitters".into(),
             Which::LaunchSites => "launch-sites".into(),
+            Which::SpyServers => "spyservers".into(),
             Which::Repo(r) => format!("repo-{}", slug(r.dir)),
             Which::CellOperators => "mobile-networks".into(),
             Which::CellTowers => "cell-towers".into(),
@@ -367,6 +386,7 @@ impl Which {
             Which::Satellites(g) => format!("{} satellites", g.name),
             Which::Transmitters => "Satellite transmitters".into(),
             Which::LaunchSites => "Radiosonde launch sites".into(),
+            Which::SpyServers => "Public SpyServers".into(),
             Which::Repo(r) => r.name.into(),
             Which::CellOperators => "Mobile networks".into(),
             Which::CellTowers => "Cell towers".into(),
@@ -383,6 +403,7 @@ impl Which {
             Which::Satellites(g) => g.publisher,
             Which::Transmitters => "db.satnogs.org",
             Which::LaunchSites => "sondehub.org",
+            Which::SpyServers => "airspy.com",
             Which::CellOperators => "github.com/pbakondy/mcc-mnc-list",
             Which::CellTowers => "opencellid.org",
             Which::Artemis => "github.com/AresValley/Artemis-DB",
@@ -404,6 +425,7 @@ impl Which {
             Which::Satellites(g) => g.page,
             Which::Transmitters => "https://db.satnogs.org/",
             Which::LaunchSites => "https://sondehub.org/",
+            Which::SpyServers => "https://airspy.com/directory/",
             Which::CellOperators => "https://github.com/pbakondy/mcc-mnc-list",
             Which::CellTowers => "https://opencellid.org/",
             Which::Artemis => "https://github.com/AresValley/Artemis-DB",
@@ -499,6 +521,7 @@ impl Which {
             Which::Satellites(g) => (g.credit_name, g.credit_licence),
             Which::Transmitters => ("SatNOGS DB", "CC BY-SA 4.0"),
             Which::LaunchSites => ("SondeHub", "CC BY-SA 2.0"),
+            Which::SpyServers => ("Airspy", "no licence stated"),
             _ => ("radioid.net", "amateur use"),
         };
         Credit { name, licence, url: self.page() }
@@ -525,6 +548,7 @@ impl Which {
             Which::Satellites(g) => g.terms,
             Which::Transmitters => "CC BY-SA 4.0, credit the SatNOGS project",
             Which::LaunchSites => "CC BY-SA 2.0, credit SondeHub and link sondehub.org",
+            Which::SpyServers => "Airspy's server directory, no licence published",
             // radioid.net publishes the registry for amateur use and states
             // no licence, so the honest line is who it belongs to.
             _ => "radioid.net, for amateur radio use",
@@ -559,6 +583,11 @@ impl Which {
                  days and hours it goes up on, and which instrument it carries. The station \
                  picks a frequency on the day, so the band is still scanned; this says where \
                  to expect one and when."
+            }
+            Which::SpyServers => {
+                "Every SpyServer listed in the Airspy directory: where it answers, the range \
+                 it tunes and whether it has a listener slot free. Read by the discover list \
+                 when adding a radio over the network."
             }
             Which::Repo(r) => r.about,
             Which::CellOperators => {
@@ -595,6 +624,7 @@ impl Which {
             Which::Satellites(g) => vec![g.source()],
             Which::Transmitters => vec![datasets::satnogs::source()],
             Which::LaunchSites => vec![datasets::sondehub::source()],
+            Which::SpyServers => vec![datasets::spyserver::source()],
             Which::CellOperators => vec![datasets::cells::operators_source()],
             // Nothing to fetch until both halves of the URL exist. An empty
             // list reads as nothing held, which is the truth.
@@ -657,6 +687,7 @@ impl Which {
             Which::Satellites(g) => SATS[group_index(g)].read().as_ref().map(|s| s.len()),
             Which::Transmitters => TRANSMITTERS.read().as_ref().map(|t| t.len()),
             Which::LaunchSites => LAUNCH_SITES.read().as_ref().map(|s| s.len()),
+            Which::SpyServers => SPYSERVERS.read().as_ref().map(|s| s.len()),
             // The files in the tree, which is what a directory browser
             // will list; one number for the row, from the status the tree
             // carries beside it.
@@ -901,6 +932,14 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
             }
             if let Some(s) = datasets::sondehub::refresh(cache, when)? {
                 *LAUNCH_SITES.write() = Some(Arc::new(s));
+            }
+        }
+        Which::SpyServers => {
+            if SPYSERVERS.read().is_none() {
+                *SPYSERVERS.write() = Some(Arc::new(datasets::spyserver::load(cache)?));
+            }
+            if let Some(s) = datasets::spyserver::refresh(cache, when)? {
+                *SPYSERVERS.write() = Some(Arc::new(s));
             }
         }
         Which::Satellites(g) => {

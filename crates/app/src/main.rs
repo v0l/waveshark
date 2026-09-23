@@ -1182,7 +1182,8 @@ struct Args {
     run: bool,
 
     /// Open with a settings dialog up: agent, radio, spectrum, waterfall,
-    /// log, scanners, memory, data or app. For looking at one in a screenshot
+    /// log, scanners, memory, data, app or spyservers. For looking at one in a
+    /// screenshot
     #[arg(long, value_name = "NAME")]
     settings: Option<String>,
 
@@ -1730,9 +1731,10 @@ fn main() -> eframe::Result<()> {
                 app.show_chain();
             }
             if let Some(name) = &args.settings {
-                match ui::Settings::parse(name) {
-                    Some(s) => app.open_settings(s),
-                    None => eprintln!("--settings {name}: no such dialog"),
+                match (name.as_str(), ui::Settings::parse(name)) {
+                    (_, Some(s)) => app.open_settings(s),
+                    ("spyservers", None) => app.find_spyservers(),
+                    (_, None) => eprintln!("--settings {name}: no such dialog"),
                 }
             }
             if args.flights {

@@ -203,6 +203,7 @@ pub struct App {
     feed_host: String,
     /// The remote radio being created, while that dialog is open.
     remote: Option<RemoteEdit>,
+    find: Option<settings::FindEdit>,
     /// The capture being described, while the card asking what is in it is
     /// open.
     capture_edit: Option<settings::CaptureEdit>,
@@ -685,6 +686,7 @@ impl Default for App {
             radio_dirty: false,
             feed_host: String::new(),
             remote: None,
+            find: None,
             capture_edit: None,
             feed_kind: nodes::FEED_KINDS[0],
             scanner_edit: None,
@@ -1163,6 +1165,11 @@ impl App {
     /// Open with a settings dialog up, for a screenshot of it.
     pub fn open_settings(&mut self, which: Settings) {
         self.open = Some(which);
+    }
+
+    pub fn find_spyservers(&mut self) {
+        self.remote = Some(RemoteEdit::spyserver());
+        self.find = Some(settings::FindEdit::open());
     }
 
     pub fn start_on_open(&mut self) {
@@ -3020,6 +3027,7 @@ impl eframe::App for App {
         }
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
+        self.find_modal(ui.ctx());
         self.capture_modal(ui.ctx());
         self.wigle_modal(ui.ctx());
         self.beacondb_modal(ui.ctx());

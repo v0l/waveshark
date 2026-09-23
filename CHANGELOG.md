@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- SpyServer directory: public servers listed by frequency and free slot, opened with TUNE.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
 - Compiled features listed under the version in Setup, ffmpeg among them.
 - RDS station on a keyed WFM channel: a PI code, a name and radiotext.

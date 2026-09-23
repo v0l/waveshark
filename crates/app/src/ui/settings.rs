@@ -2581,7 +2581,7 @@ impl App {
         let Some(mut edit) = self.remote.take() else {
             return;
         };
-        let (mut close, mut add) = (false, false);
+        let (mut close, mut add, mut find) = (false, false, false);
         let mut link = None;
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
             .backdrop_color(Color32::from_black_alpha(150))
@@ -2605,6 +2605,13 @@ impl App {
                                     link = Some(edit.proto.url().to_string());
                                 }
                             });
+                            if edit.proto == remote::Proto::SpyServer {
+                                row_help(ui, "public", FIND_HELP, |ui| {
+                                    if listed_row(ui) {
+                                        find = true;
+                                    }
+                                });
+                            }
                         }
                         Over::Frames => {
                             row_help(ui, "format", FEED_HELP, |ui| {
@@ -2693,7 +2700,10 @@ impl App {
         if let Some(url) = link {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
-        if r.should_close() {
+        if find {
+            self.find = Some(FindEdit::open());
+        }
+        if r.should_close() && self.find.is_none() {
             close = true;
         }
         if add {
@@ -2708,6 +2718,100 @@ impl App {
         }
         if !close {
             self.remote = Some(edit);
+        }
+    }
+
+    pub(super) fn find_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.find.take() else {
+            return;
+        };
+        let which = crate::data::Which::SpyServers;
+        let servers = crate::data::spyservers();
+        let (hz, bad_hz) = edit.hz();
+        let filter =
+            datasets::spyserver::Filter { hz, full_control: edit.full_control, free: edit.free };
+        let kept: Vec<&datasets::spyserver::Server> =
+            servers.iter().flat_map(|v| v.iter()).filter(|s| filter.keeps(s)).collect();
+        let (mut close, mut tune) = (false, None);
+        let r = egui::containers::Modal::new(egui::Id::new("find-spyserver"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                modal_title(ui, "Public SpyServers");
+                section(ui, "filter", "which of the listed servers to show", |ui| {
+                    row_help(ui, "tunes", TUNES_HELP, |ui| {
+                        field(ui, &mut edit.mhz, "any frequency, or MHz such as 145.8");
+                    });
+                    switch(
+                        ui,
+                        "control",
+                        &mut edit.full_control,
+                        "only servers whose dial may be moved",
+                        CONTROL_HELP,
+                    );
+                    switch(
+                        ui,
+                        "free",
+                        &mut edit.free,
+                        "only servers with a listener slot free",
+                        FREE_HELP,
+                    );
+                    match (&edit.err, &bad_hz, &servers) {
+                        (Some(e), _, _) => lamp(ui, false, e),
+                        (None, Some(e), _) => lamp(ui, false, e),
+                        (None, None, Some(v)) => {
+                            lamp(ui, true, &format!("{} of {} servers", kept.len(), v.len()))
+                        }
+                        (None, None, None) => match crate::data::failed(which) {
+                            Some(e) => lamp(ui, false, &e),
+                            None => lamp(ui, false, "reading the directory"),
+                        },
+                    }
+                });
+                ui.add_space(6.0);
+                let w = ui.available_width();
+                egui::ScrollArea::vertical()
+                    .max_height(share_of_screen(ui, 0.55, 240.0, 520.0))
+                    .show(ui, |ui| {
+                        ui.set_max_width(w);
+                        for s in &kept {
+                            if server_card(ui, s) {
+                                tune = Some((*s).clone());
+                            }
+                            ui.add_space(6.0);
+                        }
+                    });
+                footer(ui, |ui| {
+                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                        close = true;
+                    }
+                    let label = match crate::data::busy(which) {
+                        true => "CHECKING",
+                        false => crate::i18n::t("ui.refresh"),
+                    };
+                    if ui.add_enabled(!crate::data::busy(which), egui::Button::new(label)).clicked()
+                    {
+                        crate::data::refresh(which);
+                    }
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if let Some(s) = tune {
+            let mut remote = RemoteEdit::spyserver();
+            remote.host = s.addr();
+            remote.label = s.description.clone();
+            match self.add_remote(ctx, &mut remote) {
+                Ok(()) => {
+                    self.remote = None;
+                    close = true;
+                }
+                Err(e) => edit.err = Some(format!("{}: {e}", s.addr())),
+            }
+        }
+        if !close {
+            self.find = Some(edit);
         }
     }
 
@@ -3651,6 +3755,90 @@ fn server_row(ui: &mut egui::Ui, server: &str) -> bool {
     open
 }
 
+const FIND_HELP: &str = "Servers their owners have listed in the Airspy directory, open to \
+     anybody. TUNE on one adds it to the radio list like an address typed here.";
+const TUNES_HELP: &str = "Keep only servers whose radio reaches this frequency. Empty for all.";
+const CONTROL_HELP: &str = "A server granting control lets the dial go anywhere in its range. \
+     One that does not lets it move only inside the span it is already on.";
+const FREE_HELP: &str = "A server takes a fixed number of listeners and turns the next away.";
+
+fn listed_row(ui: &mut egui::Ui) -> bool {
+    let mut open = false;
+    ui.horizontal(|ui| {
+        let said = match crate::data::spyservers() {
+            Some(v) => format!("{} in the Airspy directory", v.len()),
+            None => "the Airspy directory".to_string(),
+        };
+        theme::Line::new().value(said).size(13.0).show(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            open = ui.small_button("FIND").clicked();
+        });
+    });
+    open
+}
+
+fn bare_mhz(hz: u64) -> String {
+    let s = format!("{:.3}", hz as f64 / 1e6);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server) -> bool {
+    let mut tune = false;
+    let rail = s.has_slot().then_some(theme::TRACE);
+    let mhz = |hz: u64| format!("{:.3}", hz as f64 / 1e6);
+    card(
+        ui,
+        rail,
+        |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                tune = ui.button("TUNE").clicked();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    theme::Line::new()
+                        .value(&s.description)
+                        .size(12.0)
+                        .gap(12.0)
+                        .note(&s.device)
+                        .size(10.5)
+                        .elided(ui);
+                });
+            });
+        },
+        |ui| {
+            theme::Line::new()
+                .legend("range")
+                .value(format!("{}-{} MHz", bare_mhz(s.min_hz), bare_mhz(s.max_hz)))
+                .size(12.0)
+                .gap(18.0)
+                .legend("on")
+                .heard(mhz(s.center_hz))
+                .size(12.0)
+                .gap(18.0)
+                .legend("span")
+                .value(format!("{} kHz", s.bandwidth_hz / 1000))
+                .size(12.0)
+                .gap(18.0)
+                .legend("users")
+                .value(format!("{} of {}", s.clients, s.max_clients))
+                .size(12.0)
+                .show(ui);
+            let dial = match s.full_control {
+                true => "dial free".to_string(),
+                false => "dial fixed to its span".to_string(),
+            };
+            let session = match s.session_limit {
+                Some(secs) => format!(", {} min a session", secs.div_ceil(60)),
+                None => String::new(),
+            };
+            let antenna = match s.antenna.is_empty() {
+                true => String::new(),
+                false => format!(", {}", s.antenna),
+            };
+            hint(ui, &format!("{}, {dial}{session}{antenna}", s.addr()));
+        },
+    );
+    tune
+}
+
 /// A capture whose name does not say what it holds, while the card asking is
 /// open.
 ///
@@ -3728,6 +3916,37 @@ pub struct RemoteEdit {
     /// Why the last attempt was refused, kept beside the field it belongs to
     /// rather than in the status line under the dial.
     err: Option<String>,
+}
+
+impl RemoteEdit {
+    pub fn spyserver() -> Self {
+        Self { proto: remote::Proto::SpyServer, ..Self::default() }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct FindEdit {
+    mhz: String,
+    full_control: bool,
+    free: bool,
+    err: Option<String>,
+}
+
+impl FindEdit {
+    pub fn open() -> Self {
+        crate::data::check(crate::data::Which::SpyServers);
+        Self { free: true, ..Self::default() }
+    }
+
+    fn hz(&self) -> (Option<u64>, Option<String>) {
+        match self.mhz.trim() {
+            "" => (None, None),
+            t => match t.parse::<f64>() {
+                Ok(m) if m >= 0.0 => (Some((m * 1e6).round() as u64), None),
+                _ => (None, Some(format!("{t} is not a frequency in MHz"))),
+            },
+        }
+    }
 }
 
 impl Default for RemoteEdit {
