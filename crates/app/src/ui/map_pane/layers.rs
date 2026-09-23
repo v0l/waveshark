@@ -689,6 +689,7 @@ fn nearest_cell(
 pub(super) struct TrackLayer<'a> {
     pub active: &'a [&'a crate::tracks::Track],
     pub now: std::time::Instant,
+    pub named_airframes: bool,
 }
 
 impl Layer for TrackLayer<'_> {
@@ -701,6 +702,13 @@ impl Layer for TrackLayer<'_> {
     }
 
     fn draw(&mut self, c: &Canvas) {
+        let fleet = self
+            .active
+            .iter()
+            .any(|a| matches!(a.id, crate::tracks::TrackId::Icao(_)))
+            .then(crate::data::aircraft)
+            .flatten();
+        self.named_airframes = false;
         for a in self.active {
             let Some((lat, lon)) = a.position else {
                 continue;
@@ -737,7 +745,13 @@ impl Layer for TrackLayer<'_> {
             } else {
                 c.p.circle_stroke(at, 3.5, Stroke::new(1.0, col.gamma_multiply(0.7)));
             }
-            let label = a.label.clone().unwrap_or_else(|| a.id.text());
+            let airframe = a.airframe(fleet.as_deref());
+            self.named_airframes |= airframe.is_some();
+            let label = a
+                .label
+                .clone()
+                .or_else(|| airframe.map(|p| p.registration.to_string()).filter(|r| !r.is_empty()))
+                .unwrap_or_else(|| a.id.text());
             c.label(Pos2::new(at.x + 9.0, at.y - 5.0), &label, theme::VALUE, fade);
             // The second line is whatever that kind is measured by: an
             // aircraft by its altitude, a vessel by its speed. A station is
@@ -771,6 +785,13 @@ impl Layer for TrackLayer<'_> {
     fn status(&self) -> Option<String> {
         let n = self.active.iter().filter(|a| a.position.is_some()).count();
         Some(format!("{n} plotted"))
+    }
+
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        match self.named_airframes {
+            true => vec![crate::data::Which::Aircraft.credit()],
+            false => Vec::new(),
+        }
     }
 }
 

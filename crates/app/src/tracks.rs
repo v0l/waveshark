@@ -514,7 +514,7 @@ pub struct Track {
 }
 
 impl Track {
-    fn new(id: TrackId, detail: Detail, at: std::time::Instant) -> Self {
+    pub(crate) fn new(id: TrackId, detail: Detail, at: std::time::Instant) -> Self {
         Self {
             id,
             label: None,
@@ -540,6 +540,25 @@ impl Track {
 
     pub fn age(&self, now: std::time::Instant) -> std::time::Duration {
         now.saturating_duration_since(self.last)
+    }
+
+    pub fn airframe<'a>(
+        &self,
+        fleet: Option<&'a datasets::aircraft::Fleet>,
+    ) -> Option<datasets::aircraft::Aircraft<'a>> {
+        match (&self.id, fleet) {
+            (TrackId::Icao(icao), Some(f)) => f.get(*icao),
+            _ => None,
+        }
+    }
+
+    pub fn vesselfinder(&self) -> Option<String> {
+        match (&self.id, self.kind()) {
+            (TrackId::Mmsi(mmsi), Kind::Vessel) => {
+                Some(format!("https://www.vesselfinder.com/vessels/details/{mmsi}"))
+            }
+            _ => None,
+        }
     }
 
     /// Altitude, for the kinds that report one.
@@ -1644,5 +1663,49 @@ mod tests {
         let (lat, lon) = n.position.expect("placed");
         assert!((lat - 53.64).abs() < 1e-6 && (lon + 6.65).abs() < 1e-6);
         assert_eq!(n.kind(), Kind::Vehicle);
+    }
+
+    #[test]
+    fn an_aircraft_reads_its_registration_off_its_address_and_nothing_else_does() {
+        let fleet = datasets::aircraft::read(
+            "sample",
+            "4CA068;EI-CJX;B752;00;BOEING 757-200;;;\n".as_bytes(),
+        )
+        .unwrap();
+        let at = std::time::Instant::now();
+        let plane = Track::new(TrackId::Icao(0x4ca068), Detail::new_aircraft(), at);
+        assert_eq!(
+            plane.airframe(Some(&fleet)).map(|a| a.summary()).as_deref(),
+            Some("EI-CJX B752")
+        );
+        assert!(plane.airframe(None).is_none());
+        let unknown = Track::new(TrackId::Icao(0x4ca069), Detail::new_aircraft(), at);
+        assert!(unknown.airframe(Some(&fleet)).is_none());
+        let ship = Track::new(TrackId::Mmsi(0x4ca068), vessel(), at);
+        assert!(ship.airframe(Some(&fleet)).is_none(), "an MMSI is not an ICAO address");
+    }
+
+    #[test]
+    fn a_vessel_links_to_vesselfinder_and_a_shore_station_does_not() {
+        let at = std::time::Instant::now();
+        let ship = Track::new(TrackId::Mmsi(250002345), vessel(), at);
+        assert_eq!(
+            ship.vesselfinder().as_deref(),
+            Some("https://www.vesselfinder.com/vessels/details/250002345")
+        );
+        let mark = Track::new(TrackId::Mmsi(992501234), Detail::Station { aid: true }, at);
+        assert!(mark.vesselfinder().is_none());
+        let plane = Track::new(TrackId::Icao(0x4ca068), Detail::new_aircraft(), at);
+        assert!(plane.vesselfinder().is_none());
+    }
+
+    fn vessel() -> Detail {
+        Detail::Vessel {
+            heading_deg: None,
+            nav_status: None,
+            ship_type: None,
+            destination: None,
+            class_b: false,
+        }
     }
 }

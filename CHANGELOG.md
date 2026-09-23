@@ -14,6 +14,8 @@ the code is in the commit log.
 - Text field right-click menu with cut, copy, paste and select all.
 - KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
 - SpyServer directory: public servers listed by frequency and free slot, opened with TUNE.
+- Aircraft registration and type on the map's track table, from the Mictronics database.
+- VesselFinder link on each vessel in the track table.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
 - Compiled features listed under the version in Setup, ffmpeg among them.
 - RDS station on a keyed WFM channel: a PI code, a name and radiotext.

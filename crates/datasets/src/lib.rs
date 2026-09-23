@@ -9,6 +9,7 @@
 //! saying where the file comes from, a parse, and a refresh that reparses
 //! only when the file actually changed.
 
+pub mod aircraft;
 pub mod airports;
 pub mod cache;
 pub mod cells;

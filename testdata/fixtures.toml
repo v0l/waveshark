@@ -911,3 +911,39 @@ lon_deg = 0.9226
 altitude_m = 10500.5
 climb_ms = 4.30
 battery_v = 2.7
+
+[[capture]]
+name = "ais_nijmegen_162M_768k.cu8"
+sha256 = "3caaac9675213a9defab1b4bdbb3c22dce209affd0c8c1b60d5c6f2c1d5d4d35"
+url = "https://nostr.download/3caaac9675213a9defab1b4bdbb3c22dce209affd0c8c1b60d5c6f2c1d5d4d35.xz"
+compression = "xz"
+center_hz = 162_000_000
+rate_sps = 768_000
+format = "cu8"
+license = "CC-BY-4.0"
+description = """
+44 seconds of both AIS channels from the Waal at Nijmegen, written by the
+receiver's own raw span capture off a LimeSDR-USB on 2026-09-23. It holds the
+MMSIs and positions of the barges passing the city that afternoon.
+
+The level is the point of it. The samples spread over about half a
+least significant bit, four distinct byte values in the first 200 000, so
+every frame is read out of what is nearly a one-bit stream. Uncut, because a
+cut on energy found 4 to 34 bursts depending on its threshold, and each cut
+changed what both decoders read.
+
+Independently read by gnuais 0.3.3, fed each channel's discriminator
+through scipy: 12 frames passed their CRC, from 244690403, 205581490,
+244133678, 244670443, 244013030 and 211664370. This receiver reads five, all
+on channel B, four of them among gnuais's twelve. The fifth, from 244650878,
+passed its own CRC and gnuais did not read it.
+
+With the DC block on, the receiver reads none of them.
+"""
+
+[capture.expect]
+frames = 5
+channel_hz = 162_025_000
+vessels = [205581490, 244650878, 244690403]
+reference = "gnuais 0.3.3"
+reference_frames = 12

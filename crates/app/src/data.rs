@@ -10,6 +10,7 @@
 //! and nothing asks it a question until a digital voice frame arrives, so
 //! they load on first use and stay loaded.
 
+use datasets::aircraft::Fleet;
 use datasets::airports::Airport;
 use datasets::cells::{Cells, Operators};
 use datasets::gateways::{Gateway, HostFile};
@@ -43,6 +44,7 @@ pub fn airports() -> &'static [Airport] {
     *AIRPORTS.read()
 }
 
+static AIRCRAFT: RwLock<Option<Arc<Fleet>>> = RwLock::new(None);
 static USERS: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static NXDN: RwLock<Option<Arc<Users>>> = RwLock::new(None);
 static REPEATERS: RwLock<Option<Arc<Vec<Repeater>>>> = RwLock::new(None);
@@ -70,6 +72,10 @@ static CELLS: RwLock<Option<Arc<Cells>>> = RwLock::new(None);
 static ARTEMIS: RwLock<Option<Arc<Vec<sigid::Signal>>>> = RwLock::new(None);
 static UNID: RwLock<Option<Arc<Vec<sigid::Signal>>>> = RwLock::new(None);
 static SIGID: RwLock<Option<Arc<sigid::Db>>> = RwLock::new(None);
+
+pub fn aircraft() -> Option<Arc<Fleet>> {
+    on_demand(Which::Aircraft, &AIRCRAFT)
+}
 
 /// The DMR ID registry: what the number in a DMR frame belongs to.
 ///
@@ -292,6 +298,7 @@ fn on_demand<T>(which: Which, held: &'static RwLock<Option<Arc<T>>>) -> Option<A
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Which {
     Airports,
+    Aircraft,
     Repeaters,
     DmrIds,
     NxdnIds,
@@ -329,6 +336,7 @@ impl Which {
             let mut v = vec![
                 Which::Repo(&git::PROTOCOLS),
                 Which::Airports,
+                Which::Aircraft,
                 Which::Repeaters,
                 Which::DmrIds,
                 Which::NxdnIds,
@@ -360,6 +368,7 @@ impl Which {
         }
         match self {
             Which::Airports => "airports".into(),
+            Which::Aircraft => "aircraft".into(),
             Which::Repeaters => "dmr-repeaters".into(),
             Which::DmrIds => "dmr-ids".into(),
             Which::NxdnIds => "nxdn-ids".into(),
@@ -379,6 +388,7 @@ impl Which {
     pub fn label(self) -> String {
         match self {
             Which::Airports => "Airports".into(),
+            Which::Aircraft => "Aircraft".into(),
             Which::Repeaters => "DMR repeaters".into(),
             Which::DmrIds => "DMR IDs".into(),
             Which::NxdnIds => "NXDN IDs".into(),
@@ -399,6 +409,7 @@ impl Which {
     pub fn publisher(self) -> &'static str {
         match self {
             Which::Airports => "ourairports.com",
+            Which::Aircraft => "github.com/wiedehopf/tar1090-db",
             Which::Gateway(h) => h.publisher,
             Which::Satellites(g) => g.publisher,
             Which::Transmitters => "db.satnogs.org",
@@ -421,6 +432,7 @@ impl Which {
     pub fn page(self) -> &'static str {
         match self {
             Which::Airports => "https://ourairports.com/data/",
+            Which::Aircraft => "https://github.com/Mictronics/aircraft-database",
             Which::Gateway(h) => h.page,
             Which::Satellites(g) => g.page,
             Which::Transmitters => "https://db.satnogs.org/",
@@ -512,6 +524,7 @@ impl Which {
     pub fn credit(self) -> Credit {
         let (name, licence) = match self {
             Which::Airports => ("OurAirports", "public domain"),
+            Which::Aircraft => ("Mictronics", "ODC-By"),
             Which::CellOperators => ("mcc-mnc-list", "MIT"),
             Which::CellTowers => ("OpenCelliD", "CC BY-SA 4.0"),
             Which::Artemis => ("Artemis-DB", "sigidwiki.com"),
@@ -540,6 +553,7 @@ impl Which {
     pub fn terms(self) -> &'static str {
         match self {
             Which::Airports => "public domain (OurAirports)",
+            Which::Aircraft => "ODC-By, credit the Mictronics aircraft database",
             Which::CellOperators => "MIT (pbakondy/mcc-mnc-list)",
             Which::CellTowers => "CC BY-SA 4.0, credit OpenCelliD and link opencellid.org",
             Which::Artemis => "Artemis-DB, from the Signal Identification Wiki",
@@ -561,6 +575,11 @@ impl Which {
             Which::Airports => {
                 "Airfields and their tower, ground and ATIS frequencies, drawn on the map \
                  under the aircraft."
+            }
+            Which::Aircraft => {
+                "The registration, type and operator behind each ICAO address, so an \
+                 aircraft heard over ADS-B reads as EI-CJX, a Boeing 757, rather than a hex \
+                 number."
             }
             Which::Repeaters => {
                 "Registered DMR repeaters with their output frequency, offset and colour code."
@@ -617,6 +636,7 @@ impl Which {
         use datasets::{airports, radioid};
         match self {
             Which::Airports => vec![airports::airports_source(), airports::frequencies_source()],
+            Which::Aircraft => vec![datasets::aircraft::source()],
             Which::Repeaters => vec![radioid::repeaters_source()],
             Which::DmrIds => vec![radioid::users_source()],
             Which::NxdnIds => vec![radioid::nxdn_source()],
@@ -680,6 +700,7 @@ impl Which {
                 0 => None,
                 n => Some(n),
             },
+            Which::Aircraft => AIRCRAFT.read().as_ref().map(|f| f.len()),
             Which::Repeaters => REPEATERS.read().as_ref().map(|r| r.len()),
             Which::DmrIds => USERS.read().as_ref().map(|u| u.len()),
             Which::NxdnIds => NXDN.read().as_ref().map(|u| u.len()),
@@ -885,6 +906,14 @@ fn work(which: Which, cache: &Cache, when: When) -> Result<(), datasets::Error> 
                 publish_airports(a);
             }
         }
+        Which::Aircraft => {
+            if AIRCRAFT.read().is_none() {
+                *AIRCRAFT.write() = Some(Arc::new(datasets::aircraft::load(cache)?));
+            }
+            if let Some(f) = datasets::aircraft::refresh(cache, when)? {
+                *AIRCRAFT.write() = Some(Arc::new(f));
+            }
+        }
         Which::Repeaters => {
             if REPEATERS.read().is_none() {
                 *REPEATERS.write() = Some(Arc::new(radioid::load_repeaters(cache)?));
@@ -1063,6 +1092,11 @@ pub fn fetch_all() {
         "airports",
         datasets::airports::refresh(&cache, When::Now).map(|u| u.is_some()),
         datasets::airports::load(&cache).map(|a| a.len()),
+    );
+    each(
+        "aircraft",
+        datasets::aircraft::refresh(&cache, When::Now).map(|u| u.is_some()),
+        datasets::aircraft::load(&cache).map(|f| f.len()),
     );
     each(
         "dmr repeaters",

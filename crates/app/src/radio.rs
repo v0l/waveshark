@@ -5417,6 +5417,55 @@ pub(crate) mod tests {
         assert!((rh - 55.7).abs() < 0.5, "{rh}% against the published 55%");
     }
 
+    fn ais_fixture() -> Option<common::IqBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/ais_nijmegen_162M_768k.cu8");
+        if !p.exists() {
+            return None;
+        }
+        sources::FileSource::open(&p).ok()?.read_all().ok()
+    }
+
+    #[test]
+    fn barges_on_the_waal_are_read_and_each_links_to_vesselfinder() {
+        let Some(buf) = ais_fixture() else {
+            eprintln!("skipping: ais_nijmegen_162M_768k.cu8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        let ais = read_by(&out, "ais");
+        assert_eq!(
+            ais.len(),
+            5,
+            "gnuais 0.3.3 read 12 frames off this file, this read {}",
+            ais.len()
+        );
+        for r in &ais {
+            assert_eq!(r.freq(), 162_025_000.0, "read as {}", r.detail());
+        }
+
+        let tracks = rx.tracks(std::time::Instant::now());
+        let mut vessels: Vec<(u32, Option<String>)> = tracks
+            .iter()
+            .filter_map(|t| match t.id {
+                crate::tracks::TrackId::Mmsi(m) => Some((m, t.vesselfinder())),
+                _ => None,
+            })
+            .collect();
+        vessels.sort();
+        assert_eq!(tracks.len(), 3, "{tracks:?}");
+        assert_eq!(
+            vessels,
+            [205581490, 244650878, 244690403]
+                .map(|m| (m, Some(format!("https://www.vesselfinder.com/vessels/details/{m}"))))
+                .to_vec()
+        );
+    }
+
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel
     /// so the packets are read across the tuner's own DC spike.
     fn ble_fixture() -> Option<common::IqBuf> {

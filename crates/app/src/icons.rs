@@ -197,10 +197,27 @@ pub fn icon_button_sized(
     selected: bool,
     size: f32,
 ) -> Response {
-    let (rect, mut resp) = ui.allocate_exact_size(
+    let (rect, resp) = ui.allocate_exact_size(
         Vec2::splat(size),
         if enabled { Sense::click() } else { Sense::hover() },
     );
+    dress(ui, rect, resp, icon, tip, enabled, selected)
+}
+
+pub fn icon_button_at(ui: &mut Ui, rect: Rect, id: egui::Id, icon: Icon, tip: &str) -> Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    dress(ui, rect, resp, icon, tip, true, false)
+}
+
+fn dress(
+    ui: &mut Ui,
+    rect: Rect,
+    mut resp: Response,
+    icon: Icon,
+    tip: &str,
+    enabled: bool,
+    selected: bool,
+) -> Response {
     let hovered = resp.hovered();
     if ui.is_rect_visible(rect) {
         let p = ui.painter();

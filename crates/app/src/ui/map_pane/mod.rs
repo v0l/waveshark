@@ -121,7 +121,7 @@ impl Map<'_> {
                 let mut cells = CellLayer::new(self.heard);
                 let mut sondes = SondeLayer::default();
                 let mut station = StationLayer { home, accuracy_m };
-                let mut tracks = TrackLayer { active: &active, now };
+                let mut tracks = TrackLayer { active: &active, now, named_airframes: false };
                 let mut sats = SatLayer::new(
                     crate::sats::sky(sat_group),
                     sat_group,
@@ -212,9 +212,10 @@ impl Map<'_> {
         // and the one column that differs is named for what it holds. An
         // altitude column full of dashes beside every vessel is worse than a
         // column that says "altitude / status".
-        const COLS: [(&str, f32); 12] = [
+        const COLS: [(&str, f32); 13] = [
             ("name", 100.0),
-            ("id", 80.0),
+            ("id", 100.0),
+            ("registry", 110.0),
             ("system", 76.0),
             ("kind", 62.0),
             ("status", 110.0),
@@ -238,6 +239,11 @@ impl Map<'_> {
         // strip is open, and scrolled sideways rather than squeezed when the
         // window is narrower than that.
         let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 60.0;
+        let fleet = active
+            .iter()
+            .any(|t| matches!(t.id, crate::tracks::TrackId::Icao(_)))
+            .then(crate::data::aircraft)
+            .flatten();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_min_width(width);
             let (rect, _) = ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::hover());
@@ -260,6 +266,10 @@ impl Map<'_> {
                     if !ui.is_rect_visible(rect) {
                         continue;
                     }
+                    let registry = (
+                        a.airframe(fleet.as_deref()).map(|p| p.summary()).unwrap_or_default(),
+                        theme::VALUE,
+                    );
                     let p = ui.painter_at(rect);
                     if n % 2 == 1 {
                         p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
@@ -344,6 +354,7 @@ impl Map<'_> {
                     let text = [
                         (a.label.clone().unwrap_or_else(|| dash.clone()), theme::TRACE),
                         (a.id.text(), theme::VALUE),
+                        registry,
                         (a.id.system().to_string(), theme::LEGEND),
                         (kind.to_string(), theme::LEGEND),
                         (state, state_col),
@@ -369,12 +380,30 @@ impl Map<'_> {
                         (a.messages.to_string(), theme::LEGEND),
                     ];
                     let mut x = rect.left();
-                    for ((t, c), (_, w)) in text.iter().zip(COLS) {
+                    let mut id_end = x;
+                    for ((t, c), (name, w)) in text.iter().zip(COLS) {
                         table::cell(&p, rect, x, w, t, *c);
+                        if name == "id" {
+                            let drawn = p.layout_no_wrap(t.to_string(), theme::figure(11.0), *c);
+                            id_end = x + drawn.size().x.min(w - 6.0);
+                        }
                         x += w;
                     }
                     let age = a.age(now).as_secs();
                     table::cell(&p, rect, x, rect.right() - x, &format!("{age}s"), theme::LEGEND);
+                    if let Some(url) = a.vesselfinder() {
+                        let at = Rect::from_min_size(
+                            Pos2::new(id_end + 4.0, rect.top()),
+                            Vec2::splat(table::ROW_H),
+                        );
+                        let id = egui::Id::new(("vesselfinder", &a.id));
+                        let tip = "Open on VesselFinder";
+                        if crate::icons::icon_button_at(ui, at, id, crate::icons::Icon::Link, tip)
+                            .clicked()
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        }
+                    }
                 }
             });
         });
@@ -453,5 +482,93 @@ fn state_of(a: &crate::tracks::Track, dash: &str) -> (String, Color32) {
         // The protocol said where it was and not what it is,
         // and the packet list is where its fields are.
         crate::tracks::Detail::Device => (dash.clone(), theme::LEGEND),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracks::{Detail, Track, TrackId};
+
+    const ID_COLUMN: std::ops::Range<f32> = 100.0..200.0;
+
+    fn clicks_that_open(track: &Track, xs: std::ops::Range<f32>) -> Vec<(Pos2, String)> {
+        let ctx = egui::Context::default();
+        crate::ui::install(&ctx);
+        let now = std::time::Instant::now();
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| Map::track_rows(ui, &[track], now))
+                .platform_output
+                .commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::OpenUrl(u) => Some(u.url),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut opened = Vec::new();
+        for row in 0..40 {
+            let mut x = xs.start;
+            while x < xs.end {
+                let at = Pos2::new(x, row as f32 * table::ROW_H / 2.0);
+                let mut urls = frame(vec![egui::Event::PointerMoved(at), button(at, true)]);
+                urls.extend(frame(vec![egui::Event::PointerMoved(at), button(at, false)]));
+                opened.extend(urls.into_iter().map(|u| (at, u)));
+                x += 2.0;
+            }
+        }
+        opened
+    }
+
+    fn vessel(mmsi: u32) -> Track {
+        let detail = Detail::Vessel {
+            heading_deg: None,
+            nav_status: None,
+            ship_type: None,
+            destination: None,
+            class_b: false,
+        };
+        Track::new(TrackId::Mmsi(mmsi), detail, std::time::Instant::now())
+    }
+
+    #[test]
+    fn the_vesselfinder_link_sits_after_the_mmsi_in_the_id_column() {
+        let opened = clicks_that_open(&vessel(244650878), 0.0..1600.0);
+        assert!(!opened.is_empty(), "nothing on the row opened VesselFinder");
+        for (at, url) in &opened {
+            assert_eq!(url, "https://www.vesselfinder.com/vessels/details/244650878");
+            assert!(ID_COLUMN.contains(&at.x), "opened from {at:?}, outside the id column");
+            assert!(at.x > ID_COLUMN.start + 40.0, "opened from {at:?}, on the MMSI itself");
+        }
+        let xs: Vec<f32> = opened.iter().map(|(at, _)| at.x).collect();
+        let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+        assert!(
+            hi - lo <= table::ROW_H + 10.0,
+            "ceiling: one icon and egui's 5 px pick radius each side, got {lo}..{hi}"
+        );
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            opened.iter().all(|(at, _)| seen.insert((at.x as i32, at.y as i32))),
+            "a click opened twice"
+        );
+    }
+
+    #[test]
+    fn an_aircraft_row_has_no_link() {
+        let plane =
+            Track::new(TrackId::Icao(0x4ca068), Detail::new_aircraft(), std::time::Instant::now());
+        assert!(clicks_that_open(&plane, ID_COLUMN).is_empty());
     }
 }

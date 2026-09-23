@@ -1394,15 +1394,25 @@ impl App {
 
     fn agent_tracks(&self, limit: usize) -> Value {
         let now = std::time::Instant::now();
+        let fleet = crate::data::aircraft();
         let rows: Vec<Value> = self
             .map
             .tracks
             .iter()
             .take(limit)
             .map(|t| {
+                let airframe = t.airframe(fleet.as_deref());
                 json!({
                     "id": format!("{:?}", t.id),
                     "label": t.label,
+                    "airframe": airframe.map(|a| json!({
+                        "registration": a.registration,
+                        "type": a.type_code,
+                        "description": a.description,
+                        "year": a.year,
+                        "owner": a.owner,
+                        "military": a.military,
+                    })),
                     "position": t.position.map(|(lat, lon)| json!({ "lat": lat, "lon": lon })),
                     "confirmed": t.confirmed,
                     "course_deg": t.course_deg,
