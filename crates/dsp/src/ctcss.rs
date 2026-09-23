@@ -231,6 +231,23 @@ impl Ctcss {
     }
 }
 
+pub struct Keyer {
+    step: f64,
+    phase: f64,
+}
+
+impl Keyer {
+    pub fn new(hz: f32, rate: f64) -> Self {
+        Self { step: std::f64::consts::TAU * f64::from(hz) / rate.max(1.0), phase: 0.0 }
+    }
+
+    pub fn sample(&mut self) -> f32 {
+        let v = self.phase.sin() as f32;
+        self.phase = (self.phase + self.step) % std::f64::consts::TAU;
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +348,21 @@ mod tests {
         assert!(TONES.windows(2).all(|w| w[1] > w[0]), "the set must be in ascending order");
         assert_eq!(TONES[0], 67.0);
         assert_eq!(TONES[TONES.len() - 1], 254.1);
+    }
+
+    #[test]
+    fn every_tone_keyed_is_read_back_as_itself() {
+        let rate = 48_000.0;
+        let mut wrong = Vec::new();
+        for (index, hz) in TONES.iter().enumerate() {
+            let mut k = Keyer::new(*hz, rate);
+            let audio: Vec<f32> = (0..(rate * 1.5) as usize).map(|_| 0.15 * k.sample()).collect();
+            let mut c = Ctcss::new(rate);
+            c.push(&audio);
+            if c.tone().map(|t| t.index) != Some(index) {
+                wrong.push((*hz, c.tone().map(|t| t.hz)));
+            }
+        }
+        assert_eq!(wrong, vec![], "of {} tones", TONES.len());
     }
 }

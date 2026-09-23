@@ -14,7 +14,7 @@ the code is in the commit log.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
 - Compiled features listed under the version in Setup, ffmpeg among them.
 - RDS station on a keyed WFM channel: a PI code, a name and radiotext.
-- CTCSS tones and DCS codes on a saved channel, imported, exported and squelched on.
+- CTCSS tones and DCS codes on a saved channel, squelched on, sent when keyed, imported and exported.
 - MDC-1200 bursts damaged in the air still name their radio, from the parity it sent.
 - EAS, SSTV, APT and WEFAX read off a listening channel's audio, picked on the
   strip.

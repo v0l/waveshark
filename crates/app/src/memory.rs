@@ -227,6 +227,10 @@ fn tokens(rest: &[&str], from: usize) -> (Option<TxSpec>, Option<Coded>, usize) 
                 Ok(c) => tone = Some(c),
                 Err(()) => break,
             },
+            "txtone" => match value.parse() {
+                Ok(c) => tx.get_or_insert_with(TxSpec::default).tone = Some(c),
+                Err(()) => break,
+            },
             // A label may hold a colon. Anything not named here ends the
             // tokens and starts it.
             _ => break,
@@ -251,6 +255,9 @@ fn written_tokens(c: &Saved) -> Vec<String> {
         }
         if tx.trim_db != default.trim_db {
             out.push(format!("trim:{}dB", num(tx.trim_db as f64)));
+        }
+        if let Some(tone) = tx.tone {
+            out.push(format!("txtone:{tone}"));
         }
     }
     if let Some(tone) = c.tone {
@@ -295,6 +302,7 @@ const HEADER: &str = "\
 #   src:    what it transmits, mic or tone; tone unless it says otherwise
 #   trim:   this channel's own offset from the transmit gain, e.g. trim:-6dB
 #   tone:   the coded squelch it opens on, e.g. tone:88.5 or tone:D023
+#   txtone: the tone or code it sends when keyed, e.g. txtone:88.5
 ";
 
 #[cfg(test)]
@@ -356,6 +364,31 @@ mod tests {
         assert!(written.contains("tone:88.5"), "{written}");
         assert!(written.contains("tone:D023"), "{written}");
         assert_eq!(Memory::parse(&written).list[..3], m.list[..3]);
+    }
+
+    #[test]
+    fn a_channel_keeps_the_tone_it_sends_apart_from_the_one_it_opens_on() {
+        let m = Memory::parse(
+            "[Repeaters]\n\
+             145.7375 MHz NFM shift:-600kHz txtone:77.0 GB3XX\n\
+             430.875 MHz NFM tone:D023 txtone:D023 GB7YY\n\
+             433.5 MHz NFM txtone:89.2 made up\n",
+        );
+        assert_eq!(m.list.len(), 3);
+        assert_eq!(m.list[0].tone, None);
+        assert_eq!(m.list[0].tx.expect("the shift").tone, Some(Coded::Tone(4)));
+        assert_eq!(m.list[0].label, "GB3XX");
+        assert_eq!(m.list[1].tone, Some(Coded::Dcs(23)));
+        assert_eq!(m.list[1].tx.expect("the code it sends").tone, Some(Coded::Dcs(23)));
+        assert_eq!(m.list[1].tx.unwrap().shift_hz, 0.0);
+        assert_eq!(m.list[2].tx, None);
+        assert_eq!(m.list[2].label, "txtone:89.2 made up");
+
+        let written = m.render();
+        let gb3xx: Vec<&str> =
+            written.lines().find(|l| l.ends_with("GB3XX")).unwrap().split_whitespace().collect();
+        assert_eq!(gb3xx[3..], ["shift:-600kHz", "txtone:77.0", "GB3XX"]);
+        assert_eq!(Memory::parse(&written), m);
     }
 
     /// A repeater channel keeps its shift.

@@ -723,6 +723,7 @@ pub struct TxSpec {
     /// is the same end whether a voice, a hand or the agent let the key up.
     pub roger_ms: f64,
     pub roger_hz: f64,
+    pub tone: Option<dsp::squelch::Coded>,
 }
 
 /// What lets a voice key the transmitter instead of a hand.
@@ -770,6 +771,7 @@ impl Default for TxSpec {
             vox: VoxSpec::default(),
             roger_ms: 0.0,
             roger_hz: 1_000.0,
+            tone: None,
         }
     }
 }
@@ -4759,6 +4761,11 @@ pub(crate) mod tests {
         assert!(!mic.same_chain(&louder), "the gain is a setting on the source stage");
         let shifted = TxPlan { spec: TxSpec { shift_hz: -600_000.0, ..here.spec }, ..here };
         assert!(here.same_chain(&shifted), "a repeater shift only moves the radio");
+        let toned = TxPlan {
+            spec: TxSpec { tone: Some(dsp::squelch::Coded::Tone(8)), ..here.spec },
+            ..here
+        };
+        assert!(!here.same_chain(&toned), "a tone is a stage of its own");
     }
 
     #[test]

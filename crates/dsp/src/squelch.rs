@@ -337,6 +337,31 @@ impl std::fmt::Display for Coded {
     }
 }
 
+pub enum CodedKeyer {
+    Tone(crate::ctcss::Keyer),
+    Dcs(crate::dcs::Keyer),
+}
+
+impl CodedKeyer {
+    pub fn sample(&mut self) -> f32 {
+        match self {
+            CodedKeyer::Tone(k) => k.sample(),
+            CodedKeyer::Dcs(k) => k.sample(),
+        }
+    }
+}
+
+impl Coded {
+    pub fn keyer(self, rate: f64) -> CodedKeyer {
+        match self {
+            Coded::Tone(i) => {
+                CodedKeyer::Tone(crate::ctcss::Keyer::new(crate::ctcss::TONES[i], rate))
+            }
+            Coded::Dcs(d) => CodedKeyer::Dcs(crate::dcs::Keyer::new(d, rate)),
+        }
+    }
+}
+
 /// Mean power of a block in dBFS, for the modes with no capture effect.
 pub fn level_db(buf: &[f32]) -> f32 {
     if buf.is_empty() {

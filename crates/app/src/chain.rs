@@ -586,6 +586,7 @@ impl TxPlan {
             && a.mic_gain == b.mic_gain
             && a.tone_hz == b.tone_hz
             && a.vox == b.vox
+            && a.tone == b.tone
             // A different file is a different chain, even though nothing
             // in the stages' settings says so: the file rides on the sinks.
             && a.source != crate::radio::TxSource::Sub
@@ -3005,6 +3006,16 @@ const TX_RADIO: &str = "radio_tx";
 /// the modulator is given, so this is what keeps a transmission inside its
 /// channel: speech to 15 kHz through a 2.5 kHz deviation is 35 kHz wide
 /// where the band plan allows 12.5.
+pub fn sends_subtone(
+    spec: &crate::radio::TxSpec,
+    mode: crate::radio::TxMode,
+) -> Option<dsp::squelch::Coded> {
+    use crate::radio::{TxMode, TxSource};
+    let voice = matches!(spec.source, TxSource::Mic | TxSource::Agent | TxSource::Tone);
+    let fm = matches!(mode, TxMode::Nfm | TxMode::Fm);
+    spec.tone.filter(|_| voice && fm)
+}
+
 pub fn tx_audio_band(mode: crate::radio::TxMode) -> (f64, f64) {
     use crate::radio::TxMode;
     match mode {
@@ -3090,8 +3101,9 @@ pub mod derived {
     /// The broadcast multiplex: the programme goes in and a pilot, a 57 kHz
     /// subcarrier and the station's own identity come out.
     pub const RDS: u64 = Patch::DERIVED_BASE + 37;
+    pub const SUBTONE: u64 = Patch::DERIVED_BASE + 38;
     /// The stages that transmit, which are run on a thread of their own.
-    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, ROGER, RDS, TX_MOD, TX_RADIO];
+    pub const TRANSMIT: &[u64] = &[TX_CLOCK, TX_SOURCE, VOX, ROGER, RDS, SUBTONE, TX_MOD, TX_RADIO];
     /// What is going out, drawn on the span the receiver is deaf to while it
     /// goes out. In front of the head, so everything downstream sees it.
     pub const TX_MONITOR: u64 = Patch::DERIVED_BASE + 19;
@@ -3350,6 +3362,13 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                 p.add_derived(derived::ROGER, "roger", s);
                 p.connect(modulates, (derived::ROGER, 0));
                 modulates = Source::Stage(derived::ROGER, 0);
+            }
+            if let Some(code) = sends_subtone(&tx.spec, tx.mode) {
+                let mut s = Settings::new();
+                s.insert("code".into(), pipeline::ParamValue::Text(code.label()));
+                p.add_derived(derived::SUBTONE, "subtone", s);
+                p.connect(modulates, (derived::SUBTONE, 0));
+                modulates = Source::Stage(derived::SUBTONE, 0);
             }
 
             if let Some(station) = plan.rds.as_ref().filter(|_| tx.mode == TxMode::Wfm)
@@ -7792,7 +7811,13 @@ pub fn transmit_graph(
             }
         }
     };
-    pipeline::chain(input, vec![head, modulator, Box::new(nodes::TxSinkNode::new(stream))])
+    let mut stages = vec![head];
+    if let Some(code) = sends_subtone(tx, mode) {
+        stages.push(Box::new(nodes::SubToneNode::new(Some(code), nodes::SUBTONE_LEVEL as f32)));
+    }
+    stages.push(modulator);
+    stages.push(Box::new(nodes::TxSinkNode::new(stream)));
+    pipeline::chain(input, stages)
 }
 
 #[cfg(test)]
@@ -7934,6 +7959,36 @@ mod tx_tests {
         let crossings = seg.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
         let hz = crossings as f64 * rate / seg.len() as f64;
         assert!((hz - 1_000.0).abs() < 10.0, "recovered {hz:.0} Hz");
+    }
+
+    fn heard_off_the_air(tx: TxSpec, mode: TxMode) -> Vec<f32> {
+        let rate = 48_000.0;
+        let iq = transmit(tx, mode, rate, 20);
+        assert_eq!(iq.len(), 20 * 4_800);
+        let deviation = match mode {
+            TxMode::Fm => nodes::FM_DEVIATION_HZ,
+            _ => nodes::NBFM_DEVIATION_HZ,
+        };
+        let mut demod = dsp::FmDemod::new(rate, deviation);
+        let mut audio = Vec::new();
+        demod.process(&iq, &mut audio);
+        audio
+    }
+
+    #[test]
+    fn a_keyed_channel_with_a_tone_is_heard_carrying_it() {
+        use dsp::squelch::Coded;
+        for mode in [TxMode::Nfm, TxMode::Fm] {
+            let tx = TxSpec { tone: Some(Coded::Tone(8)), ..Default::default() };
+            let mut c = dsp::ctcss::Ctcss::new(48_000.0);
+            c.push(&heard_off_the_air(tx, mode));
+            assert_eq!(c.tone().map(|t| t.label()), Some("88.5".into()), "{mode:?}");
+
+            let tx = TxSpec { tone: Some(Coded::Dcs(23)), ..Default::default() };
+            let mut d = dsp::dcs::Dcs::new(48_000.0);
+            d.push(&heard_off_the_air(tx, mode));
+            assert_eq!(d.code().map(|c| c.label()), Some("D023".into()), "{mode:?}");
+        }
     }
 
     #[test]
@@ -8659,6 +8714,33 @@ mod tx_in_graph_tests {
             im += f64::from(*s) * p.sin();
         }
         (2.0 * (re * re + im * im).sqrt() / audio.len() as f64) as f32
+    }
+
+    #[test]
+    fn a_channel_with_a_tone_sends_it_between_the_audio_and_an_fm_modulator_only() {
+        let kinds = |mode: TxMode, source: TxSource| {
+            let mut plan = plan_with_tx(source);
+            let tx = plan.tx.as_mut().unwrap();
+            tx.mode = mode;
+            tx.spec.tone = Some(dsp::squelch::Coded::Tone(8));
+            let rx = Receiver::build(&plan, Sinks::default()).unwrap();
+            let topo = rx.tx_topology().expect("a transmit chain");
+            topo.nodes.iter().map(|n| n.kind.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(TxMode::Nfm, TxSource::Tone),
+            ["tx_clock", "tone", "subtone", "fm_mod", "radio_tx"]
+        );
+        assert_eq!(
+            kinds(TxMode::Fm, TxSource::Tone),
+            ["tx_clock", "tone", "subtone", "fm_mod", "radio_tx"]
+        );
+        assert_eq!(kinds(TxMode::Am, TxSource::Tone), ["tx_clock", "tone", "am_mod", "radio_tx"]);
+        assert_eq!(kinds(TxMode::Wfm, TxSource::Tone), ["tx_clock", "tone", "fm_mod", "radio_tx"]);
+        assert_eq!(
+            kinds(TxMode::Carrier, TxSource::Tone),
+            ["tx_clock", "tone", "fm_mod", "radio_tx"]
+        );
     }
 
     /// A recorded span goes back out as it stands.

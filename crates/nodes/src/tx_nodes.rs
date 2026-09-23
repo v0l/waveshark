@@ -2097,6 +2097,129 @@ pub fn build_roger(s: &Settings) -> Result<Box<dyn Node>> {
     Ok(Box::new(RogerNode::new(s.f64_or(ROGER_MS, 0.0), s.f64_or(ROGER_HZ, 1_000.0))))
 }
 
+pub const SUBTONE_LEVEL: f64 = 0.15;
+const CODE: &str = "code";
+
+pub struct SubToneNode {
+    code: Option<dsp::squelch::Coded>,
+    level: f32,
+    rate: f64,
+    keyer: Option<dsp::squelch::CodedKeyer>,
+}
+
+impl Default for SubToneNode {
+    fn default() -> Self {
+        Self { code: None, level: SUBTONE_LEVEL as f32, rate: 0.0, keyer: None }
+    }
+}
+
+impl SubToneNode {
+    pub fn new(code: Option<dsp::squelch::Coded>, level: f32) -> Self {
+        Self { code, level: level.clamp(0.0, 0.5), ..Self::default() }
+    }
+
+    fn rekey(&mut self) {
+        self.keyer = match (self.code, self.rate > 0.0) {
+            (Some(c), true) => Some(c.keyer(self.rate)),
+            _ => None,
+        };
+    }
+}
+
+impl Simple for SubToneNode {
+    fn name(&self) -> &str {
+        "subtone"
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        vec![("code".into(), self.code.map(|c| c.label()).unwrap_or_else(|| "none".into()))]
+    }
+
+    fn negotiate(&mut self, input: &PortSpec) -> Result<StreamSpec> {
+        if input.spec.kind != PortKind::Real {
+            return Err(common::Error::other("subtone runs on a real audio stream"));
+        }
+        if input.spec.rate <= 0.0 {
+            return Err(common::Error::other("subtone needs the rate its tone is made at"));
+        }
+        self.rate = input.spec.rate;
+        self.rekey();
+        Ok(input.spec)
+    }
+
+    fn process(
+        &mut self,
+        input: &Payload,
+        output: &mut Payload,
+        _ctx: &mut NodeCtx<'_>,
+    ) -> Result<()> {
+        let Some(audio) = input.as_real() else {
+            return Ok(());
+        };
+        let out = output.real_mut();
+        let Some(keyer) = self.keyer.as_mut() else {
+            out.extend_from_slice(audio);
+            return Ok(());
+        };
+        let over = 1.0 - self.level;
+        out.extend(audio.iter().map(|s| s * over + self.level * keyer.sample()));
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.rekey();
+    }
+
+    fn over_began(&mut self) {
+        self.rekey();
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::text(CODE, self.code.map(|c| c.label()).unwrap_or_default())
+                .label("CTCSS tone or DCS code"),
+            Param::float(LEVEL, f64::from(self.level), 0.0..=0.5).label("Share of deviation"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
+        match name {
+            CODE => {
+                let said = value.as_str().unwrap_or_default().trim().to_string();
+                self.code = match said.is_empty() {
+                    true => None,
+                    false => Some(said.parse().map_err(|()| {
+                        common::Error::other(format!(
+                            "subtone: {said:?} is neither a CTCSS tone nor a DCS code"
+                        ))
+                    })?),
+                };
+                self.rekey();
+            }
+            LEVEL => self.level = value.as_f64().unwrap_or(SUBTONE_LEVEL).clamp(0.0, 0.5) as f32,
+            _ => return Err(common::Error::other(format!("subtone: unknown parameter {name:?}"))),
+        }
+        Ok(())
+    }
+}
+
+pub const SUBTONE: StageDesc = StageDesc {
+    name: "subtone",
+    summary: "The CTCSS tone or DCS code a repeater opens on, under the audio",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_subtone(s: &Settings) -> Result<Box<dyn Node>> {
+    let mut n = SubToneNode::default();
+    for name in [CODE, LEVEL] {
+        if let Some(v) = s.get(name) {
+            Simple::set_param(&mut n, name, v.clone())?;
+        }
+    }
+    Ok(Box::new(n))
+}
+
 pub const MORSE_TX: StageDesc = StageDesc {
     name: "morse_tx",
     summary: "Key text as Morse on a carrier, ready for a transmitter",
@@ -2289,5 +2412,86 @@ mod keyer_tests {
         }
         // 100 ms of clock, keyed as timings to the microsecond.
         assert_eq!(total, 100_000, "the tone keyer dropped {} us", 100_000 - total as i64);
+    }
+}
+
+#[cfg(test)]
+mod subtone_tests {
+    use super::*;
+
+    const RATE: f64 = 48_000.0;
+    const BLOCK: usize = 960;
+
+    fn spec() -> PortSpec {
+        PortSpec {
+            spec: StreamSpec {
+                kind: PortKind::Real,
+                rate: RATE,
+                flow: Flow::Tx,
+                bandwidth: 6_000.0,
+                ..Default::default()
+            },
+            latency: 0,
+        }
+    }
+
+    fn speech(n: usize) -> f32 {
+        0.8 * (std::f32::consts::TAU * 1_000.0 * n as f32 / RATE as f32).sin()
+    }
+
+    fn keyed(code: &str, blocks: usize) -> Vec<f32> {
+        let mut s = Settings::new();
+        s.insert(CODE.into(), ParamValue::Text(code.into()));
+        let mut node = build_subtone(&s).unwrap();
+        node.negotiate(&[spec()]).unwrap();
+        let mut out_all = Vec::new();
+        for b in 0..blocks {
+            let audio: Vec<f32> = (0..BLOCK).map(|i| speech(b * BLOCK + i)).collect();
+            let mut out = Payload::Real(Vec::new());
+            let (mut ev, mut tg) = (Vec::new(), Vec::new());
+            let ins = [spec()];
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            let node = node.as_any_mut().downcast_mut::<SubToneNode>().unwrap();
+            Simple::process(node, &Payload::Real(audio), &mut out, &mut ctx).unwrap();
+            let Payload::Real(v) = out else { unreachable!() };
+            out_all.extend(v);
+        }
+        out_all
+    }
+
+    #[test]
+    fn a_tone_goes_under_the_audio_without_taking_it_past_full_scale() {
+        let out = keyed("88.5", 100);
+        assert_eq!(out.len(), 100 * BLOCK);
+        let mut c = dsp::ctcss::Ctcss::new(RATE);
+        c.push(&out);
+        assert_eq!(c.tone().map(|t| t.label()), Some("88.5".to_string()));
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            (0.80..=0.84).contains(&peak),
+            "0.8 at 0.85 under 0.15 of tone peaks at 0.83, not {peak}"
+        );
+    }
+
+    #[test]
+    fn a_code_goes_under_the_audio_and_reads_as_itself() {
+        let out = keyed("D023", 100);
+        let mut d = dsp::dcs::Dcs::new(RATE);
+        d.push(&out);
+        assert_eq!(d.code().map(|c| c.label()), Some("D023".to_string()));
+    }
+
+    #[test]
+    fn no_code_passes_the_audio_untouched() {
+        let out = keyed("", 5);
+        let sent: Vec<f32> = (0..5 * BLOCK).map(speech).collect();
+        assert_eq!(out, sent);
+    }
+
+    #[test]
+    fn a_code_no_radio_offers_is_refused() {
+        let mut s = Settings::new();
+        s.insert(CODE.into(), ParamValue::Text("89.2".into()));
+        assert!(build_subtone(&s).is_err());
     }
 }

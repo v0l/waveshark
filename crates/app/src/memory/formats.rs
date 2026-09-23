@@ -142,17 +142,19 @@ pub fn write_csv(m: &Memory) -> String {
         // which it means in `Tone`, so a channel opening on a tone leaves as
         // TSQL and one on a code as DTCS. The columns it is not using still
         // have to carry something a handheld will accept.
-        let (tone_mode, ctcss, dtcs) = match c.tone {
-            Some(t @ Coded::Tone(_)) => ("TSQL", t.hz().unwrap_or(88.5), 23),
-            Some(Coded::Dcs(d)) => ("DTCS", 88.5, d),
-            None => ("", 88.5, 23),
-        };
+        let chirp = ChirpTone::of(c.tone, c.tx.and_then(|t| t.tone));
         s.push_str(&format!(
-            "{n},{},{:.6},{duplex},{:.6},{tone_mode},{ctcss:.1},{ctcss:.1},{dtcs:03},NN,{},\
+            "{n},{},{:.6},{duplex},{:.6},{},{:.1},{:.1},{:03},NN,{:03},{},{},\
              5.00,,{}\n",
             quoted(&c.label),
             c.freq / 1e6,
             offset / 1e6,
+            chirp.mode,
+            chirp.rtone,
+            chirp.ctone,
+            chirp.dtcs,
+            chirp.rx_dtcs,
+            chirp.cross,
             chirp_mode(c),
             quoted(&comment),
         ));
@@ -186,7 +188,64 @@ fn quoted(s: &str) -> String {
 }
 
 const CHIRP_HEADER: &str = "Location,Name,Frequency,Duplex,Offset,Tone,rToneFreq,cToneFreq,\
-DtcsCode,DtcsPolarity,Mode,TStep,Skip,Comment\n";
+DtcsCode,DtcsPolarity,RxDtcsCode,CrossMode,Mode,TStep,Skip,Comment\n";
+
+struct ChirpTone {
+    mode: &'static str,
+    rtone: f32,
+    ctone: f32,
+    dtcs: u16,
+    rx_dtcs: u16,
+    cross: String,
+}
+
+impl ChirpTone {
+    fn of(rx: Option<Coded>, tx: Option<Coded>) -> Self {
+        let mut t = ChirpTone {
+            mode: "",
+            rtone: 88.5,
+            ctone: 88.5,
+            dtcs: 23,
+            rx_dtcs: 23,
+            cross: "Tone->Tone".into(),
+        };
+        let side = |c: Option<Coded>| match c {
+            Some(Coded::Tone(_)) => "Tone",
+            Some(Coded::Dcs(_)) => "DTCS",
+            None => "",
+        };
+        match (rx, tx) {
+            (None, None) => {}
+            (Some(Coded::Tone(i)), Some(Coded::Tone(j))) if i == j => {
+                t.mode = "TSQL";
+                t.ctone = dsp::ctcss::TONES[i];
+            }
+            (Some(Coded::Dcs(a)), Some(Coded::Dcs(b))) if a == b => {
+                t.mode = "DTCS";
+                t.dtcs = a;
+            }
+            (None, Some(Coded::Tone(i))) => {
+                t.mode = "Tone";
+                t.rtone = dsp::ctcss::TONES[i];
+            }
+            _ => {
+                t.mode = "Cross";
+                t.cross = format!("{}->{}", side(tx), side(rx));
+                match tx {
+                    Some(Coded::Tone(i)) => t.rtone = dsp::ctcss::TONES[i],
+                    Some(Coded::Dcs(d)) => t.dtcs = d,
+                    None => {}
+                }
+                match rx {
+                    Some(Coded::Tone(i)) => t.ctone = dsp::ctcss::TONES[i],
+                    Some(Coded::Dcs(d)) => t.rx_dtcs = d,
+                    None => {}
+                }
+            }
+        }
+        t
+    }
+}
 
 /// A comma separated list, Chirp's or anybody's, read by its header.
 fn csv_list(text: &str, group: &str) -> Read {
@@ -226,6 +285,12 @@ fn csv_list(text: &str, group: &str) -> Read {
     out
 }
 
+struct Coding {
+    rx: Option<Coded>,
+    tx: Option<Coded>,
+    dropped: bool,
+}
+
 /// Which column holds what, by the names the exporters use.
 #[derive(Default, Debug)]
 struct Columns {
@@ -243,6 +308,8 @@ struct Columns {
     rx_tone: Option<usize>,
     tx_tone: Option<usize>,
     dtcs: Option<usize>,
+    rx_dtcs: Option<usize>,
+    cross: Option<usize>,
     comment: Option<usize>,
 }
 
@@ -270,6 +337,8 @@ impl Columns {
                 "ctonefreq" | "ctcss" | "ctcssrx" | "rxtone" => &mut c.rx_tone,
                 "rtonefreq" | "txtone" => &mut c.tx_tone,
                 "dtcscode" | "dtcs" | "dcs" => &mut c.dtcs,
+                "rxdtcscode" => &mut c.rx_dtcs,
+                "crossmode" => &mut c.cross,
                 "comment" | "notes" => &mut c.comment,
                 _ => continue,
             };
@@ -289,26 +358,56 @@ impl Columns {
     /// different one each way. Only the first two are something a receiver
     /// can be squelched on. A list with no such column and a tone column
     /// filled in means the tone, which is what everybody else writes.
-    fn coded(&self, at: impl Fn(Option<usize>) -> String) -> (Option<Coded>, bool) {
-        let parse = |s: String| s.parse::<Coded>().ok();
+    fn coded(&self, at: impl Fn(Option<usize>) -> String) -> Coding {
         let used = |s: &str| !matches!(s, "" | "0" | "0.0" | "000");
+        let read = |s: String| match used(&s) {
+            true => (s.parse::<Coded>().ok(), s.parse::<Coded>().is_err()),
+            false => (None, false),
+        };
+        let code = |i: Option<usize>| match at(i) {
+            d if used(&d) => format!("D{d}"),
+            _ => String::new(),
+        };
         let Some(mode) = self.tone_mode.map(|_| at(self.tone_mode)) else {
-            let said = at(self.rx_tone);
-            let said = match used(&said) {
-                true => said,
+            let said = match used(&at(self.rx_tone)) {
+                true => at(self.rx_tone),
                 false => at(self.tx_tone),
             };
-            return match used(&said) {
-                true => (parse(said.clone()), parse(said).is_none()),
-                false => (None, false),
-            };
+            let (rx, rx_lost) = read(said);
+            let (tx, tx_lost) = read(at(self.tx_tone));
+            return Coding { rx, tx, dropped: rx_lost || tx_lost };
         };
-        let got = match mode.to_ascii_uppercase().as_str() {
-            "TSQL" | "TSQL-R" => parse(at(self.rx_tone)),
-            "DTCS" | "DTCS-R" => parse(format!("D{}", at(self.dtcs))),
-            _ => None,
+        let (rx, tx) = match mode.to_ascii_uppercase().as_str() {
+            "TSQL" => (read(at(self.rx_tone)), read(at(self.rx_tone))),
+            "TSQL-R" => (read(at(self.rx_tone)), (None, false)),
+            "DTCS" => (read(code(self.dtcs)), read(code(self.dtcs))),
+            "DTCS-R" => (read(code(self.dtcs)), (None, false)),
+            "TONE" => ((None, false), read(at(self.tx_tone))),
+            "CROSS" if self.cross.is_some() => {
+                let cross = at(self.cross);
+                let (tx_side, rx_side) = cross.split_once("->").unwrap_or(("?", "?"));
+                let rx_dtcs = match self.rx_dtcs {
+                    Some(_) => self.rx_dtcs,
+                    None => self.dtcs,
+                };
+                let tx = match tx_side {
+                    "Tone" => read(at(self.tx_tone)),
+                    "DTCS" => read(code(self.dtcs)),
+                    "" => (None, false),
+                    _ => (None, true),
+                };
+                let rx = match rx_side {
+                    "Tone" => read(at(self.rx_tone)),
+                    "DTCS" => read(code(rx_dtcs)),
+                    "" => (None, false),
+                    _ => (None, true),
+                };
+                (rx, tx)
+            }
+            "" => ((None, false), (None, false)),
+            _ => ((None, true), (None, false)),
         };
-        (got, got.is_none() && used(&mode))
+        Coding { rx: rx.0, tx: tx.0, dropped: rx.1 || tx.1 }
     }
 
     /// The channel a row holds, and whether it carried a tone that had to be
@@ -350,7 +449,7 @@ impl Columns {
             ("", None) => comment.to_string(),
             (n, _) => n.to_string(),
         };
-        let (tone, dropped) = self.coded(|i| at(i).to_string());
+        let Coding { rx: tone, tx: sends, dropped } = self.coded(|i| at(i).to_string());
         let group = match (at(self.group), ours.map(|(g, _)| g.trim())) {
             ("", None | Some("")) => group.to_string(),
             ("", Some(g)) => g.to_string(),
@@ -363,7 +462,11 @@ impl Columns {
                 freq,
                 mode,
                 bandwidth_hz,
-                tx: (shift != 0.0).then(|| TxSpec { shift_hz: shift, ..TxSpec::default() }),
+                tx: (shift != 0.0 || sends.is_some()).then(|| TxSpec {
+                    shift_hz: shift,
+                    tone: sends,
+                    ..TxSpec::default()
+                }),
                 tone,
             },
             dropped,
@@ -589,8 +692,10 @@ mod tests {
         assert_eq!(format, Format::Chirp);
         assert_eq!(out.list.len(), 4);
         assert_eq!(out.skipped, 0);
-        assert_eq!(out.tones, 1, "the tone the first entry sends is not one it opens on");
+        assert_eq!(out.tones, 0, "the tone the first entry sends goes out when it is keyed");
         assert!(out.list.iter().all(|c| c.tone.is_none()), "nothing here squelches on a tone");
+        assert_eq!(out.list[0].tx.expect("a repeater shift").tone, Some(Coded::Tone(13)));
+        assert_eq!(out.list[1].tx.expect("a repeater shift").tone, None);
 
         assert_eq!(out.list[0].label, "GB3DB");
         assert_eq!(out.list[0].freq, 145_725_000.0);
@@ -631,8 +736,49 @@ mod tests {
             vec![Some(Coded::Tone(15)), Some(Coded::Dcs(47)), None, None, None],
             "110.9 is the tone it listens for, not the 103.5 it sends"
         );
+        assert_eq!(
+            out.list.iter().map(|c| c.tx.and_then(|t| t.tone)).collect::<Vec<_>>(),
+            vec![Some(Coded::Tone(15)), Some(Coded::Dcs(47)), None, None, None],
+            "TSQL and DTCS send what they open on"
+        );
         assert_eq!(out.tones, 2, "the cross entry and the tone no radio offers");
         assert!(out.note(Format::Chirp).contains("2 tones dropped"), "{}", out.note(Format::Chirp));
+    }
+
+    #[test]
+    fn a_chirp_cross_row_sends_one_thing_and_opens_on_another() {
+        let text = "Location,Name,Frequency,Duplex,Offset,Tone,rToneFreq,cToneFreq,DtcsCode,\
+             DtcsPolarity,RxDtcsCode,CrossMode,Mode,TStep,Skip,Power,Comment\n\
+             0,A,145.500000,,0.000000,Cross,77.0,88.5,023,NN,047,Tone->Tone,NFM,12.50,,5.0W,\n\
+             1,B,145.512500,,0.000000,Cross,77.0,88.5,023,NN,047,Tone->DTCS,NFM,12.50,,5.0W,\n\
+             2,C,145.525000,,0.000000,Cross,77.0,88.5,023,NN,047,DTCS->Tone,NFM,12.50,,5.0W,\n\
+             3,D,145.537500,,0.000000,Cross,77.0,88.5,023,NN,047,DTCS->DTCS,NFM,12.50,,5.0W,\n\
+             4,E,145.550000,,0.000000,Cross,77.0,88.5,023,NN,047,->Tone,NFM,12.50,,5.0W,\n\
+             5,F,145.562500,,0.000000,Cross,77.0,88.5,023,NN,047,Tone->,NFM,12.50,,5.0W,\n\
+             6,G,145.575000,,0.000000,Cross,77.0,88.5,023,NN,047,DTCS->,NFM,12.50,,5.0W,\n\
+             7,H,145.587500,,0.000000,Cross,77.0,88.5,023,NN,047,->DTCS,NFM,12.50,,5.0W,\n\
+             8,I,145.600000,,0.000000,Cross,77.0,89.2,023,NN,047,Tone->Tone,NFM,12.50,,5.0W,\n";
+        let (format, out) = read(text, "Import");
+        assert_eq!(format, Format::Chirp);
+        assert_eq!(out.list.len(), 9);
+        let (t77, t885, d23, d47) =
+            (Coded::Tone(4), Coded::Tone(8), Coded::Dcs(23), Coded::Dcs(47));
+        let got: Vec<_> = out.list.iter().map(|c| (c.tx.and_then(|t| t.tone), c.tone)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Some(t77), Some(t885)),
+                (Some(t77), Some(d47)),
+                (Some(d23), Some(t885)),
+                (Some(d23), Some(d47)),
+                (None, Some(t885)),
+                (Some(t77), None),
+                (Some(d23), None),
+                (None, Some(d47)),
+                (Some(t77), None),
+            ]
+        );
+        assert_eq!(out.tones, 1, "the 89.2 no radio offers");
     }
 
     /// A list with one tone column and nothing saying what it is for means
@@ -743,16 +889,31 @@ mod tests {
     fn the_export_reads_back_as_the_same_bank() {
         let bank = Memory::parse(
             "[Airband]\n118.1 MHz AM Dublin tower\n\
-             [Repeaters]\n145.7375 MHz NFM 12.5 kHz shift:-600kHz tone:88.5 GB3XX\n\
+             [Repeaters]\n145.7375 MHz NFM 12.5 kHz shift:-600kHz txtone:88.5 tone:88.5 GB3XX\n\
              [Pagers]\n439.9875 MHz POCSAG capcodes\n\
-             [Watch]\n433.475 MHz auto 40 kHz calling\n",
+             [Watch]\n433.475 MHz auto 40 kHz calling\n\
+             [Coded]\n145.6 MHz NFM txtone:D023 tone:D023 same\n\
+             145.6125 MHz NFM shift:-600kHz txtone:77.0 opens anything\n\
+             145.625 MHz NFM tone:D047 sends nothing\n\
+             145.6375 MHz NFM txtone:D023 tone:88.5 cross\n",
         );
-        assert_eq!(bank.list.len(), 4);
+        assert_eq!(bank.list.len(), 8);
         let csv = write_csv(&bank);
         let (format, back) = read(&csv, UNGROUPED);
         assert_eq!(format, Format::Chirp);
-        assert_eq!(back.list.len(), 4);
+        assert_eq!(back.list.len(), 8);
+        assert_eq!(back.tones, 0);
+        let codes = |m: &[Saved]| -> Vec<_> {
+            m.iter().map(|c| (c.tx.and_then(|t| t.tone), c.tone)).collect()
+        };
+        assert_eq!(codes(&back.list), codes(&bank.list));
+        let modes: Vec<&str> =
+            csv.lines().skip(5).map(|l| l.split(',').nth(5).unwrap_or("")).collect();
+        assert_eq!(modes, ["DTCS", "Tone", "Cross", "Cross"]);
+        assert!(csv.contains(",Cross,88.5,88.5,023,NN,047,->DTCS,"), "{csv}");
+        assert!(csv.contains(",Cross,88.5,88.5,023,NN,023,DTCS->Tone,"), "{csv}");
 
+        let back = Read { list: back.list[..4].to_vec(), ..back };
         let modes: Vec<ChanMode> = back.list.iter().map(|c| c.mode.clone()).collect();
         assert_eq!(
             modes,

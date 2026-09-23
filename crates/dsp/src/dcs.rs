@@ -265,6 +265,38 @@ impl Dcs {
     }
 }
 
+pub const KEYER_CUTOFF_HZ: f64 = 150.0;
+
+pub struct Keyer {
+    word: u32,
+    per_bit: f64,
+    at: f64,
+    alpha: f32,
+    poles: [f32; 2],
+}
+
+impl Keyer {
+    pub fn new(digits: u16, rate: f64) -> Self {
+        let rate = rate.max(1.0);
+        Self {
+            word: word_of(digits),
+            per_bit: rate / BAUD,
+            at: 0.0,
+            alpha: (1.0 - (-std::f64::consts::TAU * KEYER_CUTOFF_HZ / rate).exp()) as f32,
+            poles: [0.0; 2],
+        }
+    }
+
+    pub fn sample(&mut self) -> f32 {
+        let bit = (self.at / self.per_bit) as usize % WORD_BITS;
+        let level = if self.word >> bit & 1 == 1 { 1.0 } else { -1.0 };
+        self.at = (self.at + 1.0) % (self.per_bit * WORD_BITS as f64);
+        self.poles[0] += self.alpha * (level - self.poles[0]);
+        self.poles[1] += self.alpha * (self.poles[0] - self.poles[1]);
+        self.poles[1]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +414,44 @@ mod tests {
         assert_eq!(d.code(), None);
         let changed = d.push(&sent(131, false, 2.0, 0.2, false)).expect("the new code");
         assert_eq!(changed.digits, 131);
+    }
+
+    fn speech_band_db(x: &[f32]) -> f64 {
+        let n = x.len();
+        let mut buf: Vec<rustfft::num_complex::Complex<f32>> =
+            x.iter().map(|v| rustfft::num_complex::Complex::new(*v, 0.0)).collect();
+        rustfft::FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+        let power = |lo: f64, hi: f64| -> f64 {
+            (1..n / 2)
+                .filter(|i| (lo..hi).contains(&(*i as f64 * RATE / n as f64)))
+                .map(|i| f64::from(buf[i].norm_sqr()))
+                .sum()
+        };
+        10.0 * (power(300.0, 3_400.0) / power(0.0, RATE / 2.0)).log10()
+    }
+
+    #[test]
+    fn a_keyed_code_keeps_32_db_out_of_the_speech_band_where_a_square_word_keeps_15() {
+        let mut k = Keyer::new(23, RATE);
+        let keyed: Vec<f32> = (0..RATE as usize).map(|_| k.sample()).collect();
+        let square = sent(23, false, 1.0, 1.0, false);
+        let (keyed, square) = (speech_band_db(&keyed), speech_band_db(&square));
+        assert!((-33.5..-31.5).contains(&keyed), "keyed {keyed:.1} dB, measured -32.6");
+        assert!((-16.0..-14.0).contains(&square), "square {square:.1} dB, measured -15.1");
+    }
+
+    #[test]
+    fn every_standard_code_keyed_is_read_back_as_itself() {
+        let mut wrong = Vec::new();
+        for digits in CODES {
+            let mut k = Keyer::new(digits, RATE);
+            let audio: Vec<f32> = (0..(RATE * 1.5) as usize).map(|_| 0.15 * k.sample()).collect();
+            let mut d = Dcs::new(RATE);
+            d.push(&audio);
+            if d.code() != Some(Code { digits }) {
+                wrong.push((digits, d.code()));
+            }
+        }
+        assert_eq!(wrong, vec![], "of {} codes", CODES.len());
     }
 }

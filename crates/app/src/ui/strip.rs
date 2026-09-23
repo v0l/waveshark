@@ -249,6 +249,47 @@ impl Strip<'_> {
         changed
     }
 
+    fn channel_tx_code(
+        ui: &mut egui::Ui,
+        id: u64,
+        tx: &mut crate::radio::TxSpec,
+        opens_on: Option<Coded>,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            theme::Line::new().legend("tx code").show(ui);
+            let set = tx.tone;
+            let mut picked = set;
+            let list = egui::ComboBox::from_id_salt(("chan-tx-tone", id))
+                .selected_text(set.map(|c| c.label()).unwrap_or_else(|| "NONE".into()))
+                .width(78.0)
+                .show_ui(ui, |ui| {
+                    let tones = (0..dsp::ctcss::TONES.len()).map(Coded::Tone);
+                    let codes = dsp::dcs::CODES.iter().map(|d| Coded::Dcs(*d));
+                    if ui.selectable_label(set.is_none(), "NONE").clicked() {
+                        picked = None;
+                    }
+                    ui.separator();
+                    for want in tones.chain(codes) {
+                        if ui.selectable_label(set == Some(want), want.label()).clicked() {
+                            picked = Some(want);
+                        }
+                    }
+                });
+            list.response.on_hover_text("send this CTCSS tone or DCS code under the audio");
+            if let Some(sql) = opens_on.filter(|c| picked != Some(*c))
+                && ui.small_button("SAME").on_hover_text("send the code it opens on").clicked()
+            {
+                picked = Some(sql);
+            }
+            if picked != set {
+                tx.tone = picked;
+                changed = true;
+            }
+        });
+        changed
+    }
+
     /// A decoder on what the channel is playing.
     ///
     /// An alert relayed on a broadcast channel, a picture on the calling
@@ -665,6 +706,7 @@ impl Strip<'_> {
         let Some(mode) = crate::radio::tx_mode_for(&ch.mode, sends) else {
             return false;
         };
+        let (id, opens_on) = (ch.id, ch.tone);
         let tx = ch.tx.get_or_insert_with(crate::radio::TxSpec::default);
 
         ui.add_space(6.0);
@@ -723,6 +765,11 @@ impl Strip<'_> {
                 changed = true;
             }
         });
+        if matches!(mode, crate::radio::TxMode::Nfm | crate::radio::TxMode::Fm)
+            && matches!(tx.source, TxSource::Mic | TxSource::Tone | TxSource::Agent)
+        {
+            changed |= Self::channel_tx_code(ui, id, tx, opens_on);
+        }
 
         match tx.source {
             // Nothing but the tone that ends its overs: the panel where the
