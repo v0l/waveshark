@@ -624,3 +624,112 @@ fn a_channel_that_decoded_is_remembered() {
     assert!((hz - 869_525_000.0).abs() < 50_000.0, "remembered at {hz}");
     assert_eq!(*width, 250_000.0);
 }
+
+fn gaussian(seed: u64, sigma: f32) -> impl FnMut() -> C32 {
+    let mut seed = seed;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    move || {
+        let u1 = next().max(1e-12);
+        let u2 = next();
+        let r = (-2.0 * u1.ln()).sqrt();
+        C32::new(
+            (r * (std::f64::consts::TAU * u2).cos()) as f32 * sigma,
+            (r * (std::f64::consts::TAU * u2).sin()) as f32 * sigma,
+        )
+    }
+}
+
+fn z_wave_burst(
+    iq: &mut Vec<C32>,
+    noise: &mut impl FnMut() -> C32,
+    center: Hz,
+    hz: f64,
+    baud: f64,
+    value: u8,
+) {
+    let rate = 2_000_000.0;
+    let (deviation, manchester, fcs, preamble) = match baud {
+        19_200.0 => (20_000.0, true, decode::zwave::Fcs::Xor, 20),
+        40_000.0 => (20_000.0, false, decode::zwave::Fcs::Xor, 20),
+        _ => (29_000.0, false, decode::zwave::Fcs::Crc16, 25),
+    };
+    let frame = decode::zwave::encode(
+        fcs,
+        0xd6b2_6208,
+        1,
+        7,
+        decode::zwave::singlecast_control(3, true),
+        &[0x25, 0x01, value],
+    );
+    let bits = decode::zwave::keyed(&frame, preamble);
+    let symbols: Vec<bool> =
+        if manchester { bits.iter().flat_map(|b| [*b, !*b]).collect() } else { bits };
+    let keyed = dsp::fsk::modulate(&symbols, rate, baud, deviation, 0.3);
+    let mut mix = Mixer::new(hz - center.as_f64(), rate);
+    let mut moved = Vec::new();
+    mix.process(&keyed, &mut moved);
+    iq.extend(moved.into_iter().map(|s| s + noise()));
+    iq.extend((0..300_000).map(|_| noise()));
+}
+
+fn z_wave_read(pk: &[common::packet::Packet]) -> Vec<(u64, u8)> {
+    pk.iter()
+        .filter(|p| decode::zwave::read(p.bytes()).is_some())
+        .map(|p| (p.carrier.center_hz, decode::zwave::parse(p.bytes()).unwrap().payload[2]))
+        .collect()
+}
+
+#[test]
+fn z_wave_at_all_three_rates_is_read_and_868_49_is_not() {
+    let center = Hz::hz(868_200_000);
+    let mut noise = gaussian(0x5DEE_CE66_D1CE_4E5B, 0.02);
+    let mut iq: Vec<C32> = (0..300_000).map(|_| noise()).collect();
+    z_wave_burst(&mut iq, &mut noise, center, 868_490_000.0, 40_000.0, 0x44);
+    z_wave_burst(&mut iq, &mut noise, center, 868_420_000.0, 19_200.0, 0x11);
+    z_wave_burst(&mut iq, &mut noise, center, 868_420_000.0, 40_000.0, 0x22);
+    z_wave_burst(&mut iq, &mut noise, center, 868_400_000.0, 100_000.0, 0x33);
+    let pk = packets(NodeSpec::new("auto"), 2_000_000.0, center, &iq);
+    let read = z_wave_read(&pk);
+    let values: Vec<u8> = read.iter().map(|(_, v)| *v).collect();
+    assert_eq!(values, [0x11, 0x22, 0x33], "{read:x?} of {} packets", pk.len());
+    assert!(read.iter().all(|(hz, _)| hz.abs_diff(868_410_000) < 15_000), "{read:?}");
+}
+
+#[test]
+fn z_wave_up_to_24_khz_off_is_built_on_open_since_the_classifier_misses_40_kbit_s() {
+    let center = Hz::hz(868_200_000);
+    let (mut frames, mut rows) = (Vec::new(), Vec::new());
+    for (hz, baud) in
+        [(868_420_000.0, 19_200.0), (868_420_000.0, 40_000.0), (868_400_000.0, 100_000.0)]
+    {
+        let (mut f, mut r) = (0, 0);
+        for sigma in [0.03f32, 0.1] {
+            for trial in 0..12u64 {
+                let mut noise = gaussian(0x1234_5678 ^ (trial * 7919 + baud as u64), sigma);
+                let lead = 300_000 + trial as usize * 7_919;
+                let mut iq: Vec<C32> = (0..lead).map(|_| noise()).collect();
+                let off = (trial as f64 - 6.0) * 4_000.0;
+                z_wave_burst(&mut iq, &mut noise, center, hz + off, baud, trial as u8);
+                let pk = packets(NodeSpec::new("auto"), 2_000_000.0, center, &iq);
+                let read = z_wave_read(&pk);
+                assert!(read.iter().all(|(_, v)| *v == trial as u8), "{read:?}");
+                f += usize::from(!read.is_empty());
+                r += read.len();
+            }
+        }
+        frames.push(f);
+        rows.push(r);
+    }
+    assert_eq!(
+        frames,
+        [24, 24, 20],
+        "bursts read of 24 at 9.6, 40 and 100 kbit/s; master before #195 read [0, 1, 20], \
+         and waiting for an Fsk2 or Msk verdict reads [24, 0, 6]"
+    );
+    assert_eq!(rows, [24, 28, 20], "four 40 kbit/s bursts at 0.1 open two sources each");
+}

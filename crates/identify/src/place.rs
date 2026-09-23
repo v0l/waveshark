@@ -30,6 +30,7 @@ pub enum Placement {
     /// On fixed frequencies the standard put it on: 1090 MHz, the two AIS
     /// channels, the three BLE advertising channels.
     Channels(Vec<f64>),
+    Within(Vec<f64>, f64),
 }
 
 impl Placement {
@@ -40,6 +41,7 @@ impl Placement {
             Placement::Usage(u) => common::bands::at(hz).is_some_and(|b| u.contains(&b.usage)),
             Placement::Bands(bands) => bands.iter().any(|(lo, hi)| (*lo..*hi).contains(&hz)),
             Placement::Channels(chs) => chs.iter().any(|c| (c - hz).abs() <= width_hz / 2.0),
+            Placement::Within(chs, off_hz) => chs.iter().any(|c| (c - hz).abs() <= *off_hz),
         }
     }
 
@@ -57,7 +59,7 @@ impl Placement {
         match self {
             Placement::Usage(u) => common::bands::ranges_for(u),
             Placement::Bands(bands) => bands.clone(),
-            Placement::Channels(chs) => {
+            Placement::Channels(chs) | Placement::Within(chs, _) => {
                 chs.iter().map(|c| (c - width_hz / 2.0, c + width_hz / 2.0)).collect()
             }
         }
@@ -71,7 +73,7 @@ impl Placement {
             // where to put a hand-placed channel itself.
             Placement::Usage(_) => None,
             Placement::Bands(b) => b.first().map(|(lo, hi)| (lo + hi) / 2.0),
-            Placement::Channels(c) => c.first().copied(),
+            Placement::Channels(c) | Placement::Within(c, _) => c.first().copied(),
         }
     }
 }
@@ -132,6 +134,16 @@ mod tests {
         assert_eq!(c.bands(2e6), vec![(1089e6, 1091e6)]);
     }
 
+    #[test]
+    fn a_held_channel_covers_its_tolerance_and_not_its_width() {
+        let w = Placement::Within(vec![868.42e6], 50e3);
+        assert!(w.covers(868.45e6, 200e3));
+        assert!(w.covers(868.37e6, 200e3));
+        assert!(!w.covers(868.48e6, 200e3));
+        assert_eq!(w.bands(200e3), vec![(868.32e6, 868.52e6)]);
+        assert_eq!(w.default_hz(), Some(868.42e6));
+    }
+
     /// A span reaches a placement its middle is nowhere near: 2 MS/s at
     /// 1089 MHz still holds 1090.
     #[test]
@@ -140,6 +152,8 @@ mod tests {
         assert!(!c.covers(1089e6, 100e3));
         assert!(c.reaches(1088e6, 1090e6, 100e3));
         assert!(!c.reaches(1080e6, 1085e6, 100e3));
+        let w = Placement::Within(vec![868.42e6], 50e3);
+        assert!(w.reaches(868.2e6, 868.4e6, 200e3));
         let b = Placement::Bands(vec![(400e6, 406e6)]);
         assert!(b.reaches(405.79e6, 405.82e6, 10e3));
         assert!(!b.reaches(406.1e6, 406.2e6, 10e3));

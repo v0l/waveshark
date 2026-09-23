@@ -92,7 +92,7 @@ impl Simple for ZWaveNode {
         if self.channel_hz <= 0.0 {
             self.channel_hz = center;
         }
-        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
+        if (self.channel_hz - center).abs() > (rate - CHANNEL_WIDTH_HZ).max(0.0) / 2.0 {
             return Err(common::Error::other("zwave needs its channel inside the span"));
         }
         let mut factor = 1usize;
@@ -100,17 +100,18 @@ impl Simple for ZWaveNode {
             factor *= 2;
         }
         let work = rate / factor as f64;
-        if work < 4.0 * RATES[2].0 {
+        self.readers = RATES
+            .iter()
+            .filter(|(baud, _, _)| work >= 4.0 * baud)
+            .map(|(baud, bw, man)| zwave::Reader::new(work, *baud, *bw, *man))
+            .collect();
+        if self.readers.is_empty() {
             return Err(common::Error::other(
-                "zwave needs at least 400 kS/s: four samples a symbol at 100 kbit/s",
+                "zwave needs at least 76.8 kS/s: four samples a chip at 9.6 kbit/s",
             ));
         }
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.readers = RATES
-            .iter()
-            .map(|(baud, bw, man)| zwave::Reader::new(work, *baud, *bw, *man))
-            .collect();
         // Fifty milliseconds: the longest frame at 9.6 kbit/s is about
         // 60 ms of preamble and payload, and a shorter ring would hand a
         // slow frame samples that are not its own.
@@ -188,7 +189,7 @@ impl Protocol for ZWave {
     fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
         let bytes = p.bytes();
         let hz = p.center_hz() as f64;
-        if !CHANNELS.iter().any(|c| (c - hz).abs() <= CHANNEL_WIDTH_HZ / 2.0) {
+        if !Signal::placement(self).covers(hz, CHANNEL_WIDTH_HZ) {
             return None;
         }
         Some(read(bytes).into_iter().collect())
@@ -398,7 +399,12 @@ mod tests {
         let mut n = ZWaveNode::new(868_420_000.0);
         assert!(n.negotiate(&spec(2_000_000.0, 868_420_000.0)).is_ok());
         assert!(n.negotiate(&spec(500_000.0, 868_420_000.0)).is_ok());
-        assert!(n.negotiate(&spec(200_000.0, 868_420_000.0)).is_err());
+        assert_eq!(n.readers.len(), 3);
+        assert!(n.negotiate(&spec(333_333.0, 868_420_000.0)).is_ok());
+        assert_eq!(n.readers.len(), 2, "100 kbit/s has three samples a symbol at 333 kS/s");
+        assert!(n.negotiate(&spec(100_000.0, 868_420_000.0)).is_ok());
+        assert_eq!(n.readers.len(), 1);
+        assert!(n.negotiate(&spec(50_000.0, 868_420_000.0)).is_err());
         assert!(n.negotiate(&spec(1_000_000.0, 869_500_000.0)).is_err());
     }
 }

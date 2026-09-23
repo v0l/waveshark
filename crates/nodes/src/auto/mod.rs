@@ -1537,6 +1537,31 @@ mod tests {
         assert!(placed.contains(&250_000.0), "the remembered channel went: {placed:?}");
     }
 
+    #[test]
+    fn a_verdict_on_a_remembered_channel_builds_no_second_front_end_at_its_width() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(2_000_000.0, Hz::mhz(868))]).unwrap();
+        n.remember("zwave", 868_410_000.0, 200_000.0);
+        let b = SourceBlock {
+            id: n.memory.channels()[0].id,
+            state: SourceState::Opened,
+            center_hz: 868_410_000,
+            bandwidth_hz: 105_000.0,
+            signal_hz: 70_000.0,
+            rate: 333_333.0,
+            start_sample: 0,
+            snr_db: 20.0,
+            samples: Vec::new(),
+        };
+        let slot = n.open(&b, None).unwrap();
+        n.slots.push(slot);
+        let router = n.slots[0].members.iter_mut().find(|m| m.router.is_some()).unwrap();
+        router.verdicts.push((dsp::Modulation::Fsk2, 67_000.0));
+        n.place_on_verdict(0, false);
+        let names: Vec<&str> = n.slots[0].members.iter().map(|m| m.name).collect();
+        assert_eq!(names, ["zwave", "burst_route"]);
+    }
+
     /// A channel kept with a hold is given back once nothing has decoded
     /// on it for that long: the detector may open there again, and the
     /// decoder that was reading it is gone.

@@ -20,13 +20,13 @@ impl Signal for ZWave {
     }
 
     fn placement(&self) -> Placement {
-        Placement::Channels(CHANNELS.to_vec())
+        Placement::Within(CHANNELS.to_vec(), OFF_CHANNEL_HZ)
     }
 
     fn shape(&self) -> Shape {
         Shape {
             widths: &[CHANNEL_WIDTH_HZ],
-            min_rate_hz: 400_000.0,
+            min_rate_hz: 4.0 * zwave::RATES[0].0,
             feed_rate_hz: WORK_HZ,
             span_wide: false,
             families: &[],
@@ -92,6 +92,8 @@ pub const CHANNELS: [f64; 12] = [
 /// keyed 29 kHz either way, which is 158 kHz by Carson; the slower two are
 /// keyed 20 kHz either way and are narrower than their own channel spacing.
 pub const CHANNEL_WIDTH_HZ: f64 = 200_000.0;
+
+pub const OFF_CHANNEL_HZ: f64 = 50_000.0;
 
 /// Rate the channel is cut down to before the clocks read it: eight samples
 /// a symbol at 100 kbit/s, which leaves the widest of the three a transition

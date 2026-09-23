@@ -315,7 +315,9 @@ pub fn channels_in(s: &dyn Signal, rate_hz: f64, center_hz: f64) -> Vec<f64> {
     let (lo, hi) =
         (center_hz - rate_hz / 2.0 + width / 2.0, center_hz + rate_hz / 2.0 - width / 2.0);
     match s.placement() {
-        Placement::Channels(chs) => chs.into_iter().filter(|c| (lo..=hi).contains(c)).collect(),
+        Placement::Channels(chs) | Placement::Within(chs, _) => {
+            chs.into_iter().filter(|c| (lo..=hi).contains(c)).collect()
+        }
         _ => vec![center_hz],
     }
 }

@@ -234,7 +234,7 @@ impl AutoNode {
                 heard: true,
                 spec,
                 signal_hz: b.signal_hz,
-                tried: Vec::new(),
+                tried: vec![(p.id(), st.width_hz as u64)],
                 verdicts_seen: 0,
                 remembered: true,
                 locked: None,
@@ -587,6 +587,27 @@ mod tests {
         let (members, evidence) = at(2_462_000_000, 6.5e6, 20e6);
         assert!(members.iter().all(|m| m.router.is_none()), "a 6.5 MHz source was classified");
         assert!(evidence.is_some());
+    }
+
+    #[test]
+    fn an_868_mhz_burst_gets_z_wave_within_50_khz_of_its_channel_and_not_at_868_48() {
+        let reg = registry();
+        let rate = 400_000.0;
+        let zwave_on = |hz: u64| {
+            let mut spec = StreamSpec::iq(rate, Hz(hz));
+            spec.bandwidth = 113_000.0;
+            let mut b = block(SourceId(1), rate, SourceState::Opened, Vec::new());
+            (b.center_hz, b.bandwidth_hz, b.signal_hz) = (hz, 113_000.0, 80_000.0);
+            let origin = Origin { span_sample: 0, span_rate_hz: rate };
+            let (members, _) = found(&b, spec, origin, &reg).expect("a placement");
+            members.iter().filter(|m| m.name == "zwave").count()
+        };
+        assert_eq!(zwave_on(868_420_000), 1);
+        assert_eq!(zwave_on(868_370_000), 1);
+        assert_eq!(zwave_on(868_470_000), 1);
+        assert_eq!(zwave_on(868_480_000), 0);
+        assert_eq!(zwave_on(868_500_000), 0);
+        assert_eq!(zwave_on(868_300_000), 0);
     }
 
     /// A stream a wider one supersedes leaves nothing: whatever was read off
