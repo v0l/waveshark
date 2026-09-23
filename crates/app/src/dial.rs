@@ -5,9 +5,9 @@
 //! fast you move the mouse. Here each digit is its own hit target, and the
 //! wheel over a digit steps that decade.
 
-use crate::theme;
 use crate::wheel::Wheel;
-use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui_bench::theme;
 
 /// Digits shown, from 1 GHz down to 1 Hz. Ten of them, because the tuner
 /// reaches 1766 MHz and nine would cap the dial at 999.999999 MHz.
@@ -137,7 +137,7 @@ impl Dial {
                 Pos2::new(cell.center().x, cy),
                 Align2::CENTER_CENTER,
                 digits[i].to_string(),
-                FontId::new(size, FontFamily::Name(theme::READOUT_FONT.into())),
+                theme::figure(size),
                 col,
             );
 
@@ -150,7 +150,7 @@ impl Dial {
                     Pos2::new(x + gap * 0.5, cy),
                     Align2::CENTER_CENTER,
                     mark,
-                    FontId::new(size, FontFamily::Name(theme::READOUT_FONT.into())),
+                    theme::figure(size),
                     theme::READOUT_DIM,
                 );
                 x += gap;
@@ -161,7 +161,7 @@ impl Dial {
             Pos2::new(rect.right() - size * 0.35, cy + size * 0.12),
             Align2::RIGHT_CENTER,
             "MHz",
-            FontId::new(size * 0.34, FontFamily::Name(theme::LEGEND_FONT.into())),
+            theme::legend_font(size * 0.34),
             theme::LEGEND,
         );
 
@@ -262,7 +262,7 @@ impl Dial {
                 Pos2::new(cell.center().x, cy),
                 Align2::CENTER_CENTER,
                 digits[i].to_string(),
-                FontId::new(size, FontFamily::Name(theme::READOUT_FONT.into())),
+                theme::figure(size),
                 if leading { theme::READOUT_DIM } else { theme::READOUT },
             );
             x += digit_w;
@@ -271,7 +271,7 @@ impl Dial {
                     Pos2::new(x + gap * 0.5, cy),
                     Align2::CENTER_CENTER,
                     ".",
-                    FontId::new(size, FontFamily::Name(theme::READOUT_FONT.into())),
+                    theme::figure(size),
                     theme::READOUT_DIM,
                 );
                 x += gap;

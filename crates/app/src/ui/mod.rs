@@ -58,20 +58,27 @@ use crate::bands;
 use crate::dial::Dial;
 use crate::radio::{ChanMode, ChannelSpec, ChannelState, Cmd, Demod, Frame, Radio, StationInfo};
 use crate::row::Reception;
-use crate::theme::{self, legend, value};
 use burst::*;
 use common::{GainMode, Hz, Sps};
 use egui::containers::{CentralPanel, Panel};
 use egui::{
-    Align2, Color32, ColorImage, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind,
-    TextureOptions, Vec2,
+    Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureOptions,
+    Vec2,
 };
+use egui_bench::form::{modal_title, row, row_help};
+use egui_bench::meter::{Fader, Threshold};
+use egui_bench::readout::reading;
+use egui_bench::text::{Line, help, hint, legend, value};
+use egui_bench::{form, meter, panel, table, text, theme};
 use settings::RemoteEdit;
 use settings_rows::{ScannerRow, mhz_field};
 use state::{Channel, Logged};
-use widgets::{
-    Fader, Squelch, bin_hint, cog, cog_rect, help, hint, modal_title, reading, row, row_help,
-};
+use widgets::{bin_hint, cog, cog_rect};
+
+pub fn install(ctx: &egui::Context) {
+    egui_bench::install(ctx);
+    crate::icons::install(ctx);
+}
 
 pub struct App {
     /// What the operator has set, as one record. Every pane holds a clone of
@@ -725,7 +732,7 @@ impl App {
     /// `asked` is the receiver `--device` names, taken before the saved one
     /// so the window opens the radio the operator asked for and no other.
     pub fn new(cc: &eframe::CreationContext<'_>, asked: Option<&str>) -> Self {
-        theme::install(&cc.egui_ctx);
+        install(&cc.egui_ctx);
         crate::shutdown::install(cc.egui_ctx.clone());
         let settings = crate::session::Settings::load();
         settings.edit(apply_locale);

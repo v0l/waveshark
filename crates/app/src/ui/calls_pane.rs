@@ -125,10 +125,8 @@ impl CallList<'_> {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             let live = calls.iter().filter(|c| c.live(now)).count();
-            let mut head = theme::Line::new()
-                .legend("calls")
-                .value(format!("{} heard", calls.len()))
-                .size(11.0);
+            let mut head =
+                Line::new().legend("calls").value(format!("{} heard", calls.len())).size(11.0);
             if live > 0 {
                 head = head.value(format!("{live} on air")).tint(CRC_OK).size(11.0);
             }
@@ -195,7 +193,7 @@ impl CallList<'_> {
                                 theme::LEGEND,
                             ),
                         };
-                        theme::Line::new().value(text).tint(tint).size(11.0).show(ui);
+                        Line::new().value(text).tint(tint).size(11.0).show(ui);
                     }
                 }
             });
@@ -270,12 +268,11 @@ impl CallList<'_> {
         let mut toggled: Vec<Rule> = Vec::new();
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_min_width(width);
-            let (rect, _) =
-                ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::hover());
             let p = ui.painter_at(rect);
             let mut x = rect.left() + 12.0;
             for (name, w) in COLS {
-                widgets::cell(&p, rect, x, w, name, theme::LEGEND);
+                table::cell(&p, rect, x, w, name, theme::LEGEND);
                 x += w;
             }
             p.line_segment(
@@ -286,7 +283,7 @@ impl CallList<'_> {
             let subs = self.st.subs.clone();
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (n, c) in calls.iter().enumerate() {
-                    let h = widgets::ROW_H.max(20.0);
+                    let h = table::ROW_H.max(20.0);
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
                     if !ui.is_rect_visible(rect) {
                         continue;
@@ -381,12 +378,12 @@ impl CallList<'_> {
                                 .map(|(_, v)| *v)
                                 .unwrap_or(0.0);
                             let r = Rect::from_min_size(
-                                Pos2::new(x, rect.center().y - super::widgets::VU_H / 2.0),
-                                Vec2::new(w - 10.0, super::widgets::VU_H),
+                                Pos2::new(x, rect.center().y - meter::VU_H / 2.0),
+                                Vec2::new(w - 10.0, meter::VU_H),
                             );
-                            widgets::vu(&p, r, peak);
+                            meter::vu(&p, r, peak);
                         } else {
-                            widgets::cell(&p, rect, x, *w, text, *col);
+                            table::cell(&p, rect, x, *w, text, *col);
                         }
                         x += w;
                     }
@@ -442,11 +439,11 @@ impl CallList<'_> {
         let timeline_open = self.st.timeline.open;
         let empty = shown.is_empty();
         egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-            widgets::card(
+            panel::card(
                 ui,
                 Some(theme::TRACE),
                 |ui| {
-                    theme::Line::new()
+                    Line::new()
                         .legend("recorded")
                         .value(count)
                         .size(11.0)
@@ -503,14 +500,14 @@ impl CallList<'_> {
                     });
                 },
                 |ui| {
-                    widgets::row_help(
+                    form::row_help(
                         ui,
                         "filter",
                         "Every word has to be somewhere on the row, in any order: a talkgroup \
                          and a caller narrows to that caller on that group.",
                         |ui| {
                             let mut clear = false;
-                            widgets::field_then(
+                            form::field_then(
                                 ui,
                                 &mut self.st.filter,
                                 "talkgroup, caller, system or frequency",
@@ -528,7 +525,7 @@ impl CallList<'_> {
                         // would not: the lamp is the answer to the last
                         // press and the only place it is reported.
                         let ok = !note.contains("not") && !note.contains("nothing");
-                        widgets::lamp(ui, ok, &note);
+                        panel::status(ui, ok, &note);
                     }
                 },
             );
@@ -585,11 +582,11 @@ impl CallList<'_> {
             |ui| {
                 ui.set_min_width(width);
                 let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::hover());
                 let p = ui.painter_at(rect);
                 let mut x = rect.left() + 12.0;
                 for (name, w) in LOG_COLS {
-                    widgets::cell(&p, rect, x, w, name, theme::LEGEND);
+                    table::cell(&p, rect, x, w, name, theme::LEGEND);
                     x += w;
                 }
                 p.line_segment(
@@ -598,7 +595,7 @@ impl CallList<'_> {
                 );
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for (n, e) in shown.iter().enumerate() {
-                        let h = widgets::ROW_H.max(20.0);
+                        let h = table::ROW_H.max(20.0);
                         let (rect, resp) =
                             ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
                         if !ui.is_rect_visible(rect) {
@@ -620,7 +617,7 @@ impl CallList<'_> {
                         let buttons = LOG_COLS[0].1 + LOG_COLS[1].1;
                         let mut x = rect.left() + 12.0 + buttons;
                         for ((text, col), (_, w)) in log_cells(&e.call).iter().zip(&LOG_COLS[2..]) {
-                            widgets::cell(&p, rect, x, *w, text, *col);
+                            table::cell(&p, rect, x, *w, text, *col);
                             x += w;
                         }
                         let button_at = |i: usize| {
@@ -840,18 +837,18 @@ impl CallList<'_> {
         let level = self.radio.map(|r| r.status.call_level()).unwrap_or(0.0);
         let gain_db = self.radio.map(|r| r.status.call_gain_db()).unwrap_or(0.0);
         egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-            widgets::card(
+            panel::card(
                 ui,
                 Some(theme::READOUT),
                 |ui| {
-                    theme::Line::new()
+                    Line::new()
                         .legend("call audio")
                         .note("every call the front ends decode, mixed into the speaker")
                         .show(ui);
                 },
                 |ui| {
                     ui.horizontal(|ui| {
-                        theme::Line::new().legend("level").show(ui);
+                        Line::new().legend("level").show(ui);
                         if ui
                             .add(Fader::new(&mut self.audio.call_volume, level).width(VU_W))
                             .changed()
@@ -898,7 +895,7 @@ impl CallList<'_> {
                             ));
                         }
                         if self.audio.call_agc && gain_db.abs() > 0.1 {
-                            theme::Line::new().set(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
+                            Line::new().set(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
                         }
                     });
                 },

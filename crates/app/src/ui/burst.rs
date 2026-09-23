@@ -114,7 +114,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
     match &rec.packet.carrier.iq {
         Some(iq) => burst_view(ui, iq, h),
         None => {
-            theme::Line::new().legend("burst").note("no samples kept for this packet").show(ui);
+            Line::new().legend("burst").note("no samples kept for this packet").show(ui);
             let (rect, _) = ui
                 .allocate_exact_size(Vec2::new(ui.available_width().max(200.0), h), Sense::hover());
             ui.painter().rect_filled(rect, 2.0, theme::WELL);
@@ -128,7 +128,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
         let (peak, rms) = crate::mix::levels_db(a);
         ui.horizontal(|ui| {
             asked.play = ui.button("PLAY").clicked();
-            theme::Line::new()
+            Line::new()
                 .legend("speech")
                 .value(format!("{:.1} s", a.seconds()))
                 .size(11.0)
@@ -148,7 +148,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             for (k, v) in &said {
-                theme::Line::new().legend(*k).value(v).size(11.0).show(ui);
+                Line::new().legend(*k).value(v).size(11.0).show(ui);
             }
         });
         ui.add_space(4.0);
@@ -250,9 +250,9 @@ pub(super) fn sigid_modal(ctx: &egui::Context, rec: &Reception) -> bool {
         .backdrop_color(Color32::from_black_alpha(150))
         .show(ctx, |ui| {
             ui.set_width(640.0);
-            widgets::modal_title(ui, "Signal identification");
+            form::modal_title(ui, "Signal identification");
             let q = sigid_query(rec);
-            theme::Line::new()
+            Line::new()
                 .legend("burst")
                 .value(format!(
                     "{} {} {}",
@@ -262,17 +262,17 @@ pub(super) fn sigid_modal(ctx: &egui::Context, rec: &Reception) -> bool {
                 ))
                 .show(ui);
             if !rec.detail().is_empty() {
-                widgets::hint(ui, &rec.detail());
+                text::hint(ui, &rec.detail());
             }
             ui.add_space(8.0);
             match crate::data::sigid() {
                 None => {
-                    theme::Line::new().note("loading the signal identification wiki").show(ui);
+                    Line::new().note("loading the signal identification wiki").show(ui);
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                 }
                 Some(db) => {
                     let m = db.matches(&q);
-                    theme::Line::new().note(match m.len() {
+                    Line::new().note(match m.len() {
                         0 => "nothing listed near this frequency".to_string(),
                         n => format!("{n} entries near {}, best first", datasets::sigid::fmt_hz(q.center_hz)),
                     }).show(ui);
@@ -317,14 +317,14 @@ pub(super) fn sigid_modal(ctx: &egui::Context, rec: &Reception) -> bool {
 fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
     let s = m.signal;
     let rail = if s.identified { theme::TRACE } else { theme::READOUT };
-    widgets::card(
+    panel::card(
         ui,
         Some(rail),
         |ui| {
             // The name opens the wiki page. A link rather than a label, but
             // still one galley on the row's baseline, so it is drawn as a
             // line and given the click afterwards.
-            let drawn = theme::Line::new().value(&s.name).size(12.5).show(ui);
+            let drawn = Line::new().value(&s.name).size(12.5).show(ui);
             let link = ui
                 .interact(drawn.rect, ui.make_persistent_id(("sigid", &s.url)), Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -338,10 +338,10 @@ fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(s.url.clone()));
             }
             if !s.identified {
-                theme::Line::new().legend("unid").show(ui);
+                Line::new().legend("unid").show(ui);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::Line::new()
+                Line::new()
                     .value(&m.why)
                     .size(DENSE)
                     .tint(theme::LEGEND)
@@ -355,7 +355,7 @@ fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
         |ui| {
             let blurb = s.blurb();
             if !blurb.is_empty() {
-                theme::Line::new().note(&blurb).size(DENSE).wrapped(ui);
+                Line::new().note(&blurb).size(DENSE).wrapped(ui);
             }
             let mut facts: Vec<String> = Vec::new();
             if !s.modulations.is_empty() {
@@ -371,11 +371,7 @@ fn sigid_row(ui: &mut egui::Ui, m: &datasets::sigid::Match<'_>) {
                 facts.push(s.categories.join(", "));
             }
             if !facts.is_empty() {
-                theme::Line::new()
-                    .value(facts.join("  "))
-                    .size(DENSE)
-                    .tint(theme::LEGEND)
-                    .wrapped(ui);
+                Line::new().value(facts.join("  ")).size(DENSE).tint(theme::LEGEND).wrapped(ui);
             }
         },
     );
@@ -421,7 +417,7 @@ pub(super) fn burst_columns(samples: &[common::C32], rate: f64, cols: usize) -> 
 pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let secs = iq.samples.len() as f64 / iq.rate.max(1.0);
     let half_span = iq.rate / 2.0;
-    theme::Line::new()
+    Line::new()
         .legend("burst")
         .value(format!("{:.2} ms", secs * 1e3))
         .size(DENSE)
@@ -481,7 +477,7 @@ pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
     let tex = ui.ctx().load_texture("burst_spectrogram", image, TextureOptions::LINEAR);
     p.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
 
-    let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+    let font = theme::legend_font(9.0);
     p.text(
         Pos2::new(rect.left() + 4.0, rect.top() + 2.0),
         Align2::LEFT_TOP,
@@ -556,7 +552,7 @@ pub(super) fn burst_view(ui: &mut egui::Ui, iq: &common::IqBurst, height: f32) {
 /// the reception.
 pub(super) fn hex_dump(ui: &mut egui::Ui, bytes: &[u8]) {
     if bytes.is_empty() {
-        theme::Line::new().note("no bits could be read from this burst").show(ui);
+        Line::new().note("no bits could be read from this burst").show(ui);
         return;
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("hex").show(ui, |ui| {
@@ -573,13 +569,13 @@ pub(super) fn hex_dump(ui: &mut egui::Ui, bytes: &[u8]) {
             // One galley for the row: three labels are three galleys, which
             // egui centres against each other, and a hex dump has to read as
             // a grid down the screen.
-            theme::Line::new()
+            Line::new()
                 .value(format!("{:04x}", i * 16))
                 .size(DENSE)
                 .tint(theme::LEGEND)
                 .value(format!("{hex:<49}"))
                 .size(DENSE)
-                .heard(ascii)
+                .measured(ascii)
                 .size(DENSE)
                 .show(ui);
         }

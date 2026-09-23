@@ -79,13 +79,13 @@ impl Strip<'_> {
                     // set.
                     let (r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
                     ui.painter().rect_filled(r, 1.0, theme::TRACE);
-                    theme::Line::new().legend("playback").show(ui);
+                    Line::new().legend("playback").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("STOP").on_hover_text("Stop playing this over").clicked()
                         {
                             cmds.push(Cmd::StopPlaying);
                         }
-                        theme::Line::new()
+                        Line::new()
                             .value(format!("{left_s:.1} s left"))
                             .tint(theme::TRACE)
                             .size(11.0)
@@ -98,7 +98,7 @@ impl Strip<'_> {
                 let Some(st) = st else { return };
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("vol").show(ui);
+                    Line::new().legend("vol").show(ui);
                     let mut v = st.volume;
                     if ui.add(Fader::new(&mut v, st.level).width(VU_W)).changed() {
                         cmds.push(Cmd::StageParam(
@@ -134,17 +134,17 @@ impl Strip<'_> {
         ui.add_space(4.0);
         if demod != Demod::Wfm {
             ui.horizontal(|ui| {
-                theme::Line::new().legend("agc").show(ui);
+                Line::new().legend("agc").show(ui);
                 if ui.selectable_label(ch.agc, if ch.agc { "ON" } else { "OFF" }).clicked() {
                     ch.agc = !ch.agc;
                     changed = true;
                 }
                 if ch.agc {
-                    theme::Line::new().value(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
+                    Line::new().value(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !open {
-                        theme::Line::new().legend("muted").show(ui);
+                        Line::new().legend("muted").show(ui);
                     }
                 });
             });
@@ -156,7 +156,7 @@ impl Strip<'_> {
         // transcribed. On by default for the modes people talk on, so this is
         // a switch for turning off a channel that turned out to be data.
         ui.horizontal(|ui| {
-            theme::Line::new().legend("voice").show(ui);
+            Line::new().legend("voice").show(ui);
             let label = if ch.voice { "ON" } else { "OFF" };
             if ui
                 .selectable_label(ch.voice, label)
@@ -172,8 +172,8 @@ impl Strip<'_> {
             let (lo, hi, ratio) = demod.squelch_range();
             let mut db = ch.squelch_db.unwrap_or(default);
             ui.horizontal(|ui| {
-                theme::Line::new().legend("sql").show(ui);
-                if ui.add(Squelch::new(&mut db, lo, hi, measured, open)).changed() {
+                Line::new().legend("sql").show(ui);
+                if ui.add(Threshold::new(&mut db, lo, hi, measured, open)).changed() {
                     ch.squelch_db = Some(db);
                     changed = true;
                 }
@@ -185,14 +185,14 @@ impl Strip<'_> {
                 } else {
                     format!("{db:.0}{}", if ratio { "" } else { " dBFS" })
                 };
-                theme::Line::new().value(text).size(11.0).show(ui);
+                Line::new().value(text).size(11.0).show(ui);
             });
             // The reading the threshold is being set against. Without it the
             // control is a number to guess at, and the right number differs
             // by mode and moves with the RF gain.
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
-                theme::Line::new().note(format!("now {measured:.0} dB")).show(ui);
+                Line::new().note(format!("now {measured:.0} dB")).show(ui);
             });
         }
         // The coded squelch, which is the half of the decision a level
@@ -212,7 +212,7 @@ impl Strip<'_> {
     fn channel_tone(ui: &mut egui::Ui, ch: &mut Channel, heard: Option<Coded>) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            theme::Line::new().legend("sql code").show(ui);
+            Line::new().legend("sql code").show(ui);
             let set = ch.tone;
             let mut picked = set;
             let list = egui::ComboBox::from_id_salt(("chan-tone", ch.id))
@@ -240,7 +240,7 @@ impl Strip<'_> {
             let Some(heard) = heard else {
                 return;
             };
-            theme::Line::new().heard(heard.label()).size(11.0).show(ui);
+            Line::new().measured(heard.label()).size(11.0).show(ui);
             if ch.tone != Some(heard) && ui.small_button("USE").clicked() {
                 ch.tone = Some(heard);
                 changed = true;
@@ -257,7 +257,7 @@ impl Strip<'_> {
     ) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            theme::Line::new().legend("tx code").show(ui);
+            Line::new().legend("tx code").show(ui);
             let set = tx.tone;
             let mut picked = set;
             let list = egui::ComboBox::from_id_salt(("chan-tx-tone", id))
@@ -306,7 +306,7 @@ impl Strip<'_> {
             .map(|p| p.label().to_uppercase())
             .unwrap_or_else(|| "OFF".into());
         ui.horizontal(|ui| {
-            theme::Line::new().legend("read").show(ui);
+            Line::new().legend("read").show(ui);
             egui::ComboBox::from_id_salt(("chan-reads", ch.id))
                 .selected_text(selected)
                 .width(120.0)
@@ -343,7 +343,7 @@ impl Strip<'_> {
         let mut changed = false;
         let mut khz = ch.bandwidth() / 1e3;
         ui.horizontal(|ui| {
-            theme::Line::new().legend("bw").show(ui);
+            Line::new().legend("bw").show(ui);
             // Proportional, so the same drag is a few hundred hertz on a CW
             // filter and a few kilohertz on a broadcast channel.
             let speed = (khz / 200.0).max(0.01);
@@ -382,7 +382,7 @@ impl Strip<'_> {
                     changed = true;
                 }
             } else {
-                theme::Line::new().note("mode default").show(ui);
+                Line::new().note("mode default").show(ui);
             }
         });
         changed
@@ -425,7 +425,7 @@ impl Strip<'_> {
         ui.add_space(6.0);
         ui.separator();
         ui.horizontal(|ui| {
-            let mut head = theme::Line::new().legend("rds");
+            let mut head = Line::new().legend("rds");
             if let Some(pi) = st.pi {
                 head = head.legend(&format!("PI {pi:04X}"));
             }
@@ -436,7 +436,7 @@ impl Strip<'_> {
                 let t = blend.clamp(0.0, 1.0);
                 if t > 0.01 {
                     let c = theme::TRACE.gamma_multiply(0.35 + 0.65 * t);
-                    theme::Line::new()
+                    Line::new()
                         .value(if t > 0.99 { "stereo" } else { "blend" })
                         .tint(c)
                         .size(11.0)
@@ -447,16 +447,16 @@ impl Strip<'_> {
         if let Some(n) = &st.name {
             // Cyan, not amber: this is what the radio heard, not something the
             // operator set.
-            theme::Line::new().heard(n).size(15.0).show(ui);
+            Line::new().measured(n).size(15.0).show(ui);
         }
         if let Some(p) = st.pty {
-            theme::Line::new().legend(p).show(ui);
+            Line::new().legend(p).show(ui);
         }
         if let Some(rt) = &st.radiotext {
             ui.add_space(2.0);
             // Radiotext is up to 64 characters and the strip is narrow, so let
             // it wrap rather than truncating a song title mid-word.
-            theme::Line::new().note(rt).wrapped(ui);
+            Line::new().note(rt).wrapped(ui);
         }
     }
 
@@ -509,7 +509,7 @@ impl Strip<'_> {
             };
             p.rect_filled(rect, 3.0, fill);
             p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
-            let font = FontId::new(13.0, egui::FontFamily::Name(theme::LEGEND_FONT.into()));
+            let font = theme::legend_font(13.0);
             let label = match on_air {
                 true => "ON AIR".to_string(),
                 false => word.to_ascii_uppercase(),
@@ -545,11 +545,11 @@ impl Strip<'_> {
                 None => "taken".to_string(),
                 Some(p) => p.label().to_string(),
             };
-            let mut line = theme::Line::new().legend("heard");
+            let mut line = Line::new().legend("heard");
             if let Some(from) = &h.from {
                 line = line.value(from.clone()).size(11.0);
             }
-            line.heard(h.text.clone()).size(11.0).gap(8.0).legend(&note).size(11.0).elided(ui);
+            line.measured(h.text.clone()).size(11.0).gap(8.0).legend(&note).size(11.0).elided(ui);
         }
         let why = match (fault, &voice.state, mine) {
             (Some(f), _, _) => format!("the agent cannot answer: {f}. Set it in Agent settings"),
@@ -576,7 +576,7 @@ impl Strip<'_> {
     ) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            theme::Line::new().legend("vox").show(ui);
+            Line::new().legend("vox").show(ui);
             let text = if tx.vox.on { "ON" } else { "OFF" };
             if ui
                 .selectable_label(tx.vox.on, text)
@@ -604,7 +604,7 @@ impl Strip<'_> {
         if held {
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
-                theme::Line::new()
+                Line::new()
                     .value("held up while the receiver is playing")
                     .size(11.0)
                     .tint(theme::TRACE)
@@ -612,7 +612,7 @@ impl Strip<'_> {
             });
         }
         ui.horizontal(|ui| {
-            theme::Line::new().legend("tail").show(ui);
+            Line::new().legend("tail").show(ui);
             let mut ms = tx.vox.tail_ms;
             if ui
                 .add(egui::DragValue::new(&mut ms).speed(10.0).range(0.0..=5_000.0).suffix(" ms"))
@@ -641,7 +641,7 @@ impl Strip<'_> {
     fn channel_roger(ui: &mut egui::Ui, tx: &mut crate::radio::TxSpec) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            theme::Line::new().legend("roger").show(ui);
+            Line::new().legend("roger").show(ui);
             let mut ms = tx.roger_ms;
             if ui
                 .add(
@@ -715,9 +715,9 @@ impl Strip<'_> {
             // One line, not a legend beside a value: two `Line`s in a row
             // sit on two baselines, and the mode read a pixel or two under
             // its caption.
-            theme::Line::new().legend("tx").value(mode.label()).show(ui);
+            Line::new().legend("tx").value(mode.label()).show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::Line::new()
+                Line::new()
                     .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
                     .size(11.0)
                     .show(ui);
@@ -731,7 +731,7 @@ impl Strip<'_> {
         let controls = TxControls::of(mode, chain);
         if !digital {
             ui.horizontal(|ui| {
-                theme::Line::new().legend("src").show(ui);
+                Line::new().legend("src").show(ui);
                 for src in [
                     TxSource::Mic,
                     TxSource::Tone,
@@ -750,7 +750,7 @@ impl Strip<'_> {
         // over them at the strip's default width, and the buttons underneath
         // could not be pressed.
         ui.horizontal(|ui| {
-            theme::Line::new().legend("shift").show(ui);
+            Line::new().legend("shift").show(ui);
             let mut khz = tx.shift_hz / 1e3;
             if ui
                 .add(
@@ -792,7 +792,7 @@ impl Strip<'_> {
                     },
                 );
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("file").show(ui);
+                    Line::new().legend("file").show(ui);
                     if ui
                         .button("OPEN")
                         .on_hover_text("Choose a Flipper .sub file to replay")
@@ -806,7 +806,7 @@ impl Strip<'_> {
                             sub_pick.file = None;
                             changed = true;
                         }
-                        theme::Line::new()
+                        Line::new()
                             .value(format!(
                                 "{} {:.4} MHz {}",
                                 f.label(),
@@ -816,7 +816,7 @@ impl Strip<'_> {
                             .size(11.0)
                             .show(ui);
                     }
-                    theme::Line::new().value(name).size(11.0).elided(ui);
+                    Line::new().value(name).size(11.0).elided(ui);
                 });
                 if let Some(f) = sub_file {
                     if f.file.frequency != (ch.freq + tx.shift_hz) as u64
@@ -832,7 +832,7 @@ impl Strip<'_> {
             }
             TxSource::Capture => {
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("iq").show(ui);
+                    Line::new().legend("iq").show(ui);
                     if ui
                         .button("OPEN")
                         .on_hover_text("Choose a recorded span to send back out")
@@ -851,7 +851,7 @@ impl Strip<'_> {
                         || "nothing: choose a capture".to_string(),
                         |c| format!("{} ({:.1}s)", c.label(), c.seconds),
                     );
-                    theme::Line::new().value(name).size(11.0).elided(ui);
+                    Line::new().value(name).size(11.0).elided(ui);
                 });
                 // What is about to be radiated, said before the key is
                 // pressed: a recording is somebody else's transmission, and
@@ -863,7 +863,7 @@ impl Strip<'_> {
                     };
                     ui.horizontal(|ui| {
                         ui.add_space(28.0);
-                        theme::Line::new()
+                        Line::new()
                             .value(format!(
                                 "{where_at}, sending on {:.4} MHz",
                                 (ch.freq + tx.shift_hz) / 1e6
@@ -873,7 +873,7 @@ impl Strip<'_> {
                     });
                     ui.horizontal(|ui| {
                         ui.add_space(28.0);
-                        theme::Line::new()
+                        Line::new()
                             .value("this puts somebody else's signal on the air")
                             .size(11.0)
                             .tint(theme::FAULT)
@@ -907,7 +907,7 @@ impl Strip<'_> {
                     label => label.to_lowercase(),
                 };
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend(&what).show(ui);
+                    Line::new().legend(&what).show(ui);
                     let chosen = std::path::Path::new(&path);
                     let name = match path.is_empty() {
                         true => "nothing: the test card".to_string(),
@@ -937,7 +937,7 @@ impl Strip<'_> {
                     // Cut short: a file name is as long as somebody else
                     // made it, and a strip as wide as the longest one is a
                     // strip nobody can use.
-                    theme::Line::new().value(name).size(11.0).elided(ui);
+                    Line::new().value(name).size(11.0).elided(ui);
                 });
                 for prm in controls.params.iter().filter(|p| p.name != carries) {
                     if let Some(cmd) = tx_field(ui, node, prm, keying) {
@@ -963,18 +963,18 @@ impl Strip<'_> {
                 // channel's audio is: the level beside the control that sets
                 // it, so an operator can see they are being heard.
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("mic").show(ui);
+                    Line::new().legend("mic").show(ui);
                     let mut g = tx.mic_gain / nodes::MIC_GAIN_MAX;
                     if ui.add(Fader::new(&mut g, mic).width(VU_W)).changed() {
                         tx.mic_gain = (g * nodes::MIC_GAIN_MAX).clamp(0.0, nodes::MIC_GAIN_MAX);
                         changed = true;
                     }
-                    theme::Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
+                    Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
                 });
                 if mic_clipped {
                     ui.horizontal(|ui| {
                         ui.add_space(28.0);
-                        theme::Line::new()
+                        Line::new()
                             .value("input clipping: lower the microphone boost")
                             .size(11.0)
                             .tint(theme::FAULT)
@@ -986,7 +986,7 @@ impl Strip<'_> {
             }
             TxSource::Tone => {
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("tone").show(ui);
+                    Line::new().legend("tone").show(ui);
                     let mut hz = tx.tone_hz;
                     if ui
                         .add(
@@ -1001,7 +1001,7 @@ impl Strip<'_> {
                         changed = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        theme::Line::new().legend("trim").show(ui);
+                        Line::new().legend("trim").show(ui);
                         let mut db = tx.trim_db;
                         if ui
                             .add(
@@ -1032,7 +1032,7 @@ impl Strip<'_> {
         }
         if let Some(why) = controls.as_ref().and_then(TxControls::missing) {
             ui.add_space(2.0);
-            theme::Line::new().note(why).size(11.0).wrapped(ui);
+            Line::new().note(why).size(11.0).wrapped(ui);
             return changed;
         }
         let keyed_here = keyed == Some(ch.id);
@@ -1055,7 +1055,7 @@ impl Strip<'_> {
             p.rect_filled(rect, 3.0, fill);
             p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
             let label = if keyed_here { "ON AIR" } else { "TRANSMIT" };
-            let font = FontId::new(13.0, egui::FontFamily::Name(theme::LEGEND_FONT.into()));
+            let font = theme::legend_font(13.0);
             let galley = p.layout_no_wrap(label.to_string(), font, ink);
             let icon = 22.0;
             let gap = 8.0;
@@ -1125,7 +1125,7 @@ impl Strip<'_> {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("channels").show(ui);
+                    Line::new().legend("channels").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // The way out of the strip is on the strip. It comes
                         // back from the panels at the right of the top bar,
@@ -1157,7 +1157,7 @@ impl Strip<'_> {
                 // for it under the master read as a second master.
                 let out_level = self.radio.map(|r| r.status.out_level()).unwrap_or(0.0);
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("master").show(ui);
+                    Line::new().legend("master").show(ui);
                     if ui.add(Fader::new(&mut self.st.volume, out_level).width(VU_W)).changed() {
                         self.cmds.push(Cmd::StageParam(
                             derived::SPEAKER,
@@ -1213,7 +1213,7 @@ impl Strip<'_> {
                 ui.add_space(8.0);
 
                 if self.st.channels.is_empty() {
-                    theme::Line::new().note("Click the spectrum to tune a channel.").show(ui);
+                    Line::new().note("Click the spectrum to tune a channel.").show(ui);
                 }
 
                 let states: Vec<ChannelState> =
@@ -1310,7 +1310,7 @@ impl Strip<'_> {
                                         )
                                         .ui(ui, |ui| {
                                             ui.set_min_width(180.0);
-                                            theme::Line::new().legend("group").show(ui);
+                                            Line::new().legend("group").show(ui);
                                             let r = ui.text_edit_singleline(self.memory_group);
                                             let enter = r.lost_focus()
                                                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1345,7 +1345,7 @@ impl Strip<'_> {
                                 }
                             });
                             if ch.doppler {
-                                theme::Line::new()
+                                Line::new()
                                     .legend("doppler")
                                     .value("following the pass")
                                     .tint(theme::TRACE)
@@ -1358,7 +1358,7 @@ impl Strip<'_> {
                             // tuning leaves several of these, and they are
                             // waiting for the dial, not wrong.
                             let reach = (ch.freq - self.center).abs() <= self.rate / 2.0;
-                            let mut line = theme::Line::new().legend(&bands::where_at(ch.freq));
+                            let mut line = Line::new().legend(&bands::where_at(ch.freq));
                             if !reach {
                                 line = line.gap(12.0).legend("outside span").tint(theme::FAULT);
                             }
@@ -1465,7 +1465,7 @@ impl Strip<'_> {
                                 let st = states.iter().find(|s| s.id == ch.id).copied();
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    theme::Line::new().legend("vol").show(ui);
+                                    Line::new().legend("vol").show(ui);
                                     let level = st.map(|s| s.level).unwrap_or(0.0);
                                     let fader = crate::chain::fader_id(ch.id);
                                     if ui.add(Fader::new(&mut ch.volume, level).width(VU_W)).changed() {
@@ -1556,17 +1556,17 @@ impl Strip<'_> {
                                     let (r, _) = ui
                                         .allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
                                     ui.painter().rect_filled(r, 1.0, theme::ETCH);
-                                    theme::Line::new().value(s.label.clone()).size(12.0).show(ui);
+                                    Line::new().value(s.label.clone()).size(12.0).show(ui);
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            theme::Line::new().legend("chain").show(ui);
+                                            Line::new().legend("chain").show(ui);
                                         },
                                     );
                                 });
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    theme::Line::new().legend("vol").show(ui);
+                                    Line::new().legend("vol").show(ui);
                                     let mut v = s.volume;
                                     if ui.add(Fader::new(&mut v, s.level).width(VU_W)).changed() {
                                         self.cmds.push(Cmd::StageParam(
@@ -1628,11 +1628,11 @@ fn tx_field(
     };
     let mut out = None;
     ui.horizontal(|ui| {
-        theme::Line::new().legend(&legend).show(ui);
+        Line::new().legend(&legend).show(ui);
         match (&prm.value, &prm.range) {
             (ParamValue::Choice(i), ParamRange::Choices(choices)) => {
                 let mut pick = *i;
-                if widgets::choice(
+                if form::choice(
                     ui,
                     (node, &prm.name),
                     &mut pick,
@@ -1650,7 +1650,7 @@ fn tx_field(
             (ParamValue::Text(sent), _) => {
                 let key = format!("{node}.{}", prm.name);
                 let text = keying.fields.entry(key).or_insert_with(|| sent.clone());
-                let r = widgets::field(ui, text, &legend);
+                let r = form::field(ui, text, &legend);
                 if r.lost_focus() && text.as_str() != sent.as_str() {
                     out = Some(Cmd::NodeParam(
                         node,
@@ -1660,7 +1660,7 @@ fn tx_field(
                 }
             }
             (v, _) => {
-                theme::Line::new().value(format!("{v:?}")).size(11.0).elided(ui);
+                Line::new().value(format!("{v:?}")).size(11.0).elided(ui);
             }
         }
     });
@@ -1669,9 +1669,9 @@ fn tx_field(
 
 fn decoding_row(ui: &mut egui::Ui, caption: &str, value: &str, tint: egui::Color32) {
     ui.horizontal(|ui| {
-        theme::Line::new().legend(caption).show(ui);
+        Line::new().legend(caption).show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            theme::Line::new().value(value).tint(tint).size(11.0).show(ui);
+            Line::new().value(value).tint(tint).size(11.0).show(ui);
         });
     });
 }

@@ -5,10 +5,10 @@
 
 use super::*;
 use crate::agent::config::{Reading, Speech};
-use crate::ui::widgets::{
-    card, choice, field, field_then, footer, hint, lamp, prose, reading, row, row_help, secret,
-    section, switch, tabs,
-};
+use egui_bench::form::{choice, field, field_then, footer, prose, row, row_help, secret, switch};
+use egui_bench::panel::{card, section, tabs};
+use egui_bench::readout::reading;
+use egui_bench::text::hint;
 
 /// Ask every USB serial port whether a sub-ghz-modem is on it.
 ///
@@ -159,7 +159,7 @@ impl App {
         let groups: Vec<String> = self.memory.groups().iter().map(|g| g.to_string()).collect();
         if groups.is_empty() {
             section(ui, "channels", "", |ui| {
-                lamp(ui, true, "nothing saved yet: SAVE on a strip channel puts it here");
+                panel::status(ui, true, "nothing saved yet: SAVE on a strip channel puts it here");
             });
         }
         // The scroll area is told the modal's width: inside it the width
@@ -174,7 +174,7 @@ impl App {
                     for (i, s) in rows {
                         ui.horizontal(|ui| {
                             let reach = (s.freq - self.center).abs() <= self.rate / 2.0;
-                            let mut line = theme::Line::new()
+                            let mut line = Line::new()
                                 .set(format!("{:.4}", s.freq / 1e6))
                                 .gap(10.0)
                                 .legend(&s.mode.label());
@@ -187,7 +187,7 @@ impl App {
                                 line = line.gap(10.0).set(tone.label());
                             }
                             if !s.label.is_empty() {
-                                line = line.gap(12.0).words(&s.label);
+                                line = line.gap(12.0).value(&s.label);
                             }
                             line.show(ui);
                             ui.with_layout(
@@ -247,11 +247,11 @@ impl App {
             });
             if !self.memory_note.is_empty() {
                 let ok = !self.memory_note.starts_with("nothing");
-                lamp(ui, ok, &self.memory_note.clone());
+                panel::status(ui, ok, &self.memory_note.clone());
             }
         });
         if let Some(p) = crate::memory::Memory::path() {
-            theme::Line::new().note(p.display().to_string()).size(10.0).elided(ui);
+            Line::new().note(p.display().to_string()).size(10.0).elided(ui);
         }
     }
 
@@ -380,7 +380,7 @@ impl App {
                     ui.add(
                         egui::DragValue::new(&mut lo).speed(0.1).range(0.0..=6000.0).suffix(" MHz"),
                     );
-                    theme::Line::new().legend("to").size(11.0).show(ui);
+                    Line::new().legend("to").size(11.0).show(ui);
                     ui.add(
                         egui::DragValue::new(&mut hi).speed(0.1).range(0.0..=6000.0).suffix(" MHz"),
                     );
@@ -484,7 +484,7 @@ impl App {
                         .unwrap_or_else(|| "starting".into());
                     match st.holding {
                         true => {
-                            lamp(ui, true, &format!("held at {at}"));
+                            panel::status(ui, true, &format!("held at {at}"));
                             if ui.button("RESUME").clicked() {
                                 acts.push(Cmd::StageParam(
                                     crate::chain::derived::SCAN,
@@ -493,15 +493,15 @@ impl App {
                                 ));
                             }
                         }
-                        false => lamp(
+                        false => panel::status(
                             ui,
                             true,
                             &format!("at {at}, {} steps taken, {} to a pass", st.steps, st.stops),
                         ),
                     }
                 }
-                Some(_) => lamp(ui, false, "the dial stays where you put it"),
-                None => lamp(ui, false, "no receiver running, so nothing is walking"),
+                Some(_) => panel::status(ui, false, "the dial stays where you put it"),
+                None => panel::status(ui, false, "no receiver running, so nothing is walking"),
             }
         });
 
@@ -517,11 +517,11 @@ impl App {
                         ui,
                         Some(theme::TRACE),
                         |ui| {
-                            theme::Line::new()
+                            Line::new()
                                 .value(format!("{mhz:.4} MHz"))
                                 .size(12.0)
                                 .gap(12.0)
-                                .heard(f.protocol.clone().unwrap_or_else(|| "unclaimed".into()))
+                                .measured(f.protocol.clone().unwrap_or_else(|| "unclaimed".into()))
                                 .size(11.0)
                                 .show(ui);
                             ui.with_layout(
@@ -544,7 +544,7 @@ impl App {
                             );
                         },
                         |ui| {
-                            theme::Line::new()
+                            Line::new()
                                 .legend("heard")
                                 .value(f.heard.to_string())
                                 .size(11.0)
@@ -606,7 +606,7 @@ impl App {
         // What the table does here, before the table: the question this
         // pane answers is "why is nothing decoding here".
         section(ui, "here", "what the table runs on the span in front of you", |ui| {
-            theme::Line::new()
+            Line::new()
                 .legend("tuned to")
                 .value(format!("{:.4} MHz", center / 1e6))
                 .size(12.0)
@@ -616,8 +616,8 @@ impl App {
                 .size(12.0)
                 .show(ui);
             match active.is_empty() {
-                false => lamp(ui, true, &format!("running {}", active.join(", "))),
-                true => lamp(
+                false => panel::status(ui, true, &format!("running {}", active.join(", "))),
+                true => panel::status(
                     ui,
                     false,
                     "no block covers this frequency and span: add one, or widen a range",
@@ -641,9 +641,9 @@ impl App {
                             true => format!("held at {at}"),
                             false => format!("at {at}, {} found", st.found.len()),
                         };
-                        lamp(ui, true, &what);
+                        panel::status(ui, true, &what);
                     }
-                    None => lamp(ui, false, "the dial stays where you put it"),
+                    None => panel::status(ui, false, "the dial stays where you put it"),
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     open_walk = ui.button("WALK").clicked();
@@ -707,10 +707,7 @@ impl App {
                         ui.add(
                             egui::TextEdit::singleline(name)
                                 .frame(egui::Frame::NONE)
-                                .font(egui::FontId::new(
-                                    11.5,
-                                    egui::FontFamily::Name(theme::LEGEND_FONT.into()),
-                                ))
+                                .font(theme::legend_font(11.5))
                                 .text_color(theme::VALUE)
                                 .desired_width(120.0)
                                 .hint_text("name"),
@@ -719,7 +716,7 @@ impl App {
                         // and says it in the red it is not running in.
                         if !regions.is_empty() {
                             let names: Vec<&str> = regions.iter().map(|p| p.id()).collect();
-                            let mut line = theme::Line::new().legend("region").value(names.join(", "));
+                            let mut line = Line::new().legend("region").value(names.join(", "));
                             if !here {
                                 line = line.tint(theme::FAULT);
                             }
@@ -764,11 +761,11 @@ impl App {
                         });
                         row(ui, "range", |ui| {
                             mhz_field(ui, lo_mhz);
-                            theme::Line::new().legend("to").show(ui);
+                            Line::new().legend("to").show(ui);
                             mhz_field(ui, hi_mhz);
-                            theme::Line::new().legend("MHz").show(ui);
+                            Line::new().legend("MHz").show(ui);
                             ui.add_space(8.0);
-                            theme::Line::new().legend("span").show(ui);
+                            Line::new().legend("span").show(ui);
                             ui.add(
                                 egui::DragValue::new(span_khz)
                                     .speed(10.0)
@@ -783,7 +780,7 @@ impl App {
                             crate::scanners::Front::Banks(_) => {
                                 row(ui, "widths", |ui| {
                                     field_then(ui, widths, "31.25, 125", 40.0, |ui| {
-                                        theme::Line::new().legend("kHz").show(ui);
+                                        Line::new().legend("kHz").show(ui);
                                     });
                                 });
                             }
@@ -793,9 +790,9 @@ impl App {
                                     // that looks like data reads as data
                                     // on a row that needs none.
                                     field_then(ui, channels, "none needed", 190.0, |ui| {
-                                        theme::Line::new().legend("MHz").show(ui);
+                                        Line::new().legend("MHz").show(ui);
                                         ui.add_space(6.0);
-                                        theme::Line::new().legend("margin").show(ui);
+                                        Line::new().legend("margin").show(ui);
                                         ui.add(
                                             egui::DragValue::new(margin_khz)
                                                 .speed(1.0)
@@ -807,7 +804,7 @@ impl App {
                             }
                         }
                         if bad {
-                            lamp(ui, false, "needs a name and a range that goes upwards");
+                            panel::status(ui, false, "needs a name and a range that goes upwards");
                         }
                     },
                 );
@@ -845,18 +842,18 @@ impl App {
                     self.send(Cmd::Scanners(table.clone()));
                 }
                 if self.chain.edit.manual {
-                    theme::Line::new().note(crate::i18n::t("ui.manual_locked")).size(11.0).show(ui);
+                    Line::new().note(crate::i18n::t("ui.manual_locked")).size(11.0).show(ui);
                 }
                 if ui.add_enabled(dirty, egui::Button::new("REVERT")).clicked() {
                     rows = self.scanners.list.iter().map(ScannerRow::from_scanner).collect();
                 }
                 if dirty {
-                    theme::Line::new().set("unsaved").size(11.0).show(ui);
+                    Line::new().set("unsaved").size(11.0).show(ui);
                 }
             });
         });
         if let Some(p) = crate::scanners::Scanners::path() {
-            theme::Line::new().note(p.display().to_string()).size(10.0).elided(ui);
+            Line::new().note(p.display().to_string()).size(10.0).elided(ui);
         }
 
         self.scanner_edit = Some(rows);
@@ -947,20 +944,20 @@ impl App {
             ui.add_space(4.0);
             let at = format!("{} at {}", c.model.trim(), host_of(&c.url));
             match (c.fault(), chat.as_ref().map(|s| &s.state)) {
-                (Some(why), _) => lamp(ui, false, why),
+                (Some(why), _) => panel::status(ui, false, why),
                 (None, Some(served::State::Failed(e))) => {
-                    lamp(ui, false, &format!("{}: {e}", host_of(&c.url)))
+                    panel::status(ui, false, &format!("{}: {e}", host_of(&c.url)))
                 }
                 (None, Some(served::State::Fetching)) => {
-                    lamp(ui, true, &format!("asking {} what it serves", host_of(&c.url)))
+                    panel::status(ui, true, &format!("asking {} what it serves", host_of(&c.url)))
                 }
                 (None, Some(served::State::Ready(m))) => {
                     match m.iter().any(|x| x.id == c.model.trim()) {
-                        true => lamp(ui, true, &at),
-                        false => lamp(ui, false, &format!("{at}, which it does not list")),
+                        true => panel::status(ui, true, &at),
+                        false => panel::status(ui, false, &format!("{at}, which it does not list")),
                     }
                 }
-                (None, None) => lamp(ui, true, &at),
+                (None, None) => panel::status(ui, true, &at),
             }
         });
         ui.add_space(8.0);
@@ -982,7 +979,7 @@ impl App {
                  squelch is open.",
                 |ui| {
                     ui.add(egui::DragValue::new(&mut c.hang_s).speed(0.1).range(0.0..=30.0));
-                    theme::Line::new().legend("s").show(ui);
+                    Line::new().legend("s").show(ui);
                 },
             );
             row_help(
@@ -993,18 +990,18 @@ impl App {
                  over, which is what to set on a busy channel.",
                 |ui| {
                     ui.add(egui::DragValue::new(&mut c.follow_s).speed(1.0).range(0.0..=600.0));
-                    theme::Line::new().legend("s").show(ui);
+                    Line::new().legend("s").show(ui);
                 },
             );
             ui.add_space(4.0);
             match c.wake.trim() {
-                "" => lamp(ui, false, "no name: it will listen and never answer"),
+                "" => panel::status(ui, false, "no name: it will listen and never answer"),
                 name => {
                     let follow = match c.follow_s > 0.0 {
                         true => format!(", then anything for {:.0} s", c.follow_s),
                         false => String::new(),
                     };
-                    lamp(
+                    panel::status(
                         ui,
                         true,
                         &format!(
@@ -1115,12 +1112,16 @@ impl App {
                     };
                     let voices = listing.map(|l| l.voices_of(&c.voice_model)).unwrap_or_default();
                     if !voices.is_empty() && !voices.iter().any(|v| v == c.voice.trim()) {
-                        lamp(ui, false, &format!("{from}, which has no voice {}", c.voice.trim()));
+                        panel::status(
+                            ui,
+                            false,
+                            &format!("{from}, which has no voice {}", c.voice.trim()),
+                        );
                     } else {
-                        lamp(ui, true, &from);
+                        panel::status(ui, true, &from);
                     }
                 }
-                Some(why) => lamp(ui, false, why),
+                Some(why) => panel::status(ui, false, why),
             }
         });
 
@@ -1198,14 +1199,20 @@ impl App {
             }
             ui.add_space(4.0);
             match (c.reading, c.reading_fault()) {
-                (_, Some(why)) => lamp(ui, false, why),
-                (Reading::Local, _) => lamp(ui, true, "a model here, on the Transcript pane"),
-                (Reading::Chat, _) => {
-                    lamp(ui, true, &format!("{} at {}", c.read_model.trim(), host_of(&c.url)))
+                (_, Some(why)) => panel::status(ui, false, why),
+                (Reading::Local, _) => {
+                    panel::status(ui, true, "a model here, on the Transcript pane")
                 }
-                (Reading::Server, _) => {
-                    lamp(ui, true, &format!("{} at {}", c.read_model.trim(), host_of(&c.read_url)))
-                }
+                (Reading::Chat, _) => panel::status(
+                    ui,
+                    true,
+                    &format!("{} at {}", c.read_model.trim(), host_of(&c.url)),
+                ),
+                (Reading::Server, _) => panel::status(
+                    ui,
+                    true,
+                    &format!("{} at {}", c.read_model.trim(), host_of(&c.read_url)),
+                ),
             }
         });
 
@@ -1340,9 +1347,9 @@ impl App {
             reading(ui, "folder holds", human_bytes(bytes));
             reading(ui, "this session", format!("{logged} packets"));
             if full {
-                lamp(ui, false, "stopped: today's file is over the limit on its own");
+                panel::status(ui, false, "stopped: today's file is over the limit on its own");
             } else if on {
-                lamp(ui, true, "writing");
+                panel::status(ui, true, "writing");
             }
         });
         ui.add_space(8.0);
@@ -1359,7 +1366,7 @@ impl App {
                     None => (false, "no receiver running".into()),
                 };
                 ui.horizontal(|ui| {
-                    theme::Line::new().value(f.address()).size(12.0).legend(f.kind.name).show(ui);
+                    Line::new().value(f.address()).size(12.0).legend(f.kind.name).show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("REMOVE").clicked() {
                             remove = Some(i);
@@ -1369,7 +1376,7 @@ impl App {
                 // A feed that is down says why. The alternative is a dark
                 // lamp and a guess about whether it is the network, the
                 // port, or a receiver somebody turned off.
-                lamp(ui, ok, &said);
+                panel::status(ui, ok, &said);
                 ui.add_space(4.0);
             }
             row_help(ui, "add", "A host, or host:port, and what it speaks.", |ui| {
@@ -1438,18 +1445,20 @@ impl App {
                 }
             });
             let Some(rec) = rec else {
-                lamp(ui, false, "no receiver running, so nothing is being kept");
+                panel::status(ui, false, "no receiver running, so nothing is being kept");
                 return;
             };
             reading(ui, "folder holds", human_bytes(rec.bytes));
             reading(ui, "this session", format!("{} calls", rec.calls));
             match (rec.full, rec.on, rec.recording) {
-                (true, ..) => lamp(ui, false, "stopped: the folder is at its limit"),
-                (_, true, 0) => lamp(ui, true, "recording, nobody talking"),
-                (_, true, n) => {
-                    lamp(ui, true, &format!("recording {n} over{}", if n == 1 { "" } else { "s" }))
-                }
-                (_, false, _) => lamp(ui, false, "off: nothing is kept"),
+                (true, ..) => panel::status(ui, false, "stopped: the folder is at its limit"),
+                (_, true, 0) => panel::status(ui, true, "recording, nobody talking"),
+                (_, true, n) => panel::status(
+                    ui,
+                    true,
+                    &format!("recording {n} over{}", if n == 1 { "" } else { "s" }),
+                ),
+                (_, false, _) => panel::status(ui, false, "off: nothing is kept"),
             }
         });
         ui.add_space(8.0);
@@ -1472,7 +1481,7 @@ impl App {
                 self.settings.edit(|s| s.transcribe_on = on);
             }
             let Some(e) = engine else {
-                lamp(ui, false, "no receiver running, so the model is not loaded");
+                panel::status(ui, false, "no receiver running, so the model is not loaded");
                 return;
             };
             row_help(ui, "model", "Bigger reads better and slower.", |ui| {
@@ -1490,9 +1499,11 @@ impl App {
                 }
             });
             match (&e.reading_on, on) {
-                (Some(where_), _) => lamp(ui, true, where_),
-                (None, true) => lamp(ui, true, &format!("{} on {}", e.label, e.device_choice)),
-                (None, false) => lamp(ui, false, "off: nothing is read"),
+                (Some(where_), _) => panel::status(ui, true, where_),
+                (None, true) => {
+                    panel::status(ui, true, &format!("{} on {}", e.label, e.device_choice))
+                }
+                (None, false) => panel::status(ui, false, "off: nothing is read"),
             }
         });
     }
@@ -1542,10 +1553,14 @@ impl App {
                 }
             }
             match (on, addr, server.as_ref()) {
-                (false, _, _) => lamp(ui, false, "off: nothing is served"),
-                (true, None, _) => lamp(ui, false, "not a port or a host:port"),
-                (true, _, Some(s)) => lamp(ui, true, &format!("listening on {}", s.addr())),
-                (true, Some(a), None) => lamp(ui, false, &format!("{a} is not being served yet")),
+                (false, _, _) => panel::status(ui, false, "off: nothing is served"),
+                (true, None, _) => panel::status(ui, false, "not a port or a host:port"),
+                (true, _, Some(s)) => {
+                    panel::status(ui, true, &format!("listening on {}", s.addr()))
+                }
+                (true, Some(a), None) => {
+                    panel::status(ui, false, &format!("{a} is not being served yet"))
+                }
             }
         });
     }
@@ -1584,14 +1599,16 @@ impl App {
                 }
             }
             match (on, addr, tnc.as_ref()) {
-                (false, _, _) => lamp(ui, false, "off: nothing is served"),
-                (true, None, _) => lamp(ui, false, "not a port or a host:port"),
+                (false, _, _) => panel::status(ui, false, "off: nothing is served"),
+                (true, None, _) => panel::status(ui, false, "not a port or a host:port"),
                 (true, _, Some(t)) => match (t.error(), t.bound()) {
-                    (Some(e), _) => lamp(ui, false, &e),
-                    (None, Some(b)) => lamp(ui, true, &format!("listening on {b}")),
-                    (None, None) => lamp(ui, false, "not listening"),
+                    (Some(e), _) => panel::status(ui, false, &e),
+                    (None, Some(b)) => panel::status(ui, true, &format!("listening on {b}")),
+                    (None, None) => panel::status(ui, false, "not listening"),
                 },
-                (true, Some(a), None) => lamp(ui, false, &format!("{a} is not being served yet")),
+                (true, Some(a), None) => {
+                    panel::status(ui, false, &format!("{a} is not being served yet"))
+                }
             }
         });
     }
@@ -1773,7 +1790,7 @@ impl App {
         let busy = matches!(state, crate::update::State::Checking);
         section(ui, t("settings.version"), "what this build is, and the newest release", |ui| {
             ui.horizontal(|ui| {
-                theme::Line::new()
+                Line::new()
                     .legend("running")
                     .value(crate::update::running())
                     .size(13.0)
@@ -1796,15 +1813,19 @@ impl App {
                 if features.is_empty() { "none".to_string() } else { features.join(" ") },
             );
             match &state {
-                crate::update::State::Unchecked => lamp(ui, true, "not checked yet"),
+                crate::update::State::Unchecked => panel::status(ui, true, "not checked yet"),
                 crate::update::State::Checking => {
-                    lamp(ui, true, "asking GitHub for the latest release");
+                    panel::status(ui, true, "asking GitHub for the latest release");
                 }
                 crate::update::State::Current(r) => {
-                    lamp(ui, true, &format!("up to date, latest release is {}", r.version));
+                    panel::status(
+                        ui,
+                        true,
+                        &format!("up to date, latest release is {}", r.version),
+                    );
                 }
                 crate::update::State::Newer(r) => {
-                    lamp(ui, true, &format!("{} is available", r.version));
+                    panel::status(ui, true, &format!("{} is available", r.version));
                     match &r.asset {
                         Some(a) => {
                             reading(
@@ -1824,7 +1845,7 @@ impl App {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(r.page.clone()));
                     }
                 }
-                crate::update::State::Failed(e) => lamp(ui, false, e),
+                crate::update::State::Failed(e) => panel::status(ui, false, e),
             }
         });
         // The check runs on a thread of its own, so without this the answer
@@ -1864,15 +1885,15 @@ impl App {
                 // rude rather than necessary.
                 let must_close = installer && (cfg!(windows) || cfg!(target_os = "macos"));
                 if must_close {
-                    lamp(ui, true, "the installer is open; WaveShark is closing");
+                    panel::status(ui, true, "the installer is open; WaveShark is closing");
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 } else if installer {
-                    lamp(ui, true, "handed to the system installer");
+                    panel::status(ui, true, "handed to the system installer");
                 } else {
-                    lamp(ui, true, &format!("saved to {}", path.display()));
+                    panel::status(ui, true, &format!("saved to {}", path.display()));
                 }
             }
-            Install::Failed(e) => lamp(ui, false, &e),
+            Install::Failed(e) => panel::status(ui, false, &e),
         }
     }
 
@@ -1970,7 +1991,7 @@ impl App {
                 (saved.is_empty(), "no gps answering: the station is where it was set".into())
             }
         };
-        lamp(ui, ok, &line);
+        panel::status(ui, ok, &line);
         // The reader is not the radio's, so this pane keeps its own clock:
         // without it a fix arriving while nothing else is moving would sit
         // unshown until the pointer did.
@@ -2017,7 +2038,7 @@ impl App {
                     pick = Some(f.transport.clone());
                 }
                 let line = format!("{path}, {}", f.info.summary());
-                theme::Line::new().value(line).show(ui);
+                Line::new().value(line).show(ui);
             });
         }
         if let Some(t) = pick {
@@ -2056,7 +2077,7 @@ impl App {
                     ui,
                     rail,
                     |ui| {
-                        theme::Line::new()
+                        Line::new()
                             .legend(&r.which.label())
                             .note(r.which.publisher())
                             .size(10.5)
@@ -2094,7 +2115,7 @@ impl App {
                         });
                     },
                     |ui| {
-                        theme::Line::new()
+                        Line::new()
                             .legend("held")
                             .value(match r.rows {
                                 Some(n) => format!("{n} rows"),
@@ -2128,10 +2149,27 @@ impl App {
                         // button reading CHECKING for four minutes is
                         // indistinguishable from one that has hung.
                         if r.busy && (r.progress.running || r.progress.done > 0) {
-                            widgets::progress(ui, r.progress.done, r.progress.total);
+                            let (done, total) = (r.progress.done, r.progress.total);
+                            let fmt = crate::data::fmt_bytes;
+                            let said = match total.filter(|t| *t > 0) {
+                                Some(t) => format!(
+                                    "{} of {} ({:.0}%)",
+                                    fmt(done),
+                                    fmt(t),
+                                    done as f64 / t as f64 * 100.0
+                                ),
+                                None => format!("{} so far", fmt(done)),
+                            };
+                            egui_bench::meter::progress(
+                                ui,
+                                "downloading",
+                                done as f32,
+                                total.map(|t| t as f32),
+                                &said,
+                            );
                         }
                         if let Some(e) = &r.error {
-                            lamp(ui, false, e);
+                            panel::status(ui, false, e);
                         }
                         // What the descriptions read as, not what landed:
                         // a file that fails its own vectors is on disc and
@@ -2140,12 +2178,14 @@ impl App {
                             && let Some(got) = crate::protocols::last()
                         {
                             match got.refused.first() {
-                                None => lamp(
+                                None => panel::status(
                                     ui,
                                     true,
                                     &format!("{} descriptions installed", got.names.len()),
                                 ),
-                                Some((path, why)) => lamp(ui, false, &format!("{path}: {why}")),
+                                Some((path, why)) => {
+                                    panel::status(ui, false, &format!("{path}: {why}"))
+                                }
                             }
                         }
                         if let Some(b) = r.blocked {
@@ -2171,7 +2211,7 @@ impl App {
             }
             help(ui, t("settings.data.help"));
             if let Some(dir) = crate::data::cache_dir() {
-                theme::Line::new().note(dir.display().to_string()).size(10.0).elided(ui);
+                Line::new().note(dir.display().to_string()).size(10.0).elided(ui);
             }
         });
         // A check runs on its own thread and finishes without an event, so
@@ -2258,8 +2298,8 @@ impl App {
                     );
                     let complete = !w.name.trim().is_empty() && !w.token.trim().is_empty();
                     match complete {
-                        true => lamp(ui, true, &format!("uploading as {}", w.name.trim())),
-                        false => lamp(ui, false, "no account: nothing can be uploaded"),
+                        true => panel::status(ui, true, &format!("uploading as {}", w.name.trim())),
+                        false => panel::status(ui, false, "no account: nothing can be uploaded"),
                     }
                 });
                 ui.add_space(8.0);
@@ -2296,10 +2336,12 @@ impl App {
                             }
                             reading(ui, "spool", st.spool.display().to_string());
                             if let Some(e) = &st.error {
-                                lamp(ui, false, e);
+                                panel::status(ui, false, e);
                             }
                         }
-                        None => lamp(ui, false, "no receiver running, so nothing is collected"),
+                        None => {
+                            panel::status(ui, false, "no receiver running, so nothing is collected")
+                        }
                     }
                 });
                 footer(ui, |ui| {
@@ -2378,10 +2420,12 @@ impl App {
                             );
                             reading(ui, "spool", st.spool.display().to_string());
                             if let Some(e) = &st.error {
-                                lamp(ui, false, e);
+                                panel::status(ui, false, e);
                             }
                         }
-                        None => lamp(ui, false, "no receiver running, so nothing is collected"),
+                        None => {
+                            panel::status(ui, false, "no receiver running, so nothing is collected")
+                        }
                     }
                 });
                 footer(ui, |ui| {
@@ -2522,7 +2566,7 @@ impl App {
                                     st.devices,
                                     st.published
                                 );
-                                lamp(ui, st.connected, &said);
+                                panel::status(ui, st.connected, &said);
                                 if st.dropped > 0 {
                                     reading(
                                         ui,
@@ -2541,11 +2585,15 @@ impl App {
                                     );
                                 }
                                 if let Some(e) = &st.error {
-                                    lamp(ui, false, e);
+                                    panel::status(ui, false, e);
                                 }
                             }
-                            Some(_) => lamp(ui, false, "nothing is being published"),
-                            None => lamp(ui, false, "no receiver running, so nothing is published"),
+                            Some(_) => panel::status(ui, false, "nothing is being published"),
+                            None => panel::status(
+                                ui,
+                                false,
+                                "no receiver running, so nothing is published",
+                            ),
                         }
                     },
                 );
@@ -2678,17 +2726,17 @@ impl App {
                         f.request_focus();
                     }
                     match (&connecting, &edit.err) {
-                        (Some(h), _) => lamp(ui, false, &format!("connecting to {h}")),
-                        (None, Some(e)) => lamp(ui, false, e),
+                        (Some(h), _) => panel::status(ui, false, &format!("connecting to {h}")),
+                        (None, Some(e)) => panel::status(ui, false, e),
                         (None, None) if edit.host.trim().is_empty() => {
-                            lamp(ui, false, "no address")
+                            panel::status(ui, false, "no address")
                         }
                         (None, None) => {
                             let what = match edit.over {
                                 Over::Samples => edit.proto.name(),
                                 Over::Frames => edit.feed.name,
                             };
-                            lamp(ui, true, &format!("{what} at {}", edit.host.trim()))
+                            panel::status(ui, true, &format!("{what} at {}", edit.host.trim()))
                         }
                     }
                 });
@@ -2768,15 +2816,19 @@ impl App {
                         FREE_HELP,
                     );
                     match (&connecting, &edit.err, &bad_hz, &servers) {
-                        (Some(h), _, _, _) => lamp(ui, false, &format!("connecting to {h}")),
-                        (None, Some(e), _, _) => lamp(ui, false, e),
-                        (None, None, Some(e), _) => lamp(ui, false, e),
-                        (None, None, None, Some(v)) => {
-                            lamp(ui, true, &format!("{} of {} servers", kept.len(), v.len()))
+                        (Some(h), _, _, _) => {
+                            panel::status(ui, false, &format!("connecting to {h}"))
                         }
+                        (None, Some(e), _, _) => panel::status(ui, false, e),
+                        (None, None, Some(e), _) => panel::status(ui, false, e),
+                        (None, None, None, Some(v)) => panel::status(
+                            ui,
+                            true,
+                            &format!("{} of {} servers", kept.len(), v.len()),
+                        ),
                         (None, None, None, None) => match crate::data::failed(which) {
-                            Some(e) => lamp(ui, false, &e),
-                            None => lamp(ui, false, "reading the directory"),
+                            Some(e) => panel::status(ui, false, &e),
+                            None => panel::status(ui, false, "reading the directory"),
                         },
                     }
                 });
@@ -2878,8 +2930,8 @@ impl App {
                         },
                     );
                     match edit.resolve() {
-                        Err(e) => lamp(ui, false, &e),
-                        Ok(c) => lamp(
+                        Err(e) => panel::status(ui, false, &e),
+                        Ok(c) => panel::status(
                             ui,
                             true,
                             &format!(
@@ -3072,7 +3124,7 @@ impl App {
     /// intermodulation rather than a prettier display.
     fn radio_settings(&mut self, ui: &mut egui::Ui) {
         let Some(radio) = self.radio.as_ref() else {
-            section(ui, "radio", "", |ui| lamp(ui, false, "no radio running"));
+            section(ui, "radio", "", |ui| panel::status(ui, false, "no radio running"));
             return;
         };
         let controls = radio.status.radio();
@@ -3083,7 +3135,7 @@ impl App {
 
         section(ui, "gain", "each stage of the front end, in order from the aerial", |ui| {
             if controls.stages.is_empty() {
-                lamp(ui, true, "this device has no adjustable stages");
+                panel::status(ui, true, "this device has no adjustable stages");
             }
             for (stage, mode) in &controls.stages {
                 let auto = *mode == GainMode::Auto;
@@ -3117,7 +3169,7 @@ impl App {
                     // Under AUTO the number is the hardware's business and
                     // showing a stale one invites the operator to believe it.
                     let text = if auto { "auto".to_string() } else { format!("{db:.1} dB") };
-                    theme::Line::new().set(text).size(11.0).show(ui);
+                    Line::new().set(text).size(11.0).show(ui);
                     if stage.auto {
                         let mut on = auto;
                         if ui.checkbox(&mut on, "auto").changed() {
@@ -3146,7 +3198,7 @@ impl App {
                             self.radio_settings.tx_gain_db = stage.quantise(db);
                             changed = true;
                         }
-                        theme::Line::new().set(format!("{db:.0} dB")).size(11.0).show(ui);
+                        Line::new().set(format!("{db:.0} dB")).size(11.0).show(ui);
                     },
                 );
             }
@@ -3274,15 +3326,17 @@ impl App {
             let station = self.setting(|s| s.rds());
             let pi = self.setting(|s| s.rds_pi.clone());
             match (on, station) {
-                (false, _) => lamp(ui, true, "the programme alone, with no data on it"),
-                (true, Some(s)) => lamp(
+                (false, _) => panel::status(ui, true, "the programme alone, with no data on it"),
+                (true, Some(s)) => panel::status(
                     ui,
                     true,
                     &format!("{:04X} \"{}\" on a WFM channel", s.pi, s.label().trim_end()),
                 ),
-                (true, None) => {
-                    lamp(ui, false, &format!("{pi:?} is not four hex digits, so nothing is sent"))
-                }
+                (true, None) => panel::status(
+                    ui,
+                    false,
+                    &format!("{pi:?} is not four hex digits, so nothing is sent"),
+                ),
             }
         });
     }
@@ -3318,13 +3372,10 @@ impl App {
             ui,
             None,
             |ui| {
-                theme::Line::new().legend("trim").show(ui);
+                Line::new().legend("trim").show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     cut = ui.add_enabled(!running, egui::Button::new("TRIM")).clicked();
-                    theme::Line::new()
-                        .note("a shorter capture beside this one")
-                        .size(10.5)
-                        .elided(ui);
+                    Line::new().note("a shorter capture beside this one").size(10.5).elided(ui);
                 });
             },
             |ui| {
@@ -3398,14 +3449,14 @@ impl App {
                         );
                     }
                     _ => {
-                        lamp(ui, false, "this capture has no centre and rate to write");
+                        panel::status(ui, false, "this capture has no centre and rate to write");
                     }
                 }
                 if running {
-                    lamp(ui, true, "cutting");
+                    panel::status(ui, true, "cutting");
                 } else if let Some(said) = &self.trim.said {
                     match said {
-                        Ok(c) => lamp(
+                        Ok(c) => panel::status(
                             ui,
                             true,
                             &format!(
@@ -3415,7 +3466,7 @@ impl App {
                                 100.0 * c.share()
                             ),
                         ),
-                        Err(e) => lamp(ui, false, e),
+                        Err(e) => panel::status(ui, false, e),
                     }
                 }
             },
@@ -3644,7 +3695,7 @@ impl App {
                     let _ = std::fs::create_dir_all(&dir);
                     ui.ctx().open_url(egui::OpenUrl::new_tab(file_url(&dir)));
                 }
-                theme::Line::new().value(dir.display().to_string()).size(11.0).elided(ui);
+                Line::new().value(dir.display().to_string()).size(11.0).elided(ui);
             });
             ui.add_space(4.0);
             // The folder first: it is the number the limit above is about,
@@ -3661,13 +3712,13 @@ impl App {
                 reading(ui, "files", bursts.to_string());
             }
             if cap_full {
-                lamp(ui, false, "stopped: the folder is at its limit");
+                panel::status(ui, false, "stopped: the folder is at its limit");
             } else if armed {
                 // What the setting comes to right now, which is the only way
                 // to tell a threshold nothing will ever reach from one the
                 // noise crosses: both look the same as a number in a box.
                 match threshold_db.is_finite() {
-                    true => lamp(
+                    true => panel::status(
                         ui,
                         true,
                         &format!(
@@ -3679,10 +3730,14 @@ impl App {
                             level_db.max(-199.0)
                         ),
                     ),
-                    false => lamp(ui, false, "waiting for a floor to measure the threshold from"),
+                    false => panel::status(
+                        ui,
+                        false,
+                        "waiting for a floor to measure the threshold from",
+                    ),
                 }
             } else if cap_on {
-                lamp(ui, true, "writing");
+                panel::status(ui, true, "writing");
             }
         });
     }
@@ -3754,7 +3809,7 @@ const FEED_HELP: &str = "The wire format the far end writes. Beast carries a sig
 fn server_row(ui: &mut egui::Ui, server: &str) -> bool {
     let mut open = false;
     ui.horizontal(|ui| {
-        theme::Line::new().value(server).size(13.0).show(ui);
+        Line::new().value(server).size(13.0).show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             open = ui.small_button("PAGE").clicked();
         });
@@ -3776,7 +3831,7 @@ fn listed_row(ui: &mut egui::Ui) -> bool {
             Some(v) => format!("{} in the Airspy directory", v.len()),
             None => "the Airspy directory".to_string(),
         };
-        theme::Line::new().value(said).size(13.0).show(ui);
+        Line::new().value(said).size(13.0).show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             open = ui.small_button("FIND").clicked();
         });
@@ -3800,7 +3855,7 @@ fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server, idle: bool) -
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 tune = ui.add_enabled(idle, egui::Button::new("TUNE")).clicked();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    theme::Line::new()
+                    Line::new()
                         .value(&s.description)
                         .size(12.0)
                         .gap(12.0)
@@ -3811,13 +3866,13 @@ fn server_card(ui: &mut egui::Ui, s: &datasets::spyserver::Server, idle: bool) -
             });
         },
         |ui| {
-            theme::Line::new()
+            Line::new()
                 .legend("range")
                 .value(format!("{}-{} MHz", bare_mhz(s.min_hz), bare_mhz(s.max_hz)))
                 .size(12.0)
                 .gap(18.0)
                 .legend("on")
-                .heard(mhz(s.center_hz))
+                .measured(mhz(s.center_hz))
                 .size(12.0)
                 .gap(18.0)
                 .legend("span")

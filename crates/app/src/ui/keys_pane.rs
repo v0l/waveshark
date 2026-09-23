@@ -36,7 +36,7 @@ impl Keys<'_> {
             let enc = live.iter().filter(|s| s.aie != 0).count();
             let n = live.len();
             let chan = if n == 1 { "channel" } else { "channels" };
-            theme::Line::new()
+            Line::new()
                 .legend("encryption keys")
                 .value(format!("{n} {chan}, {enc} enciphered"))
                 .size(11.0)
@@ -79,16 +79,13 @@ impl Keys<'_> {
         let mut forget: Option<(System, String)> = None;
         // Amber rail: these are the operator's own settings, like a key
         // typed for a cell.
-        widgets::card(
+        panel::card(
             ui,
             (!held.is_empty()).then_some(theme::READOUT),
             |ui| {
-                theme::Line::new()
-                    .legend("channel keys")
-                    .value(format!("{} held", held.len()))
-                    .show(ui);
+                Line::new().legend("channel keys").value(format!("{} held", held.len())).show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::Line::new()
+                    Line::new()
                         .value("default and public channels are always read")
                         .tint(theme::LEGEND)
                         .size(11.0)
@@ -98,12 +95,8 @@ impl Keys<'_> {
             |ui| {
                 for c in &held {
                     ui.horizontal(|ui| {
-                        theme::Line::new()
-                            .legend(c.system.as_str())
-                            .value(&c.name)
-                            .size(11.0)
-                            .show(ui);
-                        theme::Line::new()
+                        Line::new().legend(c.system.as_str()).value(&c.name).size(11.0).show(ui);
+                        Line::new()
                             .value(decode::channel_keys::hex(&c.key))
                             .tint(theme::LEGEND)
                             .size(11.0)
@@ -189,10 +182,10 @@ impl Keys<'_> {
                     }
                     match &self.st.node_result {
                         Some(Ok(s)) => {
-                            theme::Line::new().value(s).tint(theme::OK).size(11.0).show(ui);
+                            Line::new().value(s).tint(theme::OK).size(11.0).show(ui);
                         }
                         Some(Err(e)) => {
-                            theme::Line::new().value(e).tint(theme::FAULT).size(11.0).show(ui);
+                            Line::new().value(e).tint(theme::FAULT).size(11.0).show(ui);
                         }
                         None => {}
                     }
@@ -260,17 +253,17 @@ impl Keys<'_> {
             (false, true) => Some(theme::READOUT),
             (false, false) => Some(theme::FAULT),
         };
-        widgets::card(
+        panel::card(
             ui,
             rail,
             |ui| {
-                theme::Line::new()
+                Line::new()
                     .value(format!("{:.4} MHz", s.channel_hz / 1e6))
                     .legend(&format!("{}/{}/cc{}", s.mcc, s.mnc, s.colour))
                     .show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let cipher = if s.aie == 0 { "clear".into() } else { format!("AIE-{}", s.aie) };
-                    theme::Line::new()
+                    Line::new()
                         .value(cipher)
                         .tint(if s.aie == 0 { theme::LEGEND } else { theme::READOUT })
                         .size(11.0)
@@ -278,7 +271,7 @@ impl Keys<'_> {
                 });
             },
             |ui| {
-                let mut line = theme::Line::new()
+                let mut line = Line::new()
                     .legend("key")
                     .value(if s.has_key { "in force" } else { "none held" })
                     .tint(if s.has_key { theme::VALUE } else { theme::LEGEND })
@@ -297,7 +290,7 @@ impl Keys<'_> {
                 // nothing shows, which is correct.
                 if !s.has_key {
                     if let Some((text, colour)) = recovery_label(s.recovery) {
-                        theme::Line::new()
+                        Line::new()
                             .legend("search")
                             .value(text)
                             .tint(colour)
@@ -326,7 +319,7 @@ impl Keys<'_> {
         // Manual entry for an enciphered cell with no key.
         if s.aie != 0 && !s.has_key {
             ui.horizontal(|ui| {
-                theme::Line::new().legend("key").show(ui);
+                Line::new().legend("key").show(ui);
                 let buf = self.st.typing.entry(cell.tag_key()).or_default();
                 ui.add(
                     egui::TextEdit::singleline(buf)
@@ -351,7 +344,7 @@ impl Keys<'_> {
         // key and working on TEA2/3. Session-only; not persisted yet.
         if s.aie != 0 {
             ui.horizontal(|ui| {
-                theme::Line::new().legend("identity").show(ui);
+                Line::new().legend("identity").show(ui);
                 let key = format!("{}#id", cell.tag_key());
                 let buf = self.st.typing.entry(key.clone()).or_default();
                 ui.add(

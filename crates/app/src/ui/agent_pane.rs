@@ -116,13 +116,18 @@ impl AgentView<'_> {
                     None => "answering".to_string(),
                     Some(p) => p.label().to_string(),
                 };
-                let mut line = theme::Line::new().legend("heard");
+                let mut line = Line::new().legend("heard");
                 // Who said it, where the radio said so: an analogue PTT-ID
                 // or a decoded call's caller. The model is told the same.
                 if let Some(from) = &h.from {
                     line = line.value(from.clone()).size(11.0);
                 }
-                line.heard(h.text.clone()).size(11.0).gap(10.0).legend(&note).size(11.0).elided(ui);
+                line.measured(h.text.clone())
+                    .size(11.0)
+                    .gap(10.0)
+                    .legend(&note)
+                    .size(11.0)
+                    .elided(ui);
             });
         }
         // Whether the next over has to say the name. An operator who has just
@@ -133,7 +138,7 @@ impl AgentView<'_> {
         {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                theme::Line::new()
+                Line::new()
                     .legend("open")
                     .value(format!("no name needed for {left:.0} s"))
                     .size(11.0)
@@ -144,11 +149,11 @@ impl AgentView<'_> {
 
         if let Some(why) = fault {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-                widgets::card(
+                panel::card(
                     ui,
                     Some(theme::FAULT),
                     |ui| {
-                        theme::Line::new().legend("agent").set(why).tint(theme::FAULT).show(ui);
+                        Line::new().legend("agent").set(why).tint(theme::FAULT).show(ui);
                     },
                     |ui| {
                         hint(
@@ -198,7 +203,7 @@ impl AgentView<'_> {
                     let quiet = !self.air.state.busy();
                     if !self.air.log.is_empty() && !self.chat.turns.is_empty() {
                         ui.add_space(6.0);
-                        theme::Line::new().legend("on the air").size(11.0).show(ui);
+                        Line::new().legend("on the air").size(11.0).show(ui);
                         ui.add_space(4.0);
                     }
                     for (nth, x) in self.air.log.iter().enumerate() {
@@ -211,11 +216,11 @@ impl AgentView<'_> {
                             Ok(_) => Some(theme::TRACE),
                             Err(_) => Some(theme::FAULT),
                         };
-                        widgets::card(
+                        panel::card(
                             ui,
                             rail,
                             |ui| {
-                                theme::Line::new().legend("heard").value(when).size(11.0).show(ui);
+                                Line::new().legend("heard").value(when).size(11.0).show(ui);
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -244,12 +249,12 @@ impl AgentView<'_> {
                                 );
                             },
                             |ui| {
-                                theme::Line::new().heard(x.heard.clone()).wrapped(ui);
+                                Line::new().measured(x.heard.clone()).wrapped(ui);
                                 match &x.said {
                                     Ok(said) => {
                                         ui.add_space(2.0);
-                                        theme::Line::new().legend("said").size(11.0).show(ui);
-                                        theme::Line::new()
+                                        Line::new().legend("said").size(11.0).show(ui);
+                                        Line::new()
                                             .note(said.clone())
                                             .size(13.0)
                                             .tint(theme::VALUE)
@@ -268,7 +273,7 @@ impl AgentView<'_> {
                                             );
                                             let c = rect.center();
                                             ui.painter().circle_filled(c, 3.0, theme::FAULT);
-                                            theme::Line::new()
+                                            Line::new()
                                                 .value(short_fault(e))
                                                 .tint(theme::FAULT)
                                                 .size(11.0)
@@ -285,7 +290,7 @@ impl AgentView<'_> {
                         ui.horizontal(|ui| {
                             ui.add(egui::Spinner::new().size(12.0));
                             ui.add_space(6.0);
-                            theme::Line::new().legend("thinking").size(11.0).show(ui);
+                            Line::new().legend("thinking").size(11.0).show(ui);
                         });
                     }
                 });
@@ -298,7 +303,7 @@ impl AgentView<'_> {
     /// its name, and the state of its voice.
     fn status_line(&self, ui: &mut egui::Ui, model: String) {
         ui.add_space(12.0);
-        theme::Line::new()
+        Line::new()
             .legend("model")
             .set(match model.is_empty() {
                 true => "none".to_string(),
@@ -307,7 +312,7 @@ impl AgentView<'_> {
             .size(11.0)
             .show(ui);
         ui.add_space(12.0);
-        theme::Line::new()
+        Line::new()
             .legend("radio")
             .value(if self.running { "running" } else { "stopped" })
             .size(11.0)
@@ -323,18 +328,13 @@ impl AgentView<'_> {
                 (State::OnAir, _) => ("on air".into(), theme::FAULT),
                 (s, _) => (s.label().into(), theme::READOUT),
             };
-            theme::Line::new()
-                .legend(&format!("channel {id}"))
-                .value(word)
-                .size(11.0)
-                .tint(tint)
-                .show(ui);
+            Line::new().legend(&format!("channel {id}")).value(word).size(11.0).tint(tint).show(ui);
             // The name it answers to, which has to survive the speech
             // model: an operator saying it and getting nothing needs to
             // see what the receiver is listening for.
             if !self.wake.trim().is_empty() {
                 ui.add_space(12.0);
-                theme::Line::new().legend("name").set(self.wake.trim()).size(11.0).show(ui);
+                Line::new().legend("name").set(self.wake.trim()).size(11.0).show(ui);
             }
         }
         // The speech model, which is the slow half of an answer and the
@@ -344,7 +344,7 @@ impl AgentView<'_> {
             && let Some((word, tint, detail)) = speech_line(&self.voice)
         {
             ui.add_space(12.0);
-            let r = theme::Line::new().legend("voice").value(word).size(11.0).tint(tint).elided(ui);
+            let r = Line::new().legend("voice").value(word).size(11.0).tint(tint).elided(ui);
             if let Some(d) = detail {
                 r.on_hover_text(d);
             }
@@ -404,18 +404,18 @@ impl AgentView<'_> {
 fn draw(ui: &mut egui::Ui, turn: &Turn) {
     match turn {
         Turn::You(text) => {
-            theme::Line::new().legend("you").size(11.0).show(ui);
-            theme::Line::new().set(text.clone()).wrapped(ui);
+            Line::new().legend("you").size(11.0).show(ui);
+            Line::new().set(text.clone()).wrapped(ui);
         }
         Turn::Said(text) => {
             // Named, like the operator's own lines: a conversation where only
             // one side is labelled is one where the reader has to work out
             // who is talking from the typeface.
-            theme::Line::new().legend("agent").size(11.0).show(ui);
+            Line::new().legend("agent").size(11.0).show(ui);
             // The thing on this pane to read, so it is the brightest and the
             // only prose: the note face, which is proportional, at the size a
             // reading is set in rather than the size a hint is.
-            theme::Line::new().note(text.clone()).size(13.0).tint(theme::VALUE).wrapped(ui);
+            Line::new().note(text.clone()).size(13.0).tint(theme::VALUE).wrapped(ui);
         }
         Turn::Did { name, args, answer } => {
             // A tool call is a margin note about how the answer was arrived
@@ -433,7 +433,7 @@ fn draw(ui: &mut egui::Ui, turn: &Turn) {
             ui.horizontal(|ui| {
                 // Indented off the prose: this is the margin, not the page.
                 ui.add_space(10.0);
-                let mut line = theme::Line::new().legend(name).size(10.5).tint(tint);
+                let mut line = Line::new().legend(name).size(10.5).tint(tint);
                 if !args.is_empty() && args != "{}" {
                     // Arguments as they were written, not shouted: a
                     // frequency in caps is a frequency misread.
@@ -447,12 +447,12 @@ fn draw(ui: &mut egui::Ui, turn: &Turn) {
             if let Some(Err(e)) = answer {
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    theme::Line::new().note(e.clone()).size(11.5).tint(theme::FAULT).wrapped(ui);
+                    Line::new().note(e.clone()).size(11.5).tint(theme::FAULT).wrapped(ui);
                 });
             }
         }
         Turn::Fault(e) => {
-            theme::Line::new().value(e.clone()).tint(theme::FAULT).wrapped(ui);
+            Line::new().value(e.clone()).tint(theme::FAULT).wrapped(ui);
         }
     }
 }

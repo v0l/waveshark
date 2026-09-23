@@ -12,8 +12,10 @@
 //! other views keep. Nothing on this pane may be the only place a number is
 //! computed, or the dashboard becomes a second opinion about the receiver.
 
-use super::widgets::{card, hint, speed_trace};
+use super::widgets::speed_trace;
 use super::*;
+use egui_bench::panel::card;
+use egui_bench::text::hint;
 use std::sync::atomic::Ordering::Relaxed;
 
 /// Which colour a card's rail carries, which is the theme's own rule: amber
@@ -178,7 +180,7 @@ impl Dashboard<'_> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            let mut line = theme::Line::new().legend("dashboard").gap(10.0);
+            let mut line = Line::new().legend("dashboard").gap(10.0);
             line = match (running, self.device) {
                 (true, Some(d)) => line.legend(d).tint(theme::OK),
                 (true, None) => line.legend("running").tint(theme::OK),
@@ -253,26 +255,21 @@ impl Dashboard<'_> {
                 &mut c[col(0)],
                 Some(Rail::Set.colour()),
                 |ui| {
-                    theme::Line::new().legend("tuned").show(ui);
+                    Line::new().legend("tuned").show(ui);
                 },
                 |ui| {
-                    theme::Line::new().set(fmt_hz(self.center)).size(20.0).show(ui);
+                    Line::new().set(fmt_hz(self.center)).size(20.0).show(ui);
                     let span = format!("{:.3} MS/s", self.rate * self.zoom.max(1) as f64 / 1e6);
-                    theme::Line::new()
-                        .legend("span")
-                        .column(ui, 74.0)
-                        .set(span)
-                        .size(12.0)
-                        .show(ui);
+                    Line::new().legend("span").column(ui, 74.0).set(span).size(12.0).show(ui);
                     if self.zoom > 1 {
-                        theme::Line::new()
+                        Line::new()
                             .legend("zoom")
                             .column(ui, 74.0)
                             .set(format!("/{}", self.zoom))
                             .size(12.0)
                             .show(ui);
                     }
-                    theme::Line::new()
+                    Line::new()
                         .legend("decoding")
                         .column(ui, 74.0)
                         .set(if self.decode_on { "on" } else { "off" })
@@ -287,9 +284,9 @@ impl Dashboard<'_> {
                 &mut c[col(1)],
                 None,
                 |ui| {
-                    theme::Line::new().legend("real time").show(ui);
+                    Line::new().legend("real time").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        theme::Line::new().value(format!("{now:.2}x")).size(12.0).show(ui);
+                        Line::new().value(format!("{now:.2}x")).size(12.0).show(ui);
                     });
                 },
                 |ui| {
@@ -313,25 +310,25 @@ impl Dashboard<'_> {
                 &mut c[col(2)],
                 Some(Rail::Heard.colour()),
                 |ui| {
-                    theme::Line::new().legend("decoded").show(ui);
+                    Line::new().legend("decoded").show(ui);
                 },
                 |ui| {
-                    theme::Line::new()
-                        .heard(burst::thousands(s.decoded.load(Relaxed)))
+                    Line::new()
+                        .measured(burst::thousands(s.decoded.load(Relaxed)))
                         .size(20.0)
                         .gap(6.0)
                         .legend("packets")
                         .show(ui);
-                    theme::Line::new()
+                    Line::new()
                         .legend("channels")
                         .column(ui, 84.0)
-                        .heard(burst::thousands(banks))
+                        .measured(burst::thousands(banks))
                         .size(12.0)
                         .show(ui);
-                    theme::Line::new()
+                    Line::new()
                         .legend("logged")
                         .column(ui, 84.0)
-                        .heard(burst::thousands(s.logged.load(Relaxed)))
+                        .measured(burst::thousands(s.logged.load(Relaxed)))
                         .size(12.0)
                         .show(ui);
                     // A column of zeros is not the answer to "why is nothing
@@ -355,14 +352,14 @@ impl Dashboard<'_> {
                 &mut c[0],
                 Some(Rail::Heard.colour()),
                 |ui| {
-                    theme::Line::new().legend("what has been heard").show(ui);
+                    Line::new().legend("what has been heard").show(ui);
                 },
                 |ui| {
                     for (name, n) in heard {
-                        theme::Line::new()
+                        Line::new()
                             .legend(name)
                             .column(ui, 90.0)
-                            .heard(burst::thousands(n))
+                            .measured(burst::thousands(n))
                             .size(12.0)
                             .show(ui);
                     }
@@ -380,20 +377,20 @@ impl Dashboard<'_> {
                 &mut c[col(1)],
                 Some(Rail::Heard.colour()),
                 |ui| {
-                    theme::Line::new().legend("on the air now").show(ui);
+                    Line::new().legend("on the air now").show(ui);
                 },
                 |ui| {
                     if open.is_empty() {
                         hint(ui, "Nothing is transmitting in the span.");
                     }
                     for src in open.iter().take(5) {
-                        theme::Line::new()
-                            .heard(fmt_hz(src.source.center_hz))
+                        Line::new()
+                            .measured(fmt_hz(src.source.center_hz))
                             .size(12.0)
                             .column(ui, 96.0)
                             .legend(src.source.locked_to.unwrap_or("open"))
                             .column(ui, 176.0)
-                            .heard(match src.source.snr_db {
+                            .measured(match src.source.snr_db {
                                 Some(db) => format!("{db:.0} dB"),
                                 None => String::new(),
                             })
@@ -412,7 +409,7 @@ impl Dashboard<'_> {
                 &mut c[col(2)],
                 None,
                 |ui| {
-                    theme::Line::new().legend("health").show(ui);
+                    Line::new().legend("health").show(ui);
                 },
                 |ui| {
                     Self::lamp_row(
@@ -471,7 +468,7 @@ impl Dashboard<'_> {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
             let col = if ok { theme::OK } else { theme::READOUT };
             ui.painter().circle_filled(rect.center(), 4.0, col);
-            theme::Line::new().value(text).size(12.0).show(ui);
+            Line::new().value(text).size(12.0).show(ui);
         });
     }
 
@@ -481,13 +478,10 @@ impl Dashboard<'_> {
             ui,
             None,
             |ui| {
-                theme::Line::new().legend("nothing is being received").show(ui);
+                Line::new().legend("nothing is being received").show(ui);
             },
             |ui| {
-                theme::Line::new()
-                    .note("Start a radio and the readings appear here.")
-                    .size(14.0)
-                    .show(ui);
+                Line::new().note("Start a radio and the readings appear here.").size(14.0).show(ui);
                 hint(
                     ui,
                     "The receiver opens on 433.92 MHz with the scanner table already watching \
@@ -519,10 +513,10 @@ impl Dashboard<'_> {
             ui,
             Some(q.rail.colour().gamma_multiply(0.55)),
             |ui| {
-                theme::Line::new().legend(q.place).show(ui);
+                Line::new().legend(q.place).show(ui);
             },
             |ui| {
-                theme::Line::new().value(q.title).size(14.0).show(ui);
+                Line::new().value(q.title).size(14.0).show(ui);
                 hint(ui, q.note);
             },
         );
@@ -546,7 +540,7 @@ impl Dashboard<'_> {
         let row = ui.horizontal(|ui| {
             // Proportional rather than the readout face: this is a sentence,
             // and the mono face is for readings.
-            theme::Line::new()
+            Line::new()
                 .note(q.title)
                 .tint(theme::VALUE)
                 .size(13.0)
@@ -576,7 +570,7 @@ impl Dashboard<'_> {
     /// A section legend with a rule running off the end of it.
     fn rule(ui: &mut egui::Ui, name: &str) {
         ui.horizontal(|ui| {
-            theme::Line::new().legend(name).show(ui);
+            Line::new().legend(name).show(ui);
             let (rect, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 8.0), Sense::hover());
             ui.painter().line_segment(

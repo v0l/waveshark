@@ -40,7 +40,7 @@ impl Msgs<'_> {
             // header says otherwise.
             let logged = msgs.iter().filter(|m| m.logged).count();
             let live = msgs.len() - logged;
-            let mut head = theme::Line::new().legend("messages");
+            let mut head = Line::new().legend("messages");
             head = match (live, logged) {
                 (n, 0) => head.value(format!("{n} received")),
                 (0, k) => head.value(format!("{k} from the log")),
@@ -121,14 +121,14 @@ impl Msgs<'_> {
 
 /// One message: a header saying where it came from, then the words.
 fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui::Response {
-    let inner = widgets::card(
+    let inner = panel::card(
         ui,
         // Cyan for what the receiver heard, and no rail for what it read
         // back off the file: the traffic on the screen now is what is on
         // the air now.
         if m.logged { None } else { Some(theme::TRACE) },
         |ui| {
-            let mut head = theme::Line::new()
+            let mut head = Line::new()
                 .legend(&m.system)
                 .value(format!("{:.4} MHz", m.channel_hz / 1e6))
                 .size(11.0);
@@ -152,13 +152,13 @@ fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui
                 // receiver was somewhere else then, possibly on another
                 // band, and an age alone reads as something arriving now.
                 match m.logged {
-                    true => theme::Line::new().legend("logged").value(m.when()).size(11.0).show(ui),
-                    false => theme::Line::new().legend(&age(m.age(now))).show(ui),
+                    true => Line::new().legend("logged").value(m.when()).size(11.0).show(ui),
+                    false => Line::new().legend(&age(m.age(now))).show(ui),
                 };
             });
         },
         |ui| {
-            theme::Line::new().words(&m.text).wrapped(ui);
+            Line::new().value(&m.text).wrapped(ui);
         },
     );
     // The same gesture as the call list: clicking a card puts the dial on

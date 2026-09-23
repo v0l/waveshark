@@ -292,7 +292,7 @@ impl Scope<'_> {
             return;
         }
         let col = theme::READOUT;
-        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let font = theme::legend_font(9.0);
         // Left to right, so a label that would land on the one before it
         // can take the next row down instead. Two sensors a few kilohertz
         // apart are two sources, and printed on one row they were one
@@ -406,7 +406,7 @@ impl Scope<'_> {
         let (fill_a, tick_a, text_a) = (110u8, 190u8, 220u8);
         // A strip at the foot of the plot, clear of the trace's baseline.
         let floor = plot.bottom() - 1.0;
-        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let font = theme::legend_font(9.0);
         // Banks stack upward. Two of them cover the same band at different
         // channel widths, and drawn on one row they were one strip with two
         // labels printed over each other.
@@ -516,7 +516,7 @@ impl Scope<'_> {
             // Set at 11 rather than 9, and in the panel's legend grey rather
             // than a shade above the background. These are the numbers that
             // say what the trace is worth, and they were unreadable.
-            let font = FontId::new(11.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+            let font = theme::legend_font(11.0);
             let at = Pos2::new(plot.right() - 5.0, y - 1.0);
             let galley = p.layout_no_wrap(text, font, theme::LEGEND);
             let rect = Align2::RIGHT_BOTTOM.anchor_size(at, galley.size());
@@ -582,7 +582,7 @@ impl Scope<'_> {
             Pos2::new(r.left() + 6.0, r.top() + 1.0),
             egui::Align2::LEFT_TOP,
             format!("{name}   {:.4} MHz   {:.3} MS/s", s.center / 1e6, s.rate / 1e6),
-            FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+            theme::figure(10.0),
             theme::LEGEND,
         );
     }
@@ -612,7 +612,7 @@ impl Scope<'_> {
         if let Some(e) = self.err {
             lines.push(e.to_string());
         }
-        let font = FontId::new(11.0, FontFamily::Name(theme::READOUT_FONT.into()));
+        let font = theme::figure(11.0);
         let mut top = plot.top() + 8.0;
         for text in lines {
             let galley = p.layout_no_wrap(text, font.clone(), theme::FAULT);
@@ -674,7 +674,7 @@ impl Scope<'_> {
     fn ribbon(&self, p: &egui::Painter, r: &Rect) {
         p.rect_filled(*r, 0.0, theme::CHASSIS);
         let (lo, hi) = (self.center - self.rate / 2.0, self.center + self.rate / 2.0);
-        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let font = theme::legend_font(9.0);
         for s in bands::segments(lo, hi) {
             let x0 = self.x_of(r, s.lo).max(r.left());
             let x1 = self.x_of(r, s.hi).min(r.right());
@@ -711,7 +711,7 @@ impl Scope<'_> {
     fn seam_marks(&self, p: &egui::Painter, plot: &Rect) {
         let Some(r) = self.radio else { return };
         let seams = r.status.radio().seams;
-        let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let font = theme::legend_font(9.0);
         for hz in seams {
             let x = self.x_of(plot, hz);
             if !plot.x_range().contains(x) {
@@ -782,11 +782,7 @@ impl Scope<'_> {
                 Stroke::new(if active { 1.5 } else { 1.0 }, col),
             );
             // Flag the label off the line so it never sits on the trace.
-            let t = p.layout_no_wrap(
-                ch.label.clone(),
-                FontId::new(10.0, FontFamily::Name(theme::LEGEND_FONT.into())),
-                Color32::BLACK,
-            );
+            let t = p.layout_no_wrap(ch.label.clone(), theme::legend_font(10.0), Color32::BLACK);
             let flag = Rect::from_min_size(
                 Pos2::new(x + 1.0, full.top() + 2.0),
                 Vec2::new(t.size().x + 8.0, t.size().y + 4.0),
@@ -828,11 +824,7 @@ impl Scope<'_> {
                 None => format!("{} {here}", fmt_hz(hz)),
             },
         };
-        let g = p.layout_no_wrap(
-            text,
-            FontId::new(11.0, FontFamily::Name(theme::READOUT_FONT.into())),
-            theme::VALUE,
-        );
+        let g = p.layout_no_wrap(text, theme::figure(11.0), theme::VALUE);
         let left = (pos.x + 8.0).min(full.right() - g.size().x - 10.0);
         let box_r = Rect::from_min_size(
             Pos2::new(left - 5.0, full.top() + 5.0),

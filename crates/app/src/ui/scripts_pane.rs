@@ -148,7 +148,7 @@ impl<'a> Scripts<'a> {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            theme::Line::new().legend("scripts").show(ui);
+            Line::new().legend("scripts").show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if crate::icons::icon_button_sized(
                     ui,
@@ -174,14 +174,14 @@ impl<'a> Scripts<'a> {
     }
 
     fn search(&mut self, ui: &mut egui::Ui) {
-        widgets::field(ui, &mut self.st.filter, "name");
+        form::field(ui, &mut self.st.filter, "name");
     }
 
     /// What to do when there is nothing to list, which is the state every
     /// receiver starts in: the files come from a dataset nobody has
     /// downloaded yet.
     fn empty(&mut self, ui: &mut egui::Ui) {
-        theme::Line::new()
+        Line::new()
             .note("no .sub files held. Download a script repository in the data settings, or save a burst from the packet list.")
             .wrapped(ui);
         ui.add_space(6.0);
@@ -293,20 +293,20 @@ impl<'a> Scripts<'a> {
     /// What the selected file is and what it would key.
     fn detail(&mut self, ui: &mut egui::Ui) {
         let Some((path, parsed)) = &self.st.picked else {
-            widgets::hint(ui, "choose a file to see what it keys");
+            text::hint(ui, "choose a file to see what it keys");
             return;
         };
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         match parsed {
             Err(e) => {
-                widgets::card(
+                panel::card(
                     ui,
                     Some(theme::FAULT),
                     |ui| {
-                        theme::Line::new().legend(&name).show(ui);
+                        Line::new().legend(&name).show(ui);
                     },
                     |ui| {
-                        theme::Line::new().note(e).wrapped(ui);
+                        Line::new().note(e).wrapped(ui);
                     },
                 );
             }
@@ -323,19 +323,15 @@ impl<'a> Scripts<'a> {
                     _ => None,
                 };
                 let file = f.clone();
-                widgets::card(
+                panel::card(
                     ui,
                     Some(theme::TRACE),
                     |ui| {
-                        theme::Line::new().legend(&name).show(ui);
+                        Line::new().legend(&name).show(ui);
                     },
                     |ui| {
-                        theme::Line::new()
-                            .legend("protocol")
-                            .value(file.label())
-                            .size(11.0)
-                            .show(ui);
-                        theme::Line::new()
+                        Line::new().legend("protocol").value(file.label()).size(11.0).show(ui);
+                        Line::new()
                             .legend("at")
                             .value(format!("{mhz:.4} MHz"))
                             .size(11.0)
@@ -362,7 +358,7 @@ impl<'a> Scripts<'a> {
                                 self.acts.push(Action::Transmit(file.clone()));
                             }
                             if let Some(why) = &stop {
-                                theme::Line::new().note(why).size(11.0).elided(ui);
+                                Line::new().note(why).size(11.0).elided(ui);
                             }
                         });
                     },
@@ -446,7 +442,7 @@ fn row_with(
     colour: egui::Color32,
     selected: bool,
 ) -> bool {
-    let h = widgets::ROW_H.max(18.0);
+    let h = table::ROW_H.max(18.0);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
     if !ui.is_rect_visible(rect) {
         return false;
@@ -461,7 +457,7 @@ fn row_with(
     // Wide enough for the figure it is: these run to five digits, and a
     // fixed column cut the count of the largest collection in half.
     let right_w = if right.is_empty() { 0.0 } else { 8.0 * right.chars().count() as f32 + 6.0 };
-    widgets::cell(
+    table::cell(
         &p,
         rect,
         x,
@@ -470,7 +466,7 @@ fn row_with(
         if selected { theme::READOUT } else { colour },
     );
     if !right.is_empty() {
-        widgets::cell(&p, rect, rect.right() - right_w, right_w, right, theme::LEGEND);
+        table::cell(&p, rect, rect.right() - right_w, right_w, right, theme::LEGEND);
     }
     resp.clicked()
 }

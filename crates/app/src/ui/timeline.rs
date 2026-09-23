@@ -220,11 +220,11 @@ pub(super) fn show(
     // the body. The header only records which button was pressed, because
     // the body holds the state and two closures cannot both have it.
     let sel = st.sel;
-    let card = widgets::card(
+    let card = panel::card(
         ui,
         Some(theme::TRACE),
         |ui| {
-            let mut line = theme::Line::new()
+            let mut line = Line::new()
                 .legend("timeline")
                 .note("clips against the clock, with the dead air taken out");
             if let Some((a, b)) = sel {
@@ -362,7 +362,7 @@ pub(super) fn show(
                     Pos2::new(x0 + 2.0, ruler.top() + 1.0),
                     egui::Align2::LEFT_TOP,
                     crate::segments::when(r.from_us).format("%d %b %H:%M:%S").to_string(),
-                    egui::FontId::new(10.0, egui::FontFamily::Name(theme::READOUT_FONT.into())),
+                    theme::figure(10.0),
                     theme::LEGEND,
                 );
             }
@@ -637,7 +637,7 @@ fn draw_break(p: &egui::Painter, lane: Rect, x0: f32, x1: f32, seconds: f64) {
             band.center_top() + Vec2::new(0.0, 2.0),
             egui::Align2::CENTER_TOP,
             span_label(seconds),
-            egui::FontId::new(9.0, egui::FontFamily::Name(theme::LEGEND_FONT.into())),
+            theme::legend_font(9.0),
             theme::LEGEND,
         );
     }

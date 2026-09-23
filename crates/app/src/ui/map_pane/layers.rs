@@ -388,7 +388,7 @@ fn nearest(shown: &[(Pos2, usize)], pos: Pos2, px: f32) -> Option<(Pos2, usize)>
 fn site_card(p: &egui::Painter, rect: Rect, anchor: Pos2, s: &datasets::sondehub::Site) {
     const MAX_ROWS: usize = 8;
     let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
-    let font = |sz: f32| FontId::new(sz, FontFamily::Name(theme::READOUT_FONT.into()));
+    let font = |sz: f32| theme::figure(sz);
     let text_max = (f64::from(rect.width()) - 2.0 * f64::from(pad) - 8.0).clamp(80.0, 260.0) as f32;
 
     let name = p.layout(s.name.clone(), font(13.0), theme::VALUE, text_max);
@@ -865,7 +865,7 @@ fn airport_card(p: &egui::Painter, rect: Rect, anchor: Pos2, a: &datasets::airpo
     // otherwise cover the map it is annotating.
     const MAX_ROWS: usize = 10;
     let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
-    let font = |sz: f32| FontId::new(sz, FontFamily::Name(theme::READOUT_FONT.into()));
+    let font = |sz: f32| theme::figure(sz);
 
     // The name wraps rather than setting the card's width: "Charles de
     // Gaulle International Airport" is wider than anything else on the

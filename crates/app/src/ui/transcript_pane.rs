@@ -46,7 +46,7 @@ impl Transcript<'_> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new()
+            Line::new()
                 .legend("transcript")
                 .value(format!("{} lines", self.st.log.len()))
                 .size(11.0)
@@ -81,7 +81,7 @@ impl Transcript<'_> {
         if let Some(key) = self.st.only.clone() {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    theme::Line::new().legend("conversation").set(who(&key)).show(ui);
+                    Line::new().legend("conversation").set(who(&key)).show(ui);
                     ui.add_space(8.0);
                     if ui.button("Everything heard").clicked() {
                         self.st.only = None;
@@ -119,15 +119,15 @@ impl Transcript<'_> {
         let wall = std::time::SystemTime::now();
         let width = ui.available_width().max(COLS.iter().map(|(_, w)| w).sum::<f32>() + 300.0);
         let text_w = width - 24.0 - COLS.iter().map(|(_, w)| w).sum::<f32>();
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::hover());
         {
             let p = ui.painter_at(rect);
             let mut x = rect.left() + 12.0;
             for (name, w) in COLS {
-                widgets::cell(&p, rect, x, w, name, theme::LEGEND);
+                table::cell(&p, rect, x, w, name, theme::LEGEND);
                 x += w;
             }
-            widgets::cell(&p, rect, x, text_w, "text", theme::LEGEND);
+            table::cell(&p, rect, x, text_w, "text", theme::LEGEND);
             p.line_segment(
                 [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
                 Stroke::new(1.0, theme::ETCH),
@@ -177,11 +177,11 @@ impl Transcript<'_> {
     fn model_card(&mut self, ui: &mut egui::Ui) {
         let Some(e) = self.engine.clone() else {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-                widgets::card(
+                panel::card(
                     ui,
                     Some(theme::LEGEND),
                     |ui| {
-                        theme::Line::new().legend("model").set("none").tint(theme::LEGEND).show(ui);
+                        Line::new().legend("model").set("none").tint(theme::LEGEND).show(ui);
                     },
                     |ui| {
                         hint(
@@ -205,7 +205,7 @@ impl Transcript<'_> {
         let want: std::cell::RefCell<(Option<bool>, bool, Option<String>, Option<String>)> =
             std::cell::RefCell::new((None, false, None, None));
         egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
-            widgets::card(
+            panel::card(
                 ui,
                 Some(rail),
                 |ui| {
@@ -213,7 +213,7 @@ impl Transcript<'_> {
                     // runs, and where a directory holds something other
                     // than the pick, the files line below says so.
                     let name = e.reading_on.clone().unwrap_or_else(|| e.label.clone());
-                    let mut head = theme::Line::new().legend("model").set(name);
+                    let mut head = Line::new().legend("model").set(name);
                     head = head.legend("state").value(e.health.state.label()).tint(rail);
                     if !e.health.device.is_empty() {
                         head = head.legend("on").value(&e.health.device);
@@ -240,13 +240,13 @@ impl Transcript<'_> {
                     // files here are not what is running: one line saying
                     // where instead, and the setting stays where it is set.
                     if let Some(on) = &e.reading_on {
-                        widgets::row(ui, "read on", |ui| {
-                            theme::Line::new().value(on.clone()).size(11.0).show(ui);
+                        form::row(ui, "read on", |ui| {
+                            Line::new().value(on.clone()).size(11.0).show(ui);
                         });
                         hint(ui, "Set in Agent settings, under reading.");
                         return;
                     }
-                    widgets::row(ui, "model", |ui| {
+                    form::row(ui, "model", |ui| {
                         egui::ComboBox::from_id_salt("stt-model")
                             .selected_text(small(&e.label))
                             .width(300.0)
@@ -268,7 +268,7 @@ impl Transcript<'_> {
                                 }
                             });
                     });
-                    widgets::row(ui, "run on", |ui| {
+                    form::row(ui, "run on", |ui| {
                         let now = e
                             .devices
                             .iter()
@@ -294,7 +294,7 @@ impl Transcript<'_> {
                     // and that is what runs. The path is on hover, where
                     // somebody checking the files can read it and nobody
                     // else has to.
-                    let mut l = theme::Line::new();
+                    let mut l = Line::new();
                     l = if e.health.present {
                         l.legend("on disc")
                             .value(super::human_bytes(e.health.bytes))
@@ -311,7 +311,7 @@ impl Transcript<'_> {
                     // reads the same as one that has hung.
                     if matches!(e.health.state, ModelState::Fetching) {
                         let f = &e.health.fetch;
-                        let mut l = theme::Line::new().legend("fetching");
+                        let mut l = Line::new().legend("fetching");
                         l = if f.file.is_empty() {
                             l.value("asking the hub")
                         } else {
@@ -347,8 +347,7 @@ impl Transcript<'_> {
                         }
                     }
                     ui.horizontal(|ui| {
-                        let mut l =
-                            theme::Line::new().legend("read").value(e.health.reads.to_string());
+                        let mut l = Line::new().legend("read").value(e.health.reads.to_string());
                         if let Some(x) = e.speed() {
                             // Against real time, because that is the number
                             // that decides whether the receiver keeps up:
@@ -376,10 +375,10 @@ impl Transcript<'_> {
                         l.size(11.0).show(ui);
                     });
                     if let ModelState::Failed(why) = &e.health.state {
-                        theme::Line::new().words(why).tint(theme::FAULT).wrapped(ui);
+                        Line::new().value(why).tint(theme::FAULT).wrapped(ui);
                     }
                     if !e.health.note.is_empty() {
-                        theme::Line::new().words(&e.health.note).tint(theme::READOUT).wrapped(ui);
+                        Line::new().value(&e.health.note).tint(theme::READOUT).wrapped(ui);
                     }
                     // Loading it by hand is the only way to find out whether
                     // transcription works on this machine without waiting
@@ -491,9 +490,9 @@ fn row(
     } else if unsure {
         text.push_str("  (unsure)");
     }
-    let font = egui::FontId::new(11.0, egui::FontFamily::Name(theme::READOUT_FONT.into()));
+    let font = theme::figure(11.0);
     let galley = ui.painter().layout(text, font, tint, text_w - 6.0);
-    let h = (galley.size().y + 4.0).max(widgets::ROW_H);
+    let h = (galley.size().y + 4.0).max(table::ROW_H);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, h), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
@@ -530,7 +529,7 @@ fn row(
     };
     // Cells are drawn on the first line of the row, which is the row's
     // top rather than its middle when the text has wrapped.
-    let line = Rect::from_min_size(rect.min, Vec2::new(rect.width(), widgets::ROW_H));
+    let line = Rect::from_min_size(rect.min, Vec2::new(rect.width(), table::ROW_H));
     let mut x = rect.left() + 12.0;
     let cells = [
         (when, theme::LEGEND),
@@ -539,7 +538,7 @@ fn row(
         (chan, theme::VALUE),
     ];
     for ((_, w), (t, col)) in COLS.iter().zip(cells) {
-        widgets::cell(&p, line, x, *w, &t, col);
+        table::cell(&p, line, x, *w, &t, col);
         x += w;
     }
     p.galley(Pos2::new(x, rect.top() + 2.0), galley, tint);

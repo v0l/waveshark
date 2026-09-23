@@ -61,7 +61,6 @@ mod segments;
 mod session;
 mod shutdown;
 mod station;
-mod theme;
 mod tracks;
 /// The transcript view and the model behind it. Only the `stt` feature
 /// transcodes anything, so without it the machinery is compiled and never

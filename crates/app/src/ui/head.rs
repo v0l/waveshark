@@ -100,7 +100,7 @@ impl App {
                             // colour. Cyan is what the radio heard, and a
                             // band plan is not heard: it is looked up from
                             // the number above it.
-                            theme::Line::new().legend(&bands::where_at(self.center)).show(ui);
+                            Line::new().legend(&bands::where_at(self.center)).show(ui);
                         });
                     });
 
@@ -321,7 +321,7 @@ impl App {
             // running at a quarter rate behaves differently enough to say so.
             if self.zoom > 1 {
                 ui.add_space(4.0);
-                theme::Line::new()
+                Line::new()
                     .value(format!("/{} zoom", self.zoom))
                     .size(11.0)
                     .tint(theme::LEGEND)
@@ -367,7 +367,7 @@ impl App {
                 // The legend doubles as the readout: with no room to label
                 // ten tabs, the one that is on has to be spelled where the
                 // eye already goes for the cell's name.
-                theme::Line::new()
+                Line::new()
                     .legend("view")
                     .gap(6.0)
                     .legend(self.view.label())
@@ -508,7 +508,7 @@ impl App {
             let now = self.speed_now();
             self.status_lamp(ui);
             ui.add_space(2.0);
-            theme::Line::new()
+            Line::new()
                 .value(match now {
                     Some(x) => format!("{x:.1}x"),
                     None => "stopped".to_string(),
@@ -617,7 +617,7 @@ fn cell(ui: &mut egui::Ui, name: &str, width: f32, content: impl FnOnce(&mut egu
         |ui| {
             ui.set_min_size(Vec2::new(width, CELL_H));
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            theme::Line::new().legend(name).show(ui);
+            Line::new().legend(name).show(ui);
             ui.add_space(3.0);
             content(ui);
         },

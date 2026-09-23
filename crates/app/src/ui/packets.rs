@@ -104,7 +104,7 @@ impl Log<'_> {
                         }
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
-                            .max_height((list_h - widgets::ROW_H).max(16.0))
+                            .max_height((list_h - table::ROW_H).max(16.0))
                             .stick_to_bottom(true)
                             .id_salt("packet_rows")
                             .show(ui, |ui| self.log_rows(ui, w));
@@ -169,7 +169,7 @@ impl Log<'_> {
             }
         }
         if let Some(said) = &self.st.sub_save.said {
-            theme::Line::new().legend("sub").note(said).size(11.0).show(&mut child);
+            Line::new().legend("sub").note(said).size(11.0).show(&mut child);
         }
     }
 
@@ -214,7 +214,7 @@ impl Log<'_> {
                     Vec::new()
                 };
                 let tracking = r.status.tracking.load(Ordering::Relaxed);
-                theme::Line::new()
+                Line::new()
                     .legend(&if !self.decode_on {
                         "decoding off".to_string()
                     } else if running.is_empty() {
@@ -233,12 +233,12 @@ impl Log<'_> {
                 .unwrap_or(0);
             if logged > 0 {
                 ui.add_space(10.0);
-                theme::Line::new().legend(&format!("{logged} saved")).show(ui).on_hover_text(
-                    match &self.log_dir {
-                        Some(d) => format!("appended to {}", d.display()),
-                        None => "appended to the packet log".into(),
-                    },
-                );
+                Line::new().legend(&format!("{logged} saved")).show(ui).on_hover_text(match &self
+                    .log_dir
+                {
+                    Some(d) => format!("appended to {}", d.display()),
+                    None => "appended to the packet log".into(),
+                });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("CLEAR").clicked() {
@@ -287,14 +287,14 @@ impl Log<'_> {
     /// The heading strip, above the rows and outside their vertical scroll, so
     /// it cannot scroll away from what it labels.
     fn log_header_row(&self, ui: &mut egui::Ui, w: f32) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, widgets::ROW_H), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, table::ROW_H), Sense::hover());
         let p = ui.painter_at(rect);
         let mut x = rect.left();
         for (name, cw) in Self::COLS {
-            widgets::cell(&p, rect, x, cw, name, theme::LEGEND);
+            table::cell(&p, rect, x, cw, name, theme::LEGEND);
             x += cw;
         }
-        widgets::cell(&p, rect, x, rect.right() - x, "info", theme::LEGEND);
+        table::cell(&p, rect, x, rect.right() - x, "info", theme::LEGEND);
         p.line_segment(
             [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
             Stroke::new(1.0, theme::ETCH),
@@ -316,7 +316,7 @@ impl Log<'_> {
                     format!("{} running, nothing heard yet", names.join(", "))
                 }
             };
-            theme::Line::new().legend(&waiting).show(ui);
+            Line::new().legend(&waiting).show(ui);
             return;
         }
         let t0 = self.st.origin;
@@ -341,7 +341,7 @@ impl Log<'_> {
             // from widgets, which is also what keeps a five hundred row list
             // cheap to draw.
             let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(width, widgets::ROW_H), Sense::click());
+                ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::click());
             if !ui.is_rect_visible(rect) {
                 continue;
             }
@@ -379,11 +379,11 @@ impl Log<'_> {
             ];
             let mut x = rect.left();
             for ((t, c), (_, cw)) in text.iter().zip(Self::COLS) {
-                widgets::cell(&p, rect, x, cw, t, *c);
+                table::cell(&p, rect, x, cw, t, *c);
                 x += cw;
             }
             let info_w = (rect.right() - x - Self::PIN_W).max(0.0);
-            widgets::cell(&p, rect, x, info_w, &rec.detail(), theme::VALUE);
+            table::cell(&p, rect, x, info_w, &rec.detail(), theme::VALUE);
 
             // The (+): a hit target of its own at the right edge, so clicking
             // it adds a channel rather than selecting the row. Only

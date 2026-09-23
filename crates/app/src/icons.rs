@@ -4,15 +4,30 @@
 //! set is consistent in a way a dozen hand-drawn glyphs never were: they were
 //! each tuned against the size the first caller used and drifted in weight
 //! between the top bar and the strip. The font is bound as its own family
-//! (`theme::ICON_FONT`) so an icon is always served by Phosphor and never by
+//! (`FONT`) so an icon is always served by Phosphor and never by
 //! whichever text font happens to have something at that code point.
 //!
 //! Every icon carries its label as hover text. An icon alone is a rebus, and
 //! the label is what makes the first use of the app possible.
 
-use crate::theme;
+use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Ui, Vec2};
+use egui_bench::theme;
 use egui_phosphor::regular as ph;
+
+pub const FONT: &str = "icons";
+
+pub fn install(ctx: &egui::Context) {
+    let family = |family, priority| InsertFontFamily { family, priority };
+    ctx.add_font(FontInsert::new(
+        "phosphor",
+        egui_phosphor::Variant::Regular.font_data(),
+        vec![
+            family(FontFamily::Name(FONT.into()), FontPriority::Highest),
+            family(FontFamily::Proportional, FontPriority::Lowest),
+        ],
+    ));
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
@@ -133,7 +148,7 @@ impl Icon {
     /// affordance with the same shape the top bar uses: two drawings of the
     /// same idea is one of them being wrong.
     pub fn paint(self, p: &egui::Painter, r: Rect, col: Color32) {
-        let font = FontId::new(r.height() * GLYPH, FontFamily::Name(theme::ICON_FONT.into()));
+        let font = FontId::new(r.height() * GLYPH, FontFamily::Name(FONT.into()));
         let galley = p.layout_no_wrap(self.glyph().to_string(), font, col);
         // Centre the ink, not the line box. The box carries the font's ascent
         // and descent, which is the same height for every glyph while the ink
@@ -301,12 +316,12 @@ mod tests {
     #[test]
     fn every_glyph_fills_the_square_it_is_given() {
         let ctx = egui::Context::default();
-        theme::install(&ctx);
+        crate::ui::install(&ctx);
         // No fonts exist until a frame has been run.
         let _ = ctx.run_ui(Default::default(), |_| {});
         let size = SIZE * GLYPH;
         for icon in ALL {
-            let font = FontId::new(size, FontFamily::Name(theme::ICON_FONT.into()));
+            let font = FontId::new(size, FontFamily::Name(FONT.into()));
             let g = icon.glyph().to_string();
             let galley = ctx.fonts_mut(|f| f.layout_no_wrap(g, font, Color32::WHITE));
             let ink = galley.mesh_bounds;

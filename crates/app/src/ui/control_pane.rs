@@ -9,7 +9,7 @@
 //! The bars are painted rather than built from widgets, for the reason the
 //! other tables are: sixteen channels on a handful of links is hundreds of
 //! rectangles a frame otherwise. Everything with words in it goes through
-//! `theme::Line` and `widgets::cell` as usual.
+//! `Line` and `table::cell` as usual.
 
 use super::*;
 use crate::control::{Control, RANGE_US};
@@ -27,13 +27,13 @@ impl ControlView<'_> {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             let live = links.iter().filter(|c| c.live(now)).count();
-            theme::Line::new()
+            Line::new()
                 .legend("control links")
                 .value(format!("{} seen", links.len()))
                 .size(11.0)
                 .show(ui);
             if live > 0 {
-                theme::Line::new()
+                Line::new()
                     .legend("live")
                     .value(live.to_string())
                     .tint(theme::OK)
@@ -74,11 +74,11 @@ impl ControlView<'_> {
 /// One handset: what it is, how it is being heard, and its channels.
 fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
     let live = c.live(now);
-    widgets::card(
+    panel::card(
         ui,
         Some(if live { theme::OK } else { theme::TRACE }),
         |ui| {
-            theme::Line::new()
+            Line::new()
                 .legend(&c.system)
                 .value(c.id.clone())
                 .tint(theme::READOUT)
@@ -89,14 +89,14 @@ fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
             // among the numbers. It is what the handset is asking for, not
             // what the aircraft did, and the caption says so.
             if c.armed == Some(true) {
-                theme::Line::new().legend("armed").tint(theme::FAULT).size(11.0).show(ui);
+                Line::new().legend("armed").tint(theme::FAULT).size(11.0).show(ui);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::Line::new().legend(&age(c.age(now))).show(ui);
+                Line::new().legend(&age(c.age(now))).show(ui);
             });
         },
         |ui| {
-            let mut line = theme::Line::new()
+            let mut line = Line::new()
                 .legend("frames")
                 .value(c.frames.to_string())
                 .size(11.0)
@@ -138,7 +138,7 @@ fn channels(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
     let width = ui.available_width();
     let col = (width / 2.0).max(120.0);
     let (rect, _) = ui.allocate_exact_size(
-        egui::Vec2::new(width, rows as f32 * widgets::ROW_H),
+        egui::Vec2::new(width, rows as f32 * table::ROW_H),
         egui::Sense::hover(),
     );
     if !ui.is_rect_visible(rect) {
@@ -147,13 +147,13 @@ fn channels(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
     let p = ui.painter();
     for i in 0..carried {
         let (r, k) = (i % rows, i / rows);
-        let top = rect.top() + r as f32 * widgets::ROW_H;
+        let top = rect.top() + r as f32 * table::ROW_H;
         let left = rect.left() + k as f32 * col;
         // A gutter, or the microseconds of the left column read as part of
         // the caption of the right one.
         let row = egui::Rect::from_min_max(
             egui::Pos2::new(left, top),
-            egui::Pos2::new(left + col - 18.0, top + widgets::ROW_H),
+            egui::Pos2::new(left + col - 18.0, top + table::ROW_H),
         );
         channel_row(p, row, i, c.channels[i], c.channel_at[i], now);
     }
@@ -170,7 +170,7 @@ fn channel_row(
 ) {
     let label_w = 34.0;
     let value_w = 56.0;
-    widgets::cell(p, row, row.left(), label_w, &format!("ch{}", index + 1), theme::LEGEND);
+    table::cell(p, row, row.left(), label_w, &format!("ch{}", index + 1), theme::LEGEND);
 
     let bar = egui::Rect::from_min_max(
         egui::Pos2::new(row.left() + label_w, row.top() + 3.0),
@@ -192,7 +192,7 @@ fn channel_row(
     );
 
     let Some(us) = us else {
-        widgets::cell(p, row, row.right() - value_w, value_w, "-", theme::LEGEND);
+        table::cell(p, row, row.right() - value_w, value_w, "-", theme::LEGEND);
         return;
     };
     // A channel the link has stopped sending keeps its last position and is
@@ -210,7 +210,7 @@ fn channel_row(
         [egui::Pos2::new(x, bar.top()), egui::Pos2::new(x, bar.bottom())],
         egui::Stroke::new(2.0, colour),
     );
-    widgets::cell(
+    table::cell(
         p,
         row,
         row.right() - value_w + 6.0,

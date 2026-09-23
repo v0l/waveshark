@@ -91,7 +91,7 @@ impl Sats<'_> {
 
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new().legend("group").show(ui);
+            Line::new().legend("group").show(ui);
             egui::ComboBox::from_id_salt("sat-group")
                 .selected_text(self.st.group.name)
                 .width(140.0)
@@ -101,7 +101,7 @@ impl Sats<'_> {
                     }
                 });
             ui.add_space(12.0);
-            theme::Line::new().legend("above").show(ui);
+            Line::new().legend("above").show(ui);
             // The threshold is what makes the table readable: everything in
             // the group grazes the horizon at some point in a day, and those
             // passes are not workable.
@@ -140,7 +140,7 @@ impl Sats<'_> {
         };
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new().legend("passes").value(heading).size(11.0).show(ui);
+            Line::new().legend("passes").value(heading).size(11.0).show(ui);
         });
         ui.add_space(6.0);
 
@@ -157,7 +157,7 @@ impl Sats<'_> {
                 let stale = oldest > 7.0;
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
-                    let mut line = theme::Line::new()
+                    let mut line = Line::new()
                         .legend("oldest elements")
                         .value(format!("{oldest:.1} days past epoch"))
                         .size(12.0);
@@ -341,11 +341,11 @@ fn pass_card(
     // always the chosen one, since picking another while tracking moves the
     // channel to it.
     let tracked = tracking.then(|| down.map(|d| d.uuid.as_str())).flatten();
-    let inner = widgets::card(
+    let inner = panel::card(
         ui,
         rail,
         |ui| {
-            theme::Line::new()
+            Line::new()
                 .legend(&format!("#{}", u.norad))
                 .value(u.name.clone())
                 .tint(theme::VALUE)
@@ -356,17 +356,17 @@ fn pass_card(
                     true => format!("up now, sets {}", crate::sats::in_when(u.pass.set_s - now)),
                     false => crate::sats::in_when(u.pass.rise_s - now),
                 };
-                theme::Line::new().legend(&when).show(ui);
+                Line::new().legend(&when).show(ui);
                 // The card says it is being listened to, since the control
                 // that says so is now down in the table and the table is
                 // only drawn for the picked card.
                 if tracking {
-                    theme::Line::new().legend("listening").tint(theme::READOUT).show(ui);
+                    Line::new().legend("listening").tint(theme::READOUT).show(ui);
                 }
             });
         },
         |ui| {
-            theme::Line::new()
+            Line::new()
                 .legend("rises")
                 .value(crate::sats::utc_hms(u.pass.rise_s))
                 .size(12.0)
@@ -386,7 +386,7 @@ fn pass_card(
             // What it transmits on, whether or not it is up: a card for a
             // pass in two hours is worth reading for the frequency.
             if let Some(d) = down {
-                theme::Line::new()
+                Line::new()
                     .legend("downlink")
                     .value(d.label())
                     .size(12.0)
@@ -397,7 +397,7 @@ fn pass_card(
                 // able to key it: knowing a repeater's input is half of
                 // knowing what the downlink is carrying.
                 if let Some(up) = d.uplink_label() {
-                    theme::Line::new().legend("uplink").value(up).size(12.0).show(ui);
+                    Line::new().legend("uplink").value(up).size(12.0).show(ui);
                 }
             }
             // What the satellite is for, before any list of what it is on:
@@ -412,11 +412,7 @@ fn pass_card(
                         _ => format!("{n} \u{d7}{c}"),
                     })
                     .collect();
-                theme::Line::new()
-                    .legend("channels")
-                    .value(names.join("  \u{b7}  "))
-                    .size(12.0)
-                    .show(ui);
+                Line::new().legend("channels").value(names.join("  \u{b7}  ")).size(12.0).show(ui);
             }
             // The table and the plot are the two halves of the same
             // question, which is what to tune and where to point, so they
@@ -437,7 +433,7 @@ fn pass_card(
                 });
             }
             let Some(l) = live else { return };
-            theme::Line::new()
+            Line::new()
                 .legend("now")
                 .value(format!("az {:.0}\u{b0} el {:.0}\u{b0}", l.az_deg, l.el_deg))
                 .tint(theme::TRACE)
@@ -461,7 +457,7 @@ fn pass_card(
             // because it changes by ten dB across a pass, which is what
             // says a fade was the pass and not the receiver.
             let hz = down.and_then(|d| d.downlink_hz);
-            let mut link = theme::Line::new()
+            let mut link = Line::new()
                 .legend("free space")
                 .value(match hz {
                     Some(hz) => format!("{:.1} dB", l.path_loss_db(hz as f64)),
@@ -536,11 +532,7 @@ fn transmitter_table(
     let mut picked = None;
     let mut listen = None;
     ui.add_space(2.0);
-    theme::Line::new()
-        .legend("transmitters")
-        .value(format!("{} live", live_tx.len()))
-        .size(11.0)
-        .show(ui);
+    Line::new().legend("transmitters").value(format!("{} live", live_tx.len())).size(11.0).show(ui);
     let w = ui.available_width();
     // The table has half a card, not all of it, so the columns compress to
     // what is there rather than running off the edge and being clipped.
@@ -548,14 +540,14 @@ fn transmitter_table(
     let scale = ((w - LISTEN_W) / full).min(1.0);
     // The heading sits outside the scroll so it cannot scroll away from what
     // it labels.
-    let (head, _) = ui.allocate_exact_size(Vec2::new(w, widgets::ROW_H), Sense::hover());
+    let (head, _) = ui.allocate_exact_size(Vec2::new(w, table::ROW_H), Sense::hover());
     let p = ui.painter_at(head);
     let mut x = head.left() + LISTEN_W;
     for (name, cw) in TX_COLS {
-        widgets::cell(&p, head, x, cw * scale, name, theme::LEGEND);
+        table::cell(&p, head, x, cw * scale, name, theme::LEGEND);
         x += cw * scale;
     }
-    widgets::cell(&p, head, x, (head.right() - x).max(0.0), "description", theme::LEGEND);
+    table::cell(&p, head, x, (head.right() - x).max(0.0), "description", theme::LEGEND);
     p.line_segment(
         [Pos2::new(head.left(), head.bottom()), Pos2::new(head.right(), head.bottom())],
         Stroke::new(1.0, theme::ETCH),
@@ -576,7 +568,7 @@ fn transmitter_table(
                     true => Sense::click(),
                     false => Sense::hover(),
                 };
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, widgets::ROW_H), sense);
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, table::ROW_H), sense);
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
@@ -584,7 +576,7 @@ fn transmitter_table(
                 let can_listen = can && (live.is_some() || on);
                 let icon = Rect::from_center_size(
                     Pos2::new(rect.left() + LISTEN_W / 2.0, rect.center().y),
-                    Vec2::splat(widgets::ROW_H - 2.0),
+                    Vec2::splat(table::ROW_H - 2.0),
                 );
                 let over_icon = can_listen && resp.hover_pos().is_some_and(|p| icon.contains(p));
                 let p = ui.painter_at(rect);
@@ -675,7 +667,7 @@ fn transmitter_table(
                 ];
                 let mut x = rect.left() + LISTEN_W;
                 for ((text, col), (_, cw)) in cells.iter().zip(TX_COLS) {
-                    widgets::cell(&p, rect, x, cw * scale, text, *col);
+                    table::cell(&p, rect, x, cw * scale, text, *col);
                     x += cw * scale;
                 }
                 let what = match (t.description.is_empty(), t.invert) {
@@ -683,7 +675,7 @@ fn transmitter_table(
                     (false, true) => format!("{} (inverting)", t.description),
                     (false, false) => t.description.clone(),
                 };
-                widgets::cell(&p, rect, x, (rect.right() - x).max(0.0), &what, quiet);
+                table::cell(&p, rect, x, (rect.right() - x).max(0.0), &what, quiet);
                 match (can, over_icon, on) {
                     (false, _, _) => {
                         resp.on_hover_text("transmit only, nothing to listen to");
@@ -767,7 +759,7 @@ fn sky_plot(ui: &mut egui::Ui, arc: &[orbit::Look], live: Option<&orbit::Look>) 
         let dim = if el == 0.0 { theme::ETCH } else { theme::ETCH.gamma_multiply(0.6) };
         p.circle_stroke(mid, ring, Stroke::new(1.0, dim));
     }
-    let font = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+    let font = theme::legend_font(9.0);
     for (name, dx, dy) in [("N", 0.0, -1.0), ("E", 1.0, 0.0), ("S", 0.0, 1.0), ("W", -1.0, 0.0)] {
         p.text(
             Pos2::new(mid.x + dx * (r + 6.0), mid.y + dy * (r + 6.0)),

@@ -5,8 +5,9 @@
 
 use super::state::ScopeState;
 use super::*;
-use crate::ui::widgets::{choice, lamp, section, switch};
 use dsp::spectrum::Detector;
+use egui_bench::form::{choice, switch};
+use egui_bench::panel::section;
 
 /// The percentile control, on the row under whichever picker is set to one.
 ///
@@ -23,7 +24,7 @@ fn percent_row(ui: &mut egui::Ui, legend: &str, d: &mut Detector) {
     row_help(ui, legend, help, |ui| {
         ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
         ui.add(egui::Slider::new(&mut v, 1.0..=99.0).show_value(false));
-        theme::Line::new().set(format!("{:.0}%", v)).size(11.0).show(ui);
+        Line::new().set(format!("{:.0}%", v)).size(11.0).show(ui);
     });
     *d = d.at_percent(v.round() as u8);
 }
@@ -101,7 +102,7 @@ impl ScopeSettings<'_> {
                 } else {
                     format!("{:.0}%", (1.0 - self.st.smoothing) * 100.0)
                 };
-                theme::Line::new().set(text).size(11.0).show(ui);
+                Line::new().set(text).size(11.0).show(ui);
             });
             let mut dc = self.settings.read(|s| s.dc_block);
             if switch(ui, "centre spur", &mut dc, "remove", "LO leakage at the tuned frequency.") {
@@ -167,10 +168,7 @@ impl ScopeSettings<'_> {
                 ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
                 let slider = egui::Slider::new(&mut self.st.wf_top_offset, 0.0..=20.0);
                 ui.add(slider.show_value(false));
-                theme::Line::new()
-                    .set(format!("{:.0} dB", self.st.wf_top_offset))
-                    .size(11.0)
-                    .show(ui);
+                Line::new().set(format!("{:.0} dB", self.st.wf_top_offset)).size(11.0).show(ui);
             });
         });
         ui.add_space(8.0);
@@ -225,8 +223,8 @@ impl ScopeSettings<'_> {
                 }
             });
             match (&status.error, &status.saved) {
-                (Some(e), _) => lamp(ui, false, e),
-                (None, Some(p)) => lamp(ui, true, &p.display().to_string()),
+                (Some(e), _) => panel::status(ui, false, e),
+                (None, Some(p)) => panel::status(ui, true, &p.display().to_string()),
                 (None, None) => {}
             }
         });

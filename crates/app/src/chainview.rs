@@ -10,8 +10,9 @@
 //! depth set by the longest path that reaches it, and edges drawn back to
 //! whichever node actually produced each input.
 
-use crate::theme;
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui_bench::text::{Line, legend};
+use egui_bench::theme;
 use pipeline::cost::Cost;
 use pipeline::graph::Topology;
 use pipeline::port::{PortKind, StreamSpec};
@@ -391,17 +392,13 @@ pub fn inspector(
     let node = topo.nodes.iter().find(|n| n.id.0 == selected)?;
     let mut out = None;
 
-    ui.label(theme::legend(&node.label));
-    ui.label(
-        egui::RichText::new(&node.kind)
-            .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
-            .color(theme::LEGEND),
-    );
+    ui.label(legend(&node.label));
+    ui.label(egui::RichText::new(&node.kind).font(theme::figure(10.0)).color(theme::LEGEND));
     ui.add_space(6.0);
     for (slot, spec) in &node.inputs {
         ui.label(
             egui::RichText::new(format!("in  {}", wire_label(spec, topo.rate_of(*slot))))
-                .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                .font(theme::figure(10.0))
                 .color(theme::LEGEND),
         );
         let _ = slot;
@@ -410,7 +407,7 @@ pub fn inspector(
         for (slot, spec) in &node.outputs {
             ui.label(
                 egui::RichText::new(format!("out {}", wire_label(spec, topo.rate_of(*slot))))
-                    .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                    .font(theme::figure(10.0))
                     .color(theme::TRACE),
             );
         }
@@ -418,21 +415,21 @@ pub fn inspector(
     if !node.readings.is_empty() {
         ui.add_space(6.0);
         for (what, value) in &node.readings {
-            theme::Line::new().legend(what).gap(6.0).value(value.clone()).size(11.0).elided(ui);
+            Line::new().legend(what).gap(6.0).value(value.clone()).size(11.0).elided(ui);
         }
     }
     if let Some(text) = cost_label(&node.cost) {
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(format!("p95 {text}"))
-                .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                .font(theme::figure(10.0))
                 .color(cost_colour(&node.cost)),
         );
         for (name, c) in &node.phases {
             if let Some(t) = cost_label(c) {
                 ui.label(
                     egui::RichText::new(format!("  {name}  {t}"))
-                        .font(FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())))
+                        .font(theme::figure(10.0))
                         .color(cost_colour(c)),
                 );
             }
@@ -451,7 +448,7 @@ pub fn inspector(
 
     for prm in &node.params {
         let name = if prm.label.is_empty() { prm.name.clone() } else { prm.label.clone() };
-        ui.label(theme::legend(&name));
+        ui.label(legend(&name));
         match (&prm.value, &prm.range) {
             (ParamValue::Float(v), ParamRange::Float { range, log }) => {
                 let mut x = *v;
@@ -565,7 +562,7 @@ pub fn draw(
         Pos2::new(rect.left() + 12.0, rect.top() + 4.0),
         egui::Align2::LEFT_TOP,
         format!("{} stages   {latency_ms:.1} ms through the chain", topo.nodes.len()),
-        FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+        theme::figure(10.0),
         theme::LEGEND,
     );
 
@@ -796,7 +793,7 @@ pub fn draw(
             Pos2::new(r.center().x, r.top() + 26.0),
             egui::Align2::CENTER_TOP,
             "not connected",
-            FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+            theme::figure(10.0),
             theme::LEGEND,
         );
         knob(&p, port(*r, 0, 1, Side::In), true, pointer);
@@ -917,7 +914,7 @@ pub fn draw(
                     Pos2::new(r.right() + 8.0, r.center().y),
                     egui::Align2::LEFT_CENTER,
                     format!("out  {}", wire_label(spec, topo.rate_of(*slot))),
-                    FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+                    theme::figure(10.0),
                     theme::TRACE,
                 );
             }
@@ -1269,7 +1266,7 @@ fn paint_scope(
     id: usize,
     frame: Option<&nodes::ScopeFrame>,
 ) {
-    let mono = FontId::new(9.0, FontFamily::Name(theme::READOUT_FONT.into()));
+    let mono = theme::figure(9.0);
     let inner = Rect::from_min_max(
         Pos2::new(r.left() + 8.0, r.top() + 40.0),
         Pos2::new(r.right() - 8.0, r.bottom() - 8.0),
@@ -1288,8 +1285,8 @@ fn paint_scope(
 
     // Level, on the same strip every fader carries, the held peak as a mark.
     let vu =
-        Rect::from_min_size(inner.min, Vec2::new(inner.width() - 78.0, crate::ui::widgets::VU_H));
-    crate::ui::widgets::vu(p, vu, f.rms * 2f32.sqrt());
+        Rect::from_min_size(inner.min, Vec2::new(inner.width() - 78.0, egui_bench::meter::VU_H));
+    egui_bench::meter::vu(p, vu, f.rms * 2f32.sqrt());
     let x = vu.left() + f.peak_hold.clamp(0.0, 1.0).sqrt() * vu.width();
     p.line_segment(
         [Pos2::new(x, vu.top()), Pos2::new(x, vu.bottom())],
@@ -1426,7 +1423,7 @@ fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool, cost
         FontId::new(12.0, FontFamily::Proportional),
         theme::VALUE,
     );
-    let mono = FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()));
+    let mono = theme::figure(10.0);
     // The kind on the left and the cost on the right of one line, so a box
     // that is costing something says so without growing.
     let cost_text = cost.and_then(cost_label);
@@ -1458,7 +1455,7 @@ fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool, cost
 
 /// A node's own breakdown, one line per phase, under its box.
 fn phases(p: &egui::Painter, r: Rect, phases: &[(String, Cost)]) -> f32 {
-    let mono = FontId::new(9.0, FontFamily::Name(theme::READOUT_FONT.into()));
+    let mono = theme::figure(9.0);
     let mut y = r.bottom() + INNER_GAP;
     for (name, c) in phases {
         let Some(text) = cost_label(c) else { continue };
@@ -1546,7 +1543,7 @@ fn edge(
             Pos2::new(mid.x, mid.y - 3.0),
             egui::Align2::CENTER_BOTTOM,
             wire_label(spec, measured),
-            FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into())),
+            theme::figure(10.0),
             theme::LEGEND,
         );
     }
@@ -1677,7 +1674,7 @@ mod tests {
     impl Harness {
         fn new(topo: Topology, patch: crate::patch::Patch) -> Self {
             let ctx = egui::Context::default();
-            theme::install(&ctx);
+            crate::ui::install(&ctx);
             Self {
                 ctx,
                 topo,
@@ -1953,7 +1950,7 @@ mod tests {
         let topo = branchy();
         let mut edit = Edit { manual: true, ..Default::default() };
         let ctx = egui::Context::default();
-        theme::install(&ctx);
+        crate::ui::install(&ctx);
         let frame = |edit: &mut Edit| {
             let _ = ctx.run_ui(Default::default(), |ui| {
                 draw(ui, &topo, 0.0, None, edit, None, None, &[], &[]);

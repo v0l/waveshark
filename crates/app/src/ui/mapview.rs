@@ -201,7 +201,7 @@ impl MapView {
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, height), Sense::click_and_drag());
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 2.0, theme::WELL);
-        let font = FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()));
+        let font = theme::figure(10.0);
 
         // Centre on what the caller suggests until someone drags the map
         // somewhere else. After that it stays where it was put: a map that
@@ -248,7 +248,7 @@ impl MapView {
         // toolbar, and every mapping application puts its layers here.
         // Placed before the layers draw so the pointer over it is the
         // control's and not the map's.
-        let legend_font = FontId::new(10.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let legend_font = theme::legend_font(10.0);
         let width =
             |s: &str| p.layout_no_wrap(s.to_string(), legend_font.clone(), theme::LEGEND).size().x;
         let named: Vec<(&'static str, &'static str)> =
@@ -442,8 +442,8 @@ impl MapView {
         credits: &[crate::data::Credit],
         raised: bool,
     ) {
-        let name_font = FontId::new(10.0, FontFamily::Name(theme::LEGEND_FONT.into()));
-        let small = FontId::new(9.0, FontFamily::Name(theme::LEGEND_FONT.into()));
+        let name_font = theme::legend_font(10.0);
+        let small = theme::legend_font(9.0);
         // Laid out first and drawn second, because the plate has to be the
         // size of the text and the text sits inside the plate.
         let mut pieces: Vec<(std::sync::Arc<egui::Galley>, Option<&'static str>)> = Vec::new();
@@ -632,7 +632,7 @@ impl Canvas {
     }
 
     pub fn font() -> FontId {
-        FontId::new(10.0, FontFamily::Name(theme::READOUT_FONT.into()))
+        theme::figure(10.0)
     }
 }
 

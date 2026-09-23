@@ -308,6 +308,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-phosphor",
+ "egui_bench",
  "flate2",
  "gps",
  "hackrf",
@@ -1932,6 +1933,14 @@ dependencies = [
  "web-time",
  "webbrowser",
  "winit",
+]
+
+[[package]]
+name = "egui_bench"
+version = "0.1.0"
+source = "git+https://github.com/v0l/egui_bench?rev=768cd8292e3886d4a9ff399c38dd28835437d3f0#768cd8292e3886d4a9ff399c38dd28835437d3f0"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

@@ -44,7 +44,7 @@ fn center_hz(plan: common::ChannelPlan, number: u16) -> Option<f64> {
 }
 
 fn cell(ui: &mut egui::Ui, text: &str) {
-    theme::Line::new().set(text).size(11.0).show(ui);
+    Line::new().set(text).size(11.0).show(ui);
 }
 
 /// What a row says about the security of a network.
@@ -65,7 +65,7 @@ impl Channels<'_> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new()
+            Line::new()
                 .legend("transmitters")
                 .value(st.stations.len().to_string())
                 .legend("channels")
@@ -113,7 +113,7 @@ impl Channels<'_> {
                     if loads.is_empty() {
                         continue;
                     }
-                    theme::Line::new().legend(plan.label()).size(11.0).show(ui);
+                    Line::new().legend(plan.label()).size(11.0).show(ui);
                     ui.add_space(2.0);
                     let busiest =
                         loads.iter().map(|l| l.stations + l.overlapping).max().unwrap_or(1).max(1);
@@ -149,13 +149,13 @@ impl Channels<'_> {
             ui,
             |ui| {
                 for h in ["address", "name", "channel", "heard on", "security", "level", "seen"] {
-                    theme::Line::new().legend(h).size(10.0).show(ui);
+                    Line::new().legend(h).size(10.0).show(ui);
                 }
                 ui.end_row();
                 for s in rows {
-                    theme::Line::new().heard(s.id.clone()).size(11.0).show(ui);
+                    Line::new().measured(s.id.clone()).size(11.0).show(ui);
                     cell(ui, s.name.as_deref().unwrap_or(""));
-                    theme::Line::new().value(s.channel.to_string()).size(11.0).show(ui);
+                    Line::new().value(s.channel.to_string()).size(11.0).show(ui);
                     // Said only when it differs: an access point read off a
                     // filter parked two channels away is the case this pane
                     // exists to show, and repeating the same number on every
@@ -168,14 +168,14 @@ impl Channels<'_> {
                         },
                     );
                     cell(ui, protection(&s.secrecy));
-                    theme::Line::new()
+                    Line::new()
                         .value(format!("{:.0} dBFS", s.rssi_dbfs))
                         .size(11.0)
                         .gap(8.0)
                         .legend(&format!("peak {:.0}", s.best_rssi_dbfs))
                         .size(10.0)
                         .show(ui);
-                    theme::Line::new()
+                    Line::new()
                         .value(format!("{} pkt", s.packets))
                         .size(11.0)
                         .gap(8.0)
@@ -200,10 +200,10 @@ fn channel_row(
 ) -> Option<Action> {
     let mut act = None;
     ui.horizontal(|ui| {
-        theme::Line::new().legend("ch").value(l.number.to_string()).size(11.0).show(ui);
+        Line::new().legend("ch").value(l.number.to_string()).size(11.0).show(ui);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(180.0, 12.0), egui::Sense::hover());
         bar(ui.painter(), rect, l, busiest);
-        theme::Line::new()
+        Line::new()
             .value(format!("{}", l.stations))
             .size(11.0)
             .legend("on it")
@@ -226,7 +226,7 @@ fn channel_row(
             .map(|s| s.last_us)
             .max()
         {
-            theme::Line::new()
+            Line::new()
                 .legend("seen")
                 .value(super::devices_pane::ago(now.saturating_sub(last)))
                 .size(10.0)

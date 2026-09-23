@@ -144,22 +144,25 @@ The same goes the other way: a view that finds itself matching on a protocol
 name, or scanning for a field called `text`, is guessing at something the
 decoder knows. Put the statement on the decode.
 
-## Words on the screen go through `theme::Line`
+## Words on the screen go through `Line`
 
-Every caption, reading, sentence and label in a pane is a `theme::Line`
-(`crates/app/src/theme.rs`), drawn with `show`, or `wrapped` for prose and text
+The theme and the widgets are the [egui_bench](https://github.com/v0l/egui_bench)
+crate, shared with cycler. A widget another instrument could use goes there;
+`crates/app/src/ui/widgets.rs` keeps only what knows about the receiver.
+
+Every caption, reading, sentence and label in a pane is an
+`egui_bench::text::Line`, drawn with `show`, or `wrapped` for prose and text
 off the air. No `egui::Label`, no `RichText`, no `ui.label` in a pane: `Line`
 paints a row as one galley on a fixed baseline, which a `Label` cannot do.
 
 The face is a meaning: `legend` a silkscreened caption, `value` a reading,
-`set` an operator's choice, `heard` what the radio heard, `words` text off the
-air, `note` a sentence for a person.
+`set` an operator's choice, `measured` what the radio heard, `note` a
+sentence for a person.
 
-Helpers built on `Line` live in `crates/app/src/ui/widgets.rs` (`hint`, `cell`,
-`row`, `card`); a new one belongs there. Painted text is the exception: a table
-cell goes through `widgets::cell`, and the spectrum's axis labels are painter
-calls because they are part of a plot. Only `widgets.rs` itself still calls
-`ui.label`, where the helpers are built; a pane that calls it is a pane to
+Helpers built on `Line` live in egui_bench (`text::hint`, `table::cell`,
+`form::row`, `panel::card`). Painted text is the exception: a table cell goes
+through `table::cell`, and the spectrum's axis labels are painter calls
+because they are part of a plot. A pane that calls `ui.label` is a pane to
 convert.
 
 A button's label is the one thing `Line` cannot set, so a button that needs a
@@ -168,7 +171,7 @@ size other than the style's keeps its `RichText`.
 ## The design language is a chassis
 
 The screen is a receiver's front panel, and every colour and face means
-one thing (`crates/app/src/theme.rs`): `CHASSIS` is the case, `PANEL` a card
+one thing (`egui_bench::theme`): `CHASSIS` is the case, `PANEL` a card
 standing proud of it, `WELL` a recess (a readout window, a text field),
 `ETCH` an edge or a rule, `LEGEND` a silkscreened caption, `VALUE` a
 reading, `READOUT` amber what the operator set, `TRACE` cyan what the radio
@@ -177,9 +180,9 @@ meaning.
 
 A modal or a settings pane is a column of cards, and nothing else:
 
-- `widgets::section(ui, legend, note, body)`: the legend and a one-line
+- `panel::section(ui, legend, note, body)`: the legend and a one-line
   purpose in the header, rows in the body. A list of things (scanners,
-  datasets, memories, feeds) is one `widgets::card` per thing with its name
+  datasets, memories, feeds) is one `panel::card` per thing with its name
   in the header, its actions on the right of the header (TUNE, REMOVE,
   REFRESH), and its state on the rail: amber for what the operator set, cyan
   for what is running or heard, red for a fault, nothing for a plain card.
@@ -193,7 +196,7 @@ A modal or a settings pane is a column of cards, and nothing else:
   bare `egui::TextEdit`, `ui.checkbox` or `ui.separator` in a modal: a switch
   is `switch`, a closed list is `choice`, a card edge is the separator.
 - A number the operator reads is `reading`. Whether the card will work as it
-  is set is a `lamp` at the foot of the card, green with what it resolved to
+  is set is a `panel::status` at the foot of the card, green with what it resolved to
   or red with why not, computed live from the fields above it.
 - The modal ends in `footer`, CLOSE outermost right and the action beside
   it. Buttons are legends: uppercase verbs.

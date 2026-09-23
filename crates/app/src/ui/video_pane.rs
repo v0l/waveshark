@@ -91,7 +91,7 @@ impl VideoPane<'_> {
         // up at once looks like a pane with no controls at all.
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new().legend("watching").show(ui);
+            Line::new().legend("watching").show(ui);
             let mut want = st.watching.clone();
             let shown = match &want {
                 Some(k) => match self.inputs.iter().find(|i| &i.key == k) {
@@ -105,7 +105,7 @@ impl VideoPane<'_> {
                 None => "best picture".to_string(),
             };
             egui::ComboBox::from_id_salt("video-channel")
-                .selected_text(theme::value(shown))
+                .selected_text(value(shown))
                 .width(240.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut want, None, "best picture");
@@ -117,7 +117,7 @@ impl VideoPane<'_> {
                         );
                     }
                     if self.inputs.is_empty() {
-                        theme::Line::new().note("nothing receiving").size(11.0).show(ui);
+                        Line::new().note("nothing receiving").size(11.0).show(ui);
                     }
                 });
             ui.add_space(12.0);
@@ -126,7 +126,7 @@ impl VideoPane<'_> {
                 1 => "1 channel".to_string(),
                 n => format!("{n} channels"),
             };
-            theme::Line::new().legend(&count).show(ui);
+            Line::new().legend(&count).show(ui);
             // Every finished still is written out without being asked, so
             // the only thing a person needs from the pane is where they went.
             if let Some(last) = self.saved.last() {
@@ -137,7 +137,7 @@ impl VideoPane<'_> {
                     n => format!("{n} pictures saved"),
                 };
                 let dir = last.parent().unwrap_or(last).display().to_string();
-                let r = theme::Line::new().legend(&what).show(ui);
+                let r = Line::new().legend(&what).show(ui);
                 r.on_hover_text(dir.clone());
                 if ui.small_button("open").clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
@@ -145,7 +145,7 @@ impl VideoPane<'_> {
             }
             for mux in &self.muxes {
                 ui.add_space(12.0);
-                theme::Line::new().legend("service").show(ui);
+                Line::new().legend("service").show(ui);
                 let mut pick = mux.wanted.clone();
                 let shown = match &pick {
                     Want::Any => nodes::dvbt_nodes::ANY.to_string(),
@@ -157,7 +157,7 @@ impl VideoPane<'_> {
                         .map_or_else(|| format!("service {id}"), nodes::dvbt_nodes::service_label),
                 };
                 egui::ComboBox::from_id_salt(("dvb-service", mux.node))
-                    .selected_text(theme::value(shown))
+                    .selected_text(value(shown))
                     .width(220.0)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut pick, Want::Any, nodes::dvbt_nodes::ANY);
@@ -169,10 +169,7 @@ impl VideoPane<'_> {
                             );
                         }
                         if mux.services.is_empty() {
-                            theme::Line::new()
-                                .note("no services described yet")
-                                .size(11.0)
-                                .show(ui);
+                            Line::new().note("no services described yet").size(11.0).show(ui);
                         }
                     });
                 if pick != mux.wanted {
@@ -219,7 +216,7 @@ impl VideoPane<'_> {
 
         let (Some(tex), Some(f)) = (st.texture.as_ref(), st.shown.as_ref()) else {
             ui.centered_and_justified(|ui| {
-                theme::Line::new().note("no picture").size(14.0).show(ui);
+                Line::new().note("no picture").size(14.0).show(ui);
             });
             return;
         };

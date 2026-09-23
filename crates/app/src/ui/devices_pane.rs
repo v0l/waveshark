@@ -48,7 +48,7 @@ impl Devices<'_> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            theme::Line::new()
+            Line::new()
                 .legend("devices")
                 .value(format!("{devices} heard"))
                 .legend("sightings")
@@ -66,7 +66,7 @@ impl Devices<'_> {
                 (true, None) => ("gps", "connected, no fix".into()),
                 (false, None) => ("gps", "nothing answering".into()),
             };
-            theme::Line::new().legend(legend).value(value).size(11.0).show(ui);
+            Line::new().legend(legend).value(value).size(11.0).show(ui);
             // Where the selected device's sightings put it. A conclusion
             // drawn from the levels along the drive, with how far it might
             // be out, which is what makes it worth saying at all.
@@ -82,7 +82,7 @@ impl Devices<'_> {
                     ),
                     None => ("likely at", "not enough places heard from yet".into()),
                 };
-                theme::Line::new().legend(legend).value(value).size(11.0).show(ui);
+                Line::new().legend(legend).value(value).size(11.0).show(ui);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -198,7 +198,7 @@ impl Devices<'_> {
                         for h in
                             ["identity", "protocol", "name", "vendor", "level", "seen", "packets"]
                         {
-                            theme::Line::new().legend(h).size(10.0).show(ui);
+                            Line::new().legend(h).size(10.0).show(ui);
                         }
                         ui.end_row();
                         for d in &rows {
@@ -225,7 +225,7 @@ impl Devices<'_> {
                             // what has been heard, and clicking a row to
                             // retune took the receiver off the band it was
                             // surveying.
-                            theme::Line::new()
+                            Line::new()
                                 .value(format!(
                                     "{} at {:.3} MHz",
                                     d.packets,
@@ -246,7 +246,7 @@ impl Devices<'_> {
 }
 
 fn cell(ui: &mut egui::Ui, text: &str) {
-    theme::Line::new().set(text).size(11.0).show(ui);
+    Line::new().set(text).size(11.0).show(ui);
 }
 
 /// Wall clock in microseconds, which is what the survey stamps sightings

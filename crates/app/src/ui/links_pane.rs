@@ -44,13 +44,9 @@ impl LinksView<'_> {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             let live = links.iter().filter(|l| l.live(now)).count();
-            theme::Line::new()
-                .legend("links")
-                .value(format!("{} seen", links.len()))
-                .size(11.0)
-                .show(ui);
+            Line::new().legend("links").value(format!("{} seen", links.len())).size(11.0).show(ui);
             if live > 0 {
-                theme::Line::new()
+                Line::new()
                     .legend("live")
                     .value(live.to_string())
                     .tint(theme::OK)
@@ -78,7 +74,7 @@ impl LinksView<'_> {
         if let Some(e) = &self.st.error {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                theme::Line::new().legend(e).tint(theme::FAULT).size(11.0).show(ui);
+                Line::new().legend(e).tint(theme::FAULT).size(11.0).show(ui);
             });
         }
         ui.add_space(6.0);
@@ -135,7 +131,7 @@ impl LinksView<'_> {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                theme::Line::new()
+                Line::new()
                     .legend("following")
                     .value(l.title())
                     .tint(theme::READOUT)
@@ -155,7 +151,7 @@ impl LinksView<'_> {
                             self.packets.iter().filter(|r| l.holds(r)).collect();
                         let first = held.first().map(|r| r.at);
                         if held.is_empty() {
-                            theme::Line::new()
+                            Line::new()
                                 .legend("no packets in the log for this link")
                                 .size(11.0)
                                 .show(ui);
@@ -174,11 +170,11 @@ impl LinksView<'_> {
 /// One link in the directory.
 fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) -> egui::Response {
     let tint = if l.live(now) { theme::OK } else { theme::TRACE };
-    let inner = widgets::card(
+    let inner = panel::card(
         ui,
         Some(if picked { theme::READOUT } else { tint }),
         |ui| {
-            theme::Line::new()
+            Line::new()
                 .legend(&l.system)
                 .value(crate::links::end_label(&l.from).to_string())
                 .tint(theme::READOUT)
@@ -188,11 +184,11 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
                 .size(11.0)
                 .show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::Line::new().legend(&age(l.age(now))).show(ui);
+                Line::new().legend(&age(l.age(now))).show(ui);
             });
         },
         |ui| {
-            let mut line = theme::Line::new()
+            let mut line = Line::new()
                 .legend("packets")
                 .value(l.packets.to_string())
                 .size(11.0)
@@ -226,14 +222,14 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
 fn packet_row(ui: &mut egui::Ui, r: &Reception, first: Option<std::time::Instant>) {
     let t = first.map(|f| r.at.saturating_duration_since(f).as_secs_f64()).unwrap_or(0.0);
     ui.horizontal_wrapped(|ui| {
-        theme::Line::new().legend(&format!("{t:>8.3}")).value(r.protocol()).size(11.0).show(ui);
+        Line::new().legend(&format!("{t:>8.3}")).value(r.protocol()).size(11.0).show(ui);
         if r.rssi_dbfs().is_finite() {
-            theme::Line::new().legend(&format!("{:.0} dBFS", r.rssi_dbfs())).size(11.0).show(ui);
+            Line::new().legend(&format!("{:.0} dBFS", r.rssi_dbfs())).size(11.0).show(ui);
         }
         if r.integrity() == common::packet::Integrity::Failed {
-            theme::Line::new().legend("crc failed").tint(theme::FAULT).size(11.0).show(ui);
+            Line::new().legend("crc failed").tint(theme::FAULT).size(11.0).show(ui);
         }
-        theme::Line::new().legend(&format!("{} B", r.bytes().len())).size(11.0).show(ui);
+        Line::new().legend(&format!("{} B", r.bytes().len())).size(11.0).show(ui);
     });
     // What it said, where it said anything: this is the point of following a
     // link, so it gets a line of its own at full width rather than a column.
@@ -241,12 +237,12 @@ fn packet_row(ui: &mut egui::Ui, r: &Reception, first: Option<std::time::Instant
     if let Some(t) = said {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            theme::Line::new().words(&t).wrapped(ui);
+            Line::new().value(&t).wrapped(ui);
         });
     } else if !r.detail().is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            theme::Line::new().legend(&r.detail()).size(10.0).show(ui);
+            Line::new().legend(&r.detail()).size(10.0).show(ui);
         });
     }
 }
