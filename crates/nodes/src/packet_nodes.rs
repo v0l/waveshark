@@ -238,6 +238,7 @@ struct Heard {
     /// Whether a detector found it rather than a front end being told to
     /// read the channel.
     detected: bool,
+    proven: Option<u64>,
 }
 
 /// One reception as the dedupe reads it: where it was heard, how wide the
@@ -251,6 +252,7 @@ struct Seen {
     rssi_dbfs: f32,
     known: bool,
     detected: bool,
+    proven: Option<u64>,
 }
 
 impl Seen {
@@ -275,6 +277,15 @@ impl Seen {
                 matches!(k.how, common::packet::Knowledge::Measured { .. })
                     || !matches!(k.symbols, Symbols::None)
             }),
+            proven: p.frame.as_ref().and_then(|f| match f.integrity {
+                Integrity::Passed | Integrity::Corrected { .. } => {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    f.bytes.hash(&mut h);
+                    Some(h.finish())
+                }
+                Integrity::Unchecked | Integrity::Failed => None,
+            }),
         }
     }
 
@@ -286,6 +297,7 @@ impl Seen {
             modulation: self.modulation,
             known: self.known,
             detected: self.detected,
+            proven: self.proven,
         }
     }
 }
@@ -316,6 +328,9 @@ fn same_burst(kept: &Heard, new: &Seen) -> bool {
     // and a measurement of noise a few kilohertz off a sensor a moment
     // before it keyed up must not stand in for the sensor's packet.
     if new.known && !kept.known {
+        return false;
+    }
+    if matches!((kept.proven, new.proven), (Some(a), Some(b)) if a != b) {
         return false;
     }
     let d = (kept.freq - new.freq).abs();
@@ -726,6 +741,33 @@ mod tests {
         );
     }
 
+    fn proven(freq: f64, bytes: Vec<u8>) -> Packet {
+        let mut p = heard(freq, "ais", -40.0);
+        p.frame = Some(common::packet::Frame::of(bytes).checked(Integrity::Passed));
+        p
+    }
+
+    #[test]
+    fn two_checked_frames_with_different_bytes_are_two_transmissions() {
+        let kept = deduped(
+            &mut DedupeNode::default(),
+            vec![proven(161_975_000.0, vec![1, 2, 3]), proven(162_025_000.0, vec![4, 5, 6])],
+        );
+        assert_eq!(kept.len(), 2, "AIS A and B heard in one block: {kept:#?}");
+    }
+
+    #[test]
+    fn one_checked_frame_read_on_two_channels_is_one_transmission() {
+        let kept = deduped(
+            &mut DedupeNode::default(),
+            vec![
+                proven(868_100_000.0, vec![1, 2, 3]),
+                proven(868_100_000.0 + WIDE_HZ, vec![1, 2, 3]),
+            ],
+        );
+        assert_eq!(kept.len(), 1);
+    }
+
     #[test]
     fn two_devices_far_apart_are_both_kept() {
         let kept = deduped(
@@ -784,6 +826,7 @@ mod tests {
             rssi_dbfs: -30.0,
             known: false,
             detected: true,
+            proven: None,
         }
     }
 

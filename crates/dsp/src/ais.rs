@@ -61,10 +61,9 @@ pub fn is_ais_band(center_hz: f64) -> bool {
 /// Symbol rate. Fixed by the standard, not a choice.
 pub const BAUD: f64 = 9600.0;
 
-/// Half the bandwidth the signal occupies. GMSK at 9600 baud with 2.4 kHz
-/// deviation is about 14 kHz wide by Carson, so this passes the signal and
-/// nothing of the neighbouring channel 25 kHz away.
-const PASSBAND_HZ: f64 = 7_000.0;
+const PASS_HZ: f64 = 5_500.0;
+const STOP_HZ: f64 = 8_500.0;
+const DC_MEMORY_SYMBOLS: f32 = 16.0;
 
 /// Samples per symbol aimed for after decimation. Five is comfortably above
 /// the two the clock recovery needs and keeps the decimated rate near 48 kHz.
@@ -136,9 +135,7 @@ impl AisSymbols {
     pub fn new(rate: f64) -> Self {
         Self {
             dc: 0.0,
-            // A few hundred symbols of memory: long enough not to track the
-            // data, short enough to follow a drifting tuner.
-            dc_alpha: (1.0 / (rate as f32 / BAUD as f32 * 200.0)).min(0.05),
+            dc_alpha: (1.0 / (rate as f32 / BAUD as f32 * DC_MEMORY_SYMBOLS)).min(0.05),
             sps: (rate / BAUD) as f32,
             since: 0.0,
             last_sign: false,
@@ -249,7 +246,7 @@ impl ChannelRx {
         Self {
             channel,
             mixer: Mixer::new(shift, rate),
-            decim: FirDecim::design_hz(rate, factor, PASSBAND_HZ, 60.0),
+            decim: FirDecim::design_band(rate, factor, PASS_HZ, STOP_HZ, 60.0),
             // Scaled so a symbol at full deviation reads near +/-1.
             demod: FmDemod::new(work, 2_400.0),
             mixed: Vec::new(),
@@ -338,23 +335,19 @@ impl AisDetector {
 mod tests {
     use super::*;
 
-    /// Modulate a level sequence as FSK at the AIS rate and deviation.
-    ///
-    /// Plain FSK rather than GMSK: the discriminator does not care about the
-    /// pulse shaping, and a test that had to implement a Gaussian filter to
-    /// check the framer would be testing the wrong thing.
     pub(super) fn modulate(levels: &[bool], rate: f64, offset_hz: f64) -> Vec<C32> {
-        let sps = rate / BAUD;
-        let mut out = Vec::with_capacity((levels.len() as f64 * sps) as usize);
-        let mut phase = 0.0f64;
-        for &l in levels {
-            let f = offset_hz + if l { 2_400.0 } else { -2_400.0 };
-            for _ in 0..sps as usize {
-                phase += std::f64::consts::TAU * f / rate;
-                out.push(C32::new(phase.cos() as f32, phase.sin() as f32));
-            }
-        }
-        out
+        let sps = (rate / BAUD) as usize;
+        let symbols: Vec<f32> = levels.iter().map(|&l| if l { 1.0 } else { -1.0 }).collect();
+        crate::gmsk::modulate(&symbols, sps, 0.4)
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                s * C32::from_polar(
+                    1.0,
+                    (std::f64::consts::TAU * offset_hz * i as f64 / rate) as f32,
+                )
+            })
+            .collect()
     }
 
     /// Run a burst through a detector with silence either side.
@@ -478,7 +471,7 @@ mod tolerance {
     /// cheap sticks, and the transmitter's own error on top.
     #[test]
     fn a_real_receivers_frequency_error_is_survivable() {
-        for err in [0.0, 500.0, 1200.0, 2000.0] {
+        for err in [-3000.0, -2000.0, -1200.0, -500.0, 0.0, 500.0, 1200.0, 2000.0, 3000.0] {
             let iq = modulate(&encode_slot(&payload(), 168), RATE, CHANNEL_HZ[0] - CENTER + err);
             let got = run(&iq, RATE, CENTER);
             assert_eq!(got.len(), 1, "lost the frame at {err} Hz of offset");

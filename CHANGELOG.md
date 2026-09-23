@@ -215,6 +215,8 @@ the code is in the commit log.
 
 - Call list airtime climbing with no channel open, and calls that never ended.
 - Network radio dialog froze the window while ADD waited for the server.
+- AIS missed most frames on weak signals, and all of them with the DC block on.
+- AIS frames on one channel dropped as copies of the other channel's.
 - A saved patch naming a stage this build was not compiled with emptied the
   whole graph.
 - Receiver froze on a rebuild while a DVB-T channel had fallen behind.

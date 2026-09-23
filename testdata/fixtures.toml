@@ -934,16 +934,22 @@ changed what both decoders read.
 
 Independently read by gnuais 0.3.3, fed each channel's discriminator
 through scipy: 12 frames passed their CRC, from 244690403, 205581490,
-244133678, 244670443, 244013030 and 211664370. This receiver reads five, all
-on channel B, four of them among gnuais's twelve. The fifth, from 244650878,
-passed its own CRC and gnuais did not read it.
+244133678, 244670443, 244013030 and 211664370. This receiver reads 24, 11 on
+channel A and 13 on B, from nine vessels. Eleven of gnuais's twelve are among
+them; the one missed is 244133678's binary broadcast.
 
-With the DC block on, the receiver reads none of them.
+It first read five, and none with the DC block on. Its channel filter passed
+everything that did not alias, so the discriminator heard about three times
+the channel's bandwidth of noise, and the dedupe took a frame on one channel
+for a copy of one heard on the other.
 """
 
 [capture.expect]
-frames = 5
-channel_hz = 162_025_000
-vessels = [205581490, 244650878, 244690403]
+frames = 24
+frames_channel_a = 11
+frames_channel_b = 13
+frames_with_dc_block = 24
+vessels = [205581490, 211664370, 244013030, 244038327, 244650495, 244650878, 244670443, 244690403, 244700331]
 reference = "gnuais 0.3.3"
 reference_frames = 12
+reference_frames_read_here = 11

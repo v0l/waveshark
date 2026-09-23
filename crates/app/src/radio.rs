@@ -5440,13 +5440,12 @@ pub(crate) mod tests {
         let ais = read_by(&out, "ais");
         assert_eq!(
             ais.len(),
-            5,
-            "gnuais 0.3.3 read 12 frames off this file, this read {}",
+            24,
+            "gnuais 0.3.3 read 12 frames off this file, 11 of them among this receiver's 24; this read {}",
             ais.len()
         );
-        for r in &ais {
-            assert_eq!(r.freq(), 162_025_000.0, "read as {}", r.detail());
-        }
+        let on = |hz: f64| ais.iter().filter(|r| r.freq() == hz).count();
+        assert_eq!((on(161_975_000.0), on(162_025_000.0)), (11, 13), "frames on channels A and B");
 
         let tracks = rx.tracks(std::time::Instant::now());
         let mut vessels: Vec<(u32, Option<String>)> = tracks
@@ -5457,13 +5456,31 @@ pub(crate) mod tests {
             })
             .collect();
         vessels.sort();
-        assert_eq!(tracks.len(), 3, "{tracks:?}");
+        assert_eq!(tracks.len(), 9, "{tracks:?}");
         assert_eq!(
             vessels,
-            [205581490, 244650878, 244690403]
-                .map(|m| (m, Some(format!("https://www.vesselfinder.com/vessels/details/{m}"))))
-                .to_vec()
+            [
+                205581490, 211664370, 244013030, 244038327, 244650495, 244650878, 244670443,
+                244690403, 244700331,
+            ]
+            .map(|m| (m, Some(format!("https://www.vesselfinder.com/vessels/details/{m}"))))
+            .to_vec()
         );
+    }
+
+    #[test]
+    fn barges_on_the_waal_are_read_through_the_dc_block() {
+        let Some(buf) = ais_fixture() else {
+            eprintln!("skipping: ais_nijmegen_162M_768k.cu8 absent, run testdata/fetch.sh");
+            return;
+        };
+        let mut plan = replay_plan(&buf, false);
+        plan.dc_block = true;
+        plan.fronts = crate::scanners::Scanners::default()
+            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
+        let out = replay_blocks(&mut rx, &buf);
+        assert_eq!(read_by(&out, "ais").len(), 24, "the same 24 as without the DC block");
     }
 
     /// The BLE capture: 2 s of advertising channel 38, tuned onto the channel

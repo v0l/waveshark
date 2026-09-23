@@ -100,7 +100,12 @@ impl Simple for AisNode {
         for f in &self.frames {
             self.accepted += 1;
             let hz = CHANNEL_HZ[(f.channel as usize).min(CHANNEL_HZ.len() - 1)];
-            out.push(self.meter.packet_now(f.payload.clone()).at_center(hz as u64));
+            out.push(
+                self.meter
+                    .packet_now(f.payload.clone())
+                    .at_center(hz as u64)
+                    .checked(common::packet::Integrity::Passed),
+            );
         }
         Ok(())
     }
