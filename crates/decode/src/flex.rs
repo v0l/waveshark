@@ -221,15 +221,9 @@ pub fn pages(words: &[u32], phase: char) -> Vec<Page> {
     if phase_words.iter().filter(|w| w.is_none()).count() > INTERLEAVE_BLOCK_WORDS {
         return Vec::new();
     }
-    let Some(biw) = phase_words[0] else { return Vec::new() };
-    if biw == 0 || biw == MESSAGE_MASK {
+    let Some((address_at, vector_at)) = phase_words[0].and_then(layout) else {
         return Vec::new();
-    }
-    let vector_at = (biw >> 10 & 0x3F) as usize;
-    let address_at = (biw >> 8 & 0x03) as usize + 1;
-    if vector_at <= address_at || vector_at >= PHASE_WORDS {
-        return Vec::new();
-    }
+    };
 
     let mut out = Vec::new();
     for i in address_at..vector_at {
@@ -272,6 +266,61 @@ pub fn pages(words: &[u32], phase: char) -> Vec<Page> {
         out.push(page);
     }
     out
+}
+
+fn layout(biw: u32) -> Option<(usize, usize)> {
+    if biw == 0 || biw == MESSAGE_MASK {
+        return None;
+    }
+    let vector_at = (biw >> 10 & 0x3F) as usize;
+    let address_at = (biw >> 8 & 0x03) as usize + 1;
+    (vector_at > address_at && vector_at < PHASE_WORDS).then_some((address_at, vector_at))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assignment {
+    pub capcode: u32,
+    pub temporary: u8,
+    pub frame: u8,
+    pub words: [u32; 2],
+}
+
+impl Assignment {
+    pub fn read(words: [u32; 2]) -> Option<Self> {
+        let (address, _) = repair(words[0])?;
+        let (viw, _) = repair(words[1])?;
+        let activation =
+            PageKind::from_bits(viw >> 4) == PageKind::ShortInstruction && viw >> 7 & 0x7 == 0;
+        if !activation || !(SHORT_ADDRESS_MIN..=SHORT_ADDRESS_MAX).contains(&address) {
+            return None;
+        }
+        Some(Self {
+            capcode: address - ADDRESS_BIAS,
+            temporary: (viw >> 17 & 0xF) as u8,
+            frame: (viw >> 10 & 0x7F) as u8,
+            words,
+        })
+    }
+
+    pub fn instruction(capcode: u32, temporary: u8, frame: u8) -> [u32; 2] {
+        let viw = PageKind::ShortInstruction.bits() << 4
+            | u32::from(frame & 0x7F) << 10
+            | u32::from(temporary & 0xF) << 17;
+        [encode_word(capcode + ADDRESS_BIAS), encode_word(viw)]
+    }
+}
+
+pub fn assignments(words: &[u32]) -> Vec<Assignment> {
+    if words.len() < PHASE_WORDS {
+        return Vec::new();
+    }
+    let Some((address_at, vector_at)) = repair(words[0]).and_then(|(biw, _)| layout(biw)) else {
+        return Vec::new();
+    };
+    (address_at..vector_at)
+        .filter_map(|i| words.get(vector_at + i - address_at).map(|v| [words[i], *v]))
+        .filter_map(Assignment::read)
+        .collect()
 }
 
 fn message_words(phase_words: &[Option<u32>], first: usize, len: usize) -> Option<Vec<u32>> {
@@ -436,17 +485,44 @@ fn encode_numeric(text: &str) -> Vec<u32> {
 pub fn read(bytes: &[u8]) -> Vec<Proto> {
     let Some(frame) = dsp::flex::Frame::from_bytes(bytes) else { return Vec::new() };
     let names = frame.mode.phase_names();
+    let this = Fiw::parse(frame.fiw).map(|f| f.frame);
+    let mut groups: Vec<(u8, Vec<u32>)> = Vec::new();
+    for a in frame.carried.iter().filter_map(|w| Assignment::read(*w)) {
+        if Some(a.frame) != this {
+            continue;
+        }
+        match groups.iter_mut().find(|(t, _)| *t == a.temporary) {
+            Some((_, capcodes)) if capcodes.contains(&a.capcode) => {}
+            Some((_, capcodes)) => capcodes.push(a.capcode),
+            None => groups.push((a.temporary, vec![a.capcode])),
+        }
+    }
     let mut out = Vec::new();
     for (phase, name) in frame.phases.iter().zip(names) {
         for page in pages(phase, *name) {
+            let to = to_party(page.capcode, &groups);
             out.push(
                 Proto::new("flex", page.kind.label())
-                    .between(Link { from: None, to: Some(Party::unit(page.capcode.to_string())) })
+                    .between(Link { from: None, to: Some(to) })
                     .maybe(page.text.map(Fact::message)),
             );
         }
     }
     out
+}
+
+fn to_party(capcode: u32, groups: &[(u8, Vec<u32>)]) -> Party {
+    let address = capcode + ADDRESS_BIAS;
+    if !TEMPORARY_ADDRESSES.contains(&address) {
+        return Party::unit(capcode.to_string());
+    }
+    let temporary = (address - TEMPORARY_ADDRESSES.start()) as u8;
+    match groups.iter().find(|(t, _)| *t == temporary) {
+        Some((_, capcodes)) => {
+            Party::group(capcodes.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
+        }
+        None => Party::temporary(capcode.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +614,44 @@ mod tests {
         assert_eq!(read[0].text.as_deref(), Some("P 1 BREDA"));
         let past = encode(&[(0x1F_7810 - ADDRESS_BIAS, Body::Alpha("OPERATOR".into()))]);
         assert_eq!(pages(&past, 'A').len(), 0, "0x1F7810 is not a temporary address");
+    }
+
+    #[test]
+    fn a_short_instruction_assigns_its_capcodes_to_a_temporary_address() {
+        let mut phase = encode(&[(1_220_499, Body::Tone), (1_220_845, Body::Tone)]);
+        for (at, capcode) in [(3, 1_220_499), (4, 1_220_845)] {
+            phase[at] = Assignment::instruction(capcode, 14, 3)[1];
+        }
+        let heard: Vec<(u32, u8, u8)> =
+            assignments(&phase).iter().map(|a| (a.capcode, a.temporary, a.frame)).collect();
+        assert_eq!(heard, [(1_220_499, 14, 3), (1_220_845, 14, 3)]);
+    }
+
+    #[test]
+    fn a_group_page_is_addressed_to_the_capcodes_assigned_to_it() {
+        let group =
+            encode(&[(0x1F_780E - ADDRESS_BIAS, Body::Alpha("A2 Breda rit: 169068".into()))]);
+        let to = |carried: Vec<[u32; 2]>| -> Vec<Option<Party>> {
+            let frame = dsp::flex::Frame {
+                mode: dsp::flex::Mode { baud: 1600, levels: 2 },
+                fiw: Fiw { cycle: 1, frame: 3 }.encode(),
+                phases: vec![group.clone()],
+                carried,
+            };
+            read(&frame.to_bytes()).into_iter().map(|r| r.link.to).collect()
+        };
+        let alone = vec![Some(Party::temporary("2029582"))];
+        assert_eq!(
+            to(vec![
+                Assignment::instruction(1_220_499, 14, 3),
+                Assignment::instruction(1_220_845, 14, 3),
+                Assignment::instruction(1_220_499, 14, 3),
+            ]),
+            vec![Some(Party::group("1220499, 1220845"))]
+        );
+        assert_eq!(to(Vec::new()), alone);
+        assert_eq!(to(vec![Assignment::instruction(1_220_499, 14, 4)]), alone, "meant for frame 4");
+        assert_eq!(to(vec![Assignment::instruction(1_220_499, 13, 3)]), alone, "another group");
     }
 
     #[test]

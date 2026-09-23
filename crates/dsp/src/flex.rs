@@ -115,6 +115,7 @@ pub struct Frame {
     /// One entry per phase in [`Mode::phase_names`] order, each
     /// [`PHASE_WORDS`] long.
     pub phases: Vec<Vec<u32>>,
+    pub carried: Vec<[u32; 2]>,
 }
 
 impl Frame {
@@ -128,6 +129,9 @@ impl Frame {
             for w in phase {
                 out.extend_from_slice(&w.to_be_bytes());
             }
+        }
+        for w in self.carried.iter().flatten() {
+            out.extend_from_slice(&w.to_be_bytes());
         }
         out
     }
@@ -145,10 +149,20 @@ impl Frame {
             .chunks_exact(4)
             .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        if words.len() != mode.phases() * PHASE_WORDS {
+        let phase_words = mode.phases() * PHASE_WORDS;
+        if bytes.len() % 4 != 2 || words.len() < phase_words {
             return None;
         }
-        Some(Self { mode, fiw, phases: words.chunks(PHASE_WORDS).map(<[u32]>::to_vec).collect() })
+        let (phases, carried) = words.split_at(phase_words);
+        if !carried.len().is_multiple_of(2) {
+            return None;
+        }
+        Some(Self {
+            mode,
+            fiw,
+            phases: phases.chunks(PHASE_WORDS).map(<[u32]>::to_vec).collect(),
+            carried: carried.chunks_exact(2).map(|c| [c[0], c[1]]).collect(),
+        })
     }
 }
 
@@ -395,6 +409,7 @@ impl FlexDemod {
                         mode: self.mode,
                         fiw: self.fiw,
                         phases: std::mem::take(&mut self.phases),
+                        carried: Vec::new(),
                     });
                     self.seen = 0;
                     self.sync = 0;
@@ -666,10 +681,16 @@ mod tests {
     fn a_frame_packs_and_unpacks() {
         let mode = Mode { baud: 3200, levels: 4 };
         let phases: Vec<Vec<u32>> = (0..4).map(|p| phase_of(&[0xABCD_0000 | p as u32])).collect();
-        let frame = Frame { mode, fiw: 0x0012_3456, phases };
+        let frame = Frame { mode, fiw: 0x0012_3456, phases, carried: Vec::new() };
         let bytes = frame.to_bytes();
         assert_eq!(bytes.len(), 6 + 4 * PHASE_WORDS * 4);
-        assert_eq!(Frame::from_bytes(&bytes), Some(frame));
+        assert_eq!(Frame::from_bytes(&bytes), Some(frame.clone()));
         assert_eq!(Frame::from_bytes(&bytes[..10]), None);
+
+        let carrying = Frame { carried: vec![[0x1111_2222, 0x3333_4444]], ..frame };
+        let bytes = carrying.to_bytes();
+        assert_eq!(bytes.len(), 6 + 4 * PHASE_WORDS * 4 + 8);
+        assert_eq!(Frame::from_bytes(&bytes), Some(carrying));
+        assert_eq!(Frame::from_bytes(&bytes[..bytes.len() - 4]), None, "half a carried pair");
     }
 }

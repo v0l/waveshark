@@ -38,6 +38,7 @@ pub struct FlexNode {
     audio: Vec<f32>,
     meter: crate::FrameMeter,
     frames: Vec<Frame>,
+    assigned: Vec<decode::flex::Assignment>,
     accepted: u64,
 }
 
@@ -62,6 +63,7 @@ impl FlexNode {
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
                 .keyed_as(common::Modulation::Fsk2),
             frames: Vec::new(),
+            assigned: Vec::new(),
             accepted: 0,
         }
     }
@@ -116,7 +118,8 @@ impl Simple for FlexNode {
         self.audio = audio;
 
         let out = o.packets_mut();
-        for f in &self.frames {
+        for f in &mut self.frames {
+            carry_assignments(&mut self.assigned, f);
             self.accepted += 1;
             let mut p = self.meter.packet_now(f.to_bytes());
             if f.mode.levels == 4
@@ -134,7 +137,24 @@ impl Simple for FlexNode {
         self.decim.reset();
         self.fm.reset();
         self.demod.reset();
+        self.assigned.clear();
     }
+}
+
+const ASSIGNMENT_REACH_FRAMES: u16 = 32;
+
+fn carry_assignments(assigned: &mut Vec<decode::flex::Assignment>, frame: &mut Frame) {
+    for phase in &frame.phases {
+        assigned.extend(decode::flex::assignments(phase));
+    }
+    let Some(this) = decode::flex::Fiw::parse(frame.fiw).map(|f| u16::from(f.frame)) else {
+        return;
+    };
+    frame.carried =
+        assigned.iter().filter(|a| u16::from(a.frame) == this).map(|a| a.words).collect();
+    assigned.retain(|a| {
+        (1..=ASSIGNMENT_REACH_FRAMES).contains(&((u16::from(a.frame) + 128 - this) % 128))
+    });
 }
 
 impl Protocol for Flex {
@@ -339,6 +359,7 @@ mod tests {
             mode: dsp::flex::Mode { baud: 1600, levels: 2 },
             fiw: Fiw { cycle: 1, frame: 2 }.encode(),
             phases: vec![decode::flex::encode(&[(1_234_567, Body::Alpha("HELLO".into()))])],
+            carried: Vec::new(),
         };
         let bytes = frame.to_bytes();
         let p = packet(bytes.clone());
@@ -351,6 +372,7 @@ mod tests {
             mode: dsp::flex::Mode { baud: 1600, levels: 2 },
             fiw: Fiw { cycle: 1, frame: 2 }.encode(),
             phases: vec![decode::flex::encode(&[])],
+            carried: Vec::new(),
         };
         let p = packet(frame.to_bytes());
         assert_eq!(Flex.stated(&p).map(|r| r.len()), Some(0));
@@ -358,6 +380,41 @@ mod tests {
             .into_iter()
             .find_map(|proto| proto.stated(&p).map(|rows| (proto.id(), rows.len())));
         assert_eq!(answered, Some(("flex", 0)));
+    }
+
+    #[test]
+    fn an_instruction_is_carried_to_the_frame_it_names() {
+        use decode::flex::Assignment;
+        let mut instruction =
+            decode::flex::encode(&[(1_220_499, Body::Tone), (1_220_845, Body::Tone)]);
+        for (at, capcode) in [(3, 1_220_499), (4, 1_220_845)] {
+            instruction[at] = Assignment::instruction(capcode, 14, 3)[1];
+        }
+        let group =
+            decode::flex::encode(&[(2_029_582, Body::Alpha("A2 Breda rit: 169068".into()))]);
+        let frame = |n: u8, phase: Vec<u32>| Frame {
+            mode: dsp::flex::Mode { baud: 1600, levels: 2 },
+            fiw: Fiw { cycle: 1, frame: n }.encode(),
+            phases: vec![phase],
+            carried: Vec::new(),
+        };
+        let mut assigned = Vec::new();
+        let mut heard = Vec::new();
+        for (n, phase) in [(2, instruction), (3, group.clone()), (4, group)] {
+            let mut f = frame(n, phase);
+            carry_assignments(&mut assigned, &mut f);
+            let rows = read(&f.to_bytes());
+            heard.push((
+                f.carried.len(),
+                rows.iter()
+                    .filter_map(|r| r.wrote().map(|_| r.link.to.clone()))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        assert_eq!(heard[0], (0, vec![]));
+        assert_eq!(heard[1], (2, vec![Some(common::packet::Party::group("1220499, 1220845"))]));
+        assert_eq!(heard[2], (0, vec![Some(common::packet::Party::temporary("2029582"))]));
+        assert!(assigned.is_empty(), "an assignment outlived its frame");
     }
 
     /// Minutes of noise on the channel produce no rows.

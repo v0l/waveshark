@@ -69,7 +69,7 @@ the code is in the commit log.
   and Matter.
 - P25 phase 1: the talkgroup, the radio id and the key a call is under,
   without speech.
-- FLEX paging at 1600 and 3200 baud, two and four level, in the message view.
+- FLEX paging at 1600 and 3200 baud, two and four level, group pages under their capcodes.
 - Two-tone paging: the pair that opens a fire or ambulance pager, named from
   an operator's list.
 - MDC-1200: the unit id a Motorola radio sends when its key goes down.
