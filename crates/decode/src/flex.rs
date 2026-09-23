@@ -53,6 +53,10 @@ const ADDRESS_BIAS: u32 = 0x8000;
 const SHORT_ADDRESS_MIN: u32 = 0x0_8001;
 const SHORT_ADDRESS_MAX: u32 = 0x1E_0000;
 
+const TEMPORARY_ADDRESSES: std::ops::RangeInclusive<u32> = 0x1F_7800..=0x1F_780F;
+
+const INTERLEAVE_BLOCK_WORDS: usize = 8;
+
 /// What a page carries. The three bits of the vector word's type field, as
 /// the FLEX specification numbers them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,22 +209,19 @@ impl Fiw {
 
 /// Read one phase of a frame.
 ///
-/// `words` is the phase as received, 88 raw 32-bit words. Words that cannot
-/// be corrected end the phase: FLEX interleaves so heavily that a word past
-/// repair means the burst was lost, and reading on from there invents
-/// addresses.
+/// `words` is the phase as received, 88 raw 32-bit words. More words past
+/// correction than one interleave block holds end the phase, since reading on
+/// from there invents addresses; fewer lose only the pages that use them.
 pub fn pages(words: &[u32], phase: char) -> Vec<Page> {
-    let mut phase_words = Vec::with_capacity(PHASE_WORDS);
-    for &w in words.iter().take(PHASE_WORDS) {
-        match repair(w) {
-            Some((message, _)) => phase_words.push(message),
-            None => return Vec::new(),
-        }
-    }
-    if phase_words.len() < PHASE_WORDS {
+    if words.len() < PHASE_WORDS {
         return Vec::new();
     }
-    let biw = phase_words[0];
+    let phase_words: Vec<Option<u32>> =
+        words.iter().take(PHASE_WORDS).map(|&w| repair(w).map(|(message, _)| message)).collect();
+    if phase_words.iter().filter(|w| w.is_none()).count() > INTERLEAVE_BLOCK_WORDS {
+        return Vec::new();
+    }
+    let Some(biw) = phase_words[0] else { return Vec::new() };
     if biw == 0 || biw == MESSAGE_MASK {
         return Vec::new();
     }
@@ -232,11 +233,13 @@ pub fn pages(words: &[u32], phase: char) -> Vec<Page> {
 
     let mut out = Vec::new();
     for i in address_at..vector_at {
-        let address = phase_words[i];
+        let Some(address) = phase_words[i] else { continue };
         if address == 0 || address == MESSAGE_MASK {
             continue; // Idle codeword rather than an address.
         }
-        if !(SHORT_ADDRESS_MIN..=SHORT_ADDRESS_MAX).contains(&address) {
+        if !(SHORT_ADDRESS_MIN..=SHORT_ADDRESS_MAX).contains(&address)
+            && !TEMPORARY_ADDRESSES.contains(&address)
+        {
             // The long form spans two words and carries its own bias; it is
             // rare enough on the air that reading it half way would be worse
             // than not reading it.
@@ -247,26 +250,21 @@ pub fn pages(words: &[u32], phase: char) -> Vec<Page> {
         if vector_word >= PHASE_WORDS {
             continue;
         }
-        let viw = phase_words[vector_word];
+        let Some(viw) = phase_words[vector_word] else { continue };
         let kind = PageKind::from_bits(viw >> 4);
         let first = (viw >> 7 & 0x7F) as usize;
         let len = (viw >> 14 & 0x7F) as usize;
-        let last = first + len.saturating_sub(1);
         let mut page = Page { capcode, kind, text: None, phase, fragment: Fragment::Whole };
         match kind {
             PageKind::Alphanumeric | PageKind::Secure => {
-                if first == 0 || last >= PHASE_WORDS || len == 0 {
-                    continue;
-                }
-                let (text, fragment) = alphanumeric(&phase_words[first..=last]);
+                let Some(message) = message_words(&phase_words, first, len) else { continue };
+                let (text, fragment) = alphanumeric(&message);
                 page.fragment = fragment;
                 page.text = Some(text);
             }
             PageKind::StandardNumeric | PageKind::SpecialNumeric | PageKind::NumberedNumeric => {
-                if first == 0 || last >= PHASE_WORDS || len == 0 {
-                    continue;
-                }
-                page.text = Some(numeric(&phase_words[first..=last], kind));
+                let Some(message) = message_words(&phase_words, first, len) else { continue };
+                page.text = Some(numeric(&message, kind));
             }
             PageKind::Tone => {}
             PageKind::ShortInstruction | PageKind::Binary => {}
@@ -274,6 +272,13 @@ pub fn pages(words: &[u32], phase: char) -> Vec<Page> {
         out.push(page);
     }
     out
+}
+
+fn message_words(phase_words: &[Option<u32>], first: usize, len: usize) -> Option<Vec<u32>> {
+    if first == 0 || len == 0 || first + len > PHASE_WORDS {
+        return None;
+    }
+    phase_words[first..first + len].iter().copied().collect()
 }
 
 /// The text of an alphanumeric page.
@@ -522,6 +527,39 @@ mod tests {
         let mut lost = phase;
         lost[3] ^= 0b1010_1010_1010;
         assert_eq!(pages(&lost, 'A').len(), 0, "an unrepairable word invented pages");
+    }
+
+    #[test]
+    fn a_group_page_on_a_temporary_address_is_read() {
+        let phase = encode(&[(0x1F_780E - ADDRESS_BIAS, Body::Alpha("P 1 BREDA".into()))]);
+        let read = pages(&phase, 'A');
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].capcode, 2_029_582);
+        assert_eq!(read[0].text.as_deref(), Some("P 1 BREDA"));
+        let past = encode(&[(0x1F_7810 - ADDRESS_BIAS, Body::Alpha("OPERATOR".into()))]);
+        assert_eq!(pages(&past, 'A').len(), 0, "0x1F7810 is not a temporary address");
+    }
+
+    #[test]
+    fn a_lost_interleave_block_costs_only_the_pages_that_use_it() {
+        let phase = encode(&[
+            (1_234_567, Body::Alpha("FIRST".into())),
+            (98_765, Body::Alpha("SECOND".into())),
+        ]);
+        let smash = |at: std::ops::Range<usize>| {
+            let mut p = phase.clone();
+            for w in &mut p[at] {
+                *w ^= 0b1010_1010_1010;
+            }
+            p
+        };
+        let texts = |p: &[u32]| -> Vec<String> {
+            pages(p, 'A').into_iter().filter_map(|pg| pg.text).collect()
+        };
+        assert_eq!(texts(&smash(80..88)), ["FIRST", "SECOND"]);
+        assert_eq!(texts(&smash(3..4)), ["SECOND"], "the first page's vector was lost");
+        assert_eq!(texts(&smash(79..88)), Vec::<String>::new(), "nine lost words read as a phase");
+        assert_eq!(texts(&smash(0..1)), Vec::<String>::new(), "a phase read without its BIW");
     }
 
     /// Noise is not a phase: random words present addresses and vectors that
