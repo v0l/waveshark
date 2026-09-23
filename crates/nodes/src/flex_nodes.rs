@@ -170,8 +170,8 @@ impl Protocol for Flex {
         if !dsp::pocsag::is_pager_band(p.center_hz() as f64) {
             return None;
         }
-        let decoded = read(bytes);
-        (!decoded.is_empty()).then_some(decoded)
+        Frame::from_bytes(bytes)?;
+        Some(read(bytes))
     }
 
     /// A Dutch national FLEX channel: the one most likely to be carrying
@@ -343,6 +343,21 @@ mod tests {
         let bytes = frame.to_bytes();
         let p = packet(bytes.clone());
         assert_eq!(Flex.stated(&p).map(|r| r.len()), Some(1));
+    }
+
+    #[test]
+    fn a_flex_frame_with_no_pages_is_still_flex_and_never_offered_to_pocsag() {
+        let frame = Frame {
+            mode: dsp::flex::Mode { baud: 1600, levels: 2 },
+            fiw: Fiw { cycle: 1, frame: 2 }.encode(),
+            phases: vec![decode::flex::encode(&[])],
+        };
+        let p = packet(frame.to_bytes());
+        assert_eq!(Flex.stated(&p).map(|r| r.len()), Some(0));
+        let answered = crate::protocol::frame_readers()
+            .into_iter()
+            .find_map(|proto| proto.stated(&p).map(|rows| (proto.id(), rows.len())));
+        assert_eq!(answered, Some(("flex", 0)));
     }
 
     /// Minutes of noise on the channel produce no rows.
