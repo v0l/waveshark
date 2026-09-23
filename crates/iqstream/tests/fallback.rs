@@ -167,9 +167,15 @@ async fn a_reader_that_stops_taking_blocks_has_them_dropped_rather_than_queued()
 
     // Nothing is read for the length of this, so the queue to the socket
     // fills and the pump has to choose between dropping and waiting.
+    let accounted = || tuner.blocks_sent() + tuner.blocks_dropped();
+    let before = accounted();
     for _ in 0..2000 {
         tuner.push(&block);
         tokio::task::yield_now().await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while accounted() < before + 2000 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let dropped = tuner.blocks_dropped();
     assert!(
