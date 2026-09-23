@@ -167,6 +167,7 @@ the code is in the commit log.
 
 ### Changed
 
+- Span shows a rate off the list as its size rather than "custom".
 - Channels and front ends in the span's rolloff are named, where the radio
   hears little.
 - Scanner channels landing on a join between two tuners are dropped, and a

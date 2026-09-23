@@ -300,7 +300,7 @@ impl App {
                 .iter()
                 .find(|s| (self.rate - s.effective()).abs() < 1.0)
                 .map(|s| s.label.clone())
-                .unwrap_or_else(|| "custom".into());
+                .unwrap_or_else(|| crate::devices::span_label(self.rate));
             egui::ComboBox::from_id_salt("span").selected_text(cur).width(SPAN_W).show_ui(
                 ui,
                 |ui| {

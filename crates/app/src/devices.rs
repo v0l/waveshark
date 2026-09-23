@@ -72,7 +72,7 @@ fn combinations(hw: &[Entry]) -> Vec<Entry> {
         out.push(Entry {
             kind: DriverKind::Combined,
             index: out.len(),
-            label: format!("{n} x {} ({})", kind.as_str(), label(span.as_f64())),
+            label: format!("{n} x {} ({})", kind.as_str(), span_label(span.as_f64())),
             // The widest span and nothing else: a combiner exists to buy
             // span, and a narrower one is one of the radios on its own.
             rates: span..=span,
@@ -488,14 +488,14 @@ pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
     // is, and offering nothing would leave the receiver unable to start.
     if out.is_empty() {
         let rate = range.end().as_f64();
-        out.push(Span { label: label(rate), rate, zoom: 1 });
+        out.push(Span { label: span_label(rate), rate, zoom: 1 });
     }
     let Some(base) = out.first().map(|s| s.rate) else {
         return out;
     };
     let mut zoom = 2;
     while base / zoom as f64 >= 48_000.0 && zoom <= 64 {
-        out.insert(0, Span { label: label(base / zoom as f64), rate: base, zoom });
+        out.insert(0, Span { label: span_label(base / zoom as f64), rate: base, zoom });
         zoom *= 2;
     }
     out
@@ -526,10 +526,10 @@ pub fn spans_for(range: &std::ops::RangeInclusive<Sps>) -> Vec<(String, f64)> {
         61_440_000.0,
     ];
     let (lo, hi) = (range.start().0 as f64, range.end().0 as f64);
-    CANDIDATES.iter().filter(|r| **r >= lo && **r <= hi).map(|r| (label(*r), *r)).collect()
+    CANDIDATES.iter().filter(|r| **r >= lo && **r <= hi).map(|r| (span_label(*r), *r)).collect()
 }
 
-fn label(hz: f64) -> String {
+pub fn span_label(hz: f64) -> String {
     if hz >= 1e6 {
         let m = hz / 1e6;
         if (m - m.round()).abs() < 1e-9 { format!("{m:.0}M") } else { format!("{m:.3}M") }
@@ -605,9 +605,11 @@ mod tests {
 
     #[test]
     fn rate_labels_are_readable() {
-        assert_eq!(label(2_400_000.0), "2.400M");
-        assert_eq!(label(8_000_000.0), "8M");
-        assert_eq!(label(250_000.0), "250k");
+        assert_eq!(span_label(2_400_000.0), "2.400M");
+        assert_eq!(span_label(8_000_000.0), "8M");
+        assert_eq!(span_label(250_000.0), "250k");
+        assert_eq!(span_label(1_250_000.0), "1.250M");
+        assert_eq!(span_label(625_000.0), "625k");
     }
 
     /// Two dongles of a kind carry the same serial, so the list has to say
