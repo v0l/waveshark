@@ -484,11 +484,13 @@ impl RtlSdr {
             ds = DirectSampling::Q;
         }
 
-        let last_ds = st.direct_sampling;
         if ds != DirectSampling::Off {
             self.enter_direct_sampling(&mut st, ds)?;
             self.set_if_freq(freq, self.xtal(&st))?;
         } else {
+            if st.direct_sampling != DirectSampling::Off {
+                self.enter_direct_sampling(&mut st, DirectSampling::Off)?;
+            }
             self.t.set_i2c_repeater(true)?;
             let r = match &mut st.r82xx {
                 Some(r) => r.set_freq(&self.t, freq),
@@ -499,10 +501,6 @@ impl RtlSdr {
         }
         st.freq = freq;
         st.direct_sampling = ds;
-
-        if last_ds != ds {
-            return self.apply_direct_sampling(&mut st);
-        }
         Ok(())
     }
 
@@ -615,9 +613,8 @@ impl RtlSdr {
         if freq > 0 {
             self.set_frequency(freq)?;
         } else {
-            let st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap();
             if st.direct_sampling != mode {
-                let mut st = self.state.lock().unwrap();
                 self.enter_direct_sampling(&mut st, mode)?;
             }
         }
@@ -660,23 +657,6 @@ impl RtlSdr {
         // Swapping the ADC inputs picks between the two sockets.
         self.t.demod_write_reg(0, 0x06, if on == DirectSampling::Q { 0x90 } else { 0x80 }, 1)?;
         st.direct_sampling = on;
-        Ok(())
-    }
-
-    /// The tuner-independent half of a mode change, which is what a control
-    /// call lands on when nothing is tuned yet.
-    fn apply_direct_sampling(&self, st: &mut State) -> Result<()> {
-        let ds = st.direct_sampling;
-        let freq = st.freq;
-        let _ = freq;
-        if ds != DirectSampling::Off {
-            self.enter_direct_sampling(st, ds)?;
-            if freq > 0 {
-                self.set_if_freq(freq, self.xtal(st))?;
-            }
-        } else {
-            self.enter_direct_sampling(st, DirectSampling::Off)?;
-        }
         Ok(())
     }
 

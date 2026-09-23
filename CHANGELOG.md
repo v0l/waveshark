@@ -225,6 +225,8 @@ the code is in the commit log.
   the pilot.
 - `--device` opened the saved radio first, claiming a receiver nobody named.
 - RTL-SDR lost samples between USB transfers, throwing mlat timing off.
+- RTL-SDR direct sampling hung when switched with nothing tuned, and switching
+  it off lost the tuner's rate and gain.
 - Mode S frames across a block edge were sent twice, the second copy late.
 - Located transmitters drew a circle far smaller than the error, tighter the
   longer the drive.

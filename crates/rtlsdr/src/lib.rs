@@ -138,6 +138,10 @@ impl RtlSdr {
         let mode = if on { DirectSampling::Q } else { DirectSampling::Off };
         self.dev.set_direct_sampling_mode(mode).map_err(map_err)?;
         self.switches.set(rtl::Switch::DirectSampling, on);
+        if !on {
+            self.set_rate(self.rate)?;
+            self.set_gain("tuner", self.tuner_gain)?;
+        }
         Ok(())
     }
 
