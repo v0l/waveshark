@@ -15,6 +15,7 @@ pub struct Entry {
     /// device is opened. Not a constant per driver: a LimeSDR on a USB 2.0
     /// port cannot carry what the same board does on USB 3.0.
     pub rates: std::ops::RangeInclusive<Sps>,
+    pub steps: Vec<Sps>,
     /// Where to reach it, for a radio that is not on this machine.
     pub addr: Option<String>,
     /// What is listening there. Set with `addr` and nothing else: the port
@@ -42,6 +43,7 @@ impl Entry {
             index,
             label,
             rates,
+            steps: Vec::new(),
             addr: None,
             proto: None,
             path: None,
@@ -76,6 +78,7 @@ fn combinations(hw: &[Entry]) -> Vec<Entry> {
             // The widest span and nothing else: a combiner exists to buy
             // span, and a narrower one is one of the radios on its own.
             rates: span..=span,
+            steps: Vec::new(),
             addr: None,
             proto: None,
             path: None,
@@ -158,6 +161,7 @@ impl Capture {
             index,
             label: format!("{name} ({:.1}s)", self.seconds),
             rates: self.rate..=self.rate,
+            steps: Vec::new(),
             addr: None,
             proto: None,
             path: Some(self.path.clone()),
@@ -345,9 +349,14 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
                         Some(c) => format!("{called} {:.3} MHz", c.as_f64() / 1e6),
                         None => format!("{called} ({})", p.tuner),
                     },
-                    rates: match p.rate {
-                        Some(rate) => rate..=rate,
-                        None => RTL_RATES,
+                    rates: match (p.rate, p.rates.first(), p.rates.last()) {
+                        (Some(rate), _, _) => rate..=rate,
+                        (None, Some(lo), Some(hi)) => *lo..=*hi,
+                        _ => RTL_RATES,
+                    },
+                    steps: match p.rate {
+                        Some(_) => Vec::new(),
+                        None => p.rates,
                     },
                     addr: Some(p.addr),
                     proto: Some(r.proto),
@@ -364,6 +373,7 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
                 index,
                 label: format!("{name} (offline)"),
                 rates: RTL_RATES,
+                steps: Vec::new(),
                 addr: Some(r.addr.clone()),
                 proto: Some(r.proto),
                 path: None,
@@ -499,6 +509,24 @@ pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
         zoom *= 2;
     }
     out
+}
+
+pub fn spans_of(e: &Entry) -> Vec<Span> {
+    let listed: Vec<Span> = e
+        .steps
+        .iter()
+        .map(|r| r.as_f64())
+        .filter(|r| *r >= 48_000.0)
+        .map(|rate| Span { label: span_label(rate), rate, zoom: 1 })
+        .collect();
+    match (listed.is_empty(), e.steps.last()) {
+        (false, _) => listed,
+        (true, Some(fastest)) => {
+            let rate = fastest.as_f64();
+            vec![Span { label: span_label(rate), rate, zoom: 1 }]
+        }
+        (true, None) => spans_with_zoom(&e.rates),
+    }
 }
 
 pub fn spans_for(range: &std::ops::RangeInclusive<Sps>) -> Vec<(String, f64)> {

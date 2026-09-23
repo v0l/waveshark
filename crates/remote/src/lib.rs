@@ -249,6 +249,7 @@ pub struct Probe {
     /// where the protocol takes its frequency and rate from this end.
     pub center: Option<Hz>,
     pub rate: Option<Sps>,
+    pub rates: Vec<Sps>,
     /// Gain the source was started with, when it was told.
     pub gain_db: Option<f32>,
     /// What the far end calls this tuner, where it has a name: a server with

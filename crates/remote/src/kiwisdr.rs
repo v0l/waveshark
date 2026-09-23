@@ -141,6 +141,7 @@ pub fn probe(addr: &str) -> Result<Probe> {
         addr,
         center: None,
         rate: Some(status.rate),
+        rates: Vec::new(),
         gain_db: None,
         name: String::new(),
         settings: Vec::new(),

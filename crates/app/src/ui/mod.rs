@@ -615,12 +615,6 @@ const SPLIT_GRIP_H: f32 = 7.0;
 /// the drag is reported and the grab is never seen.
 const GRAB_PX: f64 = 10.0;
 
-/// Rate limits for a device, used to build the span list before it is opened.
-/// The driver reports the same numbers through `DeviceInfo` once it is.
-fn device_rates(e: &crate::devices::Entry) -> std::ops::RangeInclusive<Sps> {
-    e.rates.clone()
-}
-
 impl Default for App {
     fn default() -> Self {
         let (desk, asks) = crate::agent::Desk::new();
@@ -1353,7 +1347,7 @@ impl App {
     /// The span list this receiver can offer, and a rate it can deliver.
     fn fit_spans(&mut self) {
         let Some(entry) = self.device.as_ref() else { return };
-        self.spans = crate::devices::spans_with_zoom(&device_rates(entry));
+        self.spans = crate::devices::spans_of(entry);
         if !self.spans.iter().any(|s| (s.effective() - self.rate).abs() < 1.0) {
             self.rate = self.spans.last().map(|s| s.effective()).unwrap_or(self.rate);
             self.zoom = 1;
@@ -4187,6 +4181,29 @@ mod tests {
     }
 
     #[test]
+    fn a_spyserver_offers_its_own_stages_and_nothing_wider() {
+        let mut a = app();
+        let spy = crate::devices::Entry {
+            kind: common::device::DriverKind::Network,
+            index: 0,
+            label: "spy".into(),
+            rates: Sps(23_437)..=Sps(750_000),
+            steps: [23_437, 46_875, 93_750, 187_500, 375_000, 750_000].map(Sps).to_vec(),
+            addr: Some("spy.test:5555".into()),
+            proto: Some(remote::Proto::SpyServer),
+            path: None,
+            pinned: None,
+            parts: Vec::new(),
+        };
+        a.adopt_device(spy);
+        assert_eq!(
+            a.spans.iter().map(|s| (s.label.as_str(), s.effective())).collect::<Vec<_>>(),
+            vec![("94k", 93_750.0), ("188k", 187_500.0), ("375k", 375_000.0), ("750k", 750_000.0)]
+        );
+        assert_eq!(a.rate, 750_000.0);
+    }
+
+    #[test]
     fn a_pinned_radio_is_listed_at_the_rate_it_delivers() {
         let mut a = app();
         let kiwi = crate::devices::Entry {
@@ -4194,6 +4211,7 @@ mod tests {
             index: 0,
             label: "kiwi".into(),
             rates: Sps(12_000)..=Sps(12_000),
+            steps: Vec::new(),
             addr: Some("kiwi.test:8073".into()),
             proto: Some(remote::Proto::KiwiSdr),
             path: None,

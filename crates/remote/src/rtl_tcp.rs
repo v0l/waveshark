@@ -103,6 +103,7 @@ pub fn probe(addr: &str) -> Result<Probe> {
         addr,
         center: None,
         rate: None,
+        rates: Vec::new(),
         gain_db: None,
         // A dongle on rtl_tcp is the whole server, so there is nothing to
         // tell it apart from.

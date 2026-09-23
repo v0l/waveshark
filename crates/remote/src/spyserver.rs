@@ -345,6 +345,7 @@ pub fn probe(addr: &str) -> Result<Probe> {
         addr,
         center: Some(Hz(sync.iq_center as u64)),
         rate: None,
+        rates: info.rates(),
         gain_db: None,
         name: match sync.can_control {
             true => info.device.name().to_string(),
@@ -790,6 +791,17 @@ mod tests {
         assert_eq!(p.name, "Airspy");
         assert!(p.tunable);
         assert_eq!(p.tune_range, Some(Hz(24_000_000)..=Hz(1_800_000_000)));
+    }
+
+    #[test]
+    fn a_probe_offers_no_span_wider_than_the_server_streams() {
+        let mut info = airspy_info();
+        info[40..44].copy_from_slice(&2u32.to_le_bytes());
+        let (addr, _cmds) = fake(info, 1, 0, None);
+        let p = probe(&addr).unwrap();
+        assert_eq!(p.rates.len(), 9, "stages two to ten");
+        assert_eq!(p.rates.first(), Some(&Sps(2929)));
+        assert_eq!(p.rates.last(), Some(&Sps(750_000)), "3 MS/s decimated twice");
     }
 
     #[test]
