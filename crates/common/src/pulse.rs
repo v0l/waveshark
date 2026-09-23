@@ -547,6 +547,10 @@ impl Over {
 }
 
 impl Voice {
+    pub fn called(&self) -> Option<&str> {
+        self.to.as_deref().filter(|t| !t.trim().is_empty())
+    }
+
     /// Frames in this block: samples per channel.
     pub fn frames(&self) -> usize {
         self.pcm.len() / self.channels.max(1)

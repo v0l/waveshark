@@ -127,7 +127,7 @@ impl HeardNode {
     /// analogue tap, so an unnamed party is what keeps a channel off the
     /// list.
     pub fn track(&mut self, v: &common::Voice, block_s: f64) {
-        let Some(to) = v.to.as_deref().filter(|t| !t.trim().is_empty()) else {
+        let Some(to) = v.called() else {
             return;
         };
         let key = common::ConversationKey::of(v);

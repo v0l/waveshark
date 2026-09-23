@@ -1250,7 +1250,7 @@ impl Simple for LiveTranscribeNode {
         let at = Instant::now();
         let block_s = _c.block_seconds;
         let mut seen: Vec<common::ConversationKey> = Vec::new();
-        for v in i.as_voice().unwrap_or(&[]) {
+        for v in i.as_voice().unwrap_or(&[]).iter().filter(|v| v.called().is_some()) {
             let key = common::ConversationKey::of(v);
             if self.collect(key.clone(), v, block_s, at) {
                 if let Some(t) = self.talking.get_mut(&key) {
@@ -1518,6 +1518,29 @@ mod tests {
         assert!(n.held_seconds(&key) > 1.0, "the audio was thrown away");
     }
 
+    #[test]
+    fn a_channel_not_marked_as_voice_is_not_transcribed() {
+        let mut n = LiveTranscribeNode::new();
+        n.set_param("enabled", ParamValue::Bool(true)).unwrap();
+        let ins = [PortSpec {
+            spec: StreamSpec { kind: PortKind::Voice, rate: 8_000.0, ..Default::default() },
+            latency: 0,
+        }];
+        let (mut events, tags, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+        let hz = 107_800_000.0;
+        let broadcast = voice(crate::mix::fader::ANALOGUE, hz, None, None, 0.2, 800);
+        let marked = voice(crate::mix::fader::ANALOGUE, hz, Some("CH8"), None, 0.2, 800);
+        for _ in 0..10 {
+            let mut c = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            c.block_seconds = 0.1;
+            let heard = Payload::Voice(vec![broadcast.clone(), marked.clone()]);
+            n.process(&heard, &mut Payload::Voice(Vec::new()), &mut c).unwrap();
+        }
+        let unmarked = common::ConversationKey::of(&broadcast);
+        assert_eq!(n.held_seconds(&unmarked), 0.0, "a channel with VOICE off was collected");
+        assert_eq!(n.held_seconds(&common::ConversationKey::of(&marked)), 1.0);
+    }
+
     /// A channel sitting open with nobody on it collects nothing, or every
     /// squelched receiver would hand the model an hour of noise.
     #[test]
@@ -1591,12 +1614,13 @@ mod tests {
         // Silence on the end, so the utterance is finished rather than still
         // being spoken when the samples run out.
         blocks.extend((0..20).map(|_| vec![0.0; block]));
-        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0)
+            .to(Some("CH1".into()));
         for b in blocks {
             let payload = Payload::Voice(vec![common::Voice {
                 system: crate::mix::fader::ANALOGUE,
                 channel_hz: 145_500_000.0,
-                to: None,
+                to: Some("CH1".into()),
                 from: None,
                 code: None,
                 over: None,
@@ -1670,7 +1694,7 @@ mod tests {
             let payload = Payload::Voice(vec![common::Voice {
                 system: crate::mix::fader::ANALOGUE,
                 channel_hz: 145_500_000.0,
-                to: None,
+                to: Some("CH1".into()),
                 from: None,
                 code: None,
                 over: None,
@@ -1689,7 +1713,8 @@ mod tests {
         // would have asked for it again as settled is beside the point, since
         // it is not there to ask.
         drop(n);
-        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0);
+        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 145_500_000.0)
+            .to(Some("CH1".into()));
         for _ in 0..600 {
             if log.lock().latest(&key).is_some() {
                 break;
@@ -1857,8 +1882,8 @@ mod tests {
     #[test]
     fn what_the_receiver_said_is_not_what_it_heard() {
         let mut n = LiveTranscribeNode::new();
-        let key = common::ConversationKey::new(crate::mix::fader::ANALOGUE, 446_050_000.0);
-        let speech = voice(crate::mix::fader::ANALOGUE, 446_050_000.0, None, None, 0.3, 800);
+        let speech = voice(crate::mix::fader::ANALOGUE, 446_050_000.0, Some("CH1"), None, 0.3, 800);
+        let key = common::ConversationKey::of(&speech);
         let heard = |n: &mut LiveTranscribeNode| {
             let payload = pipeline::port::Payload::Voice(vec![speech.clone()]);
             let mut out = pipeline::port::Payload::Voice(Vec::new());

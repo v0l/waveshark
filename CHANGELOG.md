@@ -167,6 +167,7 @@ the code is in the commit log.
 
 ### Changed
 
+- Transcript reads only channels with VOICE on.
 - Span shows a rate off the list as its size rather than "custom".
 - Channels and front ends in the span's rolloff are named, where the radio
   hears little.
