@@ -44,6 +44,13 @@ no account and publishes what it collects. beaconDB's `/v1/geolocate` answers
 where a receiver seeing a cell probably is; it has no bulk export yet, which
 is why OpenCelliD is still the file the map draws from.
 
+Addresses go out one at a time too. A P2000 page names where the units are
+sent, and the dispatch layer asks the PDOK Locatieserver
+(`api.pdok.nl/bzk/locatieserver/search/v3_1/free`, open and free, Dutch
+government registers) where that is. Only the street, postcode and town the
+page named are sent, and each once per session. The lookup sits behind
+`datasets::geocode::Geocoder`, so another service is another implementation.
+
 The identifying string every one of these sees is `httpc::USER_AGENT`, and
 there is exactly one of it: see the rule in `AGENTS.md`.
 

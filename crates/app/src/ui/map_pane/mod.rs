@@ -10,8 +10,8 @@ mod layers;
 use super::mapview::{Layer, MapView};
 use super::*;
 use layers::{
-    AirportLayer, CellLayer, RingLayer, SatLayer, SightingLayer, SondeLayer, StationLayer,
-    TrackLayer,
+    AirportLayer, CellLayer, DispatchLayer, RingLayer, SatLayer, SightingLayer, SondeLayer,
+    StationLayer, TrackLayer,
 };
 
 /// What the map pane remembers. Its own, and reachable from no other view:
@@ -72,6 +72,7 @@ pub(super) struct Map<'a> {
     /// Devices the survey holds, for the layers that draw what was heard
     /// rather than what somebody published.
     pub heard: &'a [survey::Device],
+    pub messages: &'a crate::messages::Messages,
     /// The satellite the pass table has selected, drawn whether or not it is
     /// above the horizon, and the group it was selected from.
     pub sat: Option<u64>,
@@ -133,13 +134,15 @@ impl Map<'_> {
                     ident: self.trail.ident,
                     estimate: self.trail.estimate,
                 };
-                let mut layers: [&mut dyn Layer; 8] = [
+                let mut dispatch = DispatchLayer::new(self.messages.recent());
+                let mut layers: [&mut dyn Layer; 9] = [
                     &mut rings,
                     &mut cells,
                     &mut airports,
                     &mut sondes,
                     &mut station,
                     &mut sightings,
+                    &mut dispatch,
                     &mut sats,
                     &mut tracks,
                 ];

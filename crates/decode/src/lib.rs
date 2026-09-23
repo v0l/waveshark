@@ -75,6 +75,7 @@ pub mod mrz;
 pub mod nrf24;
 pub mod nxdn;
 pub mod odid;
+pub mod p2000;
 pub mod p25;
 pub mod pocsag;
 pub mod protocol;

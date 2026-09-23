@@ -1284,3 +1284,115 @@ impl Layer for SatLayer {
         }
     }
 }
+
+const DISPATCH_WINDOW_S: f64 = 2.0 * 3600.0;
+const DISPATCH_CARD_PAGES: usize = 3;
+
+pub(super) struct DispatchLayer<'a> {
+    pub messages: Vec<&'a crate::messages::Message>,
+    shown: Vec<(Pos2, Vec<usize>)>,
+    locating: usize,
+}
+
+impl<'a> DispatchLayer<'a> {
+    pub fn new(messages: Vec<&'a crate::messages::Message>) -> Self {
+        Self { messages, shown: Vec::new(), locating: 0 }
+    }
+}
+
+fn dispatch_age_s(m: &crate::messages::Message) -> f64 {
+    crate::messages::now_us().saturating_sub(m.at_us) as f64 / 1e6
+}
+
+impl Layer for DispatchLayer<'_> {
+    fn key(&self) -> &'static str {
+        "dispatch"
+    }
+
+    fn label(&self) -> &'static str {
+        "DISPATCH"
+    }
+
+    fn draw(&mut self, c: &Canvas) {
+        self.shown.clear();
+        self.locating = 0;
+        let ctx = c.p.ctx().clone();
+        let mut placed: Vec<(datasets::geocode::Place, Vec<usize>)> = Vec::new();
+        for (i, m) in self.messages.iter().enumerate() {
+            let Some(dest) = m.destination.as_deref() else { continue };
+            if dispatch_age_s(m) > DISPATCH_WINDOW_S {
+                continue;
+            }
+            let Some(place) = crate::places::place_of(&ctx, dest) else {
+                self.locating += 1;
+                continue;
+            };
+            match placed.iter_mut().find(|(p, _)| p.label == place.label) {
+                Some((_, pages)) => pages.push(i),
+                None => placed.push((place, vec![i])),
+            }
+        }
+        let near = c.rect.expand(30.0);
+        for (place, pages) in placed {
+            let at = c.at(place.lat, place.lon);
+            if !near.contains(at) {
+                continue;
+            }
+            let newest =
+                pages.iter().map(|i| dispatch_age_s(self.messages[*i])).fold(f64::MAX, f64::min);
+            let fade = (1.0 - newest / DISPATCH_WINDOW_S).clamp(0.25, 1.0) as f32;
+            let col = theme::TRACE.gamma_multiply(fade);
+            let r = (place.precision.radius_m() / 1852.0 * c.nm_px_at(place.lat)) as f32;
+            if r > 6.0 {
+                c.p.circle_stroke(at, r, Stroke::new(1.0, col.gamma_multiply(0.35)));
+            }
+            c.p.circle_filled(at, 4.0, col);
+            c.p.circle_stroke(at, 6.5, Stroke::new(1.0, col.gamma_multiply(0.6)));
+            self.shown.push((at, pages));
+        }
+    }
+
+    fn over(&mut self, c: &Canvas) {
+        let Some(pos) = c.hover() else { return };
+        let hit = self
+            .shown
+            .iter()
+            .map(|(at, pages)| (at.distance(pos), *at, pages))
+            .filter(|(d, _, _)| *d <= 10.0)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let Some((_, at, pages)) = hit else { return };
+        let mut y = at.y - 6.0;
+        let mut newest: Vec<&crate::messages::Message> =
+            pages.iter().map(|i| self.messages[*i]).collect();
+        newest.sort_by_key(|m| std::cmp::Reverse(m.at_us));
+        if let Some(dest) = newest.first().and_then(|m| m.destination.as_deref()) {
+            y += c.label(Pos2::new(at.x + 10.0, y), dest, theme::VALUE, 1.0).height() + 2.0;
+        }
+        for m in newest.iter().take(DISPATCH_CARD_PAGES) {
+            let line = format!("{}  {}", m.when(), m.text);
+            y += c.label(Pos2::new(at.x + 10.0, y), &line, theme::TRACE, 1.0).height() + 2.0;
+        }
+        if newest.len() > DISPATCH_CARD_PAGES {
+            let more = format!("+{} more", newest.len() - DISPATCH_CARD_PAGES);
+            c.label(Pos2::new(at.x + 10.0, y), &more, theme::LEGEND, 1.0);
+        }
+    }
+
+    fn status(&self) -> Option<String> {
+        let pins = self.shown.len();
+        match (pins, self.locating) {
+            (0, 0) => None,
+            (n, 0) => Some(format!("{n} dispatches")),
+            (0, k) => Some(format!("locating {k} dispatches")),
+            (n, k) => Some(format!("{n} dispatches, locating {k}")),
+        }
+    }
+
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        if self.shown.is_empty() {
+            return Vec::new();
+        }
+        let g = crate::places::geocoder();
+        vec![crate::data::Credit { name: g.name(), licence: g.terms(), url: g.page() }]
+    }
+}

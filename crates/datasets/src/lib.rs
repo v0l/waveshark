@@ -13,6 +13,7 @@ pub mod airports;
 pub mod cache;
 pub mod cells;
 pub mod gateways;
+pub mod geocode;
 pub mod git;
 pub mod m17;
 pub mod pistar;

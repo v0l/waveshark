@@ -1831,6 +1831,7 @@ impl App {
             accuracy_m: self.accuracy_m,
             trail,
             heard: &self.survey.rows,
+            messages: &self.messages.list,
             sat: self.sats.selected,
             sat_group: self.sats.group,
             rt,

@@ -49,6 +49,7 @@ mod mix;
 mod oggopus;
 mod patch;
 mod picsave;
+mod places;
 mod prof;
 mod protocols;
 mod radio;

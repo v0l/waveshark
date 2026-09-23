@@ -46,6 +46,7 @@ pub struct Message {
     /// capcode, or an APRS addressee.
     pub to: Option<String>,
     pub text: String,
+    pub destination: Option<String>,
     pub first: Instant,
     pub last: Instant,
     /// When it was first heard on the clock rather than on the receiver's,
@@ -214,6 +215,10 @@ impl Message {
             from: who(&layer.link.from),
             to: who(&layer.link.to),
             text: text.to_string(),
+            destination: layer.facts.iter().find_map(|f| match f {
+                common::packet::Fact::Destination(d) => Some(d.clone()),
+                _ => None,
+            }),
             first: at,
             last: at,
             at_us: now_us(),

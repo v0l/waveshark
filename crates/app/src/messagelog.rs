@@ -77,6 +77,7 @@ fn line_of(m: &Message) -> String {
         "from": m.from,
         "to": m.to,
         "text": m.text,
+        "destination": m.destination,
     })
     .to_string()
 }
@@ -119,12 +120,17 @@ fn message_of(line: &str, now: Instant, now_us: u64) -> Option<Message> {
     let ago = std::time::Duration::from_micros(now_us.saturating_sub(at_us));
     let at = now.checked_sub(ago).unwrap_or(now);
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let channel_hz = v.get("channel_hz").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let destination = s("destination").or_else(|| {
+        decode::p2000::on_channel(channel_hz).then(|| decode::p2000::destination(&text)).flatten()
+    });
     Some(Message {
         system: s("system").unwrap_or_default(),
-        channel_hz: v.get("channel_hz").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        channel_hz,
         from: s("from"),
         to: s("to"),
         text,
+        destination,
         first: at,
         last: at,
         at_us,
@@ -318,6 +324,34 @@ mod tests {
 
     /// A decode nobody wrote does not reach the file, whatever its fields are
     /// called: the same rule as the view.
+    #[test]
+    fn a_dispatch_keeps_where_it_sent_the_units_across_a_restart() {
+        let d = dir("destination");
+        let mut n = MessageLogNode::new(d.clone());
+        let p = heard(
+            169_650_000,
+            Proto::new("flex", "FLEX-Alpha")
+                .between(Link { from: None, to: Some(Party::group("1420999, 1423001")) })
+                .saying(Fact::message("A1 Zuidsingel Venray 87804"))
+                .saying(Fact::Destination("Zuidsingel, Venray".into())),
+        );
+        run(&mut n, vec![p, page("PUMP 3 FAULT", "1111111")]);
+        let back: Vec<Option<String>> = recent(&d, 0).into_iter().map(|m| m.destination).collect();
+        assert_eq!(back, [Some("Zuidsingel, Venray".to_string()), None]);
+        let _ = std::fs::remove_dir_all(&d);
+
+        let before = r#"{"at_us":1,"system":"flex","channel_hz":169650000.0,"text":"A1 Zuidsingel Venray 87804"}"#;
+        let elsewhere = r#"{"at_us":1,"system":"flex","channel_hz":929612500.0,"text":"A1 Zuidsingel Venray 87804"}"#;
+        let (now, now_us) = (Instant::now(), crate::messages::now_us());
+        let read = |l: &str| message_of(l, now, now_us).and_then(|m| m.destination);
+        assert_eq!(
+            read(before).as_deref(),
+            Some("Zuidsingel, Venray"),
+            "a line written before destinations"
+        );
+        assert_eq!(read(elsewhere), None, "only the P2000 channel is read as P2000");
+    }
+
     #[test]
     fn a_machine_talking_is_not_written_down() {
         let d = dir("machine");

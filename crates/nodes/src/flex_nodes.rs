@@ -141,6 +141,11 @@ impl Simple for FlexNode {
     }
 }
 
+fn dispatched(row: common::packet::Proto) -> common::packet::Proto {
+    let to = row.wrote().and_then(decode::p2000::destination);
+    row.maybe(to.map(common::packet::Fact::Destination))
+}
+
 const ASSIGNMENT_REACH_FRAMES: u16 = 32;
 
 fn carry_assignments(assigned: &mut Vec<decode::flex::Assignment>, frame: &mut Frame) {
@@ -191,7 +196,11 @@ impl Protocol for Flex {
             return None;
         }
         Frame::from_bytes(bytes)?;
-        Some(read(bytes))
+        let rows = read(bytes);
+        if !decode::p2000::on_channel(p.center_hz() as f64) {
+            return Some(rows);
+        }
+        Some(rows.into_iter().map(dispatched).collect())
     }
 
     /// A Dutch national FLEX channel: the one most likely to be carrying
@@ -415,6 +424,35 @@ mod tests {
         assert_eq!(heard[1], (2, vec![Some(common::packet::Party::group("1220499, 1220845"))]));
         assert_eq!(heard[2], (0, vec![Some(common::packet::Party::temporary("2029582"))]));
         assert!(assigned.is_empty(), "an assignment outlived its frame");
+    }
+
+    #[test]
+    fn a_page_on_the_p2000_channel_says_where_the_units_are_sent() {
+        let page = decode::flex::encode(&[(
+            1_420_999,
+            Body::Alpha("A1 AMBU 18190 Rembrandtlaan 3362AG Sliedrecht SLIEDR bon 147610".into()),
+        )]);
+        let frame = Frame {
+            mode: dsp::flex::Mode { baud: 1600, levels: 2 },
+            fiw: Fiw { cycle: 1, frame: 2 }.encode(),
+            phases: vec![page],
+            carried: Vec::new(),
+        };
+        let destinations = |hz: u64| -> Vec<String> {
+            let mut p = packet(frame.to_bytes());
+            p.carrier.center_hz = hz;
+            Flex.stated(&p)
+                .unwrap_or_default()
+                .iter()
+                .flat_map(|r| r.facts.iter())
+                .filter_map(|f| match f {
+                    common::packet::Fact::Destination(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(destinations(169_650_000), ["Rembrandtlaan, 3362AG Sliedrecht"]);
+        assert_eq!(destinations(929_612_500), Vec::<String>::new(), "not P2000 off its channel");
     }
 
     /// Minutes of noise on the channel produce no rows.
