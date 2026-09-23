@@ -26,7 +26,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -69,6 +69,7 @@ pub struct Tnc {
     error: Mutex<Option<String>>,
     stop: AtomicBool,
     next_id: AtomicU64,
+    accepting: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 struct Client {
@@ -145,6 +146,27 @@ impl Tnc {
         self.from_clients.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn closed(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    pub fn close(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(at) = self.bound.lock().unwrap().take() {
+            let _ = TcpStream::connect_timeout(&reachable(at), WAKE_TIMEOUT);
+        }
+        if let Some(accepting) = self.accepting.lock().unwrap().take() {
+            let _ = accepting.join();
+        }
+        let mut clients = self.clients.lock().unwrap();
+        for c in clients.drain(..) {
+            let _ = c.sock.shutdown(Shutdown::Both);
+        }
+        self.connected.store(0, Ordering::Relaxed);
+        drop(clients);
+        SERVERS.lock().unwrap().retain(|(_, t)| !std::ptr::eq(Arc::as_ptr(t), self));
+    }
+
     fn remove(&self, id: u64) {
         let mut clients = self.clients.lock().unwrap();
         clients.retain(|c| c.id != id);
@@ -154,7 +176,7 @@ impl Tnc {
 
 /// Every server started in this process, by the address it was asked for.
 ///
-/// Held for the life of the program rather than dropped with the graph: see
+/// Held until its address changes rather than dropped with the graph: see
 /// the module note. A second node naming the same address gets the running
 /// server, not a second listener on a port already in use.
 static SERVERS: Mutex<Vec<(SocketAddr, Arc<Tnc>)>> = Mutex::new(Vec::new());
@@ -166,6 +188,23 @@ static SERVERS: Mutex<Vec<(SocketAddr, Arc<Tnc>)>> = Mutex::new(Vec::new());
 /// receive half started or transmits silence.
 pub fn running(addr: SocketAddr) -> Option<Arc<Tnc>> {
     SERVERS.lock().unwrap().iter().find(|(a, _)| *a == addr).map(|(_, t)| t.clone())
+}
+
+pub fn close(addr: SocketAddr) {
+    if let Some(tnc) = running(addr) {
+        tnc.close();
+    }
+}
+
+const WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn reachable(bound: SocketAddr) -> SocketAddr {
+    let ip = match bound.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, bound.port())
 }
 
 /// The server on this address, started if it is not running yet.
@@ -192,15 +231,17 @@ pub fn server(addr: SocketAddr) -> Arc<Tnc> {
         error: Mutex::new(None),
         stop: AtomicBool::new(false),
         next_id: AtomicU64::new(0),
+        accepting: Mutex::new(None),
     });
     let listener = TcpListener::bind(addr);
     match listener {
         Ok(l) => {
             *tnc.bound.lock().unwrap() = l.local_addr().ok();
             let t = tnc.clone();
-            let _ = std::thread::Builder::new()
+            *tnc.accepting.lock().unwrap() = std::thread::Builder::new()
                 .name(format!("kiss-{addr}"))
-                .spawn(move || accept_loop(l, t));
+                .spawn(move || accept_loop(l, t))
+                .ok();
         }
         // Said once and carried on from, the way a port already in use is
         // everywhere else here: it is not a reason to refuse to be a
@@ -294,6 +335,10 @@ impl Simple for KissTncNode {
 
     fn is_sink(&self) -> bool {
         true
+    }
+
+    fn survives_rebuild(&self, _retuned: bool, settings: &Settings) -> bool {
+        !self.tnc.closed() && address(settings) == self.tnc.address()
     }
 
     fn readings(&self) -> Vec<(String, String)> {
@@ -599,6 +644,57 @@ mod tests {
         assert_eq!(audio.len(), 204_800);
         assert_eq!(audio.iter().filter(|s| **s != 0.0).count(), 0, "an idle TNC made a noise");
         assert_eq!(node.sent(), 0);
+    }
+
+    fn free_port() -> SocketAddr {
+        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+    }
+
+    #[test]
+    fn a_closed_tnc_hangs_up_and_gives_its_port_back() {
+        let addr = free_port();
+        let tnc = server(addr);
+        let mut client = TcpStream::connect(addr).expect("connected");
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        until("the server to see the client", || tnc.connected() == 1);
+        let mut keying = crate::aprs_nodes::AprsTxNode::keying(addr);
+        assert!(Arc::ptr_eq(keying.attached().unwrap(), &tnc));
+
+        close(addr);
+        assert!(tnc.closed());
+        assert_eq!(tnc.connected(), 0);
+        assert_eq!(tnc.bound(), None);
+        assert!(running(addr).is_none(), "a closed TNC is still found by its address");
+        assert_eq!(client.read(&mut [0u8; 16]).expect("the client was hung up on"), 0);
+        drop(TcpListener::bind(addr).expect("the port was given back"));
+
+        let again = server(addr);
+        assert!(!Arc::ptr_eq(&again, &tnc));
+        assert_eq!(again.error(), None);
+        assert_eq!(again.bound(), Some(addr));
+        assert!(Arc::ptr_eq(keying.attached().unwrap(), &again), "transmit kept the closed TNC");
+        let _second = TcpStream::connect(addr).expect("the reopened TNC accepts");
+        until("the reopened TNC to see its client", || again.connected() == 1);
+        again.close();
+        assert!(running(addr).is_none());
+    }
+
+    #[test]
+    fn a_node_rebuilt_on_the_same_address_keeps_its_clients() {
+        let addr = free_port();
+        let mut s = Settings::new();
+        s.insert(ADDRESS.into(), pipeline::ParamValue::Text(addr.to_string()));
+        let first = build(&s).unwrap();
+        let tnc = running(addr).expect("the node started a server");
+        let _client = TcpStream::connect(addr).expect("connected");
+        until("the server to see the client", || tnc.connected() == 1);
+
+        drop(first);
+        let _second = build(&s).unwrap();
+        assert!(Arc::ptr_eq(&running(addr).unwrap(), &tnc));
+        assert_eq!(tnc.connected(), 1);
+        assert!(!tnc.closed());
+        tnc.close();
     }
 
     /// Two nodes naming one address are one TNC: the transmit chain is built

@@ -2857,6 +2857,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
             Cmd::Kiss(addr) => {
                 if addr != self.plan.kiss {
+                    if let Some(was) = self.plan.kiss {
+                        nodes::kiss_nodes::close(was);
+                    }
                     self.plan.kiss = addr;
                     self.needs_rebuild = true;
                 }
@@ -4284,6 +4287,45 @@ pub(crate) mod tests {
         radio.send(Cmd::Key(None));
         until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
         assert_eq!(radio.status.error.lock().clone(), None);
+    }
+
+    #[test]
+    fn a_new_tnc_address_closes_the_old_one_and_a_rebuild_does_not() {
+        let held: Vec<_> =
+            (0..2).map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+        let (first, second) = (held[0].local_addr().unwrap(), held[1].local_addr().unwrap());
+        drop(held);
+        let dev = sources::FileRadio::silent(Hz(144_800_000), Sps(2_400_000)).as_fast_as_it_can();
+        let radio = Radio::on_device(Box::new(dev), Hz(144_800_000), Sps(2_400_000), 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+
+        radio.send(Cmd::Kiss(Some(first)));
+        until("the TNC to serve", || nodes::kiss_nodes::running(first).is_some());
+        let tnc = nodes::kiss_nodes::running(first).unwrap();
+        let mut client = std::net::TcpStream::connect(first).expect("connected");
+        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        until("the TNC to see its client", || tnc.connected() == 1);
+
+        let rev = radio.status.patch_rev.load(Ordering::Relaxed);
+        radio.send(Cmd::Kiss(Some(first)));
+        radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
+        until("a rebuild", || radio.status.patch_rev.load(Ordering::Relaxed) > rev);
+        assert!(Arc::ptr_eq(&nodes::kiss_nodes::running(first).unwrap(), &tnc));
+        assert_eq!(tnc.connected(), 1, "a rebuild dropped the TNC's client");
+
+        radio.send(Cmd::Kiss(Some(second)));
+        until("the new address to serve", || nodes::kiss_nodes::running(second).is_some());
+        assert!(tnc.closed(), "the old address is still being served");
+        assert!(nodes::kiss_nodes::running(first).is_none());
+        use std::io::Read;
+        assert_eq!(client.read(&mut [0u8; 16]).expect("the client was hung up on"), 0);
+        drop(std::net::TcpListener::bind(first).expect("the old port was given back"));
+
+        let serving = nodes::kiss_nodes::running(second).unwrap();
+        radio.send(Cmd::Kiss(None));
+        until("the switch to close it", || nodes::kiss_nodes::running(second).is_none());
+        assert!(serving.closed());
+        drop(std::net::TcpListener::bind(second).expect("the port was given back"));
     }
 
     /// An alert relayed on a channel somebody is listening to is read off

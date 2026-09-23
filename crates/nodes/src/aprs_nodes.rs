@@ -301,7 +301,7 @@ impl AprsTxNode {
 
     /// The TNC, looked up once it is serving.
     pub(crate) fn attached(&mut self) -> Option<&std::sync::Arc<crate::kiss_nodes::Tnc>> {
-        if self.tnc.is_none() {
+        if self.tnc.as_ref().is_none_or(|t| t.closed()) {
             self.tnc = crate::kiss_nodes::running(self.tnc_addr);
         }
         self.tnc.as_ref()
