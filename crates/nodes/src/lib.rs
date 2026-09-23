@@ -74,6 +74,7 @@ pub mod sstv_nodes;
 pub mod stdc_nodes;
 pub mod sub_tx;
 pub mod survey_nodes;
+pub mod tempest_nodes;
 pub mod tetra_nodes;
 pub mod twotone_nodes;
 pub mod tx_nodes;
@@ -259,6 +260,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (dvbt_nodes::TS_SOURCE, dvbt_nodes::build_ts_source),
     (dvbt_nodes::DVBT_MOD, dvbt_nodes::build_dvbt_mod),
     (video_nodes::DESC, video_nodes::build),
+    (tempest_nodes::DESC, tempest_nodes::build),
     (ble_nodes::DESC, ble_nodes::build),
     (ble_nodes::BLE_TX, ble_nodes::build_tx),
     (ieee802154_nodes::DESC, ieee802154_nodes::build),

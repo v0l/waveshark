@@ -53,6 +53,7 @@ pub mod oqpsk;
 pub mod pocsag;
 pub mod pulse;
 pub mod qpsk;
+pub mod raster;
 pub mod rds;
 pub mod resample;
 pub mod route;

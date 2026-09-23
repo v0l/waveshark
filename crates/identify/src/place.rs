@@ -31,6 +31,7 @@ pub enum Placement {
     /// channels, the three BLE advertising channels.
     Channels(Vec<f64>),
     Within(Vec<f64>, f64),
+    Anywhere,
 }
 
 impl Placement {
@@ -42,6 +43,7 @@ impl Placement {
             Placement::Bands(bands) => bands.iter().any(|(lo, hi)| (*lo..*hi).contains(&hz)),
             Placement::Channels(chs) => chs.iter().any(|c| (c - hz).abs() <= width_hz / 2.0),
             Placement::Within(chs, off_hz) => chs.iter().any(|c| (c - hz).abs() <= *off_hz),
+            Placement::Anywhere => false,
         }
     }
 
@@ -62,6 +64,7 @@ impl Placement {
             Placement::Channels(chs) | Placement::Within(chs, _) => {
                 chs.iter().map(|c| (c - width_hz / 2.0, c + width_hz / 2.0)).collect()
             }
+            Placement::Anywhere => Vec::new(),
         }
     }
 
@@ -71,7 +74,7 @@ impl Placement {
         match self {
             // A service is not a frequency, so a protocol placed by one says
             // where to put a hand-placed channel itself.
-            Placement::Usage(_) => None,
+            Placement::Usage(_) | Placement::Anywhere => None,
             Placement::Bands(b) => b.first().map(|(lo, hi)| (lo + hi) / 2.0),
             Placement::Channels(c) | Placement::Within(c, _) => c.first().copied(),
         }
@@ -142,6 +145,16 @@ mod tests {
         assert!(!w.covers(868.48e6, 200e3));
         assert_eq!(w.bands(200e3), vec![(868.32e6, 868.52e6)]);
         assert_eq!(w.default_hz(), Some(868.42e6));
+    }
+
+    #[test]
+    fn a_placement_of_anywhere_is_never_found_and_only_ever_asked_for() {
+        let a = Placement::Anywhere;
+        assert!(!a.covers(445.5e6, 10e6));
+        assert!(!a.covers(0.0, 0.0));
+        assert!(!a.reaches(0.0, 6e9, 10e6));
+        assert_eq!(a.bands(10e6), vec![]);
+        assert_eq!(a.default_hz(), None);
     }
 
     /// A span reaches a placement its middle is nowhere near: 2 MS/s at

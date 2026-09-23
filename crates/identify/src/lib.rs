@@ -54,6 +54,7 @@ pub mod rs41;
 pub mod rtty;
 pub mod sstv;
 pub mod stdc;
+pub mod tempest;
 pub mod tetra;
 pub mod twotone;
 pub mod uat;
@@ -194,6 +195,7 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &wifi::Wifi,
         &droneid::DroneId,
         &video::Video,
+        &tempest::Tempest,
         &acars::Acars,
         &sstv::Sstv,
         &apt::Apt,
