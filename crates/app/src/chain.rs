@@ -8262,7 +8262,19 @@ mod tx_tests {
             Some(&sub),
         )
         .unwrap();
-        for _ in 0..2 {
+        let ids: Vec<_> = g.order().map(|(id, _)| id).collect();
+        let mut passes = 0;
+        for id in ids {
+            if let Some(n) = g.node_mut(id)
+                && n.name() == "sub_tx"
+            {
+                n.set_param("repeats", pipeline::ParamValue::Int(2)).unwrap();
+                n.over_began();
+                passes += 1;
+            }
+        }
+        assert_eq!(passes, 1, "one sub_tx stage in the chain");
+        for _ in 0..3 {
             let b = g.input_buf();
             b.clear();
             b.real_mut().resize(100_000, 0.0);
@@ -8275,6 +8287,11 @@ mod tx_tests {
             s.finish(std::time::Duration::from_millis(50));
         }
         assert!(!buf.lock().is_empty(), "nothing was transmitted");
+        assert_eq!(
+            buf.lock().len(),
+            2 * 2 * 631_150,
+            "two passes of 631.15 ms at 1 MS/s, two bytes a sample, and none for the third block"
+        );
 
         // A synthesised capture needs the two things every real one has and
         // a keyed graph does not: a noise floor for the source detector to

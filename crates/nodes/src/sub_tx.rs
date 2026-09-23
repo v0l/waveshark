@@ -13,7 +13,7 @@ use common::pulse::Pulse;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
-use pipeline::registry::{Category, Settings, StageDesc};
+use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use std::time::Duration;
 
 /// How many times the file plays per key-down. A remote sends its frame
@@ -22,6 +22,7 @@ use std::time::Duration;
 /// keyed.
 const REPEATS: &str = "repeats";
 const PAUSE_MS: &str = "pause_ms";
+const DEFAULT_PAUSE_MS: u64 = 500;
 
 const FILE_PARAM: &str = "path";
 
@@ -40,6 +41,7 @@ pub struct SubTxNode {
     bursts: Vec<Vec<Pulse>>,
     path: String,
     repeats: usize,
+    played: usize,
     pause: Duration,
 }
 
@@ -49,7 +51,8 @@ impl Default for SubTxNode {
             bursts: Vec::new(),
             path: String::new(),
             repeats: 1,
-            pause: Duration::from_millis(500),
+            played: 0,
+            pause: Duration::from_millis(DEFAULT_PAUSE_MS),
         }
     }
 }
@@ -65,10 +68,7 @@ impl SubTxNode {
     /// is what it starts as and what a cleared setting means.
     pub fn set_file(&mut self, file: Option<decode::subghz::SubGhz>) {
         match file {
-            Some(f) => {
-                self.bursts = f.bursts;
-                self.repeats = 1;
-            }
+            Some(f) => self.bursts = f.bursts,
             None => self.bursts.clear(),
         }
     }
@@ -118,9 +118,10 @@ impl Simple for SubTxNode {
     ) -> Result<()> {
         // A block of clock and nothing loaded is silence, which is the
         // stage's idle state rather than a refusal.
-        if input.is_empty() || self.bursts.is_empty() {
+        if input.is_empty() || self.bursts.is_empty() || self.played >= self.repeats {
             return Ok(());
         }
+        self.played += 1;
         let out = output.timings_mut();
         // One pass per block: the whole file goes out the first time a block
         // arrives after a key-down, and the modulator takes it from there.
@@ -135,6 +136,10 @@ impl Simple for SubTxNode {
             p.gap = p.gap.max(self.pause.as_micros() as u32);
         }
         Ok(())
+    }
+
+    fn over_began(&mut self) {
+        self.played = 0;
     }
 
     fn params(&self) -> Vec<Param> {
@@ -156,7 +161,9 @@ impl Simple for SubTxNode {
                 Ok(())
             }
             PAUSE_MS => {
-                self.pause = Duration::from_millis(value.as_f64().unwrap_or(500.0).max(0.0) as u64);
+                self.pause = Duration::from_millis(
+                    value.as_f64().map_or(DEFAULT_PAUSE_MS, |v| v.max(0.0) as u64),
+                );
                 Ok(())
             }
             // A path set on the running node is a fault here rather than a
@@ -166,6 +173,18 @@ impl Simple for SubTxNode {
             _ => Err(common::Error::other(format!("sub_tx: unknown parameter {name:?}"))),
         }
     }
+}
+
+pub fn airtime(file: &decode::subghz::SubGhz, settings: &Settings) -> Duration {
+    let passes = settings.i64_or(REPEATS, 1).clamp(1, 100) as u32;
+    let pause =
+        Duration::from_millis(settings.f64_or(PAUSE_MS, DEFAULT_PAUSE_MS as f64).max(0.0) as u64);
+    let last_gap = file
+        .bursts
+        .last()
+        .and_then(|b| b.last())
+        .map_or(Duration::ZERO, |p| Duration::from_micros(p.gap as u64));
+    file.duration() * passes + pause.saturating_sub(last_gap) * (passes - 1)
 }
 
 pub const SUB_TX: StageDesc = StageDesc {
@@ -197,33 +216,76 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_loaded_file_plays_once_per_block() {
-        let mut n = SubTxNode::new(Some(file()));
+    fn block(n: &mut SubTxNode) -> Vec<Vec<Pulse>> {
         let input = Payload::Real(vec![0.0; 960]);
         let mut out = Payload::empty_of(PortKind::Timings);
         let mut ev = Vec::new();
         let mut tg = Vec::new();
         let ins = [spec(48_000.0)];
         let ctx = &mut NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        Simple::process(&mut n, &input, &mut out, ctx).unwrap();
-        let pkgs = out.as_timings().unwrap();
-        assert_eq!(pkgs.len(), 1);
+        Simple::process(n, &input, &mut out, ctx).unwrap();
+        out.as_timings().unwrap().to_vec()
+    }
+
+    fn over(n: &mut SubTxNode, blocks: usize) -> Vec<Vec<Pulse>> {
+        Simple::over_began(n);
+        (0..blocks).flat_map(|_| block(n)).collect()
+    }
+
+    #[test]
+    fn a_key_down_plays_the_file_once_by_default() {
+        let mut n = SubTxNode::new(Some(file()));
+        let pkgs = over(&mut n, 50);
+        assert_eq!(pkgs.len(), 1, "one pass however long the key is held");
         assert_eq!(pkgs[0].len(), 2, "the file's pulses, as they are");
         assert_eq!(pkgs[0][0].mark, 350);
+        assert_eq!(pkgs[0][1].gap, 500_000, "the pause after the pass");
+    }
+
+    #[test]
+    fn passes_counts_each_key_down_afresh() {
+        let mut n = SubTxNode::new(Some(file()));
+        Simple::set_param(&mut n, REPEATS, ParamValue::Int(4)).unwrap();
+        assert_eq!(over(&mut n, 50).len(), 4, "the first over");
+        assert_eq!(over(&mut n, 50).len(), 4, "the second over, counted from zero");
+    }
+
+    #[test]
+    fn a_key_up_ends_the_passes_early() {
+        let mut n = SubTxNode::new(Some(file()));
+        Simple::set_param(&mut n, REPEATS, ParamValue::Int(10)).unwrap();
+        assert_eq!(over(&mut n, 3).len(), 3, "one pass per block until the key came up");
+        assert_eq!(over(&mut n, 50).len(), 10, "a full over after a short one");
+    }
+
+    #[test]
+    fn passes_go_out_one_per_block() {
+        let mut n = SubTxNode::new(Some(file()));
+        Simple::set_param(&mut n, REPEATS, ParamValue::Int(3)).unwrap();
+        Simple::over_began(&mut n);
+        let per_block: Vec<usize> = (0..5).map(|_| block(&mut n).len()).collect();
+        assert_eq!(per_block, [1, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn airtime_is_every_pass_and_the_pauses_between_them() {
+        let f = file();
+        assert_eq!(airtime(&f, &Settings::new()), Duration::from_micros(1_400));
+        let mut s = Settings::new();
+        s.insert(REPEATS.into(), ParamValue::Int(3));
+        assert_eq!(
+            airtime(&f, &s),
+            Duration::from_micros(3 * 1_400 + 2 * (500_000 - 350)),
+            "three passes, the last without its pause"
+        );
+        s.insert(PAUSE_MS.into(), ParamValue::Float(0.0));
+        assert_eq!(airtime(&f, &s), Duration::from_micros(3 * 1_400), "no pause, back to back");
     }
 
     #[test]
     fn nothing_loaded_is_silence_not_a_fault() {
         let mut n = SubTxNode::default();
-        let input = Payload::Real(vec![0.0; 960]);
-        let mut out = Payload::empty_of(PortKind::Timings);
-        let mut ev = Vec::new();
-        let mut tg = Vec::new();
-        let ins = [spec(48_000.0)];
-        let ctx = &mut NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
-        Simple::process(&mut n, &input, &mut out, ctx).unwrap();
-        assert!(out.as_timings().unwrap().is_empty());
+        assert_eq!(over(&mut n, 5).len(), 0);
     }
 
     #[test]

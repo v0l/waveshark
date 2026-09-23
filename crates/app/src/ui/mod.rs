@@ -1758,7 +1758,15 @@ impl App {
         // The parsed file, then the key. The strip shows what is loaded, so
         // it is the interface's copy as well as the radio's.
         self.audio.sub_pick.file = Some(f.clone());
-        let over = f.file.duration();
+        let settings = self
+            .chain
+            .patch
+            .stages()
+            .iter()
+            .find(|s| s.kind == "sub_tx")
+            .map(|s| s.settings.clone())
+            .unwrap_or_default();
+        let over = nodes::sub_tx::airtime(&f.file, &settings);
         self.cmds.push(Cmd::SubFile(Some(f)));
         self.cmds.push(Cmd::Key(Some(id)));
         // A tail beyond the file: the last gap is silence the transmitter
@@ -3839,6 +3847,37 @@ mod tests {
         assert!(a.sub_until.is_none());
         assert_eq!(a.cmds.iter().filter(|c| matches!(c, Cmd::Key(None))).count(), 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_sub_file_keeps_the_key_down_for_every_pass_the_stage_is_set_to() {
+        let mut a = app();
+        let stage = a.chain.patch.add("sub_tx");
+        let settings = &mut a.chain.patch.stage_mut(stage).unwrap().settings;
+        settings.insert("repeats".into(), pipeline::ParamValue::Int(3));
+        settings.insert("pause_ms".into(), pipeline::ParamValue::Float(200.0));
+        let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
+            Preset: FuriHalSubGhzPresetOok650Async\nProtocol: Princeton\nBit: 24\n\
+            Key: 00 00 00 00 00 95 D5 D4\nTE: 400\n";
+        let path =
+            std::env::temp_dir().join(format!("waveshark-passes-{}.sub", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        let f = crate::radio::SubFile::open(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let once = f.file.duration();
+        let last_gap = std::time::Duration::from_micros(
+            f.file.bursts.last().and_then(|b| b.last()).unwrap().gap as u64,
+        );
+        let over = once * 3 + (std::time::Duration::from_millis(200) - last_gap) * 2;
+
+        let before = std::time::Instant::now();
+        a.transmit_sub(f);
+        let until = a.sub_until.expect("the over has an end");
+        assert!(
+            until >= before + over + SUB_TAIL,
+            "three passes and two pauses before the key comes up"
+        );
+        assert!(until <= std::time::Instant::now() + over + SUB_TAIL, "and no longer");
     }
 
     /// Two detectors are two sets of numbers, so the colours are worked out

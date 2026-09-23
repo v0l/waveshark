@@ -260,6 +260,7 @@ the code is in the commit log.
   one record, and a fresh radio is told all of it. Call recording and the
   transcriber, with the weights and the device it runs on, are in that record
   too, so they stay as they were left.
+- Flipper `.sub` transmit sent the file once, whatever its Passes setting said.
 
 ## [0.4.0-rc2] - 2026-09-22
 
