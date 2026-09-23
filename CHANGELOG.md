@@ -214,6 +214,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- GT-TMBBQ05 thermometers read out of noise and other sensors' bursts.
 - Auto mode opened sources across the whole band after a transmitter clipped the receiver.
 - Call list airtime climbing with no channel open, and calls that never ended.
 - Network radio dialog froze the window while ADD waited for the server.

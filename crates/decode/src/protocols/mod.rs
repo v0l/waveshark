@@ -50,7 +50,7 @@ pub(crate) fn rows_within(bits: &BitBuffer, row_bits: std::ops::RangeInclusive<u
     row_lengths(bits).any(|(_, len)| row_bits.contains(&len))
 }
 
-/// The length of the row bit `at` falls in, for a decoder that searches
+/// The row bit `at` falls in, for a decoder that searches
 /// offsets rather than taking a row whole.
 ///
 /// rtl_433 hands a decoder one row and it checks that row's length:
@@ -59,11 +59,10 @@ pub(crate) fn rows_within(bits: &BitBuffer, row_bits: std::ops::RangeInclusive<u
 /// was the right length is not the same test, and that is how the
 /// GM-Aftermarket description read a window of zeros out of an Oregon
 /// RTGN318 burst.
-pub(crate) fn row_len_at(bits: &BitBuffer, at: usize) -> usize {
+pub(crate) fn row_at(bits: &BitBuffer, at: usize) -> std::ops::Range<usize> {
     row_lengths(bits)
         .find(|(start, len)| at >= *start && at < start + len)
-        .map(|(_, len)| len)
-        .unwrap_or(0)
+        .map_or(at..at, |(start, len)| start..start + len)
 }
 
 // A boundary list need not begin at zero: a burst sliced as one row can come

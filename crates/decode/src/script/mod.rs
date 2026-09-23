@@ -388,8 +388,9 @@ impl Scripted {
             if extract(bits, at, n) != word {
                 continue;
             }
+            let row = crate::protocols::row_at(bits, at);
             if let Some([lo, hi]) = f.row_bits
-                && !(lo..=hi).contains(&crate::protocols::row_len_at(bits, at))
+                && !(lo..=hi).contains(&row.len())
             {
                 continue;
             }
@@ -406,6 +407,9 @@ impl Scripted {
                     (differential_manchester_decode(bits, start, want), start + want * 2)
                 }
             };
+            if f.row_bits.is_some() && end > row.end {
+                continue;
+            }
             if frame.len() >= want {
                 out.push((at, end, frame.slice(0, want)));
             }
@@ -429,7 +433,7 @@ impl Scripted {
             .map(|(start, _)| bits.slice(start, want))
             .collect();
         let alone = rows.len() == 1 && bits.len() <= hi;
-        let copies = self.desc.frame.copies;
+        let copies = self.desc.frame.copies();
         rows.iter()
             .find(|r| {
                 (alone || rows.iter().filter(|o| o == r).count() >= copies)
@@ -496,11 +500,20 @@ impl Protocol for Scripted {
                 } else {
                     vec![bits]
                 };
+                let copies = f.copies();
+                let mut read: Vec<(BitBuffer, usize)> = Vec::new();
                 for s in &streams {
                     for (_, _, frame) in self.behind_sync(s) {
-                        match self.read_air(&frame) {
-                            Ok(r) => return Ok(r),
-                            Err(e) => last = e,
+                        if let Some((_, n)) = read.iter_mut().find(|(r, _)| *r == frame) {
+                            *n += 1;
+                        } else {
+                            match self.read_air(&frame) {
+                                Ok(_) => read.push((frame.clone(), 1)),
+                                Err(e) => last = e,
+                            }
+                        }
+                        if let Some((r, _)) = read.iter().find(|(_, n)| *n >= copies) {
+                            return self.read_air(r);
                         }
                     }
                 }
@@ -1481,6 +1494,77 @@ fields: [{name: a, bits: 16, data: int}]
             p.decode(&found).expect("the second row is 24 bits").get("a"),
             Some(&Value::Int(0x2a17))
         );
+
+        let straddling = package(&[&[0x11, 0xac, 0x2a], &[0x17, 0x22, 0x33]]);
+        assert_eq!(straddling.rows(), [24]);
+        assert!(matches!(p.decode(&straddling), Err(DecodeError::NotThisProtocol)));
+    }
+
+    fn gt_tmbbq05(extra: &str) -> Scripted {
+        let desc = format!(
+            r#"
+name: GT-TMBBQ05
+timing: {{ ppm: [2000, 4000], reset_us: 9100 }}
+frame: {{ bits: 32, find: sync, sync: "00", sync_bits: 1, repeats: 5, row_bits: [33, 33]{extra} }}
+check:
+  - {{ kind: parity, over: [0, 27], at: 27 }}
+  - {{ kind: nibble_sum, over: [0, 28], at: 28, width: 4 }}
+fields:
+  - {{ name: id, bits: 16, data: int }}
+  - {{ name: t, bits: 16, data: int }}
+"#
+        );
+        Scripted::new(Desc::parse(&desc).expect("a description"))
+    }
+
+    fn ppm_noise(packages: usize, pulses: usize) -> Vec<Vec<Pulse>> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |lo: u32, hi: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            lo + (state % u64::from(hi - lo)) as u32
+        };
+        (0..packages)
+            .map(|_| {
+                (0..pulses)
+                    .map(|_| {
+                        let gap = match next(0, 20) {
+                            0 => next(7000, 12_000),
+                            n if n % 2 == 0 => next(1700, 2300),
+                            _ => next(3700, 4300),
+                        };
+                        Pulse { mark: next(300, 900), gap }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gt_tmbbq05_reads_3_of_2000_ppm_noise_packages_alone_and_0_on_five_copies() {
+        let noise = ppm_noise(2000, 147);
+        let read = |p: &Scripted| noise.iter().filter(|pkg| p.decode_burst(pkg).is_ok()).count();
+        assert_eq!(read(&gt_tmbbq05("")), 3, "37 before a frame had to end inside its row");
+        assert_eq!(read(&gt_tmbbq05(", copies: 5")), 0, "rtl_433's gt_tmbbq05.c wants five rows");
+    }
+
+    #[test]
+    fn a_sync_frame_on_five_copies_is_read_off_five_and_refused_off_four() {
+        let p = gt_tmbbq05(", copies: 5");
+        let frame = BitBuffer::from_bytes(&[0x49, 0xb3, 0x79, 0x1c]);
+        let mut air = BitBuffer::new();
+        air.push(false);
+        for i in 0..32 {
+            air.push(frame.get(i).unwrap());
+        }
+        let keyed = |n| pulses(&p.timing(), &air, n);
+        assert!(p.decode_burst(&keyed(4)).is_err(), "four copies");
+        for n in [5, 8] {
+            let r = p.decode_burst(&keyed(n)).expect("five copies or more");
+            assert_eq!(r.get("id"), Some(&Value::Int(0x49b3)), "{n} copies");
+            assert_eq!(r.get("t"), Some(&Value::Int(0x791c)), "{n} copies");
+        }
     }
 
     /// A keyed Manchester row is as long as the air it carries, so a

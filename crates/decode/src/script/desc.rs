@@ -158,9 +158,8 @@ pub struct Frame {
     /// The bits behind the sync are chips of this coding
     #[serde(default)]
     pub decode: Decode,
-    /// Rows the frame must be found on, for `find: rows`; one takes any row
-    #[serde(default = "two")]
-    pub copies: usize,
+    /// Rows the frame must be found on, for `find: rows` or `sync`; one takes any row
+    copies: Option<usize>,
     /// A row of the package must be this long, inclusive
     pub row_bits: Option<[usize; 2]>,
     /// Fewest symbol changes a frame may have, against a chopped carrier
@@ -179,8 +178,10 @@ fn one() -> usize {
     1
 }
 
-fn two() -> usize {
-    2
+impl Frame {
+    pub fn copies(&self) -> usize {
+        self.copies.unwrap_or(if self.find == Find::Rows { 2 } else { 1 })
+    }
 }
 
 /// How a frame is located in the bits a package sliced to
@@ -772,7 +773,7 @@ impl Desc {
         if f.bits == 0 || f.bits > 1024 {
             return Err(format!("{name}: frame bits {} out of range", f.bits));
         }
-        if f.repeats == 0 || f.copies == 0 {
+        if f.repeats == 0 || f.copies == Some(0) {
             return Err(format!("{name}: repeats and copies must be at least one"));
         }
         if f.find == Find::Sync {
