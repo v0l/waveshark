@@ -277,6 +277,10 @@ impl Node for P25Node {
 }
 
 impl Protocol for P25 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

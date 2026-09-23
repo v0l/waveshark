@@ -356,6 +356,24 @@ impl pipeline::node::Node for VideoNode {
         Ok(())
     }
 
+    fn acquisition(&self) -> Option<pipeline::Acquisition> {
+        Some(match (self.lock.is_some(), self.locked()) {
+            (false, _) => pipeline::Acquisition::Searching,
+            (true, false) => pipeline::Acquisition::Acquiring,
+            (true, true) => pipeline::Acquisition::Locked,
+        })
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        match self.lock {
+            Some(l) => vec![
+                ("lines".into(), format!("{:?}", l.standard)),
+                ("sync".into(), format!("{:.0}% of lines", l.coverage * 100.0)),
+            ],
+            None => Vec::new(),
+        }
+    }
+
     fn reset(&mut self) {
         self.demod.reset();
         self.wide_demod.reset();
@@ -411,6 +429,10 @@ impl pipeline::node::Node for VideoNode {
 }
 
 impl Protocol for Video {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::Continuously
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

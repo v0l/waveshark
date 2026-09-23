@@ -2704,7 +2704,8 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     );
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
     when(now.kiss() != was.kiss(), Cmd::Kiss(now.kiss()));
-    let serving = now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan { addr, tunable });
+    let serving =
+        now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan { addr, tunable });
     when(now.iqstream() != was.iqstream(), Cmd::IqStream(serving));
     when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
     when(now.heat_plan() != was.heat_plan(), Cmd::Heatmap(now.heat_plan()));

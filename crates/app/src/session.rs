@@ -1290,9 +1290,8 @@ mod tests {
     /// worth serving, and a socket that keys the transmitter is.
     #[test]
     fn a_served_span_is_offered_to_the_network() {
-        let at = |typed: &str| {
-            Session::parse(&format!("iqstream_addr = {typed}")).iqstream_address()
-        };
+        let at =
+            |typed: &str| Session::parse(&format!("iqstream_addr = {typed}")).iqstream_address();
         assert_eq!(at("1234"), Some("0.0.0.0:1234".parse().unwrap()));
         assert_eq!(at("127.0.0.1:1234"), Some("127.0.0.1:1234".parse().unwrap()));
         assert_eq!(at("nonsense"), None);

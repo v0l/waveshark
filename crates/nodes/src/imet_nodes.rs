@@ -139,6 +139,10 @@ impl Simple for ImetNode {
 }
 
 impl Protocol for Imet {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

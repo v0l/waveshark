@@ -200,6 +200,10 @@ fn is_ftx(bytes: &[u8]) -> bool {
 }
 
 impl Protocol for Ft8 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -253,6 +257,10 @@ impl Protocol for Ft8 {
 }
 
 impl Protocol for Ft4 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

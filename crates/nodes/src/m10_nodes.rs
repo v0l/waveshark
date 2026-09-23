@@ -104,6 +104,10 @@ impl Simple for M10Node {
 }
 
 impl Protocol for M10 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

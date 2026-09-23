@@ -259,6 +259,10 @@ impl ScriptedProtocol {
 }
 
 impl Protocol for ScriptedProtocol {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         self.id
     }
@@ -327,6 +331,7 @@ impl Protocol for ScriptedProtocol {
                 .f("shift_hz", fsk.deviation_hz * 2.0)
                 .f("offset_hz", 0.0)
                 .s("rest", "silence"),
+            sends: crate::protocol::Sends::Fields,
         })
     }
 }
@@ -339,11 +344,6 @@ pub fn protocols() -> Vec<ScriptedProtocol> {
         .map(ScriptedProtocol::new)
         .collect()
 }
-
-/// The installed set is process wide, so the tests that put a description
-/// in it take this in turn rather than racing each other
-#[cfg(test)]
-static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -435,7 +435,7 @@ vectors:
     /// demodulate, decode, and check the fields of what comes back
     #[test]
     fn the_transmit_chain_feeds_the_receive_chain_through_the_registry() {
-        let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+        let _installing = script::test_lock();
         let got = script::install(&[("tx.yaml".into(), TEST_LINK.into())]);
         assert_eq!(got.names, ["Tx-Test-Link"], "{:?}", got.refused);
         let p = crate::protocol::by_id("tx-test-link").expect("registered");
@@ -513,7 +513,7 @@ vectors:
 
     #[test]
     fn an_installed_radio_description_is_a_protocol_in_the_registry() {
-        let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+        let _installing = script::test_lock();
         let got = script::install(&[("link.yaml".into(), TEST_LINK.into())]);
         assert_eq!(got.names, ["Tx-Test-Link"], "{:?}", got.refused);
         let p = crate::protocol::by_id("tx-test-link").expect("registered under its id");
@@ -803,7 +803,7 @@ mod tx_tests {
 
     #[test]
     fn a_described_frame_is_keyed_and_read_back_off_the_air() {
-        let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+        let _installing = script::test_lock();
         let _proto = Scripted::new(Desc::parse(TEST_LINK).unwrap());
 
         // key it the way the transmit chain does: the source at the clock's
@@ -900,7 +900,7 @@ mod tx_tests {
 
     #[test]
     fn an_installed_radio_description_is_a_protocol_in_the_registry() {
-        let _installing = INSTALLING.lock().unwrap_or_else(|e| e.into_inner());
+        let _installing = script::test_lock();
         let got = script::install(&[("link.yaml".into(), TEST_LINK.into())]);
         assert_eq!(got.names, ["Tx-Test-Link"], "{:?}", got.refused);
         let p = crate::protocol::by_id("tx-test-link").expect("registered under its id");

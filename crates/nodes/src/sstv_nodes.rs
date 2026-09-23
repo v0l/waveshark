@@ -441,6 +441,10 @@ impl Simple for SstvTxNode {
 }
 
 impl Protocol for Sstv {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -480,6 +484,7 @@ impl Protocol for Sstv {
         Some(crate::protocol::TxChain {
             source: NodeSpec::new(SSTV_TX.name),
             modulator: NodeSpec::new(crate::mod_nodes::FM_MOD.name).f("deviation_hz", DEVIATION_HZ),
+            sends: crate::protocol::Sends::File(PICTURE),
         })
     }
 }

@@ -62,6 +62,9 @@ struct Offloaded {
 struct Heard {
     params: Option<Params>,
     snr_db: Option<f32>,
+    locked: bool,
+    reading: bool,
+    stats: dvbtdec::Stats,
 }
 
 /// Blocks of samples waiting to be read. About a tenth of a second at the
@@ -84,12 +87,25 @@ impl Offloaded {
             .spawn(move || {
                 let mut rx = dvbtdec::DvbtReceiver::new();
                 let mut out = Vec::new();
+                let mut reading = false;
                 while let Ok(block) = work.recv() {
                     out.clear();
+                    let was = rx.stats();
                     rx.push(&block, &mut out);
                     let _ = back.try_send(block);
-                    *mine.lock().expect("the reading") =
-                        Heard { params: rx.params(), snr_db: rx.snr_db() };
+                    let now = rx.stats();
+                    if now.packets > was.packets {
+                        reading = true;
+                    } else if now.uncorrectable > was.uncorrectable || !rx.synced() {
+                        reading = false;
+                    }
+                    *mine.lock().expect("the reading") = Heard {
+                        params: rx.params(),
+                        snr_db: rx.snr_db(),
+                        locked: rx.locked(),
+                        reading,
+                        stats: now,
+                    };
                     if send.send(std::mem::take(&mut out)).is_err() {
                         return;
                     }
@@ -142,6 +158,7 @@ impl Offloaded {
 impl Drop for Offloaded {
     fn drop(&mut self) {
         self.iq = None;
+        self.packets = crossbeam_channel::never();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -840,6 +857,34 @@ impl pipeline::node::Node for DvbtNode {
         ]
     }
 
+    fn acquisition(&self) -> Option<pipeline::Acquisition> {
+        let heard = self.rx.heard();
+        Some(match (heard.locked, heard.params.is_some(), heard.reading) {
+            (false, ..) => pipeline::Acquisition::Searching,
+            (true, true, true) => pipeline::Acquisition::Locked,
+            (true, ..) => pipeline::Acquisition::Acquiring,
+        })
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let heard = self.rx.heard();
+        let mut out = Vec::new();
+        if let Some(p) = heard.params {
+            out.push(("multiplex".into(), p.label()));
+        }
+        if let Some(snr) = heard.snr_db.filter(|_| heard.locked) {
+            out.push(("pilots".into(), format!("{snr:.1} dB")));
+        }
+        if heard.stats.packets + heard.stats.uncorrectable > 0 {
+            out.push(("packets".into(), heard.stats.packets.to_string()));
+            out.push(("uncorrectable".into(), heard.stats.uncorrectable.to_string()));
+        }
+        if self.rx.dropped > 0 {
+            out.push(("blocks lost".into(), self.rx.dropped.to_string()));
+        }
+        out
+    }
+
     /// Set by position in the list this node just published, by service
     /// identifier, or by name. A position is what a menu sends and an
     /// identifier is what survives the list growing, so both are taken and
@@ -885,6 +930,10 @@ impl pipeline::node::Node for DvbtNode {
 const CHANNEL_HZ: &str = "channel_hz";
 
 impl Protocol for Dvbt {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::Continuously
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -927,6 +976,7 @@ impl Protocol for Dvbt {
                 .f(GUARD, guard_choice(params.guard) as f64)
                 .f(CONSTELLATION, constellation_choice(params.constellation) as f64)
                 .f(CODE_RATE, code_choice(params.code_rate_hp) as f64),
+            sends: crate::protocol::Sends::File(PATH),
         })
     }
 }
@@ -1658,7 +1708,7 @@ mod tests {
         air
     }
 
-    fn noise(seed: u64, sigma: f32, n: usize) -> Vec<C32> {
+    pub(super) fn noise(seed: u64, sigma: f32, n: usize) -> Vec<C32> {
         let mut state = seed | 1;
         let mut next = || {
             state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
@@ -1674,6 +1724,23 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn a_receiver_thread_with_a_full_queue_behind_it_is_let_go() {
+        let mut rx = Offloaded::new();
+        for _ in 0..2 * QUEUE + 2 {
+            rx.push(&[C32::default(); 4096]);
+        }
+        let (done, gone) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            drop(rx);
+            let _ = done.send(());
+        });
+        assert!(
+            gone.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            "dropping the stage waited on a thread blocked handing back packets nobody reads"
+        );
     }
 
     /// A multiplex built packet by packet, put on the air, read back off it,
@@ -1735,7 +1802,7 @@ mod tests {
 
 #[cfg(test)]
 mod node_tests {
-    use super::tests::{on_air, packet};
+    use super::tests::{noise, on_air, packet};
     use super::*;
     use common::Hz;
     use dvbt::{CodeRate, Constellation, Guard, Hierarchy};
@@ -1890,6 +1957,72 @@ mod node_tests {
         }
         assert_eq!(wrong, 0, "{wrong} of {packets} packets are not the ones in the file");
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn read_through_the_stage(air: &[C32]) -> DvbtNode {
+        let mut node = DvbtNode::new(474_000_000.0);
+        let spec = PortSpec { spec: StreamSpec::iq(RATE_HZ, Hz(474_000_000)), latency: 0 };
+        node.negotiate(&[spec]).expect("a channel in the span");
+        let mut events = Vec::new();
+        for chunk in air.chunks(65_536) {
+            let payload = Payload::Iq(chunk.to_vec());
+            let mut out = [
+                Payload::empty_of(PortKind::Bytes),
+                Payload::empty_of(PortKind::Video),
+                Payload::empty_of(PortKind::Real),
+            ];
+            let ins = [spec];
+            let (tags, mut new_tags) = (Vec::new(), Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            Node::process(&mut node, &[&payload], &mut out, &mut ctx).expect("the stage runs");
+        }
+        node.flush(&mut Vec::new());
+        node
+    }
+
+    fn reading(node: &DvbtNode, caption: &str) -> Option<String> {
+        Node::readings(node).into_iter().find(|(c, _)| c == caption).map(|(_, v)| v)
+    }
+
+    #[test]
+    fn the_stage_says_whether_it_is_locked_and_what_it_is_reading() {
+        let idle = DvbtNode::new(474_000_000.0);
+        assert_eq!(Node::acquisition(&idle), Some(pipeline::Acquisition::Searching));
+
+        let qpsk = Params {
+            mode: Mode::M2k,
+            guard: Guard::G1_32,
+            constellation: Constellation::Qpsk,
+            hierarchy: Hierarchy::None,
+            code_rate_hp: CodeRate::R1_2,
+            code_rate_lp: CodeRate::R1_2,
+            cell_id: None,
+        };
+        let clean = read_through_the_stage(&on_air(qpsk, 3 * 504));
+        assert_eq!(Node::acquisition(&clean), Some(pipeline::Acquisition::Locked));
+        assert_eq!(reading(&clean, "multiplex").as_deref(), Some("2k 1/32 QPSK 1/2"));
+        assert_eq!(reading(&clean, "packets").as_deref(), Some("1244"));
+        assert_eq!(reading(&clean, "uncorrectable").as_deref(), Some("0"));
+
+        let qam64 = Params {
+            constellation: Constellation::Qam64,
+            code_rate_hp: CodeRate::R2_3,
+            code_rate_lp: CodeRate::R2_3,
+            ..qpsk
+        };
+        let air = on_air(qam64, 3 * 2016);
+        let power = air.iter().map(|c| c.norm_sqr()).sum::<f32>() / air.len() as f32;
+        let hiss = noise(0x11_6DB, (power / 10f32.powf(1.16)).sqrt(), air.len());
+        let noisy: Vec<C32> = air.iter().zip(&hiss).map(|(a, n)| a + n).collect();
+        let stuck = read_through_the_stage(&noisy);
+        assert_eq!(
+            Node::acquisition(&stuck),
+            Some(pipeline::Acquisition::Acquiring),
+            "at 11.6 dB 64-QAM 2/3 is found and its TPS read, and not one codeword corrects"
+        );
+        assert_eq!(reading(&stuck, "multiplex").as_deref(), Some("2k 1/32 64-QAM 2/3"));
+        assert_eq!(reading(&stuck, "packets").as_deref(), Some("0"));
+        assert_eq!(reading(&stuck, "uncorrectable").as_deref(), Some("2161"));
     }
 
     #[test]

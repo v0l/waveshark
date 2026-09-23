@@ -128,6 +128,10 @@ impl Simple for EpirbNode {
 }
 
 impl Protocol for Epirb {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

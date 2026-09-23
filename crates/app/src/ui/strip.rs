@@ -352,6 +352,31 @@ impl Strip<'_> {
     /// This belongs inside the channel rather than beside the list: a station
     /// name is a property of one tuned frequency, and with several channels
     /// configured a panel-level readout gives no clue which one it describes.
+    fn channel_decoding(
+        ui: &mut egui::Ui,
+        d: &crate::chain::Decoding,
+        last: Option<std::time::Duration>,
+    ) {
+        use pipeline::Acquisition;
+        ui.add_space(6.0);
+        ui.separator();
+        let (word, tint) = match (d.acquisition, last) {
+            (Some(Acquisition::Locked), _) => ("locked".to_string(), theme::OK),
+            (Some(Acquisition::Acquiring), _) => ("acquiring".to_string(), theme::VALUE),
+            (Some(Acquisition::Searching), _) => ("searching".to_string(), theme::LEGEND),
+            (None, Some(t)) => (format!("heard {} ago", ago(t)), theme::TRACE),
+            (None, None) if d.heard > 0 => ("heard".to_string(), theme::TRACE),
+            (None, None) => ("listening".to_string(), theme::LEGEND),
+        };
+        decoding_row(ui, "decode", &word, tint);
+        if d.acquisition.is_none() && d.heard > 0 {
+            decoding_row(ui, "frames", &d.heard.to_string(), theme::VALUE);
+        }
+        for (caption, value) in &d.readings {
+            decoding_row(ui, caption, value, theme::VALUE);
+        }
+    }
+
     fn channel_rds(ui: &mut egui::Ui, st: &StationInfo, blend: f32) {
         if st.is_empty() && blend <= 0.01 {
             return;
@@ -622,7 +647,7 @@ impl Strip<'_> {
         vox: (f32, bool),
         keying: &mut crate::ui::state::Keying,
         cmds: &mut Vec<Cmd>,
-        source: Option<(usize, Vec<pipeline::param::Param>)>,
+        chain: Option<&pipeline::graph::Topology>,
         sub_file: Option<&SubFile>,
         sub_pick: &mut super::state::SubPick,
         capture: Option<&crate::radio::TxCapture>,
@@ -657,9 +682,11 @@ impl Strip<'_> {
             });
         });
 
-        // A data mode has no microphone and no test tone: what it sends is a
-        // file, chosen on the stage that reads it.
+        // A data mode has no microphone and no test tone: what it sends is
+        // whatever the operator put on the stage that holds it, and there is
+        // nothing to draw until that stage has been found.
         let digital = matches!(mode, crate::radio::TxMode::Digital(_));
+        let controls = TxControls::of(mode, chain);
         if !digital {
             ui.horizontal(|ui| {
                 theme::Line::new().legend("src").show(ui);
@@ -816,12 +843,14 @@ impl Strip<'_> {
                     }
                 }
             }
-            // A data mode with nothing but a file to choose is the
-            // television multiplex; everything else keys what its own stage
-            // holds, drawn from the stage's parameters below.
-            _ if digital && source.as_ref().is_some_and(|(_, p)| has_path(p)) => {
-                let node = source.as_ref().map(|(id, _)| *id);
-                let field = source.as_ref().and_then(|(_, p)| p.iter().find(|p| p.name == "path"));
+            // A data mode that sends a file gets a picker for it and its
+            // remaining fields underneath: a picture has a mode and a pause
+            // as well as a picture.
+            _ if digital && controls.as_ref().is_some_and(|c| c.file().is_some()) => {
+                let controls = controls.as_ref().expect("the arm matched on it");
+                let carries = controls.file().expect("the arm matched on it");
+                let node = controls.node;
+                let field = controls.param(carries);
                 let path =
                     field.and_then(|p| p.value.as_str().map(str::to_string)).unwrap_or_default();
                 // What the stage calls what it sends, so a multiplex asks
@@ -841,10 +870,8 @@ impl Strip<'_> {
                             .unwrap_or(path.clone()),
                     };
                     let open = ui.button("OPEN").on_hover_text(format!("Choose the {what}"));
-                    if open.clicked()
-                        && let Some(node) = node
-                    {
-                        files.ask(ui.ctx(), node, "path", "Choose what to transmit");
+                    if open.clicked() {
+                        files.ask(ui.ctx(), node, carries, "Choose what to transmit");
                     }
                     // Putting it back to nothing is a transmission too: the
                     // test card, which is what an empty setting means.
@@ -853,11 +880,10 @@ impl Strip<'_> {
                             .button("CLEAR")
                             .on_hover_text("Transmit the test card instead")
                             .clicked()
-                        && let Some(node) = node
                     {
                         cmds.push(Cmd::NodeParam(
                             node,
-                            "path".into(),
+                            carries.into(),
                             pipeline::param::ParamValue::Text(String::new()),
                         ));
                     }
@@ -866,15 +892,20 @@ impl Strip<'_> {
                     // strip nobody can use.
                     theme::Line::new().value(name).size(11.0).elided(ui);
                 });
+                for prm in controls.params.iter().filter(|p| p.name != carries) {
+                    if let Some(cmd) = tx_field(ui, node, prm, keying) {
+                        cmds.push(cmd);
+                    }
+                }
             }
             // What a page, a beacon or an over says. The stage describes its
             // own fields, so a protocol added later is drawn here without
             // this knowing anything about it, exactly as the chain view
             // renders a stage it has never heard of.
             _ if digital => {
-                if let Some((node, params)) = &source {
-                    for prm in params {
-                        if let Some(cmd) = tx_field(ui, *node, prm, keying) {
+                if let Some(controls) = &controls {
+                    for prm in &controls.params {
+                        if let Some(cmd) = tx_field(ui, controls.node, prm, keying) {
                             cmds.push(cmd);
                         }
                     }
@@ -950,6 +981,11 @@ impl Strip<'_> {
         // watching this channel actually wants to know.
         if tx.source == TxSource::Agent {
             Self::agent_key(ui, ch.id, air, air_fault);
+            return changed;
+        }
+        if let Some(why) = controls.as_ref().and_then(TxControls::missing) {
+            ui.add_space(2.0);
+            theme::Line::new().note(why).size(11.0).wrapped(ui);
             return changed;
         }
         let keyed_here = keyed == Some(ch.id);
@@ -1412,6 +1448,12 @@ impl Strip<'_> {
                                         Self::channel_rds(ui, &station, blend);
                                     }
                                 }
+                                if let Some(d) =
+                                    self.radio.and_then(|r| r.status.decoding_for(ch.id))
+                                {
+                                    let last = heard_since(&mut self.st.heard_at, ch.id, d.heard);
+                                    Self::channel_decoding(ui, &d, last);
+                                }
                                 if let Some(st) = st {
                                     if Self::channel_audio(ui, ch, st) {
                                         tune = Some(i);
@@ -1430,7 +1472,7 @@ impl Strip<'_> {
                                     vox,
                                     &mut self.st.keying,
                                     self.cmds,
-                                    tx_source(self.chain),
+                                    self.chain,
                                     sub_file.as_ref(),
                                     &mut self.st.sub_pick,
                                     capture.as_ref(),
@@ -1520,11 +1562,6 @@ impl Strip<'_> {
     }
 }
 
-/// Whether a transmit source is one that sends a file rather than fields.
-fn has_path(params: &[pipeline::param::Param]) -> bool {
-    params.iter().any(|p| p.name == "path")
-}
-
 /// One of a data mode's fields on the strip, sent to the stage when it is
 /// entered. `None` until something is entered.
 ///
@@ -1583,31 +1620,174 @@ fn tx_field(
     out
 }
 
-/// The stage a data mode transmits from: its node id and what it is set to
-/// send, or `None` where nothing in the running chain is one.
-///
-/// Every data mode has one, and what it holds differs: a television
-/// multiplex is a file, a page is an address and a message, a beacon is a
-/// callsign and a report. So the stage's own parameters are what is drawn,
-/// which is the same description the chain view renders.
-pub(super) fn tx_source(
-    topo: Option<&pipeline::graph::Topology>,
-) -> Option<(usize, Vec<pipeline::param::Param>)> {
-    let node = topo?.nodes.iter().find(|n| n.id.0 == derived::TX_SOURCE as usize)?;
-    Some((node.id.0, node.params.clone()))
+fn decoding_row(ui: &mut egui::Ui, caption: &str, value: &str, tint: egui::Color32) {
+    ui.horizontal(|ui| {
+        theme::Line::new().legend(caption).show(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            theme::Line::new().value(value).tint(tint).size(11.0).show(ui);
+        });
+    });
 }
 
-/// The stage a television channel transmits from, and the file it has.
-pub(super) fn tx_source_file(topo: Option<&pipeline::graph::Topology>) -> Option<(usize, String)> {
-    let node = topo?.nodes.iter().find(|n| n.kind == "ts_source")?;
-    let path = node
-        .params
+fn heard_since(
+    seen: &mut std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
+    id: u64,
+    heard: u64,
+) -> Option<std::time::Duration> {
+    let now = std::time::Instant::now();
+    let entry = seen.entry(id).or_insert((heard, None));
+    if heard > entry.0 {
+        entry.1 = Some(now);
+    }
+    entry.0 = heard;
+    entry.1.map(|t| now.duration_since(t))
+}
+
+fn ago(t: std::time::Duration) -> String {
+    match t.as_secs() {
+        0 => "under a second".to_string(),
+        s @ 1..=59 => format!("{s} s"),
+        s @ 60..=3599 => format!("{} min", s / 60),
+        s => format!("{} h", s / 3600),
+    }
+}
+
+/// What a transmit mode sends, as the protocol declares it.
+pub(super) fn tx_sends(mode: crate::radio::TxMode) -> Option<nodes::protocol::Sends> {
+    let crate::radio::TxMode::Digital(id) = mode else {
+        return None;
+    };
+    nodes::protocol::all()
         .iter()
-        .find(|p| p.name == "path")
-        .and_then(|p| match &p.value {
-            pipeline::param::ParamValue::Text(s) => Some(s.clone()),
+        .find(|p| p.id() == id)
+        .and_then(|p| p.transmit())
+        .map(|tx| tx.sends)
+}
+
+/// The controls a data mode's transmit side draws: the stage they are set
+/// on, what the protocol said it sends, and the stage's own description of
+/// its fields.
+///
+/// One value rather than three, and only made where all three were found,
+/// because a control with no stage behind it is a control that does nothing:
+/// a file picker that opens a dialog and drops what comes back, a field
+/// typed into that goes nowhere. There is no drawing a half of this.
+///
+/// The stage is found by the tag the patch drew it under. What the interface
+/// is handed is the two graphs merged, with the transmit side's node ids
+/// moved up past the receiver's, so a position in that list is not a stage's
+/// identity: looking for one there found nothing at all, and every data mode
+/// lost its fields and its picker.
+///
+/// What each mode holds differs, so the stage's parameters are what is
+/// drawn: a television multiplex is a file, a page is an address and a
+/// message, a beacon is a callsign and a report.
+pub(super) struct TxControls {
+    pub node: usize,
+    pub sends: nodes::protocol::Sends,
+    pub params: Vec<pipeline::param::Param>,
+}
+
+impl TxControls {
+    pub fn of(
+        mode: crate::radio::TxMode,
+        topo: Option<&pipeline::graph::Topology>,
+    ) -> Option<Self> {
+        let sends = tx_sends(mode)?;
+        let node = topo?.stage(derived::TX_SOURCE)?;
+        Some(Self { node: node.id.0, sends, params: node.params.clone() })
+    }
+
+    /// The parameter holding the file it sends, for a mode that sends one.
+    pub fn file(&self) -> Option<&'static str> {
+        match self.sends {
+            nodes::protocol::Sends::File(name) => Some(name),
             _ => None,
-        })
-        .unwrap_or_default();
-    Some((node.id.0, path))
+        }
+    }
+
+    pub fn param(&self, name: &str) -> Option<&pipeline::param::Param> {
+        self.params.iter().find(|p| p.name == name)
+    }
+
+    /// What to say in place of the key where nothing has been entered.
+    pub fn missing(&self) -> Option<&'static str> {
+        self.sends.missing_in(&self.params)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::{Receiver, Sinks, TxPlan, derived, tests as chain_tests};
+    use crate::radio::{ChanMode, ChannelSpec, TxSource, TxSpec};
+    use common::Hz;
+
+    /// The strip draws an input for everything this build can key up.
+    ///
+    /// Every protocol that transmits declares what it sends, and the strip
+    /// draws that stage's parameters without knowing one protocol from
+    /// another. The two halves have to meet: a lookup that finds no stage is
+    /// a channel with no fields, a file picker with no stage to send a file
+    /// to, and a key that puts a carrier on the air carrying nothing, and
+    /// none of it fails anywhere a test was looking.
+    #[test]
+    fn every_keyable_protocol_has_its_input_on_the_strip() {
+        let _installing = decode::script::test_lock();
+        let mut drawn = Vec::new();
+        for proto in nodes::protocol::all() {
+            let Some(tx) = proto.transmit() else { continue };
+            let hz = proto.default_hz();
+            let rate = proto.shape().min_rate_hz.max(proto.shape().widths[0] * 4.0).max(2.4e6);
+            let mut plan = chain_tests::plan(rate, Hz(hz as u64));
+            plan.channels = vec![ChannelSpec {
+                id: 1,
+                label: "CH1".into(),
+                offset_hz: 0.0,
+                mode: ChanMode::Decode(proto.id().into()),
+                bandwidth_hz: None,
+                squelch_db: None,
+                agc: true,
+                voice: false,
+                reads: None,
+                tx: Some(TxSpec::default()),
+                tone: None,
+            }];
+            let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
+                .unwrap_or_else(|| panic!("{}: it transmits but has no mode", proto.id()));
+            plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(hz as u64) });
+
+            let rx = Receiver::build(&plan, Sinks::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", proto.id()));
+            let merged = crate::transmit::merged(&rx.topology(), rx.tx_topology().as_ref());
+            let controls = TxControls::of(mode, Some(&merged))
+                .unwrap_or_else(|| panic!("{}: the strip finds no stage to draw", proto.id()));
+            let (node, params) = (controls.node, &controls.params);
+            assert!(
+                node >= crate::transmit::TX_ID_BASE,
+                "{}: {node} is not on the transmit side, so a field set here goes nowhere",
+                proto.id()
+            );
+            assert_eq!(
+                merged.nodes.iter().find(|n| n.id.0 == node).and_then(|n| n.tag),
+                Some(derived::TX_SOURCE),
+                "{}",
+                proto.id()
+            );
+            assert!(!params.is_empty(), "{}: nothing for the operator to fill in", proto.id());
+            if let Some(name) = tx.sends.param() {
+                assert!(
+                    params.iter().any(|p| p.name == name),
+                    "{}: {name:?} is what it sends and the strip cannot draw it: {:?}",
+                    proto.id(),
+                    params.iter().map(|p| p.name.clone()).collect::<Vec<_>>()
+                );
+            }
+            assert_eq!(controls.sends, tx.sends, "{}", proto.id());
+            drawn.push(proto.id());
+        }
+        for id in ["ble", "sstv", "dvbt", "aprs", "pocsag", "rtty"] {
+            assert!(drawn.contains(&id), "{id} keys up and has no input on the strip: {drawn:?}");
+        }
+    }
 }

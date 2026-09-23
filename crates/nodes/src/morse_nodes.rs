@@ -180,6 +180,10 @@ impl Simple for MorseNode {
 }
 
 impl Protocol for Morse {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

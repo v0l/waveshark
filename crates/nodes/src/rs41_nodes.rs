@@ -205,6 +205,10 @@ impl Simple for Rs41Node {
 }
 
 impl Protocol for Rs41 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

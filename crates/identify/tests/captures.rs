@@ -91,16 +91,14 @@ fn minutes_of_noise_name_nothing() {
         seed ^= seed << 17;
         (seed >> 40) as f32 / 8_388_608.0 - 0.125
     };
-    let bands: Vec<(f64, f64, usize, Vec<C32>)> = [
-        (2_400_000.0f64, 1_090_000_000.0f64, 60.0, 1usize),
-        (31_250.0, 405_800_240.0, 120.0, 0),
-    ]
-    .into_iter()
-    .map(|(rate, center, seconds, frames)| {
-        let n = (rate * seconds) as usize;
-        (rate, center, frames, (0..n).map(|_| C32::new(noise(), noise())).collect())
-    })
-    .collect();
+    let bands: Vec<(f64, f64, usize, Vec<C32>)> =
+        [(2_400_000.0f64, 1_090_000_000.0f64, 60.0, 1usize), (31_250.0, 405_800_240.0, 120.0, 0)]
+            .into_iter()
+            .map(|(rate, center, seconds, frames)| {
+                let n = (rate * seconds) as usize;
+                (rate, center, frames, (0..n).map(|_| C32::new(noise(), noise())).collect())
+            })
+            .collect();
     std::thread::scope(|scope| {
         for (rate, center, frames, iq) in &bands {
             let (rate, center, frames, iq) = (*rate, *center, *frames, iq.as_slice());

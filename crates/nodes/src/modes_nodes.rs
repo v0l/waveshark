@@ -179,6 +179,10 @@ impl Simple for ModeSNode {
 pub use identify::modes::ModeS;
 
 impl Protocol for ModeS {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

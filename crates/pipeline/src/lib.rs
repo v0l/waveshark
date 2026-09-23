@@ -28,7 +28,7 @@ pub use graph::{
     Emitted, GRAPH_INPUT, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, chain,
 };
 pub use lock::{Claim, Lock, Raster, Verdict};
-pub use node::{Node, NodeCtx, PortSpec, Simple};
+pub use node::{Acquisition, Node, NodeCtx, PortSpec, Simple};
 pub use param::{Param, ParamRange, ParamValue};
 pub use port::{Payload, PortKind, StreamSpec, Tag, TagValue};
 pub use registry::Registry as NodeRegistry;

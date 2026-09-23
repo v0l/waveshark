@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
+- Compiled features listed under the version in Setup, ffmpeg among them.
 - CTCSS tones and DCS codes on a saved channel, imported, exported and squelched on.
 - MDC-1200 bursts damaged in the air still name their radio, from the parity it sent.
 - EAS, SSTV, APT and WEFAX read off a listening channel's audio, picked on the
@@ -200,6 +202,11 @@ the code is in the commit log.
 
 ### Fixed
 
+- A saved patch naming a stage this build was not compiled with emptied the
+  whole graph.
+- Receiver froze on a rebuild while a DVB-T channel had fallen behind.
+- A strip channel whose decoder refused its input stopped the receiver, an
+  AIS channel away from the pair it reads being the easy way in.
 - Located transmitters drew a circle far smaller than the error, tighter the
   longer the drive.
 - Home Assistant stopped publishing after the radio was restarted, and kept

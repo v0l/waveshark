@@ -207,6 +207,10 @@ fn is_baudot(bytes: &[u8]) -> bool {
 }
 
 impl Protocol for Rtty {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -260,6 +264,7 @@ impl Protocol for Rtty {
             modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
                 .f("shift_hz", Shift::default().hz())
                 .f("offset_hz", 0.0),
+            sends: crate::protocol::Sends::Words(TEXT),
         })
     }
 }

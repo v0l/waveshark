@@ -170,6 +170,10 @@ impl Simple for IridiumNode {
 }
 
 impl Protocol for Iridium {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

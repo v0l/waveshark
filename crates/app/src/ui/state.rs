@@ -994,6 +994,7 @@ pub(super) struct AudioState {
     pub sub_pick: SubPick,
     /// The capture the IQ transmit source replays.
     pub capture_pick: CapturePick,
+    pub heard_at: std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
 }
 
 /// What the transmit key is doing: which channel it is keying, and whether it
@@ -1137,6 +1138,7 @@ impl Default for AudioState {
             keying: Keying::default(),
             sub_pick: SubPick::default(),
             capture_pick: CapturePick::default(),
+            heard_at: std::collections::HashMap::new(),
         }
     }
 }

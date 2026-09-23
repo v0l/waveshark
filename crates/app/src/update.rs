@@ -24,6 +24,23 @@ pub fn running() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+pub fn features() -> Vec<&'static str> {
+    [
+        (cfg!(feature = "ffmpeg"), "ffmpeg"),
+        (cfg!(feature = "limesdr"), "limesdr"),
+        (cfg!(feature = "stt"), "stt"),
+        (cfg!(feature = "tts"), "tts"),
+        (cfg!(feature = "cuda"), "cuda"),
+        (cfg!(all(target_os = "macos", any(feature = "stt", feature = "tts"))), "metal"),
+        (cfg!(feature = "tea"), "tea"),
+        (cfg!(feature = "ambe"), "ambe"),
+        (cfg!(feature = "mcp"), "mcp"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect()
+}
+
 /// A published release, reduced to what an operator has to decide with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
@@ -451,6 +468,12 @@ fn split(v: &str) -> (Vec<u64>, Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_feature_list_names_ffmpeg_only_when_it_is_built_in() {
+        assert_eq!(features().contains(&"ffmpeg"), cfg!(feature = "ffmpeg"));
+        assert_eq!(features().contains(&"mcp"), cfg!(feature = "mcp"));
+    }
 
     #[test]
     fn a_later_version_is_newer() {

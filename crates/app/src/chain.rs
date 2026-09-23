@@ -159,6 +159,14 @@ pub struct Chan {
     pub blend: f32,
     pub station: Station,
     pub rds_stats: (u64, u64, bool),
+    front: Option<NodeId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Decoding {
+    pub acquisition: Option<pipeline::Acquisition>,
+    pub heard: u64,
+    pub readings: Vec<(String, String)>,
 }
 
 /// One bank sweeping the span.
@@ -1004,6 +1012,7 @@ impl Receiver {
         let mut ring = None;
         let mut sinks = sinks;
         let was = crate::patch::Patch::default();
+        let mut left_out: Vec<String> = Vec::new();
         let built = add_patch(
             &mut b,
             &mut pool,
@@ -1014,7 +1023,13 @@ impl Receiver {
             &mut sinks,
             false,
         )
-        .and_then(|_| b.build());
+        .and_then(|(.., out)| {
+            left_out = out;
+            b.build()
+        });
+        if !left_out.is_empty() {
+            self.refused = Some(left_out.join("; "));
+        }
         match built {
             Ok(mut graph) => {
                 if let Some(sent) =
@@ -1255,15 +1270,20 @@ impl Receiver {
         // in a file written by an older build cannot switch on something the
         // operator switched off.
         derived_settings(&mut patch, plan);
+        sync_audio(&mut patch, plan);
+        sync_video(&mut patch);
         // Stages a previous attempt found could not take the stream they were
         // wired to. Left out rather than built, with what they said kept for
         // the interface: a decoder that refuses its input is one decoder
         // missing, not a receiver that will not start.
+        //
+        // After the strip is drawn, not before it: `sync_audio` redraws every
+        // channel's chain from the channel list, so a front end taken out
+        // ahead of it came straight back and the same refusal went round
+        // until the loop gave up and stopped the radio.
         for id in leave_out {
             patch.remove(*id);
         }
-        sync_audio(&mut patch, plan);
-        sync_video(&mut patch);
         let mut tx_sinks = sinks_tx;
         // The radio never goes into a graph as it is built. It is handed to
         // the thread that transmits, which holds it until there is a chain to
@@ -1291,7 +1311,7 @@ impl Receiver {
         // `self.patch` is still the one the pooled nodes were built from,
         // which is what says whether a stage that kept its id still asks for
         // the same kind of node.
-        let (patch_packets, patch_ids, reused) = match add_patch(
+        let (patch_packets, patch_ids, reused, left_out) = match add_patch(
             &mut b,
             &mut pool,
             &self.patch,
@@ -1304,9 +1324,12 @@ impl Receiver {
             Ok(v) => v,
             Err(e) => {
                 refused = Some(format!("the patch cannot be built: {e}"));
-                (Vec::new(), HashMap::new(), Vec::new())
+                (Vec::new(), HashMap::new(), Vec::new(), Vec::new())
             }
         };
+        if !left_out.is_empty() {
+            refused = Some(left_out.join("; "));
+        }
 
         // What the parts that are not drawn yet read. They followed the DC
         // block when it was built here; now they follow whatever the patch
@@ -1485,6 +1508,7 @@ impl Receiver {
                 blend: 0.0,
                 station: Station::default(),
                 rds_stats: (0, 0, false),
+                front: (last == "chan_front").then_some(tail),
             });
         }
 
@@ -1691,6 +1715,29 @@ impl Receiver {
 
     pub fn channels(&self) -> &[Chan] {
         &self.chans
+    }
+
+    pub fn decoding(&self) -> Vec<(u64, Decoding)> {
+        self.chans
+            .iter()
+            .filter_map(|c| {
+                let front = c.front?;
+                let node = self.graph.node(front)?;
+                let carried: u64 = (0..node.num_outputs())
+                    .map(|k| front.out(k))
+                    .filter(|o| {
+                        self.graph
+                            .spec_of(*o)
+                            .is_some_and(|s| matches!(s.kind, PortKind::Packets | PortKind::Video))
+                    })
+                    .filter_map(|o| self.graph.produced(o))
+                    .sum();
+                let heard = carried + self.graph.decoded(front).unwrap_or(0);
+                let decoding =
+                    Decoding { acquisition: node.acquisition(), heard, readings: node.readings() };
+                Some((c.spec.id, decoding))
+            })
+            .collect()
     }
 
     /// Whether a plan differs from what is running only in settings that can
@@ -4730,7 +4777,7 @@ fn describe(r: &pipeline::Request) -> String {
 
 /// What building a patch produced: the stages that put packets on the bus,
 /// where every stage ended up, and which of them kept the node they had.
-type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>);
+type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>, Vec<String>);
 
 /// The same registry, built once, for the questions a patch answers about a
 /// stage before any node of it exists.
@@ -4826,6 +4873,13 @@ pub fn registry() -> pipeline::registry::Registry {
 /// because a stage has just been dropped on the canvas and not yet wired up
 /// would make the obvious way to work impossible: nobody draws a chain
 /// backwards from its last wire.
+///
+/// A stage this build cannot make is left out the same way, and what the
+/// registry said about it comes back for the operator. A saved patch names
+/// stages by kind, so one written where a decoder was compiled in is read
+/// where it was not, and the whole patch coming back as an error cost the
+/// receiver its head, its spectrum and every channel for the sake of one
+/// stage nobody could build.
 fn add_patch(
     b: &mut GraphBuilder,
     pool: &mut HashMap<u64, NodePart>,
@@ -4840,6 +4894,7 @@ fn add_patch(
     use pipeline::registry::SettingsExt;
     let reg = registry();
     let mut made: Vec<(u64, String, Box<dyn pipeline::node::Node>)> = Vec::new();
+    let mut left_out: Vec<String> = Vec::new();
     // Which stages came through the rebuild with the node they had. A channel
     // built from scratch has forgotten its station and its gain, and the
     // interface has to know not to keep showing them.
@@ -4921,7 +4976,14 @@ fn add_patch(
                     None => continue,
                 }
             }
-            None => reg.build(&st.kind, &st.settings)?,
+            None => match reg.build(&st.kind, &st.settings) {
+                Ok(n) => n,
+                Err(e) => {
+                    left_out
+                        .push(format!("{} was left out: {e}", stage_label(&st.kind, &st.settings)));
+                    continue;
+                }
+            },
         };
         // A stage the receiver derived is described by its settings, so one
         // that came back out of the pool is brought up to date rather than
@@ -5020,7 +5082,7 @@ fn add_patch(
             }
         }
     }
-    Ok((packets, ids, reused))
+    Ok((packets, ids, reused, left_out))
 }
 
 /// A rate as a person reads it, for a node label.
@@ -8082,6 +8144,7 @@ mod tx_tests {
     /// corpus.
     #[test]
     fn a_transmitted_sub_file_decodes_back_off_the_recording() {
+        let _installing = decode::script::test_lock();
         if !decode::script::install_fetched() {
             return;
         }
@@ -8260,6 +8323,89 @@ mod refusal_tests {
         // quietly missing.
         let said = rx.refused.clone().expect("nothing said why it is not there");
         assert!(said.contains("rejected") || said.contains("left out"), "it said {said:?}");
+    }
+
+    /// A channel on the strip whose decoder refuses costs itself and
+    /// nothing else.
+    ///
+    /// The strip's chains are redrawn from the channel list on every
+    /// attempt, so a front end left out of the patch was put back before the
+    /// graph was built and refused again. The loop saw the same tag twice,
+    /// gave up, and the receiver stopped with one line of red: an AIS
+    /// channel a megahertz off the pair it reads took the whole radio down.
+    #[test]
+    fn a_channel_whose_decoder_refuses_does_not_take_the_receiver_with_it() {
+        let mut plan = tests::plan(8_000_000.0, Hz(162_000_000));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 1_000_000.0,
+            mode: ChanMode::Decode("ais".into()),
+            bandwidth_hz: None,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            reads: None,
+            tx: None,
+            tone: None,
+        }];
+
+        let rx = Receiver::build(&plan, Sinks::default()).expect("the receiver still builds");
+        let topo = rx.topology();
+        assert!(!topo.nodes.iter().any(|n| n.kind == "ais"), "the decoder that refused was built");
+        for want in ["dc_block", "spectrum"] {
+            assert!(topo.nodes.iter().any(|n| n.kind == want), "{want} went with it");
+        }
+        let said = rx.refused.clone().expect("nothing said why the channel is not there");
+        assert!(said.contains("161.975"), "it said {said:?}");
+
+        // On the pair it reads, it is there and nothing is said.
+        plan.channels[0].offset_hz = 0.0;
+        let rx = Receiver::build(&plan, Sinks::default()).expect("a receiver");
+        assert!(rx.topology().nodes.iter().any(|n| n.kind == "ais"));
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    /// A stage this build cannot make costs itself and nothing else.
+    ///
+    /// A patch names its stages by kind, and the set of kinds is what the
+    /// binary was compiled with: an edits file written where `stt` or
+    /// `limesdr` was on is read by a build where it was off, and a stage a
+    /// later version added is read by an earlier one. The registry's refusal
+    /// used to come back out of `add_patch` and take the whole patch with it,
+    /// so one name nobody could build left the receiver with no head, no
+    /// spectrum and no channels at all.
+    #[test]
+    fn a_stage_this_build_cannot_make_does_not_take_the_patch_with_it() {
+        let mut plan = tests::plan(2_400_000.0, Hz::mhz(145));
+        plan.channels = vec![ChannelSpec {
+            id: 1,
+            label: "CH1".into(),
+            offset_hz: 25_000.0,
+            mode: ChanMode::Audio(Demod::Nfm),
+            bandwidth_hz: None,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            reads: None,
+            tx: None,
+            tone: None,
+        }];
+        let mut drawn = derived_patch(&plan);
+        let base = drawn.clone();
+        let missing = drawn.add("a_decoder_this_build_has_never_heard_of");
+        drawn.connect(crate::patch::Source::Stage(derived::DC, 0), (missing, 0));
+        plan.edits = crate::patch::Edits::diff(&drawn, &base, operator_owns);
+
+        let rx = Receiver::build(&plan, Sinks::default()).expect("the receiver still builds");
+        let topo = rx.topology();
+        assert!(!topo.nodes.iter().any(|n| n.tag == Some(missing)), "it was built after all");
+        for want in ["dc_block", "spectrum"] {
+            assert!(topo.nodes.iter().any(|n| n.kind == want), "{want} went with it");
+        }
+        assert_eq!(rx.channels().len(), 1, "the channel on the strip went with it");
+        let said = rx.refused.clone().expect("nothing said why it is not there");
+        assert!(said.contains("left out"), "it said {said:?}");
     }
 }
 
@@ -8682,6 +8828,7 @@ fields:
 vectors:
   - { hex: "a5 c3 2b 6e 0b 5a 35 48", fields: { id: 0xa5c3, temperature_c: 111.18, battery_mv: 2906, seq: 53 } }
 "#;
+        let _installing = decode::script::test_lock();
         decode::script::install(&[("chain.yaml".into(), yaml.into())]);
 
         let hz = 433_920_000.0;
@@ -8975,6 +9122,65 @@ vectors:
             "the graph runs at {:.2}x real time with a television transmission on it",
             seconds / took
         );
+    }
+
+    #[test]
+    fn a_television_channel_on_the_strip_says_it_is_locked_and_to_what() {
+        let params = dsp::dvbt::Params {
+            mode: dsp::dvbt::Mode::M2k,
+            guard: dsp::dvbt::Guard::G1_32,
+            constellation: dsp::dvbt::Constellation::Qpsk,
+            hierarchy: dsp::dvbt::Hierarchy::None,
+            code_rate_hp: dsp::dvbt::CodeRate::R1_2,
+            code_rate_lp: dsp::dvbt::CodeRate::R1_2,
+            cell_id: None,
+        };
+        let mut tx = nodes::dvbt_nodes::DvbtModulator::new(params);
+        let mut at_standard = Vec::new();
+        for n in 0..3 * 504u16 {
+            tx.push(&ts_packet(n), &mut at_standard);
+        }
+        let rate = 10_000_000.0;
+        let mut up = dsp::resample::Rational::approx(dsp::dvbt::RATE_HZ, rate, 4096);
+        let mut air = Vec::new();
+        up.process(&at_standard, &mut air);
+
+        let mut plan = tests::plan(rate, Hz(474_000_000));
+        plan.fronts.clear();
+        plan.channels = vec![ChannelSpec {
+            id: 7,
+            label: "MUX".into(),
+            offset_hz: 0.0,
+            mode: ChanMode::Decode("dvbt".into()),
+            bandwidth_hz: None,
+            squelch_db: None,
+            agc: true,
+            voice: false,
+            reads: None,
+            tx: None,
+            tone: None,
+        }];
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let state =
+            |rx: &Receiver| rx.decoding().into_iter().find(|(id, _)| *id == 7).map(|(_, d)| d);
+        assert_eq!(
+            state(&rx).and_then(|d| d.acquisition),
+            Some(pipeline::Acquisition::Searching),
+            "before anything arrives"
+        );
+
+        for block in air.chunks(16_384) {
+            rx.process(block).unwrap();
+        }
+        until("the multiplex to lock", || {
+            rx.process(&[]).unwrap();
+            state(&rx).and_then(|d| d.acquisition) == Some(pipeline::Acquisition::Locked)
+        });
+        let d = state(&rx).expect("the channel");
+        let multiplex = d.readings.iter().find(|(c, _)| c == "multiplex").map(|(_, v)| v.as_str());
+        assert_eq!(multiplex, Some("2k 1/32 QPSK 1/2"));
+        let lost = d.readings.iter().find(|(c, _)| c == "uncorrectable").map(|(_, v)| v.as_str());
+        assert_eq!(lost, Some("0"));
     }
 
     /// Wait for the transmitter, which is a thread: what it has done is

@@ -211,6 +211,10 @@ impl Simple for WifiNode {
 }
 
 impl Protocol for Wifi {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

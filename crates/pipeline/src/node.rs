@@ -10,6 +10,13 @@ use std::any::Any;
 /// unless it says otherwise. See [`Node::flush_s`].
 pub const FLUSH_S: f64 = 0.25;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Acquisition {
+    Searching,
+    Acquiring,
+    Locked,
+}
+
 /// Downcasting, given to every node rather than opted into.
 ///
 /// A host reads state a node exposes beyond its ports by asking for the
@@ -102,6 +109,10 @@ macro_rules! node_options {
         /// takes itself. Read by whatever draws the chain.
         fn readings(&self) -> Vec<(String, String)> {
             Vec::new()
+        }
+
+        fn acquisition(&self) -> Option<crate::node::Acquisition> {
+            None
         }
 
         /// Whether this node ends the stream rather than passing one on.
@@ -205,6 +216,9 @@ macro_rules! forward_node_options {
         }
         fn readings(&self) -> Vec<(String, String)> {
             Simple::readings(self)
+        }
+        fn acquisition(&self) -> Option<crate::node::Acquisition> {
+            Simple::acquisition(self)
         }
         fn is_sink(&self) -> bool {
             Simple::is_sink(self)

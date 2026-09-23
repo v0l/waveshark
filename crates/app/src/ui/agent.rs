@@ -905,9 +905,21 @@ impl App {
         // Before the channel is borrowed: a file is a setting on the stage
         // that reads it, not on the channel.
         if let Some(path) = a.file.clone() {
-            let (node, _) = super::strip::tx_source_file(self.chain.topo.as_ref())
-                .ok_or("nothing in the running graph transmits a file")?;
-            self.send(Cmd::NodeParam(node, "path".into(), pipeline::param::ParamValue::Text(path)));
+            let mode = self
+                .audio
+                .channels
+                .iter()
+                .find(|c| c.id == a.id)
+                .and_then(|c| crate::radio::tx_mode_for(&c.mode, c.tx.unwrap_or_default().source))
+                .ok_or_else(|| format!("channel {} cannot transmit", a.id))?;
+            let controls = super::strip::TxControls::of(mode, self.chain.topo.as_ref())
+                .ok_or("nothing in the running graph transmits for this channel")?;
+            let param = controls.file().ok_or("this channel does not transmit a file")?;
+            self.send(Cmd::NodeParam(
+                controls.node,
+                param.into(),
+                pipeline::param::ParamValue::Text(path),
+            ));
         }
         let c = self
             .audio

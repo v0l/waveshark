@@ -235,6 +235,10 @@ impl DmrNode {
 }
 
 impl Protocol for Dmr {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

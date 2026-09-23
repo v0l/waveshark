@@ -97,6 +97,7 @@ struct Entry {
     scratch_specs: Vec<PortSpec>,
     scratch_new_tags: Vec<Tag>,
     scratch_events: Vec<Event>,
+    decoded: u64,
     base_index: u64,
     error: Option<Error>,
     /// Smoothed cost of one call, in microseconds, for deciding whether
@@ -356,6 +357,14 @@ impl Topology {
     pub fn producer(&self, slot: usize) -> Option<&TopoNode> {
         self.nodes.iter().find(|n| n.outputs.iter().any(|(s, _)| *s == slot))
     }
+
+    /// The node built under a tag, which is the only way to find a stage in
+    /// a published topology: `id` is a position in one graph and two graphs
+    /// are merged into what an interface is handed, where the tag is what
+    /// the stage was drawn as.
+    pub fn stage(&self, tag: u64) -> Option<&TopoNode> {
+        self.nodes.iter().find(|n| n.tag == Some(tag))
+    }
 }
 
 pub struct Graph {
@@ -574,6 +583,7 @@ impl Graph {
                 scratch_specs: Vec::new(),
                 scratch_new_tags: Vec::new(),
                 scratch_events: Vec::new(),
+                decoded: 0,
                 base_index: 0,
                 error: None,
                 cost_us: 0.0,
@@ -792,6 +802,7 @@ impl Graph {
             t.clear();
         }
         self.produced.iter_mut().for_each(|p| *p = 0);
+        self.entries.iter_mut().for_each(|e| e.decoded = 0);
         self.rate.iter_mut().for_each(|r| *r = 0.0);
         self.rate_seen.iter_mut().for_each(|p| *p = 0);
     }
@@ -836,6 +847,15 @@ impl Graph {
     pub fn buf(&self, from: Out) -> Option<&Payload> {
         let e = self.entries.get(from.node.0)?;
         e.out_slots.get(from.port).map(|&s| &self.bufs[s])
+    }
+
+    pub fn decoded(&self, id: NodeId) -> Option<u64> {
+        self.entries.get(id.0).map(|e| e.decoded)
+    }
+
+    pub fn produced(&self, from: Out) -> Option<u64> {
+        let e = self.entries.get(from.node.0)?;
+        e.out_slots.get(from.port).map(|&s| self.produced[s])
     }
 
     /// Negotiated spec at a particular node port.
@@ -977,6 +997,9 @@ impl Graph {
                     }
                     produced[s] += bufs[s].len() as u64;
                 }
+                e.decoded +=
+                    e.scratch_events.iter().filter(|ev| matches!(ev, Event::Decoded(_))).count()
+                        as u64;
                 let raised = e.scratch_events.drain(..);
                 events.extend(raised.map(|event| Emitted { node: NodeId(k), event }));
             }

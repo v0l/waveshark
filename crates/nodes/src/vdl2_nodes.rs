@@ -141,6 +141,10 @@ impl Simple for Vdl2Node {
 }
 
 impl Protocol for Vdl2 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

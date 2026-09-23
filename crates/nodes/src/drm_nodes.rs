@@ -147,6 +147,29 @@ impl Simple for DrmNode {
         Ok(())
     }
 
+    fn acquisition(&self) -> Option<pipeline::Acquisition> {
+        Some(match (self.rx.locked(), self.rx.stats.fac_ok > 0) {
+            (false, _) => pipeline::Acquisition::Searching,
+            (true, false) => pipeline::Acquisition::Acquiring,
+            (true, true) => pipeline::Acquisition::Locked,
+        })
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if self.rx.locked() {
+            out.push(("snr".into(), format!("{:.1} dB", self.rx.snr_db())));
+        }
+        let services = self.rx.multiplex().services.len();
+        if services > 0 {
+            out.push(("services".into(), services.to_string()));
+        }
+        if let Some(q) = self.rx.stats.quality() {
+            out.push(("fac".into(), format!("{:.0}% intact", q * 100.0)));
+        }
+        out
+    }
+
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
@@ -156,6 +179,10 @@ impl Simple for DrmNode {
 }
 
 impl Protocol for DrmProtocol {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::Continuously
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

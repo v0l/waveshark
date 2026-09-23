@@ -175,6 +175,10 @@ impl Simple for WefaxNode {
 }
 
 impl Protocol for Wefax {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

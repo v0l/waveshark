@@ -108,6 +108,10 @@ impl Simple for Lms6Node {
 }
 
 impl Protocol for Lms6 {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

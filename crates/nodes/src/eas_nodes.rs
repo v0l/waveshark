@@ -240,6 +240,10 @@ impl Simple for EasNode {
 }
 
 impl Protocol for Eas {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

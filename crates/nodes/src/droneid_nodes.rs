@@ -144,6 +144,10 @@ impl Simple for DroneIdNode {
 }
 
 impl Protocol for DroneId {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

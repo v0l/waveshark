@@ -264,6 +264,12 @@ pub fn router_max_width_hz() -> f64 {
     widest * CHANNEL_WIDTH_TOLERANCE
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrives {
+    InBursts,
+    Continuously,
+}
+
 pub trait Protocol: Send + Sync {
     /// The stage registry's name for the decoder, and the word a table or a
     /// saved channel names it by.
@@ -280,6 +286,8 @@ pub trait Protocol: Send + Sync {
     }
 
     fn placement(&self) -> Placement;
+
+    fn arrives(&self) -> Arrives;
 
     /// The frequency to offer when somebody places it by hand: the calling
     /// channel, the one allocation, the middle of the band.
@@ -436,6 +444,54 @@ pub struct TxChain {
     pub source: NodeSpec,
     /// What turns it into samples.
     pub modulator: NodeSpec,
+    /// What the operator has to give it before it has anything to send.
+    pub sends: Sends,
+}
+
+/// Where a transmission's content comes from, and which of the source
+/// stage's parameters carries it.
+///
+/// A data mode has no microphone, so the payload is whatever was entered on
+/// the strip, and a stage with nothing entered keys a carrier that says
+/// nothing: an empty page, a picture with no file, a multiplex of stuffing.
+/// Naming the parameter here is what lets the strip draw the input and the
+/// key refuse, without knowing one protocol from another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sends {
+    /// Words typed on the strip, in the named parameter: a page, a beacon's
+    /// report, an over of teleprinter text.
+    Words(&'static str),
+    /// A file chosen on the strip, in the named parameter: a picture, a
+    /// transport stream.
+    File(&'static str),
+    /// The stage's own fields, which carry a default that reads back at the
+    /// far end: an advertised name and address, a remote's vector.
+    Fields,
+}
+
+impl Sends {
+    /// The parameter carrying what is sent, where one parameter does.
+    pub fn param(self) -> Option<&'static str> {
+        match self {
+            Self::Words(name) | Self::File(name) => Some(name),
+            Self::Fields => None,
+        }
+    }
+
+    /// What the strip says in place of the key where nothing has been
+    /// entered and a key would put a carrier and no content on the air.
+    ///
+    /// `None` where the stage sends something whatever it was given: an
+    /// empty picture or multiplex is the test card, and a stage that sends
+    /// its own fields has them.
+    pub fn missing_in(self, params: &[pipeline::param::Param]) -> Option<&'static str> {
+        let Self::Words(name) = self else { return None };
+        let empty = params
+            .iter()
+            .find(|p| p.name == name)
+            .is_some_and(|p| matches!(&p.value, pipeline::ParamValue::Text(t) if t.is_empty()));
+        empty.then_some("nothing to send: type what goes out")
+    }
 }
 
 /// Every protocol compiled into this build, and every description with a
@@ -688,6 +744,19 @@ mod tests {
             let g = crate::build_chain(spec, &chain, &reg)
                 .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
             let (tail, _) = g.order().last().expect("a tail");
+            let front = g.node(tail).expect("the front end");
+            match p.arrives() {
+                Arrives::Continuously => assert!(
+                    front.acquisition().is_some(),
+                    "{} reads a signal that is always there and never says whether it is locked",
+                    p.id()
+                ),
+                Arrives::InBursts => assert!(
+                    front.acquisition().is_none(),
+                    "{} reads bursts and reports a lock it cannot have",
+                    p.id()
+                ),
+            }
             let outs = g.node(tail).map(|n| n.num_outputs()).unwrap_or(0);
             let kinds: Vec<PortKind> =
                 (0..outs).filter_map(|k| g.spec_of(tail.out(k)).map(|s| s.kind)).collect();
@@ -704,6 +773,8 @@ mod tests {
     /// worst moment rather than a refusal.
     #[test]
     fn every_transmit_chain_builds_and_ends_in_samples() {
+        let _installing = decode::script::test_lock();
+        decode::script::install(&[]);
         let reg = crate::registry();
         let mut keyed = Vec::new();
         for p in all() {
@@ -732,6 +803,94 @@ mod tests {
             ["ble", "sstv", "dvbt", "aprs", "pocsag", "rtty"],
             "what this build can key up"
         );
+    }
+
+    /// Every protocol that says it transmits says what it transmits, as a
+    /// parameter the strip can draw an input for.
+    ///
+    /// A data mode has no microphone behind it, so what goes out is what an
+    /// operator entered, and a source stage keeping its payload somewhere
+    /// the strip cannot see is a key that puts a carrier and no content on
+    /// the air. `Sends` is on `TxChain` rather than defaulted, so a protocol
+    /// added later does not compile until it has answered.
+    #[test]
+    fn every_transmit_chain_says_what_it_sends() {
+        let _installing = decode::script::test_lock();
+        decode::script::install(&[]);
+        let reg = crate::registry();
+        let mut said = Vec::new();
+        for p in all() {
+            let Some(tx) = p.transmit() else { continue };
+            let node = reg
+                .build(&tx.source.kind, &tx.source.settings)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id()));
+            let params = node.params();
+            assert!(!params.is_empty(), "{} offers the operator no input at all", p.id());
+            said.push((p.id(), tx.sends));
+            let Some(name) = tx.sends.param() else {
+                // What it sends is its own fields, so they have to say
+                // something as they stand: a default of nothing is a mode
+                // that transmits nothing until an operator guesses which
+                // field was meant to be filled in.
+                assert!(
+                    params.iter().any(|q| match &q.value {
+                        pipeline::ParamValue::Text(t) => !t.is_empty(),
+                        _ => true,
+                    }),
+                    "{} sends its fields and every one of them is empty",
+                    p.id()
+                );
+                continue;
+            };
+            let carries = params
+                .iter()
+                .find(|q| q.name == name)
+                .unwrap_or_else(|| panic!("{}: {name:?} is not a parameter of its source", p.id()));
+            assert!(
+                matches!(carries.value, pipeline::ParamValue::Text(_)),
+                "{}: {name:?} is not something an operator can enter",
+                p.id()
+            );
+        }
+        assert_eq!(
+            said,
+            [
+                ("ble", Sends::Fields),
+                ("sstv", Sends::File("path")),
+                ("dvbt", Sends::File("path")),
+                ("aprs", Sends::Words("info")),
+                ("pocsag", Sends::Words("message")),
+                ("rtty", Sends::Words("text")),
+            ],
+            "what this build sends when it is keyed"
+        );
+    }
+
+    /// A words mode with nothing typed into it has nothing to send, and
+    /// says so until something is.
+    ///
+    /// The strip puts that where the key is, so an empty page cannot be
+    /// keyed. A file mode is not the same case: an empty picture or
+    /// multiplex is the test card, which is a transmission.
+    #[test]
+    fn a_page_with_nothing_typed_into_it_has_nothing_to_send() {
+        let reg = crate::registry();
+        let of = |id: &str| {
+            let p = *all().iter().find(|p| p.id() == id).expect("the protocol");
+            let tx = p.transmit().expect("a transmit chain");
+            let node = reg.build(&tx.source.kind, &tx.source.settings).expect("a source");
+            (tx.sends, node)
+        };
+
+        let (sends, mut pager) = of("pocsag");
+        assert_eq!(sends.missing_in(&pager.params()), Some("nothing to send: type what goes out"));
+        pager
+            .set_param("message", pipeline::ParamValue::Text("NET AT 2000".into()))
+            .expect("the page");
+        assert_eq!(sends.missing_in(&pager.params()), None, "a page that says something");
+
+        let (sends, picture) = of("sstv");
+        assert_eq!(sends.missing_in(&picture.params()), None, "no picture is the test card");
     }
 
     /// Every protocol that says a listening channel's audio is enough for it

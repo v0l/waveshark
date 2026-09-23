@@ -478,10 +478,8 @@ pub fn tabs<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, options: &[(T, &s
     ui.painter().rect_filled(rule, 0.0, theme::ETCH);
     for (x, w, on) in marks {
         if on {
-            let mark = Rect::from_min_size(
-                Pos2::new(x, strip.bottom() - MARK_H),
-                Vec2::new(w, MARK_H),
-            );
+            let mark =
+                Rect::from_min_size(Pos2::new(x, strip.bottom() - MARK_H), Vec2::new(w, MARK_H));
             ui.painter().rect_filled(mark, 0.0, theme::READOUT);
         }
     }

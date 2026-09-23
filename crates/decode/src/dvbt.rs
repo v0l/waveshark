@@ -443,6 +443,14 @@ impl DvbtReceiver {
         self.outer.stats
     }
 
+    pub fn locked(&self) -> bool {
+        self.front.locked()
+    }
+
+    pub fn synced(&self) -> bool {
+        self.outer.synced()
+    }
+
     /// Signal to noise on the pilots of the last symbol read.
     pub fn snr_db(&self) -> Option<f32> {
         self.symbols.last().map(|s| s.snr_db)

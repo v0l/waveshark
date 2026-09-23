@@ -1228,6 +1228,7 @@ pub struct Status {
     /// two stations each have their own, and sharing one would print the
     /// first channel's name over every other.
     stations: parking_lot::Mutex<Vec<(u64, StationInfo)>>,
+    decoding: parking_lot::Mutex<Vec<(u64, crate::chain::Decoding)>>,
     /// The picture the video bus is publishing, when anything is producing
     /// one.
     ///
@@ -1562,6 +1563,7 @@ impl Default for Status {
             radio: parking_lot::Mutex::new(RadioControls::default()),
             channels: parking_lot::Mutex::new(Vec::new()),
             stations: parking_lot::Mutex::new(Vec::new()),
+            decoding: parking_lot::Mutex::new(Vec::new()),
             video: parking_lot::Mutex::new(None),
             video_inputs: parking_lot::Mutex::new(Vec::new()),
             multiplexes: parking_lot::Mutex::new(Vec::new()),
@@ -1778,6 +1780,17 @@ impl Status {
     /// What one channel is receiving, or nothing when it is not decoding RDS.
     pub fn station_for(&self, id: u64) -> Option<StationInfo> {
         self.stations.lock().iter().find(|(k, _)| *k == id).map(|(_, s)| s.clone())
+    }
+
+    pub fn decoding_for(&self, id: u64) -> Option<crate::chain::Decoding> {
+        self.decoding.lock().iter().find(|(k, _)| *k == id).map(|(_, d)| d.clone())
+    }
+
+    fn set_decoding(&self, now: Vec<(u64, crate::chain::Decoding)>) {
+        let mut cur = self.decoding.lock();
+        if *cur != now {
+            *cur = now;
+        }
     }
 
     /// The first channel's station, for the headless probe, which runs one.
@@ -3816,6 +3829,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         if let Some(w) = self.rx.channels().iter().find(wfm) {
             self.status.set_blend(w.blend);
         }
+        self.status.set_decoding(self.rx.decoding());
     }
 }
 
@@ -4580,6 +4594,7 @@ pub(crate) mod tests {
     /// sensor the replay test pins.
     #[test]
     fn a_capture_played_into_the_radio_thread_is_decoded() {
+        let _installing = decode::script::test_lock();
         if !decode::script::install_fetched() {
             return;
         }
@@ -4927,6 +4942,7 @@ pub(crate) mod tests {
     /// would read.
     #[test]
     fn a_sensor_heard_by_the_receiver_reaches_the_house() {
+        let _installing = decode::script::test_lock();
         if !decode::script::install_fetched() {
             return;
         }
@@ -6150,6 +6166,16 @@ pub(crate) mod tests {
         // for: a decode channel is told where to listen.
         let hz = m17[0].freq();
         assert!((hz - 433_475_000.0).abs() < 1.0, "read at {hz} Hz");
+        let decoding = rx.decoding();
+        assert_eq!(decoding.len(), 1, "one decode channel, one reading of it");
+        let (id, strip) = &decoding[0];
+        assert_eq!(*id, 1);
+        assert_eq!(strip.acquisition, None, "M17 arrives in bursts and has no lock to report");
+        assert_eq!(
+            (strip.heard, m17.len()),
+            (53, 53),
+            "frames the strip says the channel heard, and M17 rows the receiver read"
+        );
         // Placed by the strip, so nothing above it measures anything: the
         // auto node's fill is not in this path at all, and a row still has
         // its level, its ratio to the floor and the samples behind it.
@@ -6338,6 +6364,10 @@ pub(crate) mod tests {
 
     #[test]
     fn blocks_with_no_samples_between_the_real_ones_change_nothing_that_is_read() {
+        let _installing = decode::script::test_lock();
+        if !decode::script::install_fetched() {
+            return;
+        }
         let Some(buf) = fixture() else {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;
@@ -6372,6 +6402,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_scanner_decodes_a_real_transmission_without_being_tuned_to_it() {
+        let _installing = decode::script::test_lock();
         if !decode::script::install_fetched() {
             return;
         }
@@ -6435,6 +6466,10 @@ pub(crate) mod tests {
     /// can check: a replayed decode must not be stamped in the future.
     #[test]
     fn a_replayed_decode_is_not_stamped_in_the_future() {
+        let _installing = decode::script::test_lock();
+        if !decode::script::install_fetched() {
+            return;
+        }
         let Some(buf) = fixture() else {
             eprintln!("skipping: fixture absent, run testdata/fetch.sh");
             return;

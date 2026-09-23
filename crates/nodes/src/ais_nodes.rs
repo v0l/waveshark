@@ -112,6 +112,10 @@ impl Simple for AisNode {
 }
 
 impl Protocol for Ais {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

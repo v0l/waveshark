@@ -301,6 +301,27 @@ impl Simple for LrptNode {
         Ok(())
     }
 
+    fn acquisition(&self) -> Option<pipeline::Acquisition> {
+        Some(match (self.demod.locked(), self.deframer.found() > 0) {
+            (false, _) => pipeline::Acquisition::Searching,
+            (true, false) => pipeline::Acquisition::Acquiring,
+            (true, true) => pipeline::Acquisition::Locked,
+        })
+    }
+
+    fn readings(&self) -> Vec<(String, String)> {
+        let (found, failed) = self.frames();
+        let mut out = Vec::new();
+        if found + failed > 0 {
+            out.push(("frames".into(), found.to_string()));
+            out.push(("uncorrectable".into(), failed.to_string()));
+        }
+        if self.strips > 0 {
+            out.push(("strips".into(), self.strips.to_string()));
+        }
+        out
+    }
+
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
@@ -314,6 +335,10 @@ impl Simple for LrptNode {
 }
 
 impl Protocol for Lrpt {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::Continuously
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

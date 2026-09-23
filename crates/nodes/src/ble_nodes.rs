@@ -396,6 +396,10 @@ fn parse_address(text: &str) -> Option<pdu::Address> {
 }
 
 impl Protocol for Ble {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -466,6 +470,7 @@ impl Protocol for Ble {
             modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
                 .f("shift_hz", 500_000.0)
                 .s("rest", "silence"),
+            sends: crate::protocol::Sends::Fields,
         })
     }
 }

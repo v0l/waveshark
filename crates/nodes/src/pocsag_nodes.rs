@@ -272,6 +272,10 @@ impl Simple for PocsagTxNode {
 }
 
 impl Protocol for Pocsag {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -323,6 +327,7 @@ impl Protocol for Pocsag {
             modulator: NodeSpec::new(crate::mod_nodes::FSK_MOD.name)
                 .f("shift_hz", DEVIATION_HZ * 2.0)
                 .f("offset_hz", 0.0),
+            sends: crate::protocol::Sends::Words(MESSAGE),
         })
     }
 }

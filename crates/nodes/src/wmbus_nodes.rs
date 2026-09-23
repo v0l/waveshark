@@ -98,6 +98,10 @@ impl Simple for WmbusNode {
 const METER_HZ: std::ops::RangeInclusive<f64> = 60_000.0..=450_000.0;
 
 impl Protocol for Wmbus {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

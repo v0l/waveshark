@@ -1425,9 +1425,9 @@ impl App {
             }
             row_help(ui, "folder", "Where the overs go. Enter or SET applies it.", |ui| {
                 let mut set = false;
-                let text = self.calls_dir_edit.get_or_insert_with(|| {
-                    crate::calllog::calls_dir().display().to_string()
-                });
+                let text = self
+                    .calls_dir_edit
+                    .get_or_insert_with(|| crate::calllog::calls_dir().display().to_string());
                 let r = field_then(ui, text, "where the overs go", 44.0, |ui| {
                     set = ui.small_button("SET").clicked();
                 });
@@ -1514,12 +1514,17 @@ impl App {
             if switch(ui, "serve", &mut on, "the span from this machine", help) {
                 self.settings.edit(|s| s.iqstream_on = on);
             }
-            row_help(ui, "listen", "A port, or host:port. A port alone is every interface.", |ui| {
-                let mut text = self.setting(|s| s.iqstream_addr.clone());
-                if field(ui, &mut text, "1234, or 0.0.0.0:1234").changed() {
-                    self.settings.edit(|s| s.iqstream_addr = text.clone());
-                }
-            });
+            row_help(
+                ui,
+                "listen",
+                "A port, or host:port. A port alone is every interface.",
+                |ui| {
+                    let mut text = self.setting(|s| s.iqstream_addr.clone());
+                    if field(ui, &mut text, "1234, or 0.0.0.0:1234").changed() {
+                        self.settings.edit(|s| s.iqstream_addr = text.clone());
+                    }
+                },
+            );
             let mut tunable = self.setting(|s| s.iqstream_tunable);
             let tune_help = "There is one tuner, so a subscriber moving the dial moves it \
                              here too, and whatever is being listened to on this screen \
@@ -1784,6 +1789,12 @@ impl App {
                     }
                 });
             });
+            let features = crate::update::features();
+            reading(
+                ui,
+                "features",
+                if features.is_empty() { "none".to_string() } else { features.join(" ") },
+            );
             match &state {
                 crate::update::State::Unchecked => lamp(ui, true, "not checked yet"),
                 crate::update::State::Checking => {
@@ -2526,10 +2537,7 @@ impl App {
                                     reading(
                                         ui,
                                         "missed",
-                                        format!(
-                                            "{} readings: nothing was connected",
-                                            st.offline
-                                        ),
+                                        format!("{} readings: nothing was connected", st.offline),
                                     );
                                 }
                                 if let Some(e) = &st.error {

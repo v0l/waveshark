@@ -147,6 +147,10 @@ impl Simple for StdcNode {
 }
 
 impl Protocol for Stdc {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }

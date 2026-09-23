@@ -141,6 +141,10 @@ impl Simple for AprsNode {
 }
 
 impl Protocol for Aprs {
+    fn arrives(&self) -> crate::protocol::Arrives {
+        crate::protocol::Arrives::InBursts
+    }
+
     fn id(&self) -> &'static str {
         Signal::id(self)
     }
@@ -195,6 +199,7 @@ impl Protocol for Aprs {
             modulator: NodeSpec::new(crate::mod_nodes::FM_MOD.name)
                 .f("deviation_hz", DEVIATION_HZ)
                 .f("offset_hz", 0.0),
+            sends: crate::protocol::Sends::Words(INFO),
         })
     }
 }
