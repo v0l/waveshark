@@ -130,7 +130,7 @@ pub fn probe(addr: &str) -> Result<Probe> {
 /// nothing subscribes here, so asking costs a handshake however many tuners
 /// come back.
 pub fn probe_all(addr: &str) -> Result<Vec<Probe>> {
-    let addr = Proto::IqStream.parse_addr(addr).ok_or(Error::NoDevice)?;
+    let addr = Proto::IqStream.parse_addr(addr)?;
     let (host, _) = crate::split_stream(&addr);
     let host = host.to_string();
     let rt = runtime()?;

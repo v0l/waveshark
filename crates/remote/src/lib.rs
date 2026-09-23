@@ -16,6 +16,7 @@ pub mod kiwisdr;
 pub mod rtl_tcp;
 pub mod spyserver;
 
+use common::addr::{AddrError, HostPort};
 use common::{Error, Hz, Result, Sps};
 use std::time::Duration;
 
@@ -139,16 +140,12 @@ impl Proto {
 
     /// Add this protocol's default port to a bare host, and reject what is not
     /// an address.
-    pub fn parse_addr(self, s: &str) -> Option<String> {
-        self.check_addr(s).ok()
-    }
-
-    pub fn check_addr(self, s: &str) -> std::result::Result<String, common::addr::AddrError> {
+    pub fn parse_addr(self, s: &str) -> std::result::Result<String, AddrError> {
         let s = match self {
             Self::KiwiSdr => s.trim().trim_start_matches("http://").trim_end_matches('/'),
             _ => s,
         };
-        check_addr(s, self.default_port())
+        parse_addr(s, self.default_port())
     }
 
     /// Ask what is at an address, without keeping the connection.
@@ -207,18 +204,14 @@ pub fn split_stream(s: &str) -> (&str, Option<u16>) {
 }
 
 /// Add a default port to a bare host, and reject what is not an address.
-pub fn parse_addr(s: &str, port: u16) -> Option<String> {
-    check_addr(s, port).ok()
-}
-
-pub fn check_addr(s: &str, port: u16) -> std::result::Result<String, common::addr::AddrError> {
+pub fn parse_addr(s: &str, port: u16) -> std::result::Result<String, AddrError> {
     let s = s.trim();
     // The tuner a multi-tuner server is being asked for travels with the
     // address and is not part of it.
     if let (head, Some(id)) = split_stream(s) {
-        return check_addr(head, port).map(|a| format!("{a}#{id}"));
+        return parse_addr(head, port).map(|a| format!("{a}#{id}"));
     }
-    common::addr::HostPort::parse(s, port).map(|h| h.to_string())
+    HostPort::parse(s, port).map(|h| h.to_string())
 }
 
 /// Read `proto://host:port`, or a bare address as iqstream.
@@ -230,7 +223,7 @@ pub fn parse_spec(s: &str) -> Option<(Proto, String)> {
         Some((scheme, rest)) => (Proto::parse(scheme)?, rest),
         None => (Proto::IqStream, s),
     };
-    Some((proto, proto.parse_addr(rest)?))
+    Some((proto, proto.parse_addr(rest).ok()?))
 }
 
 /// What a server says about its stream, before anything subscribes for real.
@@ -286,26 +279,24 @@ mod tests {
 
     #[test]
     fn a_bare_host_gets_the_protocols_default_port() {
-        assert_eq!(Proto::IqStream.parse_addr("radarpi").as_deref(), Some("radarpi:1234"));
-        assert_eq!(Proto::RtlTcp.parse_addr("radarpi").as_deref(), Some("radarpi:1234"));
-        assert_eq!(parse_addr("radarpi", 5555).as_deref(), Some("radarpi:5555"));
-        assert_eq!(parse_addr(" radarpi:9000 ", 1234).as_deref(), Some("radarpi:9000"));
-        assert_eq!(parse_addr("", 1234), None);
-        assert_eq!(parse_addr("two words", 1234), None);
-        assert_eq!(
-            check_addr("radarpi:99999", 1234),
-            Err(common::addr::AddrError::Port("99999".into()))
-        );
-        assert_eq!(check_addr("radarpi:1234#2", 5555).as_deref(), Ok("radarpi:1234#2"));
+        assert_eq!(Proto::IqStream.parse_addr("radarpi").as_deref(), Ok("radarpi:1234"));
+        assert_eq!(Proto::RtlTcp.parse_addr("radarpi").as_deref(), Ok("radarpi:1234"));
+        assert_eq!(parse_addr("radarpi", 5555).as_deref(), Ok("radarpi:5555"));
+        assert_eq!(parse_addr(" radarpi:9000 ", 1234).as_deref(), Ok("radarpi:9000"));
+        assert_eq!(parse_addr("", 1234), Err(AddrError::Empty));
+        assert_eq!(parse_addr("two words", 1234), Err(AddrError::Space));
+        assert_eq!(parse_addr("radarpi:99999", 1234), Err(AddrError::Port("99999".into())));
+        assert_eq!(parse_addr("radarpi:9000#2", 1234).as_deref(), Ok("radarpi:9000#2"));
+        assert_eq!(parse_addr("radarpi#2", 1234).as_deref(), Ok("radarpi:1234#2"));
     }
 
     #[test]
     fn an_ipv6_address_keeps_its_own_colons() {
         // Splitting on the last colon would read fd00::1 as host "fd00:" on
         // port ":1", which resolves to nothing and reports the wrong reason.
-        assert_eq!(parse_addr("fd00::1", 1234).as_deref(), Some("[fd00::1]:1234"));
-        assert_eq!(parse_addr("[fd00::1]:9000", 1234).as_deref(), Some("[fd00::1]:9000"));
-        assert_eq!(parse_addr("[fd00::1]", 1234).as_deref(), Some("[fd00::1]:1234"));
+        assert_eq!(parse_addr("fd00::1", 1234).as_deref(), Ok("[fd00::1]:1234"));
+        assert_eq!(parse_addr("[fd00::1]:9000", 1234).as_deref(), Ok("[fd00::1]:9000"));
+        assert_eq!(parse_addr("[fd00::1]", 1234).as_deref(), Ok("[fd00::1]:1234"));
     }
 
     #[test]
@@ -337,11 +328,11 @@ mod tests {
     fn a_kiwisdr_is_added_by_the_address_its_page_is_on() {
         assert_eq!(
             Proto::KiwiSdr.parse_addr("http://sdr.ironstonerange.com:8074/").as_deref(),
-            Some("sdr.ironstonerange.com:8074")
+            Ok("sdr.ironstonerange.com:8074")
         );
         assert_eq!(
             Proto::KiwiSdr.parse_addr(" http://kiwisdr.areg.org.au ").as_deref(),
-            Some("kiwisdr.areg.org.au:8073")
+            Ok("kiwisdr.areg.org.au:8073")
         );
     }
 

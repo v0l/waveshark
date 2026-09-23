@@ -1063,7 +1063,9 @@ impl std::str::FromStr for ServeTuner {
 
 /// `2.4M`, `2400k` or `2400000`, all of which mean the same rate.
 fn parse_rate(s: &str) -> Result<f64, String> {
-    sources::parse_si(s).filter(|n| *n > 0.0).ok_or_else(|| format!("{s:?} is not a sample rate"))
+    sources::parse_si(s.trim())
+        .filter(|n| *n > 0.0)
+        .ok_or_else(|| format!("{s:?} is not a sample rate"))
 }
 
 pub fn parse_location(s: &str) -> Result<(f64, f64), String> {
@@ -1887,7 +1889,18 @@ mod tests {
         assert_eq!(at("[::1]:1884"), Ok(("::1".into(), 1884)));
         assert_eq!(at("pi:99999"), Err("\"99999\" is not a port, which is 1 to 65535".into()));
         assert_eq!(at("u:p@:1883"), Err("no host before the port".into()));
+        assert_eq!(at("mqtt://u:p@[fd00::1]:1884"), Ok(("fd00::1".into(), 1884)));
+        assert_eq!(at("pi local"), Err("an address has no spaces in it".into()));
         let creds = parse_broker("mqtt://u:p@pi").unwrap().broker;
         assert_eq!((creds.username.as_str(), creds.password.as_str()), ("u", "p"));
+    }
+
+    #[test]
+    fn a_rate_is_written_with_or_without_its_multiplier() {
+        assert_eq!(parse_rate("2.4M"), Ok(2_400_000.0));
+        assert_eq!(parse_rate(" 250k "), Ok(250_000.0));
+        assert_eq!(parse_rate("2400000"), Ok(2_400_000.0));
+        assert_eq!(parse_rate("0"), Err("\"0\" is not a sample rate".into()));
+        assert_eq!(parse_rate("fast"), Err("\"fast\" is not a sample rate".into()));
     }
 }

@@ -94,7 +94,7 @@ fn send(sock: &mut TcpStream, cmd: Cmd, value: u32) -> Result<()> {
 /// rtl_tcp server. It says nothing about frequency or rate, because those are
 /// ours to choose once connected.
 pub fn probe(addr: &str) -> Result<Probe> {
-    let addr = Proto::RtlTcp.parse_addr(addr).ok_or(Error::NoDevice)?;
+    let addr = Proto::RtlTcp.parse_addr(addr)?;
     let (sock, tuner, gains) = connect(&addr)?;
     drop(sock);
     tracing::debug!("rtl_tcp {addr}: {} with {gains} gain steps", tuner.name());
@@ -143,7 +143,7 @@ impl Device {
     /// Connect, learn which tuner is at the far end, and set it going at a
     /// default the receiver will immediately overwrite.
     pub fn open(addr: &str) -> Result<Self> {
-        let addr = Proto::RtlTcp.parse_addr(addr).ok_or(Error::NoDevice)?;
+        let addr = Proto::RtlTcp.parse_addr(addr)?;
         let (sock, tuner, steps) = connect(&addr)?;
         let info = DeviceInfo {
             kind: DriverKind::Network,

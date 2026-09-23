@@ -99,6 +99,14 @@ impl FeedSpec {
     pub fn address(&self) -> String {
         common::addr::join(&self.host, self.port)
     }
+
+    pub fn parse(
+        text: &str,
+        kind: &'static FeedKind,
+    ) -> std::result::Result<Self, common::addr::AddrError> {
+        let at = common::addr::HostPort::parse(text, kind.default_port)?;
+        Ok(Self::new(at.host, at.port, kind))
+    }
 }
 
 impl PartialEq for FeedSpec {

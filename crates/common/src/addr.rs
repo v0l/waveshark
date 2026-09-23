@@ -5,6 +5,7 @@ pub enum AddrError {
     Empty,
     Space,
     NoHost,
+    Host(String),
     NoPort,
     Port(String),
     Ipv6(String),
@@ -17,6 +18,7 @@ impl std::fmt::Display for AddrError {
             Self::Empty => f.write_str("nothing typed"),
             Self::Space => f.write_str("an address has no spaces in it"),
             Self::NoHost => f.write_str("no host before the port"),
+            Self::Host(h) => write!(f, "{h:?} is not a host name or an IP address"),
             Self::NoPort => f.write_str("no port"),
             Self::Port(p) => write!(f, "{p:?} is not a port, which is 1 to 65535"),
             Self::Ipv6(h) => write!(f, "{h:?} is not an IPv6 address"),
@@ -104,11 +106,17 @@ fn split(s: &str) -> Result<(&str, Option<&str>), AddrError> {
         s.parse::<Ipv6Addr>().map_err(|_| AddrError::Ipv6(s.into()))?;
         return Ok((s, None));
     }
-    match s.split_once(':') {
-        Some(("", _)) => Err(AddrError::NoHost),
-        Some((host, p)) => Ok((host, Some(p))),
-        None => Ok((s, None)),
+    let (host, port) = match s.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (s, None),
+    };
+    if host.is_empty() {
+        return Err(AddrError::NoHost);
     }
+    if !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')) {
+        return Err(AddrError::Host(host.into()));
+    }
+    Ok((host, port))
 }
 
 fn port_of(p: &str) -> Result<u16, AddrError> {
@@ -173,6 +181,15 @@ mod tests {
         assert_eq!(host("two words"), Err(AddrError::Space));
         assert_eq!(host("host: 80"), Err(AddrError::Space));
         assert_eq!(host("  "), Err(AddrError::Empty));
+    }
+
+    #[test]
+    fn a_host_is_a_name_or_an_address_and_nothing_else() {
+        assert_eq!(host("user@host"), Err(AddrError::Host("user@host".into())));
+        assert_eq!(host("pi/feed:30005"), Err(AddrError::Host("pi/feed".into())));
+        assert_eq!(host("http://host"), Err(AddrError::Port("//host".into())));
+        assert_eq!(host("[banana]:80"), Err(AddrError::Ipv6("banana".into())));
+        assert_eq!(host("my-pi_2.local"), Ok("my-pi_2.local:1234".into()));
     }
 
     #[test]

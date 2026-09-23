@@ -1397,7 +1397,7 @@ impl App {
                 });
                 self.feed_kind = kind;
                 if add {
-                    match parse_feed(&self.feed_host, self.feed_kind) {
+                    match nodes::FeedSpec::parse(&self.feed_host, self.feed_kind) {
                         Ok(spec) if !feeds.contains(&spec) => {
                             self.settings.edit(|s| s.feeds.push(spec));
                             self.feed_host.clear();
@@ -1408,7 +1408,7 @@ impl App {
                 }
             });
             if !self.feed_host.trim().is_empty() {
-                match parse_feed(&self.feed_host, self.feed_kind) {
+                match nodes::FeedSpec::parse(&self.feed_host, self.feed_kind) {
                     Ok(spec) => panel::status(ui, true, &format!("adds {}", spec.address())),
                     Err(e) => panel::status(ui, false, &e.to_string()),
                 }
@@ -2710,6 +2710,9 @@ impl App {
                         "Where it is. A bare host gets the usual port.",
                         |ui| {
                             let f = field(ui, &mut edit.host, &placeholder);
+                            if f.changed() {
+                                edit.err = None;
+                            }
                             if f.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 add = true;
                             }
@@ -2749,11 +2752,12 @@ impl App {
                         (None, None) => {
                             let (what, at) = match edit.over {
                                 Over::Samples => {
-                                    (edit.proto.name(), edit.proto.check_addr(&edit.host))
+                                    (edit.proto.name(), edit.proto.parse_addr(&edit.host))
                                 }
                                 Over::Frames => (
                                     edit.feed.name,
-                                    super::parse_feed(&edit.host, edit.feed).map(|f| f.address()),
+                                    nodes::FeedSpec::parse(&edit.host, edit.feed)
+                                        .map(|f| f.address()),
                                 ),
                             };
                             match at {
@@ -2787,10 +2791,13 @@ impl App {
         }
         if add {
             match edit.over {
-                Over::Samples => {
-                    edit.err = None;
-                    self.add_remote(ctx, &edit);
-                }
+                Over::Samples => match edit.proto.parse_addr(&edit.host) {
+                    Ok(_) => {
+                        edit.err = None;
+                        self.add_remote(ctx, &edit);
+                    }
+                    Err(e) => edit.err = Some(e.to_string()),
+                },
                 Over::Frames => match self.add_feed(&edit) {
                     Ok(()) => close = true,
                     Err(e) => edit.err = Some(e),
@@ -3067,7 +3074,7 @@ impl App {
     /// Attach the feed, which is a setting rather than a radio: the receiver
     /// keeps running on whatever it is tuned to and the frames join the bus.
     fn add_feed(&mut self, edit: &RemoteEdit) -> std::result::Result<(), String> {
-        let spec = super::parse_feed(&edit.host, edit.feed).map_err(|e| e.to_string())?;
+        let spec = nodes::FeedSpec::parse(&edit.host, edit.feed).map_err(|e| e.to_string())?;
         if self.setting(|s| s.feeds.clone()).contains(&spec) {
             return Err("that feed is already attached".into());
         }

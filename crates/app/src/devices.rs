@@ -291,7 +291,7 @@ pub fn streams() -> Vec<Remote> {
 /// Add one server, or rename one already there. Returns the address as it will
 /// be listed, which is not always what was typed: a bare host gains a port.
 pub fn add_stream(proto: remote::Proto, addr: &str, label: &str) -> Option<String> {
-    let a = proto.parse_addr(addr)?;
+    let a = proto.parse_addr(addr).ok()?;
     let label = label.trim().to_string();
     let mut v = STREAMS.lock();
     match v.iter_mut().find(|r| r.addr == a && r.proto == proto) {

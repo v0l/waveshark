@@ -40,6 +40,9 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    #[error(transparent)]
+    Address(#[from] crate::addr::AddrError),
+
     /// A node would not take the stream it was wired to.
     ///
     /// Carries the tag the caller built it under, so whoever drew the graph

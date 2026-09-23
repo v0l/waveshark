@@ -335,7 +335,7 @@ pub fn probe(addr: &str) -> Result<Probe> {
 }
 
 pub fn probe_within(addr: &str, within: Duration) -> Result<Probe> {
-    let addr = Proto::SpyServer.parse_addr(addr).ok_or(Error::NoDevice)?;
+    let addr = Proto::SpyServer.parse_addr(addr)?;
     let (sock, info, sync) = connect(&addr, within)?;
     drop(sock);
     tracing::debug!(
@@ -379,7 +379,7 @@ pub struct Device {
 
 impl Device {
     pub fn open(addr: &str) -> Result<Self> {
-        let addr = Proto::SpyServer.parse_addr(addr).ok_or(Error::NoDevice)?;
+        let addr = Proto::SpyServer.parse_addr(addr)?;
         let (sock, server, sync) = connect(&addr, HANDSHAKE)?;
         let landed = Arc::new(Landed::default());
         landed.take(&sync);

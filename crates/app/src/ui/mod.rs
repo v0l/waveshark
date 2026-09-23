@@ -569,15 +569,6 @@ fn human_bytes(n: u64) -> String {
     "0 B".into()
 }
 
-/// `host` or `host:port`, with the format's usual port when none is given.
-fn parse_feed(
-    text: &str,
-    kind: &'static nodes::FeedKind,
-) -> Result<nodes::FeedSpec, common::addr::AddrError> {
-    let at = common::addr::HostPort::parse(text, kind.default_port)?;
-    Ok(nodes::FeedSpec::new(at.host, at.port, kind))
-}
-
 /// The average of the positions known, for opening the map somewhere useful
 /// when the receiver has not been told where it is.
 fn mean_position(active: &[&crate::tracks::Track]) -> Option<(f64, f64)> {

@@ -1166,8 +1166,7 @@ pub fn broker_address(
 fn parse_feed(v: &str) -> Option<nodes::FeedSpec> {
     let (kind, addr) = v.split_once(char::is_whitespace)?;
     let kind = nodes::feed_kind(kind.trim())?;
-    let at = common::addr::HostPort::parse(addr, kind.default_port).ok()?;
-    Some(nodes::FeedSpec::new(at.host, at.port, kind))
+    nodes::FeedSpec::parse(addr, kind).ok()
 }
 
 /// `rtl_tcp host:port name of the receiver`, as written by `render`.
@@ -1188,7 +1187,7 @@ fn parse_stream(v: &str) -> Option<crate::devices::Remote> {
         Some((addr, label)) => (addr, label.trim()),
         None => (rest, ""),
     };
-    let addr = proto.parse_addr(addr)?;
+    let addr = proto.parse_addr(addr).ok()?;
     Some(crate::devices::Remote { proto, addr, label: label.to_string() })
 }
 

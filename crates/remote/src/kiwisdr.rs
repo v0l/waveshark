@@ -125,7 +125,7 @@ pub fn fetch_status(addr: &str) -> Result<Status> {
 }
 
 pub fn probe(addr: &str) -> Result<Probe> {
-    let addr = Proto::KiwiSdr.parse_addr(addr).ok_or(Error::NoDevice)?;
+    let addr = Proto::KiwiSdr.parse_addr(addr)?;
     let status = fetch_status(&addr)?;
     if status.offline {
         return Err(Error::other(format!("{addr} is offline")));
@@ -475,7 +475,7 @@ pub struct Device {
 
 impl Device {
     pub fn open(addr: &str) -> Result<Self> {
-        let addr = Proto::KiwiSdr.parse_addr(addr).ok_or(Error::NoDevice)?;
+        let addr = Proto::KiwiSdr.parse_addr(addr)?;
         let status = fetch_status(&addr)?;
         if status.offline {
             return Err(Error::other(format!("{addr} is offline")));
