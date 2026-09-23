@@ -4565,6 +4565,42 @@ pub(crate) mod tests {
         );
     }
 
+    /// A key goes on air even when a stage in the graph refuses the span it
+    /// is wired to.
+    ///
+    /// The refusal is answered by building again without that stage, and the
+    /// radio the key handed in used to go with the attempt that failed: an
+    /// edited stage saved from a wider span, a screen decoder among them,
+    /// left every key on the strip dead until the edit was deleted.
+    #[test]
+    fn a_stage_that_refuses_the_span_does_not_take_the_key_with_it() {
+        let center = Hz(145_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+
+        // A screen decoder wants 4 MS/s and this span is 2.4, so it refuses
+        // as it is wired.
+        let mut edits = crate::patch::Edits::default();
+        edits.stages.push(crate::patch::Stage {
+            id: 1,
+            kind: "tempest".into(),
+            settings: pipeline::registry::Settings::new(),
+        });
+        edits.links.push(crate::patch::Link { from: crate::patch::Source::Span, to: (1, 0) });
+        radio.send(Cmd::Edits(edits));
+        radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
+        radio.send(Cmd::Key(Some(1)));
+        until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        until("a tenth of a second on the antenna", || watch.transmitted_len() > 240_000);
+        assert!(watch.keyed(), "the device was never asked to transmit");
+    }
+
     /// The dial and the span move under a running receiver.
     ///
     /// Both go through the radio thread and both redraw the graph: a retune

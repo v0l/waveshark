@@ -215,6 +215,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- Key that never took while a stage in the graph refused the span.
 - GT-TMBBQ05 thermometers read out of noise and other sensors' bursts.
 - Auto mode opened sources across the whole band after a transmitter clipped the receiver.
 - Call list airtime climbing with no channel open, and calls that never ended.

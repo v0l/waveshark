@@ -224,6 +224,13 @@ pub struct Receiver {
     /// opened it. Like the recorder's ring, it is handed in once and then
     /// survives rebuilds by coming back out of the pool.
     pending_tx: Option<TxSinks>,
+    /// The radio a key handed in, held here rather than carried through the
+    /// build.
+    ///
+    /// A build that fails is built again without whatever refused, and a
+    /// stream that travelled with the attempt went into the ground with it:
+    /// the key was down, the transmitter had no radio, and nothing said so.
+    keying: Option<Box<dyn common::TxStream>>,
     /// The microphone, for every rebuild that wants one.
     ///
     /// Kept rather than handed in per key, because the microphone stage is
@@ -755,6 +762,7 @@ impl Receiver {
             pending_record: None,
             pending_speaker: None,
             pending_tx: None,
+            keying: None,
             mic: None,
             heard: nodes::Heard::default(),
             voice: None,
@@ -1294,7 +1302,9 @@ impl Receiver {
         // put it on and carries it across a rebuild, so there is one way on
         // air rather than two that have to agree about which rebuild the key
         // belonged to.
-        let tx_stream = tx_sinks.as_mut().and_then(|s| s.stream.take());
+        if let Some(stream) = tx_sinks.as_mut().and_then(|s| s.stream.take()) {
+            self.keying = Some(stream);
+        }
         // The transmit chain is drawn here with everything else and run on a
         // thread of its own, so it comes out of the patch before the
         // receiver's graph is built. What crosses between the two is the
@@ -1589,6 +1599,7 @@ impl Receiver {
         self.head = head;
         self.patch = whole;
         self.base = base;
+        let tx_stream = self.keying.take();
         self.hand_over_transmitter(plan, transmit, tx_sinks, tx_stream, idle_tx);
         if let Some(sink) = self.pending_speaker.take() {
             self.set_speaker(sink);
