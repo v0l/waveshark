@@ -168,6 +168,7 @@ the code is in the commit log.
 
 ### Changed
 
+- Windows draws through DirectX 12 where the card has it, rather than Vulkan.
 - IBM Plex type throughout, the same on every machine, and dialogs on the darker chassis.
 - Transcript reads only channels with VOICE on.
 - Span shows a rate off the list as its size rather than "custom".

@@ -34,6 +34,7 @@ mod control;
 mod data;
 mod devices;
 mod dial;
+mod gpu;
 mod heatmap;
 mod i18n;
 mod icons;
@@ -1636,7 +1637,8 @@ fn main() -> eframe::Result<()> {
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
-    let opts = eframe::NativeOptions { viewport, ..Default::default() };
+    let mut opts = eframe::NativeOptions { viewport, ..Default::default() };
+    gpu::prefer_dx12_on_windows(&mut opts.wgpu_options);
     eframe::run_native(
         "waveshark",
         opts,
