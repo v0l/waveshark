@@ -370,11 +370,13 @@ impl AgentView<'_> {
                     // the whole width with it and the box then has none.
                     const SEND_W: f32 = 64.0;
                     let box_w = (ui.available_width() - SEND_W - 8.0).max(120.0);
-                    let entry = ui.add_sized(
-                        egui::Vec2::new(box_w, ASK_H - 16.0),
-                        egui::TextEdit::multiline(draft)
-                            .hint_text("What is on 446 MHz?")
-                            .desired_rows(2),
+                    let entry = egui_bench::form::clipboard_menu(
+                        ui.add_sized(
+                            egui::Vec2::new(box_w, ASK_H - 16.0),
+                            egui::TextEdit::multiline(draft)
+                                .hint_text("What is on 446 MHz?")
+                                .desired_rows(2),
+                        ),
                     );
                     let send = ui
                         .add_enabled(

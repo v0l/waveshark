@@ -120,22 +120,26 @@ impl Keys<'_> {
                                 ui.selectable_value(&mut self.st.new_system, s, s.as_str());
                             }
                         });
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.st.new_name)
-                            .hint_text(match self.st.new_system {
-                                System::Dmr => "talkgroup, or * for all",
-                                _ => "channel name",
-                            })
-                            .desired_width(120.0),
+                    egui_bench::form::clipboard_menu(
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.st.new_name)
+                                .hint_text(match self.st.new_system {
+                                    System::Dmr => "talkgroup, or * for all",
+                                    _ => "channel name",
+                                })
+                                .desired_width(120.0),
+                        ),
                     );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.st.new_key)
-                            .hint_text(match self.st.new_system {
-                                System::Dmr => "basic privacy key number, 1 to 255",
-                                _ => "key: hex or base64",
-                            })
-                            .desired_width(240.0)
-                            .font(egui::FontId::monospace(12.0)),
+                    egui_bench::form::clipboard_menu(
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.st.new_key)
+                                .hint_text(match self.st.new_system {
+                                    System::Dmr => "basic privacy key number, 1 to 255",
+                                    _ => "key: hex or base64",
+                                })
+                                .desired_width(240.0)
+                                .font(egui::FontId::monospace(12.0)),
+                        ),
                     );
                     // A DMR basic privacy key is a number the codeplug
                     // shows in decimal, so that is how it is typed.
@@ -162,10 +166,12 @@ impl Keys<'_> {
                 // Or straight out of a node on the network, which is the
                 // copy of the key that cannot be mistyped.
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.st.node_host)
-                            .hint_text("meshtastic node address, e.g. 10.0.0.5")
-                            .desired_width(240.0),
+                    egui_bench::form::clipboard_menu(
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.st.node_host)
+                                .hint_text("meshtastic node address, e.g. 10.0.0.5")
+                                .desired_width(240.0),
+                        ),
                     );
                     let busy = self.st.node_fetch.is_some();
                     let ok = !busy && !self.st.node_host.trim().is_empty();
@@ -321,11 +327,13 @@ impl Keys<'_> {
             ui.horizontal(|ui| {
                 Line::new().legend("key").show(ui);
                 let buf = self.st.typing.entry(cell.tag_key()).or_default();
-                ui.add(
-                    egui::TextEdit::singleline(buf)
-                        .hint_text("hex: 8 digits for TEA1, 20 for TEA2")
-                        .desired_width(240.0)
-                        .font(egui::FontId::monospace(12.0)),
+                egui_bench::form::clipboard_menu(
+                    ui.add(
+                        egui::TextEdit::singleline(buf)
+                            .hint_text("hex: 8 digits for TEA1, 20 for TEA2")
+                            .desired_width(240.0)
+                            .font(egui::FontId::monospace(12.0)),
+                    ),
                 );
                 let parsed = crate::keystore::parse_typed_key(buf);
                 if ui.add_enabled(parsed.is_some(), egui::Button::new("Set key")).clicked() {
@@ -347,11 +355,13 @@ impl Keys<'_> {
                 Line::new().legend("identity").show(ui);
                 let key = format!("{}#id", cell.tag_key());
                 let buf = self.st.typing.entry(key.clone()).or_default();
-                ui.add(
-                    egui::TextEdit::singleline(buf)
-                        .hint_text("secret: 16 hex digits")
-                        .desired_width(240.0)
-                        .font(egui::FontId::monospace(12.0)),
+                egui_bench::form::clipboard_menu(
+                    ui.add(
+                        egui::TextEdit::singleline(buf)
+                            .hint_text("secret: 16 hex digits")
+                            .desired_width(240.0)
+                            .font(egui::FontId::monospace(12.0)),
+                    ),
                 );
                 let secret = parse_id_secret(buf);
                 if ui.add_enabled(secret.is_some(), egui::Button::new("Set secret")).clicked() {

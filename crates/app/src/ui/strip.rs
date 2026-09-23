@@ -1285,11 +1285,11 @@ impl Strip<'_> {
                                 // is named after its transmitter, and ninety
                                 // points cut that off mid-callsign.
                                 let room = (ui.available_width() - 130.0).max(90.0);
-                                ui.add(
+                                egui_bench::form::clipboard_menu(ui.add(
                                     egui::TextEdit::singleline(&mut ch.label)
                                         .desired_width(room)
                                         .frame(egui::Frame::NONE),
-                                );
+                                ));
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {

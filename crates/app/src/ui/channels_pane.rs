@@ -77,10 +77,12 @@ impl Channels<'_> {
                 if !st.stations.is_empty() && ui.button("FORGET").clicked() {
                     act = Some(Action::Clear);
                 }
-                ui.add(
-                    egui::TextEdit::singleline(self.filter)
-                        .hint_text("filter")
-                        .desired_width(160.0),
+                egui_bench::form::clipboard_menu(
+                    ui.add(
+                        egui::TextEdit::singleline(self.filter)
+                            .hint_text("filter")
+                            .desired_width(160.0),
+                    ),
                 );
             });
         });

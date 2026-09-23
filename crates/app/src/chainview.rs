@@ -494,7 +494,9 @@ pub fn inspector(
                 let file = prm.name == "path";
                 ui.horizontal(|ui| {
                     let w = (ui.available_width() - if file { 30.0 } else { 0.0 }).max(40.0);
-                    let r = ui.add(egui::TextEdit::singleline(&mut t).desired_width(w));
+                    let r = egui_bench::form::clipboard_menu(
+                        ui.add(egui::TextEdit::singleline(&mut t).desired_width(w)),
+                    );
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         out = Some((node.id.0, prm.name.clone(), ParamValue::Text(t)));
                     }

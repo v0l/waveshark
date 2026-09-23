@@ -124,10 +124,12 @@ impl Devices<'_> {
                 if ui.button(label).clicked() {
                     act = Some(Action::HomeAssistant);
                 }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.st.filter)
-                        .hint_text("filter")
-                        .desired_width(160.0),
+                egui_bench::form::clipboard_menu(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.st.filter)
+                            .hint_text("filter")
+                            .desired_width(160.0),
+                    ),
                 );
                 // The switch that fills this pane, on the pane: the same
                 // value Setup shows beside the GPS, since the position is

@@ -704,14 +704,14 @@ impl App {
                         } else {
                             "off: click to run"
                         });
-                        ui.add(
+                        egui_bench::form::clipboard_menu(ui.add(
                             egui::TextEdit::singleline(name)
                                 .frame(egui::Frame::NONE)
                                 .font(theme::legend_font(11.5))
                                 .text_color(theme::VALUE)
                                 .desired_width(120.0)
                                 .hint_text("name"),
-                        );
+                        ));
                         // A block that is somebody else's allocation says so,
                         // and says it in the red it is not running in.
                         if !regions.is_empty() {

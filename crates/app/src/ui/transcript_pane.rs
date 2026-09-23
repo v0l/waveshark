@@ -53,10 +53,12 @@ impl Transcript<'_> {
                 .show(ui);
             if !self.st.log.is_empty() {
                 ui.add_space(12.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.st.filter)
-                        .hint_text("filter")
-                        .desired_width(160.0),
+                egui_bench::form::clipboard_menu(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.st.filter)
+                            .hint_text("filter")
+                            .desired_width(160.0),
+                    ),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

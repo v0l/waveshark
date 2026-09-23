@@ -50,7 +50,9 @@ impl Msgs<'_> {
             if !self.st.list.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
-                ui.add(egui::TextEdit::singleline(filter).hint_text("filter").desired_width(160.0));
+                egui_bench::form::clipboard_menu(ui.add(
+                    egui::TextEdit::singleline(filter).hint_text("filter").desired_width(160.0),
+                ));
                 if !filter.is_empty() && ui.button("Clear filter").clicked() {
                     filter.clear();
                 }
