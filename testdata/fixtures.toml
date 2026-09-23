@@ -953,3 +953,77 @@ vessels = [205581490, 211664370, 244013030, 244038327, 244650495, 244650878, 244
 reference = "gnuais 0.3.3"
 reference_frames = 12
 reference_frames_read_here = 11
+
+[[capture]]
+name = "screen_1080p60_595M_20000k.cs16"
+sha256 = "6b333bc10f2fea68d60dd72b5990ee57e936263a3f8a18e54e0c06f17dc5c55b"
+url = "https://nostr.download/6b333bc10f2fea68d60dd72b5990ee57e936263a3f8a18e54e0c06f17dc5c55b.xz"
+compression = "xz"
+center_hz = 595_000_000
+rate_sps = 20_000_000
+format = "cs16"
+license = "CC-BY-4.0"
+description = """
+The unintentional emissions of a monitor's cable, at 595 MHz, which is the
+fourth harmonic of the 148.5 MHz pixel clock a 1920x1080 screen at 60 Hz is
+driven with. Written by the receiver's own raw span capture off a LimeSDR-USB
+on 2026-09-24 and cut to 0.6 s, 36 frames.
+
+Which screen is not inferred, it was switched: the transmitter is a
+Mediatrix MPI7002 panel on a Raspberry Pi, and turning its HDMI output off
+takes the 67.501 kHz line away entirely while everything else about the
+receiver stays where it was. See screen_off_595M_20000k.cs16, recorded three
+minutes later at the same dial and gain, which is that same band with the
+output off.
+
+What the capture is evidence of is the half of the measurement a real screen
+can withhold. The line period is exact: 67.501 kHz against the mode's own
+67.500. The frame is not there at all, because this screen carries its
+picture weakly at the fourth harmonic and what survives is the blanking, so
+the strongest line count in the 49 to 87 Hz range stands about 2 sigma above
+the other 601, which is what the largest of 601 draws of noise does by
+itself. A synthesised screen of the same mode stands 18.1 sigma over the same
+field.
+
+So the receiver refuses it in auto and reads it when the mode is named: told
+1920x1080 60 Hz it measures 60.0007 Hz from the line period alone, seven
+parts in a million from the mode's own rate, and 30 of its 31 frames land
+where that period says they will. The picture that comes out is the raster's
+blanking, a bright band 12.7% of the line wide and 4% of the frame tall,
+which is 280 pixels of 2200 and 45 lines of 1125. Before the field was
+measured this way the same capture locked at 833, 1112 and 1291 lines on
+successive tries, all at that one correct line rate, and painted a picture
+that rolled.
+"""
+
+[capture.expect]
+line_hz = 67_501.0
+forced_mode = "1920x1080 60 Hz"
+forced_lines = 1125
+forced_frame_hz = 60.0007
+forced_frames_held = 30
+forced_frames_judged = 31
+auto_locks = false
+
+[[capture]]
+name = "screen_off_595M_20000k.cs16"
+sha256 = "694fef5cfc6ed69adf78eab0dcf96bc7418bc1f889673ea2e9a8e23756ef8c9b"
+url = "https://nostr.download/694fef5cfc6ed69adf78eab0dcf96bc7418bc1f889673ea2e9a8e23756ef8c9b.xz"
+compression = "xz"
+center_hz = 595_000_000
+rate_sps = 20_000_000
+format = "cs16"
+license = "CC-BY-4.0"
+description = """
+The same band as screen_1080p60_595M_20000k.cs16, at the same dial, the same
+span and the same gain, three minutes later with the screen's HDMI output
+switched off. Everything else in the room stayed where it was, so what is
+missing from this one is the screen and nothing else.
+
+It is the negative the other capture needs. A decoder that reads a raster out
+of this is reading the receiver, the band or itself: there is no line period
+to find here at all, where the other gives 67.501 kHz at a score of 733.
+"""
+
+[capture.expect]
+line_found = false

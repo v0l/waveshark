@@ -211,23 +211,25 @@ impl Reader {
     }
 
     fn limits(&self) -> Limits {
-        let line_hz = line_hz_limits();
-        match self.forced {
-            Some(m) => Limits {
-                frame_hz: (m.refresh_hz() * 0.995, m.refresh_hz() * 1.005),
-                line_hz,
-                ..Limits::default()
-            },
-            None => Limits { line_hz, ..Limits::default() },
-        }
+        Limits { line_hz: line_hz_limits(), ..Limits::default() }
     }
 
     fn measure(&self) -> Option<Locked> {
         let rate = self.search_rate_hz();
-        let mut periods = raster::find_periods(&self.search, rate, self.limits())?;
-        if let Some(m) = self.forced {
-            periods.lines = m.total_height;
-        }
+        let periods = match self.forced {
+            // The operator named the raster, so the line period is the whole
+            // measurement: a screen too weak to show its frame is exactly
+            // the one somebody names the mode of.
+            Some(m) => {
+                let (line, score) = raster::find_line(&self.search, rate, self.limits())?;
+                Periods {
+                    frame_samples: line * m.total_height as f64,
+                    lines: m.total_height,
+                    score,
+                }
+            }
+            None => raster::find_periods(&self.search, rate, self.limits())?,
+        };
         let frame_hz = periods.frame_hz(rate);
         let mode = match self.forced {
             Some(m) => Some(m),

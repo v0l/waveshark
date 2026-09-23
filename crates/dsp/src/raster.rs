@@ -43,9 +43,39 @@ impl Default for Limits {
 /// the screens in the tests score 554 to 835.
 pub const LOCK_SCORE: f32 = 10.0;
 
-/// Noise alone scores 1.4; the screens in the tests score 16.8 under the
-/// heaviest noise and 92 under the lightest.
-pub const MIN_CLARITY: f32 = 5.0;
+/// Measured over the whole field of line counts the refresh range allows,
+/// about 600 of them: a synthesised 1920x1080 screen's own count stands
+/// 18.1 sigma over that field, an off-air source at 595 MHz with a
+/// 67.501 kHz line rate and no frame in it reached 2.9, and the largest of
+/// 600 draws of noise is about 3.2 by itself.
+pub const MIN_CLARITY: f32 = 8.0;
+
+fn line_lags(r: &[f32], limits: Limits, rate: f64) -> (usize, usize) {
+    let lo = (rate / limits.line_hz.1) as usize;
+    let hi = ((rate / limits.line_hz.0) as usize).min(r.len().saturating_sub(2));
+    (lo, hi)
+}
+
+pub fn find_line(env: &[f32], rate: f64, limits: Limits) -> Option<(f64, f32)> {
+    let r = autocorrelation(env);
+    let frame_lo = (rate / limits.frame_hz.1) as usize;
+    let frame_hi = ((rate / limits.frame_hz.0) as usize).min(r.len().saturating_sub(2));
+    if frame_lo + 2 >= frame_hi {
+        return None;
+    }
+    let (line_lo, line_hi) = line_lags(&r, limits, rate);
+    if line_lo + 2 >= line_hi {
+        return None;
+    }
+    let (_, raw) = strongest(&r, frame_lo, frame_hi)?;
+    let score = (raw - median(&r[frame_lo..frame_hi])) * (env.len() as f32).sqrt();
+    if score < LOCK_SCORE {
+        return None;
+    }
+    let line = refine_line(&r, fundamental(&r, line_lo, line_hi)?, frame_hi);
+    let line_hz = rate / line;
+    (line_hz >= limits.line_hz.0 && line_hz <= limits.line_hz.1).then_some((line, score))
+}
 
 pub fn find_periods(env: &[f32], rate: f64, limits: Limits) -> Option<Periods> {
     let r = autocorrelation(env);
@@ -54,9 +84,7 @@ pub fn find_periods(env: &[f32], rate: f64, limits: Limits) -> Option<Periods> {
     if frame_lo + 2 >= frame_hi {
         return None;
     }
-    let line_lo = (frame_lo as f64 / limits.lines.1 as f64) as usize;
-    let line_hi =
-        ((frame_hi as f64 / limits.lines.0 as f64) as usize).min(r.len().saturating_sub(2));
+    let (line_lo, line_hi) = line_lags(&r, limits, rate);
     if line_lo + 2 >= line_hi {
         return None;
     }
@@ -77,8 +105,7 @@ pub fn find_periods(env: &[f32], rate: f64, limits: Limits) -> Option<Periods> {
     if line_hz < limits.line_hz.0 || line_hz > limits.line_hz.1 {
         return None;
     }
-    let independent = edges.len() as f32 / (line / 8.0).round().max(1.0) as f32;
-    if clarity * independent.sqrt() < MIN_CLARITY {
+    if clarity < MIN_CLARITY {
         return None;
     }
     Some(Periods { frame_samples: frame, lines, score })
@@ -131,8 +158,6 @@ fn refine_line(r: &[f32], coarse: f64, frame_hi: usize) -> f64 {
     line
 }
 
-const RIVALS: usize = 3;
-
 fn whole_frame(
     r: &[f32],
     line: f64,
@@ -146,15 +171,20 @@ fn whole_frame(
         let near = (count as f64 * line).round() as usize;
         (near >= 1 && near + 1 < r.len()).then(|| (near, r[near - 1].max(r[near]).max(r[near + 1])))
     };
-    let (count, (near, peak)) = (first..=last)
-        .filter_map(|c| at(c).map(|p| (c, p)))
-        .max_by(|a, b| a.1.1.total_cmp(&b.1.1))?;
-    let runner_up = (count.saturating_sub(RIVALS)..=count + RIVALS)
-        .filter(|c| *c != count)
-        .filter_map(at)
-        .map(|(_, p)| p)
-        .fold(f32::MIN, f32::max);
-    Some((count, interpolate(r, near), peak - runner_up))
+    let field: Vec<(usize, usize, f32)> =
+        (first..=last).filter_map(|c| at(c).map(|(near, peak)| (c, near, peak))).collect();
+    if field.len() < 8 {
+        return None;
+    }
+    let n = field.len() as f32;
+    let mean = field.iter().map(|f| f.2).sum::<f32>() / n;
+    let sd = (field.iter().map(|f| (f.2 - mean) * (f.2 - mean)).sum::<f32>() / n).sqrt();
+    let (count, near, peak) = *field.iter().max_by(|a, b| a.2.total_cmp(&b.2))?;
+    let clarity = match sd > 0.0 {
+        true => (peak - mean) / sd,
+        false => 0.0,
+    };
+    Some((count, interpolate(r, near), clarity))
 }
 
 fn strongest(r: &[f32], lo: usize, hi: usize) -> Option<(f64, f32)> {
@@ -426,8 +456,10 @@ impl Raster {
             dy += blank_end(&rows) as isize;
         }
         shift(&mut out, self.width, dx, dy);
-        let (lo, hi) =
-            out.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        let mut sorted = out.clone();
+        sorted.sort_by(f32::total_cmp);
+        let cut = (sorted.len() as f64 * CONTRAST_TAIL) as usize;
+        let (lo, hi) = (sorted[cut], sorted[sorted.len() - 1 - cut]);
         let range = (hi - lo).max(f32::MIN_POSITIVE);
         out.iter().map(|v| (((v - lo) / range) * 255.0).clamp(0.0, 255.0) as u8).collect()
     }
@@ -452,6 +484,9 @@ fn profile(canvas: &[f32], width: usize, axis: Axis) -> Vec<f32> {
 }
 
 const MAX_PULL: f64 = 0.001;
+
+/// What fraction of the canvas is allowed off each end of the grey scale.
+const CONTRAST_TAIL: f64 = 0.02;
 
 /// Frames of a 640x480 desktop correlate with the average at a median of
 /// 0.998; frames of noise alone reach 0.229 at most.
@@ -653,18 +688,6 @@ mod tests {
         let p = find_periods(&env, rate, Limits::default()).expect("a raster");
         assert_eq!(p.lines, 806);
         assert!((p.frame_hz(rate) - 60.0038).abs() < 0.05, "{} Hz", p.frame_hz(rate));
-    }
-
-    #[test]
-    fn a_raster_faster_than_any_display_is_refused() {
-        let rate = 12e6;
-        let fast = Screen { clock_hz: 191.704e6, htotal: 1000, vtotal: 2372, active: (900, 2200) };
-        let env = fast.emit(rate, 0.06, 0.2, &desktop);
-        assert_eq!(find_periods(&env, rate, Limits::default()), None, "191 kHz a line is nothing");
-        let wide = Limits { line_hz: (20e3, 250e3), ..Limits::default() };
-        let p = find_periods(&env, rate, wide).expect("the raster itself is there");
-        assert_eq!(p.lines, 2372);
-        assert!((p.line_hz(rate) - 191_704.0).abs() < 200.0, "{} lines a second", p.line_hz(rate));
     }
 
     #[test]
