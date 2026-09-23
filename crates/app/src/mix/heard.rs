@@ -203,12 +203,6 @@ impl HeardNode {
                     c.said = v.over.clone();
                 }
             }
-            Some(c) => {
-                c.quiet_s += block_s;
-                if c.quiet_s >= HANG_S {
-                    c.over = true;
-                }
-            }
             None if talking => {
                 self.live.insert(
                     key,
@@ -229,7 +223,16 @@ impl HeardNode {
                     },
                 );
             }
-            None => {}
+            _ => {}
+        }
+    }
+
+    fn age(&mut self, block_s: f64) {
+        for c in self.live.values_mut() {
+            c.quiet_s += block_s;
+            if c.quiet_s >= HANG_S {
+                c.over = true;
+            }
         }
     }
 
@@ -293,6 +296,7 @@ impl Node for HeardNode {
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
         self.decay();
+        self.age(ctx.block_seconds);
         let Some(out) = outputs.first_mut() else { return Ok(()) };
         for p in inputs {
             let Payload::Voice(voices) = p else { continue };
@@ -343,13 +347,67 @@ mod tests {
         }
     }
 
+    fn block(h: &mut HeardNode, v: &common::Voice, block_s: f64) {
+        h.age(block_s);
+        h.track(v, block_s);
+    }
+
+    #[test]
+    fn a_channel_moved_1_khz_ends_the_call_on_the_old_key() {
+        let mut h = HeardNode::new();
+        let mut before = tuned(Some("CH22"));
+        before.channel_hz = 405_147_100.0;
+        for _ in 0..10 {
+            block(&mut h, &before, 0.02);
+        }
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].over);
+
+        let mut after = before.clone();
+        after.channel_hz = 405_148_100.0;
+        for _ in 0..200 {
+            block(&mut h, &after, 0.02);
+        }
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        let old = calls.iter().find(|c| c.channel_hz == 405_147_100.0).expect("the old key");
+        assert!(old.over, "a key that stopped getting audio was never closed");
+        assert!((old.seconds - 0.2).abs() < 1e-9, "airtime {}", old.seconds);
+        let new = calls.iter().find(|c| c.channel_hz == 405_148_100.0).expect("the new key");
+        assert!(!new.over);
+        assert!((new.seconds - 4.0).abs() < 1e-9, "airtime {}", new.seconds);
+
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1, "the old key was reported again: {calls:?}");
+        assert_eq!(calls[0].channel_hz, 405_148_100.0);
+    }
+
+    #[test]
+    fn a_call_whose_audio_stops_arriving_is_closed_after_the_hang_time() {
+        let mut h = HeardNode::new();
+        for _ in 0..10 {
+            block(&mut h, &tuned(Some("CH22")), 0.02);
+        }
+        assert_eq!(h.take_calls().len(), 1);
+        h.age(0.65);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].over, "closed before {HANG_S} s of silence");
+        h.age(0.1);
+        let calls = h.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].over, "0.75 s with no block did not close it");
+        assert_eq!(h.take_calls().len(), 0, "an ended call is reported once");
+    }
+
     #[test]
     fn each_group_on_a_carrier_meters_on_its_own() {
         // A trunked system puts several groups on one frequency. Keyed by
         // frequency alone every row in the call list read the same level, so
         // the whole column moved whenever anybody spoke.
         let mut h = HeardNode::new();
-        h.track(&voice("TG100", "M0ABC", &[0.5; 160]), 0.02);
+        block(&mut h, &voice("TG100", "M0ABC", &[0.5; 160]), 0.02);
         let levels = h.levels();
         let meter = |to: &str| {
             common::ConversationKey::new("M17", 433_475_000.0).to(Some(to.into())).meter()
@@ -363,14 +421,14 @@ mod tests {
     #[test]
     fn a_call_is_listed_while_somebody_talks_and_once_when_they_stop() {
         let mut h = HeardNode::new();
-        h.track(&voice("ALL", "M0ABC", &[0.5; 160]), 0.02);
+        block(&mut h, &voice("ALL", "M0ABC", &[0.5; 160]), 0.02);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1);
         assert!(!calls[0].over);
         assert_eq!(calls[0].to, "ALL");
         // Quiet for longer than the hang time ends it.
         for _ in 0..40 {
-            h.track(&voice("ALL", "M0ABC", &[0.0; 160]), 0.02);
+            block(&mut h, &voice("ALL", "M0ABC", &[0.0; 160]), 0.02);
         }
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1);
@@ -402,7 +460,7 @@ mod tests {
         let mut h = HeardNode::new();
         let mut first = tuned(Some("CH1"));
         first.code = None;
-        h.track(&first, 0.02);
+        block(&mut h, &first, 0.02);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].code, None, "half a second of audio has not been read yet");
@@ -410,7 +468,7 @@ mod tests {
         // The detector settles and the group arrives, on the same over.
         let mut coded = tuned(Some("CH1"));
         coded.code = Some("D023".into());
-        h.track(&coded, 0.02);
+        block(&mut h, &coded, 0.02);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1, "the group made a second row: {calls:?}");
         assert_eq!(calls[0].code.as_deref(), Some("D023"));
@@ -420,7 +478,7 @@ mod tests {
         // radio is watching the list to see it change.
         let mut again = tuned(Some("CH1"));
         again.code = Some("D131".into());
-        h.track(&again, 0.02);
+        block(&mut h, &again, 0.02);
         let calls = h.take_calls();
         assert_eq!(calls[0].code.as_deref(), Some("D131"), "the group never changed");
     }
@@ -438,14 +496,14 @@ mod tests {
         let mut h = HeardNode::new();
         let mut anonymous = tuned(Some("CH1"));
         anonymous.from = None;
-        h.track(&anonymous, 0.02);
+        block(&mut h, &anonymous, 0.02);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from, None);
 
         let mut named = tuned(Some("CH1"));
         named.from = Some("123".into());
-        h.track(&named, 0.02);
+        block(&mut h, &named, 0.02);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1, "the same over became two rows: {calls:?}");
         assert_eq!(calls[0].from.as_deref(), Some("123"));
@@ -453,7 +511,7 @@ mod tests {
 
         // And the next block of the same over adds to it rather than
         // starting again.
-        h.track(&named, 0.02);
+        block(&mut h, &named, 0.02);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].from.as_deref(), Some("123"));
@@ -465,7 +523,7 @@ mod tests {
         // Nothing about a mode and a frequency says it is a conversation, so
         // it is not a row in the call list.
         let mut h = HeardNode::new();
-        h.track(&tuned(None), 0.01);
+        block(&mut h, &tuned(None), 0.01);
         assert!(h.take_calls().is_empty());
         assert!(h.levels().is_empty());
     }
@@ -476,7 +534,7 @@ mod tests {
         // which is exactly what the call list asks of a decoder. The agent's
         // own channel is one of these.
         let mut h = HeardNode::new();
-        h.track(&tuned(Some("CH1")), 0.01);
+        block(&mut h, &tuned(Some("CH1")), 0.01);
         let calls = h.take_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].to, "CH1");

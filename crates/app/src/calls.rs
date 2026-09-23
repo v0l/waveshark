@@ -92,7 +92,7 @@ pub struct Call {
     /// Seconds of the over in progress the bus has already reported, so the
     /// running total it sends is folded in once rather than summed again on
     /// every block.
-    pub heard_s: f64,
+    pub heard_s: std::collections::HashMap<common::ConversationKey, f64>,
     /// Whether the audio bus has reported this call. Once it has, the bus is
     /// what counts overs and airtime: a decoder's packets say the same over
     /// happened, and counting both listed every digital over twice.
@@ -222,7 +222,7 @@ impl Calls {
                 k.first = c.first;
                 k.seconds = 0.0;
                 k.overs = 0;
-                k.heard_s = 0.0;
+                k.heard_s.clear();
             }
             k.last = c.last;
             // The first word from the bus on a row the packets made: from
@@ -232,13 +232,18 @@ impl Calls {
                 k.by_bus = true;
                 k.seconds = 0.0;
                 k.overs = 0;
-                k.heard_s = 0.0;
+                k.heard_s.clear();
             }
             // The bus reports the over's running total, so what is added is
             // the part not already counted.
-            let more = (c.seconds - k.heard_s).max(0.0);
-            k.seconds += more;
-            k.heard_s = if c.over { 0.0 } else { c.seconds };
+            let renamed = c.was.as_ref().and_then(|w| k.heard_s.remove(w));
+            let counted = k.heard_s.get(&key).copied().or(renamed).unwrap_or(0.0);
+            k.seconds += (c.seconds - counted).max(0.0);
+            if c.over {
+                k.heard_s.remove(&key);
+            } else {
+                k.heard_s.insert(key, c.seconds);
+            }
             if c.over {
                 k.overs += 1;
             }
@@ -258,7 +263,7 @@ impl Calls {
             last: c.last,
             overs: u64::from(c.over),
             seconds: c.seconds,
-            heard_s: if c.over { 0.0 } else { c.seconds },
+            heard_s: if c.over { Default::default() } else { [(key, c.seconds)].into() },
             by_bus: true,
             transcript: None,
         });
@@ -484,6 +489,46 @@ mod tests {
         assert_eq!(rows[0].overs, 1);
         assert!((rows[0].seconds - 2.9).abs() < 1e-6, "airtime {}", rows[0].seconds);
         assert_eq!(rows[0].codec, Some("Codec 2 3200"), "what the system said is kept");
+    }
+
+    #[test]
+    fn two_keys_on_one_row_count_only_their_own_airtime() {
+        let mut c = Calls::new();
+        let at = Instant::now();
+        let mut stale = bus("Audio", 405_147_100.0, "CH22", None, at);
+        stale.seconds = 100.0;
+        let mut live = bus("Audio", 405_147_400.0, "CH22", None, at);
+        for frame in 1..=10 {
+            c.hear(&stale);
+            live.seconds = 0.01 * f64::from(frame);
+            live.last = at + Duration::from_millis(10 * frame as u64);
+            c.hear(&live);
+        }
+        let rows = c.active(at + Duration::from_secs(1));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!((rows[0].seconds - 100.1).abs() < 1e-9, "airtime {}", rows[0].seconds);
+    }
+
+    #[test]
+    fn a_call_renamed_mid_over_keeps_what_was_counted() {
+        let mut c = Calls::new();
+        let at = Instant::now();
+        let mut anonymous = bus("Audio", 145.5e6, "CH1", None, at);
+        anonymous.seconds = 0.5;
+        c.hear(&anonymous);
+        let mut named = bus("Audio", 145.5e6, "CH1", Some("123"), at);
+        named.was = Some(anonymous.key());
+        named.seconds = 0.6;
+        c.hear(&named);
+        named.was = None;
+        named.seconds = 0.8;
+        named.over = true;
+        c.hear(&named);
+        let rows = c.active(at + Duration::from_secs(1));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].overs, 1);
+        assert!((rows[0].seconds - 0.8).abs() < 1e-9, "airtime {}", rows[0].seconds);
+        assert_eq!(rows[0].heard_s.len(), 0, "an ended over left a watermark");
     }
 
     /// A call and the speech heard on it have to agree on one key, or the

@@ -208,6 +208,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- Call list airtime climbing with no channel open, and calls that never ended.
 - Network radio dialog froze the window while ADD waited for the server.
 - A saved patch naming a stage this build was not compiled with emptied the
   whole graph.

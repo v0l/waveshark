@@ -1074,7 +1074,7 @@ mod tests {
             overs: 1,
             seconds: 1.0,
             transcript: None,
-            heard_s: 0.0,
+            heard_s: Default::default(),
             by_bus: true,
         };
         // Two checkboxes at the front and the log button at the back are
