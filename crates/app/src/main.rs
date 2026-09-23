@@ -1638,10 +1638,7 @@ fn main() -> eframe::Result<()> {
         "waveshark",
         opts,
         Box::new(move |cc| {
-            let mut app = ui::App::new(cc);
-            if let Some(name) = &args.device {
-                app.set_device(name);
-            }
+            let mut app = ui::App::new(cc, args.device.as_deref());
             if let Some(db) = args.rf_gain {
                 app.set_rf_gain(db);
             }

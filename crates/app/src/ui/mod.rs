@@ -709,7 +709,9 @@ impl Default for App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// `asked` is the receiver `--device` names, taken before the saved one
+    /// so the window opens the radio the operator asked for and no other.
+    pub fn new(cc: &eframe::CreationContext<'_>, asked: Option<&str>) -> Self {
         theme::install(&cc.egui_ctx);
         crate::shutdown::install(cc.egui_ctx.clone());
         let settings = crate::session::Settings::load();
@@ -722,17 +724,10 @@ impl App {
             crate::devices::add_stream(r.proto, &r.addr, &r.label);
         }
         let devices = crate::devices::list();
-        // The saved radio may not be plugged in any more, in which case the
-        // rest of the session still applies to whatever is.
-        let device = s
-            .device
-            .as_deref()
-            .and_then(|want| devices.iter().find(|d| d.label == want).cloned())
-            .or_else(|| devices.first().cloned());
+        let device = choose_device(&devices, asked, s.device.as_deref());
         let radio_settings = s.radio(device.as_ref().map(|d| d.label.as_str()));
         let mut app = Self {
             devices,
-            device,
             center: s.center,
             // The file holds the device's own rate; the app works in the
             // effective one, which zoom divides.
@@ -782,6 +777,12 @@ impl App {
         // list is read off disk and is the only one that is not empty on the
         // first frame.
         app.forget_what_was_already_here();
+        // Everything the choice of receiver decides, before the one connect:
+        // a device armed for the first frame instead would open the saved
+        // radio here, take its USB claim and drop it a frame later.
+        if let Some(e) = device {
+            app.adopt_device(e);
+        }
         app.connect(&cc.egui_ctx);
         app
     }
@@ -1174,20 +1175,6 @@ impl App {
     #[cfg(feature = "mcp")]
     pub fn serve_mcp(&mut self, addr: std::net::SocketAddr) -> anyhow::Result<()> {
         crate::agent::serve(addr, self.rt.handle(), self.desk.clone())
-    }
-
-    pub fn set_device(&mut self, want: &str) {
-        let w = want.to_lowercase();
-        match self.devices.iter().find(|d| d.label.to_lowercase().contains(&w)).cloned() {
-            Some(d) => {
-                self.adopt_device(d);
-                self.autostart = true;
-            }
-            None => {
-                let have: Vec<&str> = self.devices.iter().map(|d| d.label.as_str()).collect();
-                eprintln!("no radio matching {want:?}; attached: {have:?}");
-            }
-        }
     }
 
     /// Pick the span closest to `hz`, narrowing in software if the radio
@@ -2894,6 +2881,31 @@ fn sat_label(d: &sats_pane::Downlink) -> String {
     format!("{}:{what}", d.sat)
 }
 
+/// Which receiver to open: the one `--device` names, else the one the
+/// session saved, else whatever is attached.
+///
+/// A name is matched the way the list matches it, on any part of a label and
+/// without case, so `--device hackrf` finds the board without its serial. A
+/// name nothing answers to is said once and the saved receiver is opened, so
+/// a typo does not leave the window with no radio at all.
+fn choose_device(
+    devices: &[crate::devices::Entry],
+    asked: Option<&str>,
+    saved: Option<&str>,
+) -> Option<crate::devices::Entry> {
+    if let Some(want) = asked {
+        let w = want.to_lowercase();
+        match devices.iter().find(|d| d.label.to_lowercase().contains(&w)) {
+            Some(d) => return Some(d.clone()),
+            None => {
+                let have: Vec<&str> = devices.iter().map(|d| d.label.as_str()).collect();
+                eprintln!("no radio matching {want:?}; attached: {have:?}");
+            }
+        }
+    }
+    devices.iter().find(|d| Some(d.label.as_str()) == saved).or_else(|| devices.first()).cloned()
+}
+
 fn fmt_hz(hz: f64) -> String {
     if hz.abs() >= 1e6 {
         format!("{:.4} MHz", hz / 1e6)
@@ -4517,8 +4529,8 @@ mod tests {
     }
 
     /// `--device` is the same choice as clicking the receiver in the list,
-    /// so it moves the dial to a pinned recording, rebuilds the span list
-    /// from that receiver's rates and starts it.
+    /// so it moves the dial to a pinned recording and rebuilds the span list
+    /// from that receiver's rates.
     ///
     /// Without this, `--capture x_868.3M_250k.cu8 --device x` opened on last
     /// session's 100 MHz at 2.304 MS/s, neither of which the file delivers,
@@ -4536,7 +4548,8 @@ mod tests {
         a.scope.wf_center = 100e6;
         a.scope.db_center = 100e6;
         a.devices = vec![capture.entry(0)];
-        a.set_device("bench_868.3M");
+        let named = choose_device(&a.devices, Some("bench_868.3M"), None).expect("the capture");
+        a.adopt_device(named);
 
         assert_eq!(a.device.as_ref().and_then(|d| d.path.as_deref()), Some(path.as_path()));
         assert_eq!(a.center, 868_300_000.0);
@@ -4548,20 +4561,62 @@ mod tests {
         assert_eq!(spans, vec![62_500.0, 125_000.0, 250_000.0], "span list");
         assert_eq!(a.rate, 250_000.0, "2.304 MS/s is not a rate this file delivers");
         assert_eq!(a.zoom, 1);
-        assert!(a.autostart, "a named receiver is connected to, as clicking one is");
-
-        // A name nothing answers to changes nothing and starts nothing,
-        // rather than leaving the receiver pointed at a device it has not got.
-        let mut b = App { center: 100e6, rate: 2_304_000.0, ..Default::default() };
-        b.devices = vec![capture.entry(0)];
-        b.set_device("no such radio");
-        assert_eq!(b.device, None);
-        assert_eq!(b.spans.len(), 0);
-        assert_eq!(b.center, 100e6);
-        assert_eq!(b.rate, 2_304_000.0);
-        assert!(!b.autostart);
 
         crate::devices::remove_capture(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the window opens is what the command line named, and the saved
+    /// receiver is not opened on the way.
+    ///
+    /// `--device` used to be read after `App::new` had already connected, so
+    /// a run naming one radio claimed two: the saved one for a frame, then
+    /// the named one. A second process holding the saved dongle raised a
+    /// fault banner for a radio nobody asked for.
+    #[test]
+    fn a_named_device_is_the_only_one_opened() {
+        let dir = std::env::temp_dir().join("sr_named_device");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = dir.join("saved_433.92M_250k.cu8");
+        let asked = dir.join("asked_868.3M_250k.cu8");
+        std::fs::write(&saved, vec![0u8; 500_000]).unwrap();
+        std::fs::write(&asked, vec![0u8; 500_000]).unwrap();
+        let one = crate::devices::add_named_capture(saved.clone()).expect("a capture");
+        let two = crate::devices::add_named_capture(asked.clone()).expect("a capture");
+        let devices = vec![one.entry(0), two.entry(1)];
+        let saved_label = devices[0].label.clone();
+
+        // The tail of `App::new`: choose, take, open, and nothing armed for
+        // the first frame to open again.
+        let mut a = App { devices: devices.clone(), ..Default::default() };
+        let opened = crate::radio::Radio::opened();
+        let chosen =
+            choose_device(&a.devices, Some("asked_868.3M"), Some(&saved_label)).expect("a radio");
+        a.adopt_device(chosen);
+        a.connect(&egui::Context::default());
+        assert_eq!(
+            crate::radio::Radio::opened() - opened,
+            1,
+            "one device opened for a run given --device, not the saved one as well"
+        );
+        assert_eq!(a.device.as_ref().and_then(|d| d.path.as_deref()), Some(asked.as_path()));
+        assert!(!a.autostart, "nothing is left for the first frame to open");
+        a.stop();
+
+        // The saved receiver when nothing is named, and still the saved one
+        // when what is named is not attached.
+        let saved_first = choose_device(&devices, None, Some(&saved_label)).expect("a radio");
+        assert_eq!(saved_first.path.as_deref(), Some(saved.as_path()));
+        let fallback = choose_device(&devices, Some("no such radio"), Some(&saved_label));
+        assert_eq!(fallback.as_ref().and_then(|d| d.path.as_deref()), Some(saved.as_path()));
+        // Nothing saved and nothing named is whatever is plugged in.
+        let first = choose_device(&devices, None, None).expect("a radio");
+        assert_eq!(first.path.as_deref(), Some(saved.as_path()));
+        assert_eq!(choose_device(&[], Some("hackrf"), None), None);
+
+        crate::devices::remove_capture(&saved);
+        crate::devices::remove_capture(&asked);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

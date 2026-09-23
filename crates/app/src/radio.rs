@@ -1952,7 +1952,18 @@ pub struct Radio {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How many devices have been opened since the process started.
+///
+/// A claim taken on a radio nobody named is invisible from the outside, so
+/// the count is kept where the claim is taken and a test can read it back.
+static OPENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Radio {
+    /// Devices opened so far, counting each start of a radio thread.
+    pub fn opened() -> usize {
+        OPENED.load(Ordering::Relaxed)
+    }
+
     /// Start streaming from an RTL-SDR. `repaint` is called on every frame so
     /// the UI wakes without polling.
     #[allow(clippy::too_many_arguments)]
@@ -1976,6 +1987,7 @@ impl Radio {
         let (dec_tx, dec_rx) = bounded(64);
         let status = Arc::new(Status::default());
         let st = status.clone();
+        OPENED.fetch_add(1, Ordering::Relaxed);
 
         let handle = std::thread::Builder::new()
             .name("radio".into())

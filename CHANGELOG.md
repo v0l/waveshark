@@ -212,6 +212,7 @@ the code is in the commit log.
   last pulse, which is most Honeywell ActivLink doorbells and door contacts.
 - RDS lost half its groups on a station whose subcarrier is in quadrature with
   the pilot.
+- `--device` opened the saved radio first, claiming a receiver nobody named.
 - Located transmitters drew a circle far smaller than the error, tighter the
   longer the drive.
 - Home Assistant stopped publishing after the radio was restarted, and kept
