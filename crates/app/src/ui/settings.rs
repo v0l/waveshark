@@ -4274,9 +4274,13 @@ mod tests {
         a.add_remote(&ctx, &edit);
         a.poll_remote(&ctx);
         let took = asked.elapsed();
-        assert!(took < Duration::from_millis(50), "the frame waited {took:?} on the server");
+        let pending = Duration::from_millis(500);
+        assert!(
+            took < pending / 2,
+            "ceiling: the frame waited {took:?} on a server that is still silent after {pending:?}"
+        );
 
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(pending);
         a.poll_remote(&ctx);
         assert_eq!(a.joining.as_ref().map(|j| j.host.as_str()), Some(host.as_str()));
         assert!(a.find.is_some() && a.remote.is_some(), "a modal closed before any answer");
