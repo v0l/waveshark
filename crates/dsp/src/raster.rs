@@ -630,12 +630,41 @@ impl Raster {
             dy += blank_end(&rows) as isize;
         }
         shift(&mut out, self.width, dx, dy);
-        let mut sorted = out.clone();
+        let mut sorted: Vec<f32> = match self.lit_cells(&out) {
+            Some(lit) => lit,
+            None => out.clone(),
+        };
         sorted.sort_by(f32::total_cmp);
         let cut = (sorted.len() as f64 * CONTRAST_TAIL) as usize;
         let (lo, hi) = (sorted[cut], sorted[sorted.len() - 1 - cut]);
         let range = (hi - lo).max(f32::MIN_POSITIVE);
         out.iter().map(|v| (((v - lo) / range) * 255.0).clamp(0.0, 255.0) as u8).collect()
+    }
+
+    /// The cells with picture in them, which is the canvas less the rows
+    /// and columns the beam is blanked for.
+    ///
+    /// The grey scale is stretched over these rather than over the whole
+    /// canvas. Blanking is a twelfth of a 1920x1080 line and a twenty-fifth
+    /// of its frame, at a level of its own, so a scale that has to reach it
+    /// spends a good part of its range on the one part of the raster that
+    /// never holds anything: off air at 1485 MHz the picture came out
+    /// washed into the top of the scale with its panels barely apart.
+    ///
+    /// `None` where no dark run stands out, which is a screen with no
+    /// blanking to find and nothing to leave out.
+    fn lit_cells(&self, canvas: &[f32]) -> Option<Vec<f32>> {
+        let cols = dark_run(&profile(canvas, self.width, Axis::Column))?;
+        let rows = dark_run(&profile(canvas, self.width, Axis::Row))?;
+        let lit: Vec<f32> = canvas
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| {
+                !cols.contains(&(at % self.width)) && !rows.contains(&(at / self.width))
+            })
+            .map(|(_, v)| *v)
+            .collect();
+        (lit.len() > canvas.len() / 4).then_some(lit)
     }
 
     /// The averaged cells on one axis of the complex plane: the one they
@@ -734,6 +763,28 @@ fn best_shift(a: &[f32], b: &[f32], max: isize) -> (f64, f32) {
         false => 0.0,
     };
     (best.0 as f64 + offset, quality)
+}
+
+/// Which places along a profile are in its longest dark run, wrapped where
+/// the run crosses the end.
+fn dark_run(profile: &[f32]) -> Option<Vec<usize>> {
+    let n = profile.len();
+    let end = blank_end(profile);
+    let dark = darkness(profile);
+    let mut run = Vec::new();
+    let mut at = (end + n - 1) % n;
+    while profile[at] <= dark && run.len() < n {
+        run.push(at);
+        at = (at + n - 1) % n;
+    }
+    (!run.is_empty()).then_some(run)
+}
+
+/// The level below which a profile is blanking rather than picture.
+fn darkness(profile: &[f32]) -> f32 {
+    let (lo, hi) =
+        profile.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    lo + 0.25 * (hi - lo)
 }
 
 fn blank_end(profile: &[f32]) -> usize {
@@ -963,6 +1014,37 @@ mod tests {
         assert!(r.frames() >= 29, "{} frames of {seconds}s", r.frames());
         let ppm = (r.period() - truth) / truth * 1e6;
         assert!(ppm.abs() < 2.0, "{ppm} ppm out after {} frames", r.frames());
+    }
+
+    /// The grey scale is stretched over the picture, not over the blanking.
+    ///
+    /// Blanking is a twelfth of a 1920x1080 line and sits at a level of its
+    /// own, so a scale that has to reach it spends a good part of its range
+    /// where the raster never holds anything: off air at 1485 MHz that put
+    /// the whole picture into the top of the scale, and leaving the blanking
+    /// out took the spread of the active area from 49.9 to 59.7 counts.
+    #[test]
+    fn the_scale_is_spent_on_the_picture_rather_than_on_the_blanking() {
+        let rate = 8e6;
+        let env = VGA.emit(rate, 0.35, 0.4, &desktop);
+        let width = 254;
+        let mut r = Raster::new(width, 525, rate / VGA.frame_hz(), 8.0);
+        r.push(&real(&env[MID_FRAME..]));
+        let picture = r.picture((0, 0), true);
+        // The active part of a 640x480 raster, which is where the screen is.
+        let active: Vec<u8> =
+            picture.chunks(width).take(480).flat_map(|row| row[..203].iter().copied()).collect();
+        let mean = active.iter().map(|v| *v as f32).sum::<f32>() / active.len() as f32;
+        let spread = (active.iter().map(|v| (*v as f32 - mean) * (*v as f32 - mean)).sum::<f32>()
+            / active.len() as f32)
+            .sqrt();
+        assert!(spread > 40.0, "the picture spans {spread:.1} counts of 255");
+        // And the blanking is still the darkest thing in it, so the picture
+        // has not simply been stretched over its own noise.
+        let blank: Vec<u8> =
+            picture.chunks(width).take(480).flat_map(|row| row[210..].iter().copied()).collect();
+        let dark = blank.iter().map(|v| *v as f32).sum::<f32>() / blank.len() as f32;
+        assert!(dark < mean, "the blanking read {dark:.0} against a picture of {mean:.0}");
     }
 
     #[test]

@@ -14,7 +14,7 @@ the code is in the commit log.
 - Text field right-click menu with cut, copy, paste and select all.
 - Display signal leakage read as pictures, TempestSDR-style, with the video mode found automatically or named.
 - Display leakage block in the scanner table, on the cable clock of every display mode.
-- Display leakage read coherently: the pixel clock harmonic is mixed to nothing and frames are averaged as complex samples, which reads a screen the envelope search cannot find at all.
+- Display leakage read coherently: the pixel clock harmonic is mixed to nothing and frames are averaged as complex samples, legible enough to read a clock off a screen from across the room.
 - KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
 - SpyServer directory: public servers listed by frequency and free slot, silent ones hidden, opened with TUNE.
 - IQStream directory on nostr, listed from the receiver or wave1090 `--iqstream-list`, opened with TUNE.
