@@ -11,7 +11,7 @@ use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
-const SYSTEM: &str = "screen";
+const SYSTEM: &str = "display leakage";
 
 pub struct TempestNode {
     reader: Reader,
@@ -219,9 +219,6 @@ impl Protocol for Tempest {
     fn outputs(&self) -> &'static [PortKind] {
         &[PortKind::Video]
     }
-    fn stage_label(&self, hz: f64) -> String {
-        format!("{:.3} SCREEN", hz / 1e6)
-    }
     fn chain(&self, _at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name)]
     }
@@ -236,7 +233,7 @@ const AUTO: &str = "auto";
 
 pub const DESC: StageDesc = StageDesc {
     name: "tempest",
-    summary: "A screen's picture off the harmonics of its pixel clock",
+    summary: "A display's picture off the leakage from its cable",
     category: Category::Decode,
     feeds_bus: false,
 };
@@ -320,7 +317,7 @@ mod tests {
         );
         assert_eq!(frames.len(), 2, "pictures in half a second");
         let f = &frames[0];
-        assert_eq!(f.system, "screen");
+        assert_eq!(f.system, "display leakage");
         assert_eq!(f.label.as_deref(), Some("1280x1024 60 Hz"));
         assert_eq!((f.width, f.height), (313, 1066));
         assert_eq!(f.samples.len(), 313 * 1066);

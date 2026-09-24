@@ -1124,7 +1124,7 @@ range = 5725 - 5875 MHz
 span  = 250 kHz
 front = auto
 
-[Screen]
+[Display leakage]
 # A screen leaks at the clock its cable runs at and at every multiple of it.
 # For HDMI and DVI the cable runs ten times the pixel clock, ten bits going
 # out per pixel, and that is where the picture is: off air a 1920x1080 panel
@@ -1191,7 +1191,8 @@ mod tests {
     #[test]
     fn every_display_mode_is_a_channel_of_the_screen_block() {
         let table = Scanners::default();
-        let screen = table.list.iter().find(|b| b.name == "Screen").expect("a screen block");
+        let screen =
+            table.list.iter().find(|b| b.name == "Display leakage").expect("a screen block");
         assert_eq!(screen.front.key(), "tempest");
         assert!(
             screen.min_rate <= 4e6,
@@ -1227,11 +1228,11 @@ mod tests {
                 .active(Span::whole(center, 20e6))
                 .iter()
                 .map(|b| b.name.as_str())
-                .filter(|n| *n == "Screen")
+                .filter(|n| *n == "Display leakage")
                 .collect()
         };
-        assert_eq!(running(1485e6), ["Screen"], "the 1920x1080 cable clock");
-        assert_eq!(running(1080e6), ["Screen"], "the 1280x1024 cable clock");
+        assert_eq!(running(1485e6), ["Display leakage"], "the 1920x1080 cable clock");
+        assert_eq!(running(1080e6), ["Display leakage"], "the 1280x1024 cable clock");
         assert_eq!(running(1200e6), Vec::<&str>::new(), "no clock near 1200 MHz");
         // And it is placed on the clock the span holds rather than on the
         // protocol's own default, so the chain says which screen it is
@@ -1330,7 +1331,7 @@ mod tests {
                 "ISM 920",
                 "ISM 2.4",
                 "ISM 5.8",
-                "Screen"
+                "Display leakage"
             ]
         );
         // The GSM block ships off: it names a carrier nobody can know from

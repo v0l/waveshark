@@ -10,11 +10,11 @@ impl Signal for Tempest {
     }
 
     fn label(&self) -> &'static str {
-        "screen"
+        "display leakage"
     }
 
     fn aliases(&self) -> &'static [&'static str] {
-        &["tempestsdr", "van eck", "monitor"]
+        &["tempestsdr", "van eck", "monitor", "screen", "display"]
     }
 
     fn placement(&self) -> Placement {
