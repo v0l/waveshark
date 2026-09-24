@@ -84,6 +84,8 @@ const MIN_HANGOVER_BLOCKS: usize = 3;
 /// two equal: a stream opened on a transmission would sleep through it.
 const WARM_BLOCKS: u32 = 8;
 
+const FLOOR_MEMORY_S: f64 = 0.010;
+
 /// Fewest windows measured in a block, whatever the burst spacing says.
 ///
 /// The median needs something to be a median of. A DroneID burst is 720 us
@@ -200,6 +202,9 @@ pub struct ChannelGate {
     seen: u32,
     /// This block's window powers, sorted, so the median costs no allocation.
     windows: Vec<f32>,
+    floors: std::collections::VecDeque<(f32, usize)>,
+    past: Vec<f32>,
+    memory: usize,
 }
 
 impl ChannelGate {
@@ -212,6 +217,9 @@ impl ChannelGate {
             hold,
             seen: 0,
             windows: Vec::new(),
+            floors: std::collections::VecDeque::new(),
+            past: Vec::new(),
+            memory: (FLOOR_MEMORY_S * span.rate) as usize,
         }
     }
 
@@ -225,8 +233,10 @@ impl ChannelGate {
         let loudest = self.windows.iter().copied().fold(0.0f32, f32::max);
         self.windows.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = self.windows[self.windows.len() / 2].max(1e-20);
+        let floor = self.remembered().map_or(median, |r| r.min(median));
+        self.remember(median, span.measured);
         self.seen = self.seen.saturating_add(1);
-        if loudest > median * WAKE_RATIO || self.seen <= WARM_BLOCKS {
+        if loudest > floor * WAKE_RATIO || self.seen <= WARM_BLOCKS {
             // And never under two blocks whatever the time: the block after
             // the one that woke it is where a burst straddling the boundary
             // finishes, and what a burst still being collected is dropped
@@ -239,6 +249,23 @@ impl ChannelGate {
         self.active
     }
 
+    fn remembered(&mut self) -> Option<f32> {
+        self.past.clear();
+        self.past.extend(self.floors.iter().map(|f| f.0));
+        self.past.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.past.get(self.past.len() / 2).copied()
+    }
+
+    fn remember(&mut self, median: f32, samples: usize) {
+        self.floors.push_back((median, samples));
+        let mut held: usize = self.floors.iter().map(|f| f.1).sum();
+        while held > self.memory + samples
+            && let Some((_, n)) = self.floors.pop_front()
+        {
+            held -= n;
+        }
+    }
+
     /// Whether it was lit for the last block measured.
     pub fn lit(&self) -> bool {
         self.active
@@ -248,6 +275,7 @@ impl ChannelGate {
         self.active = true;
         self.hangover = self.hold;
         self.seen = 0;
+        self.floors.clear();
     }
 }
 
@@ -296,6 +324,20 @@ mod tests {
         span.measure(&block(rate, 131_072, 5e6, 40_000, 6_144, 0.2));
         assert!(on.awake(&span), "the channel the burst was on slept through it");
         assert!(!off.awake(&span), "a channel with nothing on it woke");
+    }
+
+    #[test]
+    fn a_2ms_burst_in_a_3ms_block_wakes_its_channel() {
+        let rate = 20_000_000.0;
+        let mut span = SpanGate::new(rate, 352e-6);
+        let mut gate = ChannelGate::new(&span, 3e6, 1e6);
+        for _ in 0..12 {
+            span.measure(&block(rate, 65_536, 0.0, 0, 0, 0.0));
+            gate.awake(&span);
+        }
+        assert!(!gate.awake(&span), "a quiet channel is not read");
+        span.measure(&block(rate, 65_536, 3e6, 10_000, 40_000, 0.2));
+        assert!(gate.awake(&span), "a 2 ms burst in a 3.3 ms block slept through");
     }
 
     /// And a channel with something on it in every block still has a floor

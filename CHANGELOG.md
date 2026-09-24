@@ -13,6 +13,10 @@ the code is in the commit log.
 
 - Scanner front ends and channels run out to the span edge, with no rolloff held back.
 
+### Fixed
+
+- 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
+
 ## [0.4.0] - 2026-09-24
 
 ### Added
