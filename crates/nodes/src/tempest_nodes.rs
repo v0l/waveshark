@@ -170,14 +170,7 @@ impl pipeline::node::Node for TempestNode {
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
-            MODE => {
-                self.forced = match &v {
-                    ParamValue::Choice(0) => None,
-                    ParamValue::Choice(i) => display::modes().get(i - 1),
-                    ParamValue::Text(t) => display::by_label(t),
-                    _ => None,
-                };
-            }
+            MODE => self.forced = mode_setting(Some(&v)),
             DEPTH => self.depth = v.as_i64().unwrap_or(DEFAULT_DEPTH).clamp(1, 64),
             NUDGE_X => self.nudge.0 = v.as_i64().unwrap_or(0),
             NUDGE_Y => self.nudge.1 = v.as_i64().unwrap_or(0),
@@ -239,10 +232,25 @@ pub const DESC: StageDesc = StageDesc {
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let mut n = TempestNode::new(display::by_label(s.str_or(MODE, AUTO)));
+    let mut n = TempestNode::new(mode_setting(s.get(MODE)));
     n.depth = s.i64_or(DEPTH, DEFAULT_DEPTH).clamp(1, 64);
     n.align = s.bool_or(ALIGN, true);
+    n.nudge = (s.i64_or(NUDGE_X, 0), s.i64_or(NUDGE_Y, 0));
     Ok(Box::new(n))
+}
+
+/// The mode a saved setting names, as a label or as a place in the list.
+///
+/// The interface sends a choice as its position, which is what a rebuild
+/// then reads back: a mode picked by hand was read as a label, found
+/// nothing, and the decoder went back to searching for the mode on every
+/// retune.
+fn mode_setting(v: Option<&ParamValue>) -> Option<&'static display::Mode> {
+    match v? {
+        ParamValue::Choice(0) => None,
+        ParamValue::Choice(i) => display::modes().get(i - 1),
+        other => other.as_str().filter(|t| *t != AUTO).and_then(display::by_label),
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +368,33 @@ mod tests {
         let mut n = TempestNode::default();
         assert!(Node::negotiate(&mut n, &[spec(2.4e6)]).is_err());
         assert!(Node::negotiate(&mut n, &[spec(MIN_RATE_HZ)]).is_ok());
+    }
+
+    /// A mode picked in the interface survives the rebuild that follows it.
+    ///
+    /// The interface sends a choice as its place in the list, and a rebuild
+    /// builds the stage again from its settings. Reading that back as a
+    /// label found nothing and left the decoder searching, so every retune
+    /// undid the operator's choice.
+    #[test]
+    fn a_mode_picked_by_hand_survives_a_rebuild() {
+        let at = display::modes()
+            .iter()
+            .position(|m| m.label() == "1920x1080 60 Hz")
+            .expect("the mode is in the table");
+        let mut settings = Settings::new();
+        settings.insert(MODE.into(), ParamValue::Choice(at + 1));
+        let built = build(&settings).expect("a screen decoder");
+        let mode = built.params().into_iter().find(|p| p.name == MODE).expect("the mode");
+        assert_eq!(mode.value, ParamValue::Choice(at + 1), "the choice came back as auto");
+
+        // A file that named the mode in words is read the same way, and so
+        // is one that says nothing.
+        let mut named = Settings::new();
+        named.insert(MODE.into(), ParamValue::Text("1024x768 60 Hz".into()));
+        assert_eq!(mode_setting(named.get(MODE)).map(|m| m.total_height), Some(806));
+        assert_eq!(mode_setting(None), None);
+        assert_eq!(mode_setting(Some(&ParamValue::Choice(0))), None, "auto is the first choice");
     }
 
     #[test]

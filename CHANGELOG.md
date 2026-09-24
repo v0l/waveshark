@@ -218,6 +218,7 @@ the code is in the commit log.
 
 - Key that never took while a stage in the graph refused the span.
 - Span claims from a decoder reported as faults on the waterfall every time it locked.
+- Display mode picked by hand went back to auto on the next retune.
 - GT-TMBBQ05 thermometers read out of noise and other sensors' bursts.
 - Auto mode opened sources across the whole band after a transmitter clipped the receiver.
 - Call list airtime climbing with no channel open, and calls that never ended.
