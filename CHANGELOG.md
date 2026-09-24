@@ -9,6 +9,8 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-24
+
 ### Added
 
 - `wave1090`, a Mode S receiver on dump1090's AVR, BaseStation and Beast
@@ -702,7 +704,8 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/v0l/waveshark/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/v0l/waveshark/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/v0l/waveshark/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/v0l/waveshark/releases/tag/v0.1.0
