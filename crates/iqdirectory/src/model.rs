@@ -143,7 +143,15 @@ pub struct Entry {
     pub host: String,
     pub port: u16,
     pub data_port: Option<u16>,
+    pub also: Vec<std::net::SocketAddr>,
     pub station: Station,
+}
+
+pub fn private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
 }
 
 impl Entry {
@@ -197,7 +205,13 @@ pub(crate) mod tests {
     }
 
     pub fn entry(host: &str, tuners: Vec<Tuner>) -> Entry {
-        Entry { host: host.into(), port: 5557, data_port: None, station: station(tuners) }
+        Entry {
+            host: host.into(),
+            port: 5557,
+            data_port: None,
+            also: Vec::new(),
+            station: station(tuners),
+        }
     }
 
     #[test]

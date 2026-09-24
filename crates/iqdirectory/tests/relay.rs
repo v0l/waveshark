@@ -10,6 +10,7 @@ fn entry(host: &str, center_hz: u64) -> Entry {
         host: host.into(),
         port: 5557,
         data_port: None,
+        also: Vec::new(),
         station: Station {
             name: host.into(),
             description: String::new(),

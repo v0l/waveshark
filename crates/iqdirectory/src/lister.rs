@@ -1,4 +1,5 @@
 use crate::event::ANNOUNCE_EVERY_SECS;
+use crate::model::private;
 use crate::portmap::PortMap;
 use crate::{Directory, Entry, Hardware, Keys, Location, Station, Tuner, Version};
 use std::net::SocketAddr;
@@ -116,6 +117,7 @@ pub fn entry(
     host: &str,
     port: u16,
     data_port: Option<u16>,
+    also: Vec<SocketAddr>,
     server: &iqstream::Server,
 ) -> Entry {
     let streams = server.streams();
@@ -134,6 +136,7 @@ pub fn entry(
         host: host.to_string(),
         port,
         data_port,
+        also,
         station: Station {
             name: listing.name.clone(),
             description: listing.description.clone(),
@@ -170,9 +173,16 @@ async fn run(
                     addr: SocketAddr::new(host.parse().unwrap_or(server.addr().ip()), port),
                     data_port,
                 }));
+                let also: Vec<SocketAddr> = listing
+                    .public_host
+                    .is_none()
+                    .then(|| lan_addr(server.addr()))
+                    .flatten()
+                    .into_iter()
+                    .collect();
                 announce(
                     &listing,
-                    &entry(&listing, &host, port, data_port, &server),
+                    &entry(&listing, &host, port, data_port, also, &server),
                     &mut dir,
                     &mut announced,
                 )
@@ -200,6 +210,32 @@ async fn run(
     server.set_public(None);
     if let Some((_, dir)) = dir {
         dir.shutdown().await;
+    }
+}
+
+pub fn lan_addr(bound: SocketAddr) -> Option<SocketAddr> {
+    let ip = match bound.ip().is_unspecified() {
+        false => bound.ip(),
+        true => {
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            probe.connect("192.0.2.1:9").ok()?;
+            probe.local_addr().ok()?.ip()
+        }
+    };
+    private(ip).then_some(SocketAddr::new(ip, bound.port()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lan_address_is_only_ever_a_private_one() {
+        let at = |a: &str| lan_addr(a.parse().unwrap());
+        assert_eq!(at("10.1.2.3:1234"), Some("10.1.2.3:1234".parse().unwrap()));
+        assert_eq!(at("203.0.113.9:1234"), None);
+        assert_eq!(at("127.0.0.1:1234"), None);
+        assert!(at("0.0.0.0:1234").is_none_or(|a| a.port() == 1234 && private(a.ip())));
     }
 }
 

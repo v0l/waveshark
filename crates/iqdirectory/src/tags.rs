@@ -13,6 +13,7 @@ pub fn encode(entry: &Entry) -> Vec<Tag> {
         tags.push(Tag::custom("description", [s.description.as_str()]));
     }
     tags.push(Tag::custom("r", [format!("{SCHEME}{}", entry.addr())]));
+    tags.extend(entry.also.iter().map(|a| Tag::custom("r", [format!("{SCHEME}{a}")])));
     if let Some(p) = entry.data_port {
         tags.push(Tag::custom("data_port", [p.to_string()]));
     }
@@ -70,10 +71,15 @@ pub fn decode<'a>(tags: impl Iterator<Item = &'a Tag> + Clone) -> Result<Entry, 
             .map(|v| v.parse().map_err(|_| format!("{key} {v:?} is not a number")))
             .transpose()
     };
-    let (host, port) = first("r")
-        .and_then(|r| r.strip_prefix(SCHEME))
-        .and_then(host_port)
-        .ok_or("no iqstream:// address in an r tag")?;
+    let mut addrs = tags
+        .clone()
+        .filter(|t| t.kind() == "r")
+        .filter_map(|t| t.content())
+        .filter_map(|r| r.trim().strip_prefix(SCHEME))
+        .filter_map(host_port);
+    let (host, port) = addrs.next().ok_or("no iqstream:// address in an r tag")?;
+    let also: Vec<std::net::SocketAddr> =
+        addrs.filter_map(|(h, p)| Some(std::net::SocketAddr::new(h.parse().ok()?, p))).collect();
     let version = first("version").and_then(version).ok_or("no protocol version")?;
     let location = tags
         .clone()
@@ -91,6 +97,7 @@ pub fn decode<'a>(tags: impl Iterator<Item = &'a Tag> + Clone) -> Result<Entry, 
         host,
         port,
         data_port: number("data_port")?.map(|p| p as u16),
+        also,
         station: Station {
             name: first("name").unwrap_or_default().to_string(),
             description: first("description").unwrap_or_default().to_string(),
@@ -154,8 +161,11 @@ mod tests {
 
     #[test]
     fn a_station_is_published_as_tags_with_one_tuner_tag_per_tuner() {
-        let e =
-            Entry { data_port: Some(40_001), ..entry("sdr.example.net", vec![airband(), hf()]) };
+        let e = Entry {
+            data_port: Some(40_001),
+            also: vec!["10.100.2.249:1234".parse().unwrap()],
+            ..entry("sdr.example.net", vec![airband(), hf()])
+        };
         let tags = encode(&e);
         let v = Version::OURS;
         let version = format!("{}.{}", v.major, v.minor);
@@ -165,6 +175,7 @@ mod tests {
                 vec!["name", "G0ABC"],
                 vec!["description", "Loft, Reading"],
                 vec!["r", "iqstream://sdr.example.net:5557"],
+                vec!["r", "iqstream://10.100.2.249:1234"],
                 vec!["data_port", "40001"],
                 vec!["version", &version],
                 vec!["clients", "1"],
@@ -205,7 +216,11 @@ mod tests {
 
     #[test]
     fn the_tags_read_back_to_the_station_with_its_location_to_the_finest_geohash() {
-        let e = Entry { data_port: Some(40_001), ..entry("2001:db8::7", vec![airband(), hf()]) };
+        let e = Entry {
+            data_port: Some(40_001),
+            also: vec!["[fd00::7]:1234".parse().unwrap(), "10.0.0.7:1234".parse().unwrap()],
+            ..entry("2001:db8::7", vec![airband(), hf()])
+        };
         let back = decode(encode(&e).iter()).unwrap();
         let at = back.station.location.unwrap();
         assert!((at.lat - 51.45).abs() < 0.022 && (at.lon - -0.97).abs() < 0.022, "{at:?}");
@@ -241,6 +256,25 @@ mod tests {
         assert_eq!(
             with(&["tuner", "id 0", "type hackrf", "center x", "rate 2"]).unwrap_err(),
             "tuner center \"x\" is not a number"
+        );
+    }
+
+    #[test]
+    fn the_first_address_is_the_station_and_the_rest_are_other_ways_to_it() {
+        let e = parsed(&[
+            &["r", "https://sdr.example.net"],
+            &["r", "iqstream://83.71.105.199:53956"],
+            &["version", "1.5"],
+            &["r", "iqstream://10.100.2.249:1234"],
+            &["r", "iqstream://sdr.lan:1234"],
+            &["r", "iqstream://[fd00::7]:1234"],
+        ])
+        .unwrap();
+        assert_eq!(e.addr(), "83.71.105.199:53956", "the first iqstream one, not the first r");
+        assert_eq!(
+            e.also,
+            ["10.100.2.249:1234".parse().unwrap(), "[fd00::7]:1234".parse().unwrap()],
+            "a name that is not an address is skipped rather than resolved"
         );
     }
 

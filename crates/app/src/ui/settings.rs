@@ -3083,7 +3083,8 @@ impl App {
                         for f in &kept {
                             if station_card(ui, f, connecting.is_none()) {
                                 let at = match f.heard {
-                                    crate::stations::Heard::Ours(local) => local.to_string(),
+                                    crate::stations::Heard::Ours(local)
+                                    | crate::stations::Heard::Near(local) => local.to_string(),
                                     _ => f.listing.entry.addr(),
                                 };
                                 tune = Some((at, f.listing.entry.station.name.clone()));
@@ -4139,6 +4140,9 @@ fn station_card(ui: &mut egui::Ui, f: &crate::stations::Found, idle: bool) -> bo
             match f.heard {
                 crate::stations::Heard::Ours(local) => {
                     said.push(format!("this receiver, reached here at {local}"))
+                }
+                crate::stations::Heard::Near(lan) => {
+                    said.push(format!("on this network, reached here at {lan}"))
                 }
                 crate::stations::Heard::Unchecked => said.push("not yet checked".into()),
                 crate::stations::Heard::Answered | crate::stations::Heard::Silent => {}

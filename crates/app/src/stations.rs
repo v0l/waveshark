@@ -10,6 +10,7 @@ const PROBERS: usize = 10;
 pub enum Heard {
     Unchecked,
     Ours(SocketAddr),
+    Near(SocketAddr),
     Answered,
     Silent,
 }
@@ -17,7 +18,7 @@ pub enum Heard {
 impl Heard {
     pub fn answered(&self) -> bool {
         match self {
-            Heard::Ours(_) | Heard::Answered => true,
+            Heard::Ours(_) | Heard::Near(_) | Heard::Answered => true,
             Heard::Unchecked | Heard::Silent => false,
         }
     }
@@ -25,9 +26,10 @@ impl Heard {
     fn rank(&self) -> u8 {
         match self {
             Heard::Ours(_) => 0,
-            Heard::Answered => 1,
-            Heard::Unchecked => 2,
-            Heard::Silent => 3,
+            Heard::Near(_) => 1,
+            Heard::Answered => 2,
+            Heard::Unchecked => 3,
+            Heard::Silent => 4,
         }
     }
 }
@@ -149,16 +151,23 @@ fn probe(
 ) -> Vec<Heard> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let heard: Vec<Mutex<Heard>> = listings.iter().map(|_| Mutex::new(Heard::Silent)).collect();
+    let home = own.and_then(|o| listings.iter().find(|l| l.author == o.author));
+    let home = home.map(|l| l.entry.host.clone());
     std::thread::scope(|scope| {
         for _ in 0..PROBERS.min(listings.len()) {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(l) = listings.get(i) else { break };
-                    let ours = own.filter(|o| o.author == l.author);
-                    let at = ours.map_or_else(|| l.entry.addr(), |o| o.local.to_string());
-                    if answers(&at) {
-                        *heard[i].lock() = ours.map_or(Heard::Answered, |o| Heard::Ours(o.local));
+                    let tries: Vec<(String, Heard)> = match own.filter(|o| o.author == l.author) {
+                        Some(o) => vec![(o.local.to_string(), Heard::Ours(o.local))],
+                        None if home.as_ref() == Some(&l.entry.host) => {
+                            l.entry.also.iter().map(|a| (a.to_string(), Heard::Near(*a))).collect()
+                        }
+                        None => vec![(l.entry.addr(), Heard::Answered)],
+                    };
+                    if let Some((_, found)) = tries.into_iter().find(|(at, _)| answers(at)) {
+                        *heard[i].lock() = found;
                     }
                 }
             });
@@ -197,6 +206,7 @@ mod tests {
                 host: host.into(),
                 port: 1234,
                 data_port: None,
+                also: Vec::new(),
                 station: Station {
                     name: name.into(),
                     description: String::new(),
@@ -299,6 +309,49 @@ mod tests {
             .collect();
         assert_eq!(names, ["mine", "other"]);
         assert_eq!(tally(&found), (2, 2, 2));
+    }
+
+    #[test]
+    fn a_station_behind_the_same_router_is_asked_on_its_other_addresses() {
+        let mine = listing("mine", "83.71.105.199", 1, Dial::Fixed);
+        let radarpi = Listing {
+            entry: Entry {
+                also: vec!["10.9.9.9:1234".parse().unwrap(), "10.100.2.249:1234".parse().unwrap()],
+                ..listing("radarpi", "83.71.105.199", 1, Dial::Fixed).entry
+            },
+            ..listing("radarpi", "83.71.105.199", 1, Dial::Fixed)
+        };
+        let elsewhere = Listing {
+            entry: Entry {
+                also: vec!["10.100.2.249:1234".parse().unwrap()],
+                ..listing("elsewhere", "203.0.113.9", 1, Dial::Fixed).entry
+            },
+            ..listing("elsewhere", "203.0.113.9", 1, Dial::Fixed)
+        };
+        let own = Own { author: mine.author, local: "127.0.0.1:1234".parse().unwrap() };
+        let asked = Mutex::new(Vec::new());
+        let all = [mine.clone(), radarpi.clone(), elsewhere.clone()];
+        let heard = probe(&all, Some(own), |addr| {
+            asked.lock().push(addr.to_string());
+            addr != "10.9.9.9:1234"
+        });
+        let mut asked = asked.into_inner();
+        asked.sort();
+        assert_eq!(
+            asked,
+            ["10.100.2.249:1234", "10.9.9.9:1234", "127.0.0.1:1234", "203.0.113.9:1234"],
+            "a stranger's other addresses are never asked, however private they look"
+        );
+        assert_eq!(
+            heard,
+            [
+                Heard::Ours(own.local),
+                Heard::Near("10.100.2.249:1234".parse().unwrap()),
+                Heard::Answered
+            ]
+        );
+        let alone = probe(&[radarpi], None, |addr| addr == "83.71.105.199:1234");
+        assert_eq!(alone, [Heard::Answered], "without a listing of its own it cannot tell");
     }
 
     #[test]
