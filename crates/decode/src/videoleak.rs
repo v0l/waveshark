@@ -427,11 +427,19 @@ mod tests {
             (lo - 31_468.75 * 0.8).abs() < 100.0,
             "{lo} is not 640x480's line rate less a fifth"
         );
-        assert!((hi - 135_000.0 * 1.2).abs() < 100.0, "{hi} is not 4K60's line rate and a fifth");
+        assert!(
+            (hi - 182_879.6 * 1.2).abs() < 200.0,
+            "{hi} is not the 49 inch ultrawide's line rate and a fifth"
+        );
         for m in display::modes() {
             assert!((lo..=hi).contains(&m.line_hz()), "{} is outside the range", m.label());
         }
-        assert!(!(lo..=hi).contains(&191_704.0), "the off-air false lock is still allowed");
+        // 191.704 kHz was an off-air false lock, and it now sits inside the
+        // range, because a 5120x1440 screen at 120 Hz runs 182.9 kHz a line
+        // and the ceiling has to clear it. What refuses that lock is the
+        // clarity of its frame, not its rate.
+        assert!((lo..=hi).contains(&191_704.0));
+        assert!(!(lo..=hi).contains(&300_000.0), "nothing runs 300 kHz a line");
     }
 
     #[test]

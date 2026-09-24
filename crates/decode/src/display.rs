@@ -189,6 +189,14 @@ pub fn modes() -> &'static [Mode] {
             pixel_clock_hz: 241_500_000,
         },
         Mode {
+            width: 5120,
+            height: 1440,
+            total_width: 5400,
+            total_height: 1524,
+            refresh_centihz: 12000,
+            pixel_clock_hz: 987_550_000,
+        },
+        Mode {
             width: 3840,
             height: 2160,
             total_width: 4400,
@@ -237,7 +245,7 @@ mod tests {
             assert!(m.total_width > m.width, "{} has no horizontal blanking", m.label());
             assert!(m.total_height > m.height, "{} has no vertical blanking", m.label());
         }
-        assert_eq!(modes().len(), 21, "modes in the table");
+        assert_eq!(modes().len(), 22, "modes in the table");
     }
 
     #[test]
@@ -252,6 +260,9 @@ mod tests {
         // 21:9 at 1080 and at 1440.
         assert_eq!(named(59.98, 1111).as_deref(), Some("2560x1080 60 Hz"));
         assert_eq!(named(59.97, 1481).as_deref(), Some("3440x1440 60 Hz"));
+        // A 49 inch ultrawide at 120, which is the fastest thing in the
+        // table and the only one over 100 Hz.
+        assert_eq!(named(120.0, 1524).as_deref(), Some("5120x1440 120 Hz"));
         assert_eq!(named(50.0, 1125).as_deref(), Some("1920x1080 50 Hz"));
         assert_eq!(named(60.0, 999), None);
         assert_eq!(named(72.0, 1125), None);

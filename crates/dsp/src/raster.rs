@@ -35,7 +35,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { frame_hz: (49.0, 87.0), lines: (400, 2400), line_hz: (20e3, 150e3) }
+        Self { frame_hz: (49.0, 145.0), lines: (400, 2400), line_hz: (20e3, 250e3) }
     }
 }
 
