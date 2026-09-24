@@ -13,6 +13,7 @@ the code is in the commit log.
 
 - Text field right-click menu with cut, copy, paste and select all.
 - TempestSDR-style screen pictures off a monitor's cable emissions, with the video mode found automatically or named.
+- Screen block in the scanner table, on the cable clock of every display mode, so a screen is looked for wherever one leaks.
 - KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
 - SpyServer directory: public servers listed by frequency and free slot, silent ones hidden, opened with TUNE.
 - Aircraft registration and type on the map's track table, from the Mictronics database.

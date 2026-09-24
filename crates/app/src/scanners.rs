@@ -163,6 +163,17 @@ impl Front {
         self.proto().is_some_and(|p| !p.shape().span_wide)
     }
 
+    /// Whether the channels a block lists are alternatives rather than a
+    /// set the front end needs all of.
+    ///
+    /// AIS needs both of its, because stations alternate and a receiver
+    /// holding one hears half the traffic. A decoder with nowhere of its
+    /// own is the other case: the clocks a screen might run are places to
+    /// look, and any one of them inside the span is a reason to look there.
+    pub fn any_channel_will_do(&self) -> bool {
+        self.proto().is_some_and(|p| matches!(p.placement(), nodes::protocol::Placement::Anywhere))
+    }
+
     /// The same front end moved to another frequency.
     ///
     /// Every protocol front end has one, span wide or not: a camera reads
@@ -296,7 +307,7 @@ impl Scanner {
         // whichever channels are in the span. AIS is the other case, where
         // both channels are one front end and half of them is half the
         // traffic, so there it is all of them or none.
-        if self.front.reads_one_channel() {
+        if self.front.reads_one_channel() || self.front.any_channel_will_do() {
             return self.channels.iter().any(|c| (c - center).abs() <= edge);
         }
         self.channels.iter().all(|c| (c - center).abs() <= edge)
@@ -341,7 +352,7 @@ impl Span {
 /// block up. Without it the file is written once, on the first run, and a
 /// front end added later never runs for anybody who already had one: BLE
 /// shipped, and every existing installation quietly had no Bluetooth.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// The scanners, in the order they are consulted.
 #[derive(Clone, PartialEq, Debug)]
@@ -464,6 +475,19 @@ impl Scanners {
                     if !out.iter().any(|e| e.front == front) {
                         out.push(FrontAt { front, band });
                     }
+                }
+                continue;
+            }
+            // One front end for a decoder that reads the span, put on
+            // whichever of the channels it lists the span holds, so the
+            // chain says which clock it is looking at rather than the
+            // protocol's own default.
+            if s.front.any_channel_will_do()
+                && let Some(hz) = s.covered(at.center, at.usable).first().copied()
+            {
+                let front = s.front.at(hz);
+                if !out.iter().any(|e| e.front.key() == front.key()) {
+                    out.push(FrontAt { front, band });
                 }
                 continue;
             }
@@ -1099,6 +1123,27 @@ front = auto
 range = 5725 - 5875 MHz
 span  = 250 kHz
 front = auto
+
+[Screen]
+# A screen leaks at the clock its cable runs at and at every multiple of it.
+# For HDMI and DVI the cable runs ten times the pixel clock, ten bits going
+# out per pixel, and that is where the picture is: off air a 1920x1080 panel
+# read as blanking and nothing else at 594 MHz, the fourth multiple of its
+# 148.5 MHz pixel clock, and showed its windows at 1485. So the channels are
+# the cable clocks of the modes this build knows, and any one of them inside
+# the span is a reason to look. A screen whose cable clock is past what the
+# radio tunes is still there lower down: divide by ten and take whichever
+# multiple of the pixel clock lands in the span.
+#
+# DisplayPort is not here. That cable runs a link rate of its own, scrambled
+# and unrelated to the pixel clock, so the picture is not on it to find:
+# 5120x1440 at 120 is in the mode table and has no channel, its cable clock
+# being 9.9 GHz and its panels DisplayPort.
+range    = 240 - 5950 MHz
+span     = 4 MHz
+front    = tempest
+channels = 251.75 MHz, 315 MHz, 400 MHz, 495 MHz, 650 MHz, 742.5 MHz, 787.5 MHz, 855 MHz, 1065 MHz, 1080 MHz, 1350 MHz, 1462.5 MHz, 1485 MHz, 1540 MHz, 1620 MHz, 1812.5 MHz, 2415 MHz, 3197.5 MHz, 5940 MHz
+margin   = 2 MHz
 ";
 
 #[cfg(test)]
@@ -1133,6 +1178,77 @@ mod tests {
         again.list.retain(|s| s.name != "ISM 2.4");
         assert!(!again.take_new_blocks());
         assert!(!again.list.iter().any(|s| s.name == "ISM 2.4"));
+    }
+
+    /// Every display mode the receiver knows is a channel of the screen
+    /// block, on the clock its cable runs at, which for HDMI and DVI is ten
+    /// times the pixel clock.
+    ///
+    /// The two tables are written in different crates and would otherwise
+    /// drift: a mode added to `decode::display` with no channel here is a
+    /// screen the scanner never looks for. The exception is a cable clock
+    /// past 6 GHz, which no radio here tunes.
+    #[test]
+    fn every_display_mode_is_a_channel_of_the_screen_block() {
+        let table = Scanners::default();
+        let screen = table.list.iter().find(|b| b.name == "Screen").expect("a screen block");
+        assert_eq!(screen.front.key(), "tempest");
+        assert!(
+            screen.min_rate <= 4e6,
+            "{} MS/s is more than a screen needs",
+            screen.min_rate / 1e6
+        );
+        let mut covered = 0;
+        for m in decode::display::modes() {
+            let cable = m.pixel_clock_hz as f64 * 10.0;
+            if cable > 6e9 {
+                continue;
+            }
+            assert!(
+                screen.channels.iter().any(|c| (c - cable).abs() < 1.0),
+                "{} leaks at {:.3} MHz and no channel looks there",
+                m.label(),
+                cable / 1e6
+            );
+            covered += 1;
+        }
+        assert_eq!(covered, 21, "modes with a channel");
+        assert_eq!(screen.channels.len(), 19, "channels, one per distinct cable clock");
+    }
+
+    /// The clocks are alternatives, not a set. A span holding one of them
+    /// runs the block; AIS is the other case, where a span holding one of
+    /// its two channels hears half the traffic and the block waits for both.
+    #[test]
+    fn one_cable_clock_in_the_span_is_enough_to_look_for_a_screen() {
+        let table = Scanners::default();
+        let running = |center: f64| -> Vec<&str> {
+            table
+                .active(Span::whole(center, 20e6))
+                .iter()
+                .map(|b| b.name.as_str())
+                .filter(|n| *n == "Screen")
+                .collect()
+        };
+        assert_eq!(running(1485e6), ["Screen"], "the 1920x1080 cable clock");
+        assert_eq!(running(1080e6), ["Screen"], "the 1280x1024 cable clock");
+        assert_eq!(running(1200e6), Vec::<&str>::new(), "no clock near 1200 MHz");
+        // And it is placed on the clock the span holds rather than on the
+        // protocol's own default, so the chain says which screen it is
+        // looking for.
+        let fronts = table.fronts(Span::whole(1485e6, 20e6));
+        let screen =
+            fronts.iter().find(|f| f.front.key() == "tempest").expect("a screen front end");
+        assert_eq!(screen.front, Front::Protocol { id: "tempest", hz: 1485e6 });
+        assert_eq!(
+            table
+                .fronts(Span::whole(1485e6, 20e6))
+                .iter()
+                .filter(|f| f.front.key() == "tempest")
+                .count(),
+            1,
+            "one screen decoder, not one per clock"
+        );
     }
 
     #[test]
@@ -1213,7 +1329,8 @@ mod tests {
                 "ISM 915",
                 "ISM 920",
                 "ISM 2.4",
-                "ISM 5.8"
+                "ISM 5.8",
+                "Screen"
             ]
         );
         // The GSM block ships off: it names a carrier nobody can know from
