@@ -14,8 +14,12 @@ fn main() {
     let mut f = std::fs::File::open(&path).expect("open");
     let mut raw = Vec::new();
     f.read_to_end(&mut raw).expect("read");
+    let fmt = match path.ends_with(".cs8") {
+        true => SampleFormat::Cs8,
+        false => SampleFormat::Cs16,
+    };
     let mut iq: Vec<C32> = Vec::new();
-    SampleFormat::Cs16.convert(&raw, &mut iq);
+    fmt.convert(&raw, &mut iq);
     println!("{} samples at {rate}", iq.len());
 
     let mut reader = Reader::new(rate);

@@ -166,6 +166,22 @@ pub fn modes() -> &'static [Mode] {
         },
         Mode {
             width: 2560,
+            height: 1080,
+            total_width: 2720,
+            total_height: 1111,
+            refresh_centihz: 5998,
+            pixel_clock_hz: 181_250_000,
+        },
+        Mode {
+            width: 3440,
+            height: 1440,
+            total_width: 3600,
+            total_height: 1481,
+            refresh_centihz: 5997,
+            pixel_clock_hz: 319_750_000,
+        },
+        Mode {
+            width: 2560,
             height: 1440,
             total_width: 2720,
             total_height: 1481,
@@ -221,7 +237,7 @@ mod tests {
             assert!(m.total_width > m.width, "{} has no horizontal blanking", m.label());
             assert!(m.total_height > m.height, "{} has no vertical blanking", m.label());
         }
-        assert_eq!(modes().len(), 19, "modes in the table");
+        assert_eq!(modes().len(), 21, "modes in the table");
     }
 
     #[test]
@@ -232,6 +248,10 @@ mod tests {
         assert_eq!(named(60.02, 1066).as_deref(), Some("1280x1024 60 Hz"));
         assert_eq!(named(60.0, 1125).as_deref(), Some("1920x1080 60 Hz"));
         assert_eq!(named(60.0, 2250).as_deref(), Some("3840x2160 60 Hz"));
+        // The ultrawides, which share no line count with anything else:
+        // 21:9 at 1080 and at 1440.
+        assert_eq!(named(59.98, 1111).as_deref(), Some("2560x1080 60 Hz"));
+        assert_eq!(named(59.97, 1481).as_deref(), Some("3440x1440 60 Hz"));
         assert_eq!(named(50.0, 1125).as_deref(), Some("1920x1080 50 Hz"));
         assert_eq!(named(60.0, 999), None);
         assert_eq!(named(72.0, 1125), None);
