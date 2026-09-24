@@ -349,15 +349,12 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
                         Some(c) => format!("{called} {:.3} MHz", c.as_f64() / 1e6),
                         None => format!("{called} ({})", p.tuner),
                     },
-                    rates: match (p.rate, p.rates.first(), p.rates.last()) {
-                        (Some(rate), _, _) => rate..=rate,
-                        (None, Some(lo), Some(hi)) => *lo..=*hi,
+                    rates: match (p.rates.first(), p.rates.last(), p.rate) {
+                        (Some(lo), Some(hi), _) => *lo..=*hi,
+                        (_, _, Some(rate)) => rate..=rate,
                         _ => RTL_RATES,
                     },
-                    steps: match p.rate {
-                        Some(_) => Vec::new(),
-                        None => p.rates,
-                    },
+                    steps: p.rates,
                     addr: Some(p.addr),
                     proto: Some(r.proto),
                     path: None,

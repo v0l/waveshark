@@ -167,18 +167,9 @@ impl ServedTunerNode {
         let entry = pick(&self.radio).ok_or_else(|| {
             common::Error::other(format!("no radio matching {:?} is attached", self.radio))
         })?;
-        let mut dev = crate::devices::open(&entry)?;
-
         let rate = self.rate.unwrap_or_else(|| DEFAULT_RATE.min(*entry.rates.end()));
-        dev.set_rate(rate)?;
-        if let Some(c) = self.center {
-            dev.set_dial(c)?;
-        }
-        // Whatever the driver will pick for itself: a served dongle has no
-        // operator here to turn a gain up, and one left at zero reads nothing.
-        for stage in dev.info().gain_stages.clone() {
-            let _ = dev.set_gain(&stage.name, GainMode::Auto);
-        }
+        let dev = opened_at(&entry, rate, self.center)?;
+        let rates = served_rates(dev.info(), rate);
 
         let addr = self
             .address
@@ -195,7 +186,7 @@ impl ServedTunerNode {
             center_hz: dev.center().0,
             sample_rate: dev.rate().0 as u32,
             gain_db: None,
-            settings: settings_of(dev.as_ref()),
+            settings: served_settings(dev.as_ref(), &rates),
             // Always, and this is the difference from the receiver's own span:
             // nothing here is listening to this radio, so moving it disturbs
             // nobody.
@@ -212,7 +203,7 @@ impl ServedTunerNode {
             .name("iqstream-tuner".into())
             .spawn(move || {
                 let (tuner, stop, blocks, ended) = pumping;
-                let why = match pump(dev, &tuner, &stop, &blocks) {
+                let why = match pump(dev, &entry, &rates, &tuner, &stop, &blocks) {
                     Ok(()) => return,
                     Err(e) => e.to_string(),
                 };
@@ -224,6 +215,60 @@ impl ServedTunerNode {
 
         Ok(Serving { label, tuner, server, stop, blocks, ended })
     }
+}
+
+fn opened_at(
+    entry: &crate::devices::Entry,
+    rate: Sps,
+    center: Option<Hz>,
+) -> Result<Box<dyn Device>> {
+    let mut dev = crate::devices::open(entry)?;
+    dev.set_rate(rate)?;
+    if let Some(c) = center {
+        dev.set_dial(c)?;
+    }
+    // Whatever the driver will pick for itself: a served dongle has no
+    // operator here to turn a gain up, and one left at zero reads nothing.
+    for stage in dev.info().gain_stages.clone() {
+        let _ = dev.set_gain(&stage.name, GainMode::Auto);
+    }
+    Ok(dev)
+}
+
+fn served_rates(info: &common::device::DeviceInfo, ceiling: Sps) -> Vec<u32> {
+    let listed: Vec<Sps> = match info.rates.is_empty() {
+        true => crate::devices::spans_for(&info.rate_range)
+            .into_iter()
+            .map(|(_, r)| Sps(r as u64))
+            .collect(),
+        false => info.rates.clone(),
+    };
+    let mut rates: Vec<u32> = listed
+        .into_iter()
+        .chain(std::iter::once(ceiling))
+        .filter(|r| *r <= ceiling && info.rate_range.contains(r))
+        .map(|r| r.0 as u32)
+        .collect();
+    rates.sort_unstable();
+    rates.dedup();
+    rates
+}
+
+fn served_settings(dev: &dyn Device, rates: &[u32]) -> Vec<Setting> {
+    let mut s = settings_of(dev);
+    if rates.len() > 1 {
+        s.push(Setting::rate_choice(dev.rate().0 as u32, rates));
+    }
+    s
+}
+
+fn asked_rate(ask: &iqstream::Ask, rates: &[u32]) -> Option<Sps> {
+    if ask.name != iqstream::RATE_SETTING {
+        return None;
+    }
+    let SettingValue::Choice(v) = &ask.value else { return None };
+    let r: u32 = v.parse().ok()?;
+    rates.contains(&r).then_some(Sps(r as u64))
 }
 
 /// What the radio is set to, in the terms the protocol carries.
@@ -314,6 +359,8 @@ const SETTINGS_EVERY: std::time::Duration = std::time::Duration::from_millis(500
 /// Read the radio, hand it out, and move it where a subscriber asked.
 fn pump(
     mut dev: Box<dyn Device>,
+    entry: &crate::devices::Entry,
+    rates: &[u32],
     tuner: &Arc<iqstream::Stream>,
     stop: &Arc<AtomicBool>,
     blocks: &Arc<AtomicU64>,
@@ -347,7 +394,23 @@ fn pump(
         // read back rather than assumed: a dongle snaps a gain to its own
         // step, and a switch it has not got is refused by the driver.
         for ask in tuner.asked() {
-            if let Err(e) = apply(dev.as_mut(), &ask) {
+            if ask.name == iqstream::RATE_SETTING {
+                let Some(r) = asked_rate(&ask, rates) else { continue };
+                if r == dev.rate() {
+                    continue;
+                }
+                rx.stop();
+                drop(rx);
+                if dev.rate_needs_restart() {
+                    let center = dev.center();
+                    drop(dev);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    dev = opened_at(entry, r, Some(center))?;
+                } else {
+                    dev.set_rate(r)?;
+                }
+                rx = dev.start_rx()?;
+            } else if let Err(e) = apply(dev.as_mut(), &ask) {
                 tracing::debug!("iqstream_tuner: {}: {e}", ask.name);
             }
             asked_settings = std::time::Instant::now() - SETTINGS_EVERY;
@@ -359,8 +422,8 @@ fn pump(
         // block and a message only when something moved.
         if asked_settings.elapsed() >= SETTINGS_EVERY {
             asked_settings = std::time::Instant::now();
-            tuner.set_settings(settings_of(dev.as_ref()));
             tuner.set_sample_rate(dev.rate().0 as u32);
+            tuner.set_settings(served_settings(dev.as_ref(), rates));
         }
     }
     rx.stop();
@@ -547,6 +610,47 @@ mod tests {
 
     /// A radio with nothing to say about itself says nothing, rather than a
     /// list of settings that are all the driver's defaults.
+    #[test]
+    fn a_served_radio_offers_the_rates_up_to_the_one_it_was_served_at() {
+        let dev = Bench::default();
+        assert_eq!(
+            served_rates(&dev.info, Sps(2_400_000)),
+            [250_000, 1_024_000, 2_048_000, 2_304_000, 2_400_000]
+        );
+        assert_eq!(served_rates(&dev.info, Sps(1_024_000)), [250_000, 1_024_000]);
+        assert_eq!(
+            served_rates(&dev.info, Sps(1_800_000)),
+            [250_000, 1_024_000, 1_800_000],
+            "a rate off the list is still the one it runs at"
+        );
+        let mut rtl = Bench::default();
+        rtl.info.rates = common::rtl::RATES.to_vec();
+        rtl.info.rate_range = common::rtl::RATE_RANGE;
+        assert_eq!(
+            served_rates(&rtl.info, Sps(2_400_000)),
+            [240_000, 960_000, 1_024_000, 1_200_000, 2_048_000, 2_400_000],
+            "a driver's own list, not the span candidates"
+        );
+    }
+
+    #[test]
+    fn a_rate_is_taken_only_from_the_list_it_offered() {
+        let rates = [250_000, 1_024_000, 2_400_000];
+        let ask = |name: &str, v: &str| iqstream::Ask {
+            name: name.into(),
+            value: SettingValue::Choice(v.into()),
+        };
+        assert_eq!(asked_rate(&ask("rate", "1024000"), &rates), Some(Sps(1_024_000)));
+        assert_eq!(asked_rate(&ask("rate", "3200000"), &rates), None, "above the ceiling");
+        assert_eq!(asked_rate(&ask("rate", "fast"), &rates), None);
+        assert_eq!(asked_rate(&ask("antenna", "1024000"), &rates), None);
+        let dev = Bench::default();
+        let s = served_settings(&dev, &rates);
+        assert_eq!(s.len(), 6, "the five a radio has and the rate");
+        assert_eq!(s[5].rates(), Some(rates.to_vec()));
+        assert_eq!(served_settings(&dev, &[2_400_000]).len(), 5, "one rate is not a choice");
+    }
+
     #[test]
     fn a_radio_that_offers_nothing_lists_nothing() {
         let mut dev = Bench::default();

@@ -176,7 +176,7 @@ the code is in the commit log.
 
 ### Changed
 
-- IQStream remote gains in the far end's own steps, served ones included.
+- IQStream remote gains in the far end's own steps, and spans from the rates it offers.
 - Windows draws through DirectX 12 where the card has it, rather than Vulkan.
 - IBM Plex type throughout, the same on every machine, and dialogs on the darker chassis.
 - Transcript reads only channels with VOICE on.

@@ -49,6 +49,6 @@ pub mod client;
 pub mod proto;
 pub mod server;
 
-pub use client::{Block, ClientConfig, IqStream, Prefer, StreamInfo, list};
-pub use proto::{Codec, Setting, SettingKind, SettingValue, StreamDesc, Transport};
+pub use client::{Block, ClientConfig, IqStream, Prefer, StreamInfo, list, set};
+pub use proto::{Codec, RATE_SETTING, Setting, SettingKind, SettingValue, StreamDesc, Transport};
 pub use server::{Ask, Public, Server, ServerConfig, Stream, StreamConfig, Tune};

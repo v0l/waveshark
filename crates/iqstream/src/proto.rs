@@ -684,6 +684,27 @@ impl Default for Setting {
     }
 }
 
+pub const RATE_SETTING: &str = "rate";
+
+impl Setting {
+    pub fn rate_choice(now: u32, rates: &[u32]) -> Setting {
+        Setting {
+            name: RATE_SETTING.into(),
+            label: "Sample rate".into(),
+            kind: SettingKind::Choice,
+            value: SettingValue::Choice(now.to_string()),
+            options: rates.iter().map(u32::to_string).collect(),
+            unit: "S/s".into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn rates(&self) -> Option<Vec<u32>> {
+        (self.name == RATE_SETTING && self.kind == SettingKind::Choice)
+            .then(|| self.options.iter().filter_map(|o| o.parse().ok()).collect())
+    }
+}
+
 /// One figure off a tag that holds it as text, and None where the tag is
 /// absent or is not a number.
 fn number(m: &TlvMap<'_>, tag: u16) -> Option<f64> {
@@ -1241,6 +1262,22 @@ mod tests {
         assert_eq!(Transport::from_code(0).unwrap(), Transport::Udp);
         assert_eq!(Transport::from_code(1).unwrap(), Transport::Tcp);
         assert!(Transport::from_code(2).is_err());
+    }
+
+    #[test]
+    fn rates_travel_as_a_choice_named_rate_and_nothing_else_reads_as_rates() {
+        let s = Setting::rate_choice(2_400_000, &[1_024_000, 2_048_000, 2_400_000]);
+        let back = Setting::decode(&s.encode()).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.value, SettingValue::Choice("2400000".into()));
+        assert_eq!(back.rates(), Some(vec![1_024_000, 2_048_000, 2_400_000]));
+        let port = Setting {
+            name: "antenna".into(),
+            kind: SettingKind::Choice,
+            options: vec!["1024000".into()],
+            ..Default::default()
+        };
+        assert_eq!(port.rates(), None, "a choice under another name is not a rate");
     }
 
     #[test]

@@ -150,7 +150,7 @@ pub fn probe_all(addr: &str) -> Result<Vec<Probe>> {
                 addr: format!("{host}#{}", s.id),
                 center: Some(Hz(s.center_hz)),
                 rate: Some(Sps(s.sample_rate as u64)),
-                rates: Vec::new(),
+                rates: offered_rates(&s.settings, s.tunable),
                 gain_db: s.gain_db,
                 name: s.name,
                 settings: s.settings,
@@ -168,6 +168,22 @@ pub fn probe_all(addr: &str) -> Result<Vec<Probe>> {
         }
     })
 }
+
+fn offered_rates(settings: &[Setting], tunable: bool) -> Vec<Sps> {
+    let mut rates: Vec<Sps> = settings
+        .iter()
+        .filter(|_| tunable)
+        .find_map(Setting::rates)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| Sps(r as u64))
+        .collect();
+    rates.sort();
+    rates.dedup();
+    rates
+}
+
+const RATE_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct Device {
     addr: String,
@@ -228,6 +244,11 @@ impl Device {
         // A server that did not say is still streaming something; the entry
         // has to carry a number, and the dial cannot move it either way.
         let (center, rate) = (p.center.unwrap_or(Hz(0)), p.rate.unwrap_or(Sps(1)));
+        let offered = offered_rates(&p.settings, p.tunable);
+        let rates = match offered.is_empty() {
+            true => vec![rate],
+            false => offered,
+        };
         // A dial needs somewhere to go, so a server that takes a tune but
         // named no range is treated as pinned: it can still be asked over the
         // wire, but nothing here can offer a slider with no ends.
@@ -245,8 +266,8 @@ impl Device {
             label,
             tuner: "remote".to_string(),
             ranges,
-            rates: vec![rate],
-            rate_range: rate..=rate,
+            rate_range: rates[0]..=rates[rates.len() - 1],
+            rates,
             // Gain belongs to whoever owns the tuner, so the stages are the
             // ones it offered, and none at all from a server sharing a radio
             // somebody else is listening to: a slider that moves nothing
@@ -347,10 +368,38 @@ impl DeviceTrait for Device {
     }
 
     fn set_rate(&mut self, r: Sps) -> Result<()> {
-        if r != self.rate {
+        if r == self.rate {
+            return Ok(());
+        }
+        if !self.settable || !self.info.rates.contains(&r) {
             return Err(Error::RateUnsupported { req: r });
         }
+        let (host, id) = (crate::split_stream(&self.addr).0.to_string(), self.stream.unwrap_or(0));
+        runtime()?.block_on(async {
+            let value = SettingValue::Choice(r.0.to_string());
+            iqstream::set(host.as_str(), "waveshark", id, iqstream::RATE_SETTING, value)
+                .await
+                .map_err(|e| Error::other(format!("{host}: {e}")))?;
+            let started = tokio::time::Instant::now();
+            loop {
+                let listing = iqstream::list(host.as_str(), "waveshark probe");
+                if let Ok(Ok(streams)) = tokio::time::timeout(CONNECT_TIMEOUT, listing).await
+                    && streams.iter().any(|s| s.id == id && s.sample_rate as u64 == r.0)
+                {
+                    return Ok(());
+                }
+                if started.elapsed() >= RATE_SETTLE {
+                    return Err(Error::other(format!("{host} did not move to {} S/s", r.0)));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })?;
+        self.rate = r;
         Ok(())
+    }
+
+    fn rate_needs_restart(&self) -> bool {
+        self.info.rates.len() > 1
     }
 
     fn rate(&self) -> Sps {
@@ -431,6 +480,7 @@ impl DeviceTrait for Device {
             .lock()
             .map(|now| {
                 now.iter()
+                    .filter(|s| s.name != iqstream::RATE_SETTING)
                     .filter_map(|s| match &s.value {
                         SettingValue::Choice(selected) => Some(common::device::Choice {
                             name: s.name.clone(),
@@ -794,6 +844,77 @@ mod tests {
         assert_eq!(stages[0].quantise(1.0), 0.9);
         assert_eq!(stages[1].quantise(30.0), 32.0, "an 8 dB step");
         assert_eq!(stages[2].quantise(30.3), 30.3, "a 1.4 server says neither, so continuous");
+    }
+
+    #[test]
+    fn a_span_listed_by_the_server_is_asked_for_and_taken_once_it_runs() {
+        let rates = [1_024_000u32, 2_400_000];
+        let server = iqstream::Server::start(
+            "127.0.0.1:0".parse().unwrap(),
+            iqstream::ServerConfig::single(
+                "test",
+                iqstream::StreamConfig {
+                    name: "loft".into(),
+                    center_hz: 433_920_000,
+                    sample_rate: 2_400_000,
+                    tunable: true,
+                    tune_range_hz: Some((24_000_000, 1_766_000_000)),
+                    settings: vec![gain(20.0), Setting::rate_choice(2_400_000, &rates)],
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+        let tuner = server.default_stream().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let owner = {
+            let (tuner, stop) = (tuner.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    for ask in tuner.asked() {
+                        if let SettingValue::Choice(v) = &ask.value
+                            && ask.name == iqstream::RATE_SETTING
+                        {
+                            let r: u32 = v.parse().unwrap();
+                            tuner.set_sample_rate(r);
+                            tuner.set_settings(vec![gain(20.0), Setting::rate_choice(r, &rates)]);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+
+        let addr = server.addr().to_string();
+        let mut d = Device::open(&addr).unwrap();
+        assert_eq!(d.info().rates, [Sps(1_024_000), Sps(2_400_000)]);
+        assert_eq!(d.info().rate_range, Sps(1_024_000)..=Sps(2_400_000));
+        assert!(d.rate_needs_restart(), "a span is changed with the stream stopped");
+        assert!(d.choices().is_empty(), "the rate is the span list, not a control of its own");
+        assert!(matches!(d.set_rate(Sps(2_048_000)), Err(Error::RateUnsupported { .. })));
+        assert_eq!(tuner.sample_rate(), 2_400_000, "an unlisted rate is not asked for");
+
+        d.set_rate(Sps(1_024_000)).unwrap();
+        assert_eq!(d.rate(), Sps(1_024_000));
+        assert_eq!(tuner.sample_rate(), 1_024_000);
+        let again = remote_probe(&addr);
+        assert_eq!(again.rate, Some(Sps(1_024_000)), "the next probe finds it there");
+        stop.store(true, Ordering::SeqCst);
+        owner.join().unwrap();
+    }
+
+    fn remote_probe(addr: &str) -> Probe {
+        super::probe(addr).unwrap()
+    }
+
+    #[test]
+    fn a_server_that_offers_no_control_offers_no_span_either() {
+        let mut p = probe(false, None);
+        p.settings = vec![Setting::rate_choice(2_400_000, &[1_024_000, 2_400_000])];
+        let mut d = Device::from_probe(&p);
+        assert_eq!(d.info().rates, [Sps(2_400_000)]);
+        assert!(!d.rate_needs_restart());
+        assert!(matches!(d.set_rate(Sps(1_024_000)), Err(Error::RateUnsupported { .. })));
     }
 
     /// A server that offered its radio gives the receiver real controls: a

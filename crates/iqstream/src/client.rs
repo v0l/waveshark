@@ -306,6 +306,25 @@ fn subscribe_frame(
 ///
 /// What builds a radio list: a server with three dongles on it is three
 /// entries, and each says where it is and how far its dial goes.
+pub async fn set<A: ToSocketAddrs + std::fmt::Debug>(
+    server: A,
+    name: &str,
+    stream: u16,
+    setting: &str,
+    value: SettingValue,
+) -> Result<()> {
+    let mut g = greet(server, name).await?;
+    let mut t = Tlvs::new();
+    t.u16(tag::STREAM_ID, stream)
+        .str(tag::SETTING_NAME, setting)
+        .str(tag::SETTING_VALUE, &value.text());
+    g.write_half.write_all(&Frame::new(msg::SET_SETTING, &t).encode()).await.map_err(other)?;
+    g.write_half.shutdown().await.map_err(other)?;
+    let mut rest = Vec::new();
+    let _ = g.read_half.read_to_end(&mut rest).await;
+    Ok(())
+}
+
 pub async fn list<A: ToSocketAddrs + std::fmt::Debug>(
     server: A,
     name: &str,
