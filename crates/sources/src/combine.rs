@@ -274,10 +274,6 @@ fn describe(children: &[Box<dyn Device>], child_rate: Sps) -> DeviceInfo {
         rate_range: span..=span,
         gain_stages: first.gain_stages.clone(),
         native_format: first.native_format,
-        // The slices tile at their spacing, so the band the stream carries is
-        // narrower than its sample rate by whatever the overlap costs.
-        usable_bandwidth_ratio: (1.0 - OVERLAP) as f32
-            * children.iter().map(|c| c.info().usable_bandwidth_ratio).fold(1.0f32, f32::min),
         tunable: true,
         // Transmitting out of a stitched receiver is a different radio's job.
         tx: None,
@@ -871,7 +867,6 @@ mod tests {
         // 4.2 MHz of the 4.8 MS/s the stream runs at.
         assert_eq!(dev.spacing(), 2_100_000.0);
         assert_eq!(dev.info().label, "2 x Bench radio (4.200 MHz)");
-        assert!((dev.info().usable_bandwidth_ratio - 0.875).abs() < 1e-6);
     }
 
     #[test]
@@ -1212,7 +1207,6 @@ mod tests {
             rate_range: Sps(225_000)..=Sps(2_400_000),
             gain_stages: Vec::new(),
             native_format: common::SampleFormat::Cu8,
-            usable_bandwidth_ratio: 0.8,
             tunable: true,
             tx: None,
         };

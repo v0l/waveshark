@@ -141,7 +141,6 @@ impl FileRadio {
             rate_range: Sps(1)..=Sps(u64::MAX),
             gain_stages: Vec::new(),
             native_format: SampleFormat::Cf32,
-            usable_bandwidth_ratio: 1.0,
             tunable: true,
             tx: Some(TxInfo {
                 // Anything: nothing is radiated, and refusing a frequency

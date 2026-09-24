@@ -1076,13 +1076,11 @@ pub(crate) fn replay_receiver(
 pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
     let rate = buf.rate.as_f64();
     let scanners = crate::scanners::Scanners::load();
-    let fronts = scanners.fronts(crate::scanners::Span::whole(buf.center.as_f64(), rate));
+    let fronts = scanners.fronts(crate::scanners::Span::new(buf.center.as_f64(), rate));
     Plan {
         center: buf.center,
         rate,
         zoom: 1,
-        // A recording is whatever was written to it, edges and all.
-        usable_ratio: 1.0,
         // A file has already been through whatever the receiver did to it.
         dc_block: false,
         refresh_hz: 30.0,
@@ -1498,8 +1496,6 @@ pub struct RadioControls {
     /// Where one tuner's span ends and the next begins, on a receiver made of
     /// several. Empty for one radio.
     pub seams: Vec<f64>,
-    /// Fraction of the span inside the radio's analogue filter
-    pub usable_ratio: f32,
 }
 
 impl Default for RadioControls {
@@ -1516,7 +1512,6 @@ impl Default for RadioControls {
             tx_reach: None,
             tunable: true,
             seams: Vec::new(),
-            usable_ratio: 1.0,
         }
     }
 }
@@ -1567,7 +1562,6 @@ impl RadioControls {
             // where an rtl_tcp server on the same kind of socket retunes.
             tunable: dev.info().tunable,
             seams: dev.seams().iter().map(|h| h.as_f64()).collect(),
-            usable_ratio: dev.info().usable_bandwidth_ratio,
         }
     }
 }
@@ -2138,7 +2132,6 @@ impl Audio {
             center: Hz(0),
             rate,
             zoom: 1,
-            usable_ratio: 1.0,
             dc_block: false,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
@@ -2433,7 +2426,6 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             center: dev.dial(),
             rate: dev.rate().as_f64(),
             zoom: 1,
-            usable_ratio: dev.info().usable_bandwidth_ratio,
             dc_block: true,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
@@ -3986,11 +3978,7 @@ fn fronts_here(
     if !decode_on {
         return Vec::new();
     }
-    scanners.fronts(crate::scanners::Span::inside(
-        plan.center.as_f64(),
-        plan.eff_rate(),
-        plan.usable_rate(),
-    ))
+    scanners.fronts(crate::scanners::Span::new(plan.center.as_f64(), plan.eff_rate()))
 }
 
 /// Publish the chain the receiver is running, for the chain view.
@@ -4015,7 +4003,6 @@ fn plan_at(rate: f64, center: Hz) -> Plan {
         iqstream: None,
         iqstream_tuners: Vec::new(),
         zoom: 1,
-        usable_ratio: 1.0,
         dc_block: false,
         refresh_hz: 30.0,
         smoothing: crate::chain::DEFAULT_SMOOTHING,
@@ -4095,35 +4082,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_block_in_the_rolloff_is_not_given_a_front_end() {
-        // A pager channel 220 kHz off a 500 kHz span's centre is inside the
-        // span and outside a 0.75 radio's filter, so a demodulator there
-        // reads the anti-alias skirt and reports nothing for the CPU.
-        let s = crate::scanners::Scanners::parse(
-            "[POCSAG]\nrange = 439.9 - 440.1 MHz\nspan = 100 kHz\nfront = pocsag\n\
-             channels = 439.9875 MHz\nmargin = 12.5 kHz\n",
-        );
-        let mut plan = crate::chain::tests::plan(500_000.0, Hz(439_767_500));
-        plan.fronts = Vec::new();
-        assert_eq!(fronts_here(&s, &plan, true).len(), 1, "the whole span reaches the channel");
-        plan.usable_ratio = 0.75;
-        assert_eq!(fronts_here(&s, &plan, true).len(), 0, "a front end in the rolloff");
-    }
-
-    /// A block's span is the rate its decoder needs, not the part of the span
-    /// inside the filter.
-    ///
-    /// Mode S wants 2 MS/s and a dongle samples at 2.4, of which 1.92 is
-    /// inside the analogue filter. Judging the block on the 1.92 refused it,
-    /// and a receiver parked on 1090 MHz drew no ADS-B front end, no packet
-    /// bus and no tracker: nothing decoded anywhere in the span.
-    #[test]
     fn a_block_is_judged_on_the_rate_the_radio_samples_at() {
         let s = crate::scanners::Scanners::default();
         let mut plan = crate::chain::tests::plan(2_400_000.0, Hz(1_090_000_000));
         plan.fronts = Vec::new();
-        plan.usable_ratio = common::rtl::USABLE_BANDWIDTH_RATIO;
-        assert!((plan.usable_rate() - 1_920_000.0).abs() < 1.0);
         let fronts = fronts_here(&s, &plan, true);
         assert_eq!(
             fronts.iter().map(|f| f.front.key()).collect::<Vec<_>>(),
@@ -5485,7 +5447,7 @@ pub(crate) mod tests {
         };
         let mut plan = replay_plan(&buf, false);
         plan.fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let ais = read_by(&out, "ais");
@@ -5528,7 +5490,7 @@ pub(crate) mod tests {
         let mut plan = replay_plan(&buf, false);
         plan.dc_block = true;
         plan.fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         assert_eq!(read_by(&out, "ais").len(), 24, "the same 24 as without the DC block");
@@ -5562,7 +5524,7 @@ pub(crate) mod tests {
         // The shipped table rather than whatever is in this machine's config:
         // a block the operator deleted should not fail the corpus.
         let fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         assert!(
             fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
             "the table put nothing on a span covering channel 38: {fronts:?}"
@@ -5618,7 +5580,7 @@ pub(crate) mod tests {
             return;
         };
         let fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         assert!(
             fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
             "the table put nothing on a span covering channel 11: {fronts:?}"
@@ -5669,7 +5631,7 @@ pub(crate) mod tests {
         };
         let mut plan = replay_plan(&buf, false);
         plan.fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let read = read_by(&out, "wifi").len();
@@ -5765,7 +5727,7 @@ pub(crate) mod tests {
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
         let mut plan = replay_plan(&buf, false);
         plan.fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
         let out = replay_blocks(&mut rx, &buf);
         let wifi = read_by(&out, "wifi");
@@ -5932,7 +5894,7 @@ pub(crate) mod tests {
             return;
         };
         let fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::whole(buf.center.as_f64(), buf.rate.as_f64()));
+            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         let mut plan = replay_plan(&buf, false);
         plan.fronts = fronts;
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
@@ -6519,7 +6481,7 @@ pub(crate) mod tests {
         let rate = 20_000_000.0;
         let mut plan = plan_at(rate, Hz::mhz(433));
         plan.fronts.extend(
-            crate::scanners::Scanners::load().fronts(crate::scanners::Span::whole(433e6, rate)),
+            crate::scanners::Scanners::load().fronts(crate::scanners::Span::new(433e6, rate)),
         );
         plan.channels = vec![ChannelSpec {
             id: 1,
@@ -7626,7 +7588,6 @@ mod front_end_tests {
                         stage("vga", 62.0, 2.0),
                     ],
                     native_format: common::SampleFormat::Cs8,
-                    usable_bandwidth_ratio: 0.75,
                     tunable: true,
                     tx: None,
                 },

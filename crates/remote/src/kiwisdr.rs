@@ -21,8 +21,6 @@ const GAIN: &str = "tuner";
 
 const MAX_GAIN_DB: f32 = 120.0;
 
-const USABLE_RATIO: f32 = 0.85;
-
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL: Duration = Duration::from_millis(50);
@@ -518,7 +516,6 @@ impl Device {
                 auto: true,
             }],
             native_format: SampleFormat::Cs16,
-            usable_bandwidth_ratio: USABLE_RATIO,
             tunable: true,
             tx: None,
         };

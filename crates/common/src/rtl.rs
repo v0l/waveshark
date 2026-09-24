@@ -96,11 +96,6 @@ pub const RATES: [Sps; 8] = [
 
 pub const RATE_RANGE: std::ops::RangeInclusive<Sps> = Sps(225_001)..=Sps(3_200_000);
 
-/// The RTL2832U has no analogue anti-alias filter worth the name; the outer
-/// ~20% of the span is contaminated by the decimation filter's transition and
-/// by the DC spur's skirt.
-pub const USABLE_BANDWIDTH_RATIO: f32 = 0.80;
-
 /// A switch an RTL2832U offers beyond gain and tuning.
 ///
 /// The set is the same whichever way the dongle is reached, so the name an

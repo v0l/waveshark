@@ -396,8 +396,6 @@ impl Device {
             rates,
             gain_stages: Vec::new(),
             native_format: SampleFormat::Cu8,
-            usable_bandwidth_ratio: (server.max_bandwidth as f32 / server.max_rate.max(1) as f32)
-                .clamp(0.1, 1.0),
             tunable: sync.can_control,
             tx: None,
         };
@@ -882,7 +880,6 @@ mod tests {
         assert_eq!(d.info().tuner, "Airspy");
         assert_eq!(d.info().rates.len(), 11);
         assert_eq!(d.rate(), Sps(3_000_000), "the fastest stage until told otherwise");
-        assert_eq!(d.info().usable_bandwidth_ratio, 0.8);
 
         d.set_center(Hz::mhz(145)).unwrap();
         assert_eq!(cmds.recv_timeout(Duration::from_secs(2)).unwrap(), (101, 145_000_000));

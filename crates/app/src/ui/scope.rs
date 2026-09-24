@@ -30,9 +30,6 @@ pub(super) struct Scope<'a> {
     pub listening: Option<usize>,
     pub center: f64,
     pub rate: f64,
-    /// Width of the span inside the radio's analogue filter, which is where
-    /// the scanner table put its front ends.
-    pub usable: f64,
     pub radio: Option<&'a Radio>,
     pub scanners: &'a crate::scanners::Scanners,
     pub patch: &'a crate::patch::Patch,
@@ -396,7 +393,7 @@ impl Scope<'_> {
         if !self.decode_on {
             return;
         }
-        let marks = crate::chain::scan_marks(self.scanners, self.center, self.rate, self.usable);
+        let marks = crate::chain::scan_marks(self.scanners, self.center, self.rate);
         if marks.is_empty() {
             return;
         }

@@ -283,15 +283,10 @@ impl Scanner {
         if !self.here_in(plan) {
             return false;
         }
-        // Against the rate and not the usable width: a block's span is the
-        // rate its decoder needs, which the radio either samples at or does
-        // not. Mode S asking for 2 MS/s off a dongle running at 2.4 is
-        // answered by the band it is handed being cut to what is inside the
-        // filter, not by the block being refused.
         if at.rate < self.min_rate {
             return false;
         }
-        let (center, rate) = (at.center, at.usable);
+        let (center, rate) = (at.center, at.rate);
         if self.channels.is_empty() {
             // Nothing specific to demodulate, so the band is the test: any
             // overlap with the span, since a bank channelizes whatever it is
@@ -321,27 +316,15 @@ impl Scanner {
 }
 
 /// A tuning a scanner block is judged against
-///
-/// Two widths, because they answer different questions: `rate` is what the
-/// radio samples at, which is what a block's `span` asks for, and `usable` is
-/// how much of that is inside the analogue filter, which is where a channel
-/// is worth demodulating.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Span {
     pub center: f64,
     pub rate: f64,
-    pub usable: f64,
 }
 
 impl Span {
-    /// A span with no rolloff taken off it
-    pub fn whole(center: f64, rate: f64) -> Self {
-        Self { center, rate, usable: rate }
-    }
-
-    /// A span with the part outside the radio's analogue filter taken off
-    pub fn inside(center: f64, rate: f64, usable: f64) -> Self {
-        Self { center, rate, usable: usable.min(rate) }
+    pub fn new(center: f64, rate: f64) -> Self {
+        Self { center, rate }
     }
 }
 
@@ -470,7 +453,7 @@ impl Scanners {
             // watch a calling channel and the two repeaters beside it rather
             // than only whichever was written first.
             if s.front.reads_one_channel() && s.channels.len() > 1 {
-                for hz in s.covered(at.center, at.usable) {
+                for hz in s.covered(at.center, at.rate) {
                     let front = s.front.at(hz);
                     if !out.iter().any(|e| e.front == front) {
                         out.push(FrontAt { front, band });
@@ -483,7 +466,7 @@ impl Scanners {
             // chain says which clock it is looking at rather than the
             // protocol's own default.
             if s.front.any_channel_will_do()
-                && let Some(hz) = s.covered(at.center, at.usable).first().copied()
+                && let Some(hz) = s.covered(at.center, at.rate).first().copied()
             {
                 let front = s.front.at(hz);
                 if !out.iter().any(|e| e.front.key() == front.key()) {
@@ -1225,7 +1208,7 @@ mod tests {
         let table = Scanners::default();
         let running = |center: f64| -> Vec<&str> {
             table
-                .active(Span::whole(center, 20e6))
+                .active(Span::new(center, 20e6))
                 .iter()
                 .map(|b| b.name.as_str())
                 .filter(|n| *n == "Display leakage")
@@ -1237,13 +1220,13 @@ mod tests {
         // And it is placed on the clock the span holds rather than on the
         // protocol's own default, so the chain says which screen it is
         // looking for.
-        let fronts = table.fronts(Span::whole(1485e6, 20e6));
+        let fronts = table.fronts(Span::new(1485e6, 20e6));
         let screen =
             fronts.iter().find(|f| f.front.key() == "tempest").expect("a screen front end");
         assert_eq!(screen.front, Front::Protocol { id: "tempest", hz: 1485e6 });
         assert_eq!(
             table
-                .fronts(Span::whole(1485e6, 20e6))
+                .fronts(Span::new(1485e6, 20e6))
                 .iter()
                 .filter(|f| f.front.key() == "tempest")
                 .count(),
@@ -1267,7 +1250,7 @@ mod tests {
         assert!(s.list[1].enabled, "an absent enabled key is on");
         // At a tuning both cover, only the pager runs.
         let running: Vec<&str> = s
-            .active(Span::whole(439_987_500.0, 2_400_000.0))
+            .active(Span::new(439_987_500.0, 2_400_000.0))
             .iter()
             .map(|b| b.name.as_str())
             .collect();
@@ -1364,7 +1347,7 @@ mod tests {
     fn the_ism_blocks_run_where_they_belong() {
         use crate::bands::Plan;
         let s = Scanners::default();
-        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, Span::whole(hz, 2_400_000.0)));
+        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, Span::new(hz, 2_400_000.0)));
         // The allocations that are the same the world over.
         for hz in [40_680_000.0, 433_920_000.0, 2_437_000_000.0, 5_800_000_000.0] {
             for plan in Plan::ALL {
@@ -1391,7 +1374,7 @@ mod tests {
         assert_eq!(at(Plan::Europe, 868_300_000.0), [Front::Auto]);
         // On a narrow span, because a 2.4 MHz one at 868.3 clips the bottom
         // of GSM 850, which an American is entitled to scan.
-        assert_eq!(kinds(&s.fronts_in(Plan::Americas, Span::whole(868_300_000.0, 250_000.0))), []);
+        assert_eq!(kinds(&s.fronts_in(Plan::Americas, Span::new(868_300_000.0, 250_000.0))), []);
         assert_eq!(at(Plan::Americas, 915_000_000.0), [Front::Auto]);
         assert_eq!(at(Plan::Europe, 915_000_000.0), [], "that is the GSM uplink here");
         // 920 sits inside 902-928, and in Region 3 both blocks are about the
@@ -1409,7 +1392,7 @@ mod tests {
     fn the_gsm_downlinks_are_scanned_and_the_uplinks_are_not() {
         use crate::bands::Plan;
         let s = Scanners::default();
-        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, Span::whole(hz, 2_400_000.0)));
+        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, Span::new(hz, 2_400_000.0)));
         // Each allocation under the regulator that granted it. 850 and 1900
         // are the American pair; 900 and 1800 are used across Europe and
         // Region 3.
@@ -1431,7 +1414,7 @@ mod tests {
         assert_eq!(at(Plan::Europe, 897_000_000.0), [], "GSM 900 uplink");
         assert_eq!(at(Plan::Europe, 1_750_000_000.0), [], "DCS 1800 uplink");
         // And a span too narrow for the carrier's own rate does not match.
-        assert!(s.fronts_in(Plan::Europe, Span::whole(947_400_000.0, 500_000.0)).is_empty());
+        assert!(s.fronts_in(Plan::Europe, Span::new(947_400_000.0, 500_000.0)).is_empty());
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.
@@ -1439,7 +1422,7 @@ mod tests {
     fn the_defaults_put_each_front_end_where_it_belongs() {
         let s = Scanners::default();
         let fronts = |c: f64, r: f64| -> Vec<Front> {
-            s.fronts(Span::whole(c, r)).into_iter().map(|f| f.front).collect()
+            s.fronts(Span::new(c, r)).into_iter().map(|f| f.front).collect()
         };
         assert_eq!(fronts(1_090_000_000.0, 2_400_000.0), [Front::named("mode_s").unwrap()]);
         assert_eq!(fronts(162_000_000.0, 2_400_000.0), [Front::named("ais").unwrap()]);
@@ -1476,7 +1459,7 @@ mod tests {
         let s = Scanners::default();
         let on = |id: &str, c: f64, r: f64| -> Vec<f64> {
             let mut out: Vec<f64> = s
-                .fronts(Span::whole(c, r))
+                .fronts(Span::new(c, r))
                 .into_iter()
                 .filter_map(|f| match f.front {
                     Front::Protocol { id: got, hz } if got == id => Some(hz.round()),
@@ -1533,7 +1516,7 @@ mod tests {
         assert_eq!(t.list[1].regions, [Plan::Europe]);
         assert_eq!(t.list[2].regions, [], "absent means everywhere");
 
-        let runs = |plan: Plan, hz: f64| !t.fronts_in(plan, Span::whole(hz, 250_000.0)).is_empty();
+        let runs = |plan: Plan, hz: f64| !t.fronts_in(plan, Span::new(hz, 250_000.0)).is_empty();
         assert!(runs(Plan::Americas, 315e6));
         assert!(runs(Plan::AsiaPacific, 315e6));
         assert!(!runs(Plan::Europe, 315e6));
@@ -1606,7 +1589,7 @@ mod tests {
         let s = Scanners::default();
         let on = |plan: Plan, c: f64, r: f64| -> Vec<f64> {
             let mut out: Vec<f64> = s
-                .fronts_in(plan, Span::whole(c, r))
+                .fronts_in(plan, Span::new(c, r))
                 .into_iter()
                 .filter_map(|f| match f.front {
                     Front::Protocol { id, hz } if id == "vdl2" => Some((hz / 1e3).round() / 1e3),
@@ -1642,14 +1625,14 @@ mod tests {
     #[test]
     fn a_band_with_no_scanner_runs_nothing() {
         let s = Scanners::default();
-        assert!(s.fronts(Span::whole(95_800_000.0, 2_400_000.0)).is_empty(), "FM broadcast");
-        assert!(s.fronts(Span::whole(124_000_000.0, 2_400_000.0)).is_empty(), "airband");
-        assert!(s.fronts(Span::whole(145_500_000.0, 200_000.0)).is_empty(), "2 m voice");
+        assert!(s.fronts(Span::new(95_800_000.0, 2_400_000.0)).is_empty(), "FM broadcast");
+        assert!(s.fronts(Span::new(124_000_000.0, 2_400_000.0)).is_empty(), "airband");
+        assert!(s.fronts(Span::new(145_500_000.0, 200_000.0)).is_empty(), "2 m voice");
         // Widen that last span until it reaches the packet channel 700 kHz
         // away, though, and APRS runs: the receiver is sampling it either
         // way, and the dial is only where somebody is looking.
         assert_eq!(
-            kinds(&s.fronts(Span::whole(145_500_000.0, 2_400_000.0))),
+            kinds(&s.fronts(Span::new(145_500_000.0, 2_400_000.0))),
             [Front::protocol("aprs", 144_800_000.0), Front::protocol("sstv", 144_500_000.0)]
         );
     }
@@ -1659,9 +1642,9 @@ mod tests {
     fn a_span_the_front_end_cannot_work_in_does_not_match() {
         let s = Scanners::default();
         // Mode S bits are 1 us wide and need 2 MS/s.
-        assert!(s.fronts(Span::whole(1_090_000_000.0, 1_024_000.0)).is_empty());
+        assert!(s.fronts(Span::new(1_090_000_000.0, 1_024_000.0)).is_empty());
         assert_eq!(
-            kinds(&s.fronts(Span::whole(1_090_000_000.0, 2_048_000.0))),
+            kinds(&s.fronts(Span::new(1_090_000_000.0, 2_048_000.0))),
             [Front::named("mode_s").unwrap()]
         );
     }
@@ -1673,9 +1656,9 @@ mod tests {
         let s = Scanners::default();
         // Centred on one channel with 60 kHz: the other is 50 kHz away and
         // the span reaches only 30 kHz, so it is outside.
-        assert!(s.fronts(Span::whole(161_975_000.0, 60_000.0)).is_empty());
+        assert!(s.fronts(Span::new(161_975_000.0, 60_000.0)).is_empty());
         assert_eq!(
-            kinds(&s.fronts(Span::whole(162_000_000.0, 200_000.0))),
+            kinds(&s.fronts(Span::new(162_000_000.0, 200_000.0))),
             [Front::named("ais").unwrap()]
         );
     }
@@ -1689,12 +1672,12 @@ mod tests {
         // Tuned 200 kHz below the DAPNET channel, which the old rule would
         // have refused because the dial sits outside the block's range.
         assert_eq!(
-            kinds(&s.fronts(Span::whole(439_787_500.0, 2_400_000.0))),
+            kinds(&s.fronts(Span::new(439_787_500.0, 2_400_000.0))),
             [Front::protocol("pocsag", 439_987_500.0)]
         );
         // And AIS from a dial parked on marine voice a megahertz away.
         assert_eq!(
-            kinds(&s.fronts(Span::whole(161_000_000.0, 2_400_000.0))),
+            kinds(&s.fronts(Span::new(161_000_000.0, 2_400_000.0))),
             [Front::named("ais").unwrap()]
         );
     }
@@ -1709,7 +1692,7 @@ mod tests {
              [Packet]\nrange = 153.5 - 153.6 MHz\nspan = 48 kHz\nfront = aprs\n\
              channels = 153.55 MHz\nmargin = 8 kHz\n",
         );
-        let fronts = kinds(&s.fronts(Span::whole(153_450_000.0, 1_000_000.0)));
+        let fronts = kinds(&s.fronts(Span::new(153_450_000.0, 1_000_000.0)));
         assert_eq!(
             fronts,
             [Front::protocol("pocsag", 153_350_000.0), Front::protocol("aprs", 153_550_000.0)]
@@ -1725,8 +1708,8 @@ mod tests {
             "[A]\nrange = 433 - 435 MHz\nspan = 250 kHz\nfront = banks\nwidths = 20 kHz\n\
              [B]\nrange = 433.5 - 434 MHz\nspan = 250 kHz\nfront = banks\nwidths = 20 kHz\n",
         );
-        assert_eq!(s.active(Span::whole(433_900_000.0, 1_000_000.0)).len(), 2, "both blocks match");
-        let got = s.fronts(Span::whole(433_900_000.0, 1_000_000.0));
+        assert_eq!(s.active(Span::new(433_900_000.0, 1_000_000.0)).len(), 2, "both blocks match");
+        let got = s.fronts(Span::new(433_900_000.0, 1_000_000.0));
         assert_eq!(got.len(), 1, "one bank, not two decoding the same signals");
         assert_eq!(got[0].front, Front::Banks(vec![20_000.0]));
         // The nested block widens nothing: the union is the outer range.
@@ -1741,7 +1724,7 @@ mod tests {
         );
         assert_eq!(s.list.len(), 1);
         let hit = *s
-            .active(Span::whole(315_000_000.0, 1_000_000.0))
+            .active(Span::new(315_000_000.0, 1_000_000.0))
             .first()
             .expect("the block should match");
         assert_eq!(hit.name, "Doorbells");
@@ -1761,11 +1744,11 @@ mod tests {
              channels = 144.390 MHz\nmargin = 8 kHz\n",
         );
         assert_eq!(
-            kinds(&s.fronts(Span::whole(144_390_000.0, 500_000.0))),
+            kinds(&s.fronts(Span::new(144_390_000.0, 500_000.0))),
             [Front::protocol("aprs", 144_390_000.0)]
         );
         assert!(
-            s.fronts(Span::whole(144_800_000.0, 500_000.0)).is_empty(),
+            s.fronts(Span::new(144_800_000.0, 500_000.0)).is_empty(),
             "the European one is gone"
         );
     }
@@ -1844,7 +1827,7 @@ mod tests {
              [second]\nrange = 100 - 200 MHz\nspan = 1 kHz\nfront = ais\n",
         );
         let names: Vec<&str> = s
-            .active(Span::whole(150_000_000.0, 1_000_000.0))
+            .active(Span::new(150_000_000.0, 1_000_000.0))
             .iter()
             .map(|x| x.name.as_str())
             .collect();

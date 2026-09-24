@@ -9,6 +9,10 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Changed
+
+- Scanner front ends and channels run out to the span edge, with no rolloff held back.
+
 ## [0.4.0] - 2026-09-24
 
 ### Added

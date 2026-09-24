@@ -44,10 +44,6 @@ const RATE_MAX_USB3: u64 = 61_440_000;
 /// carries an eighth of the samples. Measured clean at 4 MS/s with no drops.
 const RATE_MAX_USB2: u64 = 4_000_000;
 
-/// The analogue LPF is set above the sample rate, so the usable span is
-/// limited by the digital decimation filter rather than by the LPF.
-const USABLE_RATIO: f32 = 0.85;
-
 /// Combined RX gain range LimeSuite distributes across LNA, TIA and PGA.
 const GAIN_MAX_DB: f32 = 73.0;
 
@@ -425,7 +421,6 @@ impl LimeSdr {
                 auto: false,
             }],
             native_format: SampleFormat::Cf32,
-            usable_bandwidth_ratio: USABLE_RATIO,
             tunable: true,
             tx: Some(common::TxInfo {
                 ranges: vec![TunerRange {

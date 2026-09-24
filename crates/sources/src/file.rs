@@ -235,7 +235,6 @@ impl FileSource {
             native_format: format,
             // A recorded file is exactly what it says; nothing is rolled off
             // beyond whatever the original capture already lost.
-            usable_bandwidth_ratio: 1.0,
             tunable: false,
             tx: None,
         };

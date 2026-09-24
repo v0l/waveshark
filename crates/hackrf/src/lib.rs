@@ -20,10 +20,6 @@ const FREQ_MAX: u64 = 6_000_000_000;
 const RATE_MIN: u64 = 2_000_000;
 const RATE_MAX: u64 = 20_000_000;
 
-/// The analogue filter is set to three quarters of the sample rate, so the
-/// outer eighth at each edge is roll-off rather than usable span.
-const USABLE_RATIO: f32 = 0.75;
-
 fn map_err(e: hackrf_usb::Error) -> Error {
     let s = e.to_string();
     if s.contains("Access") || s.contains("permission") || s.contains("Permission") {
@@ -179,7 +175,6 @@ impl HackRfDevice {
                 },
             ],
             native_format: SampleFormat::Cs8,
-            usable_bandwidth_ratio: USABLE_RATIO,
             tunable: true,
             tx: Some(TxInfo {
                 ranges: vec![TunerRange {

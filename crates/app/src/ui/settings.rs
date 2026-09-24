@@ -598,7 +598,7 @@ impl App {
             rows.iter().filter_map(ScannerRow::to_scanner).collect();
         let table = crate::scanners::Scanners { list: live, version: crate::scanners::VERSION };
         let active: Vec<String> = table
-            .active(crate::scanners::Span::whole(center, rate))
+            .active(crate::scanners::Span::new(center, rate))
             .into_iter()
             .map(|s| s.name.clone())
             .collect();

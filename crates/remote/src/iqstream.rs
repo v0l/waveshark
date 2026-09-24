@@ -279,7 +279,6 @@ impl Device {
             native_format: SampleFormat::Cu8,
             // Unknown from here: the server does not say what is feeding it.
             // The usual answer is an RTL-SDR, so assume its filtering.
-            usable_bandwidth_ratio: 0.80,
             tunable: movable.is_some(),
             tx: None,
         };

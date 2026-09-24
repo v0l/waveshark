@@ -140,7 +140,7 @@ impl super::App {
         let _ = table.save();
         self.scanner_edit = None;
         self.send(Cmd::Scanners(table));
-        let at = crate::scanners::Span::whole(self.center, self.rate);
+        let at = crate::scanners::Span::new(self.center, self.rate);
         json!({
             "scanners": self
                 .scanners

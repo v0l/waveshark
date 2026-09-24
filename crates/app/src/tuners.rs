@@ -701,7 +701,6 @@ mod tests {
                         stage("vga", "VGA", 60.0, 0.0, vec![0.0, 0.9, 1.4, 49.6, 60.0]),
                     ],
                     native_format: SampleFormat::Cu8,
-                    usable_bandwidth_ratio: 0.8,
                     tunable: true,
                     tx: None,
                 },

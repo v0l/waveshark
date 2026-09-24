@@ -165,7 +165,6 @@ impl Device {
                 auto: true,
             }],
             native_format: SampleFormat::Cu8,
-            usable_bandwidth_ratio: rtl::USABLE_BANDWIDTH_RATIO,
             tunable: true,
             tx: None,
         };
