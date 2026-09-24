@@ -1217,3 +1217,33 @@ Required Weekly Test off one of the seven 162 MHz channels, recorded as IQ.
 Nothing in it names a person: the header names two Illinois counties and the
 issuing office.
 """
+
+[[capture]]
+name = "stdc_egc_1541.45M_48k.cs16"
+sha256 = "8c68fb5147395b0e0eb5025b99caeda667bc1cb2b47802297581dd61e7f08bc8"
+url = "https://nostr.download/8c68fb5147395b0e0eb5025b99caeda667bc1cb2b47802297581dd61e7f08bc8.xz"
+compression = "xz"
+center_hz = 1_541_450_000
+rate_sps = 48_000
+format = "cs16"
+license = "unstated"
+license_source = "Signal Identification Wiki, Inmarsat-C_TDM_EGC_IQ.zip uploaded by Cartoonman on 13 January 2016"
+description = """
+Not this project's recording: 49 seconds of the Inmarsat-C TDM from the
+Signal Identification Wiki's `Inmarsat-C_TDM_EGC_IQ.zip`, uploaded by
+Cartoonman on 13 January 2016. 48 kS/s of 16-bit IQ with the carrier at the
+centre, converted from the WAV unchanged. The wiki gives no frequency; the
+packets name the Atlantic Ocean Region East satellite, whose common channel
+is 1541.45 MHz, so that is the centre in the name.
+
+stdcdec at 4b4ef4a with inmarsatc at cda1242, fed the upper sideband of the
+same samples, reads frames 5988 to 5990 with no bit errors and 46 packets in
+them. `crates/identify/tests/captures.rs` asserts the same frames and the
+same packets by type, and one more frame, 5987, which stdcdec spent locking.
+This capture is what found that every byte of a frame was being read bit
+reversed: until then no packet off the air passed its check.
+
+What it holds is real traffic and names people: ship earth station ids, the
+land earth stations that served them, the addresses of email confirmations
+and the text of an enhanced group call broadcast, all sent in the clear.
+"""

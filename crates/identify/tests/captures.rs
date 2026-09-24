@@ -279,3 +279,47 @@ fn an_nxdn96_call_is_the_one_dsd_fme_read() {
         "dsd-fme at 719d970 read source 2 to group 0 on RAN 0: {calls:?}"
     );
 }
+
+#[test]
+fn an_inmarsat_c_tdm_reads_as_stdcdec_read_it() {
+    use decode::inmarsat::stdc;
+    let Some(buf) = fixture("stdc_egc_1541.45M_48k.cs16") else { return };
+    let (rate, center) = (buf.rate.as_f64(), buf.center.as_f64());
+    let mut chan = identify::Channel::new(rate, center, center, 6_000.0, 9_600.0).unwrap();
+    let mut demod = dsp::bpsk::BpskDemod::new(chan.rate_hz, dsp::bpsk::BpskConfig::INMARSAT_C);
+    let mut framer = stdc::Framer::new();
+    let (mut narrow, mut soft, mut frames) = (Vec::new(), Vec::new(), Vec::new());
+    for b in buf.samples.chunks(8192) {
+        chan.process(b, &mut narrow);
+        soft.clear();
+        demod.process(&narrow, &mut soft);
+        framer.process(&soft, &mut frames);
+    }
+    let numbers: Vec<u16> = frames.iter().map(|f| f.number).collect();
+    assert_eq!(numbers, [5987, 5988, 5989, 5990], "stdcdec read 5988 to 5990, locking late");
+
+    let mut kinds = std::collections::BTreeMap::new();
+    for f in frames.iter().filter(|f| f.number >= 5988) {
+        for p in stdc::packets(&f.bytes) {
+            assert!(p.check_ok, "frame {} packet {:02x}", f.number, p.bytes[0]);
+            *kinds.entry(p.bytes[0]).or_insert(0) += 1;
+        }
+    }
+    let stdcdec: std::collections::BTreeMap<u8, i32> = [
+        (0x6c, 3),
+        (0x7d, 3),
+        (0x81, 20),
+        (0x92, 2),
+        (0x93, 3),
+        (0xa8, 12),
+        (0xac, 1),
+        (0xb1, 1),
+        (0xb2, 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(kinds, stdcdec, "stdcdec 4b4ef4a with inmarsatc cda1242, frames 5988 to 5990");
+
+    let rows = identify::stdc::Stdc.read(&buf.samples, rate, center).rows;
+    assert_eq!(rows.len(), 55, "every packet of the four frames");
+}

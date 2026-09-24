@@ -23,6 +23,7 @@ the code is in the commit log.
 
 - 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
 - 802.15.4 beacons read out of frames too short for their own address lists.
+- Inmarsat STD-C decoding nothing off the air.
 
 ## [0.4.0] - 2026-09-24
 

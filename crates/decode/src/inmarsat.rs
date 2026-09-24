@@ -32,11 +32,6 @@ pub const BAND_HZ: (f64, f64) = (1_525_000_000.0, 1_559_000_000.0);
 /// decoder orders it: the generator every satellite link calls A goes first.
 const CODE: conv::Code = conv::K7_A_FIRST;
 
-/// Pack bits most significant first, as STD-C counts them.
-fn pack_msb(bits: &[u8]) -> Vec<u8> {
-    bits.chunks(8).map(|c| c.iter().fold(0u8, |a, b| a << 1 | (b & 1))).collect()
-}
-
 /// Pack bits least significant first, as Aero counts them.
 fn pack_lsb(bits: &[u8]) -> Vec<u8> {
     bits.chunks(8).map(|c| c.iter().enumerate().fold(0u8, |a, (i, b)| a | (b & 1) << i)).collect()
@@ -166,7 +161,7 @@ pub mod stdc {
         }
         let bits =
             Viterbi::decode_block(CODE, &coded, &[1], ROWS * DATA_COLS / 2, conv::Ends::Anywhere);
-        let mut bytes = pack_msb(&bits);
+        let mut bytes = pack_lsb(&bits);
         bytes.resize(FRAME_BYTES, 0);
         descramble(&mut bytes);
         let number = u16::from_be_bytes([bytes[2], bytes[3]]);
@@ -558,8 +553,7 @@ pub mod stdc {
         let mut data = bytes.to_vec();
         data.resize(FRAME_BYTES, 0);
         descramble(&mut data);
-        let bits: Vec<u8> =
-            data.iter().flat_map(|b| (0..8).rev().map(move |i| b >> i & 1)).collect();
+        let bits: Vec<u8> = data.iter().flat_map(|b| (0..8).map(move |i| b >> i & 1)).collect();
         let coded = conv::Encoder::new(CODE).punctured(&bits, &[1]);
 
         let mut out = vec![0.0f32; FRAME_SYMBOLS];
