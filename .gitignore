@@ -8,6 +8,7 @@ testdata/*.cs16
 testdata/*.cf32
 testdata/*.xz
 testdata/ft8_wsjtx_*.wav
+testdata/eas_*.wav
 
 # rtl_433's test corpus, captures and the reference decodes beside them. Same
 # reason, plus it belongs to the people who contributed it: testdata/rtl433.toml

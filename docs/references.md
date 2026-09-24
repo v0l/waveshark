@@ -274,7 +274,7 @@ failing something, is in `AGENTS.md`.
 Each entry also carries a `license`, and
 [`testdata/LICENSE.md`](../testdata/LICENSE.md) holds the terms: CC BY 4.0 for
 everything recorded or generated for this project, with the attribution line
-to use, and the publisher's own terms for the six fixtures that came from
+to use, and the publisher's own terms for the ten fixtures that came from
 somewhere else.
 
 | fixture | publisher | terms |
@@ -285,6 +285,10 @@ somewhere else.
 | `sstv_martin1_44100.wav` | colaclanth/sstv | GPL-3.0, converted here and re-hosted |
 | `dvbt_hd_429M_9142857.cs8` | Ron Economos, w6rz.net | no terms stated, cut here and re-hosted |
 | `rs41_herstmonceux_405.80024M_31.25k.cs16` | SDRangel | no terms stated, cut here and re-hosted |
+| `dab_melbourne_9a_202.928M_2500k.cs16` | Signal Identification Wiki | no terms stated, cut here and re-hosted |
+| `nxdn48_453M_48k.cs16` | Signal Identification Wiki | no terms stated, converted here and re-hosted |
+| `nxdn96_453M_48k.cs16` | Signal Identification Wiki | no terms stated, converted here and re-hosted |
+| `eas_tor_kilx_22050.wav` | Signal Identification Wiki | no terms stated, converted here and re-hosted |
 
 The rtl_433 corpus (`testdata/rtl433.toml`) is contributed recordings under no
 stated licence and the LoRa survey table (`testdata/survey.toml`) is CC BY 4.0

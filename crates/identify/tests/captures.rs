@@ -179,3 +179,103 @@ fn nobody_reads_another_protocol_s_capture() {
         }
     });
 }
+
+const WELLE_IO_2_4: [(&str, &str); 29] = [
+    ("10C0", "RSN Racing&Sport"),
+    ("10C1", "RSN Carnival 1"),
+    ("10C2", "TAB Live"),
+    ("10C3", "RSN Carnival 2"),
+    ("1106", "1116 SEN"),
+    ("1107", "SEN2"),
+    ("1108", "SEN Track"),
+    ("1109", "easy music 3MP"),
+    ("110A", "Rythmos"),
+    ("110B", "NICHE RADIO"),
+    ("110C", "SEN SYDNEY"),
+    ("111A", "Nova 100"),
+    ("111B", "smoothfm 91.5"),
+    ("111C", "Coles Radio"),
+    ("111D", "Smooth Relax"),
+    ("111E", "Radio Maria"),
+    ("111F", "Nova Noughties"),
+    ("1137", "MMM SOFT ROCK"),
+    ("1138", "MMM CLASSIC ROCK"),
+    ("1139", "MMM COUNTRY"),
+    ("113A", "Little Fox"),
+    ("113B", "MMM HARD N HEAVY"),
+    ("114C", "3RRR Digital"),
+    ("114D", "LightDigital"),
+    ("114E", "3MBS Fine Music"),
+    ("114F", "3ZZZ Ethnic"),
+    ("1150", "IRIS Melbourne"),
+    ("1151", "Light89.9"),
+    ("1152", "LightChristmas"),
+];
+
+#[test]
+fn a_band_iii_recording_is_the_melbourne_ensemble_welle_io_2_4_read() {
+    let Some(buf) = fixture("dab_melbourne_9a_202.928M_2500k.cs16") else { return };
+    let (rate, center) = (buf.rate.as_f64(), buf.center.as_f64());
+    let got = identify::identify(&buf.samples, rate, center).expect("an ensemble");
+    assert_eq!(got.protocol, "dab");
+    assert_eq!(got.frames, 30, "the ensemble and its 29 services");
+    assert_eq!(got.center_hz, 202_928_000.0);
+
+    let rows = identify::dab::DabProtocol.read(&buf.samples, rate, center).rows;
+    let named = |row: &common::packet::Proto| {
+        row.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Named(n) => Some(n.label.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(rows[0].kind, "ensemble");
+    assert_eq!(named(&rows[0]).as_deref(), Some("DAB Melbourne 1"));
+    let mut services: Vec<(String, String)> = rows[1..]
+        .iter()
+        .map(|r| {
+            assert_eq!(r.kind, "audio_service");
+            (r.subject.as_ref().expect("a service id").id.to_string(), named(r).expect("a label"))
+        })
+        .collect();
+    services.sort();
+    let theirs: Vec<(String, String)> =
+        WELLE_IO_2_4.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    assert_eq!(services, theirs, "welle.io 2.4 on the same three seconds");
+}
+
+fn nxdn_calls(name: &str) -> Option<(usize, Vec<(String, String, u16)>)> {
+    let buf = fixture(name)?;
+    let rows = identify::nxdn::Nxdn.read(&buf.samples, buf.rate.as_f64(), buf.center.as_f64()).rows;
+    let calls = rows
+        .iter()
+        .filter(|r| r.kind == "vcall")
+        .map(|r| {
+            let (from, to) = r.parties();
+            let ran = r.facts.iter().find_map(|f| match f {
+                common::packet::Fact::Infrastructure(c) => c.site_code,
+                _ => None,
+            });
+            (from.unwrap().to_string(), to.unwrap().to_string(), ran.expect("a RAN"))
+        })
+        .collect();
+    Some((rows.len(), calls))
+}
+
+#[test]
+fn an_nxdn48_call_is_the_one_dsd_fme_read() {
+    let Some((rows, calls)) = nxdn_calls("nxdn48_453M_48k.cs16") else { return };
+    assert_eq!(rows, 123);
+    assert_eq!(calls.len(), 15, "dsd-fme at 719d970 printed 15 VCALL for this file");
+    assert!(calls.iter().all(|c| *c == ("901".into(), "0".into(), 1)), "{calls:?}");
+}
+
+#[test]
+fn an_nxdn96_call_is_the_one_dsd_fme_read() {
+    let Some((rows, calls)) = nxdn_calls("nxdn96_453M_48k.cs16") else { return };
+    assert_eq!(rows, 300);
+    assert_eq!(calls.len(), 146);
+    assert!(
+        calls.iter().all(|c| *c == ("2".into(), "0".into(), 0)),
+        "dsd-fme at 719d970 read source 2 to group 0 on RAN 0: {calls:?}"
+    );
+}

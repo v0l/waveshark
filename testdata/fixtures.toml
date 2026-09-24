@@ -1104,3 +1104,116 @@ weak ones under -15 dB are what a synthesised slot does not have.
 The callsigns in it are real amateur stations, sent in the clear as FT8
 always is.
 """
+
+[[capture]]
+name = "dab_melbourne_9a_202.928M_2500k.cs16"
+sha256 = "5748293c44e1654810a48cfa267d8992644aa74de0d78f2068e5a777e548a11a"
+url = "https://nostr.download/5748293c44e1654810a48cfa267d8992644aa74de0d78f2068e5a777e548a11a.xz"
+compression = "xz"
+center_hz = 202_928_000
+rate_sps = 2_500_000
+format = "cs16"
+license = "unstated"
+license_source = "Signal Identification Wiki, DAB+9A.zip uploaded by Griffonboi on 3 January 2021, cut here"
+description = """
+Not this project's recording: the DAB+ multiplex on block 9A in Melbourne,
+recorded with SDR# at 2.5 MS/s on 3 January 2021 and published on the Signal
+Identification Wiki as `DAB+9A.zip`. The first three seconds of the 7.2
+second original, unchanged: the samples are the file's own, with the WAV
+header taken off.
+
+welle.io 2.4 (the Debian trixie package) reads the ensemble DAB Melbourne 1,
+id f003, with 29 DAB+ services, after the cut was resampled to 2.048 MS/s for
+it. `crates/identify/tests/captures.rs` asserts the same ensemble and the
+same 29 service ids and labels, read at the recording's own rate through the
+resampler. Three seconds is the shortest cut that names all 29: two seconds
+names 27.
+
+Nothing in it identifies a person; the service labels are broadcasters'.
+"""
+
+[[capture]]
+name = "nxdn48_453M_48k.cs16"
+sha256 = "2496c07730c6385c68dd9f54d723f4b6ff0bc7b49c5408c2fcf14dfb1afbb626"
+url = "https://nostr.download/2496c07730c6385c68dd9f54d723f4b6ff0bc7b49c5408c2fcf14dfb1afbb626.xz"
+compression = "xz"
+center_hz = 453_000_000
+rate_sps = 48_000
+format = "cs16"
+license = "unstated"
+license_source = "Signal Identification Wiki, NXDN_IQ.zip uploaded by Cartoonman on 4 January 2016"
+description = """
+Not this project's recording: 12 seconds of NXDN48, the 6.25 kHz channel at
+4800 bit/s, from the Signal Identification Wiki's `NXDN_IQ.zip`, uploaded by
+Cartoonman on 4 January 2016, where it is `NXDN48 IQ.wav`. 48 kS/s of 16-bit
+IQ with the signal at the centre, converted from the WAV unchanged. The wiki
+gives no frequency, so the 453 MHz in the name is chosen, inside the UHF
+land mobile band NXDN is licensed in, for the band table to offer the
+decoder: it is not where it was recorded.
+
+dsd-fme built from commit 719d970 reads it off an FM discriminator of the
+same samples as a group call from unit 901 to group 0 on RAN 1, fifteen
+times over, with the alias REPEATER. `crates/identify/tests/captures.rs`
+asserts the same call, and the same fifteen of them.
+
+The radio ids in it are real, sent in the clear as NXDN signalling is.
+"""
+
+[[capture]]
+name = "nxdn96_453M_48k.cs16"
+sha256 = "48bba222129a43da7aae1c41aa2872b7adf9a3ea2d7bcbdcce5dd0ae3ad22af3"
+url = "https://nostr.download/48bba222129a43da7aae1c41aa2872b7adf9a3ea2d7bcbdcce5dd0ae3ad22af3.xz"
+compression = "xz"
+center_hz = 453_000_000
+rate_sps = 48_000
+format = "cs16"
+license = "unstated"
+license_source = "Signal Identification Wiki, NXDN_IQ.zip uploaded by Cartoonman on 4 January 2016"
+description = """
+Not this project's recording: 15 seconds of NXDN96, the 12.5 kHz channel at
+9600 bit/s, from the Signal Identification Wiki's `NXDN_IQ.zip`, uploaded by
+Cartoonman on 4 January 2016, where it is `NXDN96 IQ.wav`. 48 kS/s of 16-bit
+IQ with the signal at the centre, converted from the WAV unchanged. The wiki
+gives no frequency, so the 453 MHz in the name is chosen, inside the UHF
+land mobile band NXDN is licensed in, for the band table to offer the
+decoder: it is not where it was recorded.
+
+dsd-fme built from commit 719d970 reads it off an FM discriminator of the
+same samples as a group call from unit 2 to group 0 on RAN 0.
+`crates/identify/tests/captures.rs` asserts the same call; dsd-fme prints
+each copy of the call in a frame's two FACCH1 blocks, so its count of them
+is not the same unit as ours and is not compared.
+
+The radio ids in it are real, sent in the clear as NXDN signalling is.
+"""
+
+[[capture]]
+name = "eas_tor_kilx_22050.wav"
+sha256 = "d747148b7c768abd3db4dacfa95596bfb27785cbf66456affd9ae81b03178876"
+url = "https://nostr.download/d747148b7c768abd3db4dacfa95596bfb27785cbf66456affd9ae81b03178876.xz"
+compression = "xz"
+center_hz = 0
+rate_sps = 22_050
+format = "wav"
+license = "unstated"
+license_source = "Signal Identification Wiki, EAS_Alert_Tornado_Warning.mp3 uploaded by Cartoonman on 2 June 2015, converted here"
+description = """
+Not IQ and not this project's recording: a tornado warning from the National
+Weather Service office at Lincoln, Illinois, as broadcast, 72 seconds of
+audio published on the Signal Identification Wiki as
+`EAS_Alert_Tornado_Warning.mp3` by Cartoonman on 2 June 2015. Converted here
+from the MP3 to 22.05 kHz mono WAV with ffmpeg, so what is in it has been
+through a lossy codec.
+
+multimon-ng 1.3.1 (the Debian trixie package) reads the SAME header
+ZCZC-WXR-TOR-017021-017115+0045-1000042-KILX/NWS- and three copies of the
+end of message NNNN. `crates/nodes/tests/eas_capture.rs` runs the EAS node
+on the audio and asserts the same header and one end of message, the node
+publishing three copies as one.
+
+It is evidence about the audio path only. The #189 row still wants a
+Required Weekly Test off one of the seven 162 MHz channels, recorded as IQ.
+
+Nothing in it names a person: the header names two Illinois counties and the
+issuing office.
+"""
