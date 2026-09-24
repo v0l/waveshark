@@ -1077,3 +1077,30 @@ zigbee_data = 5
 zigbee_command = 4
 hop_sender = "A4:C1:38:01:D4:FD:FF:FF"
 joining = "94:A0:81:FF:FE:86:DD:48"
+
+[[capture]]
+name = "ft8_wsjtx_210703_133430_12000.wav"
+sha256 = "9feb99c275770a6618538026da7decc6b09eb6cf63121e5168fa86dcdf00c2f5"
+url = "https://raw.githubusercontent.com/WSJTX/wsjtx/00b0e4c1c92ff409bcce633a241409441a010340/samples/FT8/210703_133430.wav"
+compression = "none"
+center_hz = 0
+rate_sps = 12_000
+format = "wav"
+license = "GPL-3.0"
+license_source = "WSJTX/wsjtx, samples/FT8/210703_133430.wav, fetched from that repository"
+description = """
+Not IQ and not this project's recording: one 15 second FT8 slot of a busy
+20 metre band as WSJT-X records it, 12 kHz of single sideband audio, shipped
+with WSJT-X as one of its own samples and fetched here at a pinned commit.
+
+jt9 from WSJT-X 2.7.0 (the Debian trixie package) reads 22 stations out of
+it with `jt9 -8 -d 3`, and those are listed with their audio frequencies in
+`crates/decode/tests/ft8_wsjtx_sample.rs`. The test asserts that everything
+this decoder reads is one of them, at the frequency jt9 gave, and pins how
+many it reads as a floor, because the gap is the point: two stations on
+overlapping tones, a station that keyed before the recording began and the
+weak ones under -15 dB are what a synthesised slot does not have.
+
+The callsigns in it are real amateur stations, sent in the clear as FT8
+always is.
+"""

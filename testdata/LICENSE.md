@@ -29,7 +29,7 @@ is a permission from the people or the transmitters heard.
 
 ## Recordings that came from somewhere else
 
-Five of the fixtures are not ours. Each carries its own `license` and a
+Six of the fixtures are not ours. Each carries its own `license` and a
 `license_source` naming where it came from, and the terms are the publisher's,
 not this project's:
 
@@ -37,11 +37,12 @@ not this project's:
 |---|---|---|
 | `acars_acarsdec_12500.wav` | TLeconte/acarsdec, `test.wav` | LGPL-2.0-only, the licence that repository states |
 | `vdl2_model_136.975M_1050k.wav` | szpajder/dumpvdl2, `test/vdl2_model_16b_1050kHz.wav` | GPL-3.0, the licence that repository states |
+| `ft8_wsjtx_210703_133430_12000.wav` | WSJTX/wsjtx, `samples/FT8/210703_133430.wav` | GPL-3.0, the licence that repository states |
 | `sstv_martin1_44100.wav` | colaclanth/sstv, `examples/m1.ogg`, converted here | GPL-3.0, the licence that repository states |
 | `dvbt_hd_429M_9142857.cs8` | Ron Economos, `w6rz.net/adv16.cfile`, cut here | no terms stated by the publisher |
 | `rs41_herstmonceux_405.80024M_31.25k.cs16` | SDRangel, `sdrangel.org/iq-files`, cut here | no terms stated by the publisher |
 
-The first two are fetched from their own repositories at a pinned commit and
+The first three are fetched from their own repositories at a pinned commit and
 are never re-hosted. The last three are: a conversion, a cut and a requantised
 cut are on nostr.download because the originals are lossy, a gigabyte, or a
 WAV that needs converting first. Ask the publisher rather than this project if

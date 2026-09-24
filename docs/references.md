@@ -274,13 +274,14 @@ failing something, is in `AGENTS.md`.
 Each entry also carries a `license`, and
 [`testdata/LICENSE.md`](../testdata/LICENSE.md) holds the terms: CC BY 4.0 for
 everything recorded or generated for this project, with the attribution line
-to use, and the publisher's own terms for the five fixtures that came from
+to use, and the publisher's own terms for the six fixtures that came from
 somewhere else.
 
 | fixture | publisher | terms |
 |---|---|---|
 | `acars_acarsdec_12500.wav` | TLeconte/acarsdec | LGPL-2.0-only, fetched from that repository, not re-hosted |
 | `vdl2_model_136.975M_1050k.wav` | szpajder/dumpvdl2 | GPL-3.0, fetched from that repository, not re-hosted |
+| `ft8_wsjtx_210703_133430_12000.wav` | WSJTX/wsjtx | GPL-3.0, fetched from that repository, not re-hosted |
 | `sstv_martin1_44100.wav` | colaclanth/sstv | GPL-3.0, converted here and re-hosted |
 | `dvbt_hd_429M_9142857.cs8` | Ron Economos, w6rz.net | no terms stated, cut here and re-hosted |
 | `rs41_herstmonceux_405.80024M_31.25k.cs16` | SDRangel | no terms stated, cut here and re-hosted |

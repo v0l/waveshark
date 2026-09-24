@@ -130,6 +130,7 @@ pub struct Slot {
     bins: usize,
     steps: usize,
     scratch: Vec<C32>,
+    whole: Vec<C32>,
 }
 
 /// Steps a symbol the spectrogram is taken at. A station keys when its own
@@ -155,6 +156,10 @@ const FREQ_STEPS: usize = 2;
 /// hundredth of what the sync search over the same slot costs.
 const MAX_CANDIDATES: usize = 200;
 
+const DS_SPS: usize = 32;
+
+const FINE_STEPS: i64 = 4;
+
 impl Slot {
     pub fn new(rate: f64, wf: Waveform) -> Self {
         let symbol = (rate / wf.baud).round().max(4.0) as usize;
@@ -177,6 +182,7 @@ impl Slot {
             bins: nfft,
             steps: 0,
             scratch: Vec::new(),
+            whole: Vec::new(),
         }
     }
 
@@ -206,6 +212,13 @@ impl Slot {
             }
         }
         found.sort_by(|a, b| b.0.total_cmp(&a.0));
+        self.whole.clear();
+        self.whole.extend_from_slice(iq);
+        let mut planner = FftPlanner::new();
+        planner.plan_fft_forward(self.whole.len()).process(&mut self.whole);
+        let ds_bins =
+            (DS_SPS as f64 * self.wf.baud * self.whole.len() as f64 / self.rate).round() as usize;
+        let inverse = planner.plan_fft_inverse(ds_bins.max(1));
 
         let mut out: Vec<Heard> = Vec::new();
         let mut taken: Vec<(usize, usize)> = Vec::new();
@@ -222,7 +235,13 @@ impl Slot {
                 continue;
             }
             taken.push((t, f));
-            out.push(self.soft(t, f, score));
+            let mut heard = self.soft(t, f, score);
+            if let Some((llr, df, dt)) = self.refine(heard.freq_hz, heard.at_s, &*inverse) {
+                heard.llr = llr;
+                heard.freq_hz += df;
+                heard.at_s += dt;
+            }
+            out.push(heard);
         }
         out
     }
@@ -331,6 +350,117 @@ impl Slot {
             snr_db: snr_2500(signal, noise, self.wf.baud),
             llr,
         }
+    }
+
+    fn refine(&self, f_hz: f64, t_s: f64, inverse: &dyn Fft<f32>) -> Option<(Vec<f32>, f64, f64)> {
+        let wf = self.wf;
+        let n = self.whole.len();
+        let bin_hz = self.rate / n as f64;
+        let m = inverse.len();
+        if m < DS_SPS * 4 {
+            return None;
+        }
+        let centre = f_hz + (wf.tones as f64 - 1.0) / 2.0 * wf.baud;
+        let k0 = (centre / bin_hz).round() as i64;
+        let mut ds = vec![C32::default(); m];
+        let edge = m / 16;
+        for j in 0..m {
+            let offset = j as i64 - (m / 2) as i64;
+            let src = (k0 + offset).rem_euclid(n as i64) as usize;
+            let taper = match j.min(m - 1 - j) {
+                d if d < edge => 0.5 - 0.5 * (std::f32::consts::PI * d as f32 / edge as f32).cos(),
+                _ => 1.0,
+            };
+            ds[offset.rem_euclid(m as i64) as usize] = self.whole[src] * taper;
+        }
+        inverse.process(&mut ds);
+        let ds_rate = m as f64 * bin_hz;
+        let base = f_hz - k0 as f64 * bin_hz;
+        let start = (t_s * ds_rate).round() as i64;
+        let reach = (DS_SPS / TIME_STEPS / 2 + 2) as i64;
+        let fines = (2 * FINE_STEPS + 1) as usize;
+        let mut twiddles = vec![C32::default(); fines * wf.tones * DS_SPS];
+        for fine in 0..fines {
+            let df = (fine as i64 - FINE_STEPS) as f64 * wf.baud / (4.0 * FINE_STEPS as f64);
+            for t in 0..wf.tones {
+                let step = -std::f64::consts::TAU * (base + df + t as f64 * wf.baud) / ds_rate;
+                for i in 0..DS_SPS {
+                    let ph = step * i as f64;
+                    twiddles[(fine * wf.tones + t) * DS_SPS + i] =
+                        C32::new(ph.cos() as f32, ph.sin() as f32);
+                }
+            }
+        }
+        let tone_power = |from: i64, fine: usize, t: usize| -> f32 {
+            if from < 0 || from as usize + DS_SPS > m {
+                return 0.0;
+            }
+            let w = &twiddles[(fine * wf.tones + t) * DS_SPS..][..DS_SPS];
+            let mut acc = C32::default();
+            for (x, w) in ds[from as usize..from as usize + DS_SPS].iter().zip(w) {
+                acc += *x * *w;
+            }
+            acc.norm_sqr()
+        };
+        let sync = |dt: i64, fine: usize| -> f32 {
+            let (mut on, mut all) = (0.0f32, 0.0f32);
+            for group in wf.sync {
+                for (k, tone) in group.tones.iter().enumerate() {
+                    let from = start + dt + ((group.at + k) * DS_SPS) as i64;
+                    for t in 0..wf.tones {
+                        let p = tone_power(from, fine, t);
+                        all += p;
+                        if t == *tone as usize {
+                            on += p;
+                        }
+                    }
+                }
+            }
+            on / (all / wf.tones as f32).max(1e-20)
+        };
+        let centre_fine = FINE_STEPS as usize;
+        let mut best = (f32::MIN, 0i64, centre_fine);
+        for dt in -reach..=reach {
+            let score = sync(dt, centre_fine);
+            if score > best.0 {
+                best = (score, dt, centre_fine);
+            }
+        }
+        for fine in 0..fines {
+            let score = sync(best.1, fine);
+            if score > best.0 {
+                best = (score, best.1, fine);
+            }
+        }
+        let (_, dt, fine) = best;
+        let df = (fine as i64 - FINE_STEPS) as f64 * wf.baud / (4.0 * FINE_STEPS as f64);
+        let bits = wf.bits_per_symbol();
+        let mut llr = Vec::with_capacity(wf.bits());
+        for (from, to) in wf.data {
+            for s in *from..*to {
+                let at = start + dt + (s * DS_SPS) as i64;
+                let amp: Vec<f32> = (0..wf.tones).map(|t| tone_power(at, fine, t).sqrt()).collect();
+                for b in 0..bits {
+                    let (mut one, mut zero) = (f32::MIN, f32::MIN);
+                    for pattern in 0..wf.tones {
+                        let v = amp[wf.gray[pattern] as usize];
+                        match pattern >> (bits - 1 - b) & 1 {
+                            1 => one = one.max(v),
+                            _ => zero = zero.max(v),
+                        }
+                    }
+                    llr.push(one - zero);
+                }
+            }
+        }
+        let mean = llr.iter().sum::<f32>() / llr.len().max(1) as f32;
+        let var =
+            llr.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / llr.len().max(1) as f32;
+        let scale = 2.83 / var.sqrt().max(1e-12);
+        for v in llr.iter_mut() {
+            *v *= scale;
+        }
+        Some((llr, df, dt as f64 / ds_rate))
     }
 
     /// The floor the transmission stands on: the median bin of the rows it
