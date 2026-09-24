@@ -10,7 +10,8 @@ iqstream.workspace = true
 nostr-sdk = "0.45"
 portmapper = { version = "0.19", default-features = false }
 thiserror.workspace = true
-tokio = { version = "1", features = ["time", "sync", "macros"] }
+tracing.workspace = true
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 [dev-dependencies]
 nostr-sdk = { version = "0.45", features = ["local-relay"] }

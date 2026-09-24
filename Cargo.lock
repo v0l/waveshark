@@ -3682,6 +3682,7 @@ dependencies = [
  "portmapper",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -7955,11 +7956,13 @@ dependencies = [
  "common",
  "decode",
  "dsp",
+ "iqdirectory",
  "iqstream",
  "remote",
  "rtlsdr",
  "serde_json",
  "sources",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

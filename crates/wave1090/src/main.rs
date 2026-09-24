@@ -122,6 +122,43 @@ struct Args {
     #[arg(long, value_name = "ADDR")]
     iqstream_listen: Option<String>,
 
+    /// List the iqstream server in the public directory on nostr, so another
+    /// receiver can find it. Published at start and every 24 hours, and
+    /// withdrawn on SIGINT or SIGTERM
+    #[arg(long, requires = "iqstream_listen")]
+    iqstream_list: bool,
+
+    /// What the station is called in the directory
+    #[arg(long, value_name = "NAME", default_value = "wave1090")]
+    iqstream_name: String,
+
+    /// A line about the station, shown in the directory
+    #[arg(long, value_name = "TEXT", default_value = "")]
+    iqstream_description: String,
+
+    /// The antenna, shown in the directory
+    #[arg(long, value_name = "TEXT", default_value = "")]
+    iqstream_antenna: String,
+
+    /// The host other receivers reach this one at. Without it the router is
+    /// asked to open the port, over UPnP, PCP or NAT-PMP, and the address it
+    /// gives is listed
+    #[arg(long, value_name = "HOST")]
+    iqstream_public_host: Option<String>,
+
+    /// List --lat and --lon as well, to about five kilometres
+    #[arg(long, requires = "lat", requires = "lon")]
+    iqstream_locate: bool,
+
+    /// Where the key the listing is signed with is kept, made on first use.
+    /// ~/.config/wave1090/directory.nsec when not given
+    #[arg(long, value_name = "FILE")]
+    iqstream_key: Option<std::path::PathBuf>,
+
+    /// Nostr relays to list on, comma separated. Four public ones by default
+    #[arg(long, value_name = "URL", value_delimiter = ',')]
+    iqstream_relay: Vec<String>,
+
     /// How hard the parity search looks, which is what this costs.
     ///
     /// `fine` reads more than dump1090 and wants a third of a fast core;
@@ -246,7 +283,7 @@ fn serve(args: &Args, name: &'static str, port: u16) -> Result<Option<net::Fanou
 /// A subscriber here is reading the same tuner, which is how one aerial feeds
 /// this and a second receiver at once. Not tunable: the dial belongs to
 /// whoever this is decoding for.
-fn listen(args: &Args, center_hz: u64, rate: f64) -> Result<Option<Fanned>> {
+fn listen(args: &Args, center_hz: u64, rate: f64, hardware: &str) -> Result<Option<Fanned>> {
     let Some(spec) = &args.iqstream_listen else { return Ok(None) };
     let addr: std::net::SocketAddr = match spec.parse() {
         Ok(a) => a,
@@ -270,7 +307,82 @@ fn listen(args: &Args, center_hz: u64, rate: f64) -> Result<Option<Fanned>> {
     let server = iqstream::Server::start(addr, cfg).context("cannot serve iqstream")?;
     tracing::info!("iqstream on {}", server.addr());
     let tuner = server.default_stream().context("the server kept no tuner")?;
+    tuner.set_hardware(hardware);
+    if args.iqstream_list {
+        let listing = listing(args)?;
+        let shared = server.clone();
+        let lister = iqdirectory::lister::Lister::start(move || Some(shared.clone()), listing)
+            .context("cannot start the directory listing")?;
+        withdraw_on_signal(lister)?;
+    }
     Ok(Some(Fanned { server, tuner }))
+}
+
+fn key_path(args: &Args) -> Result<std::path::PathBuf> {
+    if let Some(p) = &args.iqstream_key {
+        return Ok(p.clone());
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .or_else(|| std::env::var_os("APPDATA").map(std::path::PathBuf::from))
+        .context("no home to keep the directory key in, so name it with --iqstream-key")?;
+    Ok(base.join("wave1090").join("directory.nsec"))
+}
+
+fn listing(args: &Args) -> Result<iqdirectory::lister::Listing> {
+    let path = key_path(args)?;
+    let keys = iqdirectory::identity_file(&path)
+        .with_context(|| format!("directory key {}", path.display()))?;
+    tracing::info!("iqstream directory key {}", iqdirectory::npub(&keys));
+    let nsec = iqdirectory::nsec(&keys).context("the directory key would not encode")?;
+    let relays = match args.iqstream_relay.is_empty() {
+        true => iqdirectory::RELAYS.iter().map(|r| r.to_string()).collect(),
+        false => args.iqstream_relay.clone(),
+    };
+    Ok(iqdirectory::lister::Listing {
+        name: args.iqstream_name.clone(),
+        description: args.iqstream_description.clone(),
+        antenna: args.iqstream_antenna.clone(),
+        location: station(args).filter(|_| args.iqstream_locate),
+        public_host: args.iqstream_public_host.clone(),
+        nsec,
+        relays,
+    })
+}
+
+fn withdraw_on_signal(lister: iqdirectory::lister::Lister) -> Result<()> {
+    std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                return;
+            };
+            rt.block_on(stopped());
+            tracing::info!("withdrawing the directory listing");
+            lister.withdraw(std::time::Duration::from_secs(3));
+            std::process::exit(0);
+        })
+        .context("cannot watch for signals")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn stopped() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let Ok(mut term) = signal(SignalKind::terminate()) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn stopped() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// The one tuner this receiver serves, and the server holding the port open
@@ -519,7 +631,7 @@ fn from_radio(
 
     let mut stream = dev.start_rx().context("the radio would not start")?;
     let mut reader = Reader::new(rate, args.raw, args.parity_search.config(args.preamble_ratio));
-    reader.server = listen(args, center, rate)?;
+    reader.server = listen(args, center, rate, dev.info().kind.as_str())?;
     reader.track.here = station(args);
     reader.json = writer(args)?;
     let mut stats = Stats::default();
@@ -622,7 +734,7 @@ fn from_file(args: &Args, path: &std::path::Path, ports: Ports) -> Result<()> {
         args.preamble_ratio
     );
     let mut reader = Reader::new(rate, args.raw, args.parity_search.config(args.preamble_ratio));
-    reader.server = listen(args, buf.center.0, rate)?;
+    reader.server = listen(args, buf.center.0, rate, "file")?;
     reader.track.here = station(args);
     reader.json = writer(args)?;
     for (n, block) in buf.samples.chunks(65_536).enumerate() {
@@ -638,6 +750,57 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Read;
+
+    fn parsed(extra: &[&str]) -> std::result::Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("wave1090").chain(extra.iter().copied()))
+    }
+
+    #[test]
+    fn a_listing_needs_a_server_and_a_location_needs_a_position() {
+        let err = |a: &[&str]| parsed(a).err().map(|e| e.kind());
+        assert_eq!(
+            err(&["--iqstream-list"]),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+        assert_eq!(
+            err(&["--iqstream-listen", "1234", "--iqstream-list", "--iqstream-locate"]),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+        assert_eq!(err(&["--iqstream-listen", "1234", "--iqstream-list"]), None);
+    }
+
+    #[test]
+    fn the_listing_takes_its_key_from_a_file_made_once_and_the_position_only_when_asked() {
+        let dir = std::env::temp_dir().join(format!("wave1090-key-{}", std::process::id()));
+        let key = dir.join("directory.nsec");
+        let key = key.to_str().unwrap();
+        let base = ["--iqstream-listen", "1234", "--iqstream-list", "--iqstream-key", key];
+        let at = ["--lat", "51.45", "--lon", "-0.97"];
+        let args = parsed(&[&base[..], &at[..]].concat()).unwrap();
+        let first = listing(&args).unwrap();
+        assert_eq!(first.name, "wave1090");
+        assert_eq!(first.location, None, "a position given for CPR is not listed unasked");
+        assert_eq!(first.relays.len(), iqdirectory::RELAYS.len());
+        assert_eq!(first.public_host, None);
+
+        let named = [
+            "--iqstream-locate",
+            "--iqstream-name",
+            "radarpi",
+            "--iqstream-public-host",
+            "sdr.example.net",
+            "--iqstream-relay",
+            "wss://a.example,wss://b.example",
+        ];
+        let args = parsed(&[&base[..], &at[..], &named[..]].concat()).unwrap();
+        let second = listing(&args).unwrap();
+        assert_eq!(second.nsec, first.nsec, "the same key on the second start");
+        assert_eq!(second.location, Some((51.45, -0.97)));
+        assert_eq!(second.name, "radarpi");
+        assert_eq!(second.public_host.as_deref(), Some("sdr.example.net"));
+        assert_eq!(second.relays, ["wss://a.example", "wss://b.example"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     const CAPTURE: &str = "../../testdata/adsb_1090M_2400k.cu8";
     /// Ten seconds off radarpi, with dump1090's own Beast timestamps beside it

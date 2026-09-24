@@ -41,7 +41,6 @@ rumqttc = { version = "0.25", default-features = false }
 serde_json.workspace = true
 iqstream.workspace = true
 iqdirectory.workspace = true
-tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 [features]
 # Nothing by default: the app names what it wants, and a default here was on
