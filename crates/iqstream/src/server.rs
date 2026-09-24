@@ -40,7 +40,7 @@ use crate::proto::{
 };
 use common::{Error, Result};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -163,6 +163,7 @@ pub struct Stream {
     /// The server's own, so a setting moving reaches every connection and not
     /// only this tuner's readers.
     changed: broadcast::Sender<Change>,
+    hardware: Mutex<String>,
 }
 
 /// What a tuner is set to, beyond where it is pointed.
@@ -190,6 +191,7 @@ impl Stream {
             blocks_sent: AtomicU64::new(0),
             blocks_dropped: AtomicU64::new(0),
             changed,
+            hardware: Mutex::new(String::new()),
         })
     }
 
@@ -285,6 +287,17 @@ impl Stream {
 
     pub fn center_hz(&self) -> u64 {
         self.center_hz.load(Ordering::Relaxed)
+    }
+
+    pub fn set_hardware(&self, hardware: &str) {
+        if let Ok(mut h) = self.hardware.lock() {
+            h.clear();
+            h.push_str(hardware);
+        }
+    }
+
+    pub fn hardware(&self) -> String {
+        self.hardware.lock().map(|h| h.clone()).unwrap_or_default()
     }
 
     pub fn desc(&self) -> StreamDesc {
@@ -404,6 +417,7 @@ struct Streams {
     /// client in the welcome. Zero where the port could not be had for UDP,
     /// which leaves a client naming its own port as a 1.3 one does.
     data_port: u16,
+    public: Mutex<Option<Public>>,
     /// Where each subscription's punch is expected, by the token it carries.
     /// A pump waits on its entry until a datagram arrives from the address
     /// the client's NAT gave it.
@@ -529,6 +543,7 @@ impl Server {
             next_id: AtomicU32::new(0),
             changed: broadcast::channel(8).0,
             data_port,
+            public: Mutex::new(None),
             punches: Mutex::new(HashMap::new()),
             early: Mutex::new(HashMap::new()),
         });
@@ -567,6 +582,16 @@ impl Server {
 
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    pub fn set_public(&self, public: Option<Public>) {
+        if let Ok(mut held) = self.inner.public.lock() {
+            *held = public;
+        }
+    }
+
+    pub fn public(&self) -> Option<Public> {
+        self.inner.public.lock().ok().and_then(|p| *p)
     }
 
     pub fn name(&self) -> &str {
@@ -771,7 +796,7 @@ async fn converse(
     peer: SocketAddr,
     who: &str,
 ) -> Result<()> {
-    send(out, welcome(shared)).await?;
+    send(out, welcome(shared, peer.ip())).await?;
 
     let mut subs: HashMap<u16, Subscription> = HashMap::new();
     let mut changed = shared.changed.subscribe();
@@ -1082,7 +1107,33 @@ async fn subscribe(
     Ok(Some(Subscription { stop: stop_tx, payload: payload_tx, task }))
 }
 
-fn welcome(shared: &Arc<Streams>) -> Frame {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Public {
+    pub addr: SocketAddr,
+    pub data_port: Option<u16>,
+}
+
+fn nearby(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => nearby(IpAddr::V4(v4)),
+            None => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+        },
+    }
+}
+
+impl Streams {
+    fn data_port_for(&self, peer: IpAddr) -> u16 {
+        let mapped = self.public.lock().ok().and_then(|p| *p).and_then(|p| p.data_port);
+        match (mapped, nearby(peer)) {
+            (Some(port), false) => port,
+            _ => self.data_port,
+        }
+    }
+}
+
+fn welcome(shared: &Arc<Streams>, peer: IpAddr) -> Frame {
     let mut w = Tlvs::new();
     w.str(tag::SERVER_NAME, &shared.name);
     let descs = shared.descs();
@@ -1104,8 +1155,9 @@ fn welcome(shared: &Arc<Streams>) -> Frame {
         .put(tag::SUPPORTED_CODECS, &[Codec::None.code(), Codec::Zstd.code()]);
     // Where to punch. A server that could not have the port for UDP says
     // nothing, and is then a server a client names its own port to.
-    if shared.data_port != 0 {
-        w.u16(tag::DATA_PORT, shared.data_port);
+    let data_port = shared.data_port_for(peer);
+    if data_port != 0 {
+        w.u16(tag::DATA_PORT, data_port);
     }
     put_streams(&mut w, &descs);
     Frame::new(msg::WELCOME, &w)
@@ -1317,4 +1369,40 @@ async fn read_frame(sock: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Option<
     let mut payload = vec![0u8; len];
     sock.read_exact(&mut payload).await.map_err(other)?;
     Ok(Some(Frame { version: head[0], msg_type: head[1], payload }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::TlvMap;
+
+    fn told(server: &Server, peer: &str) -> Option<u16> {
+        let frame = welcome(&server.inner, peer.parse().unwrap());
+        TlvMap::parse(&frame.payload).unwrap().u16(tag::DATA_PORT)
+    }
+
+    #[test]
+    fn a_reader_from_outside_is_told_the_mapped_data_port_and_a_neighbour_the_real_one() {
+        let server =
+            Server::start("127.0.0.1:0".parse().unwrap(), ServerConfig::default()).unwrap();
+        let local = server.addr().port();
+        assert_eq!(told(&server, "203.0.113.9"), Some(local), "nothing mapped yet");
+        server.set_public(Some(Public {
+            addr: "198.51.100.7:60995".parse().unwrap(),
+            data_port: Some(57_097),
+        }));
+        assert_eq!(told(&server, "203.0.113.9"), Some(57_097));
+        assert_eq!(told(&server, "2001:db8::1"), Some(57_097));
+        for neighbour in ["10.100.2.40", "192.168.1.5", "172.16.0.9", "127.0.0.1", "169.254.1.1"] {
+            assert_eq!(told(&server, neighbour), Some(local), "{neighbour}");
+        }
+        for neighbour in ["::1", "fd00::5", "fe80::1", "::ffff:10.0.0.7"] {
+            assert_eq!(told(&server, neighbour), Some(local), "{neighbour}");
+        }
+        server.set_public(Some(Public {
+            addr: "198.51.100.7:60995".parse().unwrap(),
+            data_port: None,
+        }));
+        assert_eq!(told(&server, "203.0.113.9"), Some(local), "UDP not mapped");
+    }
 }
