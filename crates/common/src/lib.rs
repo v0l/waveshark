@@ -10,6 +10,7 @@ pub mod decode;
 pub mod demod;
 pub mod device;
 pub mod error;
+pub mod geohash;
 pub mod iq;
 pub mod modulation;
 pub mod packet;
