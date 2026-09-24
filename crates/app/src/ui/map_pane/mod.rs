@@ -6,6 +6,7 @@
 //! to it: the range rings, the station, the airports, the tracks.
 
 mod layers;
+mod silhouette;
 
 use super::mapview::{Layer, MapView};
 use super::*;

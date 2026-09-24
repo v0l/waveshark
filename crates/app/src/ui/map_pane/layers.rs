@@ -740,19 +740,22 @@ impl Layer for TrackLayer<'_> {
             // a whole zone out beyond it. Drawn hollow so it does not claim
             // more than it knows. Nothing else can be unconfirmed: an AIS
             // position is absolute.
-            if a.confirmed {
-                track_mark(&c.p, at, a.kind(), a.course_deg, col);
-            } else {
-                c.p.circle_stroke(at, 3.5, Stroke::new(1.0, col.gamma_multiply(0.7)));
-            }
             let airframe = a.airframe(fleet.as_deref());
             self.named_airframes |= airframe.is_some();
+            let class = airframe.and_then(|p| p.class);
+            let reach = if a.confirmed {
+                track_mark(&c.p, at, a.kind(), a.course_deg, col, class)
+            } else {
+                c.p.circle_stroke(at, 3.5, Stroke::new(1.0, col.gamma_multiply(0.7)));
+                0.0
+            };
+            let text_x = at.x + (reach + 3.0).max(9.0);
             let label = a
                 .label
                 .clone()
                 .or_else(|| airframe.map(|p| p.registration.to_string()).filter(|r| !r.is_empty()))
                 .unwrap_or_else(|| a.id.text());
-            c.label(Pos2::new(at.x + 9.0, at.y - 5.0), &label, theme::VALUE, fade);
+            c.label(Pos2::new(text_x, at.y - 5.0), &label, theme::VALUE, fade);
             // The second line is whatever that kind is measured by: an
             // aircraft by its altitude, a vessel by its speed. A station is
             // fixed and has neither.
@@ -777,7 +780,7 @@ impl Layer for TrackLayer<'_> {
                 crate::tracks::Kind::Station => None,
             };
             if let Some(t) = under {
-                c.label(Pos2::new(at.x + 9.0, at.y + 5.0), &t, theme::LEGEND, fade);
+                c.label(Pos2::new(text_x, at.y + 5.0), &t, theme::LEGEND, fade);
             }
         }
     }
@@ -987,8 +990,16 @@ fn track_mark(
     kind: crate::tracks::Kind,
     course_deg: Option<f64>,
     col: Color32,
-) {
+    class: Option<datasets::aircraft::Class>,
+) -> f32 {
     use crate::tracks::Kind;
+    if let (Kind::Aircraft, Some(class)) = (kind, class) {
+        let balloon = class == datasets::aircraft::Class::Balloon;
+        if let Some(course) = course_deg.or(balloon.then_some(0.0)) {
+            super::silhouette::draw(p, at, class, course, col);
+            return super::silhouette::span(class) / 2.0;
+        }
+    }
     if kind == Kind::Station {
         let d = 4.0;
         p.add(egui::Shape::convex_polygon(
@@ -1001,11 +1012,11 @@ fn track_mark(
             Color32::TRANSPARENT,
             Stroke::new(1.5, col),
         ));
-        return;
+        return 0.0;
     }
     let Some(track) = course_deg else {
         p.circle_filled(at, 3.0, col);
-        return;
+        return 0.0;
     };
     let t = (track as f32).to_radians();
     let (s, c) = (t.sin(), t.cos());
@@ -1022,7 +1033,7 @@ fn track_mark(
                 [Pos2::new(at.x, at.y - 1.0), Pos2::new(at.x, at.y + 4.0)],
                 Stroke::new(1.0, col),
             );
-            return;
+            return 0.0;
         }
         Kind::Aircraft => {
             vec![rot(0.0, 6.0), rot(-4.0, -4.0), rot(0.0, -1.5), rot(4.0, -4.0)]
@@ -1036,6 +1047,7 @@ fn track_mark(
         _ => vec![rot(0.0, 4.5), rot(-3.0, 1.0), rot(-3.0, -3.0), rot(3.0, -3.0), rot(3.0, 1.0)],
     };
     p.add(egui::Shape::convex_polygon(shape, col, Stroke::NONE));
+    0.0
 }
 
 /// Where each line of the airport card sits, and how big the card has to be

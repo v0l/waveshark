@@ -18,7 +18,7 @@ the code is in the commit log.
 - SpyServer directory: public servers listed by frequency and free slot, silent ones hidden, opened with TUNE.
 - IQStream directory on nostr, listed from the receiver or wave1090 `--iqstream-list`, opened with TUNE.
 - IQStream port opened on the router over UPnP, PCP or NAT-PMP for a listed server.
-- Aircraft registration and type on the map's track table, from the Mictronics database.
+- Aircraft registration and type from the Mictronics database, on the track table and as the map's jet, light aircraft or helicopter shape.
 - VesselFinder link on each vessel in the track table.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
 - Compiled features listed under the version in Setup, ffmpeg among them.

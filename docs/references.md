@@ -21,7 +21,7 @@ holds the rows, the terms and the credit each is shown with.
 | what | publisher | terms | endpoint |
 |---|---|---|---|
 | Airports and their frequencies | OurAirports, via davidmegginson | public domain | `davidmegginson.github.io/ourairports-data/airports.csv`, `airport-frequencies.csv` |
-| Aircraft registrations and types by ICAO address | Mictronics aircraft database, via wiedehopf/tar1090-db | ODC-By, credit Mictronics | `raw.githubusercontent.com/wiedehopf/tar1090-db/csv/aircraft.csv.gz` |
+| Aircraft registrations and types by ICAO address | Mictronics aircraft database, via wiedehopf/tar1090-db | ODC-By, credit Mictronics | `raw.githubusercontent.com/wiedehopf/tar1090-db/csv/aircraft.csv.gz`, `…/master/db/icao_aircraft_types2.js` |
 | DMR IDs, NXDN IDs, DMR repeaters | radioid.net | for amateur use, no licence stated | `radioid.net/static/users.json`, `nxdn.csv`, `rptrs.json` |
 | M17 reflectors | M17 Project | M17 Project host files | `m17-project.github.io/hostfiles/M17Hosts.json` |
 | DMR, DPlus, DExtra, DCS hosts | Pi-Star | Pi-Star host files | `pistar.uk/downloads/` |

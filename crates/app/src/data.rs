@@ -632,7 +632,7 @@ impl Which {
             Which::Aircraft => {
                 "The registration, type and operator behind each ICAO address, so an \
                  aircraft heard over ADS-B reads as EI-CJX, a Boeing 757, rather than a hex \
-                 number."
+                 number, and is drawn on the map as a jet, a light aircraft or a helicopter."
             }
             Which::Repeaters => {
                 "Registered DMR repeaters with their output frequency, offset and colour code."
@@ -689,7 +689,9 @@ impl Which {
         use datasets::{airports, radioid};
         match self {
             Which::Airports => vec![airports::airports_source(), airports::frequencies_source()],
-            Which::Aircraft => vec![datasets::aircraft::source()],
+            Which::Aircraft => {
+                vec![datasets::aircraft::source(), datasets::aircraft::types_source()]
+            }
             Which::Repeaters => vec![radioid::repeaters_source()],
             Which::DmrIds => vec![radioid::users_source()],
             Which::NxdnIds => vec![radioid::nxdn_source()],
