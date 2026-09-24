@@ -41,6 +41,7 @@ pub mod ident_nodes;
 pub mod ieee802154_nodes;
 pub mod imet_nodes;
 pub mod iq_tx;
+pub mod iqstream_listing;
 pub mod iqstream_nodes;
 pub mod iridium_nodes;
 pub mod keyed;

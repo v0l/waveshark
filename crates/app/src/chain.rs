@@ -2487,10 +2487,16 @@ impl Receiver {
     ///
     /// Nothing if the span is not being served, and nothing on the wire
     /// unless a setting moved.
-    pub fn tell_subscribers(&mut self, gain_db: Option<f32>, settings: Vec<iqstream::Setting>) {
+    pub fn tell_subscribers(
+        &mut self,
+        hardware: &str,
+        gain_db: Option<f32>,
+        settings: Vec<iqstream::Setting>,
+    ) {
         if let Some(stage) =
             self.stage_mut::<nodes::iqstream_nodes::IqStreamServerNode>(derived::IQSTREAM)
         {
+            stage.set_hardware(hardware);
             stage.set_radio(gain_db, settings);
         }
     }
@@ -3074,13 +3080,14 @@ pub struct TunerServePlan {
 }
 
 /// Serving the span to the network.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IqStreamPlan {
     pub addr: std::net::SocketAddr,
     /// Whether a subscriber may retune this receiver. Off unless an operator
     /// asked: granting it moves the frequency on the local screen, because
     /// there is one tuner.
     pub tunable: bool,
+    pub listing: Option<nodes::iqstream_listing::Listing>,
 }
 
 pub mod derived {
@@ -5843,6 +5850,7 @@ pub(crate) mod tests {
         plan.iqstream = Some(IqStreamPlan {
             addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             tunable: false,
+            listing: None,
         });
         let drawn = derived_patch(&plan);
         let served: Vec<_> = drawn.stages().iter().filter(|s| s.kind == kind).collect();
@@ -5938,7 +5946,7 @@ pub(crate) mod tests {
         let mut plan = tests::plan(2_400_000.0, Hz::mhz(1090));
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         for tunable in [false, true] {
-            plan.iqstream = Some(IqStreamPlan { addr, tunable });
+            plan.iqstream = Some(IqStreamPlan { addr, tunable, listing: None });
             let drawn = derived_patch(&plan);
             let s = drawn.stages().iter().find(|s| s.kind == kind).expect("a server");
             assert_eq!(

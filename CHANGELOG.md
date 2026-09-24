@@ -16,6 +16,8 @@ the code is in the commit log.
 - Display leakage block in the scanner table, on the cable clock of every display mode.
 - KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
 - SpyServer directory: public servers listed by frequency and free slot, silent ones hidden, opened with TUNE.
+- IQStream directory on nostr: a served span listed publicly, found and opened with TUNE.
+- IQStream port opened on the router over UPnP, PCP or NAT-PMP for a listed server.
 - Aircraft registration and type on the map's track table, from the Mictronics database.
 - VesselFinder link on each vessel in the track table.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.

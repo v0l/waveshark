@@ -325,6 +325,7 @@ dependencies = [
  "hound",
  "httpc",
  "image",
+ "iqdirectory",
  "iqstream",
  "libc",
  "limesdr",
@@ -4502,8 +4503,10 @@ dependencies = [
  "gps",
  "identify",
  "image",
+ "iqdirectory",
  "iqstream",
  "mbe",
+ "nostr-sdk",
  "pipeline",
  "poll-promise",
  "rayon",
@@ -4513,6 +4516,7 @@ dependencies = [
  "sources",
  "stt",
  "survey",
+ "tokio",
  "tracing",
 ]
 

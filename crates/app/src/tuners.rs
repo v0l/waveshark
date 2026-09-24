@@ -202,6 +202,7 @@ impl ServedTunerNode {
             tunable: true,
             tune_range_hz: reach,
         });
+        tuner.set_hardware(dev.info().kind.as_str());
 
         let stop = Arc::new(AtomicBool::new(false));
         let blocks = Arc::new(AtomicU64::new(0));

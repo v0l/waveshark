@@ -40,6 +40,8 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 rumqttc = { version = "0.25", default-features = false }
 serde_json.workspace = true
 iqstream.workspace = true
+iqdirectory.workspace = true
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 
 [features]
 # Nothing by default: the app names what it wants, and a default here was on
@@ -59,6 +61,8 @@ ffmpeg = ["decode/ffmpeg"]
 
 [dev-dependencies]
 sources.workspace = true
+nostr-sdk = { version = "0.45", features = ["local-relay"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[example]]
 name = "chain"

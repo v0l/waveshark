@@ -376,6 +376,13 @@ pub struct Session {
     /// Whether a subscriber may move the dial. There is one tuner, so
     /// granting it retunes what is on the screen here.
     pub iqstream_tunable: bool,
+    pub iqstream_nsec: String,
+    pub iqstream_listed: bool,
+    pub iqstream_name: String,
+    pub iqstream_description: String,
+    pub iqstream_antenna: String,
+    pub iqstream_public_host: String,
+    pub iqstream_locate: bool,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -525,6 +532,13 @@ impl Default for Session {
             iqstream_addr: nodes::iqstream_nodes::DEFAULT_PORT.to_string(),
             iqstream_on: false,
             iqstream_tunable: false,
+            iqstream_nsec: String::new(),
+            iqstream_listed: false,
+            iqstream_name: String::new(),
+            iqstream_description: String::new(),
+            iqstream_antenna: String::new(),
+            iqstream_public_host: String::new(),
+            iqstream_locate: false,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -702,6 +716,33 @@ impl Session {
         self.iqstream_on
             .then(|| self.iqstream_address().ok().map(|a| (a, self.iqstream_tunable)))
             .flatten()
+    }
+
+    pub fn iqstream_listing(&self) -> Option<nodes::iqstream_listing::Listing> {
+        if !self.iqstream_listed {
+            return None;
+        }
+        iqdirectory::identity(&self.iqstream_nsec)?;
+        let name = self.iqstream_name.trim();
+        let host = self.iqstream_public_host.trim();
+        Some(nodes::iqstream_listing::Listing {
+            name: if name.is_empty() { "waveshark" } else { name }.to_string(),
+            description: self.iqstream_description.trim().to_string(),
+            antenna: self.iqstream_antenna.trim().to_string(),
+            location: self.location.filter(|_| self.iqstream_locate),
+            public_host: (!host.is_empty()).then(|| host.to_string()),
+            nsec: self.iqstream_nsec.clone(),
+            relays: iqdirectory::RELAYS.iter().map(|r| r.to_string()).collect(),
+        })
+    }
+
+    pub fn directory_keys(&mut self) -> iqdirectory::Keys {
+        if let Some(keys) = iqdirectory::identity(&self.iqstream_nsec) {
+            return keys;
+        }
+        let (keys, nsec) = iqdirectory::new_identity();
+        self.iqstream_nsec = nsec;
+        keys
     }
 
     /// The GPS the operator named, or `None` for the local gpsd the reader
@@ -942,6 +983,19 @@ impl Session {
                 .unwrap_or_else(|| d.iqstream_addr.clone()),
             iqstream_on: kv.get("iqstream_on").map(|v| *v == "true").unwrap_or(false),
             iqstream_tunable: kv.get("iqstream_tunable").map(|v| *v == "true").unwrap_or(false),
+            iqstream_nsec: kv.get("iqstream_nsec").map(|v| v.to_string()).unwrap_or_default(),
+            iqstream_listed: kv.get("iqstream_listed").map(|v| *v == "true").unwrap_or(false),
+            iqstream_name: kv.get("iqstream_name").map(|v| v.to_string()).unwrap_or_default(),
+            iqstream_description: kv
+                .get("iqstream_description")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            iqstream_antenna: kv.get("iqstream_antenna").map(|v| v.to_string()).unwrap_or_default(),
+            iqstream_public_host: kv
+                .get("iqstream_public_host")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            iqstream_locate: kv.get("iqstream_locate").map(|v| *v == "true").unwrap_or(false),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -1020,6 +1074,11 @@ impl Session {
             ("ha_spaces", &self.ha_spaces),
             ("kiss_addr", &self.kiss_addr),
             ("iqstream_addr", &self.iqstream_addr),
+            ("iqstream_nsec", &self.iqstream_nsec),
+            ("iqstream_name", &self.iqstream_name),
+            ("iqstream_description", &self.iqstream_description),
+            ("iqstream_antenna", &self.iqstream_antenna),
+            ("iqstream_public_host", &self.iqstream_public_host),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -1099,6 +1158,12 @@ impl Session {
         }
         if self.iqstream_tunable {
             s.push_str("iqstream_tunable = true\n");
+        }
+        if self.iqstream_listed {
+            s.push_str("iqstream_listed = true\n");
+        }
+        if self.iqstream_locate {
+            s.push_str("iqstream_locate = true\n");
         }
         if self.ha_on {
             s.push_str("ha_on = true\n");
@@ -1296,6 +1361,13 @@ mod tests {
             iqstream_addr: "0.0.0.0:1234".into(),
             iqstream_on: true,
             iqstream_tunable: true,
+            iqstream_nsec: "nsec1ufnus6pju578ste3v90xd5m2decpuzpql2295m3sknqcjzyys9ls0qlc85".into(),
+            iqstream_listed: true,
+            iqstream_name: "G0ABC loft".into(),
+            iqstream_description: "Discone on the chimney".into(),
+            iqstream_antenna: "Discone".into(),
+            iqstream_public_host: "sdr.example.net".into(),
+            iqstream_locate: true,
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             heat_on: false,
@@ -1358,6 +1430,37 @@ mod tests {
             Session::parse("iqstream_on = true\niqstream_tunable = true").iqstream(),
             Some(("0.0.0.0:1234".parse().unwrap(), true))
         );
+    }
+
+    #[test]
+    fn a_listing_goes_out_only_when_switched_on_with_a_key_and_a_location_only_when_shared() {
+        let mut s = Session { location: Some((51.45, -0.97)), ..Session::default() };
+        assert_eq!(s.iqstream_listing(), None, "off");
+        s.iqstream_listed = true;
+        assert_eq!(s.iqstream_listing(), None, "no key to sign with");
+        s.directory_keys();
+        let l = s.iqstream_listing().unwrap();
+        assert_eq!((l.name.as_str(), l.location, l.public_host), ("waveshark", None, None));
+        assert_eq!(l.relays.len(), iqdirectory::RELAYS.len());
+        s.iqstream_locate = true;
+        s.iqstream_public_host = " sdr.example.net ".into();
+        let l = s.iqstream_listing().unwrap();
+        assert_eq!(l.location, Some((51.45, -0.97)));
+        assert_eq!(l.public_host.as_deref(), Some("sdr.example.net"));
+    }
+
+    #[test]
+    fn the_directory_key_is_made_once_and_kept_in_the_file() {
+        let mut s = Session::default();
+        assert_eq!(s.iqstream_nsec, "");
+        let made = s.directory_keys();
+        assert!(s.iqstream_nsec.starts_with("nsec1"));
+        assert_eq!(s.directory_keys().public_key(), made.public_key());
+        let mut back = Session::parse(&s.render());
+        assert_eq!(back.directory_keys().public_key(), made.public_key());
+        let mut torn = Session::parse("iqstream_nsec = nsec1torn");
+        assert_ne!(torn.directory_keys().public_key(), made.public_key());
+        assert!(iqdirectory::identity(&torn.iqstream_nsec).is_some(), "a torn key is replaced");
     }
 
     /// A PI code is four hex digits or it is not a code: a station sent on

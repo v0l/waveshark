@@ -62,6 +62,7 @@ mod segments;
 mod session;
 mod shutdown;
 mod station;
+mod stations;
 mod tracks;
 /// The transcript view and the model behind it. Only the `stt` feature
 /// transcodes anything, so without it the machinery is compiled and never
@@ -977,7 +978,7 @@ impl std::str::FromStr for Listen {
 /// interface rather than loopback, because a stream nothing outside this
 /// machine can reach is not worth serving; MCP defaults the other way because
 /// it is an agent driving this receiver rather than a decoder reading it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Serve(pub Option<crate::chain::IqStreamPlan>);
 
 impl std::str::FromStr for Serve {
@@ -998,7 +999,7 @@ impl std::str::FromStr for Serve {
         };
         let addr = common::addr::listen(addr, std::net::Ipv4Addr::UNSPECIFIED.into())
             .map_err(|e| format!("{addr:?}: {e}"))?;
-        Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable })))
+        Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable, listing: None })))
     }
 }
 
@@ -1716,6 +1717,8 @@ fn main() -> eframe::Result<()> {
                 match (name.as_str(), ui::Settings::parse(name)) {
                     (_, Some(s)) => app.open_settings(s),
                     ("spyservers", None) => app.find_spyservers(),
+                    ("network", None) => app.open_network_settings(),
+                    ("iqstreams", None) => app.find_iqstreams(),
                     (_, None) => eprintln!("--settings {name}: no such dialog"),
                 }
             }
@@ -1855,6 +1858,7 @@ mod tests {
             Some(crate::chain::IqStreamPlan {
                 addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
                 tunable: false,
+                listing: None,
             })
         );
         assert!(Serve::from_str("1234,tune").unwrap().0.is_some_and(|s| s.tunable));

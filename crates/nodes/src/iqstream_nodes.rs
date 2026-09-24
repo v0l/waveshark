@@ -113,6 +113,7 @@ pub struct IqStreamServerNode {
     /// and is passed to the subscribers, who are otherwise reading samples
     /// whose level they cannot account for.
     radio: (Option<f32>, Vec<iqstream::Setting>),
+    hardware: String,
 }
 
 impl Default for IqStreamServerNode {
@@ -139,6 +140,16 @@ impl IqStreamServerNode {
             uc8: Vec::new(),
             asked: None,
             radio: (None, Vec::new()),
+            hardware: String::new(),
+        }
+    }
+
+    pub fn set_hardware(&mut self, hardware: &str) {
+        if self.hardware != hardware {
+            self.hardware = hardware.to_string();
+            if let Some(t) = &self.tuner {
+                t.set_hardware(hardware);
+            }
         }
     }
 
@@ -185,6 +196,9 @@ impl IqStreamServerNode {
                 settings: self.radio.1.clone(),
             };
             self.tuner = self.server.as_ref().map(|s| s.stream_named(cfg));
+            if let Some(t) = self.tuner.as_ref().filter(|_| !self.hardware.is_empty()) {
+                t.set_hardware(&self.hardware);
+            }
         }
         self.tuner.as_ref()
     }
@@ -204,6 +218,11 @@ impl Simple for IqStreamServerNode {
             Some(s) => s.addr().to_string(),
             None => "not listening".into(),
         };
+        let listed = self
+            .server
+            .as_ref()
+            .and_then(|s| crate::iqstream_listing::state(s.addr()))
+            .map_or_else(|| "not listed".into(), |l| l.describe());
         let (readers, blocks) = match &self.tuner {
             Some(t) => (t.subscribers().to_string(), t.blocks_sent()),
             None => ("0".into(), 0),
@@ -214,6 +233,7 @@ impl Simple for IqStreamServerNode {
             ("readers".into(), readers),
             ("blocks".into(), blocks.to_string()),
             ("dial".into(), if self.tunable { "offered" } else { "held here" }.into()),
+            ("directory".into(), listed),
         ]
     }
 

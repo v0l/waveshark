@@ -211,6 +211,7 @@ pub struct App {
     /// The remote radio being created, while that dialog is open.
     remote: Option<RemoteEdit>,
     find: Option<settings::FindEdit>,
+    iqfind: Option<settings::IqFindEdit>,
     joining: Option<settings::Joining>,
     /// The capture being described, while the card asking what is in it is
     /// open.
@@ -687,6 +688,7 @@ impl Default for App {
             feed_host: String::new(),
             remote: None,
             find: None,
+            iqfind: None,
             joining: None,
             capture_edit: None,
             feed_kind: nodes::FEED_KINDS[0],
@@ -1147,12 +1149,13 @@ impl App {
     }
 
     /// Serve the span to network subscribers, from the command line.
-    pub fn serve_iqstream(&mut self, serving: crate::chain::IqStreamPlan) {
+    pub fn serve_iqstream(&mut self, mut serving: crate::chain::IqStreamPlan) {
         self.settings.edit(|s| {
             s.iqstream_addr = serving.addr.to_string();
             s.iqstream_tunable = serving.tunable;
             s.iqstream_on = true;
         });
+        serving.listing = self.setting(|s| s.iqstream_listing());
         self.send(crate::radio::Cmd::IqStream(Some(serving)));
     }
 
@@ -1166,6 +1169,16 @@ impl App {
     /// Open with a settings dialog up, for a screenshot of it.
     pub fn open_settings(&mut self, which: Settings) {
         self.open = Some(which);
+    }
+
+    pub fn open_network_settings(&mut self) {
+        self.open = Some(Settings::App);
+        self.setup_tab = SetupTab::Network;
+    }
+
+    pub fn find_iqstreams(&mut self) {
+        self.remote = Some(RemoteEdit::default());
+        self.iqfind = Some(settings::IqFindEdit::open(self.setting(crate::stations::Own::of)));
     }
 
     pub fn find_spyservers(&mut self) {
@@ -2699,9 +2712,16 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
     when(now.rds() != was.rds(), Cmd::Rds(now.rds()));
     when(now.kiss() != was.kiss(), Cmd::Kiss(now.kiss()));
-    let serving =
-        now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan { addr, tunable });
-    when(now.iqstream() != was.iqstream(), Cmd::IqStream(serving));
+    let listing = now.iqstream_listing();
+    let serving = now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan {
+        addr,
+        tunable,
+        listing: listing.clone(),
+    });
+    when(
+        now.iqstream() != was.iqstream() || listing != was.iqstream_listing(),
+        Cmd::IqStream(serving),
+    );
     when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
     when(now.heat_plan() != was.heat_plan(), Cmd::Heatmap(now.heat_plan()));
     let publish = now.publish();
@@ -3015,6 +3035,7 @@ impl eframe::App for App {
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
         self.find_modal(ui.ctx());
+        self.iqfind_modal(ui.ctx());
         self.capture_modal(ui.ctx());
         self.wigle_modal(ui.ctx());
         self.beacondb_modal(ui.ctx());
@@ -3037,6 +3058,7 @@ impl eframe::App for App {
         self.sync_settings();
         self.settings.flush(true);
         self.chain.flush_edits(true);
+        nodes::iqstream_listing::withdraw_all(std::time::Duration::from_secs(3));
     }
 }
 
@@ -3716,6 +3738,7 @@ mod tests {
             [Some(crate::chain::IqStreamPlan {
                 addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
                 tunable: false,
+                listing: None,
             })],
             "a port with no host is every interface, and nobody may retune it"
         );
@@ -3727,6 +3750,7 @@ mod tests {
             [Some(crate::chain::IqStreamPlan {
                 addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
                 tunable: true,
+                listing: None,
             })]
         );
 
@@ -3741,6 +3765,7 @@ mod tests {
         a.serve_iqstream(crate::chain::IqStreamPlan {
             addr: "0.0.0.0:1299".parse().unwrap(),
             tunable: true,
+            listing: None,
         });
         assert!(a.setting(|s| s.iqstream_on));
         assert_eq!(a.setting(|s| s.iqstream_addr.clone()), "0.0.0.0:1299");

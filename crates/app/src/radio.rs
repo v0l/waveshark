@@ -2844,10 +2844,24 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 }
             }
             Cmd::IqStream(serving) => {
-                if serving != self.plan.iqstream {
-                    self.plan.iqstream = serving;
+                let listed = |p: &Option<crate::chain::IqStreamPlan>| {
+                    p.as_ref().and_then(|p| Some((p.addr, p.listing.clone()?)))
+                };
+                if let Some((was, _)) = listed(&self.plan.iqstream)
+                    && listed(&serving).is_none_or(|(now, _)| now != was)
+                {
+                    nodes::iqstream_listing::list(was, None);
+                }
+                if let Some((addr, listing)) = listed(&serving) {
+                    nodes::iqstream_listing::list(addr, Some(listing));
+                }
+                let socket = |p: &Option<crate::chain::IqStreamPlan>| {
+                    p.as_ref().map(|p| (p.addr, p.tunable))
+                };
+                if socket(&serving) != socket(&self.plan.iqstream) {
                     self.needs_rebuild = true;
                 }
+                self.plan.iqstream = serving;
             }
             Cmd::IqStreamTuners(tuners) => {
                 if tuners != self.plan.iqstream_tuners {
@@ -3720,7 +3734,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // beat as the chain, because reading it back crosses USB.
             if self.plan.iqstream.is_some() {
                 let settings = crate::tuners::settings_of(self.dev.as_ref());
-                self.rx.tell_subscribers(None, settings);
+                let hardware = self.dev.info().kind.as_str();
+                self.rx.tell_subscribers(hardware, None, settings);
             }
         }
         // Scopes are a display and refresh with the spectrum, not with the

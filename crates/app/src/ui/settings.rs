@@ -1569,6 +1569,105 @@ impl App {
                 }
             }
         });
+        ui.add_space(8.0);
+        self.directory_section(ui);
+    }
+
+    fn text_setting(
+        &mut self,
+        ui: &mut egui::Ui,
+        legend: &str,
+        help: &str,
+        hint: &str,
+        get: fn(&crate::session::Session) -> &String,
+        put: fn(&mut crate::session::Session) -> &mut String,
+    ) {
+        row_help(ui, legend, help, |ui| {
+            let mut text = self.setting(|s| get(s).clone());
+            if field(ui, &mut text, hint).changed() {
+                self.settings.edit(|s| *put(s) = text.clone());
+            }
+        });
+    }
+
+    fn directory_section(&mut self, ui: &mut egui::Ui) {
+        let serving = self.setting(|s| s.iqstream());
+        let listed = serving.and_then(|(addr, _)| nodes::iqstream_listing::state(addr));
+        section(ui, "directory", "this server in the public tuner list, over nostr", |ui| {
+            let mut on = self.setting(|s| s.iqstream_listed);
+            let help = "Publishes where to reach this server, what tuners it has and \
+                        what they are set to, so anybody can find it and read the span. \
+                        Signed with a key made for this receiver.";
+            if switch(ui, "list", &mut on, "this server publicly", help) {
+                self.settings.edit(|s| {
+                    s.iqstream_listed = on;
+                    if on {
+                        s.directory_keys();
+                    }
+                });
+            }
+            self.text_setting(
+                ui,
+                "name",
+                "What the station is called in the list.",
+                "waveshark",
+                |s| &s.iqstream_name,
+                |s| &mut s.iqstream_name,
+            );
+            self.text_setting(
+                ui,
+                "about",
+                "A line about the station: where it is, what it hears well.",
+                "discone on the chimney",
+                |s| &s.iqstream_description,
+                |s| &mut s.iqstream_description,
+            );
+            self.text_setting(
+                ui,
+                "antenna",
+                "The antenna, shown against every tuner.",
+                "discone",
+                |s| &s.iqstream_antenna,
+                |s| &mut s.iqstream_antenna,
+            );
+            self.text_setting(
+                ui,
+                "public",
+                "The host others reach this machine at. Blank asks the router to open \
+                 the port, over UPnP, PCP or NAT-PMP, and lists the address it gives.",
+                "blank to open the port on the router",
+                |s| &s.iqstream_public_host,
+                |s| &mut s.iqstream_public_host,
+            );
+            let mut locate = self.setting(|s| s.iqstream_locate);
+            let at = self.setting(|s| s.location);
+            let locate_help = "Lists the receiver's location to within about five kilometres, \
+                               so the station can be found on a map.";
+            if switch(ui, "locate", &mut locate, "where the receiver is, roughly", locate_help) {
+                self.settings.edit(|s| s.iqstream_locate = locate);
+            }
+            if let Some(keys) = self.setting(|s| iqdirectory::identity(&s.iqstream_nsec)) {
+                reading(ui, "key", iqdirectory::npub(&keys));
+            }
+            match (on, serving, listed) {
+                (false, ..) => panel::status(ui, false, "off: not in the directory"),
+                (true, None, _) => {
+                    panel::status(ui, false, "the server is off, so there is nothing to list")
+                }
+                (true, _, _) if locate && at.is_none() => {
+                    panel::status(ui, false, "no location set for this receiver to list")
+                }
+                (true, Some(_), None) => panel::status(ui, true, "starting"),
+                (true, Some(_), Some(state)) => {
+                    let fine = !matches!(
+                        state,
+                        nodes::iqstream_listing::ListingState::Unreachable(_)
+                            | nodes::iqstream_listing::ListingState::Refused(_)
+                    );
+                    panel::status(ui, fine, &state.describe())
+                }
+            }
+        });
     }
 
     /// The KISS TNC: where it listens, and what is connected to it.
@@ -2644,7 +2743,7 @@ impl App {
         let Some(mut edit) = self.remote.take() else {
             return;
         };
-        let (mut close, mut add, mut find) = (false, false, false);
+        let (mut close, mut add, mut find, mut iqfind) = (false, false, false, false);
         let mut link = None;
         let connecting = self.joining.as_ref().map(|j| j.host.clone());
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
@@ -2673,6 +2772,13 @@ impl App {
                                 row_help(ui, "public", FIND_HELP, |ui| {
                                     if listed_row(ui) {
                                         find = true;
+                                    }
+                                });
+                            }
+                            if edit.proto == remote::Proto::IqStream {
+                                row_help(ui, "public", IQFIND_HELP, |ui| {
+                                    if iqstream_listed_row(ui) {
+                                        iqfind = true;
                                     }
                                 });
                             }
@@ -2786,7 +2892,10 @@ impl App {
         if find {
             self.find = Some(FindEdit::open());
         }
-        if r.should_close() && self.find.is_none() {
+        if iqfind {
+            self.iqfind = Some(IqFindEdit::open(self.setting(crate::stations::Own::of)));
+        }
+        if r.should_close() && self.find.is_none() && self.iqfind.is_none() {
             close = true;
         }
         if add {
@@ -2913,6 +3022,96 @@ impl App {
         }
         if !close {
             self.find = Some(edit);
+        }
+    }
+
+    pub(super) fn iqfind_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.iqfind.take() else {
+            return;
+        };
+        let (hz, bad_hz) = edit.hz();
+        let query = iqdirectory::Query { hz, tunable: edit.tunable, free: false };
+        let found = crate::stations::found();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let kept =
+            found.as_deref().map(|f| crate::stations::shown(f, &query, now)).unwrap_or_default();
+        let (listed, checked, answering) =
+            found.as_deref().map(crate::stations::tally).unwrap_or_default();
+        let (mut close, mut tune): (bool, Option<(String, String)>) = (false, None);
+        let connecting = self.joining.as_ref().map(|j| j.host.clone());
+        let r = egui::containers::Modal::new(egui::Id::new("find-iqstream"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                modal_title(ui, "Public IQStream servers");
+                section(ui, "filter", "which of the listed servers to show", |ui| {
+                    row_help(ui, "tunes", TUNES_HELP, |ui| {
+                        field(ui, &mut edit.mhz, "any frequency, or MHz such as 145.8");
+                    });
+                    switch(
+                        ui,
+                        "control",
+                        &mut edit.tunable,
+                        "only servers whose dial may be moved",
+                        IQCONTROL_HELP,
+                    );
+                    match (&connecting, &bad_hz, &found) {
+                        (Some(h), _, _) => panel::status(ui, false, &format!("connecting to {h}")),
+                        (None, Some(e), _) => panel::status(ui, false, e),
+                        (None, None, Some(_)) => panel::status(
+                            ui,
+                            true,
+                            &format!(
+                                "{checked} of {listed} checked, {answering} answering, {} shown",
+                                kept.len()
+                            ),
+                        ),
+                        (None, None, None) => match crate::stations::failed() {
+                            Some(e) => panel::status(ui, false, &e),
+                            None => panel::status(ui, false, "reading the directory from nostr"),
+                        },
+                    }
+                });
+                ui.add_space(6.0);
+                let w = ui.available_width();
+                egui::ScrollArea::vertical()
+                    .max_height(share_of_screen(ui, 0.55, 240.0, 520.0))
+                    .show(ui, |ui| {
+                        ui.set_max_width(w);
+                        for f in &kept {
+                            if station_card(ui, f, connecting.is_none()) {
+                                let at = match f.heard {
+                                    crate::stations::Heard::Ours(local) => local.to_string(),
+                                    _ => f.listing.entry.addr(),
+                                };
+                                tune = Some((at, f.listing.entry.station.name.clone()));
+                            }
+                            ui.add_space(6.0);
+                        }
+                    });
+                footer(ui, |ui| {
+                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                        close = true;
+                    }
+                    let busy = crate::stations::busy();
+                    let label = if busy { "CHECKING" } else { crate::i18n::t("ui.refresh") };
+                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                        crate::stations::refresh(self.setting(crate::stations::Own::of));
+                    }
+                });
+            });
+        if r.should_close() {
+            close = true;
+        }
+        if let Some((host, label)) = tune {
+            let remote =
+                RemoteEdit { proto: remote::Proto::IqStream, host, label, ..RemoteEdit::default() };
+            self.add_remote(ctx, &remote);
+        }
+        if !close {
+            self.iqfind = Some(edit);
         }
     }
 
@@ -3865,6 +4064,91 @@ const CONTROL_HELP: &str = "A server granting control lets the dial go anywhere 
      One that does not lets it move only inside the span it is already on.";
 const FREE_HELP: &str = "A server takes a fixed number of listeners and turns the next away.";
 
+const IQFIND_HELP: &str = "Servers their owners have listed on nostr, open to anybody. TUNE on \
+     one adds it to the radio list like an address typed here.";
+const IQCONTROL_HELP: &str = "A server offering its dial lets a subscriber retune it anywhere its \
+     tuner reaches. One that does not is fixed to the span it is serving.";
+
+fn iqstream_listed_row(ui: &mut egui::Ui) -> bool {
+    let mut open = false;
+    ui.horizontal(|ui| {
+        let said = match crate::stations::found() {
+            Some(f) => match crate::stations::tally(&f) {
+                (n, 0, _) => format!("{n} on nostr"),
+                (n, _, answering) => format!("{answering} answering of {n} on nostr"),
+            },
+            None => "the nostr directory".to_string(),
+        };
+        Line::new().value(said).size(13.0).show(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            open = ui.small_button("FIND").clicked();
+        });
+    });
+    open
+}
+
+fn station_card(ui: &mut egui::Ui, f: &crate::stations::Found, idle: bool) -> bool {
+    let mut tune = false;
+    let e = &f.listing.entry;
+    let s = &e.station;
+    let answered = f.heard.answered();
+    let rail = answered.then_some(theme::TRACE);
+    let mut hardware: Vec<&str> = s.tuners.iter().map(|t| t.hardware.as_str()).collect();
+    hardware.dedup();
+    card(
+        ui,
+        rail,
+        |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                tune = ui.add_enabled(idle, egui::Button::new("TUNE")).clicked();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    Line::new()
+                        .value(&s.name)
+                        .size(12.0)
+                        .gap(12.0)
+                        .note(hardware.join(", "))
+                        .size(10.5)
+                        .elided(ui);
+                });
+            });
+        },
+        |ui| {
+            for t in &s.tuners {
+                let (lo, hi) = t.span_hz();
+                let dial = match t.dial {
+                    iqdirectory::Dial::Fixed => "fixed".to_string(),
+                    iqdirectory::Dial::Tunable { min_hz: Some(lo), max_hz: Some(hi) } => {
+                        format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi))
+                    }
+                    iqdirectory::Dial::Tunable { .. } => "free".to_string(),
+                };
+                Line::new()
+                    .legend(if t.name.is_empty() { "tuner" } else { t.name.as_str() })
+                    .measured(format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi)))
+                    .size(12.0)
+                    .gap(18.0)
+                    .legend("dial")
+                    .value(dial)
+                    .size(12.0)
+                    .show(ui);
+            }
+            let mut said = vec![e.addr(), format!("{} reading", s.clients)];
+            if !s.description.is_empty() {
+                said.push(s.description.clone());
+            }
+            match f.heard {
+                crate::stations::Heard::Ours(local) => {
+                    said.push(format!("this receiver, reached here at {local}"))
+                }
+                crate::stations::Heard::Unchecked => said.push("not yet checked".into()),
+                crate::stations::Heard::Answered | crate::stations::Heard::Silent => {}
+            }
+            hint(ui, &said.join(", "));
+        },
+    );
+    tune
+}
+
 fn listed_row(ui: &mut egui::Ui) -> bool {
     let mut open = false;
     ui.horizontal(|ui| {
@@ -4078,6 +4362,29 @@ pub struct FindEdit {
     full_control: bool,
     free: bool,
     err: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct IqFindEdit {
+    mhz: String,
+    tunable: bool,
+}
+
+impl IqFindEdit {
+    pub fn open(own: Option<crate::stations::Own>) -> Self {
+        crate::stations::check(own);
+        Self::default()
+    }
+
+    fn hz(&self) -> (Option<u64>, Option<String>) {
+        match self.mhz.trim() {
+            "" => (None, None),
+            t => match common::Hz::parse_mhz(t) {
+                Ok(hz) => (Some(hz.0), None),
+                Err(e) => (None, Some(e)),
+            },
+        }
+    }
 }
 
 impl FindEdit {
