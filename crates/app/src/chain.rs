@@ -1679,8 +1679,12 @@ impl Receiver {
                     // A retune the walk asked for is answered rather than
                     // reported: the dial moving is what it is for, and a
                     // warning per step would fill the line the operator
-                    // reads faults on.
-                    if !matches!(request, pipeline::Request::Retune { .. }) {
+                    // reads faults on. A claim and its release are the same
+                    // case: the auto node answers them, a span-wide decoder
+                    // makes one every time it locks, and a screen decoder
+                    // relocking every few seconds put a fault on the
+                    // waterfall for doing what it was placed to do.
+                    if !answered(&request) {
                         self.warnings.push(format!("{stage} asks: {}", describe(&request)));
                     }
                     self.requests.push((stage, request));
@@ -4800,6 +4804,19 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
     }
 }
 
+/// Whether a request is acted on somewhere rather than reported to the
+/// operator.
+///
+/// A walk's retune is what the walk is for, and a claim and its release are
+/// what a span-wide decoder does every time it locks and loses a picture.
+/// Reported, each of those lands on the one line an operator reads faults
+/// on: a screen decoder relocking every few seconds put a fault on the
+/// waterfall for working.
+fn answered(r: &pipeline::Request) -> bool {
+    use pipeline::Request;
+    matches!(r, Request::Retune { .. } | Request::Claim { .. } | Request::Release)
+}
+
 /// A request in a sentence, for the log.
 fn describe(r: &pipeline::Request) -> String {
     use pipeline::Request;
@@ -5510,6 +5527,30 @@ pub(crate) mod tests {
         assert_eq!(asked, vec![431e6, 433e6, 435e6], "asked for {asked:?}");
         assert_eq!(rx.take_warnings().len(), 0, "a step is not a warning");
         assert_eq!(rx.scan_status().map(|s| s.steps), Some(3));
+    }
+
+    /// Which requests are answered somewhere and which reach the operator.
+    ///
+    /// A claim is a span-wide decoder doing its job, and a screen decoder
+    /// makes one every time it locks, so reporting it put a fault on the
+    /// waterfall every few seconds. What an operator does have to be told
+    /// is a decoder asking for something nothing answers yet: a channel, a
+    /// band, a burst lock.
+    #[test]
+    fn a_claim_is_answered_rather_than_reported_as_a_fault() {
+        use pipeline::Request;
+        assert!(answered(&Request::Claim { lo_hz: 1_475e6, hi_hz: 1_495e6 }));
+        assert!(answered(&Request::Release));
+        assert!(answered(&Request::Retune { center_hz: 433e6 }));
+        assert!(!answered(&Request::Reshape { lo_hz: 430e6, hi_hz: 440e6 }));
+        assert!(!answered(&Request::OpenChannel {
+            protocol: "pocsag".into(),
+            center_hz: 153.35e6,
+            width_hz: 12_500.0,
+            role: "traffic".into(),
+            hold_s: None,
+            settings: pipeline::registry::Settings::new(),
+        }));
     }
 
     #[test]

@@ -27,6 +27,7 @@ const GAP: f32 = 16.0;
 
 /// Width of the device box, and so of the transport strip beneath it.
 const DEVICE_W: f32 = 190.0;
+const DEVICE_LIST_W: f32 = 420.0;
 
 /// Side of the icon buttons in the segmented strips. Smaller than the
 /// toolbar's, because two of them stack under a combo box inside one cell.
@@ -160,9 +161,13 @@ impl App {
         cell(ui, "receiver", DEVICE_W, |ui| {
             let cur =
                 self.device.as_ref().map(|d| d.label.clone()).unwrap_or_else(|| "none".into());
-            egui::ComboBox::from_id_salt("device").selected_text(cur).width(DEVICE_W).show_ui(
-                ui,
-                |ui| {
+            let picker = egui::ComboBox::from_id_salt("device")
+                .selected_text(cur.clone())
+                .width(DEVICE_W)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    ui.set_max_width(DEVICE_LIST_W);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     for d in &self.devices {
                         let on = self.device.as_ref() == Some(d);
                         // A remote radio was created here rather than plugged
@@ -180,15 +185,20 @@ impl App {
                         match forgettable {
                             Some(what) => {
                                 ui.horizontal(|ui| {
-                                    if ui.selectable_label(on, &d.label).clicked() {
-                                        pick = Some(d.clone());
-                                    }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             if ui.small_button("×").clicked() {
                                                 forget = Some(what.clone());
                                             }
+                                            ui.with_layout(
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    if ui.selectable_label(on, &d.label).clicked() {
+                                                        pick = Some(d.clone());
+                                                    }
+                                                },
+                                            );
                                         },
                                     );
                                 });
@@ -215,8 +225,8 @@ impl App {
                     if ui.selectable_label(false, "Open capture…").clicked() {
                         open_capture = true;
                     }
-                },
-            );
+                });
+            picker.response.on_hover_text(cur);
 
             ui.add_space(4.0);
             // One segmented control rather than four loose icons. Four

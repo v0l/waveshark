@@ -491,7 +491,8 @@ impl Dashboard<'_> {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| match device {
                     Some(d) => {
-                        if ui.button(value(format!("Start {d}")).size(13.0)).clicked() {
+                        let start = egui::Button::new(value(format!("Start {d}")).size(13.0));
+                        if ui.add(start.truncate()).on_hover_text(d).clicked() {
                             acts.push(Action::Start);
                         }
                     }
