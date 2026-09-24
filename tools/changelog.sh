@@ -46,7 +46,10 @@ release)
         exit 1
     fi
     today=$(date +%F)
-    prev=$(grep -o '^## \[[0-9][^]]*\]' "$log" | head -1 | tr -d '#[] ')
+    prev=$(grep -o '^## \[[0-9][^]]*\]' "$log" | tr -d '#[] ' | case "$ver" in
+        *-*) head -1 ;;
+        *) grep -v -- - | head -1 ;;
+    esac)
     tmp=$(mktemp)
     awk -v v="$ver" -v d="$today" '
         /^## \[Unreleased\]/ { print; print ""; print "## [" v "] - " d; next }
