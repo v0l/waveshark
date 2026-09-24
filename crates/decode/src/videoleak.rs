@@ -65,10 +65,60 @@ pub struct Read {
     pub released: bool,
 }
 
+/// Samples kept for the carrier search, and so how fine its bins are.
+///
+/// Half a million at 20 MS/s is 26 ms and a bin of 38 Hz, which a parabola
+/// through the peak turns into single figures. That is what the phase loop
+/// needs to start from: it corrects less than half a turn a frame, and a
+/// frame at 60 Hz is 60 Hz of pull-in.
+const CARRIER_SAMPLES: usize = 1 << 19;
+
+/// How far from where the mode says its harmonic should be the carrier is
+/// looked for, as a fraction of that frequency.
+///
+/// A graphics card's clock is out by tens of parts per million, so a
+/// hundred is generous; what the window really guards against is the rest
+/// of the band, which is full of teeth belonging to other things. The
+/// window is around the harmonic and not around the dial, because an
+/// operator tunes a round number: 595 MHz for a fourth harmonic that sits
+/// at 594.0071.
+const CARRIER_TOLERANCE: f64 = 1e-4;
+
+/// The narrowest that window is allowed to get, so a low harmonic of a slow
+/// clock still has somewhere to be found.
+const CARRIER_FLOOR_HZ: f64 = 20e3;
+
+/// How many teeth either side of the harmonic have to be there before it is
+/// taken for a screen's clock.
+const COMB_TEETH: usize = 3;
+
+/// How far the weakest of those teeth has to stand over the median bin.
+///
+/// Measured at 595 MHz on the fourth harmonic of a 1920x1080 screen: 42 dB
+/// with the screen on and -3 dB on the same band three minutes later with
+/// its output switched off. The strongest line alone does not separate
+/// those two at all, standing 49 dB up with the screen on and 40 dB with it
+/// off.
+const MIN_COMB_DB: f32 = 15.0;
+
+/// How much of the turn measured between a frame and the average is taken
+/// out of the mixing frequency.
+const PHASE_GAIN: f64 = 0.5;
+
+/// What a lock found from the carrier alone reports as its score, which is
+/// not the same measurement as a lock found in the envelope.
+const LOCK_SCORE_FROM_CARRIER: f32 = f32::INFINITY;
+
 pub struct Reader {
     rate_hz: f64,
+    dial_hz: f64,
     decimation: usize,
     env: Vec<f32>,
+    cells: Vec<C32>,
+    iq: Vec<C32>,
+    mix_hz: f64,
+    mix_phase: f64,
+    coherent: bool,
     search: Vec<f32>,
     partial: f32,
     partial_n: usize,
@@ -89,6 +139,12 @@ impl Reader {
         let decimation = (rate_hz / SEARCH_RATE_HZ).round().max(1.0) as usize;
         Self {
             rate_hz,
+            dial_hz: 0.0,
+            cells: Vec::new(),
+            iq: Vec::new(),
+            mix_hz: 0.0,
+            mix_phase: 0.0,
+            coherent: false,
             decimation,
             env: Vec::new(),
             search: Vec::new(),
@@ -117,6 +173,12 @@ impl Reader {
 
     pub fn frames(&self) -> u64 {
         self.raster.as_ref().map_or(0, Raster::frames)
+    }
+
+    /// Whether the harmonic was found and frames are being averaged as
+    /// complex numbers rather than as magnitudes.
+    pub fn coherent(&self) -> bool {
+        self.coherent
     }
 
     pub fn held(&self) -> (u64, u64) {
@@ -163,21 +225,60 @@ impl Reader {
         self.published = 0;
     }
 
+    /// Where the receiver is tuned, which is what makes a carrier near the
+    /// middle of the span a pixel clock harmonic rather than an offset.
+    pub fn set_dial(&mut self, hz: f64) {
+        self.dial_hz = hz;
+    }
+
     pub fn push(&mut self, iq: &[C32]) -> Read {
         self.env.clear();
         raster::envelope(iq, &mut self.env);
+        let keep = CARRIER_SAMPLES.min(iq.len());
+        if self.iq.len() + keep > CARRIER_SAMPLES {
+            let over = self.iq.len() + keep - CARRIER_SAMPLES;
+            self.iq.drain(..over.min(self.iq.len()));
+        }
+        self.iq.extend_from_slice(&iq[iq.len() - keep..]);
         let env = std::mem::take(&mut self.env);
         let mut out = self.feed(&env);
         self.env = env;
-        if let Some(r) = self.raster.as_mut() {
-            r.push(&self.env);
-            if r.frames() >= self.published + PUBLISH_FRAMES {
-                self.published = r.frames();
-                self.sequence += 1;
-                out.picture = Some(self.picture());
-            }
+        self.paint(iq);
+        if let Some(r) = self.raster.as_ref()
+            && r.frames() >= self.published + PUBLISH_FRAMES
+        {
+            self.published = r.frames();
+            self.sequence += 1;
+            out.picture = Some(self.picture());
         }
         out
+    }
+
+    /// Paint the block, with the pixel clock harmonic mixed to nothing where
+    /// one was found, and as bare magnitudes where none was.
+    fn paint(&mut self, iq: &[C32]) {
+        let Some(r) = self.raster.as_mut() else { return };
+        self.cells.clear();
+        match self.coherent {
+            true => {
+                let step = std::f64::consts::TAU * -self.mix_hz / self.rate_hz;
+                for s in iq {
+                    let turn = C32::new(self.mix_phase.cos() as f32, self.mix_phase.sin() as f32);
+                    self.cells.push(*s * turn);
+                    self.mix_phase = (self.mix_phase + step).rem_euclid(std::f64::consts::TAU);
+                }
+            }
+            false => self.cells.extend(iq.iter().map(|s| C32::new(s.norm(), 0.0))),
+        }
+        let frames = r.push(&self.cells);
+        if frames > 0 && self.coherent {
+            // What is left of the harmonic after the mix, measured as the
+            // angle a frame turned against the average, taken back out of
+            // the mixing frequency.
+            let seconds = r.period() / self.rate_hz;
+            let turned = r.turned();
+            self.mix_hz += PHASE_GAIN * turned / (std::f64::consts::TAU * seconds);
+        }
     }
 
     fn feed(&mut self, env: &[f32]) -> Read {
@@ -220,8 +321,31 @@ impl Reader {
             // The operator named the raster, so the line period is the whole
             // measurement: a screen too weak to show its frame is exactly
             // the one somebody names the mode of.
+            // A named mode and a carrier are the whole measurement: the
+            // clock is the dial plus the offset, the line count is the
+            // mode's. Nothing has to repeat well enough to be found in the
+            // envelope, which is what lets this lock on a screen the search
+            // cannot see at all.
+            Some(m) if self.carrier(m).is_some() => {
+                let clock = self.carrier(m)?;
+                Periods {
+                    frame_samples: rate * (m.total_width * m.total_height) as f64 / clock,
+                    lines: m.total_height,
+                    score: LOCK_SCORE_FROM_CARRIER,
+                }
+            }
             Some(m) => {
                 let (line, score) = raster::find_line(&self.search, rate, self.limits())?;
+                let line = match self.carrier(m) {
+                    // The clock read off the comb's own tooth, which is the
+                    // dial plus a few kilohertz and so is as exact as the
+                    // dial: measured on a 1920x1080 screen it gives the same
+                    // line rate to half a part per million from a 20 MS/s
+                    // capture and a 61.44 MS/s one, where the period read
+                    // off the samples gave 67500.97 Hz and 80721 Hz.
+                    Some(clock) => rate * m.total_width as f64 / clock,
+                    None => line,
+                };
                 Periods {
                     frame_samples: line * m.total_height as f64,
                     lines: m.total_height,
@@ -236,6 +360,36 @@ impl Reader {
             None => display::match_mode(frame_hz, periods.lines),
         };
         Some(Locked { periods, frame_hz, line_hz: periods.line_hz(rate), mode })
+    }
+
+    /// The pixel clock of a named mode, from the harmonic of it the
+    /// receiver is parked on.
+    fn carrier(&self, m: &Mode) -> Option<f64> {
+        if self.dial_hz <= 0.0 {
+            return None;
+        }
+        let harmonic = (self.dial_hz / m.pixel_clock_hz as f64).round();
+        if harmonic < 1.0 {
+            return None;
+        }
+        let found = raster::find_comb(
+            &self.iq,
+            self.rate_hz,
+            self.carrier_window(m, harmonic),
+            m.line_hz(),
+            COMB_TEETH,
+        )?;
+        (found.over_db >= MIN_COMB_DB).then(|| (self.dial_hz + found.offset_hz) / harmonic)
+    }
+
+    /// Where in the span this mode's harmonic should be, as an offset from
+    /// the dial, with room either side for a clock that is not exactly what
+    /// the standard says.
+    fn carrier_window(&self, m: &Mode, harmonic: f64) -> (f64, f64) {
+        let nominal = harmonic * m.pixel_clock_hz as f64;
+        let reach = (nominal * CARRIER_TOLERANCE).max(CARRIER_FLOOR_HZ);
+        let middle = nominal - self.dial_hz;
+        (middle - reach, middle + reach)
     }
 
     fn look(&mut self) -> Read {
@@ -286,6 +440,27 @@ impl Reader {
     }
 
     fn start(&mut self, lock: Locked) {
+        // Mix the harmonic to nothing so a frame lands at the same phase as
+        // the one before it, which is what makes averaging them as complex
+        // numbers mean anything.
+        self.coherent = false;
+        self.mix_phase = 0.0;
+        if let Some(m) = lock.mode {
+            let harmonic = (self.dial_hz / m.pixel_clock_hz as f64).round();
+            if harmonic >= 1.0
+                && let Some(found) = raster::find_comb(
+                    &self.iq,
+                    self.rate_hz,
+                    self.carrier_window(m, harmonic),
+                    m.line_hz(),
+                    COMB_TEETH,
+                )
+                && found.over_db >= MIN_COMB_DB
+            {
+                self.mix_hz = found.offset_hz;
+                self.coherent = true;
+            }
+        }
         let period = lock.periods.frame_samples * self.decimation as f64;
         let line = period / lock.periods.lines as f64;
         let width = (line.round() as usize)
@@ -316,6 +491,35 @@ mod tests {
     use super::*;
 
     fn leak(mode: &Mode, rate: f64, seconds: f64, noise: f32) -> Vec<C32> {
+        leak_flat(mode, rate, seconds, noise)
+    }
+
+    /// The same screen as a receiver really meets it: the picture riding a
+    /// tooth of the cable's comb, `offset_hz` from the dial, with the noise
+    /// added afterwards by the receiver rather than multiplied onto the
+    /// carrier. Where the noise goes is the whole point of the comparison:
+    /// noise that rides the carrier survives a magnitude detector as well as
+    /// it survives a coherent one.
+    fn carried(mode: &Mode, rate: f64, seconds: f64, noise: f32, offset_hz: f64) -> Vec<C32> {
+        let mut state = 0x5DEECE66Du64;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        leak_flat(mode, rate, seconds, 0.0)
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let phase = std::f64::consts::TAU * offset_hz * i as f64 / rate;
+                let turn = C32::new(phase.cos() as f32, phase.sin() as f32);
+                turn * a.re + C32::new(rand() * noise, rand() * noise)
+            })
+            .collect()
+    }
+
+    fn leak_flat(mode: &Mode, rate: f64, seconds: f64, noise: f32) -> Vec<C32> {
         let mut state = 0xDEADBEEF12345678u64;
         let mut rand = move || {
             state ^= state << 13;
@@ -440,6 +644,154 @@ mod tests {
         // clarity of its frame, not its rate.
         assert!((lo..=hi).contains(&191_704.0));
         assert!(!(lo..=hi).contains(&300_000.0), "nothing runs 300 kHz a line");
+    }
+
+    /// A named mode and the carrier are enough to read a screen the
+    /// envelope search cannot find at all.
+    ///
+    /// The comb's tooth is a line in the spectrum, so an FFT of half a
+    /// million samples lifts it tens of dB over the floor, while the frame
+    /// and line periods have to be found in the envelope, where the same
+    /// signal is buried. Measured on a synthesised 1920x1080 screen: under
+    /// noise six times the picture's own amplitude the envelope search
+    /// still finds the raster, and at eight times it finds nothing at all
+    /// while the carrier is still there to be read.
+    #[test]
+    fn the_carrier_reads_a_screen_the_search_cannot_find() {
+        let mode = display::by_label("1920x1080 60 Hz").expect("the mode");
+        let rate = 20e6;
+        let dial = mode.pixel_clock_hz as f64 * 10.0;
+        let iq = carried(mode, rate, 0.7, 8.0, 17_700.0);
+
+        let mut lost = Reader::new(rate);
+        lost.force(Some(mode));
+        for b in iq.chunks(131_072) {
+            lost.push(b);
+        }
+        assert!(lost.locked().is_none(), "the envelope search found something after all");
+
+        let mut told = Reader::new(rate);
+        told.set_dial(dial);
+        told.force(Some(mode));
+        for b in iq.chunks(131_072) {
+            told.push(b);
+        }
+        let lock = told.locked().expect("the carrier was not enough");
+        assert_eq!(lock.periods.lines, 1125);
+        assert!((lock.frame_hz - 60.0).abs() < 0.01, "{} Hz", lock.frame_hz);
+        assert!(told.coherent(), "found the carrier and did not use it");
+    }
+
+    /// The picture of a screen averaged as complex numbers against the same
+    /// screen averaged as magnitudes.
+    ///
+    /// Mixing the comb's tooth to nothing makes every frame land at the
+    /// same phase, so the frames add rather than their magnitudes. Off air
+    /// on a 1920x1080 panel at 1485 MHz this is the difference between a
+    /// dark rectangle with a bright border and a picture in which the four
+    /// camera panels, the divider between them and the row of thumbnails
+    /// can all be made out.
+    #[test]
+    fn a_screen_averaged_coherently_carries_more_of_its_picture() {
+        let mode = display::by_label("1920x1080 60 Hz").expect("the mode");
+        let rate = 20e6;
+        let dial = mode.pixel_clock_hz as f64 * 10.0;
+        let iq = carried(mode, rate, 0.9, 4.0, 17_700.0);
+
+        let read = |dial_hz: f64| -> Option<Picture> {
+            let mut r = Reader::new(rate);
+            if dial_hz > 0.0 {
+                r.set_dial(dial_hz);
+            }
+            r.force(Some(mode));
+            let mut last = None;
+            for b in iq.chunks(131_072) {
+                if let Some(p) = r.push(b).picture {
+                    last = Some(p);
+                }
+            }
+            last
+        };
+
+        let coherent = read(dial).expect("a coherent picture");
+        // The same samples read by a receiver that does not know where it is
+        // tuned, which cannot name the harmonic and so averages magnitudes.
+        let plain = read(0.0).expect("a magnitude picture");
+
+        let score =
+            |p: &Picture| -> f32 { matched(&p.gray, &source(mode, p.width, p.height), p.width) };
+        let (with, without) = (score(&coherent), score(&plain));
+        // Measured on this screen: 0.992 against 0.954 under noise twice
+        // the picture's amplitude, 0.977 against 0.897 at four times.
+        assert!(
+            with > without + 0.05,
+            "coherent correlates {with:.3} with the screen, magnitude {without:.3}"
+        );
+    }
+
+    /// The screen the synthesiser drew, at the shape the raster paints.
+    fn source(mode: &Mode, width: usize, height: usize) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    let px = x as f64 / width as f64 * mode.total_width as f64;
+                    let py = y as f64 / height as f64 * mode.total_height as f64;
+                    let lit = match (px < mode.width as f64, py < mode.height as f64) {
+                        (true, true) => {
+                            let (u, v) = (px / mode.width as f64, py / mode.height as f64);
+                            0.35 + 0.4 * ((u > 0.05 && u < 0.45 && v > 0.1 && v < 0.6) as u8 as f32)
+                                + 0.6 * ((u > 0.5 && u < 0.95 && v > 0.3 && v < 0.9) as u8 as f32)
+                        }
+                        _ => 0.0,
+                    };
+                    (lit * 255.0) as u8
+                })
+            })
+            .collect()
+    }
+
+    /// How well a picture matches the screen, at the best alignment: what
+    /// the raster paints is the whole frame, and where its first line falls
+    /// is a property of when the capture started rather than of the screen.
+    fn matched(got: &[u8], want: &[u8], width: usize) -> f32 {
+        let height = got.len() / width;
+        let (sx, sy) = (4usize, 8usize);
+        let (w, h) = (width / sx, height / sy);
+        let shrink = |v: &[u8]| -> Vec<f32> {
+            (0..h)
+                .flat_map(|y| {
+                    (0..w).map(move |x| {
+                        let mut sum = 0.0;
+                        for dy in 0..sy {
+                            for dx in 0..sx {
+                                sum += v[(y * sy + dy) * width + x * sx + dx] as f32;
+                            }
+                        }
+                        sum / (sx * sy) as f32
+                    })
+                })
+                .collect()
+        };
+        let (g, t) = (shrink(got), shrink(want));
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let (mg, mt) = (mean(&g), mean(&t));
+        let mut best = -1.0f32;
+        for dy in 0..h {
+            for dx in 0..w {
+                let (mut dot, mut pg, mut pt) = (0.0f32, 0.0f32, 0.0f32);
+                for y in 0..h {
+                    for x in 0..w {
+                        let a = g[y * w + x] - mg;
+                        let b = t[((y + dy) % h) * w + (x + dx) % w] - mt;
+                        dot += a * b;
+                        pg += a * a;
+                        pt += b * b;
+                    }
+                }
+                best = best.max(dot / (pg.sqrt() * pt.sqrt()).max(f32::MIN_POSITIVE));
+            }
+        }
+        best
     }
 
     #[test]

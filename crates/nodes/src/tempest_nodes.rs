@@ -83,6 +83,7 @@ impl pipeline::node::Node for TempestNode {
         self.rate = i.spec.rate;
         self.center_hz = i.spec.center.as_f64();
         self.reader = Reader::new(self.rate);
+        self.reader.set_dial(self.center_hz);
         self.configure();
         let mut out = i.spec.with_kind(PortKind::Video);
         out.rate = 0.0;

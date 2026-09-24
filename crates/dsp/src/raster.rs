@@ -56,6 +56,129 @@ fn line_lags(r: &[f32], limits: Limits, rate: f64) -> (usize, usize) {
     (lo, hi)
 }
 
+/// Bins either side of nothing that a carrier is not looked for in.
+const SPUR_BINS: usize = 3;
+
+/// A line of the comb a display's cable radiates: where it sits against the
+/// dial, and how far it stands over the rest of the band.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Carrier {
+    pub offset_hz: f64,
+    pub over_db: f32,
+}
+
+/// The pixel clock harmonic nearest the dial, found as a line in the
+/// spectrum rather than as a period in the samples.
+///
+/// A cable clocked at a fixed rate radiates a comb, and the tooth the
+/// receiver is parked on is a carrier: measured on a 1920x1080 screen at
+/// 1485 MHz it stands 60 dB over the median bin, with its neighbours
+/// 67.501 kHz either side, one line rate apart. Reading it as a frequency
+/// rather than as a lag is what makes it precise: the dial is exact, so the
+/// clock is the dial plus a small offset, and a bin of 9.5 Hz on the tenth
+/// harmonic pins the pixel clock to a hertz.
+/// The pixel clock harmonic, found as the tooth of a comb rather than as a
+/// peak on its own.
+///
+/// A carrier by itself says nothing: measured on a band with the screen
+/// switched off, the strongest line in the window a 1920x1080 mode puts its
+/// fourth harmonic in still stood 40 dB over the median, against 49 dB with
+/// the screen on. What a scanned raster has and a lone transmitter does not
+/// is neighbours: teeth one line rate apart, either side, as far out as
+/// anybody cares to look. This asks for `teeth` of them each way and
+/// reports the weakest, so a tooth with nothing beside it scores nothing.
+pub fn find_comb(
+    iq: &[C32],
+    rate: f64,
+    window_hz: (f64, f64),
+    spacing_hz: f64,
+    teeth: usize,
+) -> Option<Carrier> {
+    let (power, n) = spectrum(iq)?;
+    let bin_hz = rate / n as f64;
+    let median = median_of(&power);
+    let step = spacing_hz / bin_hz;
+    let wrap = |b: f64| -> usize { (b.round() as i64).rem_euclid(n as i64) as usize };
+    let weakest = |middle: i64| -> f32 {
+        (0..=teeth as i64)
+            .flat_map(|t| [middle as f64 + t as f64 * step, middle as f64 - t as f64 * step])
+            .map(|b| {
+                let at = wrap(b);
+                power[at].max(power[wrap(b - 1.0)]).max(power[wrap(b + 1.0)])
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let bin_of = |hz: f64| -> i64 { (hz / bin_hz).round() as i64 };
+    let (lo, hi) = (bin_of(window_hz.0), bin_of(window_hz.1));
+    // The strongest line in the window, not the best comb: every tooth of a
+    // comb scores alike, so choosing among them by their neighbours picks
+    // whichever noise favoured and mixes the picture to the wrong place. The
+    // pixel clock's own line stands over its sidebands, and the comb is what
+    // says the line is a raster's rather than somebody's transmitter.
+    let at = (lo..=hi)
+        .filter(|b| b.unsigned_abs() as usize >= SPUR_BINS)
+        .max_by(|a, b| power[wrap(*a as f64)].total_cmp(&power[wrap(*b as f64)]))?;
+    let middle = wrap(at as f64);
+    if middle == 0 || middle + 1 >= n {
+        return None;
+    }
+    let refined = interpolate(&power, middle);
+    let offset = match refined < n as f64 / 2.0 {
+        true => refined,
+        false => refined - n as f64,
+    } * bin_hz;
+    Some(Carrier { offset_hz: offset, over_db: 10.0 * (weakest(at) / median).log10() })
+}
+
+fn spectrum(iq: &[C32]) -> Option<(Vec<f32>, usize)> {
+    let n = iq.len().next_power_of_two() / 2;
+    if n < 4096 {
+        return None;
+    }
+    let mut buf: Vec<C32> = iq[..n].to_vec();
+    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    Some((buf.iter().map(|v| v.norm_sqr()).collect(), n))
+}
+
+fn median_of(power: &[f32]) -> f32 {
+    let mut sorted = power.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    sorted[sorted.len() / 2].max(f32::MIN_POSITIVE)
+}
+
+pub fn find_carrier(iq: &[C32], rate: f64, window_hz: (f64, f64)) -> Option<Carrier> {
+    let n = iq.len().next_power_of_two() / 2;
+    if n < 4096 {
+        return None;
+    }
+    let mut buf: Vec<C32> = iq[..n].to_vec();
+    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    let power: Vec<f32> = buf.iter().map(|v| v.norm_sqr()).collect();
+    let bin_hz = rate / n as f64;
+    let mut sorted = power.clone();
+    sorted.sort_by(f32::total_cmp);
+    let median = sorted[sorted.len() / 2].max(f32::MIN_POSITIVE);
+    let bin_of = |hz: f64| -> i64 { (hz / bin_hz).round() as i64 };
+    let (lo, hi) = (bin_of(window_hz.0), bin_of(window_hz.1));
+    // Never the middle of the span: a direct conversion receiver puts its
+    // own leakage there, so a peak at nothing says more about the radio
+    // than about any screen.
+    let bins = (lo..=hi)
+        .filter(|b| b.unsigned_abs() as usize >= SPUR_BINS)
+        .map(|b| b.rem_euclid(n as i64) as usize)
+        .filter(|b| *b + 1 < n && *b > 0);
+    let at = bins.max_by(|a, b| power[*a].total_cmp(&power[*b]))?;
+    if at == 0 || at + 1 >= n {
+        return None;
+    }
+    let refined = interpolate(&power, at);
+    let offset = match refined < n as f64 / 2.0 {
+        true => refined,
+        false => refined - n as f64,
+    } * bin_hz;
+    Some(Carrier { offset_hz: offset, over_db: 10.0 * (power[at] / median).log10() })
+}
+
 pub fn find_line(env: &[f32], rate: f64, limits: Limits) -> Option<(f64, f32)> {
     let r = autocorrelation(env);
     let frame_lo = (rate / limits.frame_hz.1) as usize;
@@ -247,14 +370,22 @@ pub struct Raster {
     period: f64,
     phase: f64,
     nominal: f64,
-    sum: Vec<f32>,
+    sum: Vec<C32>,
     count: Vec<u32>,
-    average: Vec<f32>,
+    average: Vec<C32>,
+    /// The frame before this one, per cell, and which cells it filled.
+    last: Vec<C32>,
+    held: Vec<bool>,
+    /// How far the phase has wandered since the first frame, which the
+    /// blending takes back out so the average stays coherent while the
+    /// caller's loop settles.
+    roll: f64,
     seen: Vec<bool>,
     averaged: u64,
     frames: u64,
     depth: f64,
     drift: f64,
+    turned: f64,
     judged: u64,
     matched: u64,
 }
@@ -273,14 +404,18 @@ impl Raster {
             period,
             nominal: period,
             phase: 0.0,
-            sum: vec![0.0; width * height],
+            sum: vec![C32::new(0.0, 0.0); width * height],
             count: vec![0; width * height],
-            average: vec![0.0; width * height],
+            average: vec![C32::new(0.0, 0.0); width * height],
+            last: vec![C32::new(0.0, 0.0); width * height],
+            held: vec![false; width * height],
+            roll: 0.0,
             seen: vec![false; width * height],
             averaged: 0,
             frames: 0,
             depth: depth.max(1.0),
             drift: 0.0,
+            turned: 0.0,
             judged: 0,
             matched: 0,
         }
@@ -306,6 +441,19 @@ impl Raster {
         self.drift
     }
 
+    /// How far the last frame's phase had turned from the average's, in
+    /// radians.
+    ///
+    /// The caller mixes the pixel clock harmonic to nothing, and this is
+    /// what is left of that: a screen and a receiver keep their own
+    /// crystals, and a part in a million of a 1485 MHz harmonic is 1485 Hz,
+    /// which turns a frame's worth of phase twenty times over. Feeding this
+    /// back into the mix is what lets frames be averaged as complex numbers
+    /// rather than as magnitudes.
+    pub fn turned(&self) -> f64 {
+        self.turned
+    }
+
     pub fn judged(&self) -> u64 {
         self.judged
     }
@@ -318,7 +466,7 @@ impl Raster {
         self.depth = depth.max(1.0);
     }
 
-    pub fn push(&mut self, env: &[f32]) -> usize {
+    pub fn push(&mut self, env: &[C32]) -> usize {
         let (w, h) = (self.width as f64, self.height as f64);
         let mut per_sample = h / self.period;
         let mut down = self.phase * per_sample;
@@ -327,7 +475,7 @@ impl Raster {
             let y = (down as usize).min(self.height - 1);
             let x = (((down - y as f64) * w) as usize).min(self.width - 1);
             let at = y * self.width + x;
-            self.sum[at] += v;
+            self.sum[at] += *v;
             self.count[at] += 1;
             down += per_sample;
             if down >= h {
@@ -345,7 +493,7 @@ impl Raster {
     fn finish(&mut self) {
         self.frames += 1;
         if self.frames == 1 {
-            self.sum.iter_mut().for_each(|s| *s = 0.0);
+            self.sum.iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
             self.count.iter_mut().for_each(|c| *c = 0);
             return;
         }
@@ -353,6 +501,8 @@ impl Raster {
             0 => 0.0,
             _ => {
                 self.judged += 1;
+                self.turned = self.turn_from_last();
+                self.roll += self.turned;
                 match self.offset_from_average() {
                     Some(s) => {
                         self.matched += 1;
@@ -372,6 +522,7 @@ impl Raster {
         }
         let (dy, dx) = steps(shift, self.width, self.line_samples());
         let a = 1.0 / self.depth as f32;
+        let back = C32::new((-self.roll).cos() as f32, (-self.roll).sin() as f32);
         for y in 0..self.height {
             for x in 0..self.width {
                 let from = y * self.width + x;
@@ -379,6 +530,9 @@ impl Raster {
                     continue;
                 }
                 let value = self.sum[from] / self.count[from] as f32;
+                self.last[from] = value;
+                self.held[from] = true;
+                let value = value * back;
                 let ty = (y as isize - dy).rem_euclid(self.height as isize) as usize;
                 let tx = (x as isize - dx).rem_euclid(self.width as isize) as usize;
                 let to = ty * self.width + tx;
@@ -389,7 +543,7 @@ impl Raster {
                 self.seen[to] = true;
             }
         }
-        self.sum.iter_mut().for_each(|s| *s = 0.0);
+        self.sum.iter_mut().for_each(|s| *s = C32::new(0.0, 0.0));
         self.count.iter_mut().for_each(|c| *c = 0);
         self.averaged += 1;
     }
@@ -408,7 +562,7 @@ impl Raster {
                 if c == 0 {
                     continue;
                 }
-                cols[x] += self.sum[at];
+                cols[x] += self.sum[at].norm();
                 seen[x] += c;
             }
         }
@@ -421,11 +575,31 @@ impl Raster {
         cols
     }
 
+    /// The angle between what was just painted and the frame before it.
+    ///
+    /// Against the frame before rather than against the average, because the
+    /// average is a mixture of frames at whatever phases they arrived at and
+    /// its own angle lags: measured that way the loop never settled, hunting
+    /// between plus and minus two radians for as long as it ran.
+    fn turn_from_last(&self) -> f64 {
+        let mut dot = C32::new(0.0, 0.0);
+        for (at, count) in self.count.iter().enumerate() {
+            if *count == 0 || !self.held[at] {
+                continue;
+            }
+            dot += (self.sum[at] / *count as f32) * self.last[at].conj();
+        }
+        match dot.norm() > 0.0 {
+            true => f64::from(dot.arg()),
+            false => 0.0,
+        }
+    }
+
     fn offset_from_average(&self) -> Option<f64> {
         let cols = self.profiles();
         let reach = (self.width as f64 * SEARCH_LINE_FRACTION) as isize;
-        let (dx, quality) =
-            best_shift(&profile(&self.average, self.width, Axis::Column), &cols, reach);
+        let seen: Vec<f32> = self.average.iter().map(|v| v.norm()).collect();
+        let (dx, quality) = best_shift(&profile(&seen, self.width, Axis::Column), &cols, reach);
         if quality < MIN_CORRELATION {
             return None;
         }
@@ -433,14 +607,14 @@ impl Raster {
     }
 
     pub fn picture(&self, nudge: (isize, isize), align: bool) -> Vec<u8> {
+        let flat = self.projected();
         let lit: Vec<f32> =
-            self.average.iter().zip(&self.seen).filter(|(_, s)| **s).map(|(v, _)| *v).collect();
+            flat.iter().zip(&self.seen).filter(|(_, s)| **s).map(|(v, _)| *v).collect();
         let fill = match lit.is_empty() {
             true => 0.0,
             false => lit.iter().sum::<f32>() / lit.len() as f32,
         };
-        let mut out: Vec<f32> = self
-            .average
+        let mut out: Vec<f32> = flat
             .iter()
             .zip(&self.seen)
             .map(|(v, s)| match s {
@@ -450,8 +624,8 @@ impl Raster {
             .collect();
         let (mut dx, mut dy) = nudge;
         if align {
-            let cols = profile(&self.average, self.width, Axis::Column);
-            let rows = profile(&self.average, self.width, Axis::Row);
+            let cols = profile(&out, self.width, Axis::Column);
+            let rows = profile(&out, self.width, Axis::Row);
             dx += blank_end(&cols) as isize;
             dy += blank_end(&rows) as isize;
         }
@@ -462,6 +636,39 @@ impl Raster {
         let (lo, hi) = (sorted[cut], sorted[sorted.len() - 1 - cut]);
         let range = (hi - lo).max(f32::MIN_POSITIVE);
         out.iter().map(|v| (((v - lo) / range) * 255.0).clamp(0.0, 255.0) as u8).collect()
+    }
+
+    /// The averaged cells on one axis of the complex plane: the one they
+    /// vary most along.
+    ///
+    /// A cell is complex because the samples were painted coherently, and
+    /// the picture is the part of that which changes from cell to cell. The
+    /// axis is the principal one of the scatter, which for a cloud with no
+    /// phase in it at all is the real axis and leaves the magnitudes as they
+    /// were. Off air the phase is where a pair of colours with the same
+    /// amplitude differ, and projecting rather than taking the magnitude is
+    /// what keeps them apart.
+    fn projected(&self) -> Vec<f32> {
+        let lit = self.seen.iter().filter(|s| **s).count().max(1) as f32;
+        let mean: C32 =
+            self.average.iter().zip(&self.seen).filter(|(_, s)| **s).map(|(v, _)| *v).sum::<C32>()
+                / lit;
+        let spread: C32 = self
+            .average
+            .iter()
+            .zip(&self.seen)
+            .filter(|(_, s)| **s)
+            .map(|(v, _)| {
+                let d = *v - mean;
+                d * d
+            })
+            .sum::<C32>();
+        let angle = match spread.norm() > 0.0 {
+            true => -0.5 * spread.arg(),
+            false => 0.0,
+        };
+        let turn = C32::new(angle.cos(), angle.sin());
+        self.average.iter().map(|v| ((*v - mean) * turn).re).collect()
     }
 }
 
@@ -651,6 +858,11 @@ mod tests {
 
     const MID_FRAME: usize = 61_237;
 
+    /// An envelope as the raster takes it now, with no phase in it.
+    fn real(env: &[f32]) -> Vec<C32> {
+        env.iter().map(|v| C32::new(*v, 0.0)).collect()
+    }
+
     fn bytes(v: &[u8]) -> Vec<f32> {
         v.iter().map(|b| *b as f32).collect()
     }
@@ -690,6 +902,41 @@ mod tests {
         assert!((p.frame_hz(rate) - 60.0038).abs() < 0.05, "{} Hz", p.frame_hz(rate));
     }
 
+    /// The comb's tooth is found as a frequency, and precisely: a line
+    /// 17700 Hz off the dial under noise four times its own amplitude comes
+    /// back to a fraction of a hertz, where a bin of this transform is 38.
+    #[test]
+    fn the_carrier_is_found_under_noise_four_times_its_size() {
+        let rate = 20e6;
+        let offset = 17_700.0;
+        let mut state = 0x243F6A8885A308D3u64;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let iq: Vec<C32> = (0..1 << 19)
+            .map(|i| {
+                let phase = std::f64::consts::TAU * offset * i as f64 / rate;
+                C32::new(phase.cos() as f32, phase.sin() as f32)
+                    + C32::new(rand() * 4.0, rand() * 4.0)
+            })
+            .collect();
+        let found = find_carrier(&iq, rate, (-400e3, 400e3)).expect("a carrier");
+        assert!(
+            (found.offset_hz - offset).abs() < 1.0,
+            "read {:.2} Hz for a carrier at {offset}",
+            found.offset_hz
+        );
+        assert!(found.over_db > 30.0, "only {:.1} dB over the floor", found.over_db);
+
+        // Noise alone has no line in it worth the name.
+        let noise: Vec<C32> = (0..1 << 19).map(|_| C32::new(rand() * 4.0, rand() * 4.0)).collect();
+        let none = find_carrier(&noise, rate, (-400e3, 400e3)).expect("a strongest bin");
+        assert!(none.over_db < 20.0, "noise peaked {:.1} dB over its own median", none.over_db);
+    }
+
     #[test]
     fn noise_alone_is_not_a_raster() {
         let mut state = 0x9E3779B97F4A7C15u64;
@@ -712,7 +959,7 @@ mod tests {
         let truth = rate / VGA.frame_hz();
         let wrong = truth * (1.0 + 30e-6);
         let mut r = Raster::new(254, 525, wrong, 8.0);
-        r.push(&env);
+        r.push(&real(&env));
         assert!(r.frames() >= 29, "{} frames of {seconds}s", r.frames());
         let ppm = (r.period() - truth) / truth * 1e6;
         assert!(ppm.abs() < 2.0, "{ppm} ppm out after {} frames", r.frames());
@@ -724,7 +971,7 @@ mod tests {
         let env = VGA.emit(rate, 0.35, 0.4, &desktop);
         let width = 254;
         let mut r = Raster::new(width, 525, rate / VGA.frame_hz(), 8.0);
-        r.push(&env[MID_FRAME..]);
+        r.push(&real(&env[MID_FRAME..]));
         let got = r.picture((0, 0), true);
         let want: Vec<u8> = (0..525)
             .flat_map(|y| {

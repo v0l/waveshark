@@ -22,7 +22,9 @@ fn main() {
     fmt.convert(&raw, &mut iq);
     println!("{} samples at {rate}", iq.len());
 
+    let dial: f64 = std::env::args().nth(5).map_or(1485e6, |s| s.parse().unwrap());
     let mut reader = Reader::new(rate);
+    reader.set_dial(dial);
     if let Some(label) = mode.as_deref().filter(|m| *m != "auto") {
         let m = display::by_label(label).expect("a mode in the table");
         reader.force(Some(m));
@@ -44,6 +46,7 @@ fn main() {
                 l.line_hz / 1e3,
                 reader.held()
             );
+            println!("coherent {}", reader.coherent());
             let mut pgm = format!("P5 {} {} 255\n", p.width, p.height).into_bytes();
             pgm.extend_from_slice(&p.gray);
             std::fs::write(&out, pgm).expect("write");

@@ -35,11 +35,12 @@ impl Signal for Tempest {
         DEFAULT_HZ
     }
 
-    fn read(&self, iq: &[C32], rate_hz: f64, _center_hz: f64) -> Reading {
+    fn read(&self, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
         if rate_hz < MIN_RATE_HZ {
             return Reading::default();
         }
         let mut reader = Reader::new(rate_hz);
+        reader.set_dial(center_hz);
         let pictures =
             iq.chunks(crate::BLOCK).filter(|block| reader.push(block).picture.is_some()).count();
         Reading { pictures, ..Reading::default() }
