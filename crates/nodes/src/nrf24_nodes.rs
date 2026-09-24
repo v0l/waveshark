@@ -50,8 +50,11 @@ pub struct Nrf24Node {
     mixer: Mixer,
     decim: FirDecim,
     readers: Vec<nrf24::Reader>,
+    activity: dsp::gate::Activity,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
+    active: Vec<common::C32>,
+    ends: Vec<usize>,
     meter: crate::FrameMeter,
     accepted: u64,
 }
@@ -70,8 +73,11 @@ impl Nrf24Node {
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(WORK_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             readers: nrf24::BAUDS.iter().map(|b| nrf24::Reader::new(WORK_HZ, *b)).collect(),
+            activity: dsp::gate::Activity::new(WORK_HZ),
             mixed: Vec::new(),
             narrow: Vec::new(),
+            active: Vec::new(),
+            ends: Vec::new(),
             meter: crate::FrameMeter::new(WORK_HZ, 2_441_000_000, 0.01)
                 .keyed_as(common::Modulation::Gfsk),
             accepted: 0,
@@ -114,6 +120,7 @@ impl Simple for Nrf24Node {
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.readers = nrf24::BAUDS.iter().map(|b| nrf24::Reader::new(work, *b)).collect();
+        self.activity = dsp::gate::Activity::new(work);
         if self.readers.iter().all(|r| !r.usable()) {
             return Err(common::Error::other("nrf24 needs four samples a symbol"));
         }
@@ -137,12 +144,23 @@ impl Simple for Nrf24Node {
         self.decim.process(&self.mixed, &mut self.narrow);
         self.meter.feed(&self.narrow);
 
+        self.active.clear();
+        self.ends.clear();
+        self.activity.keep(&self.narrow, &mut self.active, &mut self.ends);
         let mut found: Vec<(u64, nrf24::Packet)> = Vec::new();
-        let narrow = std::mem::take(&mut self.narrow);
-        for r in &mut self.readers {
-            r.read(&narrow, &mut found);
+        let mut from = 0;
+        for &end in &self.ends {
+            for r in &mut self.readers {
+                r.read(&self.active[from..end], &mut found);
+                r.flush(&mut found);
+            }
+            from = end;
         }
-        self.narrow = narrow;
+        if from < self.active.len() {
+            for r in &mut self.readers {
+                r.read(&self.active[from..], &mut found);
+            }
+        }
 
         let out = o.packets_mut();
         for (_at, p) in &found {
@@ -156,6 +174,7 @@ impl Simple for Nrf24Node {
         self.mixer.reset();
         self.decim.reset();
         self.meter.reset();
+        self.activity.reset();
         for r in &mut self.readers {
             r.reset();
         }
@@ -319,6 +338,37 @@ mod tests {
         let payloads: Vec<u8> =
             frames.iter().map(|f| nrf24::from_on_air(f).expect("a packet").payload[0]).collect();
         assert_eq!(payloads, vec![0, 1, 2, 3], "the bursts came back out of order");
+    }
+
+    #[test]
+    fn bursts_in_noise_at_10_db_are_all_read_at_either_bit_rate() {
+        let (rate, center) = (4_000_000.0, 2_450_000_000.0);
+        let address = [0xa4, 0x03, 0x55, 0x11, 0x22];
+        let mut seed = 0x0bad_cafe_f00d_d00du64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        for baud in nrf24::BAUDS {
+            let mut iq = Vec::new();
+            for n in 0..5u8 {
+                iq.extend(burst(&address, &[n, 9, 9, 9], rate, baud));
+                iq.extend(vec![C32::new(0.0, 0.0); (rate * 0.008) as usize]);
+            }
+            for s in &mut iq {
+                *s = *s * 0.5 + C32::new(rng(), rng()) * 0.1;
+            }
+            let mut node = Nrf24Node::new(center);
+            node.negotiate(&spec(rate, center)).unwrap();
+            let frames = run(&mut node, &iq, rate, center);
+            let payloads: Vec<u8> = frames
+                .iter()
+                .map(|f| nrf24::from_on_air(f).expect("a packet").payload[0])
+                .collect();
+            assert_eq!(payloads, vec![0, 1, 2, 3, 4], "{baud} baud");
+        }
     }
 
     /// Two seconds of noise produces nothing. The preamble is 28 known bits

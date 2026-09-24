@@ -340,11 +340,20 @@ impl Reader {
             }
             None => self.sync.process(iq, &mut self.bits),
         }
+        self.frames(true, out);
+    }
+
+    pub fn flush(&mut self, out: &mut Vec<(u64, Packet)>) {
+        self.frames(false, out);
+        self.reset();
+    }
+
+    fn frames(&mut self, wait: bool, out: &mut Vec<(u64, Packet)>) {
         let mut from = (self.read_from - self.dropped) as usize;
         while let Some(at) = find_preamble(&self.bits, from) {
             // A preamble too near the end may be a frame still arriving, so
             // leave it for the next block rather than deciding on half of it.
-            if self.bits.len() - at < MAX_FRAME_BITS {
+            if wait && self.bits.len() - at < MAX_FRAME_BITS {
                 from = at;
                 break;
             }

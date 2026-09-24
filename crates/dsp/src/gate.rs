@@ -279,6 +279,94 @@ impl ChannelGate {
     }
 }
 
+pub struct Activity {
+    rate: f64,
+    window: usize,
+    lookback: usize,
+    hang: usize,
+    segment: usize,
+    powers: Vec<f32>,
+    medians: std::collections::VecDeque<f32>,
+    power: f32,
+    pending: Vec<C32>,
+    behind: std::collections::VecDeque<C32>,
+    since_loud: usize,
+}
+
+const ACTIVITY_WINDOW_S: f64 = 25e-6;
+const ACTIVITY_LOOKBACK_S: f64 = 100e-6;
+const ACTIVITY_HANG_S: f64 = 100e-6;
+const ACTIVITY_SEGMENT_S: f64 = 5e-3;
+const ACTIVITY_SEGMENTS: usize = 8;
+
+impl Activity {
+    pub fn new(rate: f64) -> Self {
+        let window = ((ACTIVITY_WINDOW_S * rate) as usize).max(8);
+        let windows = |s: f64| ((s * rate) as usize).div_ceil(window).max(1);
+        Self {
+            rate,
+            window,
+            lookback: windows(ACTIVITY_LOOKBACK_S) * window,
+            hang: windows(ACTIVITY_HANG_S),
+            segment: windows(ACTIVITY_SEGMENT_S),
+            powers: Vec::new(),
+            medians: std::collections::VecDeque::with_capacity(ACTIVITY_SEGMENTS),
+            power: 0.0,
+            pending: Vec::with_capacity(window),
+            behind: std::collections::VecDeque::new(),
+            since_loud: usize::MAX,
+        }
+    }
+
+    pub fn keep(&mut self, iq: &[C32], out: &mut Vec<C32>, ends: &mut Vec<usize>) {
+        for &x in iq {
+            self.pending.push(x);
+            self.power += x.norm_sqr();
+            if self.pending.len() == self.window {
+                self.close_window(out, ends);
+            }
+        }
+    }
+
+    fn close_window(&mut self, out: &mut Vec<C32>, ends: &mut Vec<usize>) {
+        let p = self.power / self.window as f32;
+        self.power = 0.0;
+        let learning = self.medians.is_empty();
+        let floor = self.medians.iter().copied().fold(f32::INFINITY, f32::min);
+        let loud = p > floor * WAKE_RATIO;
+        self.powers.push(p);
+        if self.powers.len() == self.segment {
+            let mid = self.powers.len() / 2;
+            let (_, median, _) = self.powers.select_nth_unstable_by(mid, f32::total_cmp);
+            if self.medians.len() == ACTIVITY_SEGMENTS {
+                self.medians.pop_front();
+            }
+            self.medians.push_back(*median);
+            self.powers.clear();
+        }
+        self.since_loud = match loud || learning {
+            true => 0,
+            false => self.since_loud.saturating_add(1),
+        };
+        if self.since_loud <= self.hang {
+            out.extend(self.behind.drain(..));
+            out.extend_from_slice(&self.pending);
+        } else {
+            if self.since_loud == self.hang + 1 {
+                ends.push(out.len());
+            }
+            self.behind.extend(self.pending.iter().copied());
+            let over = self.behind.len().saturating_sub(self.lookback);
+            self.behind.drain(..over);
+        }
+        self.pending.clear();
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new(self.rate);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +426,25 @@ mod tests {
         assert!(!gate.awake(&span), "a quiet channel is not read");
         span.measure(&block(rate, 65_536, 3e6, 10_000, 40_000, 0.2));
         assert!(gate.awake(&span), "a 2 ms burst in a 3.3 ms block slept through");
+    }
+
+    #[test]
+    fn activity_keeps_a_burst_with_100us_either_side_and_drops_the_noise() {
+        let rate = 4_000_000.0;
+        let mut iq = block(rate, 80_000, 0.0, 0, 0, 0.0);
+        iq.extend(block(rate, 80_000, 300e3, 20_000, 2_000, 0.05));
+        iq.extend(block(rate, 80_000, 0.0, 0, 0, 0.0));
+        let mut gate = Activity::new(rate);
+        let (mut out, mut ends) = (Vec::new(), Vec::new());
+        for chunk in iq.chunks(8_192) {
+            gate.keep(chunk, &mut out, &mut ends);
+        }
+        let warm = (ACTIVITY_SEGMENT_S * rate) as usize;
+        assert_eq!(ends.len(), 2, "the warm-up and the burst, each closed: {ends:?}");
+        let burst = out.len() - ends[0];
+        assert!(burst >= 2_000 + 400 + 400, "{burst} samples kept of a 2000 sample burst");
+        assert!(burst <= 2_000 + 400 + 400 + 200, "{burst} samples kept of a 2000 sample burst");
+        assert!(ends[0] >= warm && ends[0] <= warm + 600, "warm-up kept {} samples", ends[0]);
     }
 
     /// And a channel with something on it in every block still has a floor

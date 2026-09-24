@@ -7565,9 +7565,9 @@ mod zoom_tests {
             (
                 "zigbee_join_ch11_2405M_8000k.cs8",
                 "four front ends over one 8 MS/s channel, as means in a 16.4 ms block: \
-                 802.15.4 4.8 ms, BLE on advertising channel 37 4.0, the nRF24 decoder the \
-                 burst router places on the joining traffic 3.4, and the router itself 2.5, \
-                 which is 13 at the 95th percentile and makes the worst blocks",
+                 802.15.4 4.9 ms, BLE on advertising channel 37 4.1, the burst router 2.4, \
+                 which is 13 at the 95th percentile and makes the worst blocks, and nRF24 \
+                 1.7",
             ),
             (
                 "pal_camera_5865M_20000k.cs8",
