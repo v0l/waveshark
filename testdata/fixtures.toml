@@ -1027,3 +1027,53 @@ to find here at all, where the other gives 67.501 kHz at a score of 733.
 
 [capture.expect]
 line_found = false
+
+[[capture]]
+name = "zigbee_join_ch11_2405M_8000k.cs8"
+sha256 = "45afc3336a1515dcb3a6c35effa4f78b624273d51147940c10a11a9ec177ca8f"
+url = "https://nostr.download/45afc3336a1515dcb3a6c35effa4f78b624273d51147940c10a11a9ec177ca8f.xz"
+compression = "xz"
+center_hz = 2_405_000_000
+rate_sps = 8_000_000
+format = "cs8"
+license = "CC-BY-4.0"
+description = """
+A Zigbee device joining a home network on channel 11, off air. Recorded with a
+HackRF at 20 MS/s on 2410 MHz while the coordinator had permit join open, then
+cut to 0.6 s and tuned to channel 11 at 8 MS/s with iq_clipper. This is one
+channel, not the band.
+
+The window holds two beacon requests from the joining device, five beacons in
+answer (four from two routers of this network and one from a neighbour's), the
+association request from 94:A0:81:FF:FE:86:DD:48 to router 0x0897, the
+router's association response, and the network traffic around it: 30 frames,
+every one with a good frame check.
+
+Each frame was dissected by Wireshark 4.4.18 through rawshark, and the counts
+below are what it reported. Our own decode agrees with it frame by frame,
+including the network layer and the EUI-64 of each hop's sender.
+
+The coordinator sends the network key to a joining device inside a key
+transport command encrypted with the default link key, which anybody can
+undo. Those frames are outside this window and nothing in it is readable with
+the default link key; the network payloads stay encrypted.
+
+Identities in it: the EUI-64s of the devices on this network, the extended PAN
+ID of this network (41:0E:3A:D6:A1:CF:ED:BD) and of a neighbour's
+(F1:4F:EF:31:2C:69:DE:F7).
+"""
+
+[capture.expect]
+frames = 30
+mac_beacon = 5
+mac_data = 9
+mac_ack = 7
+mac_command = 9
+beacon_requests = 2
+association_requests = 1
+association_responses = 1
+data_requests = 5
+zigbee_data = 5
+zigbee_command = 4
+hop_sender = "A4:C1:38:01:D4:FD:FF:FF"
+joining = "94:A0:81:FF:FE:86:DD:48"

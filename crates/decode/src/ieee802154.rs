@@ -234,6 +234,17 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
+fn beacon_payload_at(body: &[u8]) -> Option<usize> {
+    let descriptors = usize::from(*body.get(2)? & 0x07);
+    let mut at = 3;
+    if descriptors > 0 {
+        at += 1 + 3 * descriptors;
+    }
+    let pending = *body.get(at)?;
+    at += 1 + 2 * usize::from(pending & 0x07) + 8 * usize::from(pending >> 4 & 0x07);
+    (at <= body.len()).then_some(at)
+}
+
 fn u16le(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
@@ -377,6 +388,7 @@ pub fn parse(mpdu: &[u8]) -> Option<Frame> {
     match frame_type {
         FrameType::Command if !secured => command = body.first().map(|&v| Command::from_id(v)),
         FrameType::Beacon if !secured && !version.enhanced() => {
+            beacon_payload_at(body)?;
             if let Some(s) = u16le(body, 0) {
                 superframe = Some(Superframe {
                     beacon_order: (s & 0x0f) as u8,
@@ -408,6 +420,11 @@ pub fn parse(mpdu: &[u8]) -> Option<Frame> {
 }
 
 impl Frame {
+    pub fn beacon_payload(&self) -> Option<&[u8]> {
+        self.superframe?;
+        self.payload.get(beacon_payload_at(&self.payload)?..)
+    }
+
     /// How the sender is named where one transmitter is being followed across
     /// frames: its extended address where it sent one, otherwise the short
     /// address with the PAN it means something in.
@@ -511,6 +528,12 @@ pub fn read(bytes: &[u8], center: common::Hz) -> Option<Proto> {
     Some(p)
 }
 
+pub fn layers(bytes: &[u8], center: common::Hz) -> Vec<Proto> {
+    let Some(mac) = read(bytes, center) else { return Vec::new() };
+    let above = parse(bytes).and_then(|f| crate::zigbee::read(&f));
+    std::iter::once(mac).chain(above).collect()
+}
+
 /// The channel a centre names, if it names one.
 pub fn channel_of(center_hz: f64) -> Option<u8> {
     dsp::oqpsk::channels_2450()
@@ -580,6 +603,17 @@ mod tests {
         assert!(s.association_permit);
         assert_eq!(s.beacon_order, 15);
     }
+
+    #[test]
+    fn a_beacon_whose_pending_list_overruns_it_is_malformed_as_wireshark_4_4_18_says() {
+        let mpdu: Vec<u8> = (0..BEACON_OVERRUN.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&BEACON_OVERRUN[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(parse(&mpdu), None);
+    }
+
+    const BEACON_OVERRUN: &str = "008000861248dd86feff81a0947f2b08808002010521ffff76000000005d5ac5f049d21ef7112748dd86feff81a0940025132200007435f600";
 
     /// An extended address is the device's EUI-64 and carries a
     /// manufacturer's OUI, which is the one durable identity a listener gets:

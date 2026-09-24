@@ -9,6 +9,10 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Added
+
+- Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
+
 ### Changed
 
 - Scanner front ends and channels run out to the span edge, with no rolloff held back.
@@ -16,6 +20,7 @@ the code is in the commit log.
 ### Fixed
 
 - 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
+- 802.15.4 beacons read out of frames too short for their own address lists.
 
 ## [0.4.0] - 2026-09-24
 

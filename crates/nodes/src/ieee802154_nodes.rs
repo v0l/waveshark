@@ -179,7 +179,7 @@ impl Protocol for Ieee802154 {
     fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
         let bytes = p.bytes();
         channel_of(p.center_hz() as f64)?;
-        Some(read(bytes, common::Hz(p.center_hz())).into_iter().collect())
+        Some(decode::ieee802154::layers(bytes, common::Hz(p.center_hz())))
     }
     /// It cuts its own channels out of the span, for the reason `ble` does:
     /// a bank channel is [`dsp::source::BANK_CHANNEL_HZ`] wide at twice that
