@@ -38,6 +38,10 @@ pub struct Locked {
     pub frame_hz: f64,
     pub line_hz: f64,
     pub mode: Option<&'static Mode>,
+    /// Where the pixel clock harmonic sits against the dial, for a lock
+    /// that found one. `None` is a lock read out of the envelope alone,
+    /// which is averaged as magnitudes.
+    pub carrier_hz: Option<f64>,
 }
 
 impl Locked {
@@ -105,6 +109,9 @@ const MIN_COMB_DB: f32 = 15.0;
 /// out of the mixing frequency.
 const PHASE_GAIN: f64 = 0.5;
 
+/// Samples between putting the mixing phasor back on the unit circle.
+const RENORMALISE: usize = 4096;
+
 /// What a lock found from the carrier alone reports as its score, which is
 /// not the same measurement as a lock found in the envelope.
 const LOCK_SCORE_FROM_CARRIER: f32 = f32::INFINITY;
@@ -116,6 +123,8 @@ pub struct Reader {
     env: Vec<f32>,
     cells: Vec<C32>,
     iq: Vec<C32>,
+    iq_at: usize,
+    iq_full: bool,
     mix_hz: f64,
     mix_phase: f64,
     coherent: bool,
@@ -142,6 +151,8 @@ impl Reader {
             dial_hz: 0.0,
             cells: Vec::new(),
             iq: Vec::new(),
+            iq_at: 0,
+            iq_full: false,
             mix_hz: 0.0,
             mix_phase: 0.0,
             coherent: false,
@@ -234,12 +245,7 @@ impl Reader {
     pub fn push(&mut self, iq: &[C32]) -> Read {
         self.env.clear();
         raster::envelope(iq, &mut self.env);
-        let keep = CARRIER_SAMPLES.min(iq.len());
-        if self.iq.len() + keep > CARRIER_SAMPLES {
-            let over = self.iq.len() + keep - CARRIER_SAMPLES;
-            self.iq.drain(..over.min(self.iq.len()));
-        }
-        self.iq.extend_from_slice(&iq[iq.len() - keep..]);
+        self.keep(iq);
         let env = std::mem::take(&mut self.env);
         let mut out = self.feed(&env);
         self.env = env;
@@ -254,6 +260,37 @@ impl Reader {
         out
     }
 
+    /// Keep the last samples for the carrier search, written round a ring
+    /// rather than shifted down one block at a time: the shift moved three
+    /// megabytes per block for samples nothing reads until a lock is tried.
+    fn keep(&mut self, iq: &[C32]) {
+        if self.iq.len() < CARRIER_SAMPLES {
+            self.iq.resize(CARRIER_SAMPLES, C32::new(0.0, 0.0));
+            self.iq_at = 0;
+            self.iq_full = false;
+        }
+        for s in iq.iter().rev().take(CARRIER_SAMPLES).rev() {
+            self.iq[self.iq_at] = *s;
+            self.iq_at += 1;
+            if self.iq_at == CARRIER_SAMPLES {
+                self.iq_at = 0;
+                self.iq_full = true;
+            }
+        }
+    }
+
+    /// Those samples in the order they arrived, which is what a transform
+    /// of them needs.
+    fn in_order(&self) -> Vec<C32> {
+        if !self.iq_full {
+            return self.iq[..self.iq_at].to_vec();
+        }
+        let mut out = Vec::with_capacity(CARRIER_SAMPLES);
+        out.extend_from_slice(&self.iq[self.iq_at..]);
+        out.extend_from_slice(&self.iq[..self.iq_at]);
+        out
+    }
+
     /// Paint the block, with the pixel clock harmonic mixed to nothing where
     /// one was found, and as bare magnitudes where none was.
     fn paint(&mut self, iq: &[C32]) {
@@ -261,12 +298,25 @@ impl Reader {
         self.cells.clear();
         match self.coherent {
             true => {
+                // One turn of the phasor per sample rather than a sine and
+                // a cosine each: at 20 MS/s that was forty million
+                // transcendental calls a second, and the whole of the
+                // difference between reading a span twice over and reading
+                // it three times over.
                 let step = std::f64::consts::TAU * -self.mix_hz / self.rate_hz;
-                for s in iq {
-                    let turn = C32::new(self.mix_phase.cos() as f32, self.mix_phase.sin() as f32);
+                let by = C32::new(step.cos() as f32, step.sin() as f32);
+                let mut turn = C32::new(self.mix_phase.cos() as f32, self.mix_phase.sin() as f32);
+                for (n, s) in iq.iter().enumerate() {
                     self.cells.push(*s * turn);
-                    self.mix_phase = (self.mix_phase + step).rem_euclid(std::f64::consts::TAU);
+                    turn *= by;
+                    // A phasor multiplied a million times over drifts off
+                    // the unit circle, and the picture with it.
+                    if n % RENORMALISE == 0 {
+                        turn /= turn.norm().max(f32::MIN_POSITIVE);
+                    }
                 }
+                self.mix_phase =
+                    (self.mix_phase + step * iq.len() as f64).rem_euclid(std::f64::consts::TAU);
             }
             false => self.cells.extend(iq.iter().map(|s| C32::new(s.norm(), 0.0))),
         }
@@ -317,54 +367,49 @@ impl Reader {
 
     fn measure(&self) -> Option<Locked> {
         let rate = self.search_rate_hz();
-        let periods = match self.forced {
-            // The operator named the raster, so the line period is the whole
-            // measurement: a screen too weak to show its frame is exactly
-            // the one somebody names the mode of.
+        let found = self.forced.and_then(|m| self.carrier(m));
+        let periods = match (self.forced, found) {
             // A named mode and a carrier are the whole measurement: the
             // clock is the dial plus the offset, the line count is the
             // mode's. Nothing has to repeat well enough to be found in the
             // envelope, which is what lets this lock on a screen the search
             // cannot see at all.
-            Some(m) if self.carrier(m).is_some() => {
-                let clock = self.carrier(m)?;
-                Periods {
-                    frame_samples: rate * (m.total_width * m.total_height) as f64 / clock,
-                    lines: m.total_height,
-                    score: LOCK_SCORE_FROM_CARRIER,
-                }
-            }
-            Some(m) => {
+            (Some(m), Some((clock, _))) => Periods {
+                frame_samples: rate * (m.total_width * m.total_height) as f64 / clock,
+                lines: m.total_height,
+                score: LOCK_SCORE_FROM_CARRIER,
+            },
+            (Some(m), None) => {
                 let (line, score) = raster::find_line(&self.search, rate, self.limits())?;
-                let line = match self.carrier(m) {
-                    // The clock read off the comb's own tooth, which is the
-                    // dial plus a few kilohertz and so is as exact as the
-                    // dial: measured on a 1920x1080 screen it gives the same
-                    // line rate to half a part per million from a 20 MS/s
-                    // capture and a 61.44 MS/s one, where the period read
-                    // off the samples gave 67500.97 Hz and 80721 Hz.
-                    Some(clock) => rate * m.total_width as f64 / clock,
-                    None => line,
-                };
                 Periods {
                     frame_samples: line * m.total_height as f64,
                     lines: m.total_height,
                     score,
                 }
             }
-            None => raster::find_periods(&self.search, rate, self.limits())?,
+            (None, _) => raster::find_periods(&self.search, rate, self.limits())?,
         };
         let frame_hz = periods.frame_hz(rate);
         let mode = match self.forced {
             Some(m) => Some(m),
             None => display::match_mode(frame_hz, periods.lines),
         };
-        Some(Locked { periods, frame_hz, line_hz: periods.line_hz(rate), mode })
+        Some(Locked {
+            periods,
+            frame_hz,
+            line_hz: periods.line_hz(rate),
+            mode,
+            carrier_hz: found.map(|(_, offset)| offset),
+        })
     }
 
-    /// The pixel clock of a named mode, from the harmonic of it the
-    /// receiver is parked on.
-    fn carrier(&self, m: &Mode) -> Option<f64> {
+    /// The pixel clock of a named mode and where its harmonic sits against
+    /// the dial, from the comb the cable radiates.
+    ///
+    /// One transform, kept: the search is a quarter of a million points and
+    /// a lock used to ask for it three times over, once to decide, once to
+    /// measure and once to mix.
+    fn carrier(&self, m: &Mode) -> Option<(f64, f64)> {
         if self.dial_hz <= 0.0 {
             return None;
         }
@@ -373,13 +418,14 @@ impl Reader {
             return None;
         }
         let found = raster::find_comb(
-            &self.iq,
+            &self.in_order(),
             self.rate_hz,
             self.carrier_window(m, harmonic),
             m.line_hz(),
             COMB_TEETH,
         )?;
-        (found.over_db >= MIN_COMB_DB).then(|| (self.dial_hz + found.offset_hz) / harmonic)
+        (found.over_db >= MIN_COMB_DB)
+            .then(|| ((self.dial_hz + found.offset_hz) / harmonic, found.offset_hz))
     }
 
     /// Where in the span this mode's harmonic should be, as an offset from
@@ -445,21 +491,9 @@ impl Reader {
         // numbers mean anything.
         self.coherent = false;
         self.mix_phase = 0.0;
-        if let Some(m) = lock.mode {
-            let harmonic = (self.dial_hz / m.pixel_clock_hz as f64).round();
-            if harmonic >= 1.0
-                && let Some(found) = raster::find_comb(
-                    &self.iq,
-                    self.rate_hz,
-                    self.carrier_window(m, harmonic),
-                    m.line_hz(),
-                    COMB_TEETH,
-                )
-                && found.over_db >= MIN_COMB_DB
-            {
-                self.mix_hz = found.offset_hz;
-                self.coherent = true;
-            }
+        if let Some(offset) = lock.carrier_hz {
+            self.mix_hz = offset;
+            self.coherent = true;
         }
         let period = lock.periods.frame_samples * self.decimation as f64;
         let line = period / lock.periods.lines as f64;

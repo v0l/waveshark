@@ -31,11 +31,18 @@ fn main() {
         println!("forced {}", m.label());
     }
     let mut last = None;
+    let t = std::time::Instant::now();
     for block in iq.chunks(131_072) {
         if let Some(p) = reader.push(block).picture {
             last = Some(p);
         }
     }
+    let el = t.elapsed().as_secs_f64();
+    println!(
+        "{:.3} s of air in {el:.3} s = {:.2}x real time",
+        iq.len() as f64 / rate,
+        iq.len() as f64 / rate / el
+    );
     match (reader.locked(), last) {
         (Some(l), Some(p)) => {
             println!(

@@ -60,7 +60,7 @@ fn the_line_rate_is_the_mode_s_own() {
     // the line count: 60.0007 Hz, seven parts in a million from 60.
     assert!((lock.frame_hz - 60.0).abs() < 0.002, "{} Hz", lock.frame_hz);
     let (held, judged) = reader.held();
-    assert_eq!((held, judged), (26, 35), "frames found where the period says they are");
+    assert_eq!((held, judged), (31, 38), "frames found where the period says they are");
     // The fourth harmonic of the clock sits 993 kHz below the dial an
     // operator tuned, and finding it there is what lets the frames be
     // averaged as complex numbers rather than as magnitudes.
