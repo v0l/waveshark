@@ -248,6 +248,8 @@ pub fn settings_of(dev: &dyn Device) -> Vec<Setting> {
                 _ => SettingValue::Auto,
             },
             range_db: Some((*stage.range.start(), *stage.range.end())),
+            step: stage.step as f64,
+            gains_db: stage.values.clone(),
             ..Default::default()
         });
     }
@@ -520,6 +522,8 @@ mod tests {
         assert_eq!(s[0].kind, SettingKind::Gain);
         assert_eq!(s[0].value, SettingValue::Gain(24.0));
         assert_eq!(s[0].range_db, Some((0.0, 40.0)));
+        assert_eq!((s[0].step, s[0].gains_db.len()), (8.0, 0), "the HackRF LNA's 8 dB step");
+        assert_eq!((s[1].step, s[1].gains_db.clone()), (0.0, vec![0.0, 0.9, 1.4, 49.6, 60.0]));
         // A stage the driver picks for itself reads as such rather than as a
         // number nothing is set to.
         assert_eq!(s[1].value, SettingValue::Auto);
@@ -566,13 +570,15 @@ mod tests {
 
     impl Default for Bench {
         fn default() -> Self {
-            let stage = |name: &str, label: &str, hi: f32| common::device::GainStage {
-                name: name.into(),
-                label: label.into(),
-                range: 0.0..=hi,
-                values: Vec::new(),
-                step: 0.0,
-                auto: true,
+            let stage = |name: &str, label: &str, hi: f32, step: f32, values: Vec<f32>| {
+                common::device::GainStage {
+                    name: name.into(),
+                    label: label.into(),
+                    range: 0.0..=hi,
+                    values,
+                    step,
+                    auto: true,
+                }
             };
             Bench {
                 info: common::device::DeviceInfo {
@@ -586,7 +592,10 @@ mod tests {
                     }],
                     rates: Vec::new(),
                     rate_range: Sps(225_000)..=Sps(2_400_000),
-                    gain_stages: vec![stage("lna", "LNA", 40.0), stage("vga", "VGA", 60.0)],
+                    gain_stages: vec![
+                        stage("lna", "LNA", 40.0, 8.0, Vec::new()),
+                        stage("vga", "VGA", 60.0, 0.0, vec![0.0, 0.9, 1.4, 49.6, 60.0]),
+                    ],
                     native_format: SampleFormat::Cu8,
                     usable_bandwidth_ratio: 0.8,
                     tunable: true,

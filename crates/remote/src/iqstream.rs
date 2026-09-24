@@ -202,11 +202,8 @@ fn gain_stage(s: &Setting) -> Option<common::device::GainStage> {
         name: s.name.clone(),
         label: s.label.clone(),
         range: lo..=hi,
-        // Unknown from here: the far end says how far a gain goes and not
-        // which steps its hardware has, so it is asked for what was wanted
-        // and reports back what it managed.
-        values: Vec::new(),
-        step: 0.0,
+        values: s.gains_db.clone(),
+        step: s.step as f32,
         auto: true,
     })
 }
@@ -781,6 +778,22 @@ mod tests {
             value: SettingValue::Switch(on),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_remote_gain_snaps_to_the_steps_the_far_end_listed() {
+        let mut p = probe(true, None);
+        let r820t = Setting { gains_db: vec![0.0, 0.9, 1.4, 32.8, 49.6], ..gain(32.8) };
+        let lna =
+            Setting { name: "lna".into(), range_db: Some((0.0, 40.0)), step: 8.0, ..gain(24.0) };
+        p.settings = vec![r820t, lna, gain(10.0)];
+        let d = Device::from_probe(&p);
+        let stages = &d.info().gain_stages;
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0].quantise(30.0), 32.8, "nearest of the listed gains");
+        assert_eq!(stages[0].quantise(1.0), 0.9);
+        assert_eq!(stages[1].quantise(30.0), 32.0, "an 8 dB step");
+        assert_eq!(stages[2].quantise(30.3), 30.3, "a 1.4 server says neither, so continuous");
     }
 
     /// A server that offered its radio gives the receiver real controls: a

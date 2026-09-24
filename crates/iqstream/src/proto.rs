@@ -64,7 +64,10 @@ pub const VERSION_MAJOR: u16 = 1;
 /// with [`msg::PROBED`], and a client that never gets a datagram asks for
 /// [`Transport::Tcp`] and reads the samples off the control connection. A 1.3
 /// client names a port and is served exactly as before.
-pub const VERSION_MINOR: u16 = 4;
+///
+/// 5: the exact gains a stage takes, as [`tag::SETTING_GAINS_DDB`]. A 1.4
+/// reader ignores the list and draws the stage as it did.
+pub const VERSION_MINOR: u16 = 5;
 
 pub const PREAMBLE_LEN: usize = 8;
 pub const FRAME_HEADER_LEN: usize = 4;
@@ -203,6 +206,7 @@ pub mod tag {
     pub const SETTING_STEP: u16 = 0x006a;
     /// What a number is measured in, shown after it: "Hz", "dB". Since 1.3.
     pub const SETTING_UNIT: u16 = 0x006b;
+    pub const SETTING_GAINS_DDB: u16 = 0x006c;
     // Subscription parameters
     pub const UDP_PORT: u16 = 0x0020;
     pub const BIT_DEPTH: u16 = 0x0021;
@@ -660,6 +664,7 @@ pub struct Setting {
     pub step: f64,
     /// What a number is measured in, and empty for anything else.
     pub unit: String,
+    pub gains_db: Vec<f32>,
 }
 
 impl Default for Setting {
@@ -674,6 +679,7 @@ impl Default for Setting {
             range: None,
             step: 0.0,
             unit: String::new(),
+            gains_db: Vec::new(),
         }
     }
 }
@@ -707,6 +713,14 @@ impl Setting {
         if !self.unit.is_empty() {
             t.str(tag::SETTING_UNIT, &self.unit);
         }
+        if !self.gains_db.is_empty() {
+            let packed: Vec<u8> = self
+                .gains_db
+                .iter()
+                .flat_map(|g| ((g * 10.0).round() as i16).to_le_bytes())
+                .collect();
+            t.put(tag::SETTING_GAINS_DDB, &packed);
+        }
         t.bytes().to_vec()
     }
 
@@ -730,6 +744,12 @@ impl Setting {
             range: number(&m, tag::SETTING_MIN).zip(number(&m, tag::SETTING_MAX)),
             step: number(&m, tag::SETTING_STEP).unwrap_or(0.0),
             unit: m.str(tag::SETTING_UNIT).unwrap_or_default(),
+            gains_db: m
+                .get(tag::SETTING_GAINS_DDB)
+                .unwrap_or_default()
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 10.0)
+                .collect(),
         })
     }
 }
@@ -1046,6 +1066,16 @@ mod tests {
                         value: SettingValue::Gain(32.8),
                         options: Vec::new(),
                         range_db: Some((0.0, 49.6)),
+                        gains_db: vec![0.0, 0.9, 1.4, 2.7, 3.7, 32.8, 49.6, -1.0],
+                        ..Default::default()
+                    },
+                    Setting {
+                        name: "lna".into(),
+                        label: "LNA".into(),
+                        kind: SettingKind::Gain,
+                        value: SettingValue::Gain(24.0),
+                        range_db: Some((0.0, 40.0)),
+                        step: 8.0,
                         ..Default::default()
                     },
                     Setting {
