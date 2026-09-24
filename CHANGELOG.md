@@ -11,272 +11,135 @@ the code is in the commit log.
 
 ### Added
 
-- Text field right-click menu with cut, copy, paste and select all.
-- Display signal leakage read as pictures, TempestSDR-style and averaged coherently, and a scanner table block for it.
-- KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
-- Aircraft registration and type from the Mictronics database, on the track table and as the map's jet, light aircraft or helicopter shape.
+- `wave1090`, a Mode S receiver on dump1090's AVR, BaseStation and Beast
+  ports, taking mlat back and writing tar1090's JSON.
+- IQStream server on `--iqstream-listen` or the setup card, sharing the span
+  and spare radios, through NAT.
+- IQStream, rtl_tcp, SpyServer and KiwiSDR as remote tuners, beside packet feeds in one dialog.
+- IQStream remote tuners set from here: dial, gain, switches, trim and span.
+- IQStream directory on nostr, listed from the receiver or wave1090 `--iqstream-list`, opened with TUNE.
+- SpyServer directory, listed by frequency and free slot, opened with TUNE.
+- rtl_tcp bias tee, direct sampling, RTL AGC and E4000 offset tuning.
+- Stitched receivers from several matching tuners, their drift taken out and trimmed per tuner.
+- Protocol descriptions fetched from waveshark-protocols: ISM sensors, remotes
+  and FSK links as YAML, each a mode in the menu, overridden from
+  `~/.config/waveshark/protocols`.
+- Transmit for POCSAG, APRS, RTTY, BLE advertising, SSTV and RDS, on a channel decoding one.
+- VOX and a roger beep on the transmit channel.
+- CTCSS tones and DCS codes on a saved channel, squelched on and sent when keyed.
+- Flipper `.sub` files in a scripts panel, keyed at their frequency, and eight collections to download.
+- Captures transmitted from a channel, trimmed to their transmissions or a window first.
+- Captures named outside the rtl_433 convention, with rate, format and centre given on a card or `--capture`.
+- Raw capture armed on energy, a file per burst with its lead-in.
+- FT8 and FT4 on the HF dials, live or replayed, with grid squares on the map.
+- NXDN talk groups and callers, with speech where it is not enciphered.
+- P25 phase 1 talk groups, radio ids and keys, without speech.
+- DAB ensembles and their stations, without sound.
+- DRM services and their labels, without sound.
+- IEEE 802.15.4 at 2.4 GHz, with the addresses under Zigbee, Thread and Matter.
+- Z-Wave locks, sensors and plugs on 868 and 908 MHz.
+- FLEX paging at 1600 and 3200 baud, and P2000 dispatch pins on the map.
+- Two-tone paging, named from an operator's list.
+- MDC-1200 unit ids, still named from a damaged burst.
+- RTTY and Morse as text in the message view.
+- EAS and SAME alert headers, on the NOAA Weather Radio channels.
+- SSTV, APT, WEFAX and EAS read off a listening channel's audio, picked on the strip.
+- NOAA APT, HF weather fax and Meteor-M LRPT pictures on the video pane.
+- Inmarsat STD-C broadcasts and Aero ACARS off an L-band patch.
+- Iridium ring alerts, with the satellite and its beam on the map.
+- UAT at 978 MHz: light aircraft, weather and traffic.
+- COSPAS-SARSAT 406 MHz beacons on the map.
+- Radiosondes on the map: Vaisala RS41, Graw DFM, M10, M20, iMet, iMS-100, MRZ and LMS6.
+- Radiosonde launch sites from SondeHub, with the time to the next release.
+- Open Drone ID aircraft on the map, off Bluetooth and Wi-Fi.
+- Display signal leakage read as pictures, TempestSDR-style, with a scanner table block.
+- Analogue FPV video named with its channel, R1, F4, A5.
+- Itron ERT meters, XN297 remotes, Ford and Renault tyre sensors, Chrysler fobs, Eco-Eye and SPC775.
+- Aircraft registration and type from the Mictronics database, drawn as the type's silhouette.
 - VesselFinder link on each vessel in the track table.
-- Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
-- Compiled features listed under the version in Setup, ffmpeg among them.
-- RDS station on a keyed WFM channel: a PI code, a name and radiotext.
-- CTCSS tones and DCS codes on a saved channel, squelched on, sent when keyed, imported and exported.
-- MDC-1200 bursts damaged in the air still name their radio, from the parity it sent.
-- EAS, SSTV, APT and WEFAX read off a listening channel's audio, picked on the
-  strip.
-- Captures named outside the rtl_433 convention: a card or `--capture` takes the
-  centre, rate and format, for replay, trimming and transmit.
-- Trim card on the radio settings, cutting a replayed capture to its
-  transmissions or a window.
-- Distress and emergency alerts on a map row, ahead of whatever else it says.
-- Open Drone ID aircraft on the map, gathered from the separate adverts that
-  carry a drone's identity, position and height.
-- Packet list: a type column beside the protocol, and the modulation a front
-  end read a frame with.
-- HF band plan: the amateur, broadcast, aeronautical, maritime and time
-  signal allocations below 30 MHz, per region, with the sideband each uses.
-- Test recordings licensed CC BY 4.0, with each fixture's terms in
-  `testdata/LICENSE.md`.
-- `set_capture_trigger`, so an agent can arm the raw capture on energy and read what it caught.
-- `identify`, a crate naming what a recording holds from its samples and its
-  tuning, reading every protocol the receiver does without the flow graph.
-- Tuner trim on a stitched receiver, in hertz per tuner, on the radio card.
-- LimeSDR ports picked by the name printed on the board, RX1_L through
-  TX2_2, each carrying the channel it is on.
-- Protocol descriptions read three more checksums: a sum that folds its own
-  carry back in, a nibble sum that starts or ends part way through a nibble,
-  and a digest of the bytes exclusive-ored or summed first.
-- Chrysler key fobs, Eco-Eye Smart PV clamps and Sharp SPC775 thermometers.
-- `wave1090`, a Mode S receiver of its own, serving dump1090's AVR, BaseStation
-  and Beast ports off a dongle or an iqstream server, taking mlat results back
-  and passing the samples on over iqstream itself. `--write-json` feeds tar1090
-  and graphs1090 the aircraft, receiver, history and statistics files.
-- KISS TNC on `--kiss-listen` or the setup card: packet software reads
-  what the radio heard and keys AX.25 through it.
-- FT8 and FT4 on the HF dials, live or replayed: every station in the
-  passband, with their grid squares on the map.
-- Protocol descriptions: sensors, remotes and FSK links as YAML files
-  fetched from github.com/v0l/waveshark-protocols, so a fixed or added
-  layout arrives without a new build, each stating its fields' types and
-  units. A description with a radio block is a mode in the menu and the
-  scanner table, and keys up from the fields on its card. Files in
-  `~/.config/waveshark/protocols` override it, and a receiver that has never
-  fetched reads no ISM sensor until it does.
-- NXDN on 12.5 and 6.25 kHz channels: the system number, who called whom, and
-  the speech itself where it is not enciphered.
-- Iridium ring alerts at 1626 MHz: the satellite, its beam and its position,
-  on the map.
-- DAB ensembles on band III: the ensemble name, its stations, their programme
-  types and bit rates. No sound yet.
-- DRM on shortwave and medium wave: the services in a multiplex, their
-  languages and their labels. No sound yet.
-- IEEE 802.15.4 at 2.4 GHz: the addresses and networks under Zigbee, Thread
-  and Matter.
-- P25 phase 1: the talkgroup, the radio id and the key a call is under,
-  without speech.
-- FLEX paging at 1600 and 3200 baud, two and four level, group pages under their capcodes.
-- P2000 dispatch pins on the map, placed from the address in the page.
-- Two-tone paging: the pair that opens a fire or ambulance pager, named from
-  an operator's list.
-- MDC-1200: the unit id a Motorola radio sends when its key goes down.
-- RTTY: Baudot text at 45.45 to 200 baud, either way up, in the message view.
-- Morse off the air: a CW channel read as text, at the speed it was sent.
-- Z-Wave: door locks, sensors and plugs on the 868 and 908 MHz channels.
-- EAS and SAME alert headers, on the seven NOAA Weather Radio channels.
-- Inmarsat STD-C: EGC and SafetyNET broadcasts off an L-band patch antenna.
-- Inmarsat Aero: satellite ACARS and the P channel's signal units.
-- UAT at 978 MHz: light aircraft, and the ground stations' weather and traffic.
-- COSPAS-SARSAT 406 MHz distress beacons: EPIRB, PLB and ELT identities, with
-  their position on the map.
-- Itron ERT utility meters at 915 MHz: SCM, SCM+ and IDM readings.
-- XN297 toy remotes at 2.4 GHz, with their address and payload.
-- Ford and Renault tyre pressure sensors, with pressure, temperature and
-  whether the wheel is moving.
-- Meteor-M LRPT passes: the three MSU-MR channels on the video pane, a strip
-  of eight rows at a time, saved under the satellite's own clock.
-- NOAA APT passes and HF weather fax charts, drawn on the video pane as they
-  are received.
-- Analogue FPV video named from its line rate, with its channel: R1, F4, A5.
-- Vaisala RS41 radiosondes on the map, drawn as a balloon with its height and
-  climb rate: serial, and the air temperature and humidity it was sent up to
-  measure. The channel follows the transmitter as it drifts on the way up.
-- Graw DFM, Meteomodem M10 and M20, InterMet iMet, Meisei iMS-100,
-  Meteo-Radiy MRZ and Lockheed Martin LMS6 radiosondes, with their serial,
-  position and climb rate.
-- Radiosonde launch sites from SondeHub, on the map with the time until the
-  next release from each.
-- IQStream and rtl_tcp as remote tuners, added beside packet feeds in one
-  dialog.
-- SpyServer as a remote tuner, with the public directory listed by frequency and free slot.
-- IQStream remote tuners set from here: dial, gain, switches, trim and span, one receiver per tuner.
-- rtl_tcp bias tee, direct sampling and RTL AGC, on the radio card, with
-  offset tuning where the far end is an E4000.
-- An IQStream server, on `--iqstream-listen` or the setup card, so another
-  machine can read the same span, with `--iqstream-tuner` handing out radios
-  this receiver is not using as streams of their own on the same port.
-- IQStream through NAT: punched datagrams sized to the path, and the samples
-  on the control connection where none get through.
-- IQStream directory on nostr, listed from the receiver or wave1090 `--iqstream-list`, the router's port opened for it.
-- Several matching tuners offered as one wider receiver, with the drift
-  between them measured on the band they share and taken out.
-- Heatmap export: the span kept as readings and written as a page that zooms
-  and pans, with the time of day, frequency and decibels under a crosshair.
-  Moving the dial widens the picture rather than clearing it, and a row is the
-  loudest each bin reached rather than a snapshot. Four colour ramps.
-- Channel view: what is on each Wi-Fi, Bluetooth and 802.15.4 channel, how
-  loud, and how crowded it is.
-- Band walk in the scanner settings: the dial steps past the span, holds on
-  what it hears or logs it and moves on, and each find can be ignored. A step
-  counts as busy after the packets asked for.
-- Transmit for six protocols this receiver already reads, on a channel
-  decoding one: POCSAG pages, APRS beacons, RTTY overs, BLE advertisements,
-  SSTV pictures in Martin, Scottie and Robot modes, and RDS station names
-  over a programme.
-- Recorded captures sent back out: pick a file on a channel and transmit it.
-- VOX: speech keys the transmit channel, with a tail and the receiver's own
-  audio kept out of it.
-- Roger beep at the end of an over, whether a hand, a voice or the agent
-  let the key up.
-- Flipper `.sub` files: a scripts panel down the left holding every one this
-  machine has, as a tree by where it came from, and a TX button that keys one
-  at the frequency it names. RAW plays its recorded timings; Princeton, CAME,
-  Nice FLO, Holtek, Ansonic, BETT, Linear and LinearDelta3 are re-encoded from
-  their key, and a heard burst is written back out as a key file.
-- Eight collections of `.sub` captures download in the data settings,
-  UberGuidoZ and the Zero-Sploit DB among them.
-- Raw capture armed on energy: a file per burst, holding the signal from
-  before it triggered, measured over the span or one band of it.
-- Memory bank imports of Chirp, CSV, Freqman and SDR# lists, and export as
-  Chirp CSV.
-- A timeline under the call list: the recordings drawn as clips against the
-  clock, quiet longer than three seconds marked rather than left empty. Click
-  to play from a moment, drag to pick a stretch and write it out as one Opus
-  file.
-- The recordings table filters by talkgroup, caller, system or frequency, and
-  a row opens its own conversation.
-- A sub-ghz-modem as the station's GPS: DETECT in the position settings finds
-  one on a USB serial port and offers its fix feed.
-- The agent and the MCP server reach the settings: the scanner table, the
-  memory bank, its own voice, what reads speech, the station, the sound
-  devices, the survey and its feeds, the datasets and the display.
-- Trace and waterfall detectors chosen apart: the newest transform, the mean,
-  the loudest, or a percentile of the operator's choosing.
-- The channel strip can be put away, from the button on it, and brought back
-  from the panels at the right of the top bar.
-- Dataset downloads say how far they have got, in bytes and as a bar.
-- Installers: a .deb and .rpm for Linux, an .msi for Windows and a .dmg for
-  macOS. Setup fetches the one this machine installs from and opens it.
-- Linux arm64 binaries and packages, for a Raspberry Pi 4 or 5 on 64-bit.
+- Distress and emergency alerts first on a map row.
+- HF band plan below 30 MHz, per region, with the sideband each uses.
+- Channel view: how loud and how crowded each Wi-Fi, Bluetooth and 802.15.4 channel is.
+- Heatmap export, a zoomable page of the span over time.
+- Band walk in the scanner settings, stepping the dial past the span.
+- Memory bank import from Chirp, CSV, Freqman and SDR#, and export as Chirp.
+- Call timeline under the call list, with a stretch written out as one Opus file.
+- Recordings table filters by talk group, caller, system or frequency.
+- KISS TNC on `--kiss-listen` or the setup card.
+- Decoder state on the channel strip: locked, acquiring or searching.
+- Packet list type and modulation columns.
+- Trace and waterfall detectors chosen apart: newest, mean, loudest or a percentile.
+- Channel strip that can be put away and brought back.
+- Text field right-click menu with cut, copy, paste and select all.
+- sub-ghz-modem as the station's GPS, found with DETECT.
+- LimeSDR ports picked by the name printed on the board.
+- Agent and MCP reach into the settings, and arm the raw capture.
+- Dataset downloads with a progress bar.
+- Compiled features listed under the version in Setup.
+- Installers: .deb, .rpm, .msi and .dmg, with Linux arm64 for a Raspberry Pi 4 or 5.
+- Test recordings licensed CC BY 4.0, terms in `testdata/LICENSE.md`.
 
 ### Changed
 
-- Windows draws through DirectX 12 where the card has it, rather than Vulkan.
-- IBM Plex type throughout, the same on every machine, and dialogs on the darker chassis.
+- RTL-SDR driven by the receiver's own USB driver, with no librtlsdr to install.
+- Mode S reads more frames, several times faster on a Raspberry Pi 4 and x86.
+- Agent voice is Kokoro: fifteen speakers, 330 MB, faster than real time on a CPU.
+- One build per platform, speech on an NVIDIA card or the CPU.
+- Release assets named with their version, an installer and a bare binary each.
+- Windows draws through DirectX 12 where the card has it.
+- IBM Plex type throughout, and dialogs on the darker chassis.
+- Setup NETWORK tab for what this receiver serves.
+- Call recording settings on a card off the call list.
+- Map layers on a panel in the map's corner.
+- Map draws anything that reports where it was.
+- Auto mode places a decoder only where its service is.
+- Busy 2.4 GHz band at 61.44 MS/s twice as fast.
 - Transcript reads only channels with VOICE on.
-- Span shows a rate off the list as its size rather than "custom".
-- Channels and front ends in the span's rolloff are named, where the radio
-  hears little.
-- Scanner channels landing on a join between two tuners are dropped, and a
-  block written on one is named.
-- Setup holds what this receiver serves, under a NETWORK tab, and call
-  recording has its own card off the call list.
-- Map layers moved onto the map, on a panel in its corner, and the station
-  position row dropped from the pane.
-- FSK transmit rests are keyed as no carrier, not as the lower tone held.
-- Mode S frames are also framed by their CRC, so a reply whose preamble
-  another aircraft sat on is still read.
-- Mode S demodulation several times faster on a Raspberry Pi 4 and on x86.
-- Stitched receivers open nothing across a tuner join, and a channel put on
-  one says so.
-- The map draws anything that says where it was, so every sonde appears
-  beside the Vaisala ones.
-- One build per platform: the speech models use an NVIDIA card when the
-  machine has one and the CPU when it does not. The separate CUDA downloads
-  are gone.
-- A release carries the installer and the binary itself, no archives, each
-  named with its version.
-- The agent's own voice is Kokoro: fifteen named speakers, 330 MB rather than
-  3.5 GB, and ahead of real time without a card. Describing a voice in a
-  sentence is gone, and so is the precision setting.
-- The packet log folder, the unrecognised-burst filter and the raw capture
-  switch are remembered between runs.
-- Auto mode places a decoder only where that service is, so 2.4 GHz no longer
-  runs the pager and voice decoders.
-- A busy 2.4 GHz band at 61.44 MS/s runs at 0.8 times real time where it ran
-  at 0.4.
-- The band ribbon names the European land mobile allocations at 162, 410 and
-  440 MHz, which read as unallocated.
+- Span shows a rate off the list as its size.
+- Span rolloff named on the channels and front ends in it.
+- Band ribbon names the European land mobile allocations at 162, 410 and 440 MHz.
+- FSK transmit rests keyed as no carrier.
+- Packet log folder, unrecognised-burst filter and raw capture switch remembered between runs.
 
 ### Fixed
 
-- Key that never took while a stage in the graph refused the span.
-- Span claims from a decoder reported as faults on the waterfall every time it locked.
-- GT-TMBBQ05 thermometers read out of noise and other sensors' bursts.
-- Auto mode opened sources across the whole band after a transmitter clipped the receiver.
+- AIS frames missed on weak signals, with the DC block on, and on the second channel.
+- RDS groups lost on a station whose subcarrier is in quadrature with the pilot.
+- SSTV pictures washed out, black read as dark grey.
+- Comm-B and surveillance replies filed under an address no aircraft has.
+- Mode S frames across a block edge reported twice.
+- RTL-SDR samples lost between USB transfers.
+- RTL-SDR direct sampling hanging, and losing rate and gain when switched off.
+- HackRF gain and bias tee reset after a span change.
+- LimeSDR transmitting into an unselected port.
+- Linux packages failing to start without a matching LimeSuite.
+- Sensors invented out of a neighbour's burst.
+- PWM sensors and remotes missed when the first or last pulse clipped.
+- GT-TMBBQ05 thermometers read out of noise.
+- Squelch hiss at the end of every over.
+- CTCSS tones and DCS codes heard under the speech and in recordings.
+- Settings that did not stick between runs or across a radio restart.
+- Keying that never took while a stage refused the span.
+- Span claims reported as faults on the waterfall.
+- Auto mode opening sources across the band after a clipped transmitter.
 - Call list airtime climbing with no channel open, and calls that never ended.
-- AIS missed most frames on weak signals, and all of them with the DC block on.
-- AIS frames on one channel dropped as copies of the other channel's.
-- A saved patch naming a stage this build was not compiled with emptied the
-  whole graph.
-- Receiver froze on a rebuild while a DVB-T channel had fallen behind.
-- Waterfall auto scale stretched by a strong carrier, washing out everything weaker.
-- A strip channel whose decoder refused its input stopped the receiver, an
-  AIS channel away from the pair it reads being the easy way in.
-- PWM sensors and remotes read nothing where the detector clipped the first or
-  last pulse, which is most Honeywell ActivLink doorbells and door contacts.
-- RDS lost half its groups on a station whose subcarrier is in quadrature with
-  the pilot.
-- `--device` opened the saved radio first, claiming a receiver nobody named.
-- Captures named with a sequence number before the rate, as
-  `01_FR_1_433.92M_250k.cu8`, replayed at 1 S/s.
-- RTL-SDR lost samples between USB transfers, throwing mlat timing off.
-- RTL-SDR direct sampling hung when switched with nothing tuned, and switching
-  it off lost the tuner's rate and gain.
-- Mode S frames across a block edge were sent twice, the second copy late.
-- Located transmitters drew a circle far smaller than the error, tighter the
-  longer the drive.
-- Home Assistant stopped publishing after the radio was restarted, and kept
-  reconnecting without recovering.
-- SSTV pictures came back washed out, with black read as dark grey and white
-  as light grey.
-- `--device` now moves the dial, sets the span and starts the radio it names.
-- Comm-B and surveillance replies named an address that was not the
-  aircraft's, so an altitude or a squawk was filed under a hex code no
-  aircraft has.
-- Sensors invented out of a neighbour's burst: a reading that proved itself
-  by a checksum now stands alone, where a protocol with a parity bit used to
-  be published beside it, and a frame found by a sync word is believed only
-  in a row of the length its description states.
-- Band ribbon labels overlapped where one allocation sits inside another,
-  as PMR446 does inside land mobile UHF.
-- Scanner blocks were placed across a radio's filter rolloff, decoding its
-  own skirt.
-- The RTL-SDR is driven over USB by the receiver itself, with no librtlsdr
-  anywhere: nothing to install on Linux, one file on Windows, and two dongles
-  of a kind told apart by the port they are in.
-- LimeSuite is loaded when a LimeSDR is looked for, so the Linux packages
-  start on a machine with another version of it, or none.
-- Open Drone ID aircraft reporting a fix are drawn on the map, on Bluetooth
-  and Wi-Fi alike.
-- A stripe across the waterfall and a jump in the trace when the dial moved.
-- A mixer's frequency shift did nothing until the graph was rebuilt around it.
-- A LimeSDR transmitted into an unselected port, so nothing left the socket.
-- A HackRF came back at its default gain and with the bias tee off after a
-  span change.
-- The Windows installer offered a repair rather than an upgrade over a
-  release candidate.
-- A CUDA build was offered the plain download, and a plain build the CUDA one.
-- The hiss on the end of every over: the squelch no longer hangs on to a
-  channel whose carrier has gone.
-- CTCSS tones and DCS codes are filtered out of the audio, so they no longer
-  rumble under the speech, steer the gain control or reach a recording.
-- Switches that did not stick: every setting is now saved and applied from
-  one record, and a fresh radio is told all of it. Call recording and the
-  transcriber, with the weights and the device it runs on, are in that record
-  too, so they stay as they were left.
-- Address fields for feeds, network radios, the TNC and Home Assistant misreading IPv6, `localhost:port` and typos.
+- Graph emptied by a saved patch naming a stage this build lacks.
+- Receiver freezing on a rebuild behind a DVB-T channel.
+- Receiver stopping when a strip channel's decoder refused its input.
+- Waterfall auto scale stretched by a strong carrier.
+- Waterfall stripe and trace jump when the dial moved.
+- Mixer shift doing nothing until the graph was rebuilt.
+- Located transmitters drawn with a circle smaller than the error.
+- Home Assistant publishing stopped after a radio restart.
+- Band ribbon labels overlapping where one allocation sits inside another.
+- Scanner blocks placed across a radio's filter rolloff.
+- `--device` opening the saved radio first, and not tuning or starting the one named.
+- Captures with a sequence number before the rate replayed at 1 S/s.
+- Address fields misreading IPv6, `localhost:port` and typos.
 
 ### Removed
 
+- Agent voice described in a sentence, and its precision setting.
 - Packet log (+) button for adding a row's frequency as a channel.
 - ISM868-Link decoder for an unidentified 868 MHz link.
 

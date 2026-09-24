@@ -238,7 +238,7 @@ and `--settings <name>` on a settings dialog.
 
 ## Status
 
-Verified against other people's decoders, not just its own: 81 recordings from
+Verified against other people's decoders, not just its own: 97 recordings from
 rtl_433's corpus are replayed field for field against what rtl_433 25.02 made
 of them, plus ADS-B against dump1090, ACARS against acarsdec, VDL Mode 2
 against dumpvdl2, SSTV against colaclanth's decoder, and a radiosonde against
@@ -246,8 +246,8 @@ SDRangel. Off-air captures of M17, DMR, TETRA and Meshtastic are asserted
 against what the transmission itself says. Those tests need
 `testdata/fetch.sh` to have pulled the recordings, and skip cleanly when it
 has not, which is also what happens in CI. Coverage is the thin part,
-forty-five ISM decoders where the goal is hundreds, and the browser build is
-still a plan.
+about 130 ISM device descriptions where the goal is hundreds, and the browser
+build is still a plan.
 
 ## Where to read next
 
