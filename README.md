@@ -42,7 +42,9 @@ speech model transcribes what is said.
 ## Hardware
 
 Any RTL2832U dongle, a HackRF One, or a LimeSDR USB or Mini, and a tuner on
-another machine over rtl_tcp or iqstream with `--stream rtl_tcp://<host>`. A €30 RTL-SDR does all of
+another machine over IQStream, rtl_tcp, SpyServer or KiwiSDR with `--stream
+rtl_tcp://<host>`. Public IQStream and SpyServer tuners are listed in the add
+dialog's FIND. A €30 RTL-SDR does all of
 the receiving above; a HackRF buys you wider spans and a transmitter, and a
 LimeSDR both of those plus full duplex.
 
@@ -54,8 +56,7 @@ Grab a build from [releases](https://github.com/v0l/waveshark/releases): a
 or 5 under a 64-bit system from bookworm onwards. Setup checks for a newer
 release and can fetch and open the one for the machine it is running on. The
 bare binary is published beside each installer for anyone who would rather not
-install anything; the Windows one is a zip, because the `.exe` will not start
-without `rtlsdr.dll` and `libusb-1.0.dll` beside it. `wave1090` is published
+install anything; the Windows one is a zip holding the `.exe`. `wave1090` is published
 for every platform as a binary of its own. Every asset carries the version in
 its name.
 
@@ -214,7 +215,7 @@ somewhere else. The default reaches no further than this machine.
 --span <khz>           nearest span, narrowed in software if the radio cannot
 --device <name>        pick a radio when several are plugged in
 --stream <host>        offer a network tuner as a radio, iqstream or
-                       rtl_tcp://<host>
+                       rtl_tcp://, spyserver:// or kiwisdr://<host>
 --location <lat,lon>   your position, for aircraft positions from a single frame
 --record [dir]         write every burst that decodes to a directory of captures
 --capture-iq           write the raw span from the moment the radio starts

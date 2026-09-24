@@ -12,12 +12,8 @@ the code is in the commit log.
 ### Added
 
 - Text field right-click menu with cut, copy, paste and select all.
-- Display signal leakage read as pictures, TempestSDR-style and averaged coherently, with the video mode found automatically or named.
-- Display leakage block in the scanner table, on the cable clock of every display mode.
+- Display signal leakage read as pictures, TempestSDR-style and averaged coherently, and a scanner table block for it.
 - KiwiSDR as a remote tuner, 12 kHz of IQ anywhere from 0 to 30 MHz.
-- SpyServer directory: public servers listed by frequency and free slot, silent ones hidden, opened with TUNE.
-- IQStream directory on nostr, listed from the receiver or wave1090 `--iqstream-list`, opened with TUNE.
-- IQStream port opened on the router over UPnP, PCP or NAT-PMP for a listed server.
 - Aircraft registration and type from the Mictronics database, on the track table and as the map's jet, light aircraft or helicopter shape.
 - VesselFinder link on each vessel in the track table.
 - Decoder state on the channel strip: locked, acquiring or searching, and frames heard.
@@ -110,19 +106,16 @@ the code is in the commit log.
   next release from each.
 - IQStream and rtl_tcp as remote tuners, added beside packet feeds in one
   dialog.
-- SpyServer as a remote tuner, so any public Airspy or dongle on the internet
-  is a receiver here.
-- IQStream remote tuners can be tuned from here, gain and switches included,
-  and a server carrying several is one receiver per tuner in the list.
+- SpyServer as a remote tuner, with the public directory listed by frequency and free slot.
+- IQStream remote tuners set from here: dial, gain, switches, trim and span, one receiver per tuner.
 - rtl_tcp bias tee, direct sampling and RTL AGC, on the radio card, with
   offset tuning where the far end is an E4000.
-- IQStream carries a plain number setting, so a served receiver's tuner trim
-  is set from the other end.
 - An IQStream server, on `--iqstream-listen` or the setup card, so another
   machine can read the same span, with `--iqstream-tuner` handing out radios
   this receiver is not using as streams of their own on the same port.
 - IQStream through NAT: punched datagrams sized to the path, and the samples
   on the control connection where none get through.
+- IQStream directory on nostr, listed from the receiver or wave1090 `--iqstream-list`, the router's port opened for it.
 - Several matching tuners offered as one wider receiver, with the drift
   between them measured on the band they share and taken out.
 - Heatmap export: the span kept as readings and written as a page that zooms
@@ -176,7 +169,6 @@ the code is in the commit log.
 
 ### Changed
 
-- IQStream remote gains in the far end's own steps, and spans from the rates it offers.
 - Windows draws through DirectX 12 where the card has it, rather than Vulkan.
 - IBM Plex type throughout, the same on every machine, and dialogs on the darker chassis.
 - Transcript reads only channels with VOICE on.
@@ -192,10 +184,7 @@ the code is in the commit log.
 - FSK transmit rests are keyed as no carrier, not as the lower tone held.
 - Mode S frames are also framed by their CRC, so a reply whose preamble
   another aircraft sat on is still read.
-- Mode S demodulation several times faster on a Raspberry Pi 4 and on x86,
-  and `wave1090 --preamble-ratio` spends it on 5% more frames.
-- `wave1090` logs its frame rate, aircraft and clients every five seconds,
-  at the level `RUST_LOG` sets.
+- Mode S demodulation several times faster on a Raspberry Pi 4 and on x86.
 - Stitched receivers open nothing across a tuner join, and a channel put on
   one says so.
 - The map draws anything that says where it was, so every sonde appears
@@ -221,11 +210,9 @@ the code is in the commit log.
 
 - Key that never took while a stage in the graph refused the span.
 - Span claims from a decoder reported as faults on the waterfall every time it locked.
-- Display mode picked by hand went back to auto on the next retune.
 - GT-TMBBQ05 thermometers read out of noise and other sensors' bursts.
 - Auto mode opened sources across the whole band after a transmitter clipped the receiver.
 - Call list airtime climbing with no channel open, and calls that never ended.
-- Network radio dialog froze the window while ADD waited for the server.
 - AIS missed most frames on weak signals, and all of them with the DC block on.
 - AIS frames on one channel dropped as copies of the other channel's.
 - A saved patch naming a stage this build was not compiled with emptied the
@@ -249,12 +236,6 @@ the code is in the commit log.
   longer the drive.
 - Home Assistant stopped publishing after the radio was restarted, and kept
   reconnecting without recovering.
-- rtl_tcp samples lost to a network stall now move the timebase on, instead of
-  being numbered as though the stream had been continuous.
-- Z-Wave routed and explorer frames named a repeater as their command class,
-  and never reported the route they took.
-- 802.15.4 frames from Thread and newer Zigbee stacks named wrong addresses,
-  read with the older edition's rules.
 - SSTV pictures came back washed out, with black read as dark grey and white
   as light grey.
 - `--device` now moves the dial, sets the span and starts the radio it names.
@@ -292,7 +273,6 @@ the code is in the commit log.
   one record, and a fresh radio is told all of it. Call recording and the
   transcriber, with the weights and the device it runs on, are in that record
   too, so they stay as they were left.
-- Flipper `.sub` transmit sent the file once, whatever its Passes setting said.
 - Address fields for feeds, network radios, the TNC and Home Assistant misreading IPv6, `localhost:port` and typos.
 
 ### Removed

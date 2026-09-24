@@ -52,6 +52,13 @@ government registers) where that is. Only the street, postcode and town the
 page named are sent, and each once per session. The lookup sits behind
 `datasets::geocode::Geocoder`, so another service is another implementation.
 
+The public IQStream directory is read from nostr relays, and a receiver
+listing itself publishes there too: kind 10690, signed with a key made for
+that receiver, to `iqdirectory::RELAYS` (relay.damus.io, nos.lol,
+relay.primal.net, relay.snort.social) unless wave1090 names others. The relays
+publish no terms. Listing also asks the router, over UPnP, PCP or NAT-PMP, to
+open the served port.
+
 The identifying string every one of these sees is `httpc::USER_AGENT`, and
 there is exactly one of it: see the rule in `AGENTS.md`.
 
