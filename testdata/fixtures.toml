@@ -1043,10 +1043,10 @@ HackRF at 20 MS/s on 2410 MHz while the coordinator had permit join open, then
 cut to 0.6 s and tuned to channel 11 at 8 MS/s with iq_clipper. This is one
 channel, not the band.
 
-The window holds two beacon requests from the joining device, five beacons in
-answer (four from two routers of this network and one from a neighbour's), the
+The window holds two beacon requests from the joining device, six beacons in
+answer (four from two routers of this network and two from a neighbour's), the
 association request from 94:A0:81:FF:FE:86:DD:48 to router 0x0897, the
-router's association response, and the network traffic around it: 30 frames,
+router's association response, and the network traffic around it: 31 frames,
 every one with a good frame check.
 
 Each frame was dissected by Wireshark 4.4.18 through rawshark, and the counts
@@ -1064,8 +1064,8 @@ ID of this network (41:0E:3A:D6:A1:CF:ED:BD) and of a neighbour's
 """
 
 [capture.expect]
-frames = 30
-mac_beacon = 5
+frames = 31
+mac_beacon = 6
 mac_data = 9
 mac_ack = 7
 mac_command = 9

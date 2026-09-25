@@ -364,3 +364,79 @@ fn a_drm_mode_b_recording_is_the_service_dream_read() {
     );
     assert_eq!(m.label(0), Some("Spark"), "Dream at e3e104c read the label Spark");
 }
+
+#[test]
+fn a_zigbee_join_reads_as_wireshark_4_4_18_read_it() {
+    use decode::ieee802154::{Command, layers, parse};
+    use dsp::oqpsk::{OQPSK_2450, OqpskConfig, OqpskDetector, channels_2450};
+    let Some(buf) = fixture("zigbee_join_ch11_2405M_8000k.cs8") else { return };
+    let (rate, center) = (buf.rate.as_f64(), buf.center.as_f64());
+    let mut det =
+        OqpskDetector::new(rate, center, OQPSK_2450, &channels_2450(), OqpskConfig::default());
+    let mut frames = Vec::new();
+    for b in buf.samples.chunks(65_536) {
+        det.process(b, &mut frames);
+    }
+    assert_eq!(frames.len(), 31, "Wireshark 4.4.18 dissected all 31, every check good");
+    assert!(frames.iter().all(|f| f.channel == 11));
+    let stacks: Vec<Vec<common::packet::Proto>> =
+        frames.iter().map(|f| layers(&f.psdu, common::Hz(2_405_000_000))).collect();
+    let count = |id: &str, kind: &str| {
+        stacks.iter().filter(|s| s.iter().any(|l| l.id == id && l.kind == kind)).count()
+    };
+    assert_eq!(
+        [count("ieee802154", "beacon"), count("ieee802154", "data"), count("ieee802154", "ack")],
+        [6, 9, 7]
+    );
+    assert_eq!(
+        [count("zigbee", "beacon"), count("zigbee", "data"), count("zigbee", "command")],
+        [6, 5, 4]
+    );
+    let commands: Vec<Command> = frames.iter().filter_map(|f| parse(&f.psdu)?.command).collect();
+    let of = |c: Command| commands.iter().filter(|&&x| x == c).count();
+    assert_eq!(
+        [
+            of(Command::BeaconRequest),
+            of(Command::AssociationRequest),
+            of(Command::AssociationResponse),
+            of(Command::DataRequest),
+        ],
+        [2, 1, 1, 5]
+    );
+    let joining = frames
+        .iter()
+        .filter_map(|f| parse(&f.psdu))
+        .find(|f| f.command == Some(Command::AssociationRequest))
+        .unwrap();
+    assert_eq!(joining.src.to_string(), "94:A0:81:FF:FE:86:DD:48");
+    let hops: Vec<String> = stacks
+        .iter()
+        .flatten()
+        .filter(|l| l.id == "zigbee" && l.kind != "beacon")
+        .filter_map(|l| l.subject.as_ref().map(|s| s.id.to_string()))
+        .collect();
+    assert_eq!(hops.len(), 9);
+    assert!(hops.iter().all(|h| h == "A4:C1:38:01:D4:FD:FF:FF"), "{hops:?}");
+    let mut networks: Vec<String> = stacks
+        .iter()
+        .flatten()
+        .filter(|l| l.id == "zigbee" && l.kind == "beacon")
+        .flat_map(|l| &l.facts)
+        .filter_map(|f| match f {
+            common::packet::Fact::Named(n) => Some(n.label.clone()),
+            _ => None,
+        })
+        .collect();
+    networks.sort();
+    assert_eq!(
+        networks,
+        [
+            "Zigbee PAN 41:0E:3A:D6:A1:CF:ED:BD",
+            "Zigbee PAN 41:0E:3A:D6:A1:CF:ED:BD",
+            "Zigbee PAN 41:0E:3A:D6:A1:CF:ED:BD",
+            "Zigbee PAN 41:0E:3A:D6:A1:CF:ED:BD",
+            "Zigbee PAN F1:4F:EF:31:2C:69:DE:F7",
+            "Zigbee PAN F1:4F:EF:31:2C:69:DE:F7",
+        ]
+    );
+}
