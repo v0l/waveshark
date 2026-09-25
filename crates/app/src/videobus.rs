@@ -317,6 +317,13 @@ const MAX_CHANNELS: usize = 64;
 pub struct VideoBusNode {
     bus: VideoBus,
     inputs: usize,
+    offered: Vec<Offered>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offered {
+    pub from: usize,
+    pub programmes: std::sync::Arc<pipeline::Programmes>,
 }
 
 impl Default for VideoBusNode {
@@ -327,7 +334,7 @@ impl Default for VideoBusNode {
 
 impl VideoBusNode {
     pub fn new() -> Self {
-        Self { bus: VideoBus::new(), inputs: 1 }
+        Self { bus: VideoBus::new(), inputs: 1, offered: Vec::new() }
     }
 
     pub fn bus(&self) -> &VideoBus {
@@ -336,6 +343,10 @@ impl VideoBusNode {
 
     pub fn bus_mut(&mut self) -> &mut VideoBus {
         &mut self.bus
+    }
+
+    pub fn offered(&self) -> &[Offered] {
+        &self.offered
     }
 
     fn muted_param(name: &str) -> Option<&str> {
@@ -386,8 +397,16 @@ impl pipeline::node::Node for VideoBusNode {
         &mut self,
         inputs: &[&Payload],
         outputs: &mut [Payload],
-        _ctx: &mut NodeCtx<'_>,
+        ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        self.offered.clear();
+        for k in 0..inputs.len() {
+            if let Some(pipeline::Published { from, meta: pipeline::Meta::Programmes(p) }) =
+                ctx.meta(k)
+            {
+                self.offered.push(Offered { from: *from, programmes: p.clone() });
+            }
+        }
         let mut arrived = false;
         for (k, p) in inputs.iter().enumerate() {
             for f in p.as_video().unwrap_or(&[]) {
@@ -396,7 +415,7 @@ impl pipeline::node::Node for VideoBusNode {
             }
         }
         if !arrived {
-            self.bus.idle(_ctx.block_seconds);
+            self.bus.idle(ctx.block_seconds);
         }
         if let Some(f) = self.bus.published().cloned() {
             outputs[0].video_mut().push(f);

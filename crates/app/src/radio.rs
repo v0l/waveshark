@@ -1358,7 +1358,7 @@ pub struct Status {
     /// complete its last picture was. What a pane offers to switch between.
     video_inputs: parking_lot::Mutex<Vec<crate::chain::VideoInput>>,
     /// The television multiplexes being decoded, and the services on them.
-    multiplexes: parking_lot::Mutex<Vec<crate::chain::Multiplex>>,
+    programmes: parking_lot::Mutex<Vec<crate::videobus::Offered>>,
     /// Pictures written to disk, newest last, so a view can say where they
     /// went without watching the directory itself.
     pictures: parking_lot::Mutex<Vec<std::path::PathBuf>>,
@@ -1679,7 +1679,7 @@ impl Default for Status {
             decoding: parking_lot::Mutex::new(Vec::new()),
             video: parking_lot::Mutex::new(None),
             video_inputs: parking_lot::Mutex::new(Vec::new()),
-            multiplexes: parking_lot::Mutex::new(Vec::new()),
+            programmes: parking_lot::Mutex::new(Vec::new()),
             pictures: parking_lot::Mutex::new(Vec::new()),
             chain: parking_lot::Mutex::new(None),
             scopes: parking_lot::Mutex::new(Vec::new()),
@@ -1942,8 +1942,8 @@ impl Status {
     }
 
     /// The television multiplexes being decoded, with their services.
-    pub fn multiplexes(&self) -> Vec<crate::chain::Multiplex> {
-        self.multiplexes.lock().clone()
+    pub fn programmes(&self) -> Vec<crate::videobus::Offered> {
+        self.programmes.lock().clone()
     }
 
     /// Pictures written to disk this session, newest last.
@@ -3834,7 +3834,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.status.logged.store(self.rx.logged(), Ordering::Relaxed);
         self.status.set_video(self.rx.watched_video());
         self.status.set_video_inputs(self.rx.video_inputs());
-        *self.status.multiplexes.lock() = self.rx.multiplexes();
+        *self.status.programmes.lock() = self.rx.programmes();
         if let Some(saved) = self.rx.pictures_saved() {
             let mut cur = self.status.pictures.lock();
             if cur.len() != saved.len() {

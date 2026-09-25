@@ -17,6 +17,7 @@ pub mod cost;
 pub mod event;
 pub mod graph;
 pub mod lock;
+pub mod meta;
 pub mod node;
 pub mod param;
 pub mod port;
@@ -28,6 +29,7 @@ pub use graph::{
     Emitted, GRAPH_INPUT, Graph, GraphBuilder, In, NodeId, NodePart, Out, Topology, chain,
 };
 pub use lock::{Claim, Lock, Raster, Verdict};
+pub use meta::{Meta, Programme, Programmes, Published};
 pub use node::{Acquisition, Node, NodeCtx, PortSpec, Simple};
 pub use param::{Param, ParamRange, ParamValue};
 pub use port::{Payload, PortKind, StreamSpec, Tag, TagValue};

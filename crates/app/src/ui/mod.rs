@@ -1915,7 +1915,7 @@ impl App {
                 r.status.video(),
                 r.status.video_inputs(),
                 r.status.pictures(),
-                r.status.multiplexes(),
+                r.status.programmes(),
             ),
             None => (None, Vec::new(), Vec::new(), Vec::new()),
         };

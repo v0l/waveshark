@@ -417,6 +417,7 @@ impl pipeline::node::Node for DvbtNode {
         let (_, rest) = outputs.split_at_mut(1);
         let (video, sound) = rest.split_at_mut(1);
         self.tv.play(c.block_seconds, &mut video[0], &mut sound[0]);
+        self.tv.publish(c, 1);
 
         if let Some(params) = self.rx.heard().params
             && self.told != Some(params)

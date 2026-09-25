@@ -144,6 +144,7 @@ pub struct Broadcast {
     #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
     sequence: u64,
     named: Vec<u16>,
+    listing: Option<std::sync::Arc<pipeline::Programmes>>,
 }
 
 impl Broadcast {
@@ -169,6 +170,7 @@ impl Broadcast {
             playing: false,
             sequence: 0,
             named: Vec::new(),
+            listing: None,
         }
     }
 
@@ -279,6 +281,27 @@ impl Broadcast {
             return 0;
         }
         self.mux.services.iter().position(|s| self.wanted.matches(s)).map_or(0, |n| n + 1)
+    }
+
+    pub fn publish(&mut self, c: &mut pipeline::NodeCtx<'_>, port: usize) {
+        let mut list =
+            vec![pipeline::Programme { label: ANY.to_string(), setting: Want::Any.setting() }];
+        list.extend(self.mux.services.iter().map(|s| pipeline::Programme {
+            label: service_label(s),
+            setting: Want::of(s).setting(),
+        }));
+        let now = pipeline::Programmes {
+            source: format!("{} {:.3} MHz", self.system, self.channel_hz / 1e6),
+            param: SERVICE,
+            wanted: self.wanted.setting(),
+            list,
+        };
+        let listing = match &self.listing {
+            Some(held) if **held == now => held.clone(),
+            _ => std::sync::Arc::new(now),
+        };
+        self.listing = Some(listing.clone());
+        c.publish(port, pipeline::Meta::Programmes(listing));
     }
 
     pub fn param(&self) -> pipeline::param::Param {

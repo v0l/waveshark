@@ -25,6 +25,7 @@
 //! delay elements and an iterative scheduler for no benefit.
 
 use crate::event::Event;
+use crate::meta::{Meta, Published};
 use crate::node::{Node, NodeCtx, PortSpec};
 use crate::port::{Payload, StreamSpec, Tag};
 use rayon::prelude::*;
@@ -97,6 +98,8 @@ struct Entry {
     scratch_specs: Vec<PortSpec>,
     scratch_new_tags: Vec<Tag>,
     scratch_events: Vec<Event>,
+    scratch_meta: Vec<(usize, Meta)>,
+    publishes: Vec<bool>,
     decoded: u64,
     base_index: u64,
     error: Option<Error>,
@@ -120,24 +123,38 @@ impl Entry {
     /// inputs and the tags on each of them cost no allocation: the shapes
     /// with one and two ports, which is nearly every node, are gathered on
     /// the stack.
-    fn run(&mut self, bufs: &[Payload], tags: &[Vec<Tag>], block_seconds: f64) {
+    fn run(
+        &mut self,
+        bufs: &[Payload],
+        tags: &[Vec<Tag>],
+        metas: &[Option<Published>],
+        block_seconds: f64,
+    ) {
         self.scratch_events.clear();
         self.scratch_new_tags.clear();
+        self.scratch_meta.clear();
         if self.idle {
             return;
         }
         let t = std::time::Instant::now();
         let mut slots = self.in_slots.iter().copied();
         match (self.in_slots.len(), slots.next(), slots.next()) {
-            (0, _, _) => self.call(&[], &[], block_seconds),
-            (1, Some(a), _) => self.call(&[&bufs[a]], &[&tags[a]], block_seconds),
-            (2, Some(a), Some(b)) => {
-                self.call(&[&bufs[a], &bufs[b]], &[&tags[a], &tags[b]], block_seconds)
+            (0, _, _) => self.call(&[], &[], &[], block_seconds),
+            (1, Some(a), _) => {
+                self.call(&[&bufs[a]], &[&tags[a]], &[metas[a].as_ref()], block_seconds)
             }
+            (2, Some(a), Some(b)) => self.call(
+                &[&bufs[a], &bufs[b]],
+                &[&tags[a], &tags[b]],
+                &[metas[a].as_ref(), metas[b].as_ref()],
+                block_seconds,
+            ),
             _ => {
                 let ins: Vec<&Payload> = self.in_slots.iter().map(|&s| &bufs[s]).collect();
                 let its: Vec<&[Tag]> = self.in_slots.iter().map(|&s| tags[s].as_slice()).collect();
-                self.call(&ins, &its, block_seconds)
+                let ims: Vec<Option<&Published>> =
+                    self.in_slots.iter().map(|&s| metas[s].as_ref()).collect();
+                self.call(&ins, &its, &ims, block_seconds)
             }
         }
         let us = t.elapsed().as_micros() as u64;
@@ -146,7 +163,13 @@ impl Entry {
         self.ring.push(us.min(u32::MAX as u64) as u32, block_seconds);
     }
 
-    fn call(&mut self, ins: &[&Payload], in_tags: &[&[Tag]], block_seconds: f64) {
+    fn call(
+        &mut self,
+        ins: &[&Payload],
+        in_tags: &[&[Tag]],
+        in_meta: &[Option<&Published>],
+        block_seconds: f64,
+    ) {
         let mut ctx = NodeCtx::new(
             self.base_index,
             &self.scratch_specs,
@@ -154,7 +177,8 @@ impl Entry {
             &mut self.scratch_events,
             &mut self.scratch_new_tags,
         )
-        .with_block_seconds(block_seconds);
+        .with_block_seconds(block_seconds)
+        .with_meta(in_meta, &mut self.scratch_meta);
         if let Err(err) = self.node.process(ins, &mut self.scratch_out, &mut ctx) {
             self.error = Some(err);
         }
@@ -388,6 +412,7 @@ pub struct Graph {
     specs: Vec<StreamSpec>,
     latency: Vec<u64>,
     tags: Vec<Vec<Tag>>,
+    metas: Vec<Option<Published>>,
     /// Cumulative samples emitted on each slot.
     produced: Vec<u64>,
     /// Throughput per slot, in items per second, and what it was measured
@@ -571,6 +596,7 @@ impl Graph {
             specs: vec![b.input; wiring.n_slots],
             latency: vec![0; wiring.n_slots],
             tags: vec![Vec::new(); wiring.n_slots],
+            metas: vec![None; wiring.n_slots],
             produced: vec![0; wiring.n_slots],
             rate: vec![0.0; wiring.n_slots],
             rate_seen: vec![0; wiring.n_slots],
@@ -593,6 +619,8 @@ impl Graph {
                 scratch_specs: Vec::new(),
                 scratch_new_tags: Vec::new(),
                 scratch_events: Vec::new(),
+                scratch_meta: Vec::new(),
+                publishes: vec![false; outs],
                 decoded: 0,
                 base_index: 0,
                 error: None,
@@ -857,6 +885,8 @@ impl Graph {
         for t in &mut self.tags {
             t.clear();
         }
+        self.metas.iter_mut().for_each(|m| *m = None);
+        self.entries.iter_mut().for_each(|e| e.publishes.iter_mut().for_each(|p| *p = false));
         self.produced.iter_mut().for_each(|p| *p = 0);
         self.entries.iter_mut().for_each(|e| e.decoded = 0);
         self.rate.iter_mut().for_each(|r| *r = 0.0);
@@ -892,6 +922,10 @@ impl Graph {
     /// Tags the output port carried this block.
     pub fn output_tags(&self) -> &[Tag] {
         &self.tags[self.output_slot]
+    }
+
+    pub fn output_meta(&self) -> Option<&Published> {
+        self.metas[self.output_slot].as_ref()
     }
 
     /// What a particular node port produced this block.
@@ -946,7 +980,8 @@ impl Graph {
         let levels = std::mem::take(&mut self.levels);
         let mut failed: Option<Error> = None;
         'levels: for level in &levels {
-            let Graph { entries, bufs, specs, latency, tags, produced, events, .. } = &mut *self;
+            let Graph { entries, bufs, specs, latency, tags, metas, produced, events, .. } =
+                &mut *self;
 
             // Stage: copy in what each node will read and move its output
             // buffers out of the arena, so the arena can then be shared
@@ -977,6 +1012,7 @@ impl Graph {
             if level.len() > 1 && heavy > 1 {
                 let bufs = &*bufs;
                 let all_tags = &*tags;
+                let all_metas = &*metas;
                 // The level's entries, picked out of the list in one walk.
                 // Filtering the whole list per level instead cost a pass
                 // over every node in the graph for every level of it.
@@ -990,7 +1026,9 @@ impl Graph {
                     base = k + 1;
                     rest = tail;
                 }
-                picked.into_par_iter().for_each(|e| e.run(bufs, all_tags, block_seconds));
+                picked
+                    .into_par_iter()
+                    .for_each(|e| e.run(bufs, all_tags, all_metas, block_seconds));
             } else {
                 for &k in level {
                     let e = &mut entries[k];
@@ -999,7 +1037,8 @@ impl Graph {
                     // this node writes.
                     let bufs = &*bufs;
                     let all_tags = &*tags;
-                    e.run(bufs, all_tags, block_seconds);
+                    let all_metas = &*metas;
+                    e.run(bufs, all_tags, all_metas, block_seconds);
                 }
             }
 
@@ -1052,6 +1091,24 @@ impl Graph {
                         tags[s] = out;
                     }
                     produced[s] += bufs[s].len() as u64;
+                }
+                for (p, meta) in e.scratch_meta.drain(..) {
+                    if let Some(&s) = e.out_slots.get(p) {
+                        e.publishes[p] = true;
+                        metas[s] = Some(Published { from: k, meta });
+                    }
+                }
+                let first = e.in_slots.first().copied();
+                for (p, &s) in e.out_slots.iter().enumerate() {
+                    if e.publishes[p] {
+                        continue;
+                    }
+                    let carried = first
+                        .filter(|&is| specs[is].kind == specs[s].kind)
+                        .and_then(|is| metas[is].clone());
+                    if carried.is_some() || metas[s].is_some() {
+                        metas[s] = carried;
+                    }
                 }
                 e.decoded +=
                     e.scratch_events.iter().filter(|ev| matches!(ev, Event::Decoded(_))).count()
@@ -1619,5 +1676,76 @@ mod tests {
         let mut g = chain(spec(), vec![]).unwrap();
         g.feed_iq(&ramp(4)).unwrap();
         assert_eq!(g.output().as_iq().unwrap().len(), 4);
+    }
+
+    struct Offers(u32);
+    impl Simple for Offers {
+        fn name(&self) -> &str {
+            "offers"
+        }
+        fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+            Ok(i.spec)
+        }
+        fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
+            o.iq_mut().extend_from_slice(i.as_iq().unwrap());
+            if self.0 > 0 {
+                self.0 -= 1;
+                let listing = crate::meta::Programmes {
+                    source: "mux".into(),
+                    param: "service",
+                    wanted: crate::ParamValue::Int(0),
+                    list: vec![crate::meta::Programme {
+                        label: format!("left {}", self.0),
+                        setting: crate::ParamValue::Int(0),
+                    }],
+                };
+                c.publish(0, Meta::Programmes(std::sync::Arc::new(listing)));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn what_a_port_says_it_carries_holds_and_passes_through_a_node_that_says_nothing() {
+        let mut g =
+            chain(spec(), vec![Box::new(Gain(1.0)), Box::new(Offers(2)), Box::new(Gain(2.0))])
+                .unwrap();
+        let label = |g: &Graph| match g.output_meta() {
+            Some(Published { from, meta: Meta::Programmes(p) }) => {
+                Some((*from, p.list[0].label.clone()))
+            }
+            None => None,
+        };
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            g.input_buf().iq_mut().extend([C32::new(1.0, 0.0); 4]);
+            g.run().unwrap();
+            seen.push(label(&g));
+            g.input_buf().clear();
+        }
+        let left = |n: &str| Some((1, format!("left {n}")));
+        assert_eq!(seen, [left("1"), left("0"), left("0")], "published, replaced, then held");
+    }
+
+    struct Loudness;
+    impl Simple for Loudness {
+        fn name(&self) -> &str {
+            "loudness"
+        }
+        fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+            Ok(i.spec.with_kind(PortKind::Real))
+        }
+        fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+            o.real_mut().extend(i.as_iq().unwrap().iter().map(|c| c.norm()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn what_a_port_carries_is_not_said_of_a_different_kind_of_stream_made_from_it() {
+        let mut g = chain(spec(), vec![Box::new(Offers(1)), Box::new(Loudness)]).unwrap();
+        g.input_buf().iq_mut().extend([C32::new(1.0, 0.0); 4]);
+        g.run().unwrap();
+        assert_eq!(g.output_meta(), None);
     }
 }

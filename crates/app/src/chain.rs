@@ -647,18 +647,6 @@ pub struct StripState {
     pub channel: Option<u64>,
 }
 
-/// One television multiplex the receiver is decoding, and what is on it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Multiplex {
-    /// Where it is in the running graph, for setting its service.
-    pub node: usize,
-    /// What the stage is called: the frequency it is on.
-    pub label: String,
-    /// The service an operator asked for.
-    pub wanted: nodes::dvbt_nodes::Want,
-    pub services: Vec<decode::mpegts::Service>,
-}
-
 /// One input of the video bus, as a pane offers it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoInput {
@@ -1909,30 +1897,8 @@ impl Receiver {
         self.stage::<crate::picsave::PictureSaveNode>(derived::PICTURES).map(|n| n.saved().to_vec())
     }
 
-    /// The services of every television multiplex the receiver is decoding,
-    /// with the node they are on so one can be asked for.
-    ///
-    /// Read off the whole graph rather than from one hard-coded stage,
-    /// because a receiver can hold more than one multiplex at once and
-    /// neither the pane nor the agent should know where they sit.
-    pub fn multiplexes(&self) -> Vec<Multiplex> {
-        self.graph
-            .order()
-            .filter_map(|(id, _)| {
-                let tv = downcast::<nodes::dvbt_nodes::DvbtNode>(&self.graph, id)
-                    .map(|n| n.broadcast())
-                    .or_else(|| {
-                        downcast::<nodes::dvbs2_nodes::Dvbs2Node>(&self.graph, id)
-                            .map(|n| n.broadcast())
-                    })?;
-                Some(Multiplex {
-                    node: id.0,
-                    label: self.graph.node(id).map_or_else(String::new, |n| n.name().to_string()),
-                    wanted: tv.wanted().clone(),
-                    services: tv.services().to_vec(),
-                })
-            })
-            .collect()
+    pub fn programmes(&self) -> Vec<crate::videobus::Offered> {
+        self.video().map_or_else(Vec::new, |n| n.offered().to_vec())
     }
 
     /// Every transmission the video bus has seen.
@@ -6514,6 +6480,40 @@ pub(crate) mod tests {
         );
         let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
+    }
+
+    #[test]
+    fn the_video_bus_offers_what_each_multiplex_says_it_carries() {
+        let mut p = plan(9_142_857.0, Hz::mhz(429));
+        p.fronts.clear();
+        let (mut a, mut b) = (chan(1, -1_000_000.0, Demod::Nfm), chan(2, 1_000_000.0, Demod::Nfm));
+        a.mode = ChanMode::Decode("dvbt".into());
+        b.mode = ChanMode::Decode("dvbt".into());
+        p.channels = vec![a, b];
+        let mut rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        let block = vec![C32::new(0.0, 0.0); 65_536];
+        for _ in 0..3 {
+            rx.process(&block).unwrap();
+        }
+        let offered = rx.programmes();
+        let sources: Vec<(&str, &str, Vec<&str>)> = offered
+            .iter()
+            .map(|o| {
+                let labels = o.programmes.list.iter().map(|p| p.label.as_str()).collect();
+                (o.programmes.source.as_str(), o.programmes.param, labels)
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                ("DVB-T 428.000 MHz", "service", vec![nodes::dvbt_nodes::ANY]),
+                ("DVB-T 430.000 MHz", "service", vec![nodes::dvbt_nodes::ANY]),
+            ]
+        );
+        for o in &offered {
+            let stage = rx.graph.node(pipeline::NodeId(o.from)).map(|n| n.name().to_string());
+            assert_eq!(stage.as_deref(), Some("dvbt"), "the stage that published it");
+        }
     }
 
     #[test]

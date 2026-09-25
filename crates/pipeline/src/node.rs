@@ -1,6 +1,7 @@
 //! The `Node` trait: one block in the signal flow graph.
 
 use crate::event::{Event, Request};
+use crate::meta::{Meta, Published};
 use crate::param::{Param, ParamValue};
 use crate::port::{Payload, StreamSpec, Tag};
 use common::Result;
@@ -292,6 +293,8 @@ pub struct NodeCtx<'a> {
     in_tags: &'a [&'a [Tag]],
     events: &'a mut Vec<Event>,
     out_tags: &'a mut Vec<Tag>,
+    in_meta: &'a [Option<&'a Published>],
+    out_meta: Option<&'a mut Vec<(usize, Meta)>>,
 }
 
 impl<'a> NodeCtx<'a> {
@@ -302,7 +305,36 @@ impl<'a> NodeCtx<'a> {
         events: &'a mut Vec<Event>,
         out_tags: &'a mut Vec<Tag>,
     ) -> Self {
-        Self { sample_index, block_seconds: 0.0, inputs, in_tags, events, out_tags }
+        Self {
+            sample_index,
+            block_seconds: 0.0,
+            inputs,
+            in_tags,
+            events,
+            out_tags,
+            in_meta: &[],
+            out_meta: None,
+        }
+    }
+
+    pub fn with_meta(
+        mut self,
+        in_meta: &'a [Option<&'a Published>],
+        out_meta: &'a mut Vec<(usize, Meta)>,
+    ) -> Self {
+        self.in_meta = in_meta;
+        self.out_meta = Some(out_meta);
+        self
+    }
+
+    pub fn meta(&self, port: usize) -> Option<&Published> {
+        self.in_meta.get(port).copied().flatten()
+    }
+
+    pub fn publish(&mut self, port: usize, meta: Meta) {
+        if let Some(out) = self.out_meta.as_mut() {
+            out.push((port, meta));
+        }
     }
 
     /// Tags that arrived on one input port this call.
