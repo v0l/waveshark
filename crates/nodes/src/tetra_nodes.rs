@@ -297,6 +297,7 @@ pub struct TetraNode {
     /// A speech decoder per timeslot carrying traffic, holding the vocoder's
     /// inter-frame state for that call and, when known, its key.
     voice_calls: HashMap<u8, CallDecoder>,
+    spoke: HashMap<u8, (u8, u32, Option<u32>)>,
     /// The TEA1/TEA2 subsystem: keys, collision material, the key search and
     /// its backends, and the keystream-reuse watch. One member of its own
     /// type; without the `tea` feature that type is a zero-size stub, so a
@@ -350,6 +351,7 @@ impl TetraNode {
             traffic: HashMap::new(),
             lsp_by_tn: HashMap::new(),
             voice_calls: HashMap::new(),
+            spoke: HashMap::new(),
             crypto: Crypto::new(),
             slot_now: 0,
             accepted: 0,
@@ -646,9 +648,13 @@ impl TetraNode {
             let Some(marker) = markers.at(b.slot, tn) else {
                 continue;
             };
-            let Some((mut frames, bad)) = speech_in(b, cell.scramb) else {
+            let read = speech_in(b, cell.scramb);
+            let stolen = read.is_none();
+            let said = self.markers.get(&marker).map(|g| (marker, *g, self.talker(marker)));
+            if stolen && (said.is_none() || self.spoke.get(&tn) != said.as_ref()) {
                 continue;
-            };
+            }
+            let (mut frames, bad) = read.unwrap_or(([[0; speech::FRAME_BITS]; 2], [true, true]));
             let crc_ok = !bad[1];
             spoken_as.insert(tn, marker);
 
@@ -688,6 +694,9 @@ impl TetraNode {
             // `tea` feature, passes through untouched.
             self.crypto.decrypt_speech(&mut frames, cell.colour, time);
 
+            if let Some(said) = said.filter(|_| !stolen) {
+                self.spoke.insert(tn, said);
+            }
             let dec = self.voice_calls.entry(tn).or_default();
             let buf = pcm.entry(tn).or_default();
             let mut mine = Vec::new();
@@ -696,15 +705,17 @@ impl TetraNode {
                 mine.extend(samples.iter().map(|&s| s as f32 / 32768.0));
             }
             buf.extend_from_slice(&mine);
-            per_burst.push(VoiceBurst {
-                burst_index,
-                tn,
-                marker,
-                to: self.markers.get(&marker).copied(),
-                from: self.talker(marker),
-                frame: time.frame,
-                crc_ok,
-            });
+            if !stolen {
+                per_burst.push(VoiceBurst {
+                    burst_index,
+                    tn,
+                    marker,
+                    to: self.markers.get(&marker).copied(),
+                    from: self.talker(marker),
+                    frame: time.frame,
+                    crc_ok,
+                });
+            }
             if !seen_tn.contains(&tn) {
                 seen_tn.push(tn);
             }
@@ -712,6 +723,7 @@ impl TetraNode {
 
         // Drop decoders for timeslots no longer carrying traffic.
         self.voice_calls.retain(|tn, _| self.traffic.contains_key(tn));
+        self.spoke.retain(|tn, _| self.voice_calls.contains_key(tn));
 
         seen_tn
             .into_iter()
@@ -1006,6 +1018,7 @@ impl Node for TetraNode {
         self.traffic.clear();
         self.lsp_by_tn.clear();
         self.voice_calls.clear();
+        self.spoke.clear();
         self.crypto.reset();
     }
 }

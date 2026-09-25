@@ -29,6 +29,7 @@ the code is in the commit log.
 - DRM service labels missing from transmissions that send them in 16-QAM.
 - Bluetooth LE and 802.15.4 frames a few megahertz apart dropped as one burst.
 - TETRA speech coming out silent, or muted as enciphered, on clear calls.
+- Digital voice calls breaking up on the speaker.
 
 ## [0.4.0] - 2026-09-24
 

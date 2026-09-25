@@ -15,6 +15,7 @@ struct Carried {
     held: f64,
     sites: Vec<(f64, f64)>,
     played: std::collections::VecDeque<u64>,
+    waiting: Vec<(f64, common::Voice)>,
 }
 
 impl Carried {
@@ -70,9 +71,9 @@ impl NetworkNode {
         self.carried.retain(|c| now - c.last() < FORGET_S);
     }
 
-    pub fn admits(&mut self, v: &common::Voice) -> bool {
+    pub fn pass(&mut self, v: &common::Voice) -> Vec<common::Voice> {
         if v.network.is_none() || v.to.is_none() || v.pcm.is_empty() {
-            return true;
+            return vec![v.clone()];
         }
         let key = ConversationKey::of(v);
         let now = self.clock;
@@ -85,6 +86,7 @@ impl NetworkNode {
                     held: now,
                     sites: Vec::new(),
                     played: Default::default(),
+                    waiting: Vec::new(),
                 });
                 self.carried.len() - 1
             }
@@ -95,19 +97,40 @@ impl NetworkNode {
             c.key.from = key.from;
         }
         let here = (c.site_hz - v.channel_hz).abs() < CHANNEL_MATCH_HZ;
-        let frame = fingerprint(&v.pcm);
-        if here || (now - c.held >= HOLD_S && !c.played.contains(&frame)) {
-            c.site_hz = v.channel_hz;
-            c.held = now;
+        c.waiting.retain(|(at, _)| now - at < 2.0 * HOLD_S);
+        if !here && now - c.held < HOLD_S {
+            c.waiting.push((now, v.clone()));
+            self.dropped += 1;
+            return Vec::new();
+        }
+        let mut out: Vec<common::Voice> = Vec::new();
+        if !here {
+            let since = c.held;
+            let (mine, rest): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut c.waiting).into_iter().partition(|(at, w)| {
+                    *at > since && (w.channel_hz - v.channel_hz).abs() < CHANNEL_MATCH_HZ
+                });
+            c.waiting = rest;
+            self.dropped -= mine.len() as u64;
+            out.extend(mine.into_iter().map(|(_, w)| w));
+        }
+        out.push(v.clone());
+        c.site_hz = v.channel_hz;
+        c.held = now;
+        let mut fresh = Vec::new();
+        for w in out {
+            let frame = fingerprint(&w.pcm);
+            if !here && c.played.contains(&frame) {
+                self.dropped += 1;
+                continue;
+            }
             if c.played.len() == PLAYED {
                 c.played.pop_front();
             }
             c.played.push_back(frame);
-            true
-        } else {
-            self.dropped += 1;
-            false
+            fresh.push(w);
         }
+        fresh
     }
 }
 
@@ -166,9 +189,8 @@ impl Node for NetworkNode {
         for p in inputs {
             let Payload::Voice(voices) = p else { continue };
             for v in voices {
-                if self.admits(v) {
-                    out.voice_mut().push(v.clone());
-                }
+                let passed = self.pass(v);
+                out.voice_mut().extend(passed);
             }
         }
         Ok(())
@@ -220,6 +242,10 @@ mod tests {
         }
     }
 
+    fn admits(n: &mut NetworkNode, v: &common::Voice) -> bool {
+        !n.pass(v).is_empty()
+    }
+
     fn call(hz: f64, frame: usize) -> common::Voice {
         site(hz, "7309858", Some("7306696"), frame)
     }
@@ -232,7 +258,7 @@ mod tests {
         for frame in 0..50 {
             n.tick(FRAME_S);
             for hz in sites {
-                if n.admits(&call(hz, frame)) {
+                if admits(&mut n, &call(hz, frame)) {
                     passed.push(hz);
                 }
             }
@@ -248,23 +274,20 @@ mod tests {
     fn a_site_that_stops_sending_is_filled_in_from_one_that_did_not() {
         let mut n = NetworkNode::new();
         let (first, second) = (392.55e6, 390.85e6);
+        let index = |v: &common::Voice| (0..30).find(|f| call(0.0, *f).pcm == v.pcm).unwrap();
         let mut heard = Vec::new();
         for frame in 0..30 {
             n.tick(FRAME_S);
-            let from_first = !(10..20).contains(&frame);
-            if from_first && n.admits(&call(first, frame)) {
-                heard.push((frame, first));
+            if !(10..20).contains(&frame) {
+                heard.extend(n.pass(&call(first, frame)).iter().map(|v| (index(v), v.channel_hz)));
             }
-            if n.admits(&call(second, frame)) {
-                heard.push((frame, second));
-            }
+            heard.extend(n.pass(&call(second, frame)).iter().map(|v| (index(v), v.channel_hz)));
         }
         let frames: Vec<usize> = heard.iter().map(|(f, _)| *f).collect();
-        let lost = (0..30).filter(|f| !frames.contains(f)).count();
-        assert_eq!(lost, 3, "the frames the hold waits out: {frames:?}");
-        assert_eq!(frames.len(), 27, "and none played twice");
+        assert_eq!(frames, (0..30).collect::<Vec<_>>(), "every frame once, in order");
         assert!(heard[..10].iter().all(|(_, hz)| *hz == first));
         assert!(heard[10..].iter().all(|(_, hz)| *hz == second), "the fill keeps the call");
+        assert_eq!(n.dropped(), 20, "each site's copies of what the other played");
     }
 
     #[test]
@@ -272,30 +295,30 @@ mod tests {
         let mut n = NetworkNode::new();
         for frame in 0..5 {
             n.tick(FRAME_S);
-            assert!(n.admits(&call(390.85e6, frame)));
+            assert!(admits(&mut n, &call(390.85e6, frame)));
         }
         n.tick(HOLD_S);
-        assert!(!n.admits(&call(393.3e6, 4)), "a site running behind replays the last frame");
-        assert!(n.admits(&call(393.3e6, 5)));
-        assert!(n.admits(&call(393.3e6, 5)), "the site holding it is never second guessed");
+        assert!(!admits(&mut n, &call(393.3e6, 4)), "a site running behind replays the last frame");
+        assert!(admits(&mut n, &call(393.3e6, 5)));
+        assert!(admits(&mut n, &call(393.3e6, 5)), "the site holding it is never second guessed");
     }
 
     #[test]
     fn traffic_that_does_not_name_its_caller_follows_the_site_that_did() {
         let mut n = NetworkNode::new();
         n.tick(FRAME_S);
-        assert!(n.admits(&call(390.85e6, 0)));
-        assert!(!n.admits(&site(393.3e6, "7309858", None, 1)));
-        assert!(n.admits(&site(390.85e6, "7309858", None, 1)));
+        assert!(admits(&mut n, &call(390.85e6, 0)));
+        assert!(!admits(&mut n, &site(393.3e6, "7309858", None, 1)));
+        assert!(admits(&mut n, &site(390.85e6, "7309858", None, 1)));
     }
 
     #[test]
     fn two_callers_or_two_groups_are_two_calls_and_both_are_heard() {
         let mut n = NetworkNode::new();
         n.tick(FRAME_S);
-        assert!(n.admits(&call(390.85e6, 0)));
-        assert!(n.admits(&site(393.3e6, "7309858", Some("7307867"), 0)), "another caller");
-        assert!(n.admits(&site(393.3e6, "7661987", Some("7661062"), 0)), "another group");
+        assert!(admits(&mut n, &call(390.85e6, 0)));
+        assert!(admits(&mut n, &site(393.3e6, "7309858", Some("7307867"), 0)), "another caller");
+        assert!(admits(&mut n, &site(393.3e6, "7661987", Some("7661062"), 0)), "another group");
         assert_eq!(n.dropped(), 0);
     }
 
@@ -305,10 +328,10 @@ mod tests {
         n.tick(FRAME_S);
         let a = common::Voice { network: None, ..call(390.85e6, 0) };
         let b = common::Voice { channel_hz: 393.3e6, ..a.clone() };
-        assert!(n.admits(&a));
-        assert!(n.admits(&b), "without a network two carriers are two places");
+        assert!(admits(&mut n, &a));
+        assert!(admits(&mut n, &b), "without a network two carriers are two places");
         let other = common::Voice { network: Some("234-14".into()), ..call(393.3e6, 0) };
-        assert!(n.admits(&call(390.85e6, 0)));
-        assert!(n.admits(&other), "another network's group of the same number");
+        assert!(admits(&mut n, &call(390.85e6, 0)));
+        assert!(admits(&mut n, &other), "another network's group of the same number");
     }
 }

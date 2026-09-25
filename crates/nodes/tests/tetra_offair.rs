@@ -171,7 +171,10 @@ fn a_clear_call_is_spoken_whatever_the_block_size() {
         let h = listen(&buf, block);
         assert_eq!((h.rows, h.rows_crc_ok), (117, 117), "{block} sample blocks");
         let spoken: f64 = h.parties.values().sum();
-        assert!((spoken - 117.0 * 0.06).abs() < 1e-6, "{block} sample blocks: {spoken} s");
+        assert!(
+            (spoken - (117.0 + 6.0) * 0.06).abs() < 1e-6,
+            "{block} sample blocks: {spoken} s, where 6 slots stolen mid-call are concealed rather than skipped"
+        );
         let called: std::collections::BTreeSet<_> =
             h.parties.keys().filter_map(|(to, _)| to.as_deref()).collect();
         assert_eq!(called.len(), 3, "{block} sample blocks: groups called");

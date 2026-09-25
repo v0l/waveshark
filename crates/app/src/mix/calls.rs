@@ -29,6 +29,17 @@ pub const KIND: &str = "calls";
 /// vocoder's own noise between words comes up with the speech.
 const MAX_GAIN_DB: f32 = 30.0;
 
+const PREBUFFER_S: f64 = 0.25;
+const FORGET_S: f64 = 5.0;
+
+struct Stream {
+    key: common::ConversationKey,
+    labels: common::Voice,
+    queue: std::collections::VecDeque<f32>,
+    playing: bool,
+    idle_s: f64,
+}
+
 /// What a subscription matches on.
 ///
 /// Deliberately data rather than a closure: the set is edited in the
@@ -123,8 +134,8 @@ pub struct CallsNode {
     /// receiver runs.
     rs: HashMap<String, audio::Resampler>,
     scratch: Vec<f32>,
-    /// This block's speech, each admitted block labelled, at `out_rate`.
-    admitted: Vec<common::Voice>,
+    streams: Vec<Stream>,
+    owed: f64,
     /// What was last heard, for the interface to show.
     last: Option<String>,
     /// Peak of this block's mix.
@@ -147,7 +158,8 @@ impl CallsNode {
             agc_on: true,
             rs: HashMap::new(),
             scratch: Vec::new(),
-            admitted: Vec::new(),
+            streams: Vec::new(),
+            owed: 0.0,
             last: None,
             peak: 0.0,
         }
@@ -285,18 +297,49 @@ impl CallsNode {
             *s *= gain;
         }
         self.peak = self.scratch.iter().fold(self.peak, |a, s| a.max(s.abs()));
-        self.admitted.push(common::Voice {
-            rate: self.out_rate,
-            channels: 1,
-            pcm: std::mem::take(&mut self.scratch),
-            ..v.clone()
-        });
+        let key = common::ConversationKey::of(v);
+        let labels =
+            common::Voice { rate: self.out_rate, channels: 1, pcm: Vec::new(), ..v.clone() };
+        let i = match self.streams.iter().position(|s| s.key.same_conversation(&key)) {
+            Some(i) => i,
+            None => {
+                self.streams.push(Stream {
+                    key: key.clone(),
+                    labels: labels.clone(),
+                    queue: Default::default(),
+                    playing: false,
+                    idle_s: 0.0,
+                });
+                self.streams.len() - 1
+            }
+        };
+        let s = &mut self.streams[i];
+        if s.key.from.is_none() {
+            s.key.from = key.from;
+        }
+        s.labels = common::Voice { from: labels.from.clone().or(s.labels.from.clone()), ..labels };
+        s.queue.extend(self.scratch.drain(..));
+        s.idle_s = 0.0;
         true
     }
 
-    /// What was admitted this block, and clear it for the next.
-    pub fn take(&mut self) -> Vec<common::Voice> {
-        std::mem::take(&mut self.admitted)
+    pub fn play(&mut self, frames: usize, block_s: f64) -> Vec<common::Voice> {
+        let ready = (PREBUFFER_S * self.out_rate) as usize;
+        let mut out = Vec::new();
+        for s in &mut self.streams {
+            s.idle_s += block_s;
+            if !s.playing && !s.queue.is_empty() {
+                s.playing = s.queue.len() >= ready || s.idle_s >= PREBUFFER_S;
+            }
+            if !s.playing {
+                continue;
+            }
+            let n = frames.min(s.queue.len());
+            out.push(common::Voice { pcm: s.queue.drain(..n).collect(), ..s.labels.clone() });
+            s.playing = !s.queue.is_empty();
+        }
+        self.streams.retain(|s| !s.queue.is_empty() || s.idle_s < FORGET_S);
+        out
     }
 }
 
@@ -339,7 +382,7 @@ impl Node for CallsNode {
         &mut self,
         inputs: &[&Payload],
         outputs: &mut [Payload],
-        _ctx: &mut NodeCtx<'_>,
+        ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
         self.peak = 0.0;
         for p in inputs {
@@ -348,15 +391,19 @@ impl Node for CallsNode {
                 self.push(v);
             }
         }
-        let admitted = self.take();
+        let want = ctx.block_seconds * self.out_rate + self.owed;
+        let frames = want.max(0.0).floor();
+        self.owed = want - frames;
+        let played = self.play(frames as usize, ctx.block_seconds);
         if let Some(o) = outputs.first_mut() {
-            *o.voice_mut() = admitted;
+            *o.voice_mut() = played;
         }
         Ok(())
     }
 
     fn reset(&mut self) {
-        self.admitted.clear();
+        self.streams.clear();
+        self.owed = 0.0;
         self.rs.clear();
         self.agc.reset();
     }
@@ -421,7 +468,7 @@ mod tests {
     /// Everything admitted this block, summed.
     fn mixed(c: &mut CallsNode) -> Vec<f32> {
         let mut out = Vec::new();
-        for v in c.take() {
+        for v in c.play(usize::MAX, 1.0) {
             if out.len() < v.pcm.len() {
                 out.resize(v.pcm.len(), 0.0);
             }
@@ -530,7 +577,7 @@ mod tests {
         let quiet = tone(0.01, 1600);
         for _ in 0..8 {
             assert!(c.push(&voice("ALL", "M0ABC", &quiet)));
-            c.take();
+            c.play(usize::MAX, 1.0);
         }
         c.push(&voice("ALL", "M0ABC", &quiet));
         let peak = mixed(&mut c).iter().fold(0.0f32, |a, v| a.max(v.abs()));
@@ -545,7 +592,7 @@ mod tests {
         let quiet = tone(0.01, 1600);
         for _ in 0..8 {
             c.push(&voice("ALL", "M0ABC", &quiet));
-            c.take();
+            c.play(usize::MAX, 1.0);
         }
         c.push(&voice("ALL", "M0ABC", &quiet));
         let peak = mixed(&mut c).iter().fold(0.0f32, |a, v| a.max(v.abs()));
@@ -570,7 +617,7 @@ mod tests {
             pcm: vec![0.5; 480],
         };
         assert!(c.push(&sound));
-        let out = c.take();
+        let out = c.play(usize::MAX, 1.0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].pcm.len(), 480);
         assert_eq!(out[0].system, "DVB-T", "it leaves labelled as it arrived");
@@ -582,11 +629,40 @@ mod tests {
     fn what_is_admitted_leaves_with_its_labels() {
         let mut c = calls(&[Rule::Everything]);
         assert!(c.push(&voice("ALL", "M0ABC", &[0.5; 160])));
-        let out = c.take();
+        let out = c.play(usize::MAX, 1.0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].to.as_deref(), Some("ALL"));
         assert_eq!(out[0].from.as_deref(), Some("M0ABC"));
         assert_eq!(out[0].rate, 48_000.0, "at the speaker's rate");
         assert_eq!(c.last_heard(), Some("M0ABC to ALL"));
+    }
+
+    #[test]
+    fn speech_that_arrives_a_frame_at_a_time_leaves_a_block_at_a_time() {
+        let mut c = calls(&[Rule::Everything]);
+        c.set_param("agc", ParamValue::Bool(false)).unwrap();
+        let block_s = 65_536.0 / 6e6;
+        let per_block = (block_s * 48_000.0) as usize;
+        let mut played = Vec::new();
+        let mut t = 0.0;
+        let mut next = 0.0;
+        while t < 2.0 {
+            if t >= next {
+                assert!(c.push(&voice("7309858", "7306696", &[0.25; 480])));
+                next += 0.06;
+            }
+            let out = c.play(per_block, block_s);
+            played.push(out.iter().map(|v| v.pcm.len()).sum::<usize>());
+            t += block_s;
+        }
+        assert!(played.iter().all(|n| *n <= per_block), "a block played more than its length");
+        let start = played.iter().position(|n| *n > 0).unwrap();
+        assert!(
+            (start as f64 * block_s - PREBUFFER_S).abs() < 0.07,
+            "started {:.3} s in",
+            start as f64 * block_s
+        );
+        let gaps = played[start..].iter().filter(|n| **n < per_block).count();
+        assert_eq!(gaps, 0, "the speech broke up: {:?}", &played[start..]);
     }
 }

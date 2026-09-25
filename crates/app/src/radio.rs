@@ -6345,8 +6345,11 @@ pub(crate) mod tests {
             Default::default();
         let mut sent: std::collections::BTreeMap<(String, u64), f64> = Default::default();
         let mut overlapping = 0;
+        let mut per_block: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+        let (mut blocks, mut out_frames) = (0, 0);
         for block in buf.samples.chunks(65_536) {
             rx.process(block).unwrap();
+            out_frames += rx.audio_out().0.len() / 2;
             let mut once = std::collections::HashSet::new();
             for v in rx.voices().into_iter().filter(|v| v.system == "TETRA" && v.rate == 8_000.0) {
                 let pcm: Vec<u32> = v.pcm.iter().map(|s| s.to_bits()).collect();
@@ -6367,8 +6370,14 @@ pub(crate) mod tests {
                 let e = spoken.entry(to.clone()).or_default();
                 e.0 += v.seconds();
                 e.1.insert(v.channel_hz as u64);
-                now.entry(to).or_default().insert(v.channel_hz as u64);
+                if v.network.is_some() {
+                    let frames = per_block.entry(to.clone()).or_default();
+                    frames.resize(blocks + 1, 0);
+                    frames[blocks] += v.pcm.len();
+                    now.entry(to).or_default().insert(v.channel_hz as u64);
+                }
             }
+            blocks += 1;
             overlapping += now.values().filter(|c| c.len() > 1).count();
             let mut calls = rx.heard_mut().unwrap().take_calls();
             for c in &mut calls {
@@ -6377,7 +6386,17 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(overlapping, 0, "a call played from two sites in one block");
-        assert_eq!(rx.network().unwrap().dropped(), 274, "copies from the other sites");
+        assert_eq!(rx.network().unwrap().dropped(), 306, "copies from the other sites");
+        let block_frames = (65_536.0 / buf.rate.as_f64() * crate::mix::OUT_HZ) as usize;
+        for (to, frames) in &per_block {
+            let first = frames.iter().position(|n| *n > 0).unwrap();
+            let last = frames.iter().rposition(|n| *n > 0).unwrap();
+            let short = frames[first..last].iter().filter(|n| **n < block_frames).count();
+            assert_eq!(short, 0, "{to} broke up between blocks {first} and {last}");
+        }
+        let (air, heard) =
+            (buf.samples.len() as f64 / buf.rate.as_f64(), out_frames as f64 / crate::mix::OUT_HZ);
+        assert!((air - heard).abs() < 0.001, "{air:.3} s of air made {heard:.3} s of sound");
         let sites = [390.85e6, 391.925e6, 392.55e6, 393.3e6];
         let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let rows = list.active(later);
@@ -6405,20 +6424,21 @@ pub(crate) mod tests {
         for to in ["7309858", "7661987"] {
             let best =
                 sent.iter().filter(|((t, _), _)| t == to).map(|(_, s)| *s).fold(0.0, f64::max);
-            assert_eq!(
-                round(spoken[to].0),
-                round(best),
-                "{to} plays as much as its most complete site sent, no more and no less"
+            let played = spoken[to].0;
+            assert!(
+                played <= best + 1e-9 && played >= best - 0.06 - 1e-9,
+                "{to} played {played:.2} s where its most complete site sent {best:.2} s: \
+                 no more, and at most one frame less"
             );
         }
         assert_eq!(
             (round(spoken["7309858"].0), round(spoken["7661987"].0)),
-            (3.66, 2.70),
+            (3.84, 2.88),
             "seconds played"
         );
         assert_eq!(
             round(sent[&("7309858".to_string(), 392_550_000)]),
-            2.58,
+            2.76,
             "the site that broke up"
         );
     }
@@ -6453,7 +6473,10 @@ pub(crate) mod tests {
         every_row_carries_its_measurements(&voice);
 
         let spoken: f64 = heard.iter().map(|v| v.seconds()).sum();
-        assert!((spoken - 115.0 * 0.06).abs() < 1e-6, "{spoken} s spoken");
+        assert!(
+            (spoken - (115.0 + 6.0) * 0.06).abs() < 1e-6,
+            "{spoken} s spoken, where six slots stolen mid-call are concealed"
+        );
         let parties: std::collections::BTreeSet<_> =
             heard.iter().map(|v| (v.to.as_deref(), v.from.as_deref())).collect();
         assert_eq!(parties.len(), 4, "{parties:?}");
