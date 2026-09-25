@@ -20,6 +20,7 @@ the code is in the commit log.
 - XN297 remotes read at a quarter of the processor time on a quiet band.
 - FT8 and FT4 read more stations on a crowded band.
 - TETRA calls several sites send at once, heard and listed once with every site.
+- IQStream serving only from a radio attached here, never a capture file or a remote tuner.
 
 ### Fixed
 

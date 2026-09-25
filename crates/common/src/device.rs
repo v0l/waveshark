@@ -33,6 +33,13 @@ impl DriverKind {
             Self::Combined => "combined",
         }
     }
+
+    pub fn is_radio(self) -> bool {
+        match self {
+            Self::RtlSdr | Self::HackRf | Self::LimeSdr | Self::Combined => true,
+            Self::Network | Self::File | Self::Synthetic => false,
+        }
+    }
 }
 
 /// A tunable span. Tuners like the E4000 have gaps, so a device reports a list.

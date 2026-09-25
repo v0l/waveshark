@@ -2836,6 +2836,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 }
             }
             Cmd::IqStream(serving) => {
+                let serving = serving.filter(|_| self.dev.info().kind.is_radio());
                 let listed = |p: &Option<crate::chain::IqStreamPlan>| {
                     p.as_ref().and_then(|p| Some((p.addr, p.listing.clone()?)))
                 };
@@ -4268,6 +4269,35 @@ pub(crate) mod tests {
         radio.send(Cmd::Key(None));
         until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
         assert_eq!(radio.status.error.lock().clone(), None);
+    }
+
+    #[test]
+    fn a_capture_or_a_remote_tuner_is_not_served_again_and_a_radio_is() {
+        use common::device::DriverKind;
+        for (kind, served) in
+            [(DriverKind::File, false), (DriverKind::Network, false), (DriverKind::HackRf, true)]
+        {
+            let addr = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+            let dev = sources::FileRadio::silent(Hz(433_920_000), Sps(2_400_000))
+                .as_fast_as_it_can()
+                .posing_as(kind);
+            let radio = Radio::on_device(Box::new(dev), Hz(433_920_000), Sps(2_400_000), 1024);
+            until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+            let rev = radio.status.patch_rev.load(Ordering::Relaxed);
+            radio.send(Cmd::IqStream(Some(crate::chain::IqStreamPlan {
+                addr,
+                tunable: false,
+                listing: None,
+            })));
+            radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
+            until("a rebuild", || radio.status.patch_rev.load(Ordering::Relaxed) > rev);
+            if served {
+                until("the span to be served", || nodes::iqstream_nodes::running(addr).is_some());
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                assert!(nodes::iqstream_nodes::running(addr).is_none(), "{kind:?} served again");
+            }
+        }
     }
 
     #[test]

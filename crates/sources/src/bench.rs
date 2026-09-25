@@ -124,6 +124,11 @@ impl FileRadio {
         self.air.gone.store(true, Ordering::Relaxed);
     }
 
+    pub fn posing_as(mut self, kind: DriverKind) -> Self {
+        self.info.kind = kind;
+        self
+    }
+
     /// A handle on the same radio, for a test that has handed the device to
     /// [`Radio::start`](crate) and cannot reach it any more.
     pub fn watcher(&self) -> Watcher {
