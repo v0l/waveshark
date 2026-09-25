@@ -2463,6 +2463,7 @@ impl Receiver {
     pub fn tell_subscribers(
         &mut self,
         hardware: &str,
+        reach: Option<(u64, u64)>,
         gain_db: Option<f32>,
         settings: Vec<iqstream::Setting>,
     ) {
@@ -2470,6 +2471,7 @@ impl Receiver {
             self.stage_mut::<nodes::iqstream_nodes::IqStreamServerNode>(derived::IQSTREAM)
         {
             stage.set_hardware(hardware);
+            stage.set_reach(reach);
             stage.set_radio(gain_db, settings);
         }
     }

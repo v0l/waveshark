@@ -3726,8 +3726,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // beat as the chain, because reading it back crosses USB.
             if self.plan.iqstream.is_some() {
                 let settings = crate::tuners::settings_of(self.dev.as_ref());
-                let hardware = self.dev.info().kind.as_str();
-                self.rx.tell_subscribers(hardware, None, settings);
+                let info = self.dev.info();
+                let reach = crate::tuners::reach_of(info);
+                self.rx.tell_subscribers(info.kind.as_str(), reach, None, settings);
             }
         }
         // Scopes are a display and refresh with the spectrum, not with the

@@ -176,10 +176,7 @@ impl ServedTunerNode {
             .parse()
             .map_err(|_| common::Error::other(format!("{:?} is not an address", self.address)))?;
         let server = nodes::iqstream_nodes::server(addr)?;
-        let reach = dev.info().ranges.iter().fold(None::<(u64, u64)>, |acc, r| {
-            let (lo, hi) = (r.range.start().0, r.range.end().0);
-            Some(acc.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))))
-        });
+        let reach = reach_of(dev.info());
         let label = entry.label.clone();
         let tuner = server.stream_named(iqstream::StreamConfig {
             name: self.stream.clone().unwrap_or_else(|| label.clone()),
@@ -276,6 +273,13 @@ fn asked_rate(ask: &iqstream::Ask, rates: &[u32]) -> Option<Sps> {
 /// Read back off the driver rather than remembered from what was asked for: a
 /// dongle snaps a gain to its nearest step, and a switch another program left
 /// on is on whatever this stage did.
+pub fn reach_of(info: &common::device::DeviceInfo) -> Option<(u64, u64)> {
+    info.ranges.iter().fold(None, |acc, r| {
+        let (lo, hi) = (r.range.start().0, r.range.end().0);
+        Some(acc.map_or((lo, hi), |(a, b): (u64, u64)| (a.min(lo), b.max(hi))))
+    })
+}
+
 pub fn settings_of(dev: &dyn Device) -> Vec<Setting> {
     let info = dev.info();
     let mut out = Vec::new();

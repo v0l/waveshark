@@ -103,11 +103,7 @@ pub struct IqStreamServerNode {
     tuner: Option<Arc<iqstream::Stream>>,
     center: Hz,
     rate: f64,
-    /// Where the tuner reaches, so a subscriber can be offered a dial with
-    /// ends on it. Taken from the negotiated span when nothing better is
-    /// known: a stage cannot see the device, and a range of the span alone is
-    /// at least true.
-    span: (u64, u64),
+    reach: Option<(u64, u64)>,
     /// Interleaved UC8, rebuilt per block and kept to save the allocation.
     uc8: Vec<u8>,
     /// What was last asked for, so the same request is not emitted every block
@@ -142,7 +138,7 @@ impl IqStreamServerNode {
             tuner: None,
             center: Hz(0),
             rate: 0.0,
-            span: (0, 0),
+            reach: None,
             uc8: Vec::new(),
             asked: None,
             radio: (None, Vec::new()),
@@ -155,6 +151,15 @@ impl IqStreamServerNode {
             self.hardware = hardware.to_string();
             if let Some(t) = &self.tuner {
                 t.set_hardware(hardware);
+            }
+        }
+    }
+
+    pub fn set_reach(&mut self, reach: Option<(u64, u64)>) {
+        if self.reach != reach {
+            self.reach = reach;
+            if let Some(t) = &self.tuner {
+                t.set_tune_range_hz(reach);
             }
         }
     }
@@ -198,7 +203,7 @@ impl IqStreamServerNode {
                 sample_rate: self.rate as u32,
                 gain_db: self.radio.0,
                 tunable: self.tunable,
-                tune_range_hz: Some(self.span),
+                tune_range_hz: self.reach,
                 settings: self.radio.1.clone(),
             };
             self.tuner = self.server.as_ref().map(|s| s.stream_named(cfg));
@@ -249,12 +254,6 @@ impl Simple for IqStreamServerNode {
         }
         self.center = i.spec.center;
         self.rate = i.spec.rate;
-        // The span the radio is on, widened enough that a subscriber's dial
-        // has somewhere to go. Not the tuner's real range, which a stage
-        // cannot see, so a request outside it is refused by the device rather
-        // than by the server.
-        let half = (i.spec.rate / 2.0) as u64;
-        self.span = (self.center.0.saturating_sub(half.max(1)), self.center.0 + half.max(1));
         // A rate or a centre change is a different stream. The subscribers
         // are told the new centre; a rate change they cannot be told about,
         // so the stream is taken off the server and the next block starts a
@@ -365,6 +364,25 @@ mod tests {
         assert_eq!(
             offered.readings().iter().find(|(k, _)| k == "dial").map(|(_, v)| v.as_str()),
             Some("offered")
+        );
+    }
+
+    #[test]
+    fn a_dial_offered_reaches_where_the_radio_reaches_not_where_the_span_ends() {
+        let mut n = IqStreamServerNode::new("127.0.0.1:0", true);
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(433))]).unwrap();
+        block(&mut n, 64);
+        let tuner = n.tuner.clone().expect("a tuner on a free port");
+        assert_eq!(tuner.desc().tune_range_hz, None, "unknown until the radio says");
+        n.set_reach(Some((24_000_000, 1_766_000_000)));
+        assert_eq!(tuner.desc().tune_range_hz, Some((24_000_000, 1_766_000_000)));
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(868))]).unwrap();
+        block(&mut n, 64);
+        let moved = n.tuner.clone().expect("the tuner after a retune");
+        assert_eq!(
+            moved.desc().tune_range_hz,
+            Some((24_000_000, 1_766_000_000)),
+            "the same radio reaches as far from 868 MHz as from 433"
         );
     }
 

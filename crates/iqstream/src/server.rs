@@ -144,7 +144,7 @@ pub struct Stream {
     /// under the readers and so are held together and announced together.
     state: Mutex<State>,
     tunable: bool,
-    tune_range_hz: Option<(u64, u64)>,
+    tune_range_hz: Mutex<Option<(u64, u64)>>,
     center_hz: AtomicU64,
     blocks: broadcast::Sender<Arc<Vec<u8>>>,
     /// Sent to every subscriber, so a retune reaches a reader that did not ask
@@ -181,7 +181,7 @@ impl Stream {
             sample_rate: AtomicU32::new(cfg.sample_rate),
             state: Mutex::new(State { gain_db: cfg.gain_db, settings: cfg.settings }),
             tunable: cfg.tunable,
-            tune_range_hz: cfg.tune_range_hz,
+            tune_range_hz: Mutex::new(cfg.tune_range_hz),
             center_hz: AtomicU64::new(cfg.center_hz),
             blocks: broadcast::channel(FANOUT_DEPTH).0,
             retunes: broadcast::channel(8).0,
@@ -269,6 +269,23 @@ impl Stream {
         self.tunable
     }
 
+    pub fn tune_range_hz(&self) -> Option<(u64, u64)> {
+        self.tune_range_hz.lock().ok().and_then(|r| *r)
+    }
+
+    pub fn set_tune_range_hz(&self, range: Option<(u64, u64)>) {
+        let moved = match self.tune_range_hz.lock() {
+            Ok(mut r) if *r != range => {
+                *r = range;
+                true
+            }
+            _ => false,
+        };
+        if moved {
+            self.announce();
+        }
+    }
+
     pub fn subscribers(&self) -> usize {
         self.subscribers.load(Ordering::Relaxed)
     }
@@ -312,7 +329,7 @@ impl Stream {
             sample_rate: self.sample_rate(),
             gain_db,
             tunable: self.tunable,
-            tune_range_hz: self.tune_range_hz.filter(|_| self.tunable),
+            tune_range_hz: self.tune_range_hz().filter(|_| self.tunable),
             settings,
         }
     }
@@ -956,7 +973,7 @@ async fn tune(
             fault(out, error_code::NOT_TUNABLE, "this receiver is not offering its dial").await
         }
         (true, None) => fault(out, error_code::BAD_REQUEST, "tune named no frequency").await,
-        (true, Some(hz)) if stream.tune_range_hz.is_some_and(|(lo, hi)| hz < lo || hz > hi) => {
+        (true, Some(hz)) if stream.tune_range_hz().is_some_and(|(lo, hi)| hz < lo || hz > hi) => {
             fault(out, error_code::OUT_OF_RANGE, "outside this tuner's range").await
         }
         // Parked, not acted on: where it lands comes back as TUNED once the

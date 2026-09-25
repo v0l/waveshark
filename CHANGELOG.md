@@ -30,6 +30,7 @@ the code is in the commit log.
 - Bluetooth LE and 802.15.4 frames a few megahertz apart dropped as one burst.
 - TETRA speech coming out silent, or muted as enciphered, on clear calls.
 - Digital voice calls breaking up on the speaker.
+- IQStream directory tuners listed as reaching only the edges of the span being served.
 
 ## [0.4.0] - 2026-09-24
 
