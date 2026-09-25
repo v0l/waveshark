@@ -1473,7 +1473,9 @@ impl Receiver {
                 // A channel came through intact when every stage of it did.
                 kept: ["chan_mix", "chan_ifdec", last]
                     .iter()
-                    .all(|w| reused.contains(&chan_stage_id(w, spec, plan.eff_rate()))),
+                    .map(|w| chan_stage_id(w, spec, plan.eff_rate()))
+                    .filter(|id| patch.stage(*id).is_some())
+                    .all(|id| reused.contains(&id)),
                 key: ChanKey::new(spec, plan.eff_rate()),
                 // A decode channel is read at the port it is heard on when
                 // it has one, which is the output the strip listens to; its
@@ -4410,8 +4412,14 @@ fn decode_channel_stages(
     ifd.insert("passband_hz".into(), V::Float((rate / dec as f64) * 0.45));
     ifd.insert("input_rate_hz".into(), V::Float(rate));
     ifd.insert("label".into(), V::Text(format!("/{dec} to {}", hz_label(rate / dec as f64))));
-    let i = at(p, "chan_ifdec", "decimate", ifd);
-    p.connect(Source::Stage(m, 0), (i, 0));
+    let into = match dec {
+        1 => Source::Stage(m, 0),
+        _ => {
+            let i = at(p, "chan_ifdec", "decimate", ifd);
+            p.connect(Source::Stage(m, 0), (i, 0));
+            Source::Stage(i, 0)
+        }
+    };
 
     // The mixer moved the channel to the middle of the stream and said so, so
     // the front end is told the frequency it is really on: it reads its own
@@ -4430,7 +4438,7 @@ fn decode_channel_stages(
         None => vec![nodes::NodeSpec::new(kind).f("channel_hz", center + hz)],
     };
     let last = chain.len() - 1;
-    let mut from = Source::Stage(i, 0);
+    let mut from = into;
     let mut f = 0;
     for (n, stage) in chain.into_iter().enumerate() {
         let mut s = stage.settings;
@@ -6492,8 +6500,18 @@ pub(crate) mod tests {
         let patch = derived_patch(&p);
         let stage = patch.stages().iter().find(|s| s.kind == "dvbs2").expect("the carrier");
         assert_eq!(stage.settings.f64_or("width_hz", 0.0), 30_000_000.0);
-        let dec = patch.stages().iter().find(|s| s.kind == "decimate").expect("the channel's rate");
-        assert_eq!(dec.settings.i64_or("factor", 0), 1, "a 30 MHz carrier needs all 40 MS/s");
+        let mix = patch.stages().iter().find(|s| s.kind == "mixer").expect("the channel's mixer");
+        assert!(
+            patch.stages().iter().all(|s| s.kind != "decimate"),
+            "a 30 MHz carrier needs all 40 MS/s, and a decimator by one only costs"
+        );
+        assert!(
+            patch
+                .links()
+                .iter()
+                .any(|l| l.to.0 == stage.id && l.from == crate::patch::Source::Stage(mix.id, 0)),
+            "the carrier is read straight off the channel's mixer"
+        );
         let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }

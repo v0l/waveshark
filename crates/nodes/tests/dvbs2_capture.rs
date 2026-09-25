@@ -19,6 +19,11 @@ fn samples(name: &str) -> Option<Vec<C32>> {
     )
 }
 
+fn alone() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn skip(name: &str) {
     eprintln!("skipping: {name} absent, run testdata/fetch.sh");
 }
@@ -67,6 +72,7 @@ fn named(node: &Dvbs2Node) -> Vec<String> {
 
 #[test]
 fn tg4_off_astra_2g_on_a_hackrf() {
+    let _alone = alone();
     let Some(iq) = samples(TG4) else { return skip(TG4) };
     let read = through_the_stage(&iq, 20e6, 1_431_100_000.0);
     let stats = read.node.stats();
@@ -85,6 +91,7 @@ fn tg4_off_astra_2g_on_a_hackrf() {
 
 #[test]
 fn a_hackrf_centre_spur_seven_db_under_the_carrier_is_cancelled() {
+    let _alone = alone();
     let Some(iq) = samples(SPUR) else { return skip(SPUR) };
     let read = through_the_stage(&iq, 20e6, 1_431_000_000.0);
     let stats = read.node.stats();
@@ -98,6 +105,7 @@ fn a_hackrf_centre_spur_seven_db_under_the_carrier_is_cancelled() {
 
 #[test]
 fn bbc_hd_off_astra_2e_on_a_limesdr_with_its_17_mhz_spur() {
+    let _alone = alone();
     let Some(iq) = samples(BBC) else { return skip(BBC) };
     let found = dsp::dvbs2::estimate(&iq[..1 << 20], 40e6).expect("a carrier");
     assert!((found.symbol_rate - 23e6).abs() < 1_150.0, "symbol rate {}", found.symbol_rate);
@@ -123,6 +131,7 @@ fn bbc_hd_off_astra_2e_on_a_limesdr_with_its_17_mhz_spur() {
 #[cfg(feature = "ffmpeg")]
 #[test]
 fn pictures_keep_coming_after_a_frame_of_the_multiplex_is_lost() {
+    let _alone = alone();
     let Some(iq) = samples(TG4) else { return skip(TG4) };
     let read = through_the_stage(&iq, 20e6, 1_431_100_000.0);
     let packets: Vec<&[u8]> = read.stream.chunks_exact(188).collect();
@@ -154,6 +163,7 @@ fn pictures_keep_coming_after_a_frame_of_the_multiplex_is_lost() {
 
 #[test]
 fn a_symbol_rate_taken_off_a_spur_does_not_run_the_clock_away() {
+    let _alone = alone();
     let Some(iq) = samples(BBC) else { return skip(BBC) };
     let cfg = dsp::dvbs2::Config {
         rate_hz: 40e6,
@@ -259,6 +269,7 @@ fn through_a_radio_that_cannot_wait(
 
 #[test]
 fn a_carrier_lost_to_noise_on_a_radio_that_cannot_wait_is_found_again() {
+    let _alone = alone();
     let Some(iq) = samples(BBC) else { return skip(BBC) };
     let fade = Fade { during: 0.3..0.8, snr_db: None };
     let live = through_a_radio_that_cannot_wait(&iq, 40e6, 1_097_000_000.0, fade, 4.0);
@@ -272,6 +283,7 @@ fn a_carrier_lost_to_noise_on_a_radio_that_cannot_wait_is_found_again() {
 
 #[test]
 fn a_carrier_too_weak_to_read_is_not_shown_as_locked() {
+    let _alone = alone();
     use pipeline::Acquisition;
     let Some(iq) = samples(BBC) else { return skip(BBC) };
     let fade = Fade { during: 0.3..1.8, snr_db: Some(-7.0) };
@@ -294,6 +306,7 @@ fn a_carrier_too_weak_to_read_is_not_shown_as_locked() {
 
 #[test]
 fn either_of_two_carriers_in_one_span_is_read_on_its_own_channel() {
+    let _alone = alone();
     let Some(iq) = samples(TWO) else { return skip(TWO) };
     let mut got = Vec::new();
     for (channel, width) in [(1_068e6, 18e6), (1_097e6, 18e6), (1_068e6, 30e6), (1_097e6, 30e6)] {
@@ -321,4 +334,35 @@ fn either_of_two_carriers_in_one_span_is_read_on_its_own_channel() {
         ],
         "channel MHz, width MHz, offset, frames, failed, too weak"
     );
+}
+
+fn on_cpu_s() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    Some(stat.split_whitespace().next()?.parse::<f64>().ok()? / 1e9)
+}
+
+#[test]
+fn twenty_three_msym_at_61_44_msps_is_read_in_well_under_real_time() {
+    let _alone = alone();
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(iq) = samples(TWO) else { return skip(TWO) };
+    let rate = 61.44e6;
+    let mut centred = Vec::new();
+    dsp::Mixer::new(15e6, rate).process(&iq, &mut centred);
+    let cfg = dsp::dvbs2::Config {
+        rate_hz: rate,
+        symbol_rate: 23e6,
+        rolloff: 0.25,
+        gold: 0,
+        within_hz: 9e6,
+    };
+    let mut phy = dsp::dvbs2::Dvbs2::new(cfg);
+    let mut out = Vec::new();
+    let Some(started) = on_cpu_s() else { return };
+    centred.chunks(BLOCK).for_each(|b| phy.push(b, &mut out));
+    let took = (on_cpu_s().unwrap_or(0.0) - started) / (iq.len() as f64 / rate);
+    assert_eq!(out.len(), 307);
+    assert!(took < 0.67, "{took:.2} of real time on one thread, ceiling 0.67; 0.83 before");
 }

@@ -5,6 +5,7 @@ use common::C32;
 use std::f64::consts::PI;
 
 const PHASES: usize = 64;
+const RUN: usize = 32;
 const SPAN: f64 = 12.0;
 const PAIRS: usize = 32;
 const FOUND: f32 = 0.45;
@@ -50,6 +51,7 @@ struct Timing {
     period: f64,
     integral: f64,
     on_time: bool,
+    dot: crate::fir::Dot,
     last: C32,
     mid: C32,
     power: f32,
@@ -85,6 +87,7 @@ impl Timing {
             period: sps,
             integral: 0.0,
             on_time: true,
+            dot: crate::fir::Dot::pick(),
             last: C32::new(0.0, 0.0),
             mid: C32::new(0.0, 0.0),
             power: 1.0,
@@ -93,39 +96,10 @@ impl Timing {
 
     fn push(&mut self, iq: &[C32], out: &mut Vec<C32>) {
         self.history.extend_from_slice(iq);
-        let half = self.taps / 2;
-        let flat = floats(&self.history);
-        loop {
-            let n = self.at as usize;
-            let start = n + 1 - half;
-            if start + self.width > self.history.len() {
-                break;
-            }
-            let p = ((self.at - n as f64) * PHASES as f64 + 0.5) as usize;
-            let taps = &self.phases[p * 2 * self.width..(p + 1) * 2 * self.width];
-            let x = &flat[start * 2..(start + self.width) * 2];
-            let mut acc = wide::f32x8::ZERO;
-            for (xs, ts) in x.chunks_exact(8).zip(taps.chunks_exact(8)) {
-                let xs = wide::f32x8::from(<[f32; 8]>::try_from(xs).unwrap_or_default());
-                let ts = wide::f32x8::from(<[f32; 8]>::try_from(ts).unwrap_or_default());
-                acc = xs.mul_add(ts, acc);
-            }
-            let acc = acc.to_array();
-            let y = C32::new(acc[0] + acc[2] + acc[4] + acc[6], acc[1] + acc[3] + acc[5] + acc[7]);
-            let step = self.period / 2.0 * (1.0 + self.integral);
-            if self.on_time {
-                let e = ((self.last - y) * self.mid.conj()).re / self.power.max(1e-12);
-                let e = e.clamp(-1.0, 1.0) as f64;
-                self.integral = (self.integral + TIMING_KI * e).clamp(-TIMING_RANGE, TIMING_RANGE);
-                self.at += step + TIMING_KP * e * self.period / 2.0;
-                self.power += 0.001 * (y.norm_sqr() - self.power);
-                self.last = y;
-                out.push(y);
-            } else {
-                self.at += step;
-                self.mid = y;
-            }
-            self.on_time = !self.on_time;
+        match self.dot {
+            #[cfg(target_arch = "x86_64")]
+            crate::fir::Dot::Avx2Fma => unsafe { self.filter_avx2(out) },
+            crate::fir::Dot::Portable => self.filter::<false>(out),
         }
         let keep = (self.at as usize).saturating_sub(self.width);
         if keep > 0 {
@@ -134,9 +108,91 @@ impl Timing {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn filter_avx2(&mut self, out: &mut Vec<C32>) {
+        self.filter::<true>(out)
+    }
+
+    #[inline(always)]
+    fn filter<const AVX: bool>(&mut self, out: &mut Vec<C32>) {
+        let half = self.taps / 2;
+        let row = 2 * self.width;
+        let flat = floats(&self.history);
+        let half_period = self.period / 2.0;
+        let mut ys = [C32::new(0.0, 0.0); RUN];
+        loop {
+            let step = half_period * (1.0 + self.integral);
+            let mut count = 0;
+            while count < RUN {
+                let at = self.at + count as f64 * step;
+                let n = at as usize;
+                let start = (n + 1 - half) * 2;
+                if start + row > flat.len() {
+                    break;
+                }
+                let p = ((at - n as f64) * PHASES as f64 + 0.5) as usize;
+                let taps = &self.phases[p * row..(p + 1) * row];
+                let x = &flat[start..start + row];
+                ys[count] = if AVX { unsafe { dot_avx2(x, taps) } } else { dot_portable(x, taps) };
+                count += 1;
+            }
+            let mut nudge = 0.0;
+            for &y in &ys[..count] {
+                if self.on_time {
+                    let e = ((self.last - y) * self.mid.conj()).re / self.power.max(1e-12);
+                    let e = e.clamp(-1.0, 1.0) as f64;
+                    self.integral =
+                        (self.integral + TIMING_KI * e).clamp(-TIMING_RANGE, TIMING_RANGE);
+                    nudge += TIMING_KP * e * half_period;
+                    self.power += 0.001 * (y.norm_sqr() - self.power);
+                    self.last = y;
+                    out.push(y);
+                } else {
+                    self.mid = y;
+                }
+                self.on_time = !self.on_time;
+            }
+            self.at += count as f64 * step + nudge;
+            if count < RUN {
+                break;
+            }
+        }
+    }
+
     fn ratio(&self) -> f64 {
         1.0 + self.integral
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn dot_avx2(x: &[f32], taps: &[f32]) -> C32 {
+    use std::arch::x86_64::*;
+    unsafe {
+        let (xp, tp) = (x.as_ptr(), taps.as_ptr());
+        let (mut a0, mut a1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        let mut i = 0;
+        while i + 16 <= x.len() {
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(xp.add(i)), _mm256_loadu_ps(tp.add(i)), a0);
+            a1 =
+                _mm256_fmadd_ps(_mm256_loadu_ps(xp.add(i + 8)), _mm256_loadu_ps(tp.add(i + 8)), a1);
+            i += 16;
+        }
+        if i < x.len() {
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(xp.add(i)), _mm256_loadu_ps(tp.add(i)), a0);
+        }
+        let a = _mm256_add_ps(a0, a1);
+        let v = _mm_add_ps(_mm256_castps256_ps128(a), _mm256_extractf128_ps(a, 1));
+        let v = _mm_add_ps(v, _mm_movehl_ps(v, v));
+        C32::new(_mm_cvtss_f32(v), _mm_cvtss_f32(_mm_shuffle_ps(v, v, 1)))
+    }
+}
+
+#[inline(always)]
+fn dot_portable(x: &[f32], taps: &[f32]) -> C32 {
+    let a = crate::fir::Dot::Portable.run(x, taps);
+    C32::new(a[0] + a[2] + a[4] + a[6], a[1] + a[3] + a[5] + a[7])
 }
 
 fn floats(x: &[C32]) -> &[f32] {
