@@ -173,6 +173,7 @@ pub struct Dvbs2 {
     offset_hz: f64,
     acquiring: Option<Vec<C32>>,
     mer_db: Option<f32>,
+    faded: u64,
     heard: Option<Header>,
     scramble: std::sync::Arc<[u8]>,
     sof_diff: [C32; SOF_LEN - 1],
@@ -197,6 +198,7 @@ impl Dvbs2 {
             offset_hz: 0.0,
             acquiring: Some(Vec::new()),
             mer_db: None,
+            faded: 0,
             heard: None,
             scramble: pl::scrambling(cfg.gold).into_owned().into(),
             sof_diff,
@@ -214,6 +216,10 @@ impl Dvbs2 {
 
     pub fn mer_db(&self) -> Option<f32> {
         self.mer_db
+    }
+
+    pub fn faded(&self) -> u64 {
+        self.faded
     }
 
     pub fn offset_hz(&self) -> f64 {
@@ -418,6 +424,8 @@ impl Dvbs2 {
         let mer = -10.0 * sigma2.log10();
         if !mer.is_finite() || mer < MER_FLOOR {
             self.settled = false;
+            self.faded += 1;
+            self.mer_db = mer.is_finite().then_some(mer);
             return None;
         }
         self.mer_db = Some(mer);
@@ -850,5 +858,42 @@ mod tests {
             "symbol rate {}, the spurs beat at 7.5 MHz",
             c.symbol_rate
         );
+    }
+
+    #[test]
+    fn a_fade_below_the_floor_is_reported_as_it_is_and_reading_resumes_after_it() {
+        let header = Header {
+            modcod: ModCod::from_index(14).unwrap(),
+            frame: FecFrame::Normal,
+            pilots: true,
+        };
+        let (_, mut iq) = air(header, 40, 12.0, 385e3, 16.0);
+        let power = iq.iter().map(|x| x.norm_sqr()).sum::<f32>() / iq.len() as f32;
+        let sigma = (power * (20e6 / 14.25e6) as f32 / 10f32.powf(-3.0 / 10.0)).sqrt();
+        let n = iq.len();
+        let mut noise = Noise(99);
+        iq[n / 4..n / 2].iter_mut().for_each(|x| *x += noise.gauss() * sigma);
+        let mut rx =
+            Dvbs2::new(Config { rate_hz: 20e6, symbol_rate: 14.25e6, rolloff: 0.2, gold: 0 });
+        let (mut out, mut worst, mut during) = (Vec::new(), f32::MAX, 0);
+        let mut blocks = iq.chunks(65_536).enumerate();
+        for (k, block) in blocks.by_ref() {
+            let before = out.len();
+            rx.push(block, &mut out);
+            let at = (k + 1) * 65_536;
+            if (n * 5 / 16..n / 2).contains(&at) {
+                during += out.len() - before;
+                worst = worst.min(rx.mer_db().unwrap_or(f32::MAX));
+            }
+            if at >= n / 2 {
+                break;
+            }
+        }
+        let faded = rx.faded();
+        let before = out.len();
+        blocks.for_each(|(_, b)| rx.push(b, &mut out));
+        assert_eq!(during, 0, "no frame read through a fade to -3 dB");
+        assert!(worst < MER_FLOOR, "MER {worst} dB shown through the fade");
+        assert_eq!((faded, out.len() - before), (10, 19), "frames too weak, then frames read");
     }
 }

@@ -156,3 +156,124 @@ fn a_symbol_rate_taken_off_a_spur_does_not_run_the_clock_away() {
     let drift = phy.symbol_rate() / 17e6 - 1.0;
     assert!(drift.abs() <= 1.0001e-3, "the clock moved {:.0} ppm off 17 Msym/s", drift * 1e6);
 }
+
+struct Live {
+    frames_after: u64,
+    longest: std::time::Duration,
+    lost_s: f64,
+    states: Vec<(f64, Option<pipeline::Acquisition>)>,
+    weak: Option<String>,
+}
+
+struct Fade {
+    during: std::ops::Range<f64>,
+    snr_db: Option<f32>,
+}
+
+fn through_a_radio_that_cannot_wait(
+    iq: &[C32],
+    rate: f64,
+    centre: f64,
+    fade: Fade,
+    seconds: f64,
+) -> Live {
+    let power = iq.iter().take(1 << 20).map(|x| x.norm_sqr()).sum::<f32>() / (1 << 20) as f32;
+    let (keep, scale) = match fade.snr_db {
+        Some(db) => (1.0, (6.0 * power / 10f32.powf(db / 10.0)).sqrt()),
+        None => (0.0, 0.3),
+    };
+    let (mut states, mut weak) = (Vec::new(), None);
+    let mut node = Dvbs2Node::new(centre, None);
+    let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(centre as u64)), latency: 0 };
+    node.negotiate(&[spec]).expect("a carrier in the span");
+    let mut events = Vec::new();
+    let mut noise = 0x5EED_u64;
+    let (mut next, mut lost, mut longest, mut before) =
+        (0usize, 0usize, std::time::Duration::ZERO, None);
+    let start = std::time::Instant::now();
+    let end = (seconds * rate) as usize;
+    while next < end {
+        let due = start + std::time::Duration::from_secs_f64((next + BLOCK) as f64 / rate);
+        std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+        let heard = (start.elapsed().as_secs_f64() * rate) as usize / BLOCK * BLOCK;
+        if heard > next + 4 * BLOCK {
+            lost += heard - BLOCK - next;
+            next = heard - BLOCK;
+        }
+        let at = next as f64 / rate;
+        if at >= fade.during.end && before.is_none() {
+            before = Some(node.stats().frames);
+        }
+        let block: Vec<C32> = (next..next + BLOCK)
+            .map(|k| match fade.during.contains(&(k as f64 / rate)) {
+                true => {
+                    noise = noise.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    let (a, b) = ((noise >> 40) as f32, (noise >> 16 & 0xff_ffff) as f32);
+                    let hiss = C32::new(a / 16_777_216.0 - 0.5, b / 16_777_216.0 - 0.5) * scale;
+                    iq[k % iq.len()] * keep + hiss
+                }
+                false => iq[k % iq.len()],
+            })
+            .collect();
+        next += BLOCK;
+        let payload = Payload::Iq(block);
+        let mut out = [
+            Payload::empty_of(PortKind::Bytes),
+            Payload::empty_of(PortKind::Video),
+            Payload::empty_of(PortKind::Real),
+        ];
+        let ins = [spec];
+        let (tags, mut new_tags) = (Vec::new(), Vec::new());
+        let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags)
+            .with_block_seconds(BLOCK as f64 / rate);
+        let called = std::time::Instant::now();
+        Node::process(&mut node, &[&payload], &mut out, &mut ctx).expect("the stage runs");
+        longest = longest.max(called.elapsed());
+        states.push((at, Node::acquisition(&node)));
+        if fade.during.contains(&at) {
+            weak = reading(&node, "too weak").or(weak);
+        }
+    }
+    Live {
+        frames_after: node.stats().frames - before.unwrap_or(0),
+        longest,
+        lost_s: lost as f64 / rate,
+        states,
+        weak,
+    }
+}
+
+#[test]
+fn a_carrier_lost_to_noise_on_a_radio_that_cannot_wait_is_found_again() {
+    let Some(iq) = samples(BBC) else { return skip(BBC) };
+    let fade = Fade { during: 0.3..0.8, snr_db: None };
+    let live = through_a_radio_that_cannot_wait(&iq, 40e6, 1_097_000_000.0, fade, 4.0);
+    let report = format!(
+        "{} frames after the fade, longest call {:?}, {:.2} s of samples lost",
+        live.frames_after, live.longest, live.lost_s
+    );
+    assert!(live.frames_after >= 3_000, "floor 3000 of about 3300: {report}");
+    assert!(live.longest < std::time::Duration::from_millis(50), "{report}");
+}
+
+#[test]
+fn a_carrier_too_weak_to_read_is_not_shown_as_locked() {
+    use pipeline::Acquisition;
+    let Some(iq) = samples(BBC) else { return skip(BBC) };
+    let fade = Fade { during: 0.3..1.8, snr_db: Some(-7.0) };
+    let live = through_a_radio_that_cannot_wait(&iq, 40e6, 1_097_000_000.0, fade, 3.5);
+    let state = |at: f64| live.states.iter().find(|(t, _)| *t >= at).and_then(|(_, a)| *a);
+    let report = format!(
+        "{:?} at 0.25 s, {:?} at 1.5 s, {:?} at 3.4 s, too weak {:?}, {} frames after",
+        state(0.25),
+        state(1.5),
+        state(3.4),
+        live.weak,
+        live.frames_after
+    );
+    assert_eq!(state(0.25), Some(Acquisition::Locked), "{report}");
+    assert_eq!(state(1.5), Some(Acquisition::Acquiring), "{report}");
+    assert_eq!(state(3.4), Some(Acquisition::Locked), "{report}");
+    assert!(live.weak.is_some(), "the frames too weak to read are counted: {report}");
+    assert!(live.frames_after >= 1_600, "floor 1600 of about 1730: {report}");
+}

@@ -28,12 +28,14 @@ const LOOK: usize = 1 << 18;
 const MARGIN: f64 = 1.3;
 const SPUR_WIDTH_HZ: f64 = 3_000.0;
 const REORDER: usize = 64;
+const QUIET_S: f64 = 0.5;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Heard {
     locked: bool,
     header: Option<Header>,
     mer_db: Option<f32>,
+    faded: u64,
     offset_hz: f64,
     symbol_rate: Option<f64>,
 }
@@ -145,6 +147,7 @@ impl Front {
             locked: phy.locked(),
             header: phy.heard(),
             mer_db: phy.mer_db(),
+            faded: phy.faded(),
             offset_hz: self.offset_hz + phy.offset_hz(),
             symbol_rate: Some(phy.symbol_rate()),
         }
@@ -281,7 +284,7 @@ pub struct Dvbs2Node {
     tv: Broadcast,
     packets: Vec<TsPacket>,
     told: Option<Header>,
-    reading: bool,
+    quiet_s: f64,
 }
 
 impl Dvbs2Node {
@@ -297,7 +300,7 @@ impl Dvbs2Node {
             tv: Broadcast::new(SYSTEM, channel_hz),
             packets: Vec::new(),
             told: None,
-            reading: false,
+            quiet_s: f64::INFINITY,
         }
     }
 
@@ -356,7 +359,7 @@ impl Dvbs2Node {
         });
         self.transport = Transport::default();
         self.told = None;
-        self.reading = false;
+        self.quiet_s = f64::INFINITY;
     }
 }
 
@@ -422,9 +425,11 @@ impl pipeline::node::Node for Dvbs2Node {
         self.packets.clear();
         let mut packets = std::mem::take(&mut self.packets);
         let before = self.transport.stats();
-        if rx.take(&mut self.transport, &mut packets) > 0 {
-            self.reading = self.transport.stats().packets > before.packets;
-        }
+        rx.take(&mut self.transport, &mut packets);
+        self.quiet_s = match self.transport.stats().packets > before.packets {
+            true => 0.0,
+            false => self.quiet_s + c.block_seconds,
+        };
         self.tv.push(&packets, outputs[0].bytes_mut());
         self.packets = packets;
         let (_, rest) = outputs.split_at_mut(1);
@@ -475,7 +480,7 @@ impl pipeline::node::Node for Dvbs2Node {
 
     fn acquisition(&self) -> Option<pipeline::Acquisition> {
         let heard = self.heard();
-        Some(match (heard.locked, self.reading) {
+        Some(match (heard.locked, self.quiet_s < QUIET_S) {
             (false, _) => pipeline::Acquisition::Searching,
             (true, true) => pipeline::Acquisition::Locked,
             (true, false) => pipeline::Acquisition::Acquiring,
@@ -505,6 +510,9 @@ impl pipeline::node::Node for Dvbs2Node {
             out.push(("frames".into(), stats.frames.to_string()));
             out.push(("failed".into(), (stats.ldpc_failed + stats.bch_failed).to_string()));
             out.push(("packets".into(), stats.packets.to_string()));
+        }
+        if heard.faded > 0 {
+            out.push(("too weak".into(), heard.faded.to_string()));
         }
         if stats.shed > 0 {
             out.push(("frames shed".into(), stats.shed.to_string()));
