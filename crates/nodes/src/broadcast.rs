@@ -34,6 +34,8 @@ pub const SERVICE: &str = "service";
 /// The first entry of that parameter: whichever service carries a picture.
 pub const ANY: &str = "first with a picture";
 
+pub const OFF: &str = "nothing";
+
 /// Which programme of the multiplex is decoded.
 ///
 /// A name rather than a position wherever the multiplex gives one, because a
@@ -47,6 +49,7 @@ pub enum Want {
     Any,
     Id(u16),
     Named(String),
+    Off,
 }
 
 impl Want {
@@ -63,6 +66,7 @@ impl Want {
             Want::Any => s.video().is_some(),
             Want::Id(id) => s.id == *id,
             Want::Named(n) => s.name.as_deref() == Some(n.as_str()) || &service_label(s) == n,
+            Want::Off => false,
         }
     }
 
@@ -72,6 +76,7 @@ impl Want {
             Want::Any => pipeline::ParamValue::Int(0),
             Want::Id(id) => pipeline::ParamValue::Int(*id as i64),
             Want::Named(n) => pipeline::ParamValue::Text(n.clone()),
+            Want::Off => pipeline::ParamValue::Int(-1),
         }
     }
 
@@ -81,9 +86,12 @@ impl Want {
             Some(pipeline::ParamValue::Text(t)) if !t.is_empty() && t != ANY => {
                 Want::Named(t.clone())
             }
-            _ => match u16::try_from(s.i64_or(SERVICE, 0)).ok().filter(|id| *id != 0) {
-                Some(id) => Want::Id(id),
-                None => Want::Any,
+            _ => match s.i64_or(SERVICE, 0) {
+                n if n < 0 => Want::Off,
+                n => match u16::try_from(n).ok().filter(|id| *id != 0) {
+                    Some(id) => Want::Id(id),
+                    None => Want::Any,
+                },
             },
         }
     }
@@ -212,7 +220,7 @@ impl Broadcast {
     /// multiplex's tables and the container both call it.
     fn tell_media(&mut self) {
         self.asked = match &self.wanted {
-            Want::Any => None,
+            Want::Any | Want::Off => None,
             Want::Id(id) => Some(*id),
             Want::Named(_) => {
                 self.mux.services.iter().find(|s| self.wanted.matches(s)).map(|s| s.id)
@@ -232,7 +240,7 @@ impl Broadcast {
 
     #[cfg(feature = "ffmpeg")]
     fn keeps(&self, service: Option<u16>) -> bool {
-        self.asked.is_none() || service == self.asked
+        self.wanted != Want::Off && (self.asked.is_none() || service == self.asked)
     }
 
     /// The service being watched, and the packet identifier its pictures are
@@ -270,6 +278,7 @@ impl Broadcast {
     fn choices(&self) -> Vec<String> {
         let mut out = vec![ANY.to_string()];
         out.extend(self.mux.services.iter().map(service_label));
+        out.push(OFF.to_string());
         out
     }
 
@@ -277,8 +286,10 @@ impl Broadcast {
     /// receiver choosing, which is not the same as its choice landing on the
     /// first service.
     fn choice(&self) -> usize {
-        if self.wanted == Want::Any {
-            return 0;
+        match self.wanted {
+            Want::Any => return 0,
+            Want::Off => return self.mux.services.len() + 1,
+            _ => {}
         }
         self.mux.services.iter().position(|s| self.wanted.matches(s)).map_or(0, |n| n + 1)
     }
@@ -291,9 +302,11 @@ impl Broadcast {
             setting: Want::of(s).setting(),
         }));
         let now = pipeline::Programmes {
-            source: format!("{} {:.3} MHz", self.system, self.channel_hz / 1e6),
+            system: self.system,
+            channel_hz: self.channel_hz,
             param: SERVICE,
             wanted: self.wanted.setting(),
+            idle: Want::Off.setting(),
             list,
         };
         let listing = match &self.listing {
@@ -313,6 +326,7 @@ impl Broadcast {
             // A position in the list this node last published, which is what
             // a menu sends. Resolved here and kept as an identity, because
             // the list it indexes grows as the multiplex describes itself.
+            pipeline::ParamValue::Choice(n) if n == self.mux.services.len() + 1 => Want::Off,
             pipeline::ParamValue::Choice(n) => {
                 match n.checked_sub(1) {
                     None => Want::Any,
@@ -321,11 +335,13 @@ impl Broadcast {
                     })?),
                 }
             }
+            pipeline::ParamValue::Int(id) if id < 0 => Want::Off,
             pipeline::ParamValue::Int(id) => match u16::try_from(id).ok().filter(|id| *id != 0) {
                 None => Want::Any,
                 Some(id) => self.mux.service(id).map_or(Want::Id(id), Want::of),
             },
             pipeline::ParamValue::Text(ref t) if t == ANY || t.is_empty() => Want::Any,
+            pipeline::ParamValue::Text(ref t) if t == OFF => Want::Off,
             pipeline::ParamValue::Text(ref t) => {
                 let known = self.mux.services.iter().any(|s| Want::Named(t.clone()).matches(s));
                 if !known && !self.mux.services.is_empty() {
@@ -350,6 +366,7 @@ impl Broadcast {
             return;
         }
         let service = match &self.wanted {
+            Want::Off => None,
             Want::Any => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
             w => self.mux.services.iter().find(|s| w.matches(s)).cloned(),
         };
@@ -370,7 +387,9 @@ impl Broadcast {
             out.extend_from_slice(&p.bytes);
         }
         #[cfg(feature = "ffmpeg")]
-        self.media.push(&out[start..]);
+        if self.wanted != Want::Off {
+            self.media.push(&out[start..]);
+        }
         #[cfg(not(feature = "ffmpeg"))]
         let _ = start;
         self.follow_video();
@@ -662,5 +681,51 @@ mod tests {
             })
             .map(|n| n + 1);
         assert_eq!(blocks, Some(100), "shown after a second of blocks, not held for the sound");
+    }
+
+    fn bars(seconds: f64) -> Vec<TsPacket> {
+        use std::io::Read;
+        let mut card = decode::transcode::ToTs::bars(4_000_000.0);
+        let mut raw = vec![0u8; (seconds * 4e6 / 8.0 / 188.0) as usize * 188];
+        card.read_exact(&mut raw).expect("the test card");
+        raw.chunks_exact(188)
+            .map(|c| TsPacket { bytes: c.try_into().unwrap(), corrected: 0 })
+            .collect()
+    }
+
+    fn pictures(tv: &mut Broadcast, ts: &[TsPacket]) -> usize {
+        let mut shown = 0;
+        for chunk in ts.chunks(64) {
+            tv.push(chunk, &mut Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let mut video = Payload::empty_of(pipeline::port::PortKind::Video);
+            let mut sound = Payload::empty_of(pipeline::port::PortKind::Real);
+            tv.play(0.02, &mut video, &mut sound);
+            shown += video.as_video().map_or(0, |v| v.len());
+        }
+        let mut rest = Vec::new();
+        tv.flush(&[], &mut rest);
+        shown + rest.len()
+    }
+
+    #[test]
+    fn a_multiplex_asked_for_nothing_decodes_nothing_and_still_lists_its_services() {
+        let ts = bars(3.0);
+        let mut off = Broadcast::new("test", 0.0);
+        off.set_service("test", pipeline::ParamValue::Int(-1)).unwrap();
+        assert_eq!(off.wanted(), &Want::Off);
+        let (none, listed) = (pictures(&mut off, &ts), off.services().len());
+        let mut woken = Broadcast::new("test", 0.0);
+        woken.set_service("test", pipeline::ParamValue::Int(-1)).unwrap();
+        let (half, rest) = ts.split_at(ts.len() / 2);
+        for chunk in half.chunks(64) {
+            woken.push(chunk, &mut Vec::new());
+        }
+        woken.set_service("test", Want::Any.setting()).unwrap();
+        let after = pictures(&mut woken, rest);
+        let fresh = pictures(&mut Broadcast::new("test", 0.0), rest);
+        assert_eq!((none, listed), (0, 1), "pictures while asked for nothing, services listed");
+        assert_eq!(after, fresh, "woken, it reads as a multiplex just opened does");
+        assert!((20..=37).contains(&fresh), "{fresh} of 37 pictures, floor 20");
     }
 }

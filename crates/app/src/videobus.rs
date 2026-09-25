@@ -71,7 +71,17 @@ impl Rule {
 /// received, to the kilohertz. Two cameras on adjacent channels of the plan
 /// are 19 MHz apart and nothing rounds them together.
 pub fn key_of(f: &VideoFrame) -> String {
-    format!("{}:{}", f.system, (f.channel_hz / 1e3).round() as i64)
+    key(f.system, f.channel_hz)
+}
+
+pub fn key(system: &str, channel_hz: f64) -> String {
+    format!("{system}:{}", (channel_hz / 1e3).round() as i64)
+}
+
+impl Offered {
+    pub fn key(&self) -> String {
+        key(self.programmes.system, self.programmes.channel_hz)
+    }
 }
 
 /// One transmission the bus has seen, and the last picture from it.

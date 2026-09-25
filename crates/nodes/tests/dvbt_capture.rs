@@ -330,7 +330,14 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
         pipeline::param::ParamRange::Choices(c) => c.clone(),
         other => panic!("a service is a choice, not {other:?}"),
     };
-    assert_eq!(choices, vec![nodes::dvbt_nodes::ANY.to_string(), "service 1".to_string()]);
+    assert_eq!(
+        choices,
+        vec![
+            nodes::dvbt_nodes::ANY.to_string(),
+            "service 1".to_string(),
+            nodes::broadcast::OFF.to_string()
+        ]
+    );
     assert_eq!(params[0].value, ParamValue::Choice(0), "nothing was asked for");
 
     // Asked for by its identifier, which is what survives the list growing.
@@ -349,7 +356,9 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
     assert_eq!(node.wanted(), &Want::Id(1), "a position is kept as the identity it names");
     Node::set_param(&mut node, SERVICE, ParamValue::Choice(0)).expect("back to the first");
     assert_eq!(node.wanted(), &Want::Any);
-    Node::set_param(&mut node, SERVICE, ParamValue::Choice(2)).expect_err("there is no second");
+    Node::set_param(&mut node, SERVICE, ParamValue::Choice(2)).expect("the last is nothing");
+    assert_eq!(node.wanted(), &Want::Off);
+    Node::set_param(&mut node, SERVICE, ParamValue::Choice(3)).expect_err("there is no second");
     Node::set_param(&mut node, SERVICE, ParamValue::Text("BBC One".into()))
         .expect_err("nor a service of that name");
 

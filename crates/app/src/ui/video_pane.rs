@@ -91,9 +91,16 @@ impl VideoPane<'_> {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             Line::new().legend("watching").show(ui);
-            let mut want = st.watching.clone();
+            let before = pick_of(st.watching.as_deref(), &self.muxes);
+            let mut want = before.clone();
             let shown = match &want {
-                Some(k) => match self.inputs.iter().find(|i| &i.key == k) {
+                Pick::Programme(k, from, setting) => self
+                    .muxes
+                    .iter()
+                    .find(|o| o.from == *from)
+                    .and_then(|o| o.programmes.list.iter().find(|p| &p.setting == setting))
+                    .map_or_else(|| k.clone(), |p| p.label.clone()),
+                Pick::Channel(k) => match self.inputs.iter().find(|i| &i.key == k) {
                     Some(i) => format!("{}  {:.0}%", i.label, i.completeness * 100.0),
                     // Off the air, but still what was asked for.
                     None => format!(
@@ -101,24 +108,55 @@ impl VideoPane<'_> {
                         st.watching_label.clone().unwrap_or_else(|| k.clone())
                     ),
                 },
-                None => "best picture".to_string(),
+                Pick::Best => "best picture".to_string(),
             };
             egui::ComboBox::from_id_salt("video-channel")
                 .selected_text(value(shown))
-                .width(240.0)
+                .width(300.0)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut want, None, "best picture");
+                    ui.selectable_value(&mut want, Pick::Best, "best picture");
                     for i in &self.inputs {
+                        if self.muxes.iter().any(|o| o.key() == i.key) {
+                            continue;
+                        }
                         ui.selectable_value(
                             &mut want,
-                            Some(i.key.clone()),
+                            Pick::Channel(i.key.clone()),
                             format!("{}  {:.0}%", i.label, i.completeness * 100.0),
                         );
                     }
-                    if self.inputs.is_empty() {
+                    for o in &self.muxes {
+                        let on = format!(
+                            "{} {:.3} MHz",
+                            o.programmes.system,
+                            o.programmes.channel_hz / 1e6
+                        );
+                        for p in &o.programmes.list {
+                            ui.selectable_value(
+                                &mut want,
+                                Pick::Programme(o.key(), o.from, p.setting.clone()),
+                                format!("{}  {on}", p.label),
+                            );
+                        }
+                    }
+                    if self.inputs.is_empty() && self.muxes.is_empty() {
                         Line::new().note("nothing receiving").size(11.0).show(ui);
                     }
                 });
+            if want != before {
+                st.watching_label = match &want {
+                    Pick::Channel(k) => {
+                        self.inputs.iter().find(|i| &i.key == k).map(|i| i.label.clone())
+                    }
+                    _ => None,
+                };
+                st.watching = match &want {
+                    Pick::Best => None,
+                    Pick::Channel(k) | Pick::Programme(k, _, _) => Some(k.clone()),
+                };
+                self.cmds.push(Cmd::WatchVideo(st.rules()));
+            }
+            self.cmds.extend(orders(&self.muxes, &want));
             ui.add_space(12.0);
             let count = match self.inputs.len() {
                 0 => "no channels".to_string(),
@@ -141,47 +179,6 @@ impl VideoPane<'_> {
                 if ui.small_button("open").clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
                 }
-            }
-            for mux in &self.muxes {
-                let listing = &mux.programmes;
-                ui.add_space(12.0);
-                Line::new().legend("service").show(ui);
-                let mut pick = listing.wanted.clone();
-                let shown = listing.chosen().map_or_else(
-                    || match &listing.wanted {
-                        pipeline::ParamValue::Text(t) => t.clone(),
-                        other => format!("service {}", other.as_i64().unwrap_or(0)),
-                    },
-                    |p| p.label.clone(),
-                );
-                egui::ComboBox::from_id_salt(("programmes", mux.from))
-                    .selected_text(value(shown))
-                    .width(220.0)
-                    .show_ui(ui, |ui| {
-                        for p in &listing.list {
-                            ui.selectable_value(&mut pick, p.setting.clone(), &p.label);
-                        }
-                        if listing.list.len() < 2 {
-                            Line::new().note("no services described yet").size(11.0).show(ui);
-                        }
-                    });
-                if pick != listing.wanted {
-                    // As a name or a number rather than a position, because
-                    // this is written into the patch and read back by a
-                    // rebuild, which happens before any table has arrived.
-                    self.cmds.push(Cmd::NodeParam(mux.from, listing.param.into(), pick));
-                }
-            }
-            if want != st.watching {
-                st.watching_label = want
-                    .as_ref()
-                    .and_then(|k| self.inputs.iter().find(|i| &i.key == k))
-                    .map(|i| i.label.clone());
-                st.watching = want.clone();
-                self.cmds.push(Cmd::WatchVideo(match want {
-                    Some(k) => vec![crate::videobus::Rule::Channel(k)],
-                    None => vec![crate::videobus::Rule::Everything],
-                }));
             }
         });
         ui.add_space(4.0);
@@ -301,6 +298,48 @@ fn upload(
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum Pick {
+    Best,
+    Channel(String),
+    Programme(String, usize, pipeline::ParamValue),
+}
+
+fn pick_of(watching: Option<&str>, muxes: &[crate::videobus::Offered]) -> Pick {
+    let Some(k) = watching else { return Pick::Best };
+    match muxes.iter().find(|o| o.key() == k) {
+        Some(o) => Pick::Programme(k.to_string(), o.from, o.programmes.wanted.clone()),
+        None => Pick::Channel(k.to_string()),
+    }
+}
+
+fn orders(muxes: &[crate::videobus::Offered], pick: &Pick) -> Vec<Cmd> {
+    let mut out = Vec::new();
+    let playing = match pick {
+        Pick::Best => return out,
+        Pick::Programme(_, from, setting) => Some((*from, setting)),
+        Pick::Channel(_) => None,
+    };
+    for o in muxes {
+        // As a name or a number rather than a position, because
+        // this is written into the patch and read back by a
+        // rebuild, which happens before any table has arrived.
+        let set = |to: &pipeline::ParamValue| {
+            Cmd::NodeParam(o.from, o.programmes.param.to_string(), to.clone())
+        };
+        match playing {
+            Some((from, setting)) if from == o.from => {
+                if o.programmes.wanted != *setting {
+                    out.push(set(setting));
+                }
+            }
+            _ if !o.programmes.is_idle() => out.push(set(&o.programmes.idle)),
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +372,57 @@ mod tests {
         assert!(!is_new(Some(&one), &one), "the same picture is not");
         assert!(is_new(Some(&one), &frame(1, 2)), "a line arrived");
         assert!(is_new(Some(&frame(1, 4)), &frame(2, 1)), "and a new transmission");
+    }
+
+    fn offered(from: usize, hz: f64, wanted: pipeline::ParamValue) -> crate::videobus::Offered {
+        let programme = |label: &str, setting| pipeline::Programme { label: label.into(), setting };
+        crate::videobus::Offered {
+            from,
+            programmes: std::sync::Arc::new(pipeline::Programmes {
+                system: "DVB-S2",
+                channel_hz: hz,
+                param: "service",
+                wanted,
+                idle: pipeline::ParamValue::Int(-1),
+                list: vec![
+                    programme("first with a picture", pipeline::ParamValue::Int(0)),
+                    programme("BBC Two HD", pipeline::ParamValue::Text("BBC Two HD".into())),
+                ],
+            }),
+        }
+    }
+
+    fn said(cmds: Vec<Cmd>) -> Vec<(usize, String, pipeline::ParamValue)> {
+        cmds.into_iter()
+            .filter_map(|c| match c {
+                Cmd::NodeParam(n, name, v) => Some((n, name, v)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_programme_plays_and_every_other_multiplex_stops_decoding() {
+        use pipeline::ParamValue::{Int, Text};
+        let muxes = [offered(3, 1_097e6, Int(0)), offered(7, 1_068e6, Int(0))];
+        let bbc_two = Pick::Programme(muxes[0].key(), 3, Text("BBC Two HD".into()));
+        assert_eq!(
+            said(orders(&muxes, &bbc_two)),
+            [(3, "service".into(), Text("BBC Two HD".into())), (7, "service".into(), Int(-1))]
+        );
+        let camera = Pick::Channel("FPV:5800000".into());
+        assert_eq!(
+            said(orders(&muxes, &camera)),
+            [(3, "service".into(), Int(-1)), (7, "service".into(), Int(-1))],
+            "a picture that is not a programme stops every multiplex"
+        );
+        assert!(said(orders(&muxes, &Pick::Best)).is_empty());
+        let settled =
+            [offered(3, 1_097e6, Text("BBC Two HD".into())), offered(7, 1_068e6, Int(-1))];
+        assert!(said(orders(&settled, &bbc_two)).is_empty(), "nothing more to ask once it is so");
+        assert_eq!(
+            pick_of(Some(&muxes[1].key()), &settled),
+            Pick::Programme(muxes[1].key(), 7, Int(-1))
+        );
     }
 }

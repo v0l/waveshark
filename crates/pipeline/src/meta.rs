@@ -8,9 +8,11 @@ pub enum Meta {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Programmes {
-    pub source: String,
+    pub system: &'static str,
+    pub channel_hz: f64,
     pub param: &'static str,
     pub wanted: ParamValue,
+    pub idle: ParamValue,
     pub list: Vec<Programme>,
 }
 
@@ -23,6 +25,10 @@ pub struct Programme {
 impl Programmes {
     pub fn chosen(&self) -> Option<&Programme> {
         self.list.iter().find(|p| p.setting == self.wanted)
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.wanted == self.idle
     }
 }
 

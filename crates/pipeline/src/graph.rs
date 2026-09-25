@@ -1691,9 +1691,11 @@ mod tests {
             if self.0 > 0 {
                 self.0 -= 1;
                 let listing = crate::meta::Programmes {
-                    source: "mux".into(),
+                    system: "mux",
+                    channel_hz: 0.0,
                     param: "service",
                     wanted: crate::ParamValue::Int(0),
+                    idle: crate::ParamValue::Int(-1),
                     list: vec![crate::meta::Programme {
                         label: format!("left {}", self.0),
                         setting: crate::ParamValue::Int(0),

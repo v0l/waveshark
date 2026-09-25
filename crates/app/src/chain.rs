@@ -6496,18 +6496,18 @@ pub(crate) mod tests {
             rx.process(&block).unwrap();
         }
         let offered = rx.programmes();
-        let sources: Vec<(&str, &str, Vec<&str>)> = offered
+        let sources: Vec<(String, &str, Vec<&str>)> = offered
             .iter()
             .map(|o| {
                 let labels = o.programmes.list.iter().map(|p| p.label.as_str()).collect();
-                (o.programmes.source.as_str(), o.programmes.param, labels)
+                (o.key(), o.programmes.param, labels)
             })
             .collect();
         assert_eq!(
             sources,
             [
-                ("DVB-T 428.000 MHz", "service", vec![nodes::dvbt_nodes::ANY]),
-                ("DVB-T 430.000 MHz", "service", vec![nodes::dvbt_nodes::ANY]),
+                ("DVB-T:428000".to_string(), "service", vec![nodes::dvbt_nodes::ANY]),
+                ("DVB-T:430000".to_string(), "service", vec![nodes::dvbt_nodes::ANY]),
             ]
         );
         for o in &offered {
