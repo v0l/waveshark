@@ -1000,7 +1000,7 @@ impl std::str::FromStr for Serve {
         };
         let addr = common::addr::listen(addr, std::net::Ipv4Addr::UNSPECIFIED.into())
             .map_err(|e| format!("{addr:?}: {e}"))?;
-        Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable, listing: None })))
+        Ok(Self(Some(crate::chain::IqStreamPlan { addr, tunable })))
     }
 }
 
@@ -1859,7 +1859,6 @@ mod tests {
             Some(crate::chain::IqStreamPlan {
                 addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
                 tunable: false,
-                listing: None,
             })
         );
         assert!(Serve::from_str("1234,tune").unwrap().0.is_some_and(|s| s.tunable));

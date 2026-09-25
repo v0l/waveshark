@@ -1641,11 +1641,16 @@ impl App {
             );
             let mut locate = self.setting(|s| s.iqstream_locate);
             let at = self.setting(|s| s.location);
-            let locate_help = "Lists the receiver's location to within about five kilometres, \
-                               so the station can be found on a map.";
-            if switch(ui, "locate", &mut locate, "where the receiver is, roughly", locate_help) {
-                self.settings.edit(|s| s.iqstream_locate = locate);
-            }
+            let locate_help = "Lists the receiver's location so the station can be found on a \
+                               map, only as closely as chosen here.";
+            row_help(ui, "locate", locate_help, |ui| {
+                let within = sdr_directory::Accuracy::ALL
+                    .map(|a| (Some(a), format!("to within {}", a.distance())));
+                let options = std::iter::once((None, "not listed".to_string())).chain(within);
+                if choice(ui, "iqstream-locate", &mut locate, options) {
+                    self.settings.edit(|s| s.iqstream_locate = locate);
+                }
+            });
             if let Some(keys) = self.setting(|s| nostr_directory::identity(&s.iqstream_nsec)) {
                 reading(ui, "key", nostr_directory::npub(&keys));
             }
@@ -1654,7 +1659,7 @@ impl App {
                 (true, None, _) => {
                     panel::status(ui, false, "the server is off, so there is nothing to list")
                 }
-                (true, _, _) if locate && at.is_none() => {
+                (true, _, _) if locate.is_some() && at.is_none() => {
                     panel::status(ui, false, "no location set for this receiver to list")
                 }
                 (true, Some(_), None) => panel::status(ui, true, "starting"),

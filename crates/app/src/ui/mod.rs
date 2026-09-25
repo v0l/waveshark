@@ -864,6 +864,10 @@ impl App {
         let all = was.is_none();
         let blank = crate::session::Session::default();
         let before = was.as_ref().unwrap_or(&blank);
+        let offered = |s: &crate::session::Session| s.iqstream_offer();
+        if all || offered(&now) != offered(before) {
+            crate::iqstream_listing::follow(offered(before), offered(&now));
+        }
         if all || (now.survey_on, &now.survey_path) != (before.survey_on, &before.survey_path) {
             // The pane reads the survey through a connection of its own,
             // which does not exist until the radio thread has made the file.
@@ -1142,13 +1146,12 @@ impl App {
     }
 
     /// Serve the span to network subscribers, from the command line.
-    pub fn serve_iqstream(&mut self, mut serving: crate::chain::IqStreamPlan) {
+    pub fn serve_iqstream(&mut self, serving: crate::chain::IqStreamPlan) {
         self.settings.edit(|s| {
             s.iqstream_addr = serving.addr.to_string();
             s.iqstream_tunable = serving.tunable;
             s.iqstream_on = true;
         });
-        serving.listing = self.setting(|s| s.iqstream_listing());
         self.send(crate::radio::Cmd::IqStream(Some(serving)));
     }
 
@@ -2703,15 +2706,11 @@ fn settings_cmds(now: &crate::session::Session, was: Option<&crate::session::Ses
     when(now.beacondb_on != was.beacondb_on, Cmd::BeaconDb(now.beacondb_on));
     when(now.rds() != was.rds(), Cmd::Rds(now.rds()));
     when(now.kiss() != was.kiss(), Cmd::Kiss(now.kiss()));
-    let listing = now.iqstream_listing();
-    let serving = now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan {
-        addr,
-        tunable,
-        listing: listing.clone(),
-    });
     when(
-        now.iqstream() != was.iqstream() || listing != was.iqstream_listing(),
-        Cmd::IqStream(serving),
+        now.iqstream() != was.iqstream(),
+        Cmd::IqStream(
+            now.iqstream().map(|(addr, tunable)| crate::chain::IqStreamPlan { addr, tunable }),
+        ),
     );
     when(now.band_scan() != was.band_scan(), Cmd::BandScan(now.band_scan()));
     when(now.heat_plan() != was.heat_plan(), Cmd::Heatmap(now.heat_plan()));
@@ -3729,7 +3728,6 @@ mod tests {
             [Some(crate::chain::IqStreamPlan {
                 addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
                 tunable: false,
-                listing: None,
             })],
             "a port with no host is every interface, and nobody may retune it"
         );
@@ -3741,7 +3739,6 @@ mod tests {
             [Some(crate::chain::IqStreamPlan {
                 addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
                 tunable: true,
-                listing: None,
             })]
         );
 
@@ -3756,12 +3753,39 @@ mod tests {
         a.serve_iqstream(crate::chain::IqStreamPlan {
             addr: "0.0.0.0:1299".parse().unwrap(),
             tunable: true,
-            listing: None,
         });
         assert!(a.setting(|s| s.iqstream_on));
         assert_eq!(a.setting(|s| s.iqstream_addr.clone()), "0.0.0.0:1299");
         let back = crate::session::Session::parse(&a.settings.get().render());
         assert_eq!(back.iqstream(), Some(("0.0.0.0:1299".parse().unwrap(), true)));
+    }
+
+    #[test]
+    fn the_directory_listing_follows_the_card_with_no_radio_running() {
+        let mut a = app();
+        assert!(a.radio.is_none());
+        let addr = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        a.settings.edit(|s| {
+            s.iqstream_on = true;
+            s.iqstream_addr = addr.to_string();
+            s.iqstream_listed = true;
+            s.directory_keys();
+            s.location = Some((53.64, -6.65));
+            s.iqstream_locate = Some(sdr_directory::Accuracy::Region);
+        });
+        a.apply_settings();
+        let located =
+            || crate::iqstream_listing::offered(addr).map(|l| l.location.map(|at| at.geohash_len));
+        assert_eq!(located(), Some(Some(3)));
+        a.settings.edit(|s| s.iqstream_locate = Some(sdr_directory::Accuracy::Street));
+        a.apply_settings();
+        assert_eq!(located(), Some(Some(7)));
+        a.settings.edit(|s| s.iqstream_locate = None);
+        a.apply_settings();
+        assert_eq!(located(), Some(None), "unticking took the location off");
+        a.settings.edit(|s| s.iqstream_listed = false);
+        a.apply_settings();
+        assert_eq!(located(), None, "switching the listing off withdrew it");
     }
 
     /// A feed with half an account typed into it cannot upload, and the

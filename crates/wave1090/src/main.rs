@@ -146,9 +146,14 @@ struct Args {
     #[arg(long, value_name = "HOST")]
     iqstream_public_host: Option<String>,
 
-    /// List --lat and --lon as well, to about five kilometres
+    /// List --lat and --lon as well, to within --iqstream-accuracy
     #[arg(long, requires = "lat", requires = "lon")]
     iqstream_locate: bool,
+
+    /// How closely the location is listed: region (150 km), district (40 km),
+    /// town (5 km), neighbourhood (1 km) or street (150 m)
+    #[arg(long, value_name = "ACCURACY", default_value = "town", requires = "iqstream_locate")]
+    iqstream_accuracy: sdr_directory::Accuracy,
 
     /// Where the key the listing is signed with is kept, made on first use.
     /// ~/.config/wave1090/directory.nsec when not given
@@ -347,7 +352,9 @@ fn listing(args: &Args) -> Result<sdr_directory::lister::Offer<nostr_directory::
         name: args.iqstream_name.clone(),
         description: args.iqstream_description.clone(),
         antenna: args.iqstream_antenna.clone(),
-        location: station(args).filter(|_| args.iqstream_locate),
+        location: station(args)
+            .filter(|_| args.iqstream_locate)
+            .map(|(lat, lon)| sdr_directory::Location::within(lat, lon, args.iqstream_accuracy)),
         public_host: args.iqstream_public_host.clone(),
         directory: nostr_directory::Config { nsec: Some(nsec), relays },
     })
@@ -789,6 +796,8 @@ mod tests {
 
         let named = [
             "--iqstream-locate",
+            "--iqstream-accuracy",
+            "district",
             "--iqstream-name",
             "radarpi",
             "--iqstream-public-host",
@@ -799,7 +808,10 @@ mod tests {
         let args = parsed(&[&base[..], &at[..], &named[..]].concat()).unwrap();
         let second = listing(&args).unwrap();
         assert_eq!(second.directory.nsec, first.directory.nsec, "the same key on the second start");
-        assert_eq!(second.location, Some((51.45, -0.97)));
+        assert_eq!(
+            second.location,
+            Some(sdr_directory::Location { lat: 51.45, lon: -0.97, geohash_len: 4 })
+        );
         assert_eq!(second.name, "radarpi");
         assert_eq!(second.public_host.as_deref(), Some("sdr.example.net"));
         assert_eq!(second.directory.relays, ["wss://a.example", "wss://b.example"]);

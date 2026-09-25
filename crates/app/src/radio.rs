@@ -2837,24 +2837,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             }
             Cmd::IqStream(serving) => {
                 let serving = serving.filter(|_| self.dev.info().kind.is_radio());
-                let listed = |p: &Option<crate::chain::IqStreamPlan>| {
-                    p.as_ref().and_then(|p| Some((p.addr, p.listing.clone()?)))
-                };
-                if let Some((was, _)) = listed(&self.plan.iqstream)
-                    && listed(&serving).is_none_or(|(now, _)| now != was)
-                {
-                    crate::iqstream_listing::list(was, None);
-                }
-                if let Some((addr, listing)) = listed(&serving) {
-                    crate::iqstream_listing::list(addr, Some(listing));
-                }
-                let socket = |p: &Option<crate::chain::IqStreamPlan>| {
-                    p.as_ref().map(|p| (p.addr, p.tunable))
-                };
-                if socket(&serving) != socket(&self.plan.iqstream) {
+                if serving != self.plan.iqstream {
+                    self.plan.iqstream = serving;
                     self.needs_rebuild = true;
                 }
-                self.plan.iqstream = serving;
             }
             Cmd::IqStreamTuners(tuners) => {
                 if tuners != self.plan.iqstream_tuners {
@@ -4284,11 +4270,7 @@ pub(crate) mod tests {
             let radio = Radio::on_device(Box::new(dev), Hz(433_920_000), Sps(2_400_000), 1024);
             until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
             let rev = radio.status.patch_rev.load(Ordering::Relaxed);
-            radio.send(Cmd::IqStream(Some(crate::chain::IqStreamPlan {
-                addr,
-                tunable: false,
-                listing: None,
-            })));
+            radio.send(Cmd::IqStream(Some(crate::chain::IqStreamPlan { addr, tunable: false })));
             radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
             until("a rebuild", || radio.status.patch_rev.load(Ordering::Relaxed) > rev);
             if served {

@@ -2,7 +2,7 @@ pub mod lister;
 pub mod model;
 pub mod portmap;
 
-pub use model::{Dial, Entry, Hardware, Location, Station, Tuner, Version};
+pub use model::{Accuracy, Dial, Entry, Hardware, Location, Station, Tuner, Version};
 
 use std::collections::HashMap;
 use std::fmt;

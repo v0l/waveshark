@@ -39,7 +39,7 @@ pub fn encode(entry: &Entry) -> Vec<Tag> {
         tags.push(tag("session_limit", [secs.to_string()]));
     }
     if let Some(at) = s.location {
-        let hash = geohash::encode(at.lat, at.lon, GEOHASH_LADDER);
+        let hash = geohash::encode(at.lat, at.lon, at.geohash_len);
         tags.extend((1..=hash.len()).map(|n| tag("g", [&hash[..n]])));
     }
     let mut hashtags: Vec<&str> = HASHTAGS.to_vec();
@@ -94,13 +94,13 @@ pub fn decode<'a>(tags: impl Iterator<Item = &'a Tag> + Clone) -> Result<Entry, 
     let also: Vec<std::net::SocketAddr> =
         addrs.filter_map(|(h, p)| Some(std::net::SocketAddr::new(h.parse().ok()?, p))).collect();
     let version = first("version").and_then(version).ok_or("no protocol version")?;
-    let location = tags
-        .clone()
-        .filter(|t| key(t) == "g")
-        .filter_map(value)
-        .max_by_key(|g| g.len())
-        .and_then(geohash::decode)
-        .map(|(lat, lon)| Location { lat, lon });
+    let location =
+        tags.clone().filter(|t| key(t) == "g").filter_map(value).max_by_key(|g| g.len()).and_then(
+            |g| {
+                let (lat, lon) = geohash::decode(g)?;
+                Some(Location { lat, lon, geohash_len: g.len() })
+            },
+        );
     let tuners = tags
         .clone()
         .filter(|t| key(t) == "tuner")
@@ -241,6 +241,19 @@ mod tests {
             Entry { station: Station { location: e.station.location, ..back.station }, ..back };
         assert_eq!(exact, e);
         assert_eq!(exact.addr(), "[2001:db8::7]:5557");
+    }
+
+    #[test]
+    fn a_station_listed_to_forty_kilometres_carries_four_geohash_tags_and_reads_back_as_four() {
+        let mut e = entry("sdr.example.net", vec![airband()]);
+        e.station.location =
+            Some(Location::within(51.45, -0.97, sdr_directory::Accuracy::District));
+        let tags = encode(&e);
+        let cells: Vec<&str> = tags.iter().filter(|t| key(t) == "g").filter_map(value).collect();
+        assert_eq!(cells, ["g", "gc", "gcp", "gcpk"]);
+        let at = decode(tags.iter()).unwrap().station.location.unwrap();
+        assert_eq!(at.geohash_len, 4);
+        assert!((at.lat - 51.45).abs() < 0.18 && (at.lon - -0.97).abs() < 0.18, "{at:?}");
     }
 
     fn parsed(tags: &[&[&str]]) -> Result<Entry, String> {

@@ -18,6 +18,74 @@ impl Version {
 pub struct Location {
     pub lat: f64,
     pub lon: f64,
+    pub geohash_len: usize,
+}
+
+impl Location {
+    pub fn within(lat: f64, lon: f64, accuracy: Accuracy) -> Location {
+        Location { lat, lon, geohash_len: accuracy.geohash_len() }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Accuracy {
+    Region,
+    District,
+    #[default]
+    Town,
+    Neighbourhood,
+    Street,
+}
+
+impl Accuracy {
+    pub const ALL: [Accuracy; 5] = [
+        Accuracy::Region,
+        Accuracy::District,
+        Accuracy::Town,
+        Accuracy::Neighbourhood,
+        Accuracy::Street,
+    ];
+
+    pub fn geohash_len(self) -> usize {
+        match self {
+            Accuracy::Region => 3,
+            Accuracy::District => 4,
+            Accuracy::Town => 5,
+            Accuracy::Neighbourhood => 6,
+            Accuracy::Street => 7,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Accuracy::Region => "region",
+            Accuracy::District => "district",
+            Accuracy::Town => "town",
+            Accuracy::Neighbourhood => "neighbourhood",
+            Accuracy::Street => "street",
+        }
+    }
+
+    pub fn distance(self) -> &'static str {
+        match self {
+            Accuracy::Region => "150 km",
+            Accuracy::District => "40 km",
+            Accuracy::Town => "5 km",
+            Accuracy::Neighbourhood => "1 km",
+            Accuracy::Street => "150 m",
+        }
+    }
+}
+
+impl std::str::FromStr for Accuracy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Accuracy, String> {
+        Accuracy::ALL
+            .into_iter()
+            .find(|a| a.as_str() == s.trim())
+            .ok_or_else(|| format!("{s:?} is not region, district, town, neighbourhood or street"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -195,7 +263,7 @@ pub mod fixtures {
         Station {
             name: "G0ABC".into(),
             description: "Loft, Reading".into(),
-            location: Some(Location { lat: 51.45, lon: -0.97 }),
+            location: Some(Location::within(51.45, -0.97, Accuracy::Town)),
             version: Version::OURS,
             clients: 1,
             max_clients: Some(4),

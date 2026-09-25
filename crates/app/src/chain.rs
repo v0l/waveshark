@@ -3062,7 +3062,6 @@ pub struct IqStreamPlan {
     /// asked: granting it moves the frequency on the local screen, because
     /// there is one tuner.
     pub tunable: bool,
-    pub listing: Option<crate::iqstream_listing::Listing>,
 }
 
 pub mod derived {
@@ -5820,7 +5819,6 @@ pub(crate) mod tests {
         plan.iqstream = Some(IqStreamPlan {
             addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             tunable: false,
-            listing: None,
         });
         let drawn = derived_patch(&plan);
         let served: Vec<_> = drawn.stages().iter().filter(|s| s.kind == kind).collect();
@@ -5916,7 +5914,7 @@ pub(crate) mod tests {
         let mut plan = tests::plan(2_400_000.0, Hz::mhz(1090));
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         for tunable in [false, true] {
-            plan.iqstream = Some(IqStreamPlan { addr, tunable, listing: None });
+            plan.iqstream = Some(IqStreamPlan { addr, tunable });
             let drawn = derived_patch(&plan);
             let s = drawn.stages().iter().find(|s| s.kind == kind).expect("a server");
             assert_eq!(

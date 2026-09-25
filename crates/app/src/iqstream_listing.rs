@@ -37,6 +37,17 @@ pub fn list(addr: SocketAddr, listing: Option<Listing>) {
     }
 }
 
+pub fn follow(was: Option<(SocketAddr, Listing)>, now: Option<(SocketAddr, Listing)>) {
+    if let Some((at, _)) = &was
+        && now.as_ref().is_none_or(|(addr, _)| addr != at)
+    {
+        list(*at, None);
+    }
+    if let Some((addr, listing)) = now {
+        list(addr, Some(listing));
+    }
+}
+
 pub fn withdraw_all(within: Duration) {
     let all: Vec<Lister<NostrDirectory>> = match listers().lock() {
         Ok(mut table) => table.drain().map(|(_, l)| l).collect(),
@@ -47,6 +58,11 @@ pub fn withdraw_all(within: Duration) {
 
 pub fn state(addr: SocketAddr) -> Option<ListingState> {
     listers().lock().ok()?.get(&addr).map(Lister::state)
+}
+
+#[cfg(test)]
+pub fn offered(addr: SocketAddr) -> Option<Listing> {
+    listers().lock().ok()?.get(&addr)?.offer()
 }
 
 #[cfg(test)]
@@ -87,7 +103,11 @@ mod tests {
             name: "G0ABC".into(),
             description: "Loft".into(),
             antenna: "whip".into(),
-            location: Some((51.45, -0.97)),
+            location: Some(sdr_directory::Location::within(
+                51.45,
+                -0.97,
+                sdr_directory::Accuracy::Town,
+            )),
             public_host: Some("198.51.100.7".into()),
             directory: Config::publisher(&nsec, &[url.as_str()]),
         };
@@ -111,7 +131,13 @@ mod tests {
             (&"span".to_string(), &Hardware::HackRf, 433_920_000, "whip")
         );
 
-        list(addr, Some(listing.clone()));
+        let unlocated = Listing { location: None, ..listing.clone() };
+        list(addr, Some(unlocated.clone()));
+        until("the location taken off the listing", || {
+            reader.list(WAIT).unwrap()[0].entry.station.location.is_none().then_some(())
+        });
+
+        list(addr, Some(unlocated));
         list(addr, None);
         assert_eq!(state(addr), None);
         until("withdrawn", || reader.list(WAIT).unwrap().is_empty().then_some(()));

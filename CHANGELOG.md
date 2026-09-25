@@ -13,6 +13,7 @@ the code is in the commit log.
 
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
 - LimeSDR on Windows, with LimeSuite installed.
+- IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
 
 ### Changed
 
@@ -32,6 +33,7 @@ the code is in the commit log.
 - TETRA speech coming out silent, or muted as enciphered, on clear calls.
 - Digital voice calls breaking up on the speaker.
 - IQStream directory tuners listed as reaching only the edges of the span being served.
+- IQStream directory listing not updated after a retune, or with the receiver stopped.
 
 ## [0.4.0] - 2026-09-24
 

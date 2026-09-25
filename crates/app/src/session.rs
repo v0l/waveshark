@@ -382,7 +382,7 @@ pub struct Session {
     pub iqstream_description: String,
     pub iqstream_antenna: String,
     pub iqstream_public_host: String,
-    pub iqstream_locate: bool,
+    pub iqstream_locate: Option<sdr_directory::Accuracy>,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -538,7 +538,7 @@ impl Default for Session {
             iqstream_description: String::new(),
             iqstream_antenna: String::new(),
             iqstream_public_host: String::new(),
-            iqstream_locate: false,
+            iqstream_locate: None,
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -729,13 +729,22 @@ impl Session {
             name: if name.is_empty() { "waveshark" } else { name }.to_string(),
             description: self.iqstream_description.trim().to_string(),
             antenna: self.iqstream_antenna.trim().to_string(),
-            location: self.location.filter(|_| self.iqstream_locate),
+            location: self
+                .location
+                .zip(self.iqstream_locate)
+                .map(|((lat, lon), within)| sdr_directory::Location::within(lat, lon, within)),
             public_host: (!host.is_empty()).then(|| host.to_string()),
             directory: nostr_directory::Config::publisher(
                 &self.iqstream_nsec,
                 &nostr_directory::RELAYS,
             ),
         })
+    }
+
+    pub fn iqstream_offer(
+        &self,
+    ) -> Option<(std::net::SocketAddr, crate::iqstream_listing::Listing)> {
+        Some((self.iqstream()?.0, self.iqstream_listing()?))
     }
 
     pub fn directory_keys(&mut self) -> nostr_directory::Keys {
@@ -997,7 +1006,10 @@ impl Session {
                 .get("iqstream_public_host")
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
-            iqstream_locate: kv.get("iqstream_locate").map(|v| *v == "true").unwrap_or(false),
+            iqstream_locate: kv.get("iqstream_locate").and_then(|v| match *v {
+                "true" => Some(sdr_directory::Accuracy::Town),
+                v => v.parse().ok(),
+            }),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -1164,8 +1176,8 @@ impl Session {
         if self.iqstream_listed {
             s.push_str("iqstream_listed = true\n");
         }
-        if self.iqstream_locate {
-            s.push_str("iqstream_locate = true\n");
+        if let Some(within) = self.iqstream_locate {
+            s.push_str(&format!("iqstream_locate = {}\n", within.as_str()));
         }
         if self.ha_on {
             s.push_str("ha_on = true\n");
@@ -1369,7 +1381,7 @@ mod tests {
             iqstream_description: "Discone on the chimney".into(),
             iqstream_antenna: "Discone".into(),
             iqstream_public_host: "sdr.example.net".into(),
-            iqstream_locate: true,
+            iqstream_locate: Some(sdr_directory::Accuracy::District),
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             heat_on: false,
@@ -1444,11 +1456,23 @@ mod tests {
         let l = s.iqstream_listing().unwrap();
         assert_eq!((l.name.as_str(), l.location, l.public_host), ("waveshark", None, None));
         assert_eq!(l.directory.relays.len(), nostr_directory::RELAYS.len());
-        s.iqstream_locate = true;
+        s.iqstream_locate = Some(sdr_directory::Accuracy::Region);
         s.iqstream_public_host = " sdr.example.net ".into();
         let l = s.iqstream_listing().unwrap();
-        assert_eq!(l.location, Some((51.45, -0.97)));
+        assert_eq!(
+            l.location,
+            Some(sdr_directory::Location { lat: 51.45, lon: -0.97, geohash_len: 3 })
+        );
         assert_eq!(l.public_host.as_deref(), Some("sdr.example.net"));
+    }
+
+    #[test]
+    fn a_location_listed_before_there_was_a_choice_of_accuracy_reads_back_as_five_kilometres() {
+        let at = |line: &str| Session::parse(line).iqstream_locate;
+        assert_eq!(at("iqstream_locate = true"), Some(sdr_directory::Accuracy::Town));
+        assert_eq!(at("iqstream_locate = street"), Some(sdr_directory::Accuracy::Street));
+        assert_eq!(at("iqstream_locate = false"), None);
+        assert_eq!(at(""), None);
     }
 
     #[test]

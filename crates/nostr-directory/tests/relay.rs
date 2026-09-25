@@ -1,7 +1,8 @@
 use nostr_directory::mock::MockRelay;
 use nostr_directory::{Config, NostrDirectory, new_identity};
 use sdr_directory::{
-    Author, Dial, Entry, Hardware, Location, Query, SdrDirectory, Station, Tuner, Version, now,
+    Accuracy, Author, Dial, Entry, Hardware, Location, Query, SdrDirectory, Station, Tuner,
+    Version, now,
 };
 use std::time::Duration;
 
@@ -16,7 +17,7 @@ fn entry(host: &str, center_hz: u64) -> Entry {
         station: Station {
             name: host.into(),
             description: String::new(),
-            location: Some(Location { lat: 51.45, lon: -0.97 }),
+            location: Some(Location::within(51.45, -0.97, Accuracy::Town)),
             version: Version::OURS,
             clients: 0,
             max_clients: Some(4),
