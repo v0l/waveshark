@@ -446,6 +446,8 @@ pub struct TdmaTime {
     pub multiframe: u8,
 }
 
+const HYPER_SLOTS: u64 = 4 * 18 * 60;
+
 impl TdmaTime {
     pub fn advance(&mut self, slots: u64) {
         for _ in 0..slots {
@@ -518,7 +520,10 @@ impl TetraRx {
     pub fn time_at(&self, slot: u64) -> Option<TdmaTime> {
         let (t0, s0) = self.time?;
         let mut t = t0;
-        t.advance(slot.saturating_sub(s0));
+        t.advance(match slot.checked_sub(s0) {
+            Some(ahead) => ahead % HYPER_SLOTS,
+            None => HYPER_SLOTS - (s0 - slot) % HYPER_SLOTS,
+        });
         Some(t)
     }
 
@@ -824,5 +829,18 @@ mod tests {
             .find_map(|b| b.time)
             .expect("no time on a SCH/F block");
         assert_eq!(t.tn, 3, "SCH/F sits two slots after the sync burst");
+    }
+
+    #[test]
+    fn a_slot_before_the_last_sync_keeps_its_own_time() {
+        let mut rx = TetraRx::new();
+        let cell = Cell { mcc: 272, mnc: 91, colour: 3, scramb: coding::scramb_init(272, 91, 3) };
+        rx.seed(cell, TdmaTime { tn: 1, frame: 1, multiframe: 1 }, 5000);
+        let at = |s| rx.time_at(s).map(|t| (t.tn, t.frame, t.multiframe));
+        assert_eq!(at(5001), Some((2, 1, 1)));
+        assert_eq!(at(4999), Some((4, 18, 60)));
+        assert_eq!(at(4995), Some((4, 17, 60)));
+        assert_eq!(at(5000 + 4320), Some((1, 1, 1)));
+        assert_eq!(at(5000 - 4320), Some((1, 1, 1)));
     }
 }

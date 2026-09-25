@@ -2,9 +2,9 @@
 //!
 //! One transmission time slot carries two 30 ms speech frames, A then B, each
 //! 137 bits (STEC). The two are encoded together into a 432-bit block that
-//! rides the same continuous downlink burst the SCH/F uses, so the physical
-//! layer up to `TetraRx` is shared: scrambling (392-2 8.2.5) and block
-//! interleaving with depth 103 (8.2.4). What is specific to speech, and lives
+//! rides the same continuous downlink burst the SCH/F uses and shares its
+//! scrambling (392-2 8.2.5), but not the depth 103 block interleave the
+//! signalling channels add. What is specific to speech, and lives
 //! here, is the reordering and error control of clause 5:
 //!
 //!   type-1  two 137-bit STEC frames                 (274 speech bits)
@@ -89,27 +89,36 @@ fn viterbi(soft: &[i32], n: usize) -> Vec<u8> {
     )
 }
 
+pub const HALF_BITS: usize = 216;
+const STOLEN_CLASS0: usize = 51;
+const STOLEN_CLASS1: usize = 56;
+const STOLEN_CLASS2: usize = 38;
+const STOLEN_TYPE2: usize = STOLEN_CLASS0 + STOLEN_CLASS1 + STOLEN_CLASS2;
+const STOLEN_CONV_IN: usize = STOLEN_CLASS1 + STOLEN_CLASS2;
+const STOLEN_PUNCT2_PERIOD: usize = 24;
+const STOLEN_PUNCT2_KEEP: [usize; 17] =
+    [0, 1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22];
+const STOLEN_INTERLEAVE: u32 = 101;
+
+fn kept(mother_len: usize, period: usize, keep: &[usize]) -> impl Iterator<Item = usize> + '_ {
+    (0..mother_len.div_ceil(period))
+        .flat_map(move |p| keep.iter().map(move |k| p * period + k))
+        .filter(move |&i| i < mother_len)
+}
+
 fn depuncture(type3: &[u8], mother_len: usize, period: usize, keep: &[usize]) -> Vec<i32> {
     let mut mother = vec![0i32; mother_len];
     let mut j = 0;
-    for p in 0..mother_len / period {
-        for &k in keep {
-            mother[p * period + k] = if type3[j] != 0 { -1 } else { 1 };
-            j += 1;
-        }
+    for i in kept(mother_len, period, keep) {
+        mother[i] = if type3[j] != 0 { -1 } else { 1 };
+        j += 1;
     }
     debug_assert_eq!(j, type3.len());
     mother
 }
 
 fn puncture(mother: &[u8], period: usize, keep: &[usize]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for p in 0..mother.len() / period {
-        for &k in keep {
-            out.push(mother[p * period + k]);
-        }
-    }
-    out
+    kept(mother.len(), period, keep).map(|i| mother[i]).collect()
 }
 
 /// The (24,18) matrix interleave of 5.5.3: type-3 read as 24 lines of 18 lands
@@ -135,36 +144,61 @@ fn matrix_deinterleave(t4: &[u8]) -> Vec<u8> {
     t3
 }
 
-// CRC over the 60 class-2 speech bits (5.5.1): G(X) = X^7 + X^3 + 1, seven
-// parity bits, plus b8 the overall parity. Computed over the bits in the order
-// they sit in the type-2 block. The bit order the standard feeds the CRC is
-// worth re-checking against a real transmission before trusting the check to
-// reject; for the round trip here it is self-consistent.
-fn crc7(bits: &[u8]) -> [u8; 8] {
-    let mut reg = [0u8; 7];
-    for &b in bits {
-        let fb = b ^ reg[6];
-        // shift toward higher index; taps at X^7 (out) and X^3.
-        let mut nr = [0u8; 7];
-        nr[0] = fb;
-        nr[1] = reg[0];
-        nr[2] = reg[1];
-        nr[3] = reg[2] ^ fb;
-        nr[4] = reg[3];
-        nr[5] = reg[4];
-        nr[6] = reg[5];
-        reg = nr;
+const CRC_TAPS: [&[u8]; 8] = [
+    &[
+        1, 5, 8, 9, 13, 15, 16, 17, 19, 21, 22, 24, 25, 31, 32, 35, 36, 38, 40, 43, 44, 45, 48, 49,
+        50, 51, 53, 54, 56,
+    ],
+    &[
+        2, 6, 9, 10, 14, 16, 17, 18, 20, 22, 23, 25, 26, 32, 33, 36, 37, 39, 41, 44, 45, 46, 49,
+        50, 51, 52, 54, 55, 57,
+    ],
+    &[
+        3, 7, 10, 11, 15, 17, 18, 19, 21, 23, 24, 26, 27, 33, 34, 37, 38, 40, 42, 45, 46, 47, 50,
+        51, 52, 53, 55, 56, 58,
+    ],
+    &[
+        1, 4, 5, 9, 11, 12, 13, 15, 17, 18, 20, 21, 27, 28, 31, 32, 34, 36, 39, 40, 41, 44, 45, 46,
+        47, 49, 50, 52, 57, 59,
+    ],
+    &[
+        2, 5, 6, 10, 12, 13, 14, 16, 18, 19, 21, 22, 28, 29, 32, 33, 35, 37, 40, 41, 42, 45, 46,
+        47, 48, 50, 51, 53, 58, 60,
+    ],
+    &[
+        3, 6, 7, 11, 13, 14, 15, 17, 19, 20, 22, 23, 29, 30, 33, 34, 36, 38, 41, 42, 43, 46, 47,
+        48, 49, 51, 52, 54, 59,
+    ],
+    &[
+        4, 7, 8, 12, 14, 15, 16, 18, 20, 21, 23, 24, 30, 31, 34, 35, 37, 39, 42, 43, 44, 47, 48,
+        49, 50, 52, 53, 55, 60,
+    ],
+    &[
+        1, 2, 3, 4, 8, 13, 14, 16, 19, 20, 22, 23, 25, 26, 27, 28, 29, 30, 32, 33, 34, 36, 37, 40,
+        41, 42, 44, 48, 50, 53, 56, 57, 58, 59, 60,
+    ],
+];
+
+const STOLEN_CRC_TAPS: [&[u8]; 4] = [
+    &[1, 4, 5, 7, 9, 10, 11, 12, 16, 19, 20, 22, 24, 25, 26, 27],
+    &[1, 2, 4, 6, 7, 8, 9, 13, 16, 17, 19, 21, 22, 23, 24, 28],
+    &[2, 3, 5, 7, 8, 9, 10, 14, 17, 18, 20, 22, 23, 24, 25, 29],
+    &[3, 4, 6, 8, 9, 10, 11, 15, 18, 19, 21, 23, 24, 25, 26, 30],
+];
+
+fn stolen_parity(class2: &[u8]) -> [u8; 4] {
+    let mut out = [0u8; 4];
+    for (p, taps) in out.iter_mut().zip(STOLEN_CRC_TAPS) {
+        *p = taps.iter().fold(0, |acc, &t| acc ^ class2[t as usize - 1]);
     }
+    out
+}
+
+fn class2_parity(class2: &[u8]) -> [u8; 8] {
     let mut out = [0u8; 8];
-    out[..7].copy_from_slice(&reg);
-    let mut overall = 0u8;
-    for &b in bits {
-        overall ^= b;
+    for (p, taps) in out.iter_mut().zip(CRC_TAPS) {
+        *p = taps.iter().fold(0, |acc, &t| acc ^ class2[t as usize - 1]);
     }
-    for &p in &reg {
-        overall ^= p;
-    }
-    out[7] = overall;
     out
 }
 
@@ -181,8 +215,7 @@ pub fn encode(
         type2[TYPE2_B[n] as usize] = frame_b[n];
     }
     // The 60 class-2 speech bits carry the CRC in bits 274..282.
-    let class2_speech: Vec<u8> = (214..274).map(|i| type2[i]).collect();
-    let crc = crc7(&class2_speech);
+    let crc = class2_parity(&type2[CLASS0 + CLASS1..]);
     for (i, &p) in crc.iter().enumerate() {
         type2[TYPE2_PARITY[i] as usize] = p;
     }
@@ -196,9 +229,7 @@ pub fn encode(
     type3[CLASS0..CLASS0 + p1.len()].copy_from_slice(&p1);
     type3[CLASS0 + p1.len()..].copy_from_slice(&p2);
 
-    let type4 = matrix_interleave(&type3);
-    let mut type5 = vec![0u8; CHAN_BITS];
-    coding::interleave(103, &type4, &mut type5);
+    let mut type5 = matrix_interleave(&type3);
     coding::scramble(scramb, &mut type5);
     let mut out = [0u8; CHAN_BITS];
     out.copy_from_slice(&type5);
@@ -209,10 +240,8 @@ pub fn encode(
 /// with a flag for whether the class-2 CRC checked. `chan` is the burst's two
 /// 216-bit blocks concatenated, exactly what `TetraRx` hands the SCH/F.
 pub fn decode(scramb: u32, chan: &[u8; CHAN_BITS]) -> ([[u8; FRAME_BITS]; 2], bool) {
-    let mut type5 = chan.to_vec();
-    coding::scramble(scramb, &mut type5);
-    let mut type4 = vec![0u8; CHAN_BITS];
-    coding::deinterleave(103, &type5, &mut type4);
+    let mut type4 = chan.to_vec();
+    coding::scramble(scramb, &mut type4);
     let type3 = matrix_deinterleave(&type4);
 
     let class1 = &type3[CLASS0..CLASS0 + 168];
@@ -225,8 +254,7 @@ pub fn decode(scramb: u32, chan: &[u8; CHAN_BITS]) -> ([[u8; FRAME_BITS]; 2], bo
     type2[..CLASS0].copy_from_slice(&type3[..CLASS0]);
     type2[CLASS0..].copy_from_slice(&decoded);
 
-    let class2_speech: Vec<u8> = (214..274).map(|i| type2[i]).collect();
-    let crc = crc7(&class2_speech);
+    let crc = class2_parity(&type2[CLASS0 + CLASS1..]);
     let crc_ok = TYPE2_PARITY.iter().zip(crc.iter()).all(|(&i, &p)| type2[i as usize] == p);
 
     let mut frames = [[0u8; FRAME_BITS]; 2];
@@ -235,6 +263,51 @@ pub fn decode(scramb: u32, chan: &[u8; CHAN_BITS]) -> ([[u8; FRAME_BITS]; 2], bo
         frames[1][n] = type2[TYPE2_B[n] as usize];
     }
     (frames, crc_ok)
+}
+
+pub fn encode_stolen(scramb: u32, frame_b: &[u8; FRAME_BITS]) -> [u8; HALF_BITS] {
+    let mut type2 = [0u8; STOLEN_TYPE2];
+    for n in 0..FRAME_BITS {
+        type2[TYPE2_STOLEN[n] as usize] = frame_b[n];
+    }
+    let crc = stolen_parity(&type2[STOLEN_CLASS0 + STOLEN_CLASS1..]);
+    for (i, &p) in crc.iter().enumerate() {
+        type2[TYPE2_STOLEN_PARITY[i] as usize] = p;
+    }
+    let mut type3 = type2[..STOLEN_CLASS0].to_vec();
+    let mother = conv_encode(&type2[STOLEN_CLASS0..]);
+    let (m1, m2) = mother.split_at(STOLEN_CLASS1 * 3);
+    type3.extend(puncture(m1, PUNCT1_PERIOD, &PUNCT1_KEEP));
+    type3.extend(puncture(m2, STOLEN_PUNCT2_PERIOD, &STOLEN_PUNCT2_KEEP));
+    let mut type5 = [0u8; HALF_BITS];
+    coding::interleave(STOLEN_INTERLEAVE, &type3, &mut type5);
+    coding::scramble(scramb, &mut type5);
+    type5
+}
+
+pub fn decode_stolen(scramb: u32, half: &[u8; HALF_BITS]) -> ([u8; FRAME_BITS], bool) {
+    let mut type4 = half.to_vec();
+    coding::scramble(scramb, &mut type4);
+    let mut type3 = vec![0u8; HALF_BITS];
+    coding::deinterleave(STOLEN_INTERLEAVE, &type4, &mut type3);
+
+    let coded1 = STOLEN_CLASS1 * 3 / 2;
+    let class1 = &type3[STOLEN_CLASS0..STOLEN_CLASS0 + coded1];
+    let class2 = &type3[STOLEN_CLASS0 + coded1..];
+    let mut mother = depuncture(class1, STOLEN_CLASS1 * 3, PUNCT1_PERIOD, &PUNCT1_KEEP);
+    mother.extend(depuncture(class2, STOLEN_CLASS2 * 3, STOLEN_PUNCT2_PERIOD, &STOLEN_PUNCT2_KEEP));
+    let decoded = viterbi(&mother, STOLEN_CONV_IN);
+
+    let mut type2 = type3[..STOLEN_CLASS0].to_vec();
+    type2.extend_from_slice(&decoded);
+    let crc = stolen_parity(&type2[STOLEN_CLASS0 + STOLEN_CLASS1..]);
+    let crc_ok = TYPE2_STOLEN_PARITY.iter().zip(crc.iter()).all(|(&i, &p)| type2[i as usize] == p);
+
+    let mut frame = [0u8; FRAME_BITS];
+    for (n, bit) in frame.iter_mut().enumerate() {
+        *bit = type2[TYPE2_STOLEN[n] as usize];
+    }
+    (frame, crc_ok)
 }
 
 #[cfg(test)]
@@ -273,13 +346,28 @@ mod tests {
         // Flip a few on-channel bits; the matrix interleave spreads them, and
         // the RCPC-protected classes should still decode. Class 1 (rate 2/3)
         // is the weakest, so this stays within what one block can absorb.
-        for i in [44usize, 200, 360] {
-            chan[i] ^= 1;
+        for type3 in [120usize, 250, 400] {
+            chan[(type3 % 18) * 24 + type3 / 18] ^= 1;
         }
         let (frames, crc_ok) = decode(scramb, &chan);
         assert!(crc_ok, "CRC holds through a few errors");
         assert_eq!(frames[0], a);
         assert_eq!(frames[1], b);
+    }
+
+    #[test]
+    fn a_stolen_half_slot_round_trips_frame_b() {
+        let scramb = coding::scramb_init(424, 10, 15);
+        let b = frame(5);
+        let mut half = encode_stolen(scramb, &b);
+        let (got, crc_ok) = decode_stolen(scramb, &half);
+        assert!(crc_ok);
+        assert_eq!(got, b);
+        half[10] ^= 1;
+        half[150] ^= 1;
+        let (got, crc_ok) = decode_stolen(scramb, &half);
+        assert!(crc_ok, "CRC holds through two channel errors");
+        assert_eq!(got, b);
     }
 
     #[test]

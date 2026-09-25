@@ -154,6 +154,20 @@ struct Traffic {
     reported: bool,
 }
 
+struct SlotMarkers {
+    before: HashMap<u8, u8>,
+    changes: Vec<(u64, u8, Option<u8>)>,
+}
+
+impl SlotMarkers {
+    fn at(&self, slot: u64, tn: u8) -> Option<u8> {
+        match self.changes.iter().rev().find(|(s, t, _)| *t == tn && *s <= slot) {
+            Some((_, _, marker)) => *marker,
+            None => self.before.get(&tn).copied(),
+        }
+    }
+}
+
 /// Ring of channel samples behind the demodulator, in slots. A burst is
 /// reported once its whole slot is in the demodulator's buffer, which
 /// holds a slot of history, so a few slots is plenty.
@@ -607,6 +621,7 @@ impl TetraNode {
     fn decode_voice(
         &mut self,
         bursts: &[Burst],
+        markers: &SlotMarkers,
         per_burst: &mut Vec<VoiceBurst>,
     ) -> Vec<common::Voice> {
         let Some(cell) = self.rx.cell else {
@@ -615,29 +630,34 @@ impl TetraNode {
         let keyed = self.crypto.can_decrypt(cell.colour);
         let mut pcm: HashMap<u8, Vec<f32>> = HashMap::new();
         let mut seen_tn: Vec<u8> = Vec::new();
+        let mut spoken_as: HashMap<u8, u8> = HashMap::new();
 
         for (burst_index, b) in bursts.iter().enumerate() {
-            if b.kind != BurstKind::Normal1 {
+            if b.kind == BurstKind::Sync {
                 continue;
             }
             let Some(time) = self.rx.time_at(b.slot) else {
                 continue;
             };
             let tn = time.tn;
-            let Some(marker) = self.traffic.get(&tn).map(|t| t.marker) else {
+            if time.frame == 18 {
+                continue;
+            }
+            let Some(marker) = markers.at(b.slot, tn) else {
                 continue;
             };
-            let mut chan = [0u8; speech::CHAN_BITS];
-            chan[..216].copy_from_slice(&b.bits[NDB_BLK1..NDB_BB1]);
-            chan[216..].copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + 216]);
-            let (mut frames, crc_ok) = speech::decode(cell.scramb, &chan);
+            let Some((mut frames, bad)) = speech_in(b, cell.scramb) else {
+                continue;
+            };
+            let crc_ok = !bad[1];
+            spoken_as.insert(tn, marker);
 
             // What the frames say about this slot. The LSP watch runs on
             // frames that are going to be played as they are: a keyed slot
             // is decrypted first, and its watch is never consulted.
             if !keyed {
                 let watch = self.lsp_by_tn.entry(tn).or_insert_with(LspWatch::new);
-                for f in &frames {
+                for f in frames.iter().zip(bad).filter(|(_, bad)| !bad).map(|(f, _)| f) {
                     let parm = decode::vocoder::Decoder::frame_to_parm(f);
                     watch.observe([parm[0] as u16, parm[1] as u16, parm[2] as u16]);
                 }
@@ -671,8 +691,8 @@ impl TetraNode {
             let dec = self.voice_calls.entry(tn).or_default();
             let buf = pcm.entry(tn).or_default();
             let mut mine = Vec::new();
-            for frame in &frames {
-                let samples = dec.frame(frame, !crc_ok);
+            for (frame, bad) in frames.iter().zip(bad) {
+                let samples = dec.frame(frame, bad);
                 mine.extend(samples.iter().map(|&s| s as f32 / 32768.0));
             }
             buf.extend_from_slice(&mine);
@@ -702,7 +722,7 @@ impl TetraNode {
                 // used to come through with no name at all, and the bus drops
                 // speech with nobody to match it against: a clear call was
                 // listed, ticked, and never heard.
-                let marker = self.traffic.get(&tn).map(|t| t.marker);
+                let marker = spoken_as.get(&tn).copied();
                 let to = marker.map(|m| match self.markers.get(&m) {
                     Some(ssi) => ssi.to_string(),
                     None => format!("marker {m}"),
@@ -814,6 +834,10 @@ impl Node for TetraNode {
         let slot_starts: Vec<(u64, u64)> =
             self.bursts.iter().map(|b| (b.slot, b.start_sample)).collect();
 
+        let mut markers = SlotMarkers {
+            before: self.traffic.iter().map(|(tn, t)| (*tn, t.marker)).collect(),
+            changes: Vec::new(),
+        };
         let out = outputs[OUT_PACKETS].packets_mut();
         // Every block's event, then the traffic the access assign fields
         // describe, as events of the node's own.
@@ -827,6 +851,10 @@ impl Node for TetraNode {
                 Event::Aach(a) => {
                     let mut made = Vec::new();
                     self.follow_traffic(&a, block.slot, &mut made);
+                    if let Some(t) = a.time {
+                        let now = self.traffic.get(&t.tn).map(|r| r.marker);
+                        markers.changes.push((block.slot, t.tn, now));
+                    }
                     events.extend(made.into_iter().map(|e| (e, block.slot)));
                 }
                 Event::Sysinfo(si) => {
@@ -938,7 +966,7 @@ impl Node for TetraNode {
         // for the bus and one packet per burst for the log.
         let bursts = std::mem::take(&mut self.bursts);
         let mut per_burst = Vec::new();
-        let voices = self.decode_voice(&bursts, &mut per_burst);
+        let voices = self.decode_voice(&bursts, &markers, &mut per_burst);
         for vb in per_burst {
             let b = &bursts[vb.burst_index];
             self.accepted += 1;
@@ -974,6 +1002,30 @@ impl Node for TetraNode {
         self.lsp_by_tn.clear();
         self.voice_calls.clear();
         self.crypto.reset();
+    }
+}
+
+fn speech_in(b: &Burst, scramb: u32) -> Option<([[u8; speech::FRAME_BITS]; 2], [bool; 2])> {
+    match b.kind {
+        BurstKind::Normal1 => {
+            let mut chan = [0u8; speech::CHAN_BITS];
+            chan[..216].copy_from_slice(&b.bits[NDB_BLK1..NDB_BB1]);
+            chan[216..].copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + 216]);
+            let (frames, crc_ok) = speech::decode(scramb, &chan);
+            Some((frames, [!crc_ok; 2]))
+        }
+        BurstKind::Normal2 => {
+            let mut half = [0u8; speech::HALF_BITS];
+            half.copy_from_slice(&b.bits[NDB_BLK2..NDB_BLK2 + speech::HALF_BITS]);
+            if dsp::tetra::coding::decode_block(&dsp::tetra::coding::BLK_HALF, scramb, &half)
+                .is_some()
+            {
+                return None;
+            }
+            let (frame_b, crc_ok) = speech::decode_stolen(scramb, &half);
+            Some(([[0; speech::FRAME_BITS], frame_b], [true, !crc_ok]))
+        }
+        BurstKind::Sync => None,
     }
 }
 
