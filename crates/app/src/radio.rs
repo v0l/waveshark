@@ -7564,10 +7564,11 @@ mod zoom_tests {
             ),
             (
                 "zigbee_join_ch11_2405M_8000k.cs8",
-                "four front ends over one 8 MS/s channel, as means in a 16.4 ms block: \
-                 802.15.4 4.9 ms, BLE on advertising channel 37 4.1, the burst router 2.4, \
-                 which is 13 at the 95th percentile and makes the worst blocks, and nRF24 \
-                 1.7",
+                "four front ends over one 8 MS/s channel, 8 ms of a 16.4 ms block at the \
+                 median. By perf, BLE on advertising channel 37 and 802.15.4 take 7% of the \
+                 samples each, the burst router 3% and nRF24 2%; the bench's own per front \
+                 end figures are wall time inside rayon tasks and count work stolen while a \
+                 task waits, which once made the router look like the worst of them",
             ),
             (
                 "pal_camera_5865M_20000k.cs8",
