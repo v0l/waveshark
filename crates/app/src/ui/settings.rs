@@ -2047,8 +2047,8 @@ impl App {
                     .add_enabled(!scanning, egui::Button::new("DETECT").small())
                     .on_hover_text(
                         "Opens each USB serial port in turn and asks for a modem's INFO. \
-                         A port another program is reading cannot be opened, so close \
-                         anything holding one first.",
+                         A port another program has open is left alone, so close it \
+                         first if the modem is on it.",
                     )
                     .clicked()
                 {

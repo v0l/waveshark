@@ -281,6 +281,12 @@ impl<T: Read> Read for Feed<T> {
 /// `READY` and any other frame the modem volunteers are ignored; only `INFO`
 /// answers this.
 pub fn probe(path: &str, baud: u32, timeout: Duration) -> std::io::Result<Info> {
+    if held_elsewhere(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ResourceBusy,
+            format!("{path} is open in another process"),
+        ));
+    }
     let mut port = crate::source::open_port(path, baud, Duration::from_millis(200))?;
     let mut frames = Frames::new();
     let mut buf = [0u8; 512];
@@ -301,6 +307,30 @@ pub fn probe(path: &str, baud: u32, timeout: Duration) -> std::io::Result<Info> 
         }
     }
     Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "no modem answered"))
+}
+
+#[cfg(target_os = "linux")]
+fn held_elsewhere(path: &str) -> bool {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let me = std::process::id().to_string();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|p| {
+            p.file_name().to_str().is_some_and(|n| n != me && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter_map(|p| std::fs::read_dir(p.path().join("fd")).ok())
+        .flatten()
+        .flatten()
+        .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|l| l == target))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn held_elsewhere(_path: &str) -> bool {
+    false
 }
 
 /// How long a probe waits for one port. Two seconds covers an ESP32 that the
@@ -344,30 +374,142 @@ pub fn candidates() -> Vec<String> {
 /// long as it runs, which is not something to do to an operator's own GPS
 /// behind their back.
 pub fn discover() -> Vec<Found> {
-    let workers: Vec<_> = candidates()
-        .into_iter()
-        .map(|path| {
-            std::thread::spawn(move || {
-                let info = probe(&path, BAUD, PROBE);
-                match info {
-                    Ok(info) => {
-                        tracing::info!("modem on {path}: {}", info.summary());
-                        Some(Found { transport: Transport::Modem { path, baud: BAUD }, info })
-                    }
-                    Err(e) => {
-                        tracing::debug!("no modem on {path}: {e}");
-                        None
-                    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ports = candidates();
+    for path in ports.iter().cloned() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let found = match probe(&path, BAUD, PROBE) {
+                Ok(info) => {
+                    tracing::info!("modem on {path}: {}", info.summary());
+                    Some(Found { transport: Transport::Modem { path, baud: BAUD }, info })
                 }
-            })
-        })
-        .collect();
-    workers.into_iter().filter_map(|w| w.join().ok().flatten()).collect()
+                Err(e) => {
+                    tracing::debug!("no modem on {path}: {e}");
+                    None
+                }
+            };
+            let _ = tx.send(found);
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + PROBE + Duration::from_secs(1);
+    let mut found = Vec::new();
+    for _ in &ports {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(f) => found.extend(f),
+            Err(_) => break,
+        }
+    }
+    found.sort_by(|a, b| a.transport.to_string().cmp(&b.transport.to_string()));
+    found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn pty() -> (std::fs::File, String) {
+        use std::os::unix::io::FromRawFd;
+        unsafe {
+            let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(m >= 0, "posix_openpt: {}", std::io::Error::last_os_error());
+            assert_eq!(libc::grantpt(m), 0);
+            assert_eq!(libc::unlockpt(m), 0);
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(m)).to_string_lossy().into_owned();
+            (std::fs::File::from_raw_fd(m), name)
+        }
+    }
+
+    #[cfg(unix)]
+    fn ospeed(path: &str) -> libc::speed_t {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(path)
+            .expect("the pty");
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(f.as_raw_fd(), &mut t), 0);
+            libc::cfgetospeed(&t)
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_ospeed(path: &str, speed: libc::speed_t) {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(path)
+            .expect("the pty");
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(f.as_raw_fd(), &mut t), 0);
+            libc::cfsetospeed(&mut t, speed);
+            libc::cfsetispeed(&mut t, speed);
+            assert_eq!(libc::tcsetattr(f.as_raw_fd(), libc::TCSANOW, &t), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probed_port_is_handed_back_at_the_speed_it_was_found() {
+        let (_master, slave) = pty();
+        set_ospeed(&slave, libc::B9600);
+        let started = Instant::now();
+        let e = probe(&slave, BAUD, Duration::from_millis(300)).expect_err("nothing answers");
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+        assert_eq!(ospeed(&slave), libc::B9600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_port_held_by_a_reader_is_not_taken_twice() {
+        let (_master, slave) = pty();
+        let held = crate::source::open_port(&slave, BAUD, Duration::from_millis(200))
+            .expect("the first open");
+        assert_eq!(ospeed(&slave), libc::B115200);
+        let e = crate::source::open_port(&slave, BAUD, Duration::from_millis(200))
+            .err()
+            .expect("the second open to fail");
+        assert_eq!(e.kind(), std::io::ErrorKind::ResourceBusy);
+        drop(held);
+        assert!(crate::source::open_port(&slave, BAUD, Duration::from_millis(200)).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_port_another_process_has_open_is_not_probed() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let (_master, slave) = pty();
+        set_ospeed(&slave, libc::B4800);
+        let stdin = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&slave)
+            .expect("the pty");
+        let mut other = std::process::Command::new("sleep")
+            .arg("10")
+            .stdin(stdin)
+            .spawn()
+            .expect("sleep");
+        let started = Instant::now();
+        let e = probe(&slave, BAUD, PROBE).expect_err("a held port");
+        let _ = other.kill();
+        let _ = other.wait();
+        assert_eq!(e.kind(), std::io::ErrorKind::ResourceBusy);
+        assert!(started.elapsed() < Duration::from_millis(500), "took {:?}", started.elapsed());
+        assert_eq!(ospeed(&slave), libc::B4800);
+    }
 
     /// The frame `tools/modem.py` writes for `info`, byte for byte.
     #[test]

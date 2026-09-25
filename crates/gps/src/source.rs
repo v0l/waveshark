@@ -382,11 +382,46 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
 /// `idle` ends a read that has seen nothing, so a port with nothing on it
 /// does not hang the thread forever. A feed wants ten seconds of patience; a
 /// probe wants a fifth of a second and several tries.
+pub(crate) struct Port {
+    file: std::fs::File,
+    #[cfg(unix)]
+    was: libc::termios,
+}
+
+impl Read for Port {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Write for Port {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 #[cfg(unix)]
-pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<std::fs::File> {
+impl Drop for Port {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        let fd = self.file.as_raw_fd();
+        // SAFETY: `fd` is open until `file` drops after this, and `was` is the
+        // termios `tcgetattr` filled in when the port was opened.
+        unsafe {
+            libc::tcflush(fd, libc::TCIOFLUSH);
+            libc::tcsetattr(fd, libc::TCSANOW, &self.was);
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<Port> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
-    let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
-    let fd = file.as_raw_fd();
     let speed = match baud {
         4_800 => libc::B4800,
         9_600 => libc::B9600,
@@ -401,13 +436,26 @@ pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Resul
             ));
         }
     };
-    // SAFETY: `fd` is open for the lifetime of `file`, and `tty` is a valid
-    // termios the calls only ever fill in or read.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` is open for the lifetime of `file`, and `tty` and `was`
+    // are valid termios the calls only ever fill in or read.
     unsafe {
-        let mut tty: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut tty) != 0 {
+        if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                format!("{path} is in use"),
+            ));
+        }
+        let mut was: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut was) != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let mut tty = was;
         libc::cfmakeraw(&mut tty);
         libc::cfsetispeed(&mut tty, speed);
         libc::cfsetospeed(&mut tty, speed);
@@ -420,8 +468,13 @@ pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Resul
         if libc::tcsetattr(fd, libc::TCSANOW, &tty) != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        let port = Port { file, was };
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(port)
     }
-    Ok(file)
 }
 
 /// The same port on Windows: a DCB instead of a termios, and read timeouts
@@ -431,7 +484,7 @@ pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Resul
 /// whatever the driver was installed with; only the four things NMEA fixes
 /// are written, and a driver that wanted RTS/CTS keeps it.
 #[cfg(windows)]
-pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<Port> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Devices::Communication::{
         COMMTIMEOUTS, DCB, GetCommState, SetCommState, SetCommTimeouts,
@@ -470,7 +523,7 @@ pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Resul
             return Err(std::io::Error::last_os_error());
         }
     }
-    Ok(file)
+    Ok(Port { file })
 }
 
 #[cfg(test)]
