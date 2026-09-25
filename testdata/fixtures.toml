@@ -1247,3 +1247,34 @@ What it holds is real traffic and names people: ship earth station ids, the
 land earth stations that served them, the addresses of email confirmations
 and the text of an enhanced group call broadcast, all sent in the clear.
 """
+
+[[capture]]
+name = "drm_b_3.965M_48k.cs16"
+sha256 = "39642bc51c32898e22547e27adb91b51a15fd8539a5caf3eb0e7d508f0df053a"
+url = "https://nostr.download/39642bc51c32898e22547e27adb91b51a15fd8539a5caf3eb0e7d508f0df053a.xz"
+compression = "xz"
+center_hz = 3_965_000
+rate_sps = 48_000
+format = "cs16"
+license = "unstated"
+license_source = "Signal Identification Wiki, DRM_B.zip uploaded by Voxo on 15 February 2026, converted and tuned here"
+description = """
+Not this project's recording: 30 seconds of a DRM mode B transmission from
+the Signal Identification Wiki's `DRM_B.zip`, uploaded by Voxo on 15
+February 2026, 48 kS/s of 24-bit IQ with the signal 12 kHz above the centre.
+Converted here to 16-bit and mixed down by 12 kHz so the channel sits at the
+centre, which is a tuned view rather than the original samples. The wiki
+gives no frequency, so the 3.965 MHz in the name is the receiver's default
+inside the band DRM is allocated, not where it was recorded.
+
+Dream built from danielantoniazzi/dream-drm at e3e104c, reading the original
+24-bit file as positive IQ, reports service 3EE, German, science, labelled
+Spark, in a 10 kHz mode B multiplex whose description channel is sent in
+16-QAM. `crates/identify/tests/captures.rs` asserts the same service and
+label, all 71 frames' fast access channels and 23 description channels. This
+capture is what found that the description channel was never tried off air,
+because a frame identity of 11 was not taken as the first frame, and that
+16-QAM description channels were not read at all.
+
+Nothing in it names a person.
+"""

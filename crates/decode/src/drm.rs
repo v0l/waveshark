@@ -228,6 +228,8 @@ pub struct Service {
     pub programme: ProgrammeType,
 }
 
+const FIRST_WITHOUT_AFS: u32 = 3;
+
 /// A frame's fast access channel, read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fac {
@@ -276,7 +278,10 @@ impl Fac {
             _ => (0, 0),
         };
         Fac {
-            frame_id: field(v, 1, 2) as u8,
+            frame_id: match field(v, 1, 2) {
+                FIRST_WITHOUT_AFS => 0,
+                n => n as u8,
+            },
             occupancy: Occupancy::from_bits(field(v, 4, 3) as u8),
             long_interleave: v[7] == 0,
             msc: MscMode::from_bits(rm, field(v, 8, 2)),
@@ -452,6 +457,103 @@ pub fn sdc(cells: &[C32], mode: Mode, occ: Occupancy) -> Option<Sdc> {
         return None;
     }
     Some(entities(&framed, length))
+}
+
+pub fn sdc_qam16(cells: &[C32], mode: Mode, occ: Occupancy) -> Option<Sdc> {
+    if cells.len() != dsp::drm::sdc_cells(mode, occ).len() {
+        return None;
+    }
+    let usable = 2 * cells.len() - 12;
+    let strong = usable / 3;
+    let weak = 2 * (usable / 3);
+    let tail = usable - 3 * (usable / 3);
+    let first = level(&qam16_soft(cells, None), QAM16_T0[0], &QAM16_PUNCTURE[0], tail, strong)?;
+    let sign = level_bits(&first, QAM16_T0[0], &QAM16_PUNCTURE[0], tail, 2 * cells.len());
+    let second =
+        level(&qam16_soft(cells, Some(&sign)), QAM16_T0[1], &QAM16_PUNCTURE[1], tail, weak)?;
+    let mut bits = first;
+    bits.extend(second);
+    for (b, d) in bits.iter_mut().zip(dispersal(strong + weak)) {
+        *b ^= d;
+    }
+    let length = 4 + 8 * ((strong + weak - 20) / 8) + 16;
+    let mut framed = vec![0u8; 4];
+    framed.extend_from_slice(&bits[..length]);
+    let bytes_in = bits_to_bytes(&framed);
+    let split = bytes_in.len() - 2;
+    let sent = u16::from_be_bytes([bytes_in[split], bytes_in[split + 1]]);
+    if crc16(&bytes_in[..split], 0x1021, 0xFFFF) != !sent {
+        return None;
+    }
+    Some(entities(&framed, length))
+}
+
+const QAM16_A: f32 = 0.316_227_77;
+
+const QAM16_T0: [usize; 2] = [13, 21];
+
+const QAM16_PUNCTURE: [&[u8]; 2] = [&[1, 1, 1, 0, 0, 0], &[1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]];
+
+const TAIL_B2: [[u8; 6]; 7] = [
+    [0, 0, 0, 0, 0, 0],
+    [1, 0, 0, 0, 0, 0],
+    [1, 0, 0, 1, 0, 0],
+    [1, 1, 0, 1, 0, 0],
+    [1, 1, 0, 1, 1, 0],
+    [1, 1, 1, 1, 1, 0],
+    [1, 1, 1, 1, 1, 1],
+];
+
+fn full_mask(data: &[u8], tail: usize, info_bits: usize) -> Vec<u8> {
+    let period = data.len() / 6;
+    let mut mask: Vec<u8> =
+        (0..info_bits).flat_map(|b| data[(b % period) * 6..][..6].iter().copied()).collect();
+    for t in 0..6 {
+        mask.extend_from_slice(&[1, 1, TAIL_B2[tail][t], 0, 0, 0]);
+    }
+    mask
+}
+
+fn qam16_soft(cells: &[C32], sign: Option<&[u8]>) -> Vec<f32> {
+    let a = QAM16_A;
+    let near = |x: f32, p: f32, q: f32| ((x - p) * (x - p)).min((x - q) * (x - q));
+    let mut out = Vec::with_capacity(2 * cells.len());
+    for (i, x) in cells.iter().flat_map(|c| [c.re, c.im]).enumerate() {
+        out.push(match sign.map(|s| s[i]) {
+            None => near(x, a, -3.0 * a) - near(x, 3.0 * a, -a),
+            Some(0) => (x + a) * (x + a) - (x - 3.0 * a) * (x - 3.0 * a),
+            Some(_) => (x + 3.0 * a) * (x + 3.0 * a) - (x - a) * (x - a),
+        });
+    }
+    out
+}
+
+fn level(soft: &[f32], t0: usize, data: &[u8], tail: usize, info_bits: usize) -> Option<Vec<u8>> {
+    let map = interleave(soft.len(), t0);
+    let mut ordered = vec![0.0f32; soft.len()];
+    for (i, &v) in soft.iter().enumerate() {
+        ordered[map[i]] = v;
+    }
+    let mask = full_mask(data, tail, info_bits);
+    let mut bits = conv::Viterbi::decode_block(
+        conv::DRM_1_6,
+        &ordered,
+        &mask,
+        info_bits + 6,
+        conv::Ends::Zero,
+    );
+    bits.truncate(info_bits);
+    (bits.len() == info_bits).then_some(bits)
+}
+
+fn level_bits(info: &[u8], t0: usize, data: &[u8], tail: usize, coded: usize) -> Vec<u8> {
+    let mut with_tail = info.to_vec();
+    with_tail.extend(std::iter::repeat_n(0u8, 6));
+    let mask = full_mask(data, tail, info.len());
+    let mut sent = conv::Encoder::new(conv::DRM_1_6).punctured(&with_tail, &mask);
+    sent.resize(coded, 0);
+    let map = interleave(coded, t0);
+    map.iter().map(|&i| sent[i]).collect()
 }
 
 /// The cells a transmitter would send for one description channel.
@@ -673,12 +775,12 @@ impl DrmReceiver {
             return;
         }
         let Some(occ) = fac.occupancy else { return };
-        if fac.sdc == SdcMode::Qam16 {
-            self.stats.sdc_skipped += 1;
-            return;
-        }
         let cells = frame.cells(&drm::sdc_cells(mode, occ));
-        let Some(sdc) = sdc(&cells, mode, occ) else { return };
+        let read = match fac.sdc {
+            SdcMode::Qam4 => sdc(&cells, mode, occ),
+            SdcMode::Qam16 => sdc_qam16(&cells, mode, occ),
+        };
+        let Some(sdc) = read else { return };
         self.stats.sdc_ok += 1;
         for (short_id, label) in sdc.labels {
             match self.multiplex.labels.iter_mut().find(|(id, _)| *id == short_id) {

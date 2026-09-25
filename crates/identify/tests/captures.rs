@@ -323,3 +323,44 @@ fn an_inmarsat_c_tdm_reads_as_stdcdec_read_it() {
     let rows = identify::stdc::Stdc.read(&buf.samples, rate, center).rows;
     assert_eq!(rows.len(), 55, "every packet of the four frames");
 }
+
+#[test]
+fn a_drm_mode_b_recording_is_the_service_dream_read() {
+    let Some(buf) = fixture("drm_b_3.965M_48k.cs16") else { return };
+    let (rate, center) = (buf.rate.as_f64(), buf.center.as_f64());
+    let (factor, mut resample) = dsp::resample::stage(rate, identify::drm::RATE_HZ, 4096).unwrap();
+    let mut chan = identify::Channel::new(
+        rate,
+        center,
+        center,
+        identify::drm::CHANNEL_WIDTH_HZ,
+        rate / factor as f64,
+    )
+    .unwrap();
+    let mut rx = decode::drm::DrmReceiver::new(dsp::drm::Mode::B);
+    let (mut narrow, mut at) = (Vec::new(), Vec::new());
+    for b in buf.samples.chunks(8192) {
+        chan.process(b, &mut narrow);
+        match resample.as_mut() {
+            Some(r) => {
+                at.clear();
+                r.process(&narrow, &mut at);
+                rx.push(&at);
+            }
+            None => {
+                rx.push(&narrow);
+            }
+        }
+    }
+    assert_eq!((rx.stats.frames, rx.stats.fac_ok), (71, 71));
+    assert_eq!(rx.stats.sdc_ok, 23, "every super frame's 16-QAM description channel");
+    let m = rx.multiplex();
+    assert_eq!(m.services.len(), 1);
+    let s = m.services[0];
+    assert_eq!(
+        (s.id, s.language, s.programme, s.audio),
+        (0x3EE, decode::drm::Language::German, decode::dab::ProgrammeType::Science, true),
+        "Dream at e3e104c read service 3EE, German, science"
+    );
+    assert_eq!(m.label(0), Some("Spark"), "Dream at e3e104c read the label Spark");
+}
