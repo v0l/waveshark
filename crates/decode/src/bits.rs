@@ -917,6 +917,114 @@ pub fn crc8le(data: &[u8], poly: u8, init: u8) -> u8 {
     crc
 }
 
+pub struct Osd {
+    rows: Vec<Vec<u64>>,
+    bits: usize,
+}
+
+impl Osd {
+    pub fn new(generator: &[Vec<bool>]) -> Self {
+        let bits = generator.first().map_or(0, Vec::len);
+        let rows = generator
+            .iter()
+            .map(|row| {
+                let mut words = vec![0u64; bits.div_ceil(64)];
+                for (i, &b) in row.iter().enumerate() {
+                    if b {
+                        words[i / 64] |= 1 << (i % 64);
+                    }
+                }
+                words
+            })
+            .collect();
+        Self { rows, bits }
+    }
+
+    pub fn decode(
+        &self,
+        llr: &[f32],
+        pairs_from: usize,
+        max_hard_errors: usize,
+        mut accept: impl FnMut(&[bool]) -> bool,
+    ) -> Option<(Vec<bool>, usize)> {
+        let n = self.bits;
+        let words = n.div_ceil(64);
+        let bit = |w: &[u64], i: usize| w[i / 64] >> (i % 64) & 1 == 1;
+        let mut hard = vec![0u64; words];
+        for (i, &v) in llr.iter().take(n).enumerate() {
+            if v > 0.0 {
+                hard[i / 64] |= 1 << (i % 64);
+            }
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| llr[b].abs().total_cmp(&llr[a].abs()));
+        let mut rows = self.rows.clone();
+        let mut pivot: Vec<Option<usize>> = vec![None; rows.len()];
+        let mut found = 0;
+        for &col in &order {
+            if found == rows.len() {
+                break;
+            }
+            let Some(r) = (0..rows.len()).find(|&r| pivot[r].is_none() && bit(&rows[r], col))
+            else {
+                continue;
+            };
+            pivot[r] = Some(col);
+            found += 1;
+            let lead = rows[r].clone();
+            for (r2, row) in rows.iter_mut().enumerate() {
+                if r2 != r && bit(row, col) {
+                    row.iter_mut().zip(&lead).for_each(|(a, b)| *a ^= b);
+                }
+            }
+        }
+        let pivots: Vec<(usize, usize)> =
+            pivot.iter().enumerate().filter_map(|(r, c)| c.map(|c| (r, c))).collect();
+        let mut base = vec![0u64; words];
+        for &(r, c) in &pivots {
+            if bit(&hard, c) {
+                base.iter_mut().zip(&rows[r]).for_each(|(a, b)| *a ^= b);
+            }
+        }
+        let mut by_trust = pivots.clone();
+        by_trust.sort_by(|a, b| llr[a.1].abs().total_cmp(&llr[b.1].abs()));
+        let weak: Vec<usize> = by_trust.iter().take(pairs_from).map(|p| p.0).collect();
+        let mut flips: Vec<Vec<usize>> = vec![Vec::new()];
+        flips.extend(pivots.iter().map(|p| vec![p.0]));
+        for (i, &a) in weak.iter().enumerate() {
+            for &b in &weak[i + 1..] {
+                flips.push(vec![a, b]);
+            }
+        }
+        let mut scored: Vec<(f32, usize, Vec<u64>)> = flips
+            .into_iter()
+            .map(|flip| {
+                let mut word = base.clone();
+                for r in flip {
+                    word.iter_mut().zip(&rows[r]).for_each(|(a, b)| *a ^= b);
+                }
+                let (mut metric, mut errors) = (0.0f32, 0usize);
+                for i in 0..n {
+                    if bit(&word, i) != bit(&hard, i) {
+                        metric += llr[i].abs();
+                        errors += 1;
+                    }
+                }
+                (metric, errors, word)
+            })
+            .filter(|(_, errors, _)| *errors <= max_hard_errors)
+            .collect();
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, errors, word) in scored {
+            let out: Vec<bool> = (0..n).map(|i| bit(&word, i)).collect();
+            if accept(&out) {
+                return Some((out, errors));
+            }
+        }
+        None
+    }
+}
+
 /// A low-density parity-check code, held as the codeword bits each check
 /// covers.
 ///

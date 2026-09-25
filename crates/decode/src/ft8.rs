@@ -221,6 +221,23 @@ pub fn code() -> &'static Ldpc {
     CODE.get_or_init(|| Ldpc::new(&CHECKS, CODE_BITS))
 }
 
+pub fn osd() -> &'static crate::bits::Osd {
+    static OSD: std::sync::OnceLock<crate::bits::Osd> = std::sync::OnceLock::new();
+    OSD.get_or_init(|| {
+        let generator: Vec<Vec<bool>> = (0..MESSAGE_BITS)
+            .map(|i| {
+                let mut row = vec![false; CODE_BITS];
+                row[i] = true;
+                for (j, parity) in GENERATOR.iter().enumerate() {
+                    row[MESSAGE_BITS + j] = parity[i / 8] >> (7 - i % 8) & 1 != 0;
+                }
+                row
+            })
+            .collect();
+        crate::bits::Osd::new(&generator)
+    })
+}
+
 /// The check over a payload, as the transmitter computed it.
 pub fn crc14(payload: &[bool]) -> u16 {
     let mut bits = [false; CRC_OVER_BITS];
@@ -805,6 +822,16 @@ const BAND: (f64, f64) = (200.0, PASSBAND_HZ);
 /// reads seven, and 50 reads no more than 20 at four times the cost.
 const LDPC_PASSES: usize = 40;
 
+const PASSES: usize = 3;
+
+const OSD_PAIRS_FROM: usize = 20;
+
+const OSD_MAX_HARD_ERRORS: usize = 32;
+
+const ERASED_LLR: f32 = 0.5;
+
+const OSD_MAX_ERASED: f32 = 0.35;
+
 /// Bits as bytes, the first bit most significant, padded with zeros.
 pub fn pack(bits: &[bool]) -> Vec<u8> {
     bits.chunks(8)
@@ -827,33 +854,56 @@ pub fn read_slot(
     mode: Mode,
 ) -> Vec<Transmission> {
     let mut out: Vec<Transmission> = Vec::new();
-    for heard in slot.read(samples, BAND) {
-        let (bits, failed) = code().decode(&heard.llr, LDPC_PASSES);
-        if failed != 0 {
-            continue;
+    let wf = mode.waveform();
+    let mut work = samples.to_vec();
+    for _ in 0..PASSES {
+        let before = out.len();
+        let mut decoded = Vec::new();
+        read_pass(slot, &work, mode, &mut out, &mut decoded);
+        if out.len() == before {
+            break;
         }
-        // What was on the air, which for FT4 is the payload through its
-        // scrambling sequence: the check the station computed is over
-        // that, so undoing it here would fail the check.
+        for (bits, freq_hz, at_s) in decoded {
+            wf.subtract(&mut work, slot.rate(), &wf.tones(&bits), freq_hz, at_s);
+        }
+    }
+    out
+}
+
+fn read_pass(
+    slot: &mut dsp::mfsk::Slot,
+    samples: &[common::C32],
+    mode: Mode,
+    out: &mut Vec<Transmission>,
+    decoded: &mut Vec<(Vec<bool>, f64, f64)>,
+) {
+    let readable = |bits: &[bool]| {
         let message = &bits[..MESSAGE_BITS];
-        if !crc_ok(message) {
-            continue;
-        }
-        // And it has to say something. The all-zero codeword satisfies
-        // every check and carries a zero CRC, so weak soft bits settle
-        // on it and the payload layer is what refuses it.
         let mut payload = message.to_vec();
         if mode == Mode::Ft4 {
             scramble_ft4(&mut payload);
         }
-        if unpack(&payload).is_none() {
-            continue;
+        crc_ok(message) && unpack(&payload).is_some()
+    };
+    for heard in slot.read(samples, BAND) {
+        let (mut bits, failed) = code().decode(&heard.llr, LDPC_PASSES);
+        if failed != 0 || !readable(&bits) {
+            let erased = heard.llr.iter().filter(|v| v.abs() < ERASED_LLR).count();
+            if erased as f32 > OSD_MAX_ERASED * heard.llr.len() as f32 {
+                continue;
+            }
+            match osd().decode(&heard.llr, OSD_PAIRS_FROM, OSD_MAX_HARD_ERRORS, readable) {
+                Some((b, _)) => bits = b,
+                None => continue,
+            }
         }
+        let message = &bits[..MESSAGE_BITS];
         let mut bytes = vec![mode.tag()];
         bytes.extend(pack(message));
         if out.iter().any(|t| t.bytes == bytes) {
             continue;
         }
+        decoded.push((bits, heard.freq_hz, heard.at_s));
         out.push(Transmission {
             bytes,
             freq_hz: heard.freq_hz,
@@ -861,7 +911,6 @@ pub fn read_slot(
             at_s: heard.at_s,
         });
     }
-    out
 }
 
 /// One transmission read out of a window: what goes on the bus, where in the
@@ -1171,6 +1220,27 @@ mod tests {
                 .count();
             assert_eq!(read, want, "words read back at sigma {sigma}");
         }
+    }
+
+    #[test]
+    fn ten_thousand_words_of_noise_through_osd_are_not_a_message() {
+        let mut seed = 0x1319_8a2e_0370_7344u64;
+        let mut rng = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let readable = |bits: &[bool]| {
+            let message = &bits[..MESSAGE_BITS];
+            crc_ok(message) && unpack(message).is_some()
+        };
+        let mut read = 0;
+        for _ in 0..10_000 {
+            let llr: Vec<f32> = (0..CODE_BITS).map(|_| 4.0 * rng()).collect();
+            read += usize::from(
+                osd().decode(&llr, OSD_PAIRS_FROM, OSD_MAX_HARD_ERRORS, readable).is_some(),
+            );
+        }
+        assert_eq!(read, 0, "noise read as a message");
     }
 
     /// Soft bits off noise are not a message: the code converges on

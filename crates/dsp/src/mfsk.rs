@@ -61,6 +61,49 @@ impl Waveform {
     pub fn duration_s(&self) -> f64 {
         self.symbols as f64 / self.baud
     }
+
+    pub fn tones(&self, bits: &[bool]) -> Vec<u8> {
+        let mut tones = vec![0u8; self.symbols];
+        for group in self.sync {
+            tones[group.at..group.at + group.tones.len()].copy_from_slice(group.tones);
+        }
+        let per = self.bits_per_symbol();
+        let mut taken = 0usize;
+        for (from, to) in self.data {
+            for tone in tones.iter_mut().take(*to).skip(*from) {
+                let pattern =
+                    (0..per).fold(0usize, |acc, k| acc << 1 | usize::from(bits[taken + k]));
+                taken += per;
+                *tone = self.gray[pattern];
+            }
+        }
+        tones
+    }
+
+    pub fn subtract(&self, iq: &mut [C32], rate: f64, tones: &[u8], freq_hz: f64, at_s: f64) {
+        let sps = (rate / self.baud).round() as usize;
+        let start = (at_s * rate).round() as i64;
+        for (s, tone) in tones.iter().enumerate() {
+            let from = start + (s * sps) as i64;
+            if from < 0 || from as usize + sps > iq.len() {
+                continue;
+            }
+            let from = from as usize;
+            let step = std::f64::consts::TAU * (freq_hz + *tone as f64 * self.baud) / rate;
+            let wave: Vec<C32> = (0..sps)
+                .map(|n| {
+                    let ph = step * (from + n) as f64;
+                    C32::new(ph.cos() as f32, ph.sin() as f32)
+                })
+                .collect();
+            let fit =
+                iq[from..from + sps].iter().zip(&wave).map(|(x, w)| *x * w.conj()).sum::<C32>()
+                    / sps as f32;
+            for (x, w) in iq[from..from + sps].iter_mut().zip(&wave) {
+                *x -= fit * *w;
+            }
+        }
+    }
 }
 
 /// FT8: 79 symbols of 8-FSK at 6.25 baud, on a fifteen-second clock.
@@ -184,6 +227,10 @@ impl Slot {
             scratch: Vec::new(),
             whole: Vec::new(),
         }
+    }
+
+    pub fn rate(&self) -> f64 {
+        self.rate
     }
 
     /// Samples one slot of the stream holds.
@@ -528,21 +575,7 @@ mod tests {
     /// The tones of one FT8 transmission, made here rather than by the
     /// payload layer so this module's tests do not depend on it.
     fn tones_of(wf: Waveform, bits: &[bool]) -> Vec<u8> {
-        let mut tones = vec![0u8; wf.symbols];
-        for group in wf.sync {
-            tones[group.at..group.at + group.tones.len()].copy_from_slice(group.tones);
-        }
-        let per = wf.bits_per_symbol();
-        let mut taken = 0usize;
-        for (from, to) in wf.data {
-            for tone in tones.iter_mut().take(*to).skip(*from) {
-                let pattern =
-                    (0..per).fold(0usize, |acc, k| acc << 1 | usize::from(bits[taken + k]));
-                taken += per;
-                *tone = wf.gray[pattern];
-            }
-        }
-        tones
+        wf.tones(bits)
     }
 
     fn pattern(n: usize) -> Vec<bool> {

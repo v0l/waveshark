@@ -1,0 +1,31 @@
+[package]
+name = "nostr-directory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+mock-relay = []
+
+[dependencies]
+bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
+common.workspace = true
+getrandom = "0.4"
+hex = "0.4"
+httpc.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+sdr-directory.workspace = true
+secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+sdr-directory = { workspace = true, features = ["fixtures"] }
+
+[[test]]
+name = "relay"
+required-features = ["mock-relay"]
