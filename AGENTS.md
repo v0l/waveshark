@@ -52,8 +52,10 @@ default workspace member and `cargo test -p mbe` must be asked for by name.
 Releases build `--no-default-features --features limesdr,stt,cuda,mcp`, with
 `ffmpeg` added on macOS alone: Homebrew has a new enough one, where the
 release's Linux image has ffmpeg 4.4 and Windows has none at all, so those
-binaries show no pictures off a multiplex. Windows drops `limesdr` too, since
-LimeSuite is not packaged for it, and macOS drops `cuda` for Metal. `mcp` is
+binaries show no pictures off a multiplex. macOS drops `cuda` for Metal.
+LimeSuite is opened at run time through bindings checked in under
+`crates/limesdr-sys`, so no build needs its headers;
+`tools/limesdr-bindings.sh` regenerates them. `mcp` is
 the agent server behind `--mcp-listen`, which serves 127.0.0.1:8931 unless
 told an address or `off`.
 

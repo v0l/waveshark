@@ -63,7 +63,7 @@ jobs:
           - name: windows-x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
-            features: --no-default-features --features stt,cuda,mcp
+            features: --no-default-features --features limesdr,stt,cuda,mcp
             cuda: '12.8.1'
             installers: msi
 
@@ -78,7 +78,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            liblimesuite-dev pkg-config libclang-dev \
+            pkg-config \
             libasound2-dev \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev
@@ -89,15 +89,6 @@ jobs:
       - name: macOS libraries
         if: runner.os == 'macOS'
         run: brew install limesuite pkg-config ffmpeg
-
-      # The RTL-SDR is driven by the tree's own USB driver, so nothing here is
-      # needed for it on any platform. bindgen still needs libclang, which is
-      # present on the runner but not on a path it looks in by itself.
-      - name: Windows libraries
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -Append $env:GITHUB_ENV
 
       # The toolkit, where the job builds for a card. Network on Linux
       # installs only the packages named; the Windows installer takes
@@ -144,9 +135,7 @@ jobs:
       # from source has TETRA decryption and the AMBE vocoder on, and neither
       # goes into a published binary: the cipher and the vocoder are things a
       # person may compile for themselves and not things this project ships.
-      # LimeSuite has no vcpkg port either, so the Windows binary is built
-      # without the LimeSDR driver, which only means the device never appears
-      # in the list. Only the macOS job links ffmpeg, where Homebrew has a
+      # Only the macOS job links ffmpeg, where Homebrew has a
       # new enough one; the others show no pictures off a multiplex.
       # Locked: the lock file is the set of versions this has been built with,
       # and a resolver free to pick a newer one has picked a crate needing a

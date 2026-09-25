@@ -12,6 +12,7 @@ the code is in the commit log.
 ### Added
 
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
+- LimeSDR on Windows, with LimeSuite installed.
 
 ### Changed
 
