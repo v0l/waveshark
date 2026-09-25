@@ -1277,6 +1277,8 @@ impl App {
                 json!({
                     "system": c.system,
                     "channel_hz": c.channel_hz,
+                    "network": c.network,
+                    "sites_hz": c.sites,
                     "to": c.to,
                     "from": c.from,
                     "group": c.group,

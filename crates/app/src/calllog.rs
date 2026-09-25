@@ -1038,6 +1038,7 @@ mod tests {
             to: Some("ALL".into()),
             from: Some(from.into()),
             code: None,
+            network: None,
             over: None,
             rate,
             channels: 1,

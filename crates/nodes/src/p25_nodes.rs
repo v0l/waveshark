@@ -163,6 +163,7 @@ impl P25Node {
             to: Some(to),
             from: Some(from).filter(|f| !f.is_empty()),
             code: None,
+            network: None,
             over: Some(common::Over::new(Some(CODEC)).protected_by(secrecy).lasting(VOICE_SECONDS)),
             rate: VOICE_HZ,
             channels: 1,

@@ -7,8 +7,8 @@
 //! ```text
 //! channel chain ──► fader ─0─► audio_bus ──► speaker
 //!                       └─1─► heard ──► transcribe
-//! voice front end ─────────► calls ──► audio_bus
-//!               └──────────► heard
+//! voice front end ──► call_network ──► calls ──► audio_bus
+//!                                └──► heard
 //! replay ──────────────────► audio_bus
 //! ```
 //!
@@ -22,6 +22,7 @@ pub mod bus;
 pub mod calls;
 pub mod fader;
 pub mod heard;
+pub mod network;
 pub mod replay;
 pub mod speaker;
 
@@ -62,6 +63,16 @@ pub fn register(r: &mut pipeline::registry::Registry) {
             feeds_bus: false,
         },
         |s: &Settings| settle(calls::CallsNode::new(OUT_HZ), s),
+    );
+    r.register(
+        StageDesc {
+            name: network::KIND,
+            summary: "One call sent by several sites of a network, passed \
+                      on from one of them",
+            category: Category::Audio,
+            feeds_bus: false,
+        },
+        |s: &Settings| settle(network::NetworkNode::new(), s),
     );
     r.register(
         StageDesc {

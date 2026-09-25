@@ -469,6 +469,11 @@ pub struct Voice {
     /// ways. It says which group is using the channel, which for most
     /// analogue traffic is the only identity there is.
     pub code: Option<String>,
+    /// The network the transmission is on, where the system names one: a
+    /// TETRA network's MCC and MNC as "272-91". Carriers naming the same
+    /// network are its sites, and one call sent by several of them is one
+    /// call, heard once.
+    pub network: Option<String>,
     /// What the system says about the transmission itself, where it says
     /// anything: the vocoder it is in, what protects it, and whether it is
     /// still running. Stated once, here, because this is where the audio it
@@ -577,7 +582,7 @@ impl Voice {
 /// keys who is talking now on it, the transcriber files what was said under
 /// it, the call list rows on it and a meter is read back by it, and a row
 /// showed no transcript the moment any two of them spelled it differently.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default)]
 pub struct ConversationKey {
     /// The system it was heard on: "M17", "DMR", or what an analogue channel
     /// is called on the bus.
@@ -592,6 +597,48 @@ pub struct ConversationKey {
     /// meter belongs to the channel and the group, and a caller changing
     /// mid-conversation must not move it.
     pub from: Option<String>,
+    /// The network the conversation is on, where the system names one. A
+    /// key with a network is the same conversation on every site of it, so
+    /// the channel is where it was heard rather than part of what it is.
+    pub network: Option<String>,
+}
+
+impl ConversationKey {
+    fn identity(&self) -> (&str, Option<&str>, u64, Option<&str>, Option<&str>) {
+        (
+            &self.system,
+            self.network.as_deref(),
+            if self.network.is_some() { 0 } else { self.channel_hz },
+            self.to.as_deref(),
+            self.from.as_deref(),
+        )
+    }
+}
+
+impl PartialEq for ConversationKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+
+impl Eq for ConversationKey {}
+
+impl std::hash::Hash for ConversationKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.identity().hash(state);
+    }
+}
+
+impl PartialOrd for ConversationKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ConversationKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.identity().cmp(&other.identity())
+    }
 }
 
 /// How far apart two frequencies can be and still be the same channel.
@@ -603,7 +650,18 @@ pub const CHANNEL_MATCH_HZ: f64 = 500.0;
 
 impl ConversationKey {
     pub fn new(system: impl Into<String>, channel_hz: f64) -> Self {
-        Self { system: system.into(), channel_hz: channel_hz.max(0.0) as u64, to: None, from: None }
+        Self {
+            system: system.into(),
+            channel_hz: channel_hz.max(0.0) as u64,
+            to: None,
+            from: None,
+            network: None,
+        }
+    }
+
+    pub fn on(mut self, network: Option<String>) -> Self {
+        self.network = network;
+        self
     }
 
     pub fn to(mut self, to: Option<String>) -> Self {
@@ -618,7 +676,10 @@ impl ConversationKey {
 
     /// The key of the conversation this speech is part of.
     pub fn of(v: &Voice) -> Self {
-        Self::new(v.system, v.channel_hz).to(v.to.clone()).from(v.from.clone())
+        Self::new(v.system, v.channel_hz)
+            .to(v.to.clone())
+            .from(v.from.clone())
+            .on(v.network.clone())
     }
 
     /// The same conversation with nobody named as talking: what a meter is
@@ -633,9 +694,14 @@ impl ConversationKey {
     /// A caller either side may be unnamed: on TETRA the grant names who is
     /// talking and the traffic that follows does not.
     pub fn same_conversation(&self, other: &Self) -> bool {
+        let place = match (&self.network, &other.network) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.channel_hz.abs_diff(other.channel_hz) < CHANNEL_MATCH_HZ as u64,
+            _ => false,
+        };
         self.system == other.system
             && self.to == other.to
-            && self.channel_hz.abs_diff(other.channel_hz) < CHANNEL_MATCH_HZ as u64
+            && place
             && (self.from == other.from || self.from.is_none() || other.from.is_none())
     }
 }

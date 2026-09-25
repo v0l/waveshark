@@ -972,13 +972,20 @@ const fn level_col() -> usize {
     panic!("the calls table has no level column")
 }
 
+fn channel_cell(c: &Call) -> String {
+    match c.sites.len() {
+        0 | 1 => format!("{:.4} MHz", c.channel_hz / 1e6),
+        n => format!("{:.4} MHz +{}", c.channel_hz / 1e6, n - 1),
+    }
+}
+
 /// One row's text and colours, from the system column onwards.
 fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Color32)> {
     let party = if c.group { theme::TRACE } else { theme::READOUT };
     let airtime = if c.seconds > 0.0 { format!("{:.1} s", c.seconds) } else { "-".to_string() };
     vec![
         (c.system.clone(), theme::LEGEND),
-        (format!("{:.4} MHz", c.channel_hz / 1e6), theme::VALUE),
+        (channel_cell(c), theme::VALUE),
         // Enciphered traffic is marked with what protects it, so a key
         // that undoes it later has a name to change.
         (
@@ -1073,6 +1080,8 @@ mod tests {
             transcript: None,
             heard_s: Default::default(),
             by_bus: true,
+            network: None,
+            sites: Vec::new(),
         };
         // Two checkboxes at the front and the log button at the back are
         // drawn rather than written, so the text cells are what is left.

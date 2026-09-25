@@ -425,6 +425,7 @@ impl Node for DmrNode {
             // Coded squelch is an analogue thing; a decoder names the group
             // itself.
             code: None,
+            network: None,
             over: self.lc.map(|lc| {
                 common::Over::new(Some(CODEC)).protected_by(match lc.encrypted() {
                     true => common::Secrecy::Encrypted(Some(dmr::PRIVACY.into())),

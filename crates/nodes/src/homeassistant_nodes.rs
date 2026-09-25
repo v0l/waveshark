@@ -1503,6 +1503,7 @@ mod tests {
             to: Some(to.to_string()),
             from: from.map(str::to_string),
             code: code.map(str::to_string),
+            network: None,
             over: None,
             rate: 8_000.0,
             channels: 1,
@@ -1598,6 +1599,7 @@ mod tests {
             to: Some(to.to_string()),
             from: Some(from.to_string()),
             code: None,
+            network: None,
             over: Some(
                 common::Over::new(Some("ACELP 4.6k"))
                     .protected_by(common::Secrecy::Clear)

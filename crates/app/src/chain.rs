@@ -1831,6 +1831,10 @@ impl Receiver {
     }
 
     /// The tap: everything the receiver hears, and who is talking now.
+    pub fn network(&self) -> Option<&crate::mix::network::NetworkNode> {
+        self.stage::<crate::mix::network::NetworkNode>(derived::NETWORK)
+    }
+
     pub fn heard(&self) -> Option<&crate::mix::heard::HeardNode> {
         self.stage::<crate::mix::heard::HeardNode>(derived::HEARD)
     }
@@ -3119,6 +3123,8 @@ pub mod derived {
     pub const HEARD: u64 = Patch::DERIVED_BASE + 25;
     /// A decoded transmission played back once.
     pub const REPLAY: u64 = Patch::DERIVED_BASE + 26;
+    /// Every voice front end, one site of a network at a time.
+    pub const NETWORK: u64 = Patch::DERIVED_BASE + 39;
     /// The replay's own level and mute, so a playback is a strip like
     /// everything else that reaches the speaker.
     pub const REPLAY_FADER: u64 = Patch::DERIVED_BASE + 29;
@@ -4130,15 +4136,18 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             p.add_derived(id, kind, s);
         };
 
+    gather(p, derived::NETWORK, mix::network::KIND, "Call network", &loose);
+    let network = Source::Stage(derived::NETWORK, 0);
+
     // The calls: every voice fader and every loose voice port.
     let mut to_calls: Vec<Source> =
         faders.iter().filter(|(_, v)| *v).map(|(f, _)| Source::Stage(*f, 0)).collect();
-    to_calls.extend(loose.iter().copied());
+    to_calls.push(network);
     gather(p, derived::CALLS, mix::calls::KIND, "Calls", &to_calls);
 
     // The tap: every fader before its level, and every loose voice port.
     let mut to_heard: Vec<Source> = faders.iter().map(|(f, _)| Source::Stage(*f, 1)).collect();
-    to_heard.extend(loose.iter().copied());
+    to_heard.push(network);
     gather(p, derived::HEARD, mix::heard::KIND, "Heard", &to_heard);
 
     // The replay, with nothing feeding it, and a fader of its own: a
@@ -6640,16 +6649,19 @@ pub(crate) mod tests {
         let m17 = topo.nodes.iter().find(|n| n.label.contains("M17")).expect("an M17 front end");
         let node = |kind: &str| topo.nodes.iter().find(|n| n.kind == kind).expect(kind);
         let (calls, heard, bus) = (node("calls"), node("heard"), node("audio_bus"));
+        let network = node(crate::mix::network::KIND);
         let voice = m17
             .outputs
             .iter()
             .find(|(_, s)| s.kind == PortKind::Voice)
             .expect("speech leaves on a port of its own");
+        assert!(network.inputs.iter().any(|(o, _)| *o == voice.0), "the speech skips the network");
+        let one_site = network.outputs[0].0;
         // To the calls, where the subscriptions decide, and to the tap,
         // where the transcriber and the call list read it whatever they
         // decide.
-        assert!(calls.inputs.iter().any(|(o, _)| *o == voice.0), "the speech never reaches calls");
-        assert!(heard.inputs.iter().any(|(o, _)| *o == voice.0), "the speech is never heard");
+        assert!(calls.inputs.iter().any(|(o, _)| *o == one_site), "the speech never reaches calls");
+        assert!(heard.inputs.iter().any(|(o, _)| *o == one_site), "the speech is never heard");
         // The calls reach the bus labelled, and the bus mixes for the
         // speaker at the rate it wants.
         assert!(bus.inputs.iter().any(|(o, _)| *o == calls.outputs[0].0));

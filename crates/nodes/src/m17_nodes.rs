@@ -305,6 +305,7 @@ impl Node for M17Node {
             to,
             from,
             code: None,
+            network: None,
             over: None,
             rate: VOICE_HZ,
             channels: 1,

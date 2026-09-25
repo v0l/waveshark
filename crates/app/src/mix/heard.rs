@@ -57,6 +57,8 @@ pub struct LiveCall {
     /// with the same transmission on two lines. Set once, on the report that
     /// changed it.
     pub was: Option<common::ConversationKey>,
+    pub network: Option<String>,
+    pub sites: Vec<f64>,
 }
 
 impl LiveCall {
@@ -66,6 +68,7 @@ impl LiveCall {
         common::ConversationKey::new(&self.system, self.channel_hz)
             .to(Some(self.to.clone()))
             .from(self.from.clone())
+            .on(self.network.clone())
     }
 }
 
@@ -220,6 +223,8 @@ impl HeardNode {
                         over: false,
                         said: v.over.clone(),
                         was: None,
+                        network: v.network.clone(),
+                        sites: Vec::new(),
                     },
                 );
             }
@@ -340,6 +345,7 @@ mod tests {
             to: Some(to.into()),
             from: Some(from.into()),
             code: None,
+            network: None,
             over: None,
             rate: 8_000.0,
             channels: 1,
@@ -446,6 +452,7 @@ mod tests {
             to: to.map(str::to_string),
             from: None,
             code: None,
+            network: None,
             over: None,
             rate: 48_000.0,
             channels: 1,

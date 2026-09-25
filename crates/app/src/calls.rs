@@ -97,6 +97,8 @@ pub struct Call {
     /// what counts overs and airtime: a decoder's packets say the same over
     /// happened, and counting both listed every digital over twice.
     pub by_bus: bool,
+    pub network: Option<String>,
+    pub sites: Vec<f64>,
 }
 
 impl Call {
@@ -121,6 +123,7 @@ impl Call {
         common::ConversationKey::new(&self.system, self.channel_hz)
             .to((!self.to.is_empty()).then(|| self.to.clone()))
             .from(self.from.clone())
+            .on(self.network.clone())
     }
 
     /// The label a list shows: the group, with the caller beside it.
@@ -215,6 +218,9 @@ impl Calls {
             if c.code.is_some() {
                 k.code = c.code.clone();
             }
+            if !c.sites.is_empty() {
+                k.sites = c.sites.clone();
+            }
             // A gap longer than the hang time is a new conversation on the
             // same group, so the old one keeps its duration rather than
             // stretching across the silence.
@@ -266,6 +272,8 @@ impl Calls {
             heard_s: if c.over { Default::default() } else { [(key, c.seconds)].into() },
             by_bus: true,
             transcript: None,
+            network: c.network.clone(),
+            sites: c.sites.clone(),
         });
         if self.seen.len() > MAX_CALLS {
             let at = c.last;
@@ -342,6 +350,8 @@ mod tests {
             over: false,
             said: None,
             was: None,
+            network: None,
+            sites: Vec::new(),
         }
     }
 
@@ -534,6 +544,27 @@ mod tests {
     /// A call and the speech heard on it have to agree on one key, or the
     /// row shows no transcript and the button into it is never offered. The
     /// two ends build it from different things: the call from the bus's
+    #[test]
+    fn a_call_one_network_sends_from_several_sites_is_one_row_listing_them() {
+        let mut c = Calls::new();
+        let at = Instant::now();
+        let sites = vec![390.85e6, 391.925e6, 392.55e6, 393.3e6];
+        let on = |hz: f64| LiveCall {
+            network: Some("272-91".into()),
+            sites: sites.clone(),
+            ..bus("TETRA", hz, "7309858", Some("7306696"), at)
+        };
+        over(on(390.85e6), 1.2, &mut c);
+        over(on(393.3e6), 0.4, &mut c);
+        let list = c.active(at + Duration::from_secs(2));
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!((list[0].overs, list[0].channel_hz), (2, 390.85e6));
+        assert_eq!(list[0].sites, sites);
+        assert!((list[0].seconds - 1.6).abs() < 1e-9, "airtime {}", list[0].seconds);
+        over(bus("TETRA", 391.925e6, "7309858", Some("7306696"), at), 1.0, &mut c);
+        assert_eq!(c.len(), 2, "a carrier that names no network is its own place");
+    }
+
     /// report, the transcriber from the voice block the front end put on it.
     #[test]
     fn a_call_and_its_speech_are_the_same_conversation() {
@@ -547,6 +578,7 @@ mod tests {
             to: Some("9".into()),
             from: Some("1234567".into()),
             code: None,
+            network: None,
             over: None,
             rate: 8_000.0,
             channels: 1,

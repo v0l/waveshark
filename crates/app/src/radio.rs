@@ -3866,21 +3866,24 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.status.set_channel_states(self.rx.channel_states());
         self.status.set_strips(self.rx.strips());
         *self.status.tetra_keys.lock() = self.rx.tetra_key_status();
-        if let Some(h) = self.rx.heard_mut() {
-            let calls = h.take_calls();
-            if !calls.is_empty() {
-                let mut heard = self.status.heard.lock();
-                // A running call replaces its last report; an ended one is
-                // kept, since it is the only report that says so.
-                for c in calls {
-                    // A call whose labels filled in part way through the
-                    // over updates the row it was reported under, rather
-                    // than appearing beside it as a second transmission.
-                    let under = c.was.clone().unwrap_or_else(|| c.key());
-                    match heard.iter_mut().find(|h| !h.over && h.key() == under) {
-                        Some(h) => *h = c,
-                        None => heard.push(c),
-                    }
+        let mut calls = self.rx.heard_mut().map(|h| h.take_calls()).unwrap_or_default();
+        if let Some(n) = self.rx.network() {
+            for c in &mut calls {
+                c.sites = n.sites(&c.key());
+            }
+        }
+        if !calls.is_empty() {
+            let mut heard = self.status.heard.lock();
+            // A running call replaces its last report; an ended one is
+            // kept, since it is the only report that says so.
+            for c in calls {
+                // A call whose labels filled in part way through the
+                // over updates the row it was reported under, rather
+                // than appearing beside it as a second transmission.
+                let under = c.was.clone().unwrap_or_else(|| c.key());
+                match heard.iter_mut().find(|h| !h.over && h.key() == under) {
+                    Some(h) => *h = c,
+                    None => heard.push(c),
                 }
             }
         }
@@ -6321,6 +6324,71 @@ pub(crate) mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn a_call_four_tetra_sites_send_is_heard_once_and_listed_once() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/offair/tetra_band_392.8013M_6000k.cu8");
+        if !p.exists() {
+            eprintln!("skipping: testdata/offair/tetra_band_392.8013M_6000k.cu8 is local only");
+            return;
+        }
+        let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        rx.calls_mut().expect("the calls").set_subscriptions(vec![
+            crate::mix::calls::Subscription::new(crate::mix::calls::Rule::Everything),
+        ]);
+        let mut list = crate::calls::Calls::new();
+        let mut spoken: std::collections::BTreeMap<String, (f64, std::collections::BTreeSet<u64>)> =
+            Default::default();
+        let mut overlapping = 0;
+        for block in buf.samples.chunks(65_536) {
+            rx.process(block).unwrap();
+            let mut now: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+                Default::default();
+            for v in rx.voices().into_iter().filter(|v| v.system == "TETRA" && v.rate == 48_000.0) {
+                let to = v.to.clone().unwrap_or_default();
+                let e = spoken.entry(to.clone()).or_default();
+                e.0 += v.seconds();
+                e.1.insert(v.channel_hz as u64);
+                now.entry(to).or_default().insert(v.channel_hz as u64);
+            }
+            overlapping += now.values().filter(|c| c.len() > 1).count();
+            let mut calls = rx.heard_mut().unwrap().take_calls();
+            for c in &mut calls {
+                c.sites = rx.network().unwrap().sites(&c.key());
+                list.hear(c);
+            }
+        }
+        assert_eq!(overlapping, 0, "a call played from two sites in one block");
+        assert_eq!(rx.network().unwrap().dropped(), 287, "copies from the other sites");
+        let sites = [390.85e6, 391.925e6, 392.55e6, 393.3e6];
+        let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let rows = list.active(later);
+        let networked: Vec<(&str, Option<&str>, usize)> = rows
+            .iter()
+            .filter(|c| c.network.as_deref() == Some("424-10"))
+            .map(|c| (c.to.as_str(), c.from.as_deref(), c.sites.len()))
+            .collect();
+        assert_eq!(
+            networked,
+            [
+                ("7661987", Some("7661062"), 4),
+                ("7309858", Some("7306696"), 4),
+                ("7306782", None, 1)
+            ],
+            "one row per call, where there were four"
+        );
+        assert!(rows.iter().filter(|c| c.sites.len() == 4).all(|c| c.sites == sites));
+        assert_eq!(
+            rows.iter().filter(|c| c.network.is_none()).count(),
+            4,
+            "usage markers stay per carrier"
+        );
+        let heard = |to: &str| (spoken[to].0 * 100.0).round() / 100.0;
+        assert_eq!((heard("7309858"), heard("7661987")), (5.76, 5.40), "seconds played");
     }
 
     #[test]

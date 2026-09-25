@@ -318,6 +318,7 @@ impl Simple for IdentNode {
             to: Some(self.called()),
             from: self.caller.clone(),
             code: self.group.clone(),
+            network: None,
             over: None,
             rate: self.rate,
             channels: self.channels,

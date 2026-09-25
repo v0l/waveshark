@@ -728,6 +728,10 @@ impl TetraNode {
                     None => format!("marker {m}"),
                 });
                 let from = marker.and_then(|m| self.talker(m)).map(|s| s.to_string());
+                let network = marker
+                    .filter(|m| self.markers.contains_key(m))
+                    .and(self.rx.cell)
+                    .map(|c| format!("{}-{}", c.mcc, c.mnc));
                 // What the network said about the call, stated once here
                 // beside the speech it is about. The cipher is the grant's
                 // word where there was one and the slot's own behaviour
@@ -744,6 +748,7 @@ impl TetraNode {
                     to,
                     from,
                     code: None,
+                    network,
                     over: Some(common::Over::new(Some(TETRA_CODEC)).protected_by(secrecy)),
                     rate: VOICE_HZ,
                     channels: 1,

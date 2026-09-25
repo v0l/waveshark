@@ -192,6 +192,7 @@ impl NxdnNode {
             to: Some(c.dest.to_string()),
             from: Some(c.source.to_string()),
             code: None,
+            network: None,
             over: Some(common::Over::new(Some(CODEC)).protected_by(secrecy).lasting(seconds)),
             rate: VOICE_HZ,
             channels: 1,

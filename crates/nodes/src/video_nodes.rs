@@ -319,6 +319,7 @@ impl pipeline::node::Node for VideoNode {
                     to: None,
                     from: None,
                     code: None,
+                    network: None,
                     over: None,
                     rate: sound.rate(),
                     channels: 1,
