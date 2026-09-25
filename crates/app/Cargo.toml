@@ -70,7 +70,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "n
 # automating should not carry an HTTP stack.
 rmcp = { version = "3.2", default-features = false, features = [
     "server",
-    "macros",
     "schemars",
     "transport-streamable-http-server",
 ], optional = true }
