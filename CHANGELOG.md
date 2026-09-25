@@ -28,6 +28,7 @@ the code is in the commit log.
 ### Fixed
 
 - Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
+- LimeSDR left busy until a restart after a span change or USB fault.
 - 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
 - 802.15.4 beacons read out of frames too short for their own address lists.
 - Inmarsat STD-C decoding nothing off the air.

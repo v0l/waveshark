@@ -139,27 +139,81 @@ const METER_FALL: f32 = 0.88;
 /// change that silently returned the receiver to its default gain would look
 /// like the antenna had fallen out.
 fn restart(
-    entry: &crate::devices::Entry,
+    open: impl FnOnce() -> common::Result<Box<dyn common::Device>>,
+    dev: &mut Box<dyn common::Device>,
+    stream: &mut Option<Box<dyn common::RxStream>>,
     rate: Sps,
     center: Hz,
     front: &FrontEnd,
-    ppm: f64,
-    offset: f64,
-) -> common::Result<(Box<dyn common::Device>, Box<dyn common::RxStream>)> {
+) -> common::Result<()> {
+    if let Some(mut s) = stream.take() {
+        s.stop();
+    }
+    let tuning = *dev.tuning();
+    *dev = Box::new(Closed::of(dev.as_ref()));
     // The device needs a moment to release its USB claim; reopening
     // immediately gets "already in use".
     std::thread::sleep(std::time::Duration::from_millis(150));
-    let mut dev = crate::devices::open(entry)?;
-    dev.set_rate(rate)?;
+    let mut fresh = open()?;
+    fresh.set_rate(rate)?;
     // Reopening resets the correction and the converter, and a span change
     // that silently threw either away would put every frequency back where it
     // was wrong.
-    dev.correct(ppm);
-    dev.set_offset(offset);
-    dev.set_dial(center)?;
-    front.apply(dev.as_mut());
-    let stream = dev.start_rx()?;
-    Ok((dev, stream))
+    fresh.correct(tuning.ppm);
+    fresh.set_offset(tuning.offset);
+    fresh.set_dial(center)?;
+    front.apply(fresh.as_mut());
+    *stream = Some(fresh.start_rx()?);
+    *dev = fresh;
+    Ok(())
+}
+
+struct Closed {
+    info: common::DeviceInfo,
+    tuning: common::Tuning,
+    center: Hz,
+    rate: Sps,
+}
+
+impl Closed {
+    fn of(dev: &dyn common::Device) -> Self {
+        Self {
+            info: dev.info().clone(),
+            tuning: *dev.tuning(),
+            center: dev.center(),
+            rate: dev.rate(),
+        }
+    }
+}
+
+impl common::Device for Closed {
+    fn info(&self) -> &common::DeviceInfo {
+        &self.info
+    }
+    fn set_center(&mut self, _f: Hz) -> common::Result<()> {
+        Err(common::Error::Disconnected)
+    }
+    fn center(&self) -> Hz {
+        self.center
+    }
+    fn tuning(&self) -> &common::Tuning {
+        &self.tuning
+    }
+    fn tuning_mut(&mut self) -> &mut common::Tuning {
+        &mut self.tuning
+    }
+    fn set_rate(&mut self, _r: Sps) -> common::Result<()> {
+        Err(common::Error::Disconnected)
+    }
+    fn rate(&self) -> Sps {
+        self.rate
+    }
+    fn set_gain(&mut self, _stage: &str, _mode: GainMode) -> common::Result<()> {
+        Err(common::Error::Disconnected)
+    }
+    fn start_rx(&mut self) -> common::Result<Box<dyn common::RxStream>> {
+        Err(common::Error::Disconnected)
+    }
 }
 
 /// What the front end is set to, per stage and per switch.
@@ -3187,23 +3241,16 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                     Some("this radio cannot change span without being reopened".into());
                 return Flow::Go;
             };
-            self.release_stream();
-            match restart(
-                &entry,
+            if let Err(e) = restart(
+                || crate::devices::open(&entry),
+                &mut self.dev,
+                &mut self.stream,
                 r,
                 self.plan.center,
                 &self.front,
-                self.dev.asked_ppm(),
-                self.dev.offset(),
             ) {
-                Ok((d, s)) => {
-                    self.dev = d;
-                    self.stream = Some(s);
-                }
-                Err(e) => {
-                    *self.status.error.lock() = Some(format!("cannot change span: {e}"));
-                    return Flow::Stop;
-                }
+                *self.status.error.lock() = Some(format!("cannot change span: {e}"));
+                return Flow::Stop;
             }
         } else if let Err(e) = self.dev.set_rate(r) {
             *self.status.error.lock() = Some(format!("cannot change span: {e}"));
@@ -3469,37 +3516,39 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         };
         tracing::warn!("receive stopped: {e}");
         *self.status.error.lock() = Some(format!("radio stopped: {e}; reopening"));
-        let mut back = None;
+        let mut back = false;
         // A radio handed in already open has nowhere to be opened from, so
         // one that stops has stopped.
         let entry = self.entry.clone();
         for attempt in entry.iter().flat_map(|_| 1..=3) {
             std::thread::sleep(std::time::Duration::from_millis(400 * attempt));
             match restart(
-                entry.as_ref().expect("the loop runs only where there is one"),
+                || {
+                    crate::devices::open(
+                        entry.as_ref().expect("the loop runs only where there is one"),
+                    )
+                },
+                &mut self.dev,
+                &mut self.stream,
                 Sps(self.plan.rate as u64),
                 self.plan.center,
                 &self.front,
-                self.dev.asked_ppm(),
-                self.dev.offset(),
             ) {
-                Ok(got) => {
-                    back = Some(got);
+                Ok(()) => {
+                    back = true;
                     break;
                 }
                 Err(e) => tracing::warn!("reopen {attempt} failed: {e}"),
             }
         }
         match back {
-            Some((d, s)) => {
-                self.dev = d;
-                self.stream = Some(s);
+            true => {
                 self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 *self.status.error.lock() = Some("radio came back".into());
                 self.needs_rebuild = true;
                 Block::Restarted
             }
-            None => {
+            false => {
                 *self.status.error.lock() =
                     Some("the radio is gone; pick it again once it is back".into());
                 Block::Lost
@@ -8078,5 +8127,111 @@ mod front_end_tests {
         assert!(back.bias_tee, "the bias tee is a front end setting and goes back too");
         assert_eq!(back.numbers()[0].value, -310.0, "and so does a number");
         assert_eq!(RadioControls::read(&back).numbers[0].value, -310.0);
+    }
+
+    struct Claim(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Claim {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+
+    struct OneClaim {
+        info: DeviceInfo,
+        tuning: common::Tuning,
+        claim: Arc<Claim>,
+    }
+
+    impl OneClaim {
+        fn open(usb: &Arc<std::sync::atomic::AtomicBool>) -> common::Result<Box<dyn Device>> {
+            if usb.swap(true, Ordering::SeqCst) {
+                return Err(common::Error::other("Cannot claim interface - Resource busy"));
+            }
+            Ok(Box::new(Self {
+                info: ThreeStages::new().info,
+                tuning: common::Tuning::default(),
+                claim: Arc::new(Claim(usb.clone())),
+            }))
+        }
+    }
+
+    struct HeldStream(#[allow(dead_code)] Arc<Claim>);
+
+    impl common::RxStream for HeldStream {
+        fn read(&mut self) -> common::Result<common::IqBuf> {
+            Err(common::Error::Disconnected)
+        }
+        fn dropped(&self) -> u64 {
+            0
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl Device for OneClaim {
+        fn info(&self) -> &DeviceInfo {
+            &self.info
+        }
+        fn set_center(&mut self, _f: Hz) -> common::Result<()> {
+            Ok(())
+        }
+        fn center(&self) -> Hz {
+            Hz(1_097_000_000)
+        }
+        fn tuning(&self) -> &common::Tuning {
+            &self.tuning
+        }
+        fn tuning_mut(&mut self) -> &mut common::Tuning {
+            &mut self.tuning
+        }
+        fn set_rate(&mut self, _r: Sps) -> common::Result<()> {
+            Ok(())
+        }
+        fn rate(&self) -> Sps {
+            Sps(40_000_000)
+        }
+        fn set_gain(&mut self, _stage: &str, _mode: GainMode) -> common::Result<()> {
+            Ok(())
+        }
+        fn start_rx(&mut self) -> common::Result<Box<dyn common::RxStream>> {
+            Ok(Box::new(HeldStream(self.claim.clone())))
+        }
+    }
+
+    #[test]
+    fn a_radio_one_program_may_hold_is_let_go_before_it_is_opened_again() {
+        let usb = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut dev = OneClaim::open(&usb).unwrap();
+        dev.set_offset(9_750_000_000.0);
+        dev.correct(1.5);
+        let mut stream = Some(dev.start_rx().unwrap());
+        assert!(OneClaim::open(&usb).is_err(), "a LimeSDR is claimed by one handle at a time");
+
+        restart(
+            || OneClaim::open(&usb),
+            &mut dev,
+            &mut stream,
+            Sps(30_720_000),
+            Hz(10_847_000_000),
+            &FrontEnd::default(),
+        )
+        .expect("the span changes on a radio this program already held");
+        assert!(stream.is_some());
+        assert_eq!((dev.offset(), dev.asked_ppm()), (9_750_000_000.0, 1.5));
+
+        drop(stream.take());
+        assert!(
+            restart(
+                || Err(common::Error::other("unplugged")),
+                &mut dev,
+                &mut stream,
+                Sps(30_720_000),
+                Hz(10_847_000_000),
+                &FrontEnd::default(),
+            )
+            .is_err()
+        );
+        assert!(!usb.load(Ordering::SeqCst), "a failed reopen leaves nothing claimed");
+        assert_eq!(dev.offset(), 9_750_000_000.0, "and keeps the converter for the next try");
     }
 }
