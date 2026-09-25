@@ -156,7 +156,8 @@ impl VideoPane<'_> {
                 };
                 self.cmds.push(Cmd::WatchVideo(st.rules()));
             }
-            self.cmds.extend(orders(&self.muxes, &want));
+            let playing = playing(&want, self.frame.as_ref(), &self.muxes);
+            self.cmds.extend(orders(&self.muxes, &playing));
             ui.add_space(12.0);
             let count = match self.inputs.len() {
                 0 => "no channels".to_string(),
@@ -313,6 +314,14 @@ fn pick_of(watching: Option<&str>, muxes: &[crate::videobus::Offered]) -> Pick {
     }
 }
 
+fn playing(want: &Pick, shown: Option<&VideoFrame>, muxes: &[crate::videobus::Offered]) -> Pick {
+    let Some(f) = shown.filter(|_| *want == Pick::Best) else { return want.clone() };
+    match pick_of(Some(&crate::videobus::key_of(f)), muxes) {
+        Pick::Channel(_) => Pick::Best,
+        on => on,
+    }
+}
+
 fn orders(muxes: &[crate::videobus::Offered], pick: &Pick) -> Vec<Cmd> {
     let mut out = Vec::new();
     let playing = match pick {
@@ -424,5 +433,19 @@ mod tests {
             pick_of(Some(&muxes[1].key()), &settled),
             Pick::Programme(muxes[1].key(), 7, Int(-1))
         );
+    }
+
+    #[test]
+    fn the_best_picture_keeps_its_multiplex_and_stops_the_others() {
+        use pipeline::ParamValue::Int;
+        let muxes = [offered(3, 1_097e6, Int(0)), offered(7, 1_068e6, Int(0))];
+        let mut shown = frame(1, 288);
+        shown.system = "DVB-S2";
+        shown.channel_hz = 1_068e6;
+        let pick = playing(&Pick::Best, Some(&shown), &muxes);
+        assert_eq!(said(orders(&muxes, &pick)), [(3, "service".into(), Int(-1))]);
+        let camera = frame(1, 288);
+        assert_eq!(playing(&Pick::Best, Some(&camera), &muxes), Pick::Best);
+        assert_eq!(playing(&Pick::Best, None, &muxes), Pick::Best);
     }
 }

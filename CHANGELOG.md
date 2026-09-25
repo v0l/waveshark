@@ -29,6 +29,7 @@ the code is in the commit log.
 
 ### Fixed
 
+- Video pane best picture flickering between two channels received at once.
 - DVB-T pictures stopping for good after one damaged packet.
 - Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
 - DVB-T sound cutting out every second and out of step with the picture.

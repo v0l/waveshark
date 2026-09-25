@@ -211,17 +211,25 @@ impl VideoBus {
         // receiver watching two channels at once, and showing the one that
         // arrived last would flicker between them; showing the better of the
         // two is at least a decision.
-        let better = self.out.as_ref().is_none_or(|cur| f.completeness() > cur.completeness());
-        if better {
-            self.out = Some(f.clone());
+        // A more complete picture wins. Two inputs matching one rule is a
+        // receiver watching two channels at once, and showing the one that
+        // arrived last would flicker between them; showing the better of the
+        // two is at least a decision.
+        let takes_over = match &self.held {
+            None => true,
+            Some(cur) if key_of(cur) == key => true,
+            Some(cur) => {
+                let gone = self.channels.iter().find(|c| c.key == key_of(cur)).is_none_or(|c| {
+                    c.since_s > c.last.as_ref().map_or(HOLD_S, |f| f.cadence.hold_s())
+                });
+                gone || f.completeness() > cur.completeness()
+            }
+        };
+        if !takes_over {
+            return;
         }
-        let fresher = self
-            .held
-            .as_ref()
-            .is_none_or(|cur| self.since_s > 0.0 || f.completeness() >= cur.completeness());
-        if fresher {
-            self.held = Some(f);
-        }
+        self.out = Some(f.clone());
+        self.held = Some(f);
         self.since_s = 0.0;
     }
 
@@ -654,5 +662,29 @@ mod tests {
         assert!(bus.published().is_none());
         bus.idle(HOLD_S + 0.01);
         assert!(bus.watched().is_none());
+    }
+
+    #[test]
+    fn everything_watched_stays_on_one_of_two_equal_pictures_until_it_goes() {
+        let mut bus = VideoBus::new();
+        let (a, b) = (frame(1_097e6, "BBC Two HD", 288), frame(1_068e6, "Channel 4 HD", 288));
+        let mut shown = Vec::new();
+        let mut out = Vec::new();
+        for n in 0..20 {
+            bus.idle(0.02);
+            bus.push(0, if n % 2 == 0 { a.clone() } else { b.clone() });
+            shown.push(bus.watched().and_then(|f| f.label.clone()));
+            out.push(bus.published().and_then(|f| f.label.clone()));
+            bus.clear();
+        }
+        let first = Some("BBC Two HD".to_string());
+        assert!(shown.iter().all(|s| *s == first), "{shown:?}");
+        assert!(out.iter().all(|s| s.is_none() || *s == first), "{out:?}");
+        for _ in 0..40 {
+            bus.idle(0.02);
+            bus.push(1, b.clone());
+            bus.clear();
+        }
+        assert_eq!(bus.watched().and_then(|f| f.label.clone()).as_deref(), Some("Channel 4 HD"));
     }
 }
