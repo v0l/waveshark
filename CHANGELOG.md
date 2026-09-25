@@ -14,6 +14,7 @@ the code is in the commit log.
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
 - LimeSDR on Windows, with LimeSuite installed.
 - IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
+- DVB-S2 off a satellite LNB: QPSK to 32APSK, symbol rate measured, pictures and sound.
 - Chain view switch turning off one stage, or all of receive with transmit left on.
 
 ### Changed
@@ -27,7 +28,11 @@ the code is in the commit log.
 
 ### Fixed
 
+- DVB-T pictures stopping for good after one damaged packet.
 - Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
+- DVB-T sound cutting out every second and out of step with the picture.
+- Channel width stopping at 20 MHz on a wider span.
+- DVB-T pictures and sound lost after changing service.
 - LimeSDR left busy until a restart after a span change or USB fault.
 - 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
 - 802.15.4 beacons read out of frames too short for their own address lists.

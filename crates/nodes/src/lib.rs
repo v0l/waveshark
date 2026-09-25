@@ -26,6 +26,8 @@ pub mod dmr_nodes;
 pub mod drm_nodes;
 pub mod droneid_nodes;
 pub mod dsp_nodes;
+pub mod broadcast;
+pub mod dvbs2_nodes;
 pub mod dvbt_nodes;
 pub mod eas_nodes;
 pub mod elrs_nodes;
@@ -254,6 +256,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (wefax_nodes::DESC, wefax_nodes::build),
     (vdl2_nodes::DESC, vdl2_nodes::build),
     (dvbt_nodes::DESC, dvbt_nodes::build),
+    (dvbs2_nodes::DESC, dvbs2_nodes::build),
     (dab_nodes::DESC, dab_nodes::build),
     (drm_nodes::DESC, drm_nodes::build),
     (ident_nodes::DESC, ident_nodes::build),

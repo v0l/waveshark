@@ -24,6 +24,7 @@ pub mod dfm;
 pub mod dmr;
 pub mod drm;
 pub mod droneid;
+pub mod dvbs2;
 pub mod dvbt;
 pub mod eas;
 pub mod elrs;
@@ -203,6 +204,7 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &wefax::Wefax,
         &vdl2::Vdl2,
         &dvbt::Dvbt,
+        &dvbs2::Dvbs2,
         &dab::DabProtocol,
         &drm::DrmProtocol,
         &aprs::Aprs,

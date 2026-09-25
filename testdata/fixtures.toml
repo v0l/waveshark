@@ -1278,3 +1278,96 @@ because a frame identity of 11 was not taken as the first frame, and that
 
 Nothing in it names a person.
 """
+
+[[capture]]
+name = "dvbs2_tg4_1431.1M_20000k.cs8"
+sha256 = "e55abd6f05569b36f3d81fa7d2464c0ee9f1034ebe8a0b2224bea7f72a3c07cd"
+url = "https://nostr.download/e55abd6f05569b36f3d81fa7d2464c0ee9f1034ebe8a0b2224bea7f72a3c07cd.xz"
+compression = "xz"
+center_hz = 1_431_100_000
+rate_sps = 20_000_000
+format = "cs8"
+license = "CC-BY-4.0"
+description = """
+A DVB-S2 contribution feed off Astra 2G at 28.2E, 11181.1 GHz vertical, received
+in County Meath on a Sky dish and universal LNB (9.75 GHz local oscillator,
+13 V) into a HackRF One at amp 0, LNA 8, VGA 0. The first 1.5 seconds of the
+recording. 8PSK 3/4, normal frames with pilots, 14.25 Msym/s, roll-off 0.25,
+about 340 kHz above the tuning, MER about 9 dB, which is close enough to what
+8PSK 3/4 needs that a few frames fail LDPC.
+
+It carries one service, named in its SDT "TG4 Rasai BEO Lios Tuathail 2026":
+TG4's outside broadcast of the Listowel races, 1080i H.264 High 4:2:2 10-bit
+with two MPEG audio tracks, provider Digisat. The programme is TG4's; the
+recording is here as evidence that the receiver reads it. Established by
+decoding it here and by ffmpeg reading the transport stream that came out.
+
+Evidence for three faults: every frame read in real time on a HackRF, the
+service named, and a lost frame no longer stopping the picture for good.
+"""
+
+[capture.expect]
+modcod = "8PSK 3/4"
+symbol_rate = "14.250 Msym/s"
+rolloff = 0.25
+frames = 962
+failed = 6
+packets = 30_716
+service = "TG4 Rasai BEO Lios Tuathail 2026"
+
+[[capture]]
+name = "dvbs2_centre_spur_1431M_20000k.cs8"
+sha256 = "17e6a6b86fc2c74dc1775b1f34f97dcab33c7dda303a5febbc6f225fc68848dc"
+url = "https://nostr.download/17e6a6b86fc2c74dc1775b1f34f97dcab33c7dda303a5febbc6f225fc68848dc.xz"
+compression = "xz"
+center_hz = 1_431_000_000
+rate_sps = 20_000_000
+format = "cs8"
+license = "CC-BY-4.0"
+description = """
+The same TG4 feed as dvbs2_tg4_1431.1M_20000k.cs8, recorded later the same day
+with the HackRF tuned 100 kHz lower and the receiver's DC block off. 0.38
+seconds, all of the recording.
+
+What this capture is for is the HackRF's own offset at the centre of the span,
+7 dB under the whole signal and 440 kHz from the carrier's middle. With it left
+in, no frame decodes at a pilot MER of 4.4 dB; cancelled, the MER is about
+10 dB and all but a few frames read.
+"""
+
+[capture.expect]
+frames = 231
+decoded_floor = 180
+
+[[capture]]
+name = "dvbs2_bbc_hd_1097M_40000k.cs8"
+sha256 = "ecd991cfe9fc06c460eaa0a6d3313e66441b1ef2bf3dede153760a9cd3720968"
+url = "https://nostr.download/ecd991cfe9fc06c460eaa0a6d3313e66441b1ef2bf3dede153760a9cd3720968.xz"
+compression = "xz"
+center_hz = 1_097_000_000
+rate_sps = 40_000_000
+format = "cs8"
+license = "CC-BY-4.0"
+description = """
+The BBC HD multiplex off Astra 2E at 28.2E, 10.847 GHz vertical, from the same
+dish and LNB into a LimeSDR-USB at 40 MS/s. The first 0.8 seconds, requantised
+from the LimeSDR's 16-bit samples to 8 bits with the largest sample at 127.
+8PSK 3/4, normal frames with pilots, 23.000 Msym/s, roll-off 0.25, MER about
+10 dB; every frame reads.
+
+The SDT in the window names BBC One Y&L HD, BBC One SE HD, BBC Two HD, BBC One
+NI HD, ETV4, BBC Three HD and CBBC HD, all in the clear. The programmes are the
+BBC's; the recording is here as evidence that the receiver reads them.
+
+What this capture is for is the LimeSDR's spur 17 MHz below the centre, which
+beats with the one at the centre and puts a line at 17 MHz in the squared
+signal. Taken for the symbol rate, the receiver's timing ran away towards
+31 Msym/s and took the whole process down with it.
+"""
+
+[capture.expect]
+symbol_rate = "22.999 Msym/s"
+frames = 828
+failed = 0
+packets = 26_605
+services = 7

@@ -251,6 +251,8 @@ pub fn wiki_modulations(m: common::Modulation) -> &'static [&'static str] {
         M::Oqpsk => &["OQPSK", "O-QPSK", "QPSK", "DSSS", "MSK"],
         M::Dqpsk => &["DQPSK", "QPSK", "PSK"],
         M::D8psk => &["D8PSK", "8PSK", "PSK"],
+        M::Psk8 => &["8PSK", "PSK"],
+        M::Apsk => &["APSK", "16APSK", "32APSK"],
         M::Chirp | M::Css => &["FMCW", "CSS", "LFM"],
         M::Ofdm => &["OFDM", "CP-OFDM", "SC-FDMA"],
         M::Dsss => &["DSSS", "CDMA"],

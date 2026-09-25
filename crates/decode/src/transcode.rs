@@ -68,8 +68,12 @@ impl ToTs {
     /// 720 by 576 and 25 frames a second, which is what PAL test
     /// transmissions carried.
     pub fn bars(muxrate: f64) -> Self {
-        Self::run("dvbt-testcard", muxrate, |muxrate, tx, going| unsafe {
-            bars(muxrate, tx, going)
+        Self::card(muxrate, Card::Bars)
+    }
+
+    pub fn card(muxrate: f64, card: Card) -> Self {
+        Self::run("dvbt-testcard", muxrate, move |muxrate, tx, going| unsafe {
+            bars(muxrate, card, tx, going)
         })
     }
 
@@ -349,6 +353,7 @@ unsafe fn pass(
 /// transmitter is a second or so ahead.
 unsafe fn bars(
     muxrate: f64,
+    card: Card,
     tx: &SyncSender<Vec<u8>>,
     stop: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
@@ -389,14 +394,18 @@ unsafe fn bars(
         let mut fifo = AudioFifo::new(AVSampleFormat::S16, CHANNELS as u16)?;
         let (mut frame_at, mut sample_at, mut sent) = (0i64, 0i64, 0i64);
         while !stop.load(Ordering::Relaxed) {
-            let picture = card_frame(frame_at)?;
+            let picture = card_frame(frame_at, card)?;
             frame_at += 1;
             for pkt in video.encode_frame(Some(&picture))? {
                 muxer.write_packet(&pkt)?;
             }
             // The sound that goes under that picture, cut into whatever the
             // encoder takes a frame.
-            fifo.buffer_frame(&tone_frame(sample_at, TONE_HZ_RATE as i64 / CARD_FPS as i64)?)?;
+            fifo.buffer_frame(&tone_frame(
+                sample_at,
+                TONE_HZ_RATE as i64 / CARD_FPS as i64,
+                card,
+            )?)?;
             sample_at += TONE_HZ_RATE as i64 / CARD_FPS as i64;
             while let Some(mut whole) = fifo.get_frame(samples)? {
                 // Counted as it goes out: what the FIFO hands over is a
@@ -422,7 +431,7 @@ unsafe fn bars(
 /// One picture of the test card, numbered so the marker under the bars can
 /// move: a still picture says the receiver has a frame, a moving one says
 /// the transmission is live.
-unsafe fn card_frame(at: i64) -> anyhow::Result<AvFrameRef> {
+unsafe fn card_frame(at: i64, card: Card) -> anyhow::Result<AvFrameRef> {
     use ffmpeg_rs_raw::ffmpeg_sys_the_third::{av_frame_alloc, av_frame_get_buffer};
     unsafe {
         let frame = av_frame_alloc();
@@ -443,10 +452,12 @@ unsafe fn card_frame(at: i64) -> anyhow::Result<AvFrameRef> {
             let luma = (*frame).data[0].add(y * (*frame).linesize[0] as usize);
             for x in 0..w {
                 let bar = BARS[(x * BARS.len() / w).min(BARS.len() - 1)];
-                let v = match y >= under {
-                    false => bar.0,
-                    true if x.abs_diff(marker) < w / 40 => 235,
-                    true => 16,
+                let v = match (card, y >= under) {
+                    (Card::Sync, _) if card.beeping(at * (TONE_HZ_RATE / CARD_FPS) as i64) => 235,
+                    (Card::Sync, _) => 16,
+                    (Card::Bars, false) => bar.0,
+                    (Card::Bars, true) if x.abs_diff(marker) < w / 40 => 235,
+                    (Card::Bars, true) => 16,
                 };
                 *luma.add(x) = v;
             }
@@ -458,7 +469,7 @@ unsafe fn card_frame(at: i64) -> anyhow::Result<AvFrameRef> {
             let cr = (*frame).data[2].add(y * (*frame).linesize[2] as usize);
             for x in 0..w / 2 {
                 let bar = BARS[(2 * x * BARS.len() / w).min(BARS.len() - 1)];
-                let grey = 2 * y >= under;
+                let grey = card == Card::Sync || 2 * y >= under;
                 *cb.add(x) = if grey { 128 } else { bar.1 };
                 *cr.add(x) = if grey { 128 } else { bar.2 };
             }
@@ -469,7 +480,7 @@ unsafe fn card_frame(at: i64) -> anyhow::Result<AvFrameRef> {
 
 /// A second's worth of the tone, `count` samples of it, starting at sample
 /// `at` so the phase carries across frames.
-unsafe fn tone_frame(at: i64, count: i64) -> anyhow::Result<AvFrameRef> {
+unsafe fn tone_frame(at: i64, count: i64, card: Card) -> anyhow::Result<AvFrameRef> {
     use ffmpeg_rs_raw::ffmpeg_sys_the_third::{
         av_channel_layout_default, av_frame_alloc, av_frame_get_buffer,
     };
@@ -484,12 +495,27 @@ unsafe fn tone_frame(at: i64, count: i64) -> anyhow::Result<AvFrameRef> {
         let out = (*frame).data[0] as *mut i16;
         for n in 0..count {
             let t = (at + n) as f64 / TONE_HZ_RATE as f64;
-            let v = (TONE_PEAK * (std::f64::consts::TAU * TONE_HZ * t).sin()) as i16;
+            let v = match card == Card::Bars || card.beeping(at + n) {
+                true => (TONE_PEAK * (std::f64::consts::TAU * TONE_HZ * t).sin()) as i16,
+                false => 0,
+            };
             for c in 0..CHANNELS as i64 {
                 *out.add((n * CHANNELS as i64 + c) as usize) = v;
             }
         }
         Ok(AvFrameRef::new(frame))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Card {
+    Bars,
+    Sync,
+}
+
+impl Card {
+    fn beeping(self, sample: i64) -> bool {
+        self == Card::Sync && sample % i64::from(TONE_HZ_RATE) < i64::from(TONE_HZ_RATE / CARD_FPS)
     }
 }
 

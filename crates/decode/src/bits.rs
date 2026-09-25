@@ -1,5 +1,9 @@
 //! Bit buffers and integrity checks.
 
+pub mod bch;
+pub mod ldpc;
+mod ldpc_tables;
+
 /// A packed bit string, MSB first within each byte.
 ///
 /// MSB-first matches how every protocol document writes its frames, so a

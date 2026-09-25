@@ -547,6 +547,7 @@ fn compiled() -> &'static [&'static dyn Protocol] {
         &crate::wefax_nodes::Wefax,
         &crate::vdl2_nodes::Vdl2,
         &crate::dvbt_nodes::Dvbt,
+        &crate::dvbs2_nodes::Dvbs2,
         &crate::dab_nodes::DabProtocol,
         &crate::drm_nodes::DrmProtocol,
         &crate::aprs_nodes::Aprs,

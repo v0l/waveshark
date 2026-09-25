@@ -16,6 +16,8 @@
 //! read for the first sixty-eight symbols.
 
 use crate::NodeSpec;
+pub use crate::broadcast::{ANY, SERVICE, Tail, Want, service_label};
+use crate::broadcast::{Broadcast, SOUND_RATE_HZ};
 use crate::protocol::{Placed, Placement, Protocol, Shape};
 use common::{C32, Result};
 use decode::dvbt::{self as dvbtdec, OuterTx, TsPacket};
@@ -231,7 +233,7 @@ pub struct DvbtNode {
     decim: FirDecim,
     resample: Rational,
     rx: Offloaded,
-    mux: Mux,
+    tv: Broadcast,
     mixed: Vec<C32>,
     narrow: Vec<C32>,
     at_rate: Vec<C32>,
@@ -239,35 +241,7 @@ pub struct DvbtNode {
     /// What has already been said on the bus, so a multiplex that repeats its
     /// tables every half second does not repeat itself on the packet list.
     told: Option<Params>,
-    named: Vec<u16>,
     at: f64,
-    /// The container decoder, which reads the whole multiplex: the
-    /// programmes, their codecs and the clock that puts them together. None
-    /// in a build without ffmpeg, which reads the transport stream and its
-    /// tables and decodes no picture.
-    #[cfg(feature = "ffmpeg")]
-    media: decode::media::Media,
-    /// The packet identifier the pictures are on, once the tables have named
-    /// the service being watched.
-    watching: Option<u16>,
-    /// The service an operator asked for.
-    wanted: Want,
-    #[cfg(feature = "ffmpeg")]
-    decoded: Vec<decode::media::Out>,
-    /// Sound decoded and not yet handed to the bus.
-    #[cfg(feature = "ffmpeg")]
-    pcm: std::collections::VecDeque<f32>,
-    /// Where the sound has got to on the stream's own clock, which is what
-    /// says when a picture is shown.
-    #[cfg(feature = "ffmpeg")]
-    heard_s: Option<f64>,
-    /// Pictures decoded and waiting for their moment, with the moment.
-    #[cfg(feature = "ffmpeg")]
-    queue: Vec<(Option<f64>, common::VideoFrame)>,
-    /// Whether enough sound has been decoded to start playing it.
-    #[cfg(feature = "ffmpeg")]
-    playing: bool,
-    sequence: u64,
 }
 
 impl Default for DvbtNode {
@@ -290,225 +264,43 @@ impl DvbtNode {
             decim: FirDecim::design_hz(RATE_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
             resample: Rational::with_ratio(1, 1),
             rx: Offloaded::new(),
-            mux: Mux::new(),
+            tv: Broadcast::new(DVB, channel_hz),
             mixed: Vec::new(),
             narrow: Vec::new(),
             at_rate: Vec::new(),
             packets: Vec::new(),
             told: None,
-            named: Vec::new(),
             at: 0.0,
-            #[cfg(feature = "ffmpeg")]
-            media: decode::media::Media::new(),
-            watching: None,
-            wanted: Want::Any,
-            #[cfg(feature = "ffmpeg")]
-            decoded: Vec::new(),
-            #[cfg(feature = "ffmpeg")]
-            pcm: std::collections::VecDeque::new(),
-            #[cfg(feature = "ffmpeg")]
-            heard_s: None,
-            #[cfg(feature = "ffmpeg")]
-            queue: Vec::new(),
-            #[cfg(feature = "ffmpeg")]
-            playing: false,
-            sequence: 0,
         }
     }
 
-    /// Watch one service by its identifier, or none to take whichever the
-    /// multiplex describes first.
     pub fn watch(&mut self, service: Option<u16>) {
-        self.want(service.map_or(Want::Any, Want::Id));
+        self.tv.watch(service);
     }
 
-    /// Watch whatever answers to this.
     pub fn want(&mut self, want: Want) {
-        if self.wanted != want {
-            self.wanted = want;
-            self.watching = None;
-            self.tell_media();
-        }
+        self.tv.want(want);
     }
 
-    /// Tell the decoder which programme to read, by the number the
-    /// multiplex's tables and the container both call it.
-    fn tell_media(&mut self) {
-        #[cfg(feature = "ffmpeg")]
-        {
-            let id = match &self.wanted {
-                Want::Any => None,
-                Want::Id(id) => Some(*id),
-                Want::Named(_) => {
-                    self.mux.services.iter().find(|s| self.wanted.matches(s)).map(|s| s.id)
-                }
-            };
-            self.media.watch(id);
-        }
-    }
-
-    /// The service being watched, and the packet identifier its pictures are
-    /// on, once the tables have named one.
     pub fn watching(&self) -> Option<u16> {
-        self.watching
+        self.tv.watching()
     }
 
-    /// The service an operator asked for, whether or not it is on the air
-    /// yet.
     pub fn wanted(&self) -> &Want {
-        &self.wanted
+        self.tv.wanted()
     }
 
-    /// What stopped the container decoder, if anything did.
     #[cfg(feature = "ffmpeg")]
     pub fn media_fault(&self) -> Option<String> {
-        self.media.fault()
+        self.tv.media_fault()
     }
 
-    /// Every service the multiplex has described, in the order its table
-    /// lists them.
     pub fn services(&self) -> &[mpegts::Service] {
-        &self.mux.services
+        self.tv.services()
     }
 
-    /// The services as a parameter's list of choices, the first of which is
-    /// the receiver choosing for itself.
-    fn choices(&self) -> Vec<String> {
-        let mut out = vec![ANY.to_string()];
-        out.extend(self.mux.services.iter().map(service_label));
-        out
-    }
-
-    /// Where the wanted service sits in that list. The first entry is the
-    /// receiver choosing, which is not the same as its choice landing on the
-    /// first service.
-    fn choice(&self) -> usize {
-        if self.wanted == Want::Any {
-            return 0;
-        }
-        self.mux.services.iter().position(|s| self.wanted.matches(s)).map_or(0, |n| n + 1)
-    }
-
-    /// Point the demux at the video of whichever service is wanted, as soon
-    /// as the programme map names it.
-    fn follow_video(&mut self) {
-        if self.watching.is_some() {
-            return;
-        }
-        let service = match &self.wanted {
-            Want::Any => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
-            w => self.mux.services.iter().find(|s| w.matches(s)).cloned(),
-        };
-        let Some(pid) = service.as_ref().and_then(|s| s.video()).map(|v| v.pid) else {
-            return;
-        };
-        self.mux.follow(pid);
-        self.watching = Some(pid);
-    }
-
-    /// Take everything the decoder has ready.
-    ///
-    /// Everything, always: leaving it there stalls the decoding thread,
-    /// which stalls the demuxer reading from it, which fills the queue of
-    /// transport packets waiting to be read and starts dropping them. A
-    /// dropped transport packet is a hole in the middle of a coded picture,
-    /// so the sound breaks up rather than merely arriving late. What is
-    /// bounded instead is how far behind the sound may fall: see
-    /// [`DvbtNode::sound_for`].
-    #[cfg(feature = "ffmpeg")]
-    fn gather(&mut self) {
-        let mut decoded = std::mem::take(&mut self.decoded);
-        decoded.clear();
-        self.media.take(&mut decoded);
-        for d in &decoded {
-            match d {
-                decode::media::Out::Picture(p) => {
-                    let at = p.at_s;
-                    let frame = self.frame(p);
-                    self.queue.push((at, frame));
-                }
-                decode::media::Out::Sound(s) => {
-                    if self.pcm.is_empty() {
-                        self.heard_s = s.at_s;
-                    }
-                    self.pcm.extend(s.pcm.iter().copied());
-                }
-            }
-        }
-        self.decoded = decoded;
-    }
-
-    /// One block's worth of sound, and the clock moved on by it.
-    ///
-    /// Exactly what the block covers, because the bus mixes a block at a
-    /// time: handing it four seconds of sound in one block does not play
-    /// four seconds, it throws most of it away. Short is silence, which is
-    /// what a service that has not started yet sounds like.
-    #[cfg(feature = "ffmpeg")]
-    fn sound_for(&mut self, block_s: f64) -> Vec<f32> {
-        let rate = decode::media::SOUND_HZ as f64;
-        let want = (block_s * rate).round() as usize;
-        if want == 0 {
-            return Vec::new();
-        }
-        // Decoded further ahead than this and the receiver is not keeping
-        // up: the oldest sound goes and the clock jumps with it, so the
-        // pictures stay with the sound instead of the pair drifting apart
-        // for as long as the channel is open.
-        let most = (rate * BEHIND_S) as usize;
-        if self.pcm.len() > most {
-            let drop = self.pcm.len() - most;
-            self.pcm.drain(..drop);
-            if let Some(at) = &mut self.heard_s {
-                *at += drop as f64 / rate;
-            }
-        }
-        // Nothing is played until there is enough in hand to play through
-        // the next hiccup. A decoder is not a steady producer: a picture and
-        // its sound arrive when the multiplex sends them.
-        if !self.playing {
-            if self.pcm.len() < (rate * PRIME_S) as usize {
-                return vec![0.0; want];
-            }
-            self.playing = true;
-        }
-        let n = want.min(self.pcm.len());
-        let mut pcm: Vec<f32> = self.pcm.drain(..n).collect();
-        pcm.resize(want, 0.0);
-        // Run dry and it fills again before playing rather than stuttering
-        // a block at a time for as long as the decoder is behind.
-        if n < want {
-            self.playing = false;
-        }
-        // The clock only moves on sound that was really heard. A gap in the
-        // sound holds the picture rather than running past it.
-        if let Some(at) = &mut self.heard_s {
-            *at += n as f64 / rate;
-        }
-        pcm
-    }
-
-    /// The pictures whose moment has come.
-    ///
-    /// Sound is the clock, as it is in every player: the ear hears a
-    /// discontinuity that the eye does not see. A picture stamped earlier
-    /// than the sound now playing is late and goes out at once; one stamped
-    /// later waits. With no sound at all, or a stream that stamps nothing,
-    /// every picture goes out as it is decoded.
-    #[cfg(feature = "ffmpeg")]
-    fn due(&mut self) -> Vec<common::VideoFrame> {
-        let Some(now) = self.heard_s else {
-            return self.queue.drain(..).map(|(_, f)| f).collect();
-        };
-        let mut out = Vec::new();
-        self.queue.retain(|(at, f)| match at {
-            Some(at) if *at > now => true,
-            _ => {
-                out.push(f.clone());
-                false
-            }
-        });
-        out
+    pub fn broadcast(&self) -> &Broadcast {
+        &self.tv
     }
 
     /// Decode whatever picture is still held back, for a recording that has
@@ -526,166 +318,16 @@ impl DvbtNode {
         // still being read when the recording ends.
         let mut packets = Vec::new();
         self.rx.finish(&mut packets);
-        let mut bytes = Vec::with_capacity(packets.len() * 188);
-        for p in &packets {
-            self.mux.push(&p.bytes);
-            bytes.extend_from_slice(&p.bytes);
-        }
-        #[cfg(feature = "ffmpeg")]
-        self.media.push(&bytes);
-        #[cfg_attr(not(feature = "ffmpeg"), allow(unused_mut))]
-        let mut pcm = Vec::new();
-        #[cfg(feature = "ffmpeg")]
-        {
-            out.extend(self.queue.drain(..).map(|(_, f)| f));
-            pcm.extend(self.pcm.drain(..));
-            let mut decoded = std::mem::take(&mut self.decoded);
-            decoded.clear();
-            self.media.finish(&mut decoded);
-            for d in &decoded {
-                match d {
-                    decode::media::Out::Picture(p) => {
-                        let frame = self.frame(p);
-                        out.push(frame);
-                    }
-                    decode::media::Out::Sound(s) => pcm.extend_from_slice(&s.pcm),
-                }
-            }
-            self.decoded = decoded;
-        }
-        #[cfg(not(feature = "ffmpeg"))]
-        let _ = out;
-        Tail { bytes, pcm }
+        self.tv.flush(&packets, out)
     }
 
-    /// A decoded picture as the video bus carries it.
-    #[cfg(feature = "ffmpeg")]
-    fn frame(&mut self, p: &decode::media::Picture) -> common::VideoFrame {
-        self.sequence += 1;
-        // Named by the service the container says it came from, which is the
-        // same number the multiplex's own tables use.
-        let name = self
-            .mux
-            .services
-            .iter()
-            .find(|s| {
-                Some(s.id) == p.service || s.video().is_some_and(|v| Some(v.pid) == self.watching)
-            })
-            .and_then(|s| s.name.clone());
-        common::VideoFrame {
-            system: DVB,
-            channel_hz: self.channel_hz,
-            label: name,
-            width: p.width,
-            height: p.height,
-            // Broadcast pictures are 16:9 and their samples are square at
-            // this size, so the grid is the shape.
-            aspect: p.width as f32 / p.height as f32,
-            pixels: common::Pixels::Rgba8,
-            samples: std::sync::Arc::new(p.rgb.clone()),
-            lines_seen: p.height,
-            sequence: self.sequence,
-            update: common::Update::Whole,
-            // Twenty-five a second off a broadcast, each superseding the
-            // last.
-            cadence: common::Cadence::Live,
-            sent_at_us: None,
-        }
-    }
-
-    /// The multiplex as far as its tables have described it, for a pane that
-    /// wants to list what is on it.
     pub fn mux(&self) -> &Mux {
-        &self.mux
+        self.tv.mux()
     }
-}
-
-/// What was still in flight when the samples ran out: transport packets the
-/// decoding thread had not finished reading, and the sound that had no block
-/// left to go out in. A live receiver never sees either; a recording that
-/// ends does.
-pub struct Tail {
-    pub bytes: Vec<u8>,
-    pub pcm: Vec<f32>,
 }
 
 /// What the video bus calls a picture off the television multiplex.
 pub const DVB: &str = "DVB-T";
-
-/// How much sound to have in hand before any of it is played, so a gap in
-/// the decoding is not a gap in the sound.
-#[cfg(feature = "ffmpeg")]
-const PRIME_S: f64 = 0.3;
-
-/// How far ahead of what is being played the decoder may get before the
-/// receiver admits it is behind and throws the oldest sound away.
-#[cfg(feature = "ffmpeg")]
-const BEHIND_S: f64 = 1.5;
-
-/// What the sound of a service comes out at, which is what the audio bus
-/// mixes at.
-#[cfg(feature = "ffmpeg")]
-const SOUND_RATE_HZ: f64 = decode::media::SOUND_HZ as f64;
-#[cfg(not(feature = "ffmpeg"))]
-const SOUND_RATE_HZ: f64 = 48_000.0;
-
-/// Which service the pictures are read from.
-pub const SERVICE: &str = "service";
-
-/// Which programme of the multiplex is decoded.
-///
-/// A name rather than a position wherever the multiplex gives one, because a
-/// rebuild draws the node again from the patch and a position is only true
-/// until the next table arrives. What is held here is what survives a
-/// retune.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Want {
-    /// Whichever service the multiplex describes first with a picture on it.
-    #[default]
-    Any,
-    Id(u16),
-    Named(String),
-}
-
-impl Want {
-    /// A service as something to ask for again: its name where it has one.
-    pub fn of(s: &mpegts::Service) -> Self {
-        match &s.name {
-            Some(n) => Want::Named(n.clone()),
-            None => Want::Id(s.id),
-        }
-    }
-
-    pub fn matches(&self, s: &mpegts::Service) -> bool {
-        match self {
-            Want::Any => s.video().is_some(),
-            Want::Id(id) => s.id == *id,
-            Want::Named(n) => s.name.as_deref() == Some(n.as_str()) || &service_label(s) == n,
-        }
-    }
-
-    /// How it is written into a patch, and read back by [`build`].
-    pub fn setting(&self) -> pipeline::ParamValue {
-        match self {
-            Want::Any => pipeline::ParamValue::Int(0),
-            Want::Id(id) => pipeline::ParamValue::Int(*id as i64),
-            Want::Named(n) => pipeline::ParamValue::Text(n.clone()),
-        }
-    }
-}
-
-/// The first entry of that parameter: whichever service carries a picture.
-pub const ANY: &str = "first with a picture";
-
-/// A service on a list for a person: its name where the multiplex gave one,
-/// and its number where it did not.
-pub fn service_label(s: &mpegts::Service) -> String {
-    match (&s.name, s.scrambled) {
-        (Some(n), true) => format!("{n} (scrambled)"),
-        (Some(n), false) => n.clone(),
-        (None, _) => format!("service {}", s.id),
-    }
-}
 
 impl pipeline::node::Node for DvbtNode {
     fn name(&self) -> &str {
@@ -723,9 +365,8 @@ impl pipeline::node::Node for DvbtNode {
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
         self.resample = Rational::approx(rate / factor as f64, RATE_HZ, 4096);
         self.rx = Offloaded::new();
-        self.mux = Mux::new();
+        self.tv.retune();
         self.told = None;
-        self.named.clear();
 
         let mut out = i.spec.with_kind(PortKind::Bytes);
         out.center = common::Hz(self.channel_hz as u64);
@@ -768,28 +409,14 @@ impl pipeline::node::Node for DvbtNode {
         let mut packets = std::mem::take(&mut self.packets);
         self.rx.push(&self.at_rate);
         self.rx.take(&mut packets);
-        let out = outputs[0].bytes_mut();
-        for p in &packets {
-            self.mux.push(&p.bytes);
-            out.extend_from_slice(&p.bytes);
-        }
-        #[cfg(feature = "ffmpeg")]
-        self.media.push(&out[out.len() - packets.len() * 188..]);
+        self.tv.push(&packets, outputs[0].bytes_mut());
         self.packets = packets;
-        self.follow_video();
-
         // The pictures. The whole multiplex goes to the container decoder,
         // programmes, codecs, clocks and all, and what comes back is already
         // the programme that was asked for.
-        #[cfg(feature = "ffmpeg")]
-        {
-            self.gather();
-            let pcm = self.sound_for(c.block_seconds);
-            for frame in self.due() {
-                outputs[1].video_mut().push(frame);
-            }
-            outputs[2].real_mut().extend_from_slice(&pcm);
-        }
+        let (_, rest) = outputs.split_at_mut(1);
+        let (video, sound) = rest.split_at_mut(1);
+        self.tv.play(c.block_seconds, &mut video[0], &mut sound[0]);
 
         if let Some(params) = self.rx.heard().params
             && self.told != Some(params)
@@ -804,16 +431,8 @@ impl pipeline::node::Node for DvbtNode {
                     .decoded(dvbtdec::multiplex_read(params)),
             ));
         }
-        let fresh: Vec<u16> = self
-            .mux
-            .services
-            .iter()
-            .filter(|s| s.name.is_some() && !self.named.contains(&s.id))
-            .map(|s| s.id)
-            .collect();
-        for id in fresh {
-            self.named.push(id);
-            if let Some(d) = dvbtdec::service_read(&self.mux, id) {
+        for id in self.tv.fresh_services() {
+            if let Some(d) = dvbtdec::service_read(self.tv.mux(), id) {
                 let carrier = crate::locked(
                     self.channel_hz as u64,
                     CHANNEL_WIDTH_HZ as u32,
@@ -834,27 +453,13 @@ impl pipeline::node::Node for DvbtNode {
         self.mixer.reset();
         self.decim.reset();
         self.rx = Offloaded::new();
-        self.mux = Mux::new();
-        #[cfg(feature = "ffmpeg")]
-        {
-            self.media = decode::media::Media::new();
-            self.tell_media();
-            self.pcm.clear();
-            self.queue.clear();
-            self.heard_s = None;
-            self.playing = false;
-        }
-        self.watching = None;
+        self.tv.reset();
         self.told = None;
-        self.named.clear();
     }
 
     /// The services, as a choice that grows as the multiplex describes them.
     fn params(&self) -> Vec<pipeline::param::Param> {
-        vec![
-            pipeline::param::Param::choice(SERVICE, self.choice(), self.choices())
-                .label("Watching"),
-        ]
+        vec![self.tv.param()]
     }
 
     fn acquisition(&self) -> Option<pipeline::Acquisition> {
@@ -894,35 +499,7 @@ impl pipeline::node::Node for DvbtNode {
         if name != SERVICE {
             return Err(common::Error::other(format!("dvbt: unknown parameter {name:?}")));
         }
-        let want = match v {
-            // A position in the list this node last published, which is what
-            // a menu sends. Resolved here and kept as an identity, because
-            // the list it indexes grows as the multiplex describes itself.
-            pipeline::ParamValue::Choice(n) => match n.checked_sub(1) {
-                None => Want::Any,
-                Some(i) => Want::of(
-                    self.mux
-                        .services
-                        .get(i)
-                        .ok_or_else(|| common::Error::other("dvbt: no such service"))?,
-                ),
-            },
-            pipeline::ParamValue::Int(id) => match u16::try_from(id).ok().filter(|id| *id != 0) {
-                None => Want::Any,
-                Some(id) => self.mux.service(id).map_or(Want::Id(id), Want::of),
-            },
-            pipeline::ParamValue::Text(ref t) if t == ANY || t.is_empty() => Want::Any,
-            pipeline::ParamValue::Text(ref t) => {
-                let known = self.mux.services.iter().any(|s| Want::Named(t.clone()).matches(s));
-                if !known && !self.mux.services.is_empty() {
-                    return Err(common::Error::other(format!("dvbt: no service {t:?}")));
-                }
-                Want::Named(t.clone())
-            }
-            _ => return Err(common::Error::other("dvbt: a service is a name or a number")),
-        };
-        self.want(want);
-        Ok(())
+        self.tv.set_service("dvbt", v)
     }
 }
 
@@ -996,13 +573,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     // What was being watched before the rebuild. Nothing is checked here:
     // the tables have not arrived yet, so a name is taken on trust and
     // matched when the service turns up.
-    node.want(match s.get(SERVICE) {
-        Some(pipeline::ParamValue::Text(t)) if !t.is_empty() && t != ANY => Want::Named(t.clone()),
-        _ => match u16::try_from(s.i64_or(SERVICE, 0)).ok().filter(|id| *id != 0) {
-            Some(id) => Want::Id(id),
-            None => Want::Any,
-        },
-    });
+    node.want(Want::from_settings(s));
     Ok(Box::new(node))
 }
 

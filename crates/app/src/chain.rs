@@ -1917,12 +1917,17 @@ impl Receiver {
         self.graph
             .order()
             .filter_map(|(id, _)| {
-                let n = downcast::<nodes::dvbt_nodes::DvbtNode>(&self.graph, id)?;
+                let tv = downcast::<nodes::dvbt_nodes::DvbtNode>(&self.graph, id)
+                    .map(|n| n.broadcast())
+                    .or_else(|| {
+                        downcast::<nodes::dvbs2_nodes::Dvbs2Node>(&self.graph, id)
+                            .map(|n| n.broadcast())
+                    })?;
                 Some(Multiplex {
                     node: id.0,
                     label: self.graph.node(id).map_or_else(String::new, |n| n.name().to_string()),
-                    wanted: n.wanted().clone(),
-                    services: n.services().to_vec(),
+                    wanted: tv.wanted().clone(),
+                    services: tv.services().to_vec(),
                 })
             })
             .collect()
@@ -6472,6 +6477,25 @@ pub(crate) mod tests {
         let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
         assert!(rx.fader(1).is_some(), "the strip has no fader to meter");
+    }
+
+    #[test]
+    fn a_satellite_carrier_wider_than_twenty_megahertz_is_read_off_the_whole_span() {
+        use pipeline::registry::SettingsExt;
+        let mut p = plan(40_000_000.0, Hz::mhz(1097));
+        p.fronts.clear();
+        let mut s2 = chan(1, 0.0, Demod::Nfm);
+        s2.mode = ChanMode::Decode("dvbs2".into());
+        s2.bandwidth_hz = Some(30_000_000.0);
+        p.channels = vec![s2];
+
+        let patch = derived_patch(&p);
+        let stage = patch.stages().iter().find(|s| s.kind == "dvbs2").expect("the carrier");
+        assert_eq!(stage.settings.f64_or("width_hz", 0.0), 30_000_000.0);
+        let dec = patch.stages().iter().find(|s| s.kind == "decimate").expect("the channel's rate");
+        assert_eq!(dec.settings.i64_or("factor", 0), 1, "a 30 MHz carrier needs all 40 MS/s");
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 
     #[test]

@@ -13,9 +13,10 @@
 
 use ffmpeg_rs_raw::ffmpeg_sys_the_third::AVSampleFormat;
 use ffmpeg_rs_raw::ffmpeg_sys_the_third::{
-    AV_LOG_FATAL, AVPixelFormat, av_find_program_from_stream, av_log_set_level,
+    AV_DISPOSITION_VISUAL_IMPAIRED, AV_LOG_FATAL, AVCodecID, AVMediaType, AVPixelFormat,
+    AVRational as Rational, AVStream, av_dict_get, av_log_set_level,
 };
-use ffmpeg_rs_raw::{Decoder, Demuxer, Resample, Scaler, StreamType};
+use ffmpeg_rs_raw::{Decoder, Demuxer, Resample, Scaler};
 use std::io::Read;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 
@@ -161,6 +162,7 @@ impl Drop for Media {
         // Dropping the sender ends the reader, which ends the demuxer, which
         // ends the thread.
         self.feed = None;
+        drop(std::mem::replace(&mut self.out, sync_channel(0).1));
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -209,7 +211,7 @@ fn run(
     // Told what it is reading, because a stream with no beginning and no
     // file name is one ffmpeg would otherwise have to guess at.
     let mut demux = Demuxer::new_custom_io(reader, None)?.with_format("mpegts");
-    let info = unsafe { demux.probe_input()? };
+    unsafe { demux.probe_input()? };
 
     let mut want: Option<u16> = None;
     let mut decoder = Decoder::new();
@@ -230,13 +232,12 @@ fn run(
             }
         }
         if on.is_none() {
-            on = pick(want, &demux, &info);
-            if let Some(p) = &on {
-                for index in [p.video, p.sound].into_iter().flatten() {
-                    if let Some(s) = info.streams.iter().find(|s| s.index as i32 == index) {
-                        decoder.setup_decoder(s, Some(threads()))?;
-                    }
-                }
+            on = pick(want, &demux);
+            if let Some(p) = &mut on {
+                decoder = Decoder::new();
+                resample = Resample::new(AVSampleFormat::FLT, SOUND_HZ, 1);
+                p.video = p.video.filter(|&i| open(&mut decoder, &demux, i));
+                p.sound = p.sound.filter(|&i| open(&mut decoder, &demux, i));
             }
         }
 
@@ -245,8 +246,18 @@ fn run(
             // The stream ended: take whatever the decoders still hold and
             // stop.
             let service = on.as_ref().and_then(|p| p.service);
-            for (frame, index) in decoder.decode_pkt(None)? {
-                if !send(&mut scaler, &mut resample, &frame, index, on.as_ref(), service, &out) {
+            for (frame, index) in decoder.decode_pkt(None).unwrap_or_default() {
+                let clock = clock(&demux, index);
+                if !send(
+                    &mut scaler,
+                    &mut resample,
+                    &frame,
+                    index,
+                    on.as_ref(),
+                    service,
+                    clock,
+                    &out,
+                ) {
                     break;
                 }
             }
@@ -257,16 +268,26 @@ fn run(
             continue;
         }
         let service = p.service;
-        for (frame, index) in decoder.decode_pkt(Some(&pkt))? {
-            if !send(&mut scaler, &mut resample, &frame, index, on.as_ref(), service, &out) {
+        let Ok(frames) = decoder.decode_pkt(Some(&pkt)) else { continue };
+        for (frame, index) in frames {
+            let clock = clock(&demux, index);
+            if !send(&mut scaler, &mut resample, &frame, index, on.as_ref(), service, clock, &out) {
                 return Ok(());
             }
         }
     }
 }
 
+fn open(decoder: &mut Decoder, demux: &Demuxer, index: i32) -> bool {
+    unsafe {
+        let Ok(stream) = demux.get_stream(index as usize) else { return false };
+        decoder.setup_decoder_for_stream(stream, Some(threads())).is_ok()
+    }
+}
+
 /// One programme of the multiplex: what carries its picture, what carries
 /// its sound, and what its tables call it.
+#[derive(Debug, PartialEq)]
 struct Programme {
     video: Option<i32>,
     sound: Option<i32>,
@@ -274,28 +295,91 @@ struct Programme {
 }
 
 /// The programme that was asked for, or the first with a picture on it.
-fn pick(
-    want: Option<u16>,
-    demux: &Demuxer,
-    info: &ffmpeg_rs_raw::DemuxerInfo,
-) -> Option<Programme> {
-    let of = |index: usize| program_of(demux, index as i32);
-    let service = match want {
-        Some(id) => Some(id),
-        None => info
-            .streams
-            .iter()
-            .find(|s| s.stream_type == StreamType::Video)
-            .and_then(|s| of(s.index)),
+///
+/// Read off the demuxer as it stands rather than as it was probed: a
+/// programme map can arrive after the probe, and a stream can belong to more
+/// than one programme, so the question is which streams a programme lists,
+/// not which programme a stream was first seen in.
+fn pick(want: Option<u16>, demux: &Demuxer) -> Option<Programme> {
+    let programmes = unsafe { programmes(demux) };
+    let (service, streams) = match want {
+        Some(id) => programmes.into_iter().find(|(n, _)| *n == id)?,
+        None => programmes.into_iter().find(|(_, s)| s.iter().any(|t| t.kind == Kind::Video))?,
     };
-    let mine = |kind: StreamType| -> Option<i32> {
-        info.streams
-            .iter()
-            .find(|s| s.stream_type == kind && (service.is_none() || of(s.index) == service))
-            .map(|s| s.index as i32)
-    };
-    let (video, sound) = (mine(StreamType::Video), mine(StreamType::Audio));
-    (video.is_some() || sound.is_some()).then_some(Programme { video, sound, service })
+    let video = streams.iter().find(|t| t.kind == Kind::Video).map(|t| t.index);
+    let sound = streams
+        .iter()
+        .filter(|t| t.kind == Kind::Audio)
+        .min_by_key(|t| t.described)
+        .map(|t| t.index);
+    (video.is_some() || sound.is_some()).then_some(Programme {
+        video,
+        sound,
+        service: Some(service),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Video,
+    Audio,
+    Other,
+}
+
+struct Listed {
+    index: i32,
+    kind: Kind,
+    described: bool,
+}
+
+unsafe fn programmes(demux: &Demuxer) -> Vec<(u16, Vec<Listed>)> {
+    unsafe {
+        let ctx = demux.context();
+        if ctx.is_null() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for n in 0..(*ctx).nb_programs as usize {
+            let program = *(*ctx).programs.add(n);
+            let Ok(id) = u16::try_from((*program).program_num) else { continue };
+            let streams = (0..(*program).nb_stream_indexes as usize)
+                .filter_map(|k| {
+                    let index = *(*program).stream_index.add(k) as i32;
+                    let stream = demux.get_stream(index as usize).ok()?;
+                    Some(Listed { index, kind: kind(stream), described: described(stream) })
+                })
+                .collect();
+            out.push((id, streams));
+        }
+        out
+    }
+}
+
+unsafe fn kind(stream: *mut AVStream) -> Kind {
+    unsafe {
+        let par = (*stream).codecpar;
+        if (*par).codec_id == AVCodecID::NONE {
+            return Kind::Other;
+        }
+        match (*par).codec_type {
+            AVMediaType::VIDEO => Kind::Video,
+            AVMediaType::AUDIO => Kind::Audio,
+            _ => Kind::Other,
+        }
+    }
+}
+
+/// A soundtrack for somebody who cannot see the picture: flagged as such, or
+/// in the language code UK broadcasters give it.
+unsafe fn described(stream: *mut AVStream) -> bool {
+    unsafe {
+        if (*stream).disposition & AV_DISPOSITION_VISUAL_IMPAIRED as i32 != 0 {
+            return true;
+        }
+        let entry = av_dict_get((*stream).metadata, c"language".as_ptr(), std::ptr::null(), 0);
+        !entry.is_null()
+            && std::ffi::CStr::from_ptr((*entry).value).to_bytes().eq_ignore_ascii_case(b"nar")
+    }
 }
 
 /// What to tell a decoder about threads.
@@ -316,20 +400,15 @@ pub fn threads() -> std::collections::HashMap<String, String> {
 pub const THREADS: usize = 4;
 
 /// When a frame is shown or heard, in seconds on the stream's own clock.
-fn stamp(frame: &ffmpeg_rs_raw::AvFrameRef) -> Option<f64> {
-    (frame.pts != ffmpeg_rs_raw::ffmpeg_sys_the_third::AV_NOPTS_VALUE)
-        .then(|| frame.pts as f64 * frame.time_base.num as f64 / frame.time_base.den.max(1) as f64)
+fn stamp(frame: &ffmpeg_rs_raw::AvFrameRef, clock: Rational) -> Option<f64> {
+    let nothing = ffmpeg_rs_raw::ffmpeg_sys_the_third::AV_NOPTS_VALUE;
+    let pts = [frame.pts, frame.best_effort_timestamp].into_iter().find(|t| *t != nothing)?;
+    (clock.den != 0).then(|| pts as f64 * clock.num as f64 / clock.den as f64)
 }
 
-/// Which programme a stream belongs to, which in a DVB multiplex is the
-/// service identifier its tables use.
-fn program_of(demux: &Demuxer, index: i32) -> Option<u16> {
+fn clock(demux: &Demuxer, index: i32) -> Rational {
     unsafe {
-        let program = av_find_program_from_stream(demux.context(), std::ptr::null_mut(), index);
-        if program.is_null() {
-            return None;
-        }
-        u16::try_from((*program).program_num).ok()
+        demux.get_stream(index as usize).map_or(Rational { num: 0, den: 0 }, |s| (*s).time_base)
     }
 }
 
@@ -343,10 +422,11 @@ fn send(
     index: i32,
     on: Option<&Programme>,
     service: Option<u16>,
+    clock: Rational,
     out: &SyncSender<Out>,
 ) -> bool {
     if on.is_some_and(|p| p.sound == Some(index)) {
-        return sound(resample, frame, service, out);
+        return sound(resample, frame, service, clock, out);
     }
     let (w, h) = (frame.width as u16, frame.height as u16);
     if w == 0 || h == 0 {
@@ -370,8 +450,7 @@ fn send(
             std::ptr::copy_nonoverlapping(from, pixels.as_mut_ptr().add(y * row), row);
         }
     }
-    let at_s = (frame.pts != ffmpeg_rs_raw::ffmpeg_sys_the_third::AV_NOPTS_VALUE)
-        .then(|| frame.pts as f64 * frame.time_base.num as f64 / frame.time_base.den.max(1) as f64);
+    let at_s = stamp(frame, clock);
     // Blocking, so the thread is held by whoever is taking pictures rather
     // than dropping one it has already paid for. A receiver that has gone
     // ends the thread.
@@ -391,6 +470,7 @@ fn sound(
     resample: &mut Resample,
     frame: &ffmpeg_rs_raw::AvFrameRef,
     service: Option<u16>,
+    clock: Rational,
     out: &SyncSender<Out>,
 ) -> bool {
     let Ok(flat) = resample.process_frame(frame) else {
@@ -410,5 +490,175 @@ fn sound(
         }
         std::ptr::copy_nonoverlapping(src, pcm.as_mut_ptr(), n);
     }
-    out.send(Out::Sound(Sound { pcm, at_s: stamp(frame), service })).is_ok()
+    out.send(Out::Sound(Sound { pcm, at_s: stamp(frame, clock), service })).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bits::crc32;
+    use crate::mpegts::PACKET;
+
+    const PMT_TWO: u16 = 0x0FF0;
+
+    fn reseal(section: &mut [u8]) {
+        let len = (((section[1] & 0x0f) as usize) << 8 | section[2] as usize) + 3;
+        let crc = crc32(&section[..len - 4], 0x04C1_1DB7, 0xFFFF_FFFF);
+        section[len - 4..len].copy_from_slice(&crc.to_be_bytes());
+    }
+
+    fn pid(p: &[u8]) -> u16 {
+        u16::from_be_bytes([p[1] & 0x1f, p[2]])
+    }
+
+    fn two_services_sharing_one_picture(packets: usize) -> Vec<u8> {
+        let mut bars = crate::transcode::ToTs::bars(4_000_000.0);
+        let mut raw = vec![0u8; packets * PACKET];
+        bars.read_exact(&mut raw).expect("the test card");
+        let (mut pmt, mut counter) = (None, 0u8);
+        let mut out = Vec::with_capacity(raw.len() * 2);
+        for p in raw.chunks_exact(PACKET) {
+            let mut p = p.to_vec();
+            match pid(&p) {
+                0 => {
+                    let s = 5 + p[4] as usize;
+                    let end = s + 3 + (((p[s + 1] & 0x0f) as usize) << 8 | p[s + 2] as usize) - 4;
+                    pmt = (s + 8..end).step_by(4).find_map(|e| {
+                        (p[e] != 0 || p[e + 1] != 0)
+                            .then(|| u16::from_be_bytes([p[e + 2] & 0x1f, p[e + 3]]))
+                    });
+                    p[end..end + 4].copy_from_slice(&[
+                        0,
+                        2,
+                        0xe0 | (PMT_TWO >> 8) as u8,
+                        PMT_TWO as u8,
+                    ]);
+                    p[s + 2] += 4;
+                    reseal(&mut p[s..]);
+                    out.extend_from_slice(&p);
+                }
+                n if Some(n) == pmt => {
+                    out.extend_from_slice(&p);
+                    let s = 5 + p[4] as usize;
+                    p[1] = (p[1] & 0xe0) | (PMT_TWO >> 8) as u8;
+                    p[2] = PMT_TWO as u8;
+                    p[3] = (p[3] & 0xf0) | counter;
+                    counter = (counter + 1) & 0x0f;
+                    p[s + 4] = 2;
+                    reseal(&mut p[s..]);
+                    out.extend_from_slice(&p);
+                }
+                _ => out.extend_from_slice(&p),
+            }
+        }
+        out
+    }
+
+    fn pictures(out: &[Out], service: u16) -> usize {
+        out.iter().filter(|o| matches!(o, Out::Picture(p) if p.service == Some(service))).count()
+    }
+
+    fn sounds(out: &[Out], service: u16) -> usize {
+        out.iter().filter(|o| matches!(o, Out::Sound(s) if s.service == Some(service))).count()
+    }
+
+    #[test]
+    fn a_service_whose_streams_another_service_also_lists_is_watched() {
+        let ts = two_services_sharing_one_picture(8_000);
+        let mut media = Media::new();
+        media.watch(Some(2));
+        let mut out = Vec::new();
+        for block in ts.chunks(PACKET * 64) {
+            media.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        media.finish(&mut out);
+        assert_eq!(media.fault(), None);
+        assert_eq!((pictures(&out, 1), sounds(&out, 1)), (0, 0));
+        assert_eq!(
+            (pictures(&out, 2), sounds(&out, 2)),
+            (61, 98),
+            "ffprobe 8.1 lists both programmes"
+        );
+    }
+
+    #[test]
+    fn a_decoder_nobody_took_pictures_from_is_dropped_without_hanging() {
+        let ts = two_services_sharing_one_picture(8_000);
+        let mut media = Media::new();
+        for block in ts.chunks(PACKET * 64) {
+            media.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let (done, dropped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(media);
+            let _ = done.send(());
+        });
+        assert!(
+            dropped.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "the decode thread was left blocked on a full picture queue"
+        );
+    }
+
+    #[test]
+    fn pictures_follow_the_service_after_it_is_changed() {
+        let ts = two_services_sharing_one_picture(8_000);
+        let mut media = Media::new();
+        media.watch(Some(1));
+        let mut out = Vec::new();
+        let mut blocks = ts.chunks(PACKET * 64);
+        for block in blocks.by_ref() {
+            media.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            media.take(&mut out);
+            if pictures(&out, 1) >= 10 {
+                break;
+            }
+        }
+        assert!(pictures(&out, 1) >= 10, "service 1 never showed a picture");
+        media.watch(Some(2));
+        let changed = out.len();
+        for block in blocks {
+            media.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            media.take(&mut out);
+        }
+        media.finish(&mut out);
+        assert_eq!(media.fault(), None);
+        let after = &out[changed..];
+        let (shown, heard) = (pictures(after, 2), sounds(after, 2));
+        assert_eq!((pictures(&out[..changed], 2), pictures(after, 1)), (0, 0));
+        assert!(
+            (60..=66).contains(&shown),
+            "{shown} pictures after the change, floor 60, ceiling 66"
+        );
+        assert!(
+            (100..=110).contains(&heard),
+            "{heard} sounds after the change, floor 100, ceiling 110"
+        );
+    }
+
+    #[test]
+    fn pictures_and_sound_are_stamped_with_the_stream_clock() {
+        let ts = two_services_sharing_one_picture(8_000);
+        let mut media = Media::new();
+        let mut out = Vec::new();
+        for block in ts.chunks(PACKET * 64) {
+            media.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        media.finish(&mut out);
+        let at = |o: &Out| match o {
+            Out::Picture(p) => p.at_s,
+            Out::Sound(s) => s.at_s,
+        };
+        let pictures: Vec<f64> =
+            out.iter().filter(|o| matches!(o, Out::Picture(_))).filter_map(at).collect();
+        let sounds: Vec<f64> =
+            out.iter().filter(|o| matches!(o, Out::Sound(_))).filter_map(at).collect();
+        let spacing = |t: &[f64]| (t[t.len() - 1] - t[0]) / (t.len() - 1) as f64;
+        assert!((spacing(&pictures) - 0.04).abs() < 1e-6, "pictures {:.3?}", &pictures[..8]);
+        assert!((spacing(&sounds) - 1152.0 / 48_000.0).abs() < 1e-6, "sound {:.3?}", &sounds[..8]);
+    }
 }

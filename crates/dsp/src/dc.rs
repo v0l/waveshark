@@ -83,10 +83,73 @@ impl DcBlock {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SpurCancel {
+    step: C32,
+    phasor: C32,
+    amplitude: C32,
+    alpha: f32,
+    count: u32,
+}
+
+impl SpurCancel {
+    pub fn new(offset_hz: f64, rate: f64, cutoff_hz: f64) -> Self {
+        let turn = std::f64::consts::TAU * offset_hz / rate.max(1.0);
+        let a = (std::f64::consts::TAU * cutoff_hz / rate.max(1.0)).clamp(1e-9, 0.5);
+        Self {
+            step: C32::new(turn.cos() as f32, turn.sin() as f32),
+            phasor: C32::new(1.0, 0.0),
+            amplitude: C32::new(0.0, 0.0),
+            alpha: a as f32,
+            count: 0,
+        }
+    }
+
+    pub fn amplitude(&self) -> C32 {
+        self.amplitude
+    }
+
+    pub fn process(&mut self, buf: &mut [C32]) {
+        for s in buf.iter_mut() {
+            let tone = self.phasor;
+            self.amplitude += (*s * tone.conj() - self.amplitude) * self.alpha;
+            *s -= self.amplitude * tone;
+            self.phasor *= self.step;
+            self.count = self.count.wrapping_add(1);
+            if self.count.is_multiple_of(1024) {
+                self.phasor /= self.phasor.norm();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::f64::consts::TAU;
+
+    #[test]
+    fn a_spur_off_centre_is_cancelled_forty_db_and_a_tone_beside_it_kept() {
+        let rate = 20e6;
+        let spur_hz = -2_000_000.0;
+        let keep_hz = -1_950_000.0;
+        let tone = |hz: f64, n: usize, a: f32| {
+            let p = TAU * hz * n as f64 / rate;
+            C32::new(p.cos() as f32, p.sin() as f32) * a
+        };
+        let mut buf: Vec<C32> =
+            (0..200_000).map(|n| tone(spur_hz, n, 1.0) + tone(keep_hz, n, 0.1)).collect();
+        let mut cancel = SpurCancel::new(spur_hz, rate, 3_000.0);
+        cancel.process(&mut buf);
+        let tail = &buf[100_000..];
+        let at = |hz: f64| {
+            let s: C32 =
+                tail.iter().enumerate().map(|(n, x)| x * tone(hz, n + 100_000, 1.0).conj()).sum();
+            s.norm() / tail.len() as f32
+        };
+        assert!(at(spur_hz) < 0.01, "spur left at {}", at(spur_hz));
+        assert!((at(keep_hz) - 0.1).abs() < 0.005, "tone beside it at {}", at(keep_hz));
+    }
 
     const RATE: f64 = 2_400_000.0;
 

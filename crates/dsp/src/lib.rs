@@ -31,6 +31,7 @@ pub mod drift;
 pub mod drm;
 pub mod droneid;
 pub mod dtmf;
+pub mod dvbs2;
 pub mod dvbt;
 pub mod filter;
 pub mod fir;

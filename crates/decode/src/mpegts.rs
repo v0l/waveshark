@@ -605,6 +605,19 @@ pub fn text(raw: &[u8]) -> String {
     body.iter().filter(|&&b| !(0x80..0xA0).contains(&b) && b >= 0x20).map(|&b| b as char).collect()
 }
 
+pub fn service_read(protocol: &'static str, mux: &Mux, id: u16) -> Option<common::packet::Proto> {
+    use common::packet::{Entity, Fact, Id, Named, Proto, ThingKind};
+    let service = mux.service(id)?;
+    let name = service.name.clone()?;
+    let mut named = Named::new(name.clone(), ThingKind::Station).fixed();
+    named.role = service.video().map(|_| "television").or(Some("radio"));
+    Some(
+        Proto::new(protocol, "service")
+            .by(Entity::new("dvb-service", Id::Num(u64::from(id))).named(name))
+            .saying(Fact::Named(named)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

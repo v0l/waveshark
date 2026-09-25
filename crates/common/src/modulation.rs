@@ -37,6 +37,8 @@ pub enum Modulation {
     /// Eight phases, the step between symbols carrying the bits, which is
     /// what VDL Mode 2 keys.
     D8psk,
+    Psk8,
+    Apsk,
     /// Frequency swept linearly, which is chirp spread spectrum and radar.
     Chirp,
     /// Many carriers with a cyclic prefix. Told from the rest of the
@@ -96,6 +98,8 @@ impl Modulation {
             Modulation::Psk4 => "QPSK",
             Modulation::Dqpsk => "pi/4-DQPSK",
             Modulation::D8psk => "D8PSK",
+            Modulation::Psk8 => "8PSK",
+            Modulation::Apsk => "APSK",
             Modulation::Chirp => "chirp",
             Modulation::Ofdm => "OFDM",
             Modulation::Dsss => "DSSS",
@@ -169,7 +173,9 @@ impl Modulation {
             "BPSK" | "PSK2" => Some(Self::Psk2),
             "QPSK" | "PSK4" => Some(Self::Psk4),
             "PI4DQPSK" | "DQPSK" => Some(Self::Dqpsk),
-            "D8PSK" | "PSK8" | "8PSK" => Some(Self::D8psk),
+            "D8PSK" => Some(Self::D8psk),
+            "PSK8" | "8PSK" => Some(Self::Psk8),
+            "APSK" | "16APSK" | "32APSK" => Some(Self::Apsk),
             "CHIRP" => Some(Self::Chirp),
             "CSS" | "LORA" => Some(Self::Css),
             "PPM" => Some(Self::Ppm),
@@ -185,7 +191,7 @@ impl Modulation {
 
     /// Every verdict, so a caller can round-trip or list them without
     /// keeping its own copy of the set.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 25] = [
         Self::Ook,
         Self::Ask,
         Self::Fsk2,
@@ -196,6 +202,8 @@ impl Modulation {
         Self::Psk4,
         Self::Dqpsk,
         Self::D8psk,
+        Self::Psk8,
+        Self::Apsk,
         Self::Chirp,
         Self::Ofdm,
         Self::Dsss,

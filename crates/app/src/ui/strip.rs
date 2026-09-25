@@ -350,7 +350,7 @@ impl Strip<'_> {
             let r = ui.add(
                 egui::DragValue::new(&mut khz)
                     .speed(speed)
-                    .range(0.1..=20_000.0)
+                    .range(0.1..=WIDEST_KHZ)
                     .max_decimals(2)
                     .suffix(" kHz"),
             );
@@ -1763,9 +1763,17 @@ impl TxControls {
     }
 }
 
+const WIDEST_KHZ: f64 = 100_000.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_channel_can_be_as_wide_as_the_widest_span_a_radio_delivers() {
+        assert!(WIDEST_KHZ * 1e3 >= 61_440_000.0, "a LimeSDR at 61.44 MS/s");
+        assert!(WIDEST_KHZ * 1e3 >= 30_000_000.0, "a 23 Msym/s DVB-S2 carrier at a 0.3 roll-off");
+    }
     use crate::chain::{Receiver, Sinks, TxPlan, derived, tests as chain_tests};
     use crate::radio::{ChanMode, ChannelSpec, TxSource, TxSpec};
     use common::Hz;

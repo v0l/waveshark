@@ -80,7 +80,7 @@ fn every_capture_says_what_it_may_be_used_for() {
     let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
     let offair = parse(&manifest("offair.toml"), "[[capture]]");
     let survey = parse(&manifest("survey.toml"), "[[dataset]]");
-    assert_eq!(fixtures.len(), 35, "captures in fixtures.toml");
+    assert_eq!(fixtures.len(), 38, "captures in fixtures.toml");
     assert_eq!(offair.len(), 13, "captures in offair.toml");
     assert_eq!(survey.len(), 1, "datasets in survey.toml");
 
@@ -90,7 +90,7 @@ fn every_capture_says_what_it_may_be_used_for() {
 
     let ours = |set: &[Entry]| set.iter().filter(|e| e.licence == Some(Licence::CcBy4)).count();
     // Eighteen recordings and five signals generated here from a known picture.
-    assert_eq!(ours(&fixtures), 23, "CC BY 4.0 fixtures");
+    assert_eq!(ours(&fixtures), 26, "CC BY 4.0 fixtures");
     assert_eq!(ours(&offair), 13, "CC BY 4.0 off-air captures");
 
     let mut foreign: Vec<(&str, &Licence, &str)> = fixtures
@@ -145,7 +145,7 @@ fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
     let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
     let rehosted: Vec<&Entry> =
         fixtures.iter().filter(|e| e.url.contains("nostr.download")).collect();
-    assert_eq!(rehosted.len(), 32, "fixtures re-hosted on nostr.download");
+    assert_eq!(rehosted.len(), 35, "fixtures re-hosted on nostr.download");
     for entry in &rehosted {
         match entry.licence {
             Some(Licence::CcBy4) => {}
