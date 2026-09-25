@@ -12,7 +12,7 @@ tracing.workspace = true
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 byteorder = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
