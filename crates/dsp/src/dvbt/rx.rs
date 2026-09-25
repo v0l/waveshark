@@ -43,8 +43,17 @@ pub struct Symbol {
 }
 
 /// How far either side of the expected carrier the integer frequency search
-/// looks. A tuner within a few kHz of the channel is well inside this.
-const CARRIER_SEARCH: i32 = 6;
+/// looks, in hertz, so a tuner 60 ppm out at 800 MHz is inside it in every
+/// mode.
+const SEARCH_HZ: f64 = 50_000.0;
+
+const DC_ALPHA: f32 = 1.0e-5;
+
+const DC_FLOOR: f32 = 1.0e-4;
+
+const LOST_DB: f32 = 6.0;
+
+const LOST_SYMBOLS: u32 = 8;
 
 /// Symbols the acquisition folds the guard correlation over. Three is enough
 /// to put the right hypothesis clear of the wrong ones and short enough that
@@ -77,6 +86,9 @@ pub struct Dvbt {
     h: Vec<C32>,
     /// The equalised value each TPS carrier held in the previous symbol.
     tps_prev: Vec<C32>,
+    dc: C32,
+    power: f32,
+    poor: u32,
 }
 
 struct Lock {
@@ -116,6 +128,9 @@ impl Dvbt {
             next_frame: None,
             h: Vec::new(),
             tps_prev: Vec::new(),
+            dc: C32::default(),
+            power: 0.0,
+            poor: 0,
         }
     }
 
@@ -141,7 +156,13 @@ impl Dvbt {
 
     /// Read what `x` holds, appending every symbol it completes to `out`.
     pub fn push(&mut self, x: &[C32], out: &mut Vec<Symbol>) {
-        self.buf.extend_from_slice(x);
+        self.buf.reserve(x.len());
+        for &v in x {
+            self.dc += (v - self.dc) * DC_ALPHA;
+            self.power += (v.norm_sqr() - self.power) * DC_ALPHA;
+            let spike = self.dc.norm_sqr() > DC_FLOOR * self.power;
+            self.buf.push(if spike { v - self.dc } else { v });
+        }
         loop {
             if self.locked.is_none() && !self.acquire() {
                 break;
@@ -304,7 +325,8 @@ impl Dvbt {
         };
 
         let (snr_db, ok) = self.estimate_channel(mode, shift, phase);
-        if !ok {
+        self.poor = if snr_db < LOST_DB { self.poor + 1 } else { 0 };
+        if !ok || self.poor >= LOST_SYMBOLS {
             self.abandon(pos + n + g);
             return true;
         }
@@ -362,6 +384,7 @@ impl Dvbt {
     /// again immediately, on the same samples, for as long as they are there.
     fn abandon(&mut self, past: usize) {
         self.locked = None;
+        self.poor = 0;
         let drop = past.min(self.buf.len());
         self.buf.drain(..drop);
         self.phase = wrap(self.phase + drop as f64 * self.step);
@@ -408,7 +431,8 @@ impl Dvbt {
         let layout = &self.layouts[&mode];
         let w = layout.w();
         let mut best: Option<(i32, usize, f32)> = None;
-        for shift in -CARRIER_SEARCH..=CARRIER_SEARCH {
+        let reach = (SEARCH_HZ / (super::RATE_HZ / mode.fft() as f64)).ceil() as i32;
+        for shift in -reach..=reach {
             for phase in 0..4 {
                 let mut acc = C32::default();
                 let mut k = 3 * phase;
@@ -669,6 +693,34 @@ mod tests {
         let evm_db = 10.0 * (power / total as f64).log10();
         assert!((-35.0..-32.0).contains(&evm_db), "{evm_db} dB of error");
         assert!(got.iter().all(|s| s.snr_db > 25.0), "the pilots read the noise they were given");
+    }
+
+    #[test]
+    fn a_hackrf_capture_is_read_through_its_tuning_error_its_dc_and_a_lost_block() {
+        let params = Params {
+            mode: Mode::M8k,
+            guard: Guard::G1_32,
+            constellation: Constellation::Qam64,
+            hierarchy: Hierarchy::None,
+            code_rate_hp: CodeRate::R2_3,
+            code_rate_lp: CodeRate::R1_2,
+            cell_id: Some(19600),
+        };
+        let (_, air) = transmit(params, 2);
+        let rms = (air.iter().map(|s| s.norm_sqr()).sum::<f32>() / air.len() as f32).sqrt();
+        let dc = C32::new(-0.05, -0.3) * rms;
+        let mut samples: Vec<C32> =
+            impair(&air, 9.3, 30.0, params.mode, 5_000).into_iter().map(|s| s + dc).collect();
+        let cut = samples.len() * 3 / 5;
+        samples.drain(cut..cut + 390);
+        let (_, got) = read(&samples);
+        let good = got.iter().filter(|s| s.snr_db > 20.0).count();
+        assert_eq!(got.len(), 133, "symbols read of 136 sent; nothing locked six carriers out");
+        assert_eq!(
+            good, 121,
+            "symbols read clean: a DC spike on a pilot once cost every fourth symbol, \
+             and a lock that lost 390 samples never came back"
+        );
     }
 
     /// The frame counter is found and then followed: once a TPS word has been

@@ -33,6 +33,7 @@ the code is in the commit log.
 - TETRA speech coming out silent, or muted as enciphered, on clear calls.
 - Digital voice calls breaking up on the speaker.
 - IQStream directory tuners listed as reaching only the edges of the span being served.
+- DVB-T multiplexes not locking on a tuner more than a few kHz out, or reading badly through its DC spike.
 - IQStream directory listing not updated after a retune, or with the receiver stopped.
 
 ## [0.4.0] - 2026-09-24
