@@ -222,9 +222,39 @@ fn default_route() -> Option<Ipv4Addr> {
     parse_route_table(&std::fs::read_to_string("/proc/net/route").ok()?)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn default_route() -> Option<Ipv4Addr> {
+    let out = std::process::Command::new("/sbin/route").args(["-n", "get", "default"]).output();
+    parse_route_get(&String::from_utf8_lossy(&out.ok()?.stdout))
+}
+
+#[cfg(windows)]
+fn default_route() -> Option<Ipv4Addr> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("route")
+        .args(["print", "-4", "0.0.0.0"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    parse_route_print(&String::from_utf8_lossy(&out.ok()?.stdout))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn default_route() -> Option<Ipv4Addr> {
     None
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_route_get(out: &str) -> Option<Ipv4Addr> {
+    out.lines().find_map(|l| l.trim().strip_prefix("gateway:")?.trim().parse().ok())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_route_print(out: &str) -> Option<Ipv4Addr> {
+    out.lines().find_map(|l| match l.split_whitespace().collect::<Vec<_>>()[..] {
+        ["0.0.0.0", "0.0.0.0", gateway, ..] => gateway.parse().ok(),
+        _ => None,
+    })
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -657,5 +687,133 @@ mod tests {
         assert_eq!(read_pcp(&answer), Ok(("203.0.113.9:41000".parse().unwrap(), 3600)));
         answer[3] = 8;
         assert_eq!(read_pcp(&answer), Err("PCP result 8".into()));
+    }
+
+    #[test]
+    fn the_default_route_is_read_from_what_macos_and_windows_print() {
+        let macos = "   route to: default\ndestination: default\n       mask: default\n    \
+                     gateway: 192.168.1.254\n  interface: en0\n      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>\n";
+        assert_eq!(parse_route_get(macos), Some(Ipv4Addr::new(192, 168, 1, 254)));
+        assert_eq!(parse_route_get("route: writing to routing socket: not in table\n"), None);
+        let windows = "===========================================================================\n\
+                       Interface List\n 12...00 15 5d 01 02 03 ......Ethernet\n\
+                       ===========================================================================\n\n\
+                       IPv4 Route Table\n\
+                       ===========================================================================\n\
+                       Active Routes:\n\
+                       Network Destination        Netmask          Gateway       Interface  Metric\n\
+                       \x20         0.0.0.0          0.0.0.0      10.0.0.138       10.0.0.20     25\n\
+                       ===========================================================================\n\
+                       Persistent Routes:\n  None\n";
+        assert_eq!(parse_route_print(windows), Some(Ipv4Addr::new(10, 0, 0, 138)));
+        assert_eq!(parse_route_print("  0.0.0.0  0.0.0.0  On-link  10.0.0.20  25\n"), None);
+    }
+
+    fn fake_igd(conflicting: u16) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = heard.clone();
+        std::thread::spawn(move || {
+            for sock in listener.incoming().flatten() {
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut head = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head.push(line.trim().to_string());
+                }
+                let length: usize = head
+                    .iter()
+                    .find_map(|h| {
+                        h.to_ascii_lowercase().strip_prefix("content-length:")?.trim().parse().ok()
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                let body = String::from_utf8_lossy(&body).to_string();
+                let action = head
+                    .iter()
+                    .find_map(|h| {
+                        h.to_ascii_lowercase()
+                            .starts_with("soapaction:")
+                            .then(|| h.rsplit('#').next().unwrap().trim_matches('"').to_string())
+                    })
+                    .unwrap_or_default();
+                let field = |name: &str| element(&body, name).unwrap_or_default().to_string();
+                let (status, reply) = match (head[0].split(' ').nth(1).unwrap(), action.as_str()) {
+                    ("/desc.xml", _) => (
+                        200,
+                        "<root><device><serviceList><service>\
+                         <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
+                         <controlURL>/ctl</controlURL></service></serviceList></device></root>"
+                            .to_string(),
+                    ),
+                    ("/ctl", "GetExternalIPAddress") => (
+                        200,
+                        "<NewExternalIPAddress>203.0.113.9</NewExternalIPAddress>".to_string(),
+                    ),
+                    ("/ctl", "AddPortMapping") => {
+                        let (port, lease) = (field("NewExternalPort"), field("NewLeaseDuration"));
+                        log.lock().unwrap().push(format!(
+                            "add {} {port} lease {lease} for {}:{}",
+                            field("NewProtocol"),
+                            field("NewInternalClient"),
+                            field("NewInternalPort")
+                        ));
+                        match (lease.as_str(), port == conflicting.to_string()) {
+                            ("0", false) => (200, String::new()),
+                            ("0", true) => (500, "<errorCode>718</errorCode>".to_string()),
+                            _ => (500, "<errorCode>725</errorCode>".to_string()),
+                        }
+                    }
+                    ("/ctl", "DeletePortMapping") => {
+                        log.lock().unwrap().push(format!(
+                            "delete {} {}",
+                            field("NewProtocol"),
+                            field("NewExternalPort")
+                        ));
+                        (200, String::new())
+                    }
+                    _ => (404, String::new()),
+                };
+                let mut sock = reader.into_inner();
+                let _ = write!(
+                    sock,
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+            }
+        });
+        (format!("{base}/desc.xml"), heard)
+    }
+
+    #[test]
+    fn a_upnp_gateway_that_takes_only_permanent_leases_is_asked_again_and_a_taken_port_moved_off() {
+        let (location, heard) = fake_igd(5557);
+        let igd = Igd::at(&location).unwrap();
+        assert_eq!(igd.client, Ipv4Addr::LOCALHOST);
+        let (tcp, lease) = igd.map(Protocol::Tcp, 5557, 5557).unwrap();
+        assert_eq!((*tcp.ip(), lease), (Ipv4Addr::new(203, 0, 113, 9), 0));
+        assert_ne!(tcp.port(), 5557, "the port somebody else holds is not claimed");
+        igd.unmap(Protocol::Tcp, tcp.port()).unwrap();
+        let (udp, _) = igd.map(Protocol::Udp, 5557, 40_001).unwrap();
+        assert_eq!(udp.port(), 40_001);
+        let heard = heard.lock().unwrap().clone();
+        assert_eq!(
+            heard,
+            [
+                "add TCP 5557 lease 3600 for 127.0.0.1:5557".to_string(),
+                "add TCP 5557 lease 0 for 127.0.0.1:5557".to_string(),
+                format!("add TCP {} lease 3600 for 127.0.0.1:5557", tcp.port()),
+                format!("add TCP {} lease 0 for 127.0.0.1:5557", tcp.port()),
+                format!("delete TCP {}", tcp.port()),
+                "add UDP 40001 lease 3600 for 127.0.0.1:5557".to_string(),
+                "add UDP 40001 lease 0 for 127.0.0.1:5557".to_string(),
+            ]
+        );
     }
 }

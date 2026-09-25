@@ -718,29 +718,31 @@ impl Session {
             .flatten()
     }
 
-    pub fn iqstream_listing(&self) -> Option<nodes::iqstream_listing::Listing> {
+    pub fn iqstream_listing(&self) -> Option<crate::iqstream_listing::Listing> {
         if !self.iqstream_listed {
             return None;
         }
-        iqdirectory::identity(&self.iqstream_nsec)?;
+        nostr_directory::identity(&self.iqstream_nsec)?;
         let name = self.iqstream_name.trim();
         let host = self.iqstream_public_host.trim();
-        Some(nodes::iqstream_listing::Listing {
+        Some(crate::iqstream_listing::Listing {
             name: if name.is_empty() { "waveshark" } else { name }.to_string(),
             description: self.iqstream_description.trim().to_string(),
             antenna: self.iqstream_antenna.trim().to_string(),
             location: self.location.filter(|_| self.iqstream_locate),
             public_host: (!host.is_empty()).then(|| host.to_string()),
-            nsec: self.iqstream_nsec.clone(),
-            relays: iqdirectory::RELAYS.iter().map(|r| r.to_string()).collect(),
+            directory: nostr_directory::Config::publisher(
+                &self.iqstream_nsec,
+                &nostr_directory::RELAYS,
+            ),
         })
     }
 
-    pub fn directory_keys(&mut self) -> iqdirectory::Keys {
-        if let Some(keys) = iqdirectory::identity(&self.iqstream_nsec) {
+    pub fn directory_keys(&mut self) -> nostr_directory::Keys {
+        if let Some(keys) = nostr_directory::identity(&self.iqstream_nsec) {
             return keys;
         }
-        let (keys, nsec) = iqdirectory::new_identity();
+        let (keys, nsec) = nostr_directory::new_identity();
         self.iqstream_nsec = nsec;
         keys
     }
@@ -1441,7 +1443,7 @@ mod tests {
         s.directory_keys();
         let l = s.iqstream_listing().unwrap();
         assert_eq!((l.name.as_str(), l.location, l.public_host), ("waveshark", None, None));
-        assert_eq!(l.relays.len(), iqdirectory::RELAYS.len());
+        assert_eq!(l.directory.relays.len(), nostr_directory::RELAYS.len());
         s.iqstream_locate = true;
         s.iqstream_public_host = " sdr.example.net ".into();
         let l = s.iqstream_listing().unwrap();
@@ -1460,7 +1462,7 @@ mod tests {
         assert_eq!(back.directory_keys().public_key(), made.public_key());
         let mut torn = Session::parse("iqstream_nsec = nsec1torn");
         assert_ne!(torn.directory_keys().public_key(), made.public_key());
-        assert!(iqdirectory::identity(&torn.iqstream_nsec).is_some(), "a torn key is replaced");
+        assert!(nostr_directory::identity(&torn.iqstream_nsec).is_some(), "a torn key is replaced");
     }
 
     /// A PI code is four hex digits or it is not a code: a station sent on

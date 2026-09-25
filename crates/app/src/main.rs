@@ -38,6 +38,7 @@ mod gpu;
 mod heatmap;
 mod i18n;
 mod icons;
+mod iqstream_listing;
 mod keystore;
 mod links;
 mod locale;

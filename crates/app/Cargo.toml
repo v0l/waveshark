@@ -38,7 +38,8 @@ remote.workspace = true
 sources.workspace = true
 nodes.workspace = true
 iqstream.workspace = true
-iqdirectory.workspace = true
+sdr-directory.workspace = true
+nostr-directory.workspace = true
 gps.workspace = true
 survey.workspace = true
 orbit.workspace = true
@@ -91,6 +92,7 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 
 [dev-dependencies]
 hound = "3"
+nostr-directory = { workspace = true, features = ["mock-relay"] }
 
 [features]
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so

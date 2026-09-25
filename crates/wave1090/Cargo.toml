@@ -14,7 +14,8 @@ sources.workspace = true
 rtlsdr.workspace = true
 remote.workspace = true
 iqstream.workspace = true
-iqdirectory.workspace = true
+sdr-directory.workspace = true
+nostr-directory.workspace = true
 tokio = { version = "1", features = ["rt", "signal"] }
 clap.workspace = true
 chrono = { workspace = true, features = ["clock"] }

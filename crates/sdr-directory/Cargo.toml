@@ -1,0 +1,18 @@
+[package]
+name = "sdr-directory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+fixtures = []
+
+[dependencies]
+getrandom = "0.4"
+httpc.workspace = true
+iqstream.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

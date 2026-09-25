@@ -1,5 +1,6 @@
-use iqdirectory::{Directory, Listing, PublicKey, Query};
+use nostr_directory::{Config, NostrDirectory};
 use parking_lot::Mutex;
+use sdr_directory::{Author, Listing, Query, SdrDirectory};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -34,15 +35,15 @@ impl Heard {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Own {
-    pub author: PublicKey,
+    pub author: Author,
     pub local: SocketAddr,
 }
 
 impl Own {
     pub fn of(s: &crate::session::Session) -> Option<Own> {
-        let author = iqdirectory::identity(&s.iqstream_nsec)?.public_key();
+        let author = Author::from(nostr_directory::identity(&s.iqstream_nsec)?.public_key());
         let (mut local, _) = s.iqstream()?;
         if local.ip().is_unspecified() {
             local.set_ip(match local.ip() {
@@ -115,7 +116,8 @@ pub fn refresh(own: Option<Own>) {
                 .map(|l| Found { listing: l.clone(), heard: Heard::Unchecked })
                 .collect(),
         );
-        let heard = probe(&listings, own, |addr| remote::iqstream::probe_all(addr).is_ok());
+        let heard =
+            probe(&listings, own.as_ref(), |addr| remote::iqstream::probe_all(addr).is_ok());
         let mut f = finder().lock();
         if let Some(found) = f.found.as_mut() {
             for (fd, heard) in found.iter_mut().zip(heard) {
@@ -130,23 +132,16 @@ pub fn refresh(own: Option<Own>) {
 }
 
 fn read_directory() -> Result<Vec<Listing>, String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("tokio runtime: {e}"))?;
-    rt.block_on(async {
-        let dir = Directory::connect(&iqdirectory::RELAYS, RELAY_WAIT)
-            .await
-            .map_err(|e| e.to_string())?;
-        let listed = dir.list(RELAY_WAIT).await.map_err(|e| e.to_string());
-        dir.shutdown().await;
-        listed
-    })
+    let dir = NostrDirectory::open(&Config::reader(&nostr_directory::RELAYS), RELAY_WAIT)
+        .map_err(|e| e.to_string())?;
+    let listed = dir.list(RELAY_WAIT).map_err(|e| e.to_string());
+    dir.close();
+    listed
 }
 
 fn probe(
     listings: &[Listing],
-    own: Option<Own>,
+    own: Option<&Own>,
     answers: impl Fn(&str) -> bool + Sync,
 ) -> Vec<Heard> {
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -195,12 +190,12 @@ pub fn tally(found: &[Found]) -> (usize, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iqdirectory::model::{Dial, Hardware, Station, Tuner, Version};
-    use iqdirectory::{Entry, Keys};
+    use nostr_directory::Keys;
+    use sdr_directory::{Dial, Entry, Hardware, Station, Tuner, Version};
 
     fn listing(name: &str, host: &str, center_hz: u64, dial: Dial) -> Listing {
         Listing {
-            author: Keys::generate().public_key(),
+            author: Author::from(Keys::generate().public_key()),
             seen: 1_000,
             entry: Entry {
                 host: host.into(),
@@ -288,9 +283,9 @@ mod tests {
         let mine = listing("mine", "83.71.105.199", 433_920_000, Dial::Fixed);
         let other = listing("other", "203.0.113.9", 433_920_000, Dial::Fixed);
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-        let own = Own { author: mine.author, local };
+        let own = Own { author: mine.author.clone(), local };
         let asked = Mutex::new(Vec::new());
-        let heard = probe(&[other.clone(), mine.clone()], Some(own), |addr| {
+        let heard = probe(&[other.clone(), mine.clone()], Some(&own), |addr| {
             asked.lock().push(addr.to_string());
             addr != "83.71.105.199:1234"
         });
@@ -328,10 +323,10 @@ mod tests {
             },
             ..listing("elsewhere", "203.0.113.9", 1, Dial::Fixed)
         };
-        let own = Own { author: mine.author, local: "127.0.0.1:1234".parse().unwrap() };
+        let own = Own { author: mine.author.clone(), local: "127.0.0.1:1234".parse().unwrap() };
         let asked = Mutex::new(Vec::new());
         let all = [mine.clone(), radarpi.clone(), elsewhere.clone()];
-        let heard = probe(&all, Some(own), |addr| {
+        let heard = probe(&all, Some(&own), |addr| {
             asked.lock().push(addr.to_string());
             addr != "10.9.9.9:1234"
         });
@@ -358,7 +353,7 @@ mod tests {
     fn a_server_on_every_interface_is_reached_here_on_loopback() {
         let mut s = crate::session::Session { iqstream_on: true, ..Default::default() };
         assert_eq!(Own::of(&s), None, "no key yet");
-        let author = s.directory_keys().public_key();
+        let author = Author::from(s.directory_keys().public_key());
         s.iqstream_addr = "0.0.0.0:1234".into();
         assert_eq!(Own::of(&s), Some(Own { author, local: "127.0.0.1:1234".parse().unwrap() }));
         s.iqstream_addr = "[::]:1234".into();

@@ -3056,7 +3056,7 @@ pub struct IqStreamPlan {
     /// asked: granting it moves the frequency on the local screen, because
     /// there is one tuner.
     pub tunable: bool,
-    pub listing: Option<nodes::iqstream_listing::Listing>,
+    pub listing: Option<crate::iqstream_listing::Listing>,
 }
 
 pub mod derived {

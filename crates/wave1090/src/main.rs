@@ -311,8 +311,11 @@ fn listen(args: &Args, center_hz: u64, rate: f64, hardware: &str) -> Result<Opti
     if args.iqstream_list {
         let listing = listing(args)?;
         let shared = server.clone();
-        let lister = iqdirectory::lister::Lister::start(move || Some(shared.clone()), listing)
-            .context("cannot start the directory listing")?;
+        let lister = sdr_directory::lister::Lister::<nostr_directory::NostrDirectory>::start(
+            move || Some(shared.clone()),
+            listing,
+        )
+        .context("cannot start the directory listing")?;
         withdraw_on_signal(lister)?;
     }
     Ok(Some(Fanned { server, tuner }))
@@ -330,28 +333,29 @@ fn key_path(args: &Args) -> Result<std::path::PathBuf> {
     Ok(base.join("wave1090").join("directory.nsec"))
 }
 
-fn listing(args: &Args) -> Result<iqdirectory::lister::Listing> {
+fn listing(args: &Args) -> Result<sdr_directory::lister::Offer<nostr_directory::Config>> {
     let path = key_path(args)?;
-    let keys = iqdirectory::identity_file(&path)
+    let keys = nostr_directory::identity_file(&path)
         .with_context(|| format!("directory key {}", path.display()))?;
-    tracing::info!("iqstream directory key {}", iqdirectory::npub(&keys));
-    let nsec = iqdirectory::nsec(&keys).context("the directory key would not encode")?;
+    tracing::info!("iqstream directory key {}", nostr_directory::npub(&keys));
+    let nsec = nostr_directory::nsec(&keys);
     let relays = match args.iqstream_relay.is_empty() {
-        true => iqdirectory::RELAYS.iter().map(|r| r.to_string()).collect(),
+        true => nostr_directory::RELAYS.iter().map(|r| r.to_string()).collect(),
         false => args.iqstream_relay.clone(),
     };
-    Ok(iqdirectory::lister::Listing {
+    Ok(sdr_directory::lister::Offer {
         name: args.iqstream_name.clone(),
         description: args.iqstream_description.clone(),
         antenna: args.iqstream_antenna.clone(),
         location: station(args).filter(|_| args.iqstream_locate),
         public_host: args.iqstream_public_host.clone(),
-        nsec,
-        relays,
+        directory: nostr_directory::Config { nsec: Some(nsec), relays },
     })
 }
 
-fn withdraw_on_signal(lister: iqdirectory::lister::Lister) -> Result<()> {
+fn withdraw_on_signal(
+    lister: sdr_directory::lister::Lister<nostr_directory::NostrDirectory>,
+) -> Result<()> {
     std::thread::Builder::new()
         .name("signals".into())
         .spawn(move || {
@@ -780,7 +784,7 @@ mod tests {
         let first = listing(&args).unwrap();
         assert_eq!(first.name, "wave1090");
         assert_eq!(first.location, None, "a position given for CPR is not listed unasked");
-        assert_eq!(first.relays.len(), iqdirectory::RELAYS.len());
+        assert_eq!(first.directory.relays.len(), nostr_directory::RELAYS.len());
         assert_eq!(first.public_host, None);
 
         let named = [
@@ -794,11 +798,11 @@ mod tests {
         ];
         let args = parsed(&[&base[..], &at[..], &named[..]].concat()).unwrap();
         let second = listing(&args).unwrap();
-        assert_eq!(second.nsec, first.nsec, "the same key on the second start");
+        assert_eq!(second.directory.nsec, first.directory.nsec, "the same key on the second start");
         assert_eq!(second.location, Some((51.45, -0.97)));
         assert_eq!(second.name, "radarpi");
         assert_eq!(second.public_host.as_deref(), Some("sdr.example.net"));
-        assert_eq!(second.relays, ["wss://a.example", "wss://b.example"]);
+        assert_eq!(second.directory.relays, ["wss://a.example", "wss://b.example"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

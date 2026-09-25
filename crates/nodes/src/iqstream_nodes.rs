@@ -62,6 +62,12 @@ fn servers() -> &'static Mutex<HashMap<SocketAddr, Arc<iqstream::Server>>> {
 ///
 /// What the settings card reads: a pane asking what is being served must not
 /// open a listening socket nobody asked for.
+static LISTING: std::sync::OnceLock<fn(SocketAddr) -> Option<String>> = std::sync::OnceLock::new();
+
+pub fn describe_listing_with(describe: fn(SocketAddr) -> Option<String>) {
+    let _ = LISTING.set(describe);
+}
+
 pub fn running(addr: SocketAddr) -> Option<Arc<iqstream::Server>> {
     servers().lock().ok()?.get(&addr).cloned()
 }
@@ -221,8 +227,8 @@ impl Simple for IqStreamServerNode {
         let listed = self
             .server
             .as_ref()
-            .and_then(|s| crate::iqstream_listing::state(s.addr()))
-            .map_or_else(|| "not listed".into(), |l| l.describe());
+            .and_then(|s| LISTING.get().and_then(|describe| describe(s.addr())))
+            .unwrap_or_else(|| "not listed".into());
         let (readers, blocks) = match &self.tuner {
             Some(t) => (t.subscribers().to_string(), t.blocks_sent()),
             None => ("0".into(), 0),

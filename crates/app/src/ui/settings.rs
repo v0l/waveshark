@@ -1592,7 +1592,7 @@ impl App {
 
     fn directory_section(&mut self, ui: &mut egui::Ui) {
         let serving = self.setting(|s| s.iqstream());
-        let listed = serving.and_then(|(addr, _)| nodes::iqstream_listing::state(addr));
+        let listed = serving.and_then(|(addr, _)| crate::iqstream_listing::state(addr));
         section(ui, "directory", "this server in the public tuner list, over nostr", |ui| {
             let mut on = self.setting(|s| s.iqstream_listed);
             let help = "Publishes where to reach this server, what tuners it has and \
@@ -1646,8 +1646,8 @@ impl App {
             if switch(ui, "locate", &mut locate, "where the receiver is, roughly", locate_help) {
                 self.settings.edit(|s| s.iqstream_locate = locate);
             }
-            if let Some(keys) = self.setting(|s| iqdirectory::identity(&s.iqstream_nsec)) {
-                reading(ui, "key", iqdirectory::npub(&keys));
+            if let Some(keys) = self.setting(|s| nostr_directory::identity(&s.iqstream_nsec)) {
+                reading(ui, "key", nostr_directory::npub(&keys));
             }
             match (on, serving, listed) {
                 (false, ..) => panel::status(ui, false, "off: not in the directory"),
@@ -1661,8 +1661,8 @@ impl App {
                 (true, Some(_), Some(state)) => {
                     let fine = !matches!(
                         state,
-                        nodes::iqstream_listing::ListingState::Unreachable(_)
-                            | nodes::iqstream_listing::ListingState::Refused(_)
+                        crate::iqstream_listing::ListingState::Unreachable(_)
+                            | crate::iqstream_listing::ListingState::Refused(_)
                     );
                     panel::status(ui, fine, &state.describe())
                 }
@@ -3030,7 +3030,7 @@ impl App {
             return;
         };
         let (hz, bad_hz) = edit.hz();
-        let query = iqdirectory::Query { hz, tunable: edit.tunable, free: false };
+        let query = sdr_directory::Query { hz, tunable: edit.tunable, free: false };
         let found = crate::stations::found();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4117,11 +4117,11 @@ fn station_card(ui: &mut egui::Ui, f: &crate::stations::Found, idle: bool) -> bo
             for t in &s.tuners {
                 let (lo, hi) = t.span_hz();
                 let dial = match t.dial {
-                    iqdirectory::Dial::Fixed => "fixed".to_string(),
-                    iqdirectory::Dial::Tunable { min_hz: Some(lo), max_hz: Some(hi) } => {
+                    sdr_directory::Dial::Fixed => "fixed".to_string(),
+                    sdr_directory::Dial::Tunable { min_hz: Some(lo), max_hz: Some(hi) } => {
                         format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi))
                     }
-                    iqdirectory::Dial::Tunable { .. } => "free".to_string(),
+                    sdr_directory::Dial::Tunable { .. } => "free".to_string(),
                 };
                 Line::new()
                     .legend(if t.name.is_empty() { "tuner" } else { t.name.as_str() })

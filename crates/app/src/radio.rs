@@ -2842,10 +2842,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 if let Some((was, _)) = listed(&self.plan.iqstream)
                     && listed(&serving).is_none_or(|(now, _)| now != was)
                 {
-                    nodes::iqstream_listing::list(was, None);
+                    crate::iqstream_listing::list(was, None);
                 }
                 if let Some((addr, listing)) = listed(&serving) {
-                    nodes::iqstream_listing::list(addr, Some(listing));
+                    crate::iqstream_listing::list(addr, Some(listing));
                 }
                 let socket = |p: &Option<crate::chain::IqStreamPlan>| {
                     p.as_ref().map(|p| (p.addr, p.tunable))
