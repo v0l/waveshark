@@ -18,6 +18,9 @@ const GAP_S: f64 = 0.005;
 #[cfg(feature = "ffmpeg")]
 const RESYNC_S: f64 = 1.0;
 
+#[cfg(feature = "ffmpeg")]
+const HOLD_S: f64 = 1.0;
+
 /// What the sound of a service comes out at, which is what the audio bus
 /// mixes at.
 #[cfg(feature = "ffmpeg")]
@@ -134,7 +137,7 @@ pub struct Broadcast {
     heard_s: Option<f64>,
     /// Pictures decoded and waiting for their moment, with the moment.
     #[cfg(feature = "ffmpeg")]
-    queue: Vec<(Option<f64>, common::VideoFrame)>,
+    queue: Vec<(Option<f64>, common::VideoFrame, f64)>,
     /// Whether enough sound has been decoded to start playing it.
     #[cfg(feature = "ffmpeg")]
     playing: bool,
@@ -356,7 +359,7 @@ impl Broadcast {
         {
             self.gather();
             let pcm = self.sound_for(block_s);
-            for frame in self.due() {
+            for frame in self.due(block_s) {
                 video.video_mut().push(frame);
             }
             sound.real_mut().extend_from_slice(&pcm);
@@ -394,7 +397,7 @@ impl Broadcast {
                 decode::media::Out::Picture(p) if self.keeps(p.service) => {
                     let at = p.at_s;
                     let frame = self.frame(p);
-                    self.queue.push((at, frame));
+                    self.queue.push((at, frame, 0.0));
                 }
                 decode::media::Out::Sound(s) if self.keeps(s.service) => {
                     self.arrive(s.at_s, &s.pcm)
@@ -480,16 +483,19 @@ impl Broadcast {
     /// later waits. With no sound at all, or a stream that stamps nothing,
     /// every picture goes out as it is decoded.
     #[cfg(feature = "ffmpeg")]
-    fn due(&mut self) -> Vec<common::VideoFrame> {
+    fn due(&mut self, block_s: f64) -> Vec<common::VideoFrame> {
         let Some(now) = self.heard_s else {
-            return self.queue.drain(..).map(|(_, f)| f).collect();
+            return self.queue.drain(..).map(|(_, f, _)| f).collect();
         };
         let mut out = Vec::new();
-        self.queue.retain(|(at, f)| match at {
-            Some(at) if *at > now => true,
-            _ => {
-                out.push(f.clone());
-                false
+        self.queue.retain_mut(|(at, f, held)| {
+            *held += block_s;
+            match at {
+                Some(at) if *at > now && *held < HOLD_S => true,
+                _ => {
+                    out.push(f.clone());
+                    false
+                }
             }
         });
         out
@@ -507,7 +513,7 @@ impl Broadcast {
         let mut pcm = Vec::new();
         #[cfg(feature = "ffmpeg")]
         {
-            out.extend(self.queue.drain(..).map(|(_, f)| f));
+            out.extend(self.queue.drain(..).map(|(_, f, _)| f));
             pcm.extend(self.pcm.drain(..));
             let mut decoded = std::mem::take(&mut self.decoded);
             decoded.clear();
@@ -609,5 +615,29 @@ mod tests {
         assert!(tv.keeps(Some(2)));
         tv.arrive(Some(3.0), &tenth());
         assert_eq!(tv.heard_s, Some(3.0));
+    }
+
+    #[test]
+    fn a_picture_whose_sound_is_late_is_shown_within_a_second_rather_than_never() {
+        let mut tv = Broadcast::new("test", 0.0);
+        tv.arrive(Some(10.0), &vec![0.5; (0.5 * RATE) as usize]);
+        let picture = decode::media::Picture {
+            width: 2,
+            height: 2,
+            rgb: vec![0; 16],
+            at_s: Some(30.0),
+            service: None,
+        };
+        let frame = tv.frame(&picture);
+        tv.queue.push((Some(30.0), frame, 0.0));
+        let blocks = (0..200)
+            .position(|_| {
+                let mut video = Payload::empty_of(pipeline::port::PortKind::Video);
+                let mut sound = Payload::empty_of(pipeline::port::PortKind::Real);
+                tv.play(0.01, &mut video, &mut sound);
+                video.as_video().is_some_and(|v| !v.is_empty())
+            })
+            .map(|n| n + 1);
+        assert_eq!(blocks, Some(100), "shown after a second of blocks, not held for the sound");
     }
 }

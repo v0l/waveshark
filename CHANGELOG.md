@@ -31,6 +31,7 @@ the code is in the commit log.
 - DVB-T pictures stopping for good after one damaged packet.
 - Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
 - DVB-T sound cutting out every second and out of step with the picture.
+- DVB-T pictures freezing for good when the sound fell behind.
 - Channel width stopping at 20 MHz on a wider span.
 - DVB-T pictures and sound lost after changing service.
 - LimeSDR left busy until a restart after a span change or USB fault.
