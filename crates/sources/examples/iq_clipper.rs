@@ -170,8 +170,7 @@ fn tune(
     let mut file = std::fs::File::open(input).expect("open");
     let bps = format_in.bytes_per_sample();
     let mut mixer = dsp::mixer::Mixer::new(center_in - center_out, rate_in);
-    let mut resamp = dsp::resample::Rational::new(rate_in, rate_out, 512)
-        .expect("a rational ratio between the rates");
+    let mut resamp = Resampler::new(rate_in, rate_out);
 
     let block = 1 << 20;
     let mut raw = vec![0u8; block * bps];
@@ -202,6 +201,32 @@ fn tune(
         }
     }
     out
+}
+
+enum Resampler {
+    Decimate(dsp::FirDecim),
+    Rational(dsp::resample::Rational),
+}
+
+impl Resampler {
+    fn new(rate_in: f64, rate_out: f64) -> Self {
+        let factor = (rate_in / rate_out).round();
+        if factor > 1.0 && (rate_in - factor * rate_out).abs() < 1e-6 {
+            let fir = dsp::FirDecim::design_hz(rate_in, factor as usize, rate_out * 0.45, 80.0);
+            return Self::Decimate(fir);
+        }
+        Self::Rational(
+            dsp::resample::Rational::new(rate_in, rate_out, 512)
+                .expect("a rational ratio between the rates"),
+        )
+    }
+
+    fn process(&mut self, input: &[C32], out: &mut Vec<C32>) {
+        match self {
+            Self::Decimate(fir) => fir.process(input, out),
+            Self::Rational(r) => r.process(input, out),
+        }
+    }
 }
 
 fn write_samples(samples: &[C32], format: SampleFormat, out: &mut Vec<u8>) {
