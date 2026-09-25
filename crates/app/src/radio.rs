@@ -205,6 +205,8 @@ impl FrontEnd {
     }
 }
 
+const TRANSMITTER_OFF: &str = "cannot transmit: a stage of the transmit chain is switched off";
+
 /// Open the radio for transmit, and say what the graph should key.
 ///
 /// No graph is built here. The transmitter is stages in the receiver's own
@@ -3105,6 +3107,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             *self.status.error.lock() = Some("there is no such channel to key".into());
             return;
         };
+        if self.rx.transmitter_off() {
+            *self.status.error.lock() = Some(TRANSMITTER_OFF.into());
+            return;
+        }
         let tx = ch.spec_to_transmit();
         let mic = self.mic_tap();
         let up = key_up(
@@ -3403,6 +3409,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 // tone to end it either: nothing was ever on air.
                 self.unkey_now();
             }
+        }
+        if self.rx.keyed() && self.rx.transmitter_off() {
+            *self.status.error.lock() = Some(TRANSMITTER_OFF.into());
+            self.unkey_now();
         }
         // Its own slot, not the fault line: a front end the span cannot hold
         // is a standing verdict on the graph that was just built, and writing
@@ -4556,6 +4566,73 @@ pub(crate) mod tests {
             None,
             "every over went out and it complained"
         );
+    }
+
+    #[test]
+    fn a_receiver_switched_off_still_transmits_and_a_transmitter_switched_off_does_not() {
+        let center = Hz(145_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let watch = dev.watcher();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        until("the radio to say it transmits", || {
+            radio.status.can_transmit.load(Ordering::Relaxed)
+        });
+        radio.send(Cmd::Channels(vec![strip_channel(1, 50_000.0)]));
+
+        let mut edits = crate::patch::Edits::default();
+        edits.off.push(crate::patch::builtin::SPAN);
+        radio.send(Cmd::Edits(edits.clone()));
+        until("the source to be off", || radio.status.chain().is_some_and(|t| t.input_off));
+        let rx = radio.status.chain().expect("a chain");
+        let running: Vec<&str> = rx
+            .nodes
+            .iter()
+            .filter(|n| !n.idle && !n.inputs.is_empty())
+            .filter(|n| !n.outputs.iter().any(|(_, s)| s.is_tx()))
+            .map(|n| n.kind.as_str())
+            .collect();
+        assert_eq!(
+            running,
+            [
+                "call_network",
+                "calls",
+                "fader",
+                "heard",
+                "audio_bus",
+                "homeassistant",
+                "transcribe_live",
+                "call_log",
+                "speaker"
+            ],
+            "only what the network feeds, and not the radio"
+        );
+        while radio.frames.try_recv().is_ok() {}
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(radio.frames.try_iter().count(), 0, "the spectrum went on drawing");
+
+        radio.send(Cmd::Key(Some(1)));
+        until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+        until("a tenth of a second on the antenna", || watch.transmitted_len() > 240_000);
+        radio.send(Cmd::Key(None));
+        until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+        until("the device to be given back", || !watch.keyed());
+
+        edits.off.push(crate::chain::derived::TX_RADIO);
+        radio.send(Cmd::Edits(edits));
+        until("the transmitter to be off", || {
+            radio.status.chain().is_some_and(|t| {
+                t.nodes.iter().any(|n| n.tag == Some(crate::chain::derived::TX_RADIO) && n.off)
+            })
+        });
+        let sent = watch.transmitted_len();
+        radio.send(Cmd::Key(Some(1)));
+        until("the key to be refused", || radio.status.error.lock().is_some());
+        assert_eq!(radio.status.error.lock().as_deref(), Some(TRANSMITTER_OFF));
+        assert_eq!(radio.status.keyed.load(Ordering::Relaxed), 0);
+        assert!(!watch.keyed(), "the device was asked to transmit");
+        assert_eq!(watch.transmitted_len(), sent);
     }
 
     /// A key goes on air even when a stage in the graph refuses the span it

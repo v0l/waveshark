@@ -36,7 +36,9 @@ impl Chain<'_> {
             .collect();
         // Node ids are positions in the built graph, so a rebuild can leave
         // the selection pointing at a stage that is no longer there.
-        if self.st.sel.is_some_and(|s| !topo.nodes.iter().any(|n| n.id.0 == s)) {
+        if self.st.sel.is_some_and(|s| {
+            s != crate::chainview::SOURCE && !topo.nodes.iter().any(|n| n.id.0 == s)
+        }) {
             self.st.sel = None;
         }
         // The inspector takes a column on the right when a stage is selected,
@@ -45,6 +47,7 @@ impl Chain<'_> {
         // hides half of that.
         let mut act = crate::chainview::Interaction { selected: self.st.sel, ..Default::default() };
         let mut browse = None;
+        let mut off = None;
         if self.st.sel.is_some() {
             Panel::right("chain-inspector")
                 .default_size(260.0)
@@ -60,7 +63,8 @@ impl Chain<'_> {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if let Some(sel) = self.st.sel {
-                            act.changed = crate::chainview::inspector(ui, &topo, sel, &mut browse);
+                            act.changed =
+                                crate::chainview::inspector(ui, &topo, sel, &mut browse, &mut off);
                         }
                     });
                 });
@@ -149,6 +153,9 @@ impl Chain<'_> {
         }
         if let Some((node, param)) = browse {
             self.files.ask(ui.ctx(), node, &param, "Choose a file for this stage");
+        }
+        if let Some((tag, switched_off)) = off {
+            self.st.edit(self.cmds, |p| p.set_off(tag, switched_off));
         }
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
             self.cmds.push(Cmd::NodeParam(id, name, value));

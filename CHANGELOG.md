@@ -14,6 +14,7 @@ the code is in the commit log.
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
 - LimeSDR on Windows, with LimeSuite installed.
 - IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
+- Chain view switch turning off one stage, or all of receive with transmit left on.
 
 ### Changed
 
@@ -22,9 +23,11 @@ the code is in the commit log.
 - FT8 and FT4 read more stations on a crowded band.
 - TETRA calls several sites send at once, heard and listed once with every site.
 - IQStream serving only from a radio attached here, never a capture file or a remote tuner.
+- IQStream server idle with nobody subscribed, spare radios left stopped until someone is.
 
 ### Fixed
 
+- Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
 - 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
 - 802.15.4 beacons read out of frames too short for their own address lists.
 - Inmarsat STD-C decoding nothing off the air.

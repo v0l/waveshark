@@ -223,6 +223,26 @@ async fn nobody_listening_costs_nothing() {
     assert_eq!(only(&srv).blocks_sent(), 0, "a block with no subscriber is not packed");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tuner_is_listened_to_only_while_somebody_is_subscribed() {
+    let srv = server(false);
+    assert!(!only(&srv).listened(), "nobody has connected");
+    let mut stream = IqStream::connect(
+        srv.addr().to_string().as_str(),
+        ClientConfig { name: "test".into(), bits: 8, codec: Codec::None, ..Default::default() },
+    )
+    .await
+    .unwrap();
+    assert_eq!(collect(&mut stream, &only(&srv), &ramp(256), 1).await.len(), 1);
+    assert!(only(&srv).listened());
+    drop(stream);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while only(&srv).listened() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!only(&srv).listened(), "the subscriber hung up");
+}
+
 /// Two dongles on one port: each reader gets the tuner it named and none of
 /// the other's samples, and each is told where its own dial is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -290,6 +290,10 @@ impl Stream {
         self.subscribers.load(Ordering::Relaxed)
     }
 
+    pub fn listened(&self) -> bool {
+        self.blocks.receiver_count() > 0
+    }
+
     pub fn blocks_sent(&self) -> u64 {
         self.blocks_sent.load(Ordering::Relaxed)
     }
@@ -339,7 +343,7 @@ impl Stream {
     /// Costs nothing with nobody listening, which is what lets the node stay
     /// in the graph whether or not anybody has connected.
     pub fn push(&self, uc8: &[u8]) {
-        if self.blocks.receiver_count() == 0 || uc8.is_empty() {
+        if !self.listened() || uc8.is_empty() {
             return;
         }
         let _ = self.blocks.send(Arc::new(uc8.to_vec()));

@@ -107,6 +107,8 @@ struct Entry {
     total_us: u64,
     /// Recent calls, for the 95th percentile the chain view shows.
     ring: crate::cost::Ring,
+    off: bool,
+    idle: bool,
 }
 
 impl Entry {
@@ -121,6 +123,9 @@ impl Entry {
     fn run(&mut self, bufs: &[Payload], tags: &[Vec<Tag>], block_seconds: f64) {
         self.scratch_events.clear();
         self.scratch_new_tags.clear();
+        if self.idle {
+            return;
+        }
         let t = std::time::Instant::now();
         let mut slots = self.in_slots.iter().copied();
         match (self.in_slots.len(), slots.next(), slots.next()) {
@@ -330,12 +335,15 @@ pub struct TopoNode {
     pub phases: Vec<(String, crate::cost::Cost)>,
     /// What the node says it has been doing, as caption and value.
     pub readings: Vec<(String, String)>,
+    pub off: bool,
+    pub idle: bool,
 }
 
 /// The built graph's shape, in execution order.
 #[derive(Clone, Debug)]
 pub struct Topology {
     pub input: StreamSpec,
+    pub input_off: bool,
     pub nodes: Vec<TopoNode>,
     pub output_slot: usize,
     /// Items per second measured on each slot, indexed by slot.
@@ -392,6 +400,7 @@ pub struct Graph {
     rate_at: std::time::Instant,
     output_slot: Slot,
     events: Vec<Emitted>,
+    input_off: bool,
 }
 
 impl std::fmt::Debug for Graph {
@@ -568,6 +577,7 @@ impl Graph {
             rate_at: std::time::Instant::now(),
             output_slot: INPUT_SLOT,
             events: Vec::new(),
+            input_off: false,
         };
 
         let mut nodes = b.nodes;
@@ -589,6 +599,8 @@ impl Graph {
                 cost_us: 0.0,
                 total_us: 0,
                 ring: Default::default(),
+                off: false,
+                idle: false,
             });
         }
 
@@ -770,13 +782,57 @@ impl Graph {
                 cost: e.ring.cost(),
                 phases: e.node.phases(),
                 readings: e.node.readings(),
+                off: e.off,
+                idle: e.idle,
             });
         }
         Topology {
             input: self.specs[INPUT_SLOT],
+            input_off: self.input_off,
             nodes,
             output_slot: self.output_slot,
             rates: self.rate.clone(),
+        }
+    }
+
+    pub fn set_off(&mut self, id: NodeId, off: bool) {
+        if let Some(e) = self.entries.get_mut(id.0) {
+            e.off = off;
+            self.settle_idle();
+        }
+    }
+
+    pub fn set_input_off(&mut self, off: bool) {
+        self.input_off = off;
+        self.settle_idle();
+    }
+
+    pub fn input_off(&self) -> bool {
+        self.input_off
+    }
+
+    pub fn is_idle(&self, id: NodeId) -> bool {
+        self.entries.get(id.0).is_some_and(|e| e.idle)
+    }
+
+    fn settle_idle(&mut self) {
+        let mut dead = vec![false; self.specs.len()];
+        dead[INPUT_SLOT] = self.input_off;
+        let mut fed = vec![false; self.specs.len()];
+        fed[INPUT_SLOT] = true;
+        for e in &self.entries {
+            for &s in &e.out_slots {
+                fed[s] = true;
+            }
+        }
+        for &k in &self.order {
+            let e = &mut self.entries[k];
+            let wired: Vec<Slot> = e.in_slots.iter().copied().filter(|&s| fed[s]).collect();
+            let starved = !wired.is_empty() && wired.iter().all(|&s| dead[s]);
+            e.idle = e.off || starved;
+            for &s in &e.out_slots {
+                dead[s] = e.idle;
+            }
         }
     }
 
@@ -1206,6 +1262,70 @@ mod tests {
             o.extend(a.iter().zip(b).map(|(x, y)| x + y));
             Ok(())
         }
+    }
+
+    struct Counted(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Simple for Counted {
+        fn name(&self) -> &str {
+            "counted"
+        }
+        fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+            Ok(i.spec)
+        }
+        fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            o.iq_mut().extend_from_slice(i.as_iq().unwrap());
+            Ok(())
+        }
+    }
+
+    fn switched() -> (Graph, [NodeId; 4], Vec<std::sync::Arc<std::sync::atomic::AtomicUsize>>) {
+        let calls: Vec<std::sync::Arc<std::sync::atomic::AtomicUsize>> =
+            (0..3).map(|_| std::sync::Arc::default()).collect();
+        let mut b = Graph::builder(StreamSpec::iq(1_000.0, Hz(0)));
+        let a = b.add(Box::new(Counted(calls[0].clone())));
+        let after_a = b.add(Box::new(Counted(calls[1].clone())));
+        let beside = b.add(Box::new(Counted(calls[2].clone())));
+        let sum = b.add(Box::new(Sum::default()));
+        b.source(a.i()).link(a, after_a).source(beside.i());
+        b.connect(after_a.o(), sum.input(0)).connect(beside.o(), sum.input(1));
+        b.output(sum.o());
+        (b.build().unwrap(), [a, after_a, beside, sum], calls)
+    }
+
+    fn counts(calls: &[std::sync::Arc<std::sync::atomic::AtomicUsize>]) -> Vec<usize> {
+        calls.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect()
+    }
+
+    #[test]
+    fn a_node_switched_off_starves_what_it_alone_feeds() {
+        let (mut g, [a, after_a, beside, sum], calls) = switched();
+        g.set_off(a, true);
+        g.feed_iq(&[C32::new(1.0, 0.0); 8]).unwrap();
+        assert_eq!(counts(&calls), [0, 0, 1]);
+        assert!(g.is_idle(after_a), "fed only by a stage that is off");
+        assert!(!g.is_idle(beside));
+        assert!(!g.is_idle(sum), "one of its two inputs is still live");
+        let topo = g.topology();
+        assert_eq!(topo.nodes.iter().filter(|n| n.off).count(), 1);
+        assert_eq!(topo.nodes.iter().filter(|n| n.idle).count(), 2);
+
+        g.set_off(a, false);
+        g.feed_iq(&[C32::new(1.0, 0.0); 8]).unwrap();
+        assert_eq!(counts(&calls), [1, 1, 2]);
+    }
+
+    #[test]
+    fn an_input_switched_off_runs_nothing_it_feeds() {
+        let (mut g, ids, calls) = switched();
+        g.set_input_off(true);
+        g.feed_iq(&[C32::new(1.0, 0.0); 8]).unwrap();
+        assert_eq!(counts(&calls), [0, 0, 0]);
+        assert!(ids.iter().all(|&id| g.is_idle(id)));
+        assert!(g.topology().input_off);
+        g.set_input_off(false);
+        g.feed_iq(&[C32::new(1.0, 0.0); 8]).unwrap();
+        assert_eq!(counts(&calls), [1, 1, 1]);
     }
 
     /// Emits a tag on its first output sample of every call.

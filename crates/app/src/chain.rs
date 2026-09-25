@@ -838,6 +838,10 @@ impl Receiver {
         self.tx.keyed()
     }
 
+    pub fn transmitter_off(&self) -> bool {
+        derived::TRANSMIT.iter().any(|id| self.patch.is_off(*id))
+    }
+
     /// Whether the radio is on a chain that can carry what it makes, which
     /// is what ON AIR means. [`Self::keyed`] is only the key being down.
     pub fn tx_on_air(&self) -> bool {
@@ -1030,6 +1034,7 @@ impl Receiver {
         }
         match built {
             Ok(mut graph) => {
+                switch_off(&mut graph, &transmit);
                 if let Some(sent) =
                     self.stage::<nodes::TxMonitorNode>(derived::TX_MONITOR).map(|m| m.sent())
                     && let Some(sink) = graph
@@ -1327,6 +1332,7 @@ impl Receiver {
                 (Vec::new(), HashMap::new(), Vec::new(), Vec::new())
             }
         };
+        retire(std::mem::take(&mut pool));
         if !left_out.is_empty() {
             refused = Some(left_out.join("; "));
         }
@@ -1515,6 +1521,8 @@ impl Receiver {
             .collect();
         let spectrum_src = spectrum.map(|s| s.o());
         let mut graph = b.build_keeping_nodes()?;
+        switch_off(&mut graph, &patch);
+        graph.set_input_off(patch.is_off(crate::patch::builtin::SPAN));
         // What the spectrum is actually seeing, which is the head unless a
         // patch stage was put in front of it. The axis is drawn from this, so
         // a decimator between the two has to narrow the span on screen as
@@ -1795,6 +1803,7 @@ impl Receiver {
     /// Whether the spectrum completed a frame this block.
     pub fn spectrum_ready(&self) -> bool {
         main_spectrum(&self.patch)
+            .filter(|id| !self.graph.by_tag(*id).is_some_and(|n| self.graph.is_idle(n)))
             .and_then(|id| self.stage::<SpectrumNode>(id))
             .map(|s| s.is_fresh())
             .unwrap_or(false)
@@ -4933,6 +4942,34 @@ pub fn registry() -> pipeline::registry::Registry {
 /// where it was not, and the whole patch coming back as an error cost the
 /// receiver its head, its spectrum and every channel for the sake of one
 /// stage nobody could build.
+const RETIRE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn retire(pool: HashMap<u64, NodePart>) {
+    if pool.is_empty() {
+        return;
+    }
+    let names: Vec<String> = pool.values().map(|p| p.label.clone()).collect();
+    let (done, finished) = crossbeam_channel::bounded::<()>(1);
+    let spawned = std::thread::Builder::new().name("retire".into()).spawn(move || {
+        drop(pool);
+        let _ = done.send(());
+    });
+    if spawned.is_ok() && finished.recv_timeout(RETIRE_GRACE).is_err() {
+        tracing::warn!(
+            "stages still shutting down after {RETIRE_GRACE:?}, left to finish: {}",
+            names.join(", ")
+        );
+    }
+}
+
+fn switch_off(graph: &mut Graph, patch: &crate::patch::Patch) {
+    for &id in patch.off() {
+        if let Some(node) = graph.by_tag(id) {
+            graph.set_off(node, true);
+        }
+    }
+}
+
 fn add_patch(
     b: &mut GraphBuilder,
     pool: &mut HashMap<u64, NodePart>,
@@ -4963,10 +5000,9 @@ fn add_patch(
         // rather than kept and half corrected: a spectrum cannot resize, and
         // one holding an average of another band is worse than one starting
         // empty.
-        let pooled = pool
-            .remove(&st.id)
-            .filter(|_| was.stage(st.id).is_some_and(|s| s.kind == st.kind))
-            .filter(|p| p.node.survives_rebuild(retuned, &st.settings));
+        let reusable = was.stage(st.id).is_some_and(|s| s.kind == st.kind)
+            && pool.get(&st.id).is_some_and(|p| p.node.survives_rebuild(retuned, &st.settings));
+        let pooled = if reusable { pool.remove(&st.id) } else { None };
         let mut node = match pooled {
             Some(p) => {
                 reused.push(st.id);
@@ -5311,6 +5347,69 @@ impl nodes::Ring for RecordRing {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    struct StuckOnDrop(Option<crossbeam_channel::Receiver<()>>);
+
+    impl pipeline::node::Simple for StuckOnDrop {
+        fn name(&self) -> &str {
+            "stuck"
+        }
+        fn negotiate(&mut self, i: &pipeline::node::PortSpec) -> Result<StreamSpec> {
+            Ok(i.spec)
+        }
+        fn process(
+            &mut self,
+            _i: &pipeline::port::Payload,
+            _o: &mut pipeline::port::Payload,
+            _c: &mut pipeline::node::NodeCtx<'_>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for StuckOnDrop {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.recv();
+            }
+        }
+    }
+
+    #[test]
+    fn a_stage_that_never_finishes_shutting_down_does_not_hold_up_the_rebuild() {
+        let (release, held) = crossbeam_channel::bounded(1);
+        let (gone_tx, gone) = crossbeam_channel::bounded::<()>(1);
+        let mut pool = HashMap::new();
+        pool.insert(
+            7,
+            NodePart {
+                label: "stuck".into(),
+                tag: Some(7),
+                node: Box::new(StuckOnDrop(Some(held))),
+            },
+        );
+        let started = std::time::Instant::now();
+        retire(pool);
+        let waited = started.elapsed();
+        assert!(
+            (RETIRE_GRACE..RETIRE_GRACE * 2).contains(&waited),
+            "waited {waited:?}, floor the grace, ceiling twice it"
+        );
+        std::thread::spawn(move || {
+            let _ = release.send(());
+            let _ = gone_tx.send(());
+        });
+        assert!(gone.recv_timeout(std::time::Duration::from_secs(5)).is_ok());
+
+        let started = std::time::Instant::now();
+        let mut quick = HashMap::new();
+        quick.insert(
+            8,
+            NodePart { label: "quick".into(), tag: Some(8), node: Box::new(StuckOnDrop(None)) },
+        );
+        retire(quick);
+        assert!(started.elapsed() < RETIRE_GRACE, "a stage that shuts down at once was waited on");
+    }
 
     /// Whether one stage's output is wired into another's input.
     fn feeds(from: &pipeline::graph::TopoNode, to: &pipeline::graph::TopoNode) -> bool {

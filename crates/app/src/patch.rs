@@ -77,9 +77,26 @@ pub struct Patch {
     /// Ids are never reused inside one patch, so a stage deleted and another
     /// added cannot inherit its wires or its position.
     next: u64,
+    off: Vec<u64>,
 }
 
 impl Patch {
+    pub fn is_off(&self, id: u64) -> bool {
+        self.off.contains(&id)
+    }
+
+    pub fn off(&self) -> &[u64] {
+        &self.off
+    }
+
+    pub fn set_off(&mut self, id: u64, off: bool) {
+        self.off.retain(|o| *o != id);
+        if off {
+            self.off.push(id);
+            self.off.sort_unstable();
+        }
+    }
+
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
@@ -145,6 +162,7 @@ impl Patch {
     pub fn remove(&mut self, id: u64) {
         self.stages.retain(|s| s.id != id);
         self.links.retain(|l| l.to.0 != id && !matches!(l.from, Source::Stage(f, _) if f == id));
+        self.off.retain(|o| *o != id);
     }
 
     /// Take a set of stages out into a patch of their own, wires and all.
@@ -191,6 +209,7 @@ impl Patch {
         let mut out = Patch { next: self.next, ..Default::default() };
         let mine = |id: u64| ids.contains(&id);
         out.stages = self.stages.extract_if(.., |s| mine(s.id)).collect();
+        out.off = self.off.extract_if(.., |id| mine(*id)).collect();
         self.links.retain(|l| {
             let to = mine(l.to.0);
             let from_elsewhere = matches!(l.from, Source::Stage(f, _) if !mine(f));
@@ -297,6 +316,7 @@ pub struct Edits {
     pub unlinked: Vec<(u64, usize)>,
     /// Settings the operator changed on derived stages.
     pub settings: Vec<(u64, String, pipeline::param::ParamValue)>,
+    pub off: Vec<u64>,
 }
 
 /// Whether a setting the operator changed on a derived stage is theirs to
@@ -314,6 +334,7 @@ impl Edits {
             && self.links.is_empty()
             && self.unlinked.is_empty()
             && self.settings.is_empty()
+            && self.off.is_empty()
     }
 
     /// What was changed, read off a graph edited from `base`.
@@ -354,6 +375,7 @@ impl Edits {
                 e.unlinked.push(l.to);
             }
         }
+        e.off = full.off.iter().copied().filter(|id| !base.is_off(*id)).collect();
         e
     }
 
@@ -382,6 +404,9 @@ impl Edits {
         for l in &self.links {
             p.connect(l.from, l.to);
         }
+        for id in &self.off {
+            p.set_off(*id, true);
+        }
     }
 
     /// `$XDG_CONFIG_HOME/waveshark/edits`, beside the session.
@@ -407,6 +432,9 @@ impl Edits {
         }
         for (id, port) in &self.unlinked {
             s.push_str(&format!("unlink {id}:{port}\n"));
+        }
+        for id in &self.off {
+            s.push_str(&format!("off {id}\n"));
         }
         for l in &self.links {
             s.push_str(&format!("link {} {}:{}\n", render_source(l.from), l.to.0, l.to.1));
@@ -460,6 +488,11 @@ impl Edits {
                     let rest: Vec<&str> = w.collect();
                     if let Some(v) = parse_value(kind, &rest.join(" ")) {
                         e.settings.push((id, name.to_string(), v));
+                    }
+                }
+                Some("off") => {
+                    if let Some(id) = w.next().and_then(|v| v.parse().ok()) {
+                        e.off.push(id);
                     }
                 }
                 Some("unlink") => {
@@ -601,6 +634,29 @@ mod tests {
         assert_eq!(places_back, places);
         // No edits is no edits, so a fresh receiver is not told anything.
         assert!(Edits::diff(&base, &base, every_setting).is_empty());
+    }
+
+    #[test]
+    fn a_stage_or_the_span_switched_off_survives_the_next_derived_graph() {
+        let mut base = Patch::default();
+        base.add_derived(Patch::DERIVED_BASE + 3, "spectrum", Settings::new());
+        base.connect(Source::Span, (Patch::DERIVED_BASE + 3, 0));
+        let mut full = base.clone();
+        full.set_off(builtin::SPAN, true);
+        full.set_off(Patch::DERIVED_BASE + 3, true);
+
+        let e = Edits::diff(&full, &base, every_setting);
+        assert_eq!(e.off, [Patch::DERIVED_BASE + 3, builtin::SPAN]);
+        let (back, _) = Edits::parse(&e.render(&Places::new()));
+        assert_eq!(back, e);
+        let mut again = base.clone();
+        back.apply(&mut again);
+        assert_eq!(again, full);
+
+        full.set_off(builtin::SPAN, false);
+        assert_eq!(Edits::diff(&full, &base, every_setting).off, [Patch::DERIVED_BASE + 3]);
+        full.remove(Patch::DERIVED_BASE + 3);
+        assert!(full.off().is_empty(), "a deleted stage is not still off");
     }
 
     #[test]

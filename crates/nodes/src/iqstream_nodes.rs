@@ -290,7 +290,7 @@ impl Simple for IqStreamServerNode {
             self.asked = None;
         }
 
-        if !iq.is_empty() {
+        if !iq.is_empty() && tuner.listened() {
             // UC8 because that is what the protocol carries, and because
             // eight bits is the resolution most of what feeds this has
             // anyway. A subscriber wanting fewer asks for fewer and the
@@ -465,6 +465,16 @@ mod tests {
         // by the first having been seen.
         server.ask(868_300_000);
         assert_eq!(block(&mut n, 64), vec![868_300_000.0]);
+    }
+
+    #[test]
+    fn nothing_is_packed_with_nobody_subscribed() {
+        let mut n = IqStreamServerNode::new("127.0.0.1:0", false);
+        Node::negotiate(&mut n, &[spec(2_400_000.0, Hz::mhz(1090))]).unwrap();
+        for _ in 0..10 {
+            block(&mut n, 4096);
+        }
+        assert_eq!(n.uc8.capacity(), 0, "samples were packed for nobody");
     }
 
     /// A stage that was not offered the dial does not forward a request, even

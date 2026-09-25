@@ -382,13 +382,20 @@ pub struct Interaction {
 /// decoder it has never heard of. That is the point of the parameter
 /// description existing at all: without it, each stage would need its own
 /// panel written by hand and the ones nobody wrote would be unreachable.
+pub const SOURCE: usize = pipeline::graph::GRAPH_INPUT.node.0;
+
 pub fn inspector(
     ui: &mut egui::Ui,
     topo: &Topology,
     selected: usize,
     browse: &mut Option<(usize, String)>,
+    off: &mut Option<(u64, bool)>,
 ) -> Option<(usize, String, pipeline::param::ParamValue)> {
     use pipeline::param::{ParamRange, ParamValue};
+    if selected == SOURCE {
+        source_inspector(ui, topo, off);
+        return None;
+    }
     let node = topo.nodes.iter().find(|n| n.id.0 == selected)?;
     let mut out = None;
 
@@ -438,6 +445,18 @@ pub fn inspector(
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(6.0);
+
+    if let Some(tag) = node.tag {
+        let mut on = !node.off;
+        let help = "Off stops this stage and every stage that only it feeds. Kept across restarts.";
+        if egui_bench::form::switch(ui, "run", &mut on, "this stage", help) {
+            *off = Some((tag, !on));
+        }
+        if node.idle && !node.off {
+            egui_bench::text::hint(ui, "idle: nothing feeding it is running");
+        }
+        ui.add_space(6.0);
+    }
 
     if node.params.is_empty() {
         ui.label(
@@ -523,6 +542,26 @@ pub fn inspector(
     out
 }
 
+fn source_inspector(ui: &mut egui::Ui, topo: &Topology, off: &mut Option<(u64, bool)>) {
+    ui.label(legend("Source"));
+    ui.label(egui::RichText::new("device").font(theme::figure(10.0)).color(theme::LEGEND));
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(format!("out {}", wire_label(&topo.input, topo.rate_of(0))))
+            .font(theme::figure(10.0))
+            .color(theme::TRACE),
+    );
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(6.0);
+    let mut on = !topo.input_off;
+    let help = "Off stops every receive stage: the spectrum, the channels and the decoders. \
+                The transmitter keeps running. Kept across restarts.";
+    if egui_bench::form::switch(ui, "receive", &mut on, "from the radio", help) {
+        *off = Some((crate::patch::builtin::SPAN, !on));
+    }
+}
+
 fn unit(p: &pipeline::param::Param) -> String {
     if p.unit.is_empty() { String::new() } else { format!(" {}", p.unit) }
 }
@@ -585,7 +624,15 @@ pub fn draw(
         src_auto
     };
     let src = Rect::from_center_size(src_centre, Vec2::new(box_w, BOX_H));
-    stage(&p, src, "Source", "device", true, None);
+    stage(&p, src, "Source", if topo.input_off { "off" } else { "device" }, true, None);
+    if selected == Some(SOURCE) || pointer.is_some_and(|q| src.contains(q)) {
+        p.rect_stroke(
+            src.expand(1.0),
+            4.0,
+            Stroke::new(if selected == Some(SOURCE) { 1.5 } else { 1.0 }, theme::READOUT),
+            StrokeKind::Outside,
+        );
+    }
 
     let mut lane_top = vec![0.0f32; lanes];
     let mut y = top;
@@ -810,7 +857,12 @@ pub fn draw(
         let x = r.center().x;
         let hot = pointer.is_some_and(|q| r.contains(q));
         let on = selected == Some(node.id.0);
-        stage(&p, r, &node.label, &node.kind, false, Some(&node.cost));
+        let kind = match (node.off, node.idle) {
+            (true, _) => "off",
+            (false, true) => "idle",
+            (false, false) => node.kind.as_str(),
+        };
+        stage(&p, r, &node.label, kind, node.idle, Some(&node.cost).filter(|_| !node.idle));
         if node.kind == "scope" {
             let frame = scopes.iter().find(|(id, _)| *id == node.id.0).map(|(_, f)| f);
             paint_scope(ui.ctx(), &p, r, node.id.0, frame);
@@ -925,7 +977,10 @@ pub fn draw(
 
     // A click that hit no box clears the selection, which is the only way out
     // of the inspector that does not need a button to be found.
-    if resp.clicked() && !rects.iter().any(|r| pointer.is_some_and(|q| r.contains(q))) {
+    let on_source = pointer.is_some_and(|q| src.contains(q));
+    if resp.clicked() && on_source && edit.drag.is_none() {
+        act.selected = if selected == Some(SOURCE) { None } else { Some(SOURCE) };
+    } else if resp.clicked() && !rects.iter().any(|r| pointer.is_some_and(|q| r.contains(q))) {
         act.selected = None;
     }
     act
@@ -1415,15 +1470,15 @@ fn paint_scope(
     p.image(tex.id(), fr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
 }
 
-fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, source: bool, cost: Option<&Cost>) {
-    let fill = if source { theme::WELL } else { theme::PANEL };
+fn stage(p: &egui::Painter, r: Rect, label: &str, kind: &str, recessed: bool, cost: Option<&Cost>) {
+    let fill = if recessed { theme::WELL } else { theme::PANEL };
     p.rect(r, 3.0, fill, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
     p.text(
         Pos2::new(r.center().x, r.top() + 9.0),
         egui::Align2::CENTER_TOP,
         label,
         FontId::new(12.0, FontFamily::Proportional),
-        theme::VALUE,
+        if kind == "off" || kind == "idle" { theme::LEGEND } else { theme::VALUE },
     );
     let mono = theme::figure(10.0);
     // The kind on the left and the cost on the right of one line, so a box
@@ -1624,6 +1679,8 @@ mod tests {
             cost: Default::default(),
             phases: Vec::new(),
             readings: Vec::new(),
+            off: false,
+            idle: false,
         }
     }
 
@@ -1631,6 +1688,7 @@ mod tests {
     fn branchy() -> Topology {
         Topology {
             input: StreamSpec::iq(2_400_000.0, Hz::mhz(433)),
+            input_off: false,
             nodes: vec![
                 node(0, "DC block", &[0], 1),
                 node(1, "Spectrum", &[1], 2),
@@ -1765,6 +1823,17 @@ mod tests {
         topo.nodes[1].tag = Some(id);
         topo.nodes[2].tag = Some(sink);
         (topo, patch, id, sink)
+    }
+
+    #[test]
+    fn a_click_on_the_source_selects_it_so_receiving_can_be_switched_off() {
+        let (topo, patch, _) = with_patch_stage();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let src = h.edit.drawn_src.center();
+        h.press(src);
+        let act = h.release(src);
+        assert_eq!(act.selected, Some(SOURCE));
     }
 
     #[test]
@@ -1980,6 +2049,7 @@ mod tests {
         let mut t = branchy();
         let inner = Topology {
             input: t.input,
+            input_off: false,
             nodes: vec![node(0, "Envelope", &[0], 1), node(1, "OOK pulses", &[1], 2)],
             output_slot: 2,
             rates: Vec::new(),

@@ -20,7 +20,7 @@
 //! read, and answers whatever a subscriber asked of its dial. The node holds
 //! the thread and what it is doing, and the graph's tick only ever starts it.
 
-use common::device::{Device, DriverKind, GainMode};
+use common::device::{Device, DriverKind, GainMode, RxStream};
 use common::{Hz, Result, SampleFormat, Sps};
 use iqstream::{Setting, SettingKind, SettingValue};
 use pipeline::SettingsExt;
@@ -360,6 +360,8 @@ fn apply(dev: &mut dyn Device, ask: &iqstream::Ask) -> Result<()> {
 /// readers being told, against a control transfer a block.
 const SETTINGS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Read the radio, hand it out, and move it where a subscriber asked.
 fn pump(
     mut dev: Box<dyn Device>,
@@ -369,20 +371,31 @@ fn pump(
     stop: &Arc<AtomicBool>,
     blocks: &Arc<AtomicU64>,
 ) -> Result<()> {
-    let mut rx = dev.start_rx()?;
+    let mut rx: Option<Box<dyn RxStream>> = None;
     let mut uc8 = Vec::new();
     let mut asked_settings = std::time::Instant::now();
     while !stop.load(Ordering::SeqCst) {
-        let buf = match rx.read() {
-            Ok(b) => b,
-            Err(e) => {
-                rx.stop();
-                return Err(e);
+        if tuner.listened() {
+            let reading = match &mut rx {
+                Some(r) => r,
+                None => rx.insert(dev.start_rx()?),
+            };
+            let buf = match reading.read() {
+                Ok(b) => b,
+                Err(e) => {
+                    reading.stop();
+                    return Err(e);
+                }
+            };
+            SampleFormat::Cu8.encode(&buf.samples, &mut uc8);
+            tuner.push(&uc8);
+            blocks.fetch_add(1, Ordering::Relaxed);
+        } else {
+            if let Some(mut r) = rx.take() {
+                r.stop();
             }
-        };
-        SampleFormat::Cu8.encode(&buf.samples, &mut uc8);
-        tuner.push(&uc8);
-        blocks.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(IDLE_POLL);
+        }
 
         // A remote tune is answered here and nowhere else, because this radio
         // is not in the graph: where it lands is read back off the device
@@ -403,8 +416,9 @@ fn pump(
                 if r == dev.rate() {
                     continue;
                 }
-                rx.stop();
-                drop(rx);
+                if let Some(mut r) = rx.take() {
+                    r.stop();
+                }
                 if dev.rate_needs_restart() {
                     let center = dev.center();
                     drop(dev);
@@ -413,7 +427,6 @@ fn pump(
                 } else {
                     dev.set_rate(r)?;
                 }
-                rx = dev.start_rx()?;
             } else if let Err(e) = apply(dev.as_mut(), &ask) {
                 tracing::debug!("iqstream_tuner: {}: {e}", ask.name);
             }
@@ -430,7 +443,9 @@ fn pump(
             tuner.set_settings(served_settings(dev.as_ref(), rates));
         }
     }
-    rx.stop();
+    if let Some(mut r) = rx {
+        r.stop();
+    }
     Ok(())
 }
 
@@ -809,6 +824,75 @@ mod tests {
         fn start_rx(&mut self) -> Result<Box<dyn common::device::RxStream>> {
             Err(common::Error::other("not a real radio"))
         }
+    }
+
+    fn bench_entry() -> crate::devices::Entry {
+        crate::devices::Entry {
+            kind: DriverKind::RtlSdr,
+            index: 0,
+            label: "Bench".into(),
+            rates: Sps(225_000)..=Sps(2_400_000),
+            steps: Vec::new(),
+            addr: None,
+            proto: None,
+            path: None,
+            pinned: None,
+            parts: Vec::new(),
+        }
+    }
+
+    fn pumped_for(tuner: &Arc<iqstream::Stream>, run: std::time::Duration) -> Result<()> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let halt = stop.clone();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(run);
+            halt.store(true, Ordering::SeqCst);
+        });
+        let blocks = Arc::new(AtomicU64::new(0));
+        let rates = [2_400_000];
+        let ended = pump(Box::new(Bench::default()), &bench_entry(), &rates, tuner, &stop, &blocks);
+        stopper.join().unwrap();
+        ended
+    }
+
+    #[test]
+    fn a_served_radio_is_not_read_until_somebody_subscribes() {
+        let server = iqstream::Server::start(
+            "127.0.0.1:0".parse().unwrap(),
+            iqstream::ServerConfig { name: "test".into(), streams: Vec::new() },
+        )
+        .unwrap();
+        let tuner = server.stream_named(iqstream::StreamConfig {
+            name: "bench".into(),
+            center_hz: 433_000_000,
+            sample_rate: 2_400_000,
+            gain_db: None,
+            tunable: true,
+            tune_range_hz: None,
+            settings: Vec::new(),
+        });
+        assert!(
+            pumped_for(&tuner, std::time::Duration::from_millis(200)).is_ok(),
+            "the radio was started with nobody to read it"
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _client = rt
+            .block_on(iqstream::IqStream::connect(
+                server.addr().to_string().as_str(),
+                iqstream::ClientConfig { name: "test".into(), bits: 8, ..Default::default() },
+            ))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !tuner.listened() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let started = pumped_for(&tuner, std::time::Duration::from_secs(1));
+        assert_eq!(
+            started.map_err(|e| e.to_string()),
+            Err("not a real radio".to_string()),
+            "a subscriber starts the radio"
+        );
     }
 
     /// A request off the wire lands on whichever of the driver's controls it
