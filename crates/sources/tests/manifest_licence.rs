@@ -80,7 +80,7 @@ fn every_capture_says_what_it_may_be_used_for() {
     let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
     let offair = parse(&manifest("offair.toml"), "[[capture]]");
     let survey = parse(&manifest("survey.toml"), "[[dataset]]");
-    assert_eq!(fixtures.len(), 27, "captures in fixtures.toml");
+    assert_eq!(fixtures.len(), 35, "captures in fixtures.toml");
     assert_eq!(offair.len(), 13, "captures in offair.toml");
     assert_eq!(survey.len(), 1, "datasets in survey.toml");
 
@@ -89,8 +89,8 @@ fn every_capture_says_what_it_may_be_used_for() {
     }
 
     let ours = |set: &[Entry]| set.iter().filter(|e| e.licence == Some(Licence::CcBy4)).count();
-    // Seventeen recordings and five signals generated here from a known picture.
-    assert_eq!(ours(&fixtures), 22, "CC BY 4.0 fixtures");
+    // Eighteen recordings and five signals generated here from a known picture.
+    assert_eq!(ours(&fixtures), 23, "CC BY 4.0 fixtures");
     assert_eq!(ours(&offair), 13, "CC BY 4.0 off-air captures");
 
     let mut foreign: Vec<(&str, &Licence, &str)> = fixtures
@@ -104,9 +104,16 @@ fn every_capture_says_what_it_may_be_used_for() {
         names,
         [
             "acars_acarsdec_12500.wav",
+            "dab_melbourne_9a_202.928M_2500k.cs16",
+            "drm_b_3.965M_48k.cs16",
             "dvbt_hd_429M_9142857.cs8",
+            "eas_tor_kilx_22050.wav",
+            "ft8_wsjtx_210703_133430_12000.wav",
+            "nxdn48_453M_48k.cs16",
+            "nxdn96_453M_48k.cs16",
             "rs41_herstmonceux_405.80024M_31.25k.cs16",
             "sstv_martin1_44100.wav",
+            "stdc_egc_1541.45M_48k.cs16",
             "vdl2_model_136.975M_1050k.wav",
         ]
     );
@@ -117,7 +124,14 @@ fn every_capture_says_what_it_may_be_used_for() {
             &Licence::Upstream("LGPL-2.0-only".into()),
             &Licence::Unstated,
             &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
             &Licence::Upstream("GPL-3.0".into()),
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Upstream("GPL-3.0".into()),
+            &Licence::Unstated,
             &Licence::Upstream("GPL-3.0".into()),
         ]
     );
@@ -131,7 +145,7 @@ fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
     let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
     let rehosted: Vec<&Entry> =
         fixtures.iter().filter(|e| e.url.contains("nostr.download")).collect();
-    assert_eq!(rehosted.len(), 25, "fixtures re-hosted on nostr.download");
+    assert_eq!(rehosted.len(), 32, "fixtures re-hosted on nostr.download");
     for entry in &rehosted {
         match entry.licence {
             Some(Licence::CcBy4) => {}
