@@ -504,6 +504,7 @@ mod tests {
             symbol_rate: 14.25e6,
             rolloff: 0.25,
             gold: 0,
+            within_hz: 10e6,
         });
         let mut got = Vec::new();
         for b in iq.chunks(65_536) {

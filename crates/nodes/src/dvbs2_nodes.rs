@@ -124,6 +124,7 @@ impl Front {
                 symbol_rate,
                 rolloff: ROLLOFF,
                 gold: 0,
+                within_hz: if factor > 1 { self.rate / factor as f64 / 2.0 } else { self.within },
             }));
         }
         let Some(phy) = &mut self.phy else { return };

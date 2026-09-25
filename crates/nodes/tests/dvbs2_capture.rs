@@ -6,6 +6,7 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 const TG4: &str = "dvbs2_tg4_1431.1M_20000k.cs8";
 const SPUR: &str = "dvbs2_centre_spur_1431M_20000k.cs8";
 const BBC: &str = "dvbs2_bbc_hd_1097M_40000k.cs8";
+const TWO: &str = "dvbs2_two_carriers_1083M_61440k.cs8";
 const BLOCK: usize = 65_536;
 
 fn samples(name: &str) -> Option<Vec<C32>> {
@@ -28,7 +29,14 @@ struct Read {
 }
 
 fn through_the_stage(iq: &[C32], rate: f64, centre: f64) -> Read {
-    let mut node = Dvbs2Node::new(centre, None);
+    through_a_channel(iq, rate, centre, centre, None)
+}
+
+fn through_a_channel(iq: &[C32], rate: f64, centre: f64, channel: f64, width: Option<f64>) -> Read {
+    let mut node = Dvbs2Node::new(channel, None);
+    if let Some(w) = width {
+        node.within(w);
+    }
     let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(centre as u64)), latency: 0 };
     node.negotiate(&[spec]).expect("a carrier in the span");
     let (mut stream, mut events) = (Vec::new(), Vec::new());
@@ -147,7 +155,13 @@ fn pictures_keep_coming_after_a_frame_of_the_multiplex_is_lost() {
 #[test]
 fn a_symbol_rate_taken_off_a_spur_does_not_run_the_clock_away() {
     let Some(iq) = samples(BBC) else { return skip(BBC) };
-    let cfg = dsp::dvbs2::Config { rate_hz: 40e6, symbol_rate: 17e6, rolloff: 0.25, gold: 0 };
+    let cfg = dsp::dvbs2::Config {
+        rate_hz: 40e6,
+        symbol_rate: 17e6,
+        rolloff: 0.25,
+        gold: 0,
+        within_hz: 20e6,
+    };
     let mut phy = dsp::dvbs2::Dvbs2::new(cfg);
     let mut out = Vec::new();
     for block in iq.chunks(BLOCK) {
@@ -276,4 +290,35 @@ fn a_carrier_too_weak_to_read_is_not_shown_as_locked() {
     assert_eq!(state(3.4), Some(Acquisition::Locked), "{report}");
     assert!(live.weak.is_some(), "the frames too weak to read are counted: {report}");
     assert!(live.frames_after >= 1_600, "floor 1600 of about 1730: {report}");
+}
+
+#[test]
+fn either_of_two_carriers_in_one_span_is_read_on_its_own_channel() {
+    let Some(iq) = samples(TWO) else { return skip(TWO) };
+    let mut got = Vec::new();
+    for (channel, width) in [(1_068e6, 18e6), (1_097e6, 18e6), (1_068e6, 30e6), (1_097e6, 30e6)] {
+        let read = through_a_channel(&iq, 61.44e6, 1_083_000_000.0, channel, Some(width));
+        let stats = read.node.stats();
+        got.push((
+            channel / 1e6,
+            width / 1e6,
+            reading(&read.node, "offset"),
+            stats.frames,
+            stats.ldpc_failed + stats.bch_failed,
+            reading(&read.node, "too weak"),
+        ));
+    }
+    let found = |mhz, width, offset: &str, frames, failed, weak: Option<&str>| {
+        (mhz, width, Some(offset.to_string()), frames, failed, weak.map(str::to_string))
+    };
+    assert_eq!(
+        got,
+        [
+            found(1068.0, 18.0, "-103 kHz", 306, 0, Some("7")),
+            found(1097.0, 18.0, "+399 kHz", 310, 1, None),
+            found(1068.0, 30.0, "-103 kHz", 306, 0, Some("7")),
+            found(1097.0, 30.0, "+399 kHz", 310, 1, None),
+        ],
+        "channel MHz, width MHz, offset, frames, failed, too weak"
+    );
 }

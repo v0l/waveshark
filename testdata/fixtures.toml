@@ -1371,3 +1371,33 @@ frames = 828
 failed = 0
 packets = 26_605
 services = 7
+
+[[capture]]
+name = "dvbs2_two_carriers_1083M_61440k.cs8"
+sha256 = "378a928617cfb674aec2af52bc6a73109ca9fb383be105f58fff7ee11903466a"
+url = "https://nostr.download/378a928617cfb674aec2af52bc6a73109ca9fb383be105f58fff7ee11903466a.xz"
+compression = "xz"
+center_hz = 1_083_000_000
+rate_sps = 61_440_000
+format = "cs8"
+license = "CC-BY-4.0"
+description = """
+Two neighbouring DVB-S2 transponders off 28.2E, 10.818 and 10.847 GHz vertical,
+in one 61.44 MS/s span from the same dish, universal LNB and LimeSDR-USB as
+dvbs2_bbc_hd_1097M_40000k.cs8. The first 0.3 seconds, requantised from 16 bits
+to 8 with the largest sample at 127. Both are 8PSK 3/4 with pilots at
+23.000 Msym/s, roll-off 0.25; the one at 10.847 GHz is the BBC HD multiplex.
+The gap between them sits on the LimeSDR's centre, and the cable's slope
+leaves the lower carrier a few dB down on one edge.
+
+What this capture is for is a channel with another carrier beside it. The
+receiver found its carrier's frequency from the whole span, which put the lower
+carrier 290 kHz out, and every frame was too weak to read until the lock was
+thrown away and tried again.
+"""
+
+[capture.expect]
+lower_offset = "-103 kHz"
+upper_offset = "+399 kHz"
+lower_frames = 306
+upper_frames = 310

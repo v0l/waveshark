@@ -16,6 +16,7 @@ const TIMING_KP: f64 = 0.005;
 const TIMING_KI: f64 = 2e-6;
 const TIMING_RANGE: f64 = 1e-3;
 const MER_FLOOR: f32 = 1.0;
+const COHERENT: f32 = 0.5;
 const OMEGA_STEP: f64 = 2e-3;
 const SETTLED: f64 = 2e-4;
 const PILOTLESS_GAIN: f64 = 0.1;
@@ -29,6 +30,7 @@ pub struct Config {
     pub symbol_rate: f64,
     pub rolloff: f64,
     pub gold: u32,
+    pub within_hz: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -237,7 +239,7 @@ impl Dvbs2 {
                 return;
             }
             let buf = self.acquiring.take().unwrap_or_default();
-            self.offset_hz = acquire::occupied(&buf, self.cfg.rate_hz)
+            self.offset_hz = acquire::occupied_within(&buf, self.cfg.rate_hz, self.cfg.within_hz)
                 .filter(|b| b.width_hz < 1.6 * self.cfg.symbol_rate)
                 .map_or(0.0, |b| b.centre_hz);
             self.mixer = Mixer::new(-self.offset_hz, self.cfg.rate_hz);
@@ -326,6 +328,16 @@ impl Dvbs2 {
         self.symbols.drain(..best);
         self.state = State::Locked { at: 0, frame };
         true
+    }
+
+    fn coherent(&self, head: &[C32]) -> bool {
+        let (mut sof, mut norm) = (C32::new(0.0, 0.0), 0.0f32);
+        for i in 0..SOF_LEN - 1 {
+            let d = head[i].conj() * head[i + 1];
+            sof += d * self.sof_diff[i].conj();
+            norm += d.norm();
+        }
+        sof.norm() >= COHERENT * norm
     }
 
     fn metric(&self, p: usize) -> f32 {
@@ -423,6 +435,9 @@ impl Dvbs2 {
         let sigma2 = (noise / known.len() as f32).max(1e-6);
         let mer = -10.0 * sigma2.log10();
         if !mer.is_finite() || mer < MER_FLOOR {
+            if self.coherent(&head) {
+                self.omega += slope;
+            }
             self.settled = false;
             self.faded += 1;
             self.mer_db = mer.is_finite().then_some(mer);
@@ -706,8 +721,13 @@ mod tests {
     }
 
     fn receive(iq: &[C32]) -> (Dvbs2, Vec<Received>) {
-        let mut rx =
-            Dvbs2::new(Config { rate_hz: 20e6, symbol_rate: 14.25e6, rolloff: 0.2, gold: 0 });
+        let mut rx = Dvbs2::new(Config {
+            rate_hz: 20e6,
+            symbol_rate: 14.25e6,
+            rolloff: 0.2,
+            gold: 0,
+            within_hz: 10e6,
+        });
         let mut out = Vec::new();
         for block in iq.chunks(65_536) {
             rx.push(block, &mut out);
@@ -873,8 +893,13 @@ mod tests {
         let n = iq.len();
         let mut noise = Noise(99);
         iq[n / 4..n / 2].iter_mut().for_each(|x| *x += noise.gauss() * sigma);
-        let mut rx =
-            Dvbs2::new(Config { rate_hz: 20e6, symbol_rate: 14.25e6, rolloff: 0.2, gold: 0 });
+        let mut rx = Dvbs2::new(Config {
+            rate_hz: 20e6,
+            symbol_rate: 14.25e6,
+            rolloff: 0.2,
+            gold: 0,
+            within_hz: 10e6,
+        });
         let (mut out, mut worst, mut during) = (Vec::new(), f32::MAX, 0);
         let mut blocks = iq.chunks(65_536).enumerate();
         for (k, block) in blocks.by_ref() {
@@ -895,5 +920,37 @@ mod tests {
         assert_eq!(during, 0, "no frame read through a fade to -3 dB");
         assert!(worst < MER_FLOOR, "MER {worst} dB shown through the fade");
         assert_eq!((faded, out.len() - before), (10, 19), "frames too weak, then frames read");
+    }
+
+    #[test]
+    fn a_carrier_acquired_400_khz_off_is_pulled_in_by_its_headers() {
+        let header = Header {
+            modcod: ModCod::from_index(14).unwrap(),
+            frame: FecFrame::Normal,
+            pilots: true,
+        };
+        let (_, iq) = air(header, 12, 12.0, 385e3, 16.0);
+        let mut rx = Dvbs2::new(Config {
+            rate_hz: 20e6,
+            symbol_rate: 14.25e6,
+            rolloff: 0.2,
+            gold: 0,
+            within_hz: 10e6,
+        });
+        rx.acquiring = None;
+        rx.offset_hz = -15e3;
+        rx.mixer = Mixer::new(15e3, 20e6);
+        let (mut out, mut pulling, mut offset) = (Vec::new(), None, 0.0);
+        for block in iq.chunks(65_536) {
+            let before = out.len();
+            rx.push(block, &mut out);
+            if out.len() > before {
+                pulling.get_or_insert(rx.faded());
+                offset = out.last().map_or(0.0, |f: &Framed| f.offset_hz);
+            }
+        }
+        assert_eq!(pulling, Some(1), "one frame too weak while its header pulls the carrier in");
+        assert_eq!(out.len(), 9);
+        assert!((offset - 385e3).abs() < 2e3, "offset {offset}");
     }
 }

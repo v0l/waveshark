@@ -52,6 +52,7 @@ impl Signal for Dvbs2 {
             symbol_rate: carrier.symbol_rate,
             rolloff: ROLLOFF,
             gold: 0,
+            within_hz: carrier.symbol_rate / 2.0,
         });
         let mut mux = mpegts::Mux::new();
         let (mut mixed, mut packets) = (Vec::new(), Vec::new());
