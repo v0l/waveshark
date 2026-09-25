@@ -6343,13 +6343,27 @@ pub(crate) mod tests {
         let mut list = crate::calls::Calls::new();
         let mut spoken: std::collections::BTreeMap<String, (f64, std::collections::BTreeSet<u64>)> =
             Default::default();
+        let mut sent: std::collections::BTreeMap<(String, u64), f64> = Default::default();
         let mut overlapping = 0;
         for block in buf.samples.chunks(65_536) {
             rx.process(block).unwrap();
+            let mut once = std::collections::HashSet::new();
+            for v in rx.voices().into_iter().filter(|v| v.system == "TETRA" && v.rate == 8_000.0) {
+                let pcm: Vec<u32> = v.pcm.iter().map(|s| s.to_bits()).collect();
+                let at = (v.to.clone().unwrap_or_default(), v.channel_hz as u64);
+                if once.insert((at.clone(), pcm)) {
+                    *sent.entry(at).or_default() += v.seconds();
+                }
+            }
             let mut now: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
                 Default::default();
+            let mut mixed = std::collections::HashSet::new();
             for v in rx.voices().into_iter().filter(|v| v.system == "TETRA" && v.rate == 48_000.0) {
                 let to = v.to.clone().unwrap_or_default();
+                let pcm: Vec<u32> = v.pcm.iter().map(|s| s.to_bits()).collect();
+                if !mixed.insert((to.clone(), v.channel_hz as u64, pcm)) {
+                    continue;
+                }
                 let e = spoken.entry(to.clone()).or_default();
                 e.0 += v.seconds();
                 e.1.insert(v.channel_hz as u64);
@@ -6363,7 +6377,7 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(overlapping, 0, "a call played from two sites in one block");
-        assert_eq!(rx.network().unwrap().dropped(), 287, "copies from the other sites");
+        assert_eq!(rx.network().unwrap().dropped(), 274, "copies from the other sites");
         let sites = [390.85e6, 391.925e6, 392.55e6, 393.3e6];
         let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let rows = list.active(later);
@@ -6387,8 +6401,26 @@ pub(crate) mod tests {
             4,
             "usage markers stay per carrier"
         );
-        let heard = |to: &str| (spoken[to].0 * 100.0).round() / 100.0;
-        assert_eq!((heard("7309858"), heard("7661987")), (5.76, 5.40), "seconds played");
+        let round = |s: f64| (s * 100.0).round() / 100.0;
+        for to in ["7309858", "7661987"] {
+            let best =
+                sent.iter().filter(|((t, _), _)| t == to).map(|(_, s)| *s).fold(0.0, f64::max);
+            assert_eq!(
+                round(spoken[to].0),
+                round(best),
+                "{to} plays as much as its most complete site sent, no more and no less"
+            );
+        }
+        assert_eq!(
+            (round(spoken["7309858"].0), round(spoken["7661987"].0)),
+            (3.66, 2.70),
+            "seconds played"
+        );
+        assert_eq!(
+            round(sent[&("7309858".to_string(), 392_550_000)]),
+            2.58,
+            "the site that broke up"
+        );
     }
 
     #[test]
