@@ -6323,6 +6323,50 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn a_clear_tetra_call_reaches_the_voice_port_through_the_receiver() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/offair/tetra_voice_390.9M_250k.cu8");
+        if !p.exists() {
+            eprintln!("skipping: testdata/offair/tetra_voice_390.9M_250k.cu8 is local only");
+            return;
+        }
+        let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+        let mut rx = replay_receiver(&buf, None).unwrap();
+        let mut rows = Vec::new();
+        let mut heard: Vec<common::Voice> = Vec::new();
+        for block in buf.samples.chunks(16_384) {
+            rx.process(block).unwrap();
+            let mut once = std::collections::HashSet::new();
+            heard.extend(rx.voices().into_iter().filter(|v| {
+                let pcm: Vec<u32> = v.pcm.iter().map(|s| s.to_bits()).collect();
+                v.system == "TETRA" && once.insert((v.to.clone(), v.from.clone(), pcm))
+            }));
+            let at = block_start(std::time::Instant::now(), block.len(), buf.rate.as_f64());
+            rows.extend(harvest(&mut rx, at));
+        }
+        let voice: Vec<&Reception> =
+            rows.iter().filter(|r| r.protocol() == "tetra" && r.kind() == "voice").collect();
+        assert_eq!(voice.len(), 115, "two bursts go by before the front end is built");
+        assert!(voice.iter().all(|r| r.freq() == 390_850_000.0));
+        every_row_carries_its_measurements(&voice);
+
+        let spoken: f64 = heard.iter().map(|v| v.seconds()).sum();
+        assert!((spoken - 115.0 * 0.06).abs() < 1e-6, "{spoken} s spoken");
+        let parties: std::collections::BTreeSet<_> =
+            heard.iter().map(|v| (v.to.as_deref(), v.from.as_deref())).collect();
+        assert_eq!(parties.len(), 4, "{parties:?}");
+        assert!(
+            heard
+                .iter()
+                .all(|v| v.over.as_ref().map(|o| &o.secrecy) == Some(&common::Secrecy::Clear)),
+            "the call is in the clear"
+        );
+        let peak = heard.iter().flat_map(|v| v.pcm.iter()).fold(0.0f32, |a, s| a.max(s.abs()));
+        assert_eq!(peak, 1.0, "ETSI sdecoder reaches full scale on this call");
+    }
+
     /// The network in the capture enciphers its air interface, so no call
     /// control PDU is readable; the MAC headers are, and they say which
     /// groups are being addressed. That is worth logging, with what protects
