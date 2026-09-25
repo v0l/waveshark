@@ -201,6 +201,8 @@ const MAX_CANDIDATES: usize = 200;
 
 const DS_SPS: usize = 32;
 
+const EARLY_S: f64 = 1.0;
+
 const FINE_STEPS: i64 = 4;
 
 impl Slot {
@@ -241,6 +243,18 @@ impl Slot {
     /// Read every transmission in `iq`, which is one slot of a channel with
     /// the dial at zero, searching `band` in hertz.
     pub fn read(&mut self, iq: &[C32], band: (f64, f64)) -> Vec<Heard> {
+        let step = self.symbol / TIME_STEPS;
+        let early = (EARLY_S * self.rate / step as f64).round() as usize * step;
+        let mut padded = vec![C32::default(); early];
+        padded.extend_from_slice(iq);
+        let mut heard = self.read_padded(&padded, band);
+        for h in &mut heard {
+            h.at_s -= early as f64 / self.rate;
+        }
+        heard
+    }
+
+    fn read_padded(&mut self, iq: &[C32], band: (f64, f64)) -> Vec<Heard> {
         self.spectrogram(iq);
         let hz = self.rate / self.bins as f64;
         let lo = ((band.0 / hz).floor().max(0.0) as usize).min(self.bins);

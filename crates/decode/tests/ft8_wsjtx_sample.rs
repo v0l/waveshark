@@ -48,7 +48,7 @@ fn audio() -> Option<(f64, Vec<f32>)> {
 }
 
 #[test]
-fn the_wsjtx_sample_reads_11_of_the_22_stations_wsjtx_2_7_0_read() {
+fn the_wsjtx_sample_reads_12_of_the_22_stations_wsjtx_2_7_0_read() {
     let Some((rate, audio)) = audio() else { return };
     let iq: Vec<C32> = audio.iter().map(|&s| C32::new(s, 0.0)).collect();
     let mut slot = dsp::mfsk::Slot::new(rate, Mode::Ft8.waveform());
@@ -72,6 +72,7 @@ fn the_wsjtx_sample_reads_11_of_the_22_stations_wsjtx_2_7_0_read() {
         [
             "A92EE F5PSR -14",
             "CQ EA2BFM IN83",
+            "CQ F5RXL IN94",
             "K1JT EA3AGB -15",
             "K1JT HA0DU KN07",
             "K1JT HA5WA 73",
