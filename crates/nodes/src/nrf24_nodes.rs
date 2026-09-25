@@ -165,7 +165,7 @@ impl Simple for Nrf24Node {
         let out = o.packets_mut();
         for (_at, p) in &found {
             self.accepted += 1;
-            out.push(self.meter.packet_now(p.on_air()));
+            out.push(self.meter.packet_now(p.on_air()).checked(common::packet::Integrity::Passed));
         }
         Ok(())
     }

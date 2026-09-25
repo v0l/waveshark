@@ -26,6 +26,7 @@ the code is in the commit log.
 - 802.15.4 beacons read out of frames too short for their own address lists.
 - Inmarsat STD-C decoding nothing off the air.
 - DRM service labels missing from transmissions that send them in 16-QAM.
+- Bluetooth LE and 802.15.4 frames a few megahertz apart dropped as one burst.
 
 ## [0.4.0] - 2026-09-24
 

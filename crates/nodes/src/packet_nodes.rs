@@ -239,6 +239,7 @@ struct Heard {
     /// read the channel.
     detected: bool,
     proven: Option<u64>,
+    protocol: Option<&'static str>,
 }
 
 /// One reception as the dedupe reads it: where it was heard, how wide the
@@ -253,6 +254,7 @@ struct Seen {
     known: bool,
     detected: bool,
     proven: Option<u64>,
+    protocol: Option<&'static str>,
 }
 
 impl Seen {
@@ -286,6 +288,7 @@ impl Seen {
                 }
                 Integrity::Unchecked | Integrity::Failed => None,
             }),
+            protocol: p.stack.first().map(|l| l.id),
         }
     }
 
@@ -298,6 +301,7 @@ impl Seen {
             known: self.known,
             detected: self.detected,
             proven: self.proven,
+            protocol: self.protocol,
         }
     }
 }
@@ -331,6 +335,9 @@ fn same_burst(kept: &Heard, new: &Seen) -> bool {
         return false;
     }
     if matches!((kept.proven, new.proven), (Some(a), Some(b)) if a != b) {
+        return false;
+    }
+    if matches!((kept.protocol, new.protocol), (Some(a), Some(b)) if a != b) {
         return false;
     }
     let d = (kept.freq - new.freq).abs();
@@ -741,6 +748,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn two_protocols_three_megahertz_apart_are_two_transmissions() {
+        let at = |hz: u64, id: &'static str| {
+            let carrier =
+                common::packet::Carrier::heard(0, hz, 2_000_000, -40.0, 20.0, common::SourceId(0));
+            Packet::heard(carrier).decoded(common::packet::Proto::new(id, "frame"))
+        };
+        let kept = deduped(
+            &mut DedupeNode::default(),
+            vec![at(2_405_000_000, "ieee802154"), at(2_402_000_000, "ble")],
+        );
+        assert_eq!(kept.len(), 2, "a Zigbee frame and an advertisement: {kept:#?}");
+    }
+
     fn proven(freq: f64, bytes: Vec<u8>) -> Packet {
         let mut p = heard(freq, "ais", -40.0);
         p.frame = Some(common::packet::Frame::of(bytes).checked(Integrity::Passed));
@@ -827,6 +848,7 @@ mod tests {
             known: false,
             detected: true,
             proven: None,
+            protocol: None,
         }
     }
 
