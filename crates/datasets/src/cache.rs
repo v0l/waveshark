@@ -104,9 +104,31 @@ pub struct Http {
     pub url: String,
 }
 
-// Identifies the client to servers with a usage policy, the same way every
-// other request this program makes does.
-use httpc::USER_AGENT as AGENT;
+pub(crate) struct Capped<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: std::io::Read> Capped<R> {
+    pub(crate) fn new(inner: R, max: u64) -> Self {
+        Capped { inner, left: max }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            return match self.inner.read(&mut [0u8; 1])? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::other("the body is longer than any dataset may be")),
+            };
+        }
+        let room = buf.len().min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let got = self.inner.read(&mut buf[..room])?;
+        self.left -= got as u64;
+        Ok(got)
+    }
+}
 
 /// A dataset arrives in one response. The DMR user dump is 85 MB, and a limit
 /// an order of magnitude above that guards against a redirect to something
@@ -124,22 +146,16 @@ impl Fetch for Http {
         to: &mut dyn Write,
         progress: &crate::progress::Progress,
     ) -> Result<Option<Seen>, Error> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .user_agent(AGENT)
-            // 304 is the answer we are hoping for, not a failure.
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(600)))
-            .build()
-            .into();
-        let mut req = agent.get(&self.url);
+        let fail = |e: String| Error::Fetch(self.url.to_string(), e);
+        let client = httpc::blocking(Duration::from_secs(600)).map_err(|e| fail(e.to_string()))?;
+        let mut req = client.get(&self.url);
         if let Some(e) = &have.etag {
             req = req.header("If-None-Match", e);
         }
         if let Some(m) = &have.last_modified {
             req = req.header("If-Modified-Since", m);
         }
-        let fail = |e: String| Error::Fetch(self.url.to_string(), e);
-        let mut resp = req.call().map_err(|e| fail(e.to_string()))?;
+        let resp = req.send().map_err(|e| fail(e.to_string()))?;
         let code = resp.status().as_u16();
         if code == 304 {
             return Ok(None);
@@ -155,8 +171,8 @@ impl Fetch for Http {
         // over it, because the bytes are good, but it is said once where a
         // person will find it rather than discovered when it turns into a
         // 404.
-        if ureq::ResponseExt::get_uri(&resp).to_string() != self.url {
-            tracing::warn!(asked = %self.url, answered = %ureq::ResponseExt::get_uri(&resp), "dataset URL redirects");
+        if resp.url().as_str() != self.url {
+            tracing::warn!(asked = %self.url, answered = %resp.url(), "dataset URL redirects");
         }
         let seen = Seen { etag: header("etag"), last_modified: header("last-modified") };
         // What it says it is sending, so the row can draw how far through
@@ -164,8 +180,7 @@ impl Fetch for Http {
         if let Some(n) = header("content-length").and_then(|v| v.parse::<u64>().ok()) {
             progress.expect(n);
         }
-        let mut body = resp.body_mut().with_config().limit(MAX_BYTES).reader();
-        std::io::copy(&mut body, to).map_err(|e| fail(e.to_string()))?;
+        std::io::copy(&mut Capped::new(resp, MAX_BYTES), to).map_err(|e| fail(e.to_string()))?;
         Ok(Some(seen))
     }
 }
@@ -690,8 +705,75 @@ mod tests {
     /// first.
     #[test]
     fn the_agent_names_the_product_and_where_it_came_from() {
+        use httpc::USER_AGENT as AGENT;
         assert!(AGENT.starts_with("WaveShark/"), "{AGENT}");
         assert!(AGENT.contains(env!("CARGO_PKG_VERSION")), "{AGENT}");
         assert!(AGENT.contains("github.com/v0l/waveshark"), "{AGENT}");
+    }
+
+    fn serve(answers: Vec<&'static str>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/dump.csv", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (sock, answer) in listener.incoming().flatten().zip(answers) {
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let _ = tx.send(head.to_ascii_lowercase());
+                let _ = reader.into_inner().write_all(answer.as_bytes());
+            }
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn a_dataset_is_asked_for_again_with_what_was_seen_and_a_304_changes_nothing() {
+        let (url, asked) = serve(vec![
+            "HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nLast-Modified: Tue, 01 Sep 2026 00:00:00 GMT\r\n\
+             Content-Length: 5\r\nConnection: close\r\n\r\na,b\r\n",
+            "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ]);
+        let http = Http { url: url.clone() };
+        let progress = crate::progress::of("http-test");
+        let mut body = Vec::new();
+        let seen = http.fetch(&Seen::default(), &mut body, progress).unwrap().unwrap();
+        assert_eq!(body, b"a,b\r\n");
+        assert_eq!(seen.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(seen.last_modified.as_deref(), Some("Tue, 01 Sep 2026 00:00:00 GMT"));
+        let first = asked.recv().unwrap();
+        assert!(first.contains("user-agent: waveshark/"), "{first}");
+        assert!(!first.contains("if-none-match"), "{first}");
+
+        let mut again = Vec::new();
+        assert!(http.fetch(&seen, &mut again, progress).unwrap().is_none(), "a 304 is not new");
+        assert!(again.is_empty());
+        let second = asked.recv().unwrap();
+        assert!(second.contains("if-none-match: \"v1\""), "{second}");
+        assert!(second.contains("if-modified-since: tue, 01 sep 2026 00:00:00 gmt"), "{second}");
+
+        assert!(matches!(
+            http.fetch(&Seen::default(), &mut Vec::new(), progress),
+            Err(Error::Status(at, 404)) if at == url
+        ));
+    }
+
+    #[test]
+    fn a_body_longer_than_its_cap_is_refused_rather_than_cut_short() {
+        let mut out = Vec::new();
+        let err = std::io::copy(&mut Capped::new(&b"0123456789"[..], 4), &mut out).unwrap_err();
+        assert_eq!(err.to_string(), "the body is longer than any dataset may be");
+        assert_eq!(out, b"0123");
+        let mut whole = Vec::new();
+        std::io::copy(&mut Capped::new(&b"0123"[..], 4), &mut whole).unwrap();
+        assert_eq!(whole, b"0123");
     }
 }

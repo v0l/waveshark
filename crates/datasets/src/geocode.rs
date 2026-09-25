@@ -1,5 +1,4 @@
 use crate::Error;
-use httpc::USER_AGENT as AGENT;
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -44,19 +43,14 @@ pub trait Geocoder: Send + Sync {
 }
 
 pub struct Pdok {
-    agent: ureq::Agent,
+    client: Option<httpc::BlockingClient>,
 }
 
 const PDOK_FREE: &str = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free";
 
 impl Default for Pdok {
     fn default() -> Self {
-        let agent = ureq::Agent::config_builder()
-            .user_agent(AGENT)
-            .timeout_global(Some(Duration::from_secs(10)))
-            .build()
-            .into();
-        Self { agent }
+        Self { client: httpc::blocking(Duration::from_secs(10)).ok() }
     }
 }
 
@@ -75,16 +69,19 @@ impl Geocoder for Pdok {
 
     fn locate(&self, q: &Query) -> Result<Option<Place>, Error> {
         let fail = |e: String| Error::Fetch(PDOK_FREE.into(), e);
-        let mut resp = self
-            .agent
+        let client = self.client.as_ref().ok_or_else(|| fail("no HTTP client".into()))?;
+        let body = client
             .get(PDOK_FREE)
-            .query("q", &q.text)
-            .query("rows", "1")
-            .query("fq", "type:(postcode OR weg OR woonplaats)")
-            .query("fl", "centroide_ll,type,weergavenaam,woonplaatsnaam,gemeentenaam")
-            .call()
+            .query(&[
+                ("q", q.text.as_str()),
+                ("rows", "1"),
+                ("fq", "type:(postcode OR weg OR woonplaats)"),
+                ("fl", "centroide_ll,type,weergavenaam,woonplaatsnaam,gemeentenaam"),
+            ])
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.text())
             .map_err(|e| fail(e.to_string()))?;
-        let body = resp.body_mut().read_to_string().map_err(|e| fail(e.to_string()))?;
         pdok_answer(&body, &q.town).map_err(|e| Error::Parse(PDOK_FREE.into(), e))
     }
 }

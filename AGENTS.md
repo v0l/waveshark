@@ -211,8 +211,9 @@ dialog (`radio`, `spectrum`, `waterfall`, `log`, `scanners`, `memory`,
 ## Every HTTP request goes out under the same name
 
 `crates/httpc` holds the user agent and builds every client, async or
-blocking. No `reqwest::Client::builder()` anywhere else. `crates/datasets`
-fetches over `ureq` and takes the same string from `httpc::USER_AGENT`.
+blocking. No `reqwest::Client::builder()` anywhere else, and no second HTTP
+client crate: `crates/datasets` and `crates/hfmodel` fetch through
+`httpc::blocking` and `httpc::blocking_download` too.
 
 ## Every packet carries what it was heard at
 

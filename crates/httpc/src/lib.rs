@@ -14,6 +14,10 @@
 
 use std::time::Duration;
 
+pub use reqwest;
+
+pub type BlockingClient = reqwest::blocking::Client;
+
 /// What this program calls itself to every server it talks to.
 ///
 /// Name, version, and a URL somebody reading a log can go and look at, which
@@ -32,6 +36,14 @@ pub fn client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
 /// drives its own runtime and panics when it finds itself inside another.
 pub fn blocking(timeout: Duration) -> Result<reqwest::blocking::Client, reqwest::Error> {
     reqwest::blocking::Client::builder().user_agent(USER_AGENT).timeout(timeout).build()
+}
+
+pub fn blocking_download(connect: Duration) -> Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(connect)
+        .timeout(None)
+        .build()
 }
 
 #[cfg(test)]

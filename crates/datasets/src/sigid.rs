@@ -48,8 +48,6 @@ pub fn unid_source() -> Source {
     Source::http("sigidwiki-unid.json", UNID_URL, MAX_AGE)
 }
 
-use httpc::USER_AGENT as AGENT;
-
 /// The latest Artemis release, reduced to the SQLite file inside its tar.
 ///
 /// The release tag is the validator: the API says what the latest tag is,
@@ -67,14 +65,14 @@ impl Fetch for Artemis {
         to: &mut dyn Write,
         _progress: &crate::progress::Progress,
     ) -> Result<Option<Seen>, Error> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .user_agent(AGENT)
-            .timeout_global(Some(Duration::from_secs(600)))
-            .build()
-            .into();
         let fail = |e: String| Error::Fetch(RELEASES.into(), e);
-        let mut resp = agent.get(RELEASES).call().map_err(|e| fail(e.to_string()))?;
-        let body = resp.body_mut().read_to_string().map_err(|e| fail(e.to_string()))?;
+        let client = httpc::blocking(Duration::from_secs(600)).map_err(|e| fail(e.to_string()))?;
+        let body = client
+            .get(RELEASES)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.text())
+            .map_err(|e| fail(e.to_string()))?;
         let rel: serde_json::Value =
             serde_json::from_str(&body).map_err(|e| fail(e.to_string()))?;
         let tag = rel["tag_name"].as_str().ok_or_else(|| fail("no tag_name".into()))?.to_string();
@@ -90,9 +88,12 @@ impl Fetch for Artemis {
             .ok_or_else(|| fail(format!("{tag}: no .tar asset")))?
             .to_string();
         let published = rel["published_at"].as_str().map(str::to_string);
-        let mut resp =
-            agent.get(&url).call().map_err(|e| Error::Fetch(url.clone(), e.to_string()))?;
-        let mut body = resp.body_mut().with_config().limit(1 << 30).reader();
+        let resp = client
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| Error::Fetch(url.clone(), e.to_string()))?;
+        let mut body = crate::cache::Capped::new(resp, 1 << 30);
         match tar_entry(&mut body, "data.sqlite", to) {
             Ok(true) => Ok(Some(Seen { etag: Some(tag), last_modified: published })),
             Ok(false) => Err(Error::Fetch(url, "no data.sqlite in the release tar".into())),

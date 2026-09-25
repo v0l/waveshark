@@ -7,7 +7,7 @@
 //! the WAV loader and its resampler, since the receiver resamples for
 //! itself; and the downloader, which built its own HTTP client, where every
 //! request this program makes goes out under one name (`crates/httpc`) and
-//! the model is fetched through `hf_hub` like Whisper's is.
+//! the model is fetched through `hfmodel` like Whisper's is.
 //!
 //! The model is an audio encoder in front of a Qwen3 text decoder. It reads
 //! the whole utterance at once rather than in 30 second windows, names the

@@ -37,38 +37,13 @@ pub struct Fetching {
 /// the callers keep it behind a mutex an interface reads.
 pub type OnProgress<'a> = &'a mut dyn FnMut(&Fetching);
 
-/// What the hub calls as bytes arrive, folded into a [`Fetching`] and handed
-/// on. Held by reference so one report survives every file of a fetch.
-struct Report<'a, 'b> {
-    seen: &'a std::cell::RefCell<Fetching>,
-    on: &'a std::cell::RefCell<OnProgress<'b>>,
-}
-
-impl hf_hub::api::Progress for Report<'_, '_> {
-    fn init(&mut self, size: usize, filename: &str) {
-        let mut f = self.seen.borrow_mut();
-        f.file = filename.to_string();
-        f.done = 0;
-        f.total = size as u64;
-        (self.on.borrow_mut())(&f);
-    }
-
-    fn update(&mut self, size: usize) {
-        let mut f = self.seen.borrow_mut();
-        f.done += size as u64;
-        (self.on.borrow_mut())(&f);
-    }
-
-    fn finish(&mut self) {
-        let mut f = self.seen.borrow_mut();
-        f.done = f.total;
-        (self.on.borrow_mut())(&f);
-    }
-}
+const HUB: &str = "https://huggingface.co";
+const CONNECT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One repository, one directory, and a running report.
 pub struct Fetch<'a> {
-    api: hf_hub::api::sync::ApiRepo,
+    client: httpc::BlockingClient,
+    base: String,
     dir: PathBuf,
     seen: std::cell::RefCell<Fetching>,
     on: std::cell::RefCell<OnProgress<'a>>,
@@ -81,7 +56,7 @@ impl<'a> Fetch<'a> {
         dir: impl AsRef<Path>,
         on: OnProgress<'a>,
     ) -> Result<Self> {
-        Self::of(repo, revision, hf_hub::RepoType::Model, dir, on)
+        Self::at(format!("{HUB}/{repo}/resolve/{revision}"), dir, on)
     }
 
     /// The same, for a repository the hub files under datasets rather than
@@ -92,61 +67,76 @@ impl<'a> Fetch<'a> {
         dir: impl AsRef<Path>,
         on: OnProgress<'a>,
     ) -> Result<Self> {
-        Self::of(repo, revision, hf_hub::RepoType::Dataset, dir, on)
+        Self::at(format!("{HUB}/datasets/{repo}/resolve/{revision}"), dir, on)
     }
 
-    fn of(
-        repo: &str,
-        revision: &str,
-        kind: hf_hub::RepoType,
-        dir: impl AsRef<Path>,
-        on: OnProgress<'a>,
-    ) -> Result<Self> {
-        use hf_hub::api::sync::ApiBuilder;
+    fn at(base: String, dir: impl AsRef<Path>, on: OnProgress<'a>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
-        let api = ApiBuilder::new()
-            .build()
-            .map_err(|e| Error::other(format!("hub: {e}")))?
-            .repo(hf_hub::Repo::with_revision(repo.to_string(), kind, revision.to_string()));
+        let client =
+            httpc::blocking_download(CONNECT).map_err(|e| Error::other(format!("hub: {e}")))?;
         Ok(Self {
-            api,
+            client,
+            base,
             dir,
             seen: std::cell::RefCell::new(Fetching::default()),
             on: std::cell::RefCell::new(on),
         })
     }
 
+    fn report(&self, change: impl FnOnce(&mut Fetching)) {
+        change(&mut self.seen.borrow_mut());
+        (self.on.borrow_mut())(&self.seen.borrow());
+    }
+
     /// One file, into the directory. Already there and it is not fetched
     /// again.
     pub fn get(&self, name: &str) -> Result<PathBuf> {
-        {
-            let mut f = self.seen.borrow_mut();
+        let dst = self.dir.join(name);
+        if dst.is_file() {
+            return Ok(dst);
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        self.report(|f| {
             f.file = name.to_string();
             f.done = 0;
             f.total = 0;
             f.files = f.files.max(f.files_done + 1);
+        });
+        let url = format!("{}/{name}", self.base);
+        let fail = |e: String| Error::other(format!("hub {name}: {e}"));
+        let mut resp = self
+            .client
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| fail(e.to_string()))?;
+        let total = resp.content_length().unwrap_or(0);
+        self.report(|f| f.total = total);
+        let part = dst.with_file_name(format!(
+            "{}.part",
+            dst.file_name().and_then(|n| n.to_str()).unwrap_or("download")
+        ));
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&part)?);
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut resp, &mut buf).map_err(|e| fail(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut out, &buf[..n])?;
+            self.report(|f| f.done += n as u64);
         }
-        let src = self
-            .api
-            .download_with_progress(name, Report { seen: &self.seen, on: &self.on })
-            .map_err(|e| Error::other(format!("hub {name}: {e}")))?;
-        {
-            let mut f = self.seen.borrow_mut();
+        std::io::Write::flush(&mut out)?;
+        drop(out);
+        std::fs::rename(&part, &dst)?;
+        self.report(|f| {
             f.files_done += 1;
+            f.total = f.total.max(f.done);
             f.done = f.total;
-        }
-        (self.on.borrow_mut())(&self.seen.borrow());
-        let dst = self.dir.join(name);
-        // A file in a subdirectory of the repository keeps that directory
-        // here, so a voice lands in `voices/` rather than on top of the last
-        // one fetched.
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if !dst.exists() {
-            std::fs::copy(&src, &dst)?;
-        }
+        });
         Ok(dst)
     }
 
@@ -226,6 +216,83 @@ mod tests {
         let other = dir.join("config.json");
         std::fs::write(&other, "{}").expect("a config");
         assert!(shards(&other).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn hub(
+        files: &'static [(&'static str, &'static str)],
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/org/model/resolve/main", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for sock in listener.incoming().flatten() {
+                let mut reader = BufReader::new(sock.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let path = first.split(' ').nth(1).unwrap_or_default().to_string();
+                let _ = tx.send(path.clone());
+                let found = files.iter().find(|(name, _)| path.ends_with(&format!("/{name}")));
+                let answer = match found {
+                    Some((_, body)) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                };
+                let _ = reader.into_inner().write_all(answer.as_bytes());
+            }
+        });
+        (base, rx)
+    }
+
+    #[test]
+    fn weights_without_an_index_are_the_one_file_and_a_file_held_is_not_fetched_again() {
+        let (base, asked) = hub(&[
+            ("config.json", "{}"),
+            ("model.safetensors", "0123456789"),
+            ("voices/af.bin", "v"),
+        ]);
+        let dir = std::env::temp_dir().join(format!("hfmodel-fetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut reports = Vec::new();
+        let mut on = |f: &Fetching| reports.push(f.clone());
+        let fetch = Fetch::at(base, &dir, &mut on).unwrap();
+        let weights = fetch.weights().unwrap();
+        assert_eq!(weights, dir.join("model.safetensors"));
+        assert_eq!(std::fs::read(&weights).unwrap(), b"0123456789");
+        assert_eq!(fetch.get("voices/af.bin").unwrap(), dir.join("voices/af.bin"));
+        assert_eq!(fetch.get("config.json").unwrap(), dir.join("config.json"));
+        assert_eq!(fetch.get("config.json").unwrap(), dir.join("config.json"));
+        assert!(fetch.get("missing.json").is_err());
+        drop(fetch);
+        let paths: Vec<String> = asked.try_iter().collect();
+        assert_eq!(
+            paths,
+            [
+                "/org/model/resolve/main/model.safetensors.index.json",
+                "/org/model/resolve/main/model.safetensors",
+                "/org/model/resolve/main/voices/af.bin",
+                "/org/model/resolve/main/config.json",
+                "/org/model/resolve/main/missing.json",
+            ],
+            "the second config.json came off the disc"
+        );
+        let last = reports.iter().rfind(|f| f.file == "model.safetensors").unwrap();
+        assert_eq!((last.done, last.total), (10, 10));
+        assert_eq!(reports.last().map(|f| f.files_done), Some(3), "three files arrived");
+        assert!(!dir.join("model.safetensors.index.json").exists());
+        assert!(!dir.join("missing.json.part").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

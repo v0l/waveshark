@@ -24,8 +24,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use httpc::USER_AGENT as AGENT;
-
 /// One repository arrives in one response; a limit well above that guards
 /// against a redirect to something else entirely rather than bounding
 /// anything real.
@@ -265,13 +263,9 @@ fn fetch(
     cache: &crate::cache::Cache,
     have: &Option<String>,
 ) -> Result<Option<Tree>, Error> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .user_agent(AGENT)
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(600)))
-        .build()
-        .into();
-    let commit = head_commit(repo, &agent)?;
+    let client = httpc::blocking(Duration::from_secs(600))
+        .map_err(|e| Error::Fetch(repo.tarball.into(), e.to_string()))?;
+    let commit = head_commit(repo, &client)?;
     if have.as_deref() == Some(commit.as_str()) {
         return Ok(None);
     }
@@ -282,9 +276,9 @@ fn fetch(
     let tmp = git.join(format!("{}.part", repo.dir));
     std::fs::create_dir_all(&git).map_err(|e| Error::Io(git.display().to_string(), e))?;
     let _ = std::fs::remove_dir_all(&tmp);
-    let mut resp = agent
+    let resp = client
         .get(repo.tarball)
-        .call()
+        .send()
         .map_err(|e| Error::Fetch(repo.tarball.into(), e.to_string()))?;
     if resp.status().as_u16() != 200 {
         return Err(Error::Status(repo.tarball.into(), resp.status().as_u16()));
@@ -302,7 +296,7 @@ fn fetch(
     {
         progress.expect(n);
     }
-    let body = resp.body_mut().with_config().limit(repo.max_bytes.max(MAX_BYTES)).reader();
+    let body = crate::cache::Capped::new(resp, repo.max_bytes.max(MAX_BYTES));
     let mut gz = flate2::read::GzDecoder::new(crate::progress::Tapped { inner: body, progress });
     let files = match unpack_kept(&mut gz, &tmp, repo.keep) {
         Ok(files) => {
@@ -333,16 +327,13 @@ fn fetch(
 }
 
 /// The branch's current commit id, from the `head` URL's JSON.
-fn head_commit(repo: &'static Repo, agent: &ureq::Agent) -> Result<String, Error> {
-    let mut resp =
-        agent.get(repo.head).call().map_err(|e| Error::Fetch(repo.head.into(), e.to_string()))?;
+fn head_commit(repo: &'static Repo, client: &httpc::BlockingClient) -> Result<String, Error> {
+    let resp =
+        client.get(repo.head).send().map_err(|e| Error::Fetch(repo.head.into(), e.to_string()))?;
     if resp.status().as_u16() != 200 {
         return Err(Error::Status(repo.head.into(), resp.status().as_u16()));
     }
-    let body = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| Error::Fetch(repo.head.into(), e.to_string()))?;
+    let body = resp.text().map_err(|e| Error::Fetch(repo.head.into(), e.to_string()))?;
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| Error::Parse(repo.head.into(), e.to_string()))?;
     v["commit"]["sha"]
