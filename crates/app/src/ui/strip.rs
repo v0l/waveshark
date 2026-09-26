@@ -1080,6 +1080,7 @@ impl Strip<'_> {
                         }
                     });
                 });
+                changed |= Self::channel_roger(ui, tx);
             }
         }
 
