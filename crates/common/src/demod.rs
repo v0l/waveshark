@@ -160,3 +160,143 @@ impl Demod {
         }
     }
 }
+
+pub const SIDEBAND_AUDIO_HZ: (f64, f64) = (300.0, 2_700.0);
+pub const CW_FILTER_HZ: f64 = 500.0;
+pub const AUDIO_EDGE_RANGE_HZ: std::ops::RangeInclusive<f64> = 50.0..=6_000.0;
+// A width below a hundred hertz is a mis-set control rather than a
+// channel, and it would design a filter with thousands of taps.
+pub const NARROWEST_HZ: f64 = 100.0;
+
+pub fn clamp_audio(low_hz: f64, high_hz: f64) -> (f64, f64) {
+    let (floor, ceiling) = (*AUDIO_EDGE_RANGE_HZ.start(), *AUDIO_EDGE_RANGE_HZ.end());
+    let low = low_hz.clamp(floor, ceiling - NARROWEST_HZ);
+    (low, high_hz.clamp(low + NARROWEST_HZ, ceiling))
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Passband {
+    pub low_hz: f64,
+    pub high_hz: f64,
+}
+
+impl Passband {
+    pub fn around(width_hz: f64) -> Self {
+        Self { low_hz: -width_hz / 2.0, high_hz: width_hz / 2.0 }
+    }
+
+    pub fn width(self) -> f64 {
+        self.high_hz - self.low_hz
+    }
+
+    pub fn reach(self) -> f64 {
+        self.low_hz.abs().max(self.high_hz.abs())
+    }
+
+    pub fn shifted(self, hz: f64) -> Self {
+        Self { low_hz: self.low_hz + hz, high_hz: self.high_hz + hz }
+    }
+}
+
+impl Demod {
+    pub fn audio_edges(self, width_hz: Option<f64>, low_hz: Option<f64>) -> (f64, f64) {
+        let width = width_hz.filter(|w| *w >= NARROWEST_HZ).unwrap_or(match self {
+            Demod::Cw => CW_FILTER_HZ,
+            _ => SIDEBAND_AUDIO_HZ.1 - SIDEBAND_AUDIO_HZ.0,
+        });
+        let low = low_hz.unwrap_or(match self {
+            Demod::Cw => self.cw_pitch() - width / 2.0,
+            _ => SIDEBAND_AUDIO_HZ.0,
+        });
+        clamp_audio(low, low + width)
+    }
+
+    pub fn passband(self, width_hz: Option<f64>, low_hz: Option<f64>) -> Passband {
+        if !self.is_ssb() {
+            return Passband::around(
+                width_hz.filter(|w| *w >= NARROWEST_HZ).unwrap_or_else(|| self.bandwidth()),
+            );
+        }
+        let (low, high) = self.audio_edges(width_hz, low_hz);
+        match self {
+            Demod::Lsb => Passband { low_hz: -high, high_hz: -low },
+            _ => Passband { low_hz: low, high_hz: high }.shifted(-self.cw_pitch()),
+        }
+    }
+
+    pub fn audio_of(self, p: Passband) -> (f64, f64) {
+        match self {
+            Demod::Lsb => clamp_audio(-p.high_hz, -p.low_hz),
+            _ => {
+                let a = p.shifted(self.cw_pitch());
+                clamp_audio(a.low_hz, a.high_hz)
+            }
+        }
+    }
+
+    pub fn if_reach(self, p: Passband) -> f64 {
+        match self.is_ssb() {
+            true => p.shifted(self.cw_pitch()).reach().max(self.bandwidth() / 2.0),
+            false => p.reach(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sideband_passband_sits_on_its_side_of_the_dial() {
+        assert_eq!(Demod::Usb.passband(None, None), Passband { low_hz: 300.0, high_hz: 2_700.0 });
+        assert_eq!(Demod::Lsb.passband(None, None), Passband { low_hz: -2_700.0, high_hz: -300.0 });
+        assert_eq!(Demod::Cw.passband(None, None), Passband { low_hz: -250.0, high_hz: 250.0 });
+        assert_eq!(Demod::Nfm.passband(None, None), Passband::around(12_500.0));
+    }
+
+    #[test]
+    fn a_width_and_a_low_edge_set_a_sideband_filter() {
+        assert_eq!(Demod::Usb.audio_edges(Some(2_000.0), Some(500.0)), (500.0, 2_500.0));
+        assert_eq!(
+            Demod::Lsb.passband(Some(2_000.0), Some(500.0)),
+            Passband { low_hz: -2_500.0, high_hz: -500.0 }
+        );
+        assert_eq!(Demod::Cw.audio_edges(Some(200.0), None), (600.0, 800.0));
+        assert_eq!(Demod::Am.passband(Some(6_000.0), Some(500.0)), Passband::around(6_000.0));
+    }
+
+    #[test]
+    fn audio_edges_stay_inside_what_the_filter_can_pass() {
+        assert_eq!(Demod::Usb.audio_edges(Some(20_000.0), Some(-100.0)), (50.0, 6_000.0));
+        assert_eq!(Demod::Usb.audio_edges(Some(40.0), Some(1_000.0)), (1_000.0, 3_400.0));
+        assert_eq!(Demod::Usb.audio_edges(Some(500.0), Some(5_950.0)), (5_900.0, 6_000.0));
+    }
+
+    #[test]
+    fn a_passband_reads_back_as_the_audio_it_came_from() {
+        for d in [Demod::Usb, Demod::Lsb, Demod::Cw] {
+            let p = d.passband(Some(1_800.0), Some(400.0));
+            assert_eq!(d.audio_of(p), (400.0, 2_200.0), "{}", d.label());
+        }
+    }
+
+    #[test]
+    fn a_passband_dragged_through_the_dial_stops_at_the_filter_floor() {
+        let through = Passband { low_hz: -400.0, high_hz: 2_700.0 };
+        assert_eq!(Demod::Usb.audio_of(through), (50.0, 2_700.0));
+        assert_eq!(
+            Demod::Lsb.audio_of(Passband { low_hz: -2_700.0, high_hz: 400.0 }),
+            (50.0, 2_700.0)
+        );
+        assert_eq!(Demod::Cw.audio_of(Passband { low_hz: -900.0, high_hz: 250.0 }), (50.0, 950.0));
+    }
+
+    #[test]
+    fn the_if_covers_the_sideband_filter_and_never_narrows_below_the_mode() {
+        assert_eq!(Demod::Usb.if_reach(Demod::Usb.passband(None, None)), 3_000.0);
+        assert_eq!(Demod::Usb.if_reach(Demod::Usb.passband(Some(4_500.0), None)), 4_800.0);
+        assert_eq!(Demod::Cw.if_reach(Demod::Cw.passband(None, None)), 2_000.0);
+        assert_eq!(Demod::Cw.if_reach(Demod::Cw.passband(Some(3_000.0), Some(1_000.0))), 4_000.0);
+        assert_eq!(Demod::Nfm.if_reach(Demod::Nfm.passband(Some(25_000.0), None)), 12_500.0);
+    }
+}

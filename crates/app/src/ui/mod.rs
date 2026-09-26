@@ -1231,6 +1231,7 @@ impl App {
             freq,
             mode: ChanMode::Audio(demod),
             bandwidth_hz: None,
+            audio_low_hz: None,
             label: format!("{mhz:.1}"),
             on: true,
             volume: 0.8,
@@ -2545,6 +2546,7 @@ impl App {
                         self.listen(i);
                     }
                 }
+                scope::Action::Resized => self.send_channels(),
                 scope::Action::Open(w) => self.open = Some(w),
             }
         }
@@ -2774,6 +2776,7 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
         reads: None,
         mode,
         bandwidth_hz: None,
+        audio_low_hz: None,
         label: label.unwrap_or_else(|| format!("CH{id}")),
         on: true,
         volume: 0.8,
@@ -2799,6 +2802,7 @@ fn recalled(id: u64, s: &crate::memory::Saved) -> Channel {
     };
     Channel {
         bandwidth_hz: s.bandwidth_hz,
+        audio_low_hz: s.audio_low_hz,
         tx: s.tx,
         tone: s.tone,
         ..fresh(id, s.freq, s.mode.clone(), label)
@@ -2817,6 +2821,7 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             offset_hz: c.freq - center,
             mode: c.mode.clone(),
             bandwidth_hz: c.bandwidth_hz,
+            audio_low_hz: c.audio_low_hz,
             squelch_db: c.squelch_db,
             agc: c.agc,
             voice: c.voice,
@@ -3960,6 +3965,7 @@ mod tests {
             freq,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             label: format!("CH{id}"),
             on,
             volume,
@@ -4149,6 +4155,7 @@ mod tests {
                 freq: *f,
                 mode: ChanMode::Audio(Demod::Wfm),
                 bandwidth_hz: None,
+                audio_low_hz: None,
                 label: "t".into(),
                 on: true,
                 volume: 0.8,
@@ -4293,6 +4300,64 @@ mod tests {
         let mut a = with_channels(&[95_000_000.0]);
         let a = scope_of(&mut a);
         assert_eq!(a.channel_at(&rect, a.x_of(&rect, 94_500_000.0)), None);
+    }
+
+    fn sideband_at(demod: Demod, rate: f64) -> App {
+        let mut a = with_channels(&[14_200_000.0]);
+        a.center = 14_200_000.0;
+        a.rate = rate;
+        a.audio.channels[0].mode = ChanMode::Audio(demod);
+        a
+    }
+
+    #[test]
+    fn a_sideband_edge_is_grabbed_where_it_is_drawn() {
+        use state::{Edge, Grab};
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 400.0));
+        let mut a = sideband_at(Demod::Usb, 24_000.0);
+        let s = scope_of(&mut a);
+        let at = |hz: f64| s.grab_at(&rect, s.x_of(&rect, 14_200_000.0 + hz));
+        assert_eq!(at(0.0), Some(Grab::Channel(0)));
+        assert_eq!(at(300.0), Some(Grab::Edge(0, Edge::Low)));
+        assert_eq!(at(2_700.0), Some(Grab::Edge(0, Edge::High)));
+        assert_eq!(at(1_500.0), Some(Grab::Channel(0)), "inside the passband moves it");
+        assert_eq!(at(-1_500.0), None, "the rejected sideband is not the channel");
+
+        let mut a = sideband_at(Demod::Cw, 2_400_000.0);
+        let s = scope_of(&mut a);
+        let x = s.x_of(&rect, 14_200_200.0);
+        assert_eq!(s.grab_at(&rect, x), Some(Grab::Channel(0)), "edges under the dial line");
+    }
+
+    #[test]
+    fn dragging_an_edge_moves_that_edge_alone() {
+        use state::Edge;
+        let mut a = sideband_at(Demod::Usb, 24_000.0);
+        let ch = &mut a.audio.channels[0];
+        ch.drag_edge(Edge::High, 2_000.0);
+        assert_eq!((ch.audio_low_hz, ch.bandwidth_hz), (Some(300.0), Some(1_700.0)));
+        ch.drag_edge(Edge::Low, 800.0);
+        assert_eq!((ch.audio_low_hz, ch.bandwidth_hz), (Some(800.0), Some(1_200.0)));
+        ch.drag_edge(Edge::Low, -500.0);
+        assert_eq!(ch.passband(), common::Passband { low_hz: 50.0, high_hz: 2_000.0 });
+        ch.drag_edge(Edge::Low, 5_000.0);
+        assert_eq!(ch.passband(), common::Passband { low_hz: 1_900.0, high_hz: 2_000.0 });
+
+        let mut a = sideband_at(Demod::Lsb, 24_000.0);
+        let ch = &mut a.audio.channels[0];
+        ch.drag_edge(Edge::Low, -3_000.0);
+        assert_eq!(ch.passband(), common::Passband { low_hz: -3_000.0, high_hz: -300.0 });
+        assert_eq!((ch.audio_low_hz, ch.bandwidth_hz), (Some(300.0), Some(2_700.0)));
+
+        let mut a = sideband_at(Demod::Cw, 24_000.0);
+        let ch = &mut a.audio.channels[0];
+        ch.drag_edge(Edge::High, 100.0);
+        assert_eq!(ch.passband(), common::Passband { low_hz: -250.0, high_hz: 100.0 });
+
+        let mut a = sideband_at(Demod::Nfm, 24_000.0);
+        let ch = &mut a.audio.channels[0];
+        ch.drag_edge(Edge::Low, -10_000.0);
+        assert_eq!(ch.passband(), common::Passband::around(20_000.0), "both edges move");
     }
 
     #[test]

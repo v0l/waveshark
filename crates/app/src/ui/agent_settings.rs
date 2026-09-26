@@ -274,6 +274,7 @@ impl super::App {
             freq,
             mode,
             bandwidth_hz: a.bandwidth_khz.filter(|k| *k > 0.0).map(|k| k * 1e3),
+            audio_low_hz: None,
             tx: None,
             tone,
         });

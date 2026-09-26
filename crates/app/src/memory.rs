@@ -11,7 +11,7 @@
 
 pub mod formats;
 
-use crate::radio::{ChanMode, TxSource, TxSpec};
+use crate::radio::{ChanMode, Demod, TxSource, TxSpec};
 use crate::scanners::{hz, num};
 pub use dsp::squelch::Coded;
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ pub struct Saved {
     pub mode: ChanMode,
     /// `None` for the mode's own width.
     pub bandwidth_hz: Option<f64>,
+    pub audio_low_hz: Option<f64>,
     /// What it puts on the air, or `None` for the mode's own default.
     ///
     /// A repeater channel is one channel that listens on the output and
@@ -160,15 +161,30 @@ impl Memory {
             let rest: Vec<&str> = t.collect();
             // A width is a number followed by a unit; a label that starts
             // with a number would have to be written after one.
-            let (bandwidth_hz, label_from) = match rest.as_slice() {
+            let (bandwidth_hz, audio_low_hz, label_from) = match rest.as_slice() {
                 [n, u, ..] if n.parse::<f64>().is_ok() && is_unit(u) => {
-                    (hz(&format!("{n} {u}")), 2)
+                    (hz(&format!("{n} {u}")), None, 2)
                 }
-                _ => (None, 0),
+                [n, u, ..] if is_unit(u) && mode.demod().is_some_and(Demod::is_ssb) => {
+                    match edges(n, u) {
+                        Some((low, high)) => (Some(high - low), Some(low), 2),
+                        None => (None, None, 0),
+                    }
+                }
+                _ => (None, None, 0),
             };
             let (tx, tone, label_from) = tokens(&rest[label_from..], label_from);
             let label = rest[label_from..].join(" ");
-            list.push(Saved { group: group.clone(), label, freq, mode, bandwidth_hz, tx, tone });
+            list.push(Saved {
+                group: group.clone(),
+                label,
+                freq,
+                mode,
+                bandwidth_hz,
+                audio_low_hz,
+                tx,
+                tone,
+            });
         }
         Self { list }
     }
@@ -183,9 +199,17 @@ impl Memory {
                     format!("{} MHz", num(c.freq / 1e6)),
                     c.mode.label()
                 ));
-                match c.bandwidth_hz {
-                    Some(bw) => s.push_str(&format!("{:<12}", format!("{} kHz", num(bw / 1e3)))),
-                    None => s.push_str(&format!("{:<12}", "")),
+                let sideband = c.mode.demod().filter(|d| d.is_ssb());
+                match (c.bandwidth_hz, c.audio_low_hz, sideband) {
+                    (_, Some(_), Some(d)) => {
+                        let (low, high) = d.audio_edges(c.bandwidth_hz, c.audio_low_hz);
+                        let range = format!("{}-{} kHz", num(low / 1e3), num(high / 1e3));
+                        s.push_str(&format!("{range:<12}"));
+                    }
+                    (Some(bw), _, _) => {
+                        s.push_str(&format!("{:<12}", format!("{} kHz", num(bw / 1e3))))
+                    }
+                    (None, _, _) => s.push_str(&format!("{:<12}", "")),
                 }
                 for token in written_tokens(c) {
                     s.push_str(&format!("{token:<16}"));
@@ -266,6 +290,12 @@ fn written_tokens(c: &Saved) -> Vec<String> {
     out
 }
 
+fn edges(range: &str, unit: &str) -> Option<(f64, f64)> {
+    let (low, high) = range.split_once('-')?;
+    let (low, high) = (hz(&format!("{low} {unit}"))?, hz(&format!("{high} {unit}"))?);
+    (low < high).then_some((low, high))
+}
+
 fn is_unit(s: &str) -> bool {
     matches!(s.to_ascii_lowercase().as_str(), "hz" | "khz" | "mhz" | "ghz")
 }
@@ -297,7 +327,8 @@ const HEADER: &str = "\
 # file from its own list, so comments below this header are not kept.
 #
 #   modes   WFM NFM AM USB LSB CW AUTO, or a front end such as M17 or POCSAG
-#   width   e.g. 25 kHz; leave it out for the mode's own
+#   width   e.g. 25 kHz, or 0.3-2.7 kHz of audio on USB, LSB and CW;
+#           leave it out for the mode's own
 #   shift:  what it transmits away from its own frequency, e.g. shift:-600kHz
 #   src:    what it transmits, mic or tone; tone unless it says otherwise
 #   trim:   this channel's own offset from the transmit gain, e.g. trim:-6dB
@@ -330,6 +361,30 @@ mod tests {
         assert_eq!(m.list.iter().filter(|c| c.tx.is_some()).count(), 0);
         assert_eq!(m.list.iter().filter(|c| c.tone.is_some()).count(), 0);
         assert_eq!(Memory::parse(&m.render()), m);
+    }
+
+    #[test]
+    fn a_sideband_filter_is_saved_as_its_two_edges() {
+        let m = Memory::parse(
+            "[HF]\n14.2 MHz USB 0.5-2.5 kHz ragchew\n7.1 MHz LSB 2.4 kHz net\n\
+             14.06 MHz CW 0.6-0.8 kHz qrp\n145.5 MHz NFM 0.5-2.5 kHz odd\n",
+        );
+        assert_eq!(m.list.len(), 4);
+        let edges: Vec<_> = m.list.iter().map(|c| (c.audio_low_hz, c.bandwidth_hz)).collect();
+        assert_eq!(
+            edges,
+            [
+                (Some(500.0), Some(2_000.0)),
+                (None, Some(2_400.0)),
+                (Some(600.0), Some(200.0)),
+                (None, None),
+            ]
+        );
+        assert_eq!(m.list[0].label, "ragchew");
+        assert_eq!(m.list[3].label, "0.5-2.5 kHz odd", "a range means nothing to NFM");
+        let written = m.render();
+        assert!(written.contains("USB     0.5-2.5 kHz"), "{written}");
+        assert_eq!(Memory::parse(&written), m);
     }
 
     /// A channel keeps the coded squelch it was programmed with.
@@ -444,6 +499,7 @@ mod tests {
             freq: 145_600_000.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: bw,
+            audio_low_hz: None,
             tx: None,
             tone: None,
         };

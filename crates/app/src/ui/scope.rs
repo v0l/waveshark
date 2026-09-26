@@ -6,7 +6,7 @@
 //! asks for by returning an [`Action`]; the caller is then the only place
 //! that talks to the radio.
 
-use super::state::ScopeState;
+use super::state::{Edge, Grab, ScopeState};
 use super::*;
 
 /// What the pane wants done, once the caller has it back.
@@ -19,6 +19,7 @@ pub(super) enum Action {
     Retune(f64),
     /// A channel marker was dragged to a new frequency.
     Moved(usize),
+    Resized,
     /// Open one of the settings panels the pane carries a cog for.
     Open(Settings),
 }
@@ -72,6 +73,36 @@ impl Scope<'_> {
             .filter(|(_, c)| (c.freq - hz).abs() < tol)
             .min_by(|a, b| (a.1.freq - hz).abs().partial_cmp(&(b.1.freq - hz).abs()).unwrap())
             .map(|(i, _)| i)
+    }
+
+    pub(super) fn grab_at(&self, rect: &Rect, x: f32) -> Option<Grab> {
+        let tol = GRAB_PX * self.rate / rect.width().max(1.0) as f64;
+        let hz = self.hz_at(rect, x);
+        let mut best: Option<(f64, Grab)> = None;
+        for (i, c) in self.channels.iter().enumerate() {
+            let band = c.passband();
+            let marks = [
+                (0.0, Grab::Channel(i)),
+                (band.low_hz, Grab::Edge(i, Edge::Low)),
+                (band.high_hz, Grab::Edge(i, Edge::High)),
+            ];
+            for (offset, grab) in marks {
+                let apart = grab == Grab::Channel(i) || offset.abs() >= tol;
+                let d = (c.freq + offset - hz).abs();
+                if apart && d < tol && best.is_none_or(|(b, _)| d < b) {
+                    best = Some((d, grab));
+                }
+            }
+        }
+        best.map(|(_, g)| g).or_else(|| {
+            self.channels
+                .iter()
+                .position(|c| {
+                    let band = c.passband().shifted(c.freq);
+                    (band.low_hz..=band.high_hz).contains(&hz)
+                })
+                .map(Grab::Channel)
+        })
     }
 
     pub(super) fn x_of(&self, rect: &Rect, hz: f64) -> f32 {
@@ -165,7 +196,7 @@ impl Scope<'_> {
             self.cursor(&p, &full, &resp, shift);
         }
 
-        if resp.clicked() && self.st.drag_ch.is_none() {
+        if resp.clicked() && self.st.drag.is_none() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 // Cogs sit inside the pane, so they get first refusal on a
                 // click; otherwise opening settings would also drop a channel.
@@ -203,11 +234,11 @@ impl Scope<'_> {
             let origin =
                 ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
             self.st.splitting = origin.is_some_and(|pos| grip.contains(pos));
-            self.st.drag_ch = origin.and_then(|pos| {
+            self.st.drag = origin.and_then(|pos| {
                 if plot_cog.contains(pos) || fall_cog.contains(pos) || grip.contains(pos) {
                     return None;
                 }
-                self.channel_at(&full, pos.x)
+                self.grab_at(&full, pos.x)
             });
         }
         if resp.dragged() && self.st.splitting {
@@ -218,13 +249,19 @@ impl Scope<'_> {
                 self.st.plot_frac = f.clamp(*PLOT_FRAC_RANGE.start(), *PLOT_FRAC_RANGE.end());
             }
         } else if resp.dragged() {
-            match self.st.drag_ch {
-                Some(i) if i < self.channels.len() => {
+            match self.st.drag {
+                Some(Grab::Channel(i)) if i < self.channels.len() => {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         // Follow the pointer rather than accumulating deltas,
                         // so the marker cannot drift away from the cursor.
                         self.channels[i].freq = self.hz_at_snapped(&full, pos.x, ui);
                         self.acts.push(Action::Moved(i));
+                    }
+                }
+                Some(Grab::Edge(i, edge)) if i < self.channels.len() => {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let offset = self.hz_at(&full, pos.x) - self.channels[i].freq;
+                        self.channels[i].drag_edge(edge, offset);
                     }
                 }
                 _ => {
@@ -237,7 +274,10 @@ impl Scope<'_> {
             }
         }
         if resp.drag_stopped() {
-            self.st.drag_ch = None;
+            if let Some(Grab::Edge(..)) = self.st.drag {
+                self.acts.push(Action::Resized);
+            }
+            self.st.drag = None;
             self.st.splitting = false;
         }
 
@@ -248,11 +288,11 @@ impl Scope<'_> {
         // A marker under the pointer is draggable, so say so.
         if grip_hot {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        } else if self.st.drag_ch.is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        } else if let Some(grab) = self.st.drag {
+            ui.ctx().set_cursor_icon(grab_icon(grab));
         } else if let Some(h) = hover {
-            if !plot_hot && !fall_hot && self.channel_at(&full, h.x).is_some() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            if let Some(grab) = self.grab_at(&full, h.x).filter(|_| !plot_hot && !fall_hot) {
+                ui.ctx().set_cursor_icon(grab_icon(grab));
             }
         }
 
@@ -745,8 +785,8 @@ impl Scope<'_> {
             // Show what the demodulator actually takes in, not just where it
             // is centred: an NFM channel and a WFM channel at the same spot
             // are wildly different slices of spectrum.
-            let half = ch.bandwidth() / 2.0;
-            let (bx0, bx1) = (self.x_of(full, ch.freq - half), self.x_of(full, ch.freq + half));
+            let band = ch.passband().shifted(ch.freq);
+            let (bx0, bx1) = (self.x_of(full, band.low_hz), self.x_of(full, band.high_hz));
             if bx1 - bx0 >= 1.0 {
                 let band = Rect::from_min_max(
                     Pos2::new(bx0.max(full.left()), full.top()),
@@ -829,5 +869,12 @@ impl Scope<'_> {
         );
         p.rect(box_r, 2.0, theme::WELL, Stroke::new(1.0, theme::ETCH), StrokeKind::Inside);
         p.galley(Pos2::new(left, full.top() + 8.0), g, theme::VALUE);
+    }
+}
+
+fn grab_icon(grab: Grab) -> egui::CursorIcon {
+    match grab {
+        Grab::Channel(_) => egui::CursorIcon::ResizeHorizontal,
+        Grab::Edge(..) => egui::CursorIcon::ResizeColumn,
     }
 }

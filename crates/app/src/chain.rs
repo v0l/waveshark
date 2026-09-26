@@ -111,9 +111,6 @@ impl SubBand {
     }
 }
 
-/// The narrow CW filter, in Hz.
-const CW_FILTER_HZ: f64 = 500.0;
-
 /// What a channel branch was built for. A branch is only reused while all of
 /// this is unchanged, since every one of these decides a filter's
 /// coefficients or a mixer's shift.
@@ -124,6 +121,7 @@ struct ChanKey {
     /// not a parameter: without this here a width set on the strip was
     /// applied as a level change and reached nothing.
     width_bits: u64,
+    low_bits: u64,
     rate_bits: u64,
 }
 
@@ -132,6 +130,7 @@ impl ChanKey {
         Self {
             mode: spec.mode.key(),
             width_bits: spec.bandwidth().to_bits(),
+            low_bits: spec.passband().low_hz.to_bits(),
             rate_bits: rate.to_bits(),
         }
     }
@@ -1419,8 +1418,10 @@ impl Receiver {
             // rather than let an operator wonder why a strong signal reads
             // as nothing.
             let at = plan.center.as_f64() + spec.offset_hz;
-            let half = spec.bandwidth() / 2.0;
-            if let Some(hz) = plan.seams.iter().find(|h| (at - half..=at + half).contains(h)) {
+            let band = spec.passband();
+            if let Some(hz) =
+                plan.seams.iter().find(|h| (at + band.low_hz..=at + band.high_hz).contains(h))
+            {
                 refused = Some(format!(
                     "{} sits across the join at {:.4} MHz, where neither tuner hears it whole",
                     spec.label,
@@ -4448,9 +4449,10 @@ fn audio_channel_stages(
     // The channel's own width decides the IF rate when it is wider than the
     // mode's: a 25 kHz repeater set by hand on an NFM channel has to survive
     // the decimation before any filter can be built around it.
-    let width = spec.bandwidth();
-    let if_dec =
-        ((rate / mode.if_rate().max(width * crate::radio::IF_HEADROOM)).round() as usize).max(1);
+    let reach = spec.if_reach();
+    let if_dec = ((rate / mode.if_rate().max(2.0 * reach * crate::radio::IF_HEADROOM)).round()
+        as usize)
+        .max(1);
     let if_rate = rate / if_dec as f64;
     let au_dec = ((if_rate / AUDIO_HZ).round() as usize).max(1);
     // Every stage says which channel it belongs to, so the ones a channel
@@ -4471,7 +4473,7 @@ fn audio_channel_stages(
     // stopband has to land where the first alias folds down.
     let mut ifd = Settings::new();
     ifd.insert("factor".into(), V::Int(if_dec as i64));
-    ifd.insert("passband_hz".into(), V::Float(width / 2.0));
+    ifd.insert("passband_hz".into(), V::Float(reach));
     ifd.insert("input_rate_hz".into(), V::Float(rate));
     ifd.insert("label".into(), V::Text("IF decimator".into()));
     let i = at(p, "chan_ifdec", "decimate", ifd);
@@ -4487,22 +4489,11 @@ fn audio_channel_stages(
         "envelope"
     } else if mode.is_ssb() {
         d.insert("sideband".into(), V::Text(crate::radio::sideband(mode).to_string()));
-        if mode == Demod::Cw {
-            d.insert("pitch_hz".into(), V::Float(mode.cw_pitch()));
-            // On CW the width control is the filter itself, which is the
-            // whole reason to reach for it: 500 Hz on a quiet band, 150 in a
-            // pile-up.
-            d.insert("width_hz".into(), V::Float(spec.bandwidth_hz.unwrap_or(CW_FILTER_HZ)));
-            d.insert("label".into(), V::Text("CW filter".into()));
-        } else {
-            // Half the channel is one sideband, which is what the demodulator
-            // passes: the control narrows the audio with the channel rather
-            // than leaving a filter open wider than the IF in front of it.
-            if let Some(bw) = spec.bandwidth_hz {
-                d.insert("high_hz".into(), V::Float((bw / 2.0).max(400.0)));
-            }
-            d.insert("label".into(), V::Text("Sideband filter".into()));
-        }
+        let (low, high) = mode.audio_of(spec.passband());
+        d.insert("low_hz".into(), V::Float(low));
+        d.insert("high_hz".into(), V::Float(high));
+        let label = if mode == Demod::Cw { "CW filter" } else { "Sideband filter" };
+        d.insert("label".into(), V::Text(label.into()));
         "ssb_demod"
     } else {
         d.insert("deviation_hz".into(), V::Float(mode.deviation()));
@@ -4555,7 +4546,8 @@ fn audio_channel_stages(
     ad.insert("factor".into(), V::Int(au_dec as i64));
     // Never wider than the channel itself: a filter passing 4 kHz of audio
     // out of a 5 kHz channel is passing the skirt as well as the signal.
-    ad.insert("passband_hz".into(), V::Float(mode.audio_bw().min(width / 2.0)));
+    let highest = if mode.is_ssb() { mode.audio_of(spec.passband()).1 } else { 0.0 };
+    ad.insert("passband_hz".into(), V::Float(mode.audio_bw().max(highest).min(reach)));
     ad.insert("input_rate_hz".into(), V::Float(if_rate));
     ad.insert("label".into(), V::Text("Audio decimator".into()));
     let aud = at(p, "chan_audiodec", "real_decimate", ad);
@@ -4638,6 +4630,9 @@ fn chan_stage_id(what: &str, spec: &ChannelSpec, rate: f64) -> u64 {
     // in the chain is designed around it, and a channel that changed width
     // has to be built again rather than keep coefficients for the old one.
     spec.bandwidth().to_bits().hash(&mut h);
+    if spec.mode.demod().is_some_and(Demod::is_ssb) {
+        spec.passband().low_hz.to_bits().hash(&mut h);
+    }
     rate.to_bits().hash(&mut h);
     derived::at(what, spec.id, h.finish() ^ fnv(what))
 }
@@ -6104,6 +6099,7 @@ pub(crate) mod tests {
             offset_hz: offset,
             mode: ChanMode::Audio(demod),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -6726,6 +6722,79 @@ pub(crate) mod tests {
         sq.squelch_db = Some(-20.0);
         same.channels = vec![sq];
         assert!(rx.params_only(&same), "a squelch change should not rebuild");
+    }
+
+    #[test]
+    fn a_sideband_channel_is_built_from_its_two_edges() {
+        use pipeline::registry::SettingsExt;
+        let cases = [
+            (Demod::Usb, None, None, (300.0, 2_700.0), 3_000.0, 3_000.0),
+            (Demod::Usb, Some(4_500.0), None, (300.0, 4_800.0), 4_800.0, 4_800.0),
+            (Demod::Lsb, Some(2_000.0), Some(500.0), (500.0, 2_500.0), 3_000.0, 3_000.0),
+            (Demod::Cw, None, None, (450.0, 950.0), 2_000.0, 1_200.0),
+            (Demod::Cw, Some(200.0), None, (600.0, 800.0), 2_000.0, 1_200.0),
+            (Demod::Cw, Some(3_000.0), Some(1_000.0), (1_000.0, 4_000.0), 4_000.0, 4_000.0),
+        ];
+        for (demod, width, low, (lo_hz, hi_hz), if_hz, audio_hz) in cases {
+            let mut p = plan(2_400_000.0, Hz::mhz(14));
+            let mut spec = chan(1, 0.0, demod);
+            spec.bandwidth_hz = width;
+            spec.audio_low_hz = low;
+            p.channels = vec![spec];
+            let patch = derived_patch(&p);
+            let labelled = |label: &str| {
+                patch
+                    .stages()
+                    .iter()
+                    .find(|s| s.settings.get("label").and_then(|v| v.as_str()) == Some(label))
+                    .unwrap_or_else(|| panic!("{label} on {}", demod.label()))
+                    .settings
+                    .clone()
+            };
+            let filter = if demod == Demod::Cw { "CW filter" } else { "Sideband filter" };
+            let dem = labelled(filter);
+            let edges = (dem.f64_or("low_hz", 0.0), dem.f64_or("high_hz", 0.0));
+            assert_eq!(edges, (lo_hz, hi_hz), "{} {width:?} {low:?}", demod.label());
+            assert_eq!(labelled("IF decimator").f64_or("passband_hz", 0.0), if_hz);
+            assert_eq!(labelled("Audio decimator").f64_or("passband_hz", 0.0), audio_hz);
+        }
+    }
+
+    #[test]
+    fn moving_a_sideband_low_edge_rebuilds_the_channel() {
+        let mut p = plan(2_400_000.0, Hz::mhz(14));
+        p.channels = vec![chan(1, 0.0, Demod::Usb)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let mut moved = chan(1, 0.0, Demod::Usb);
+        moved.audio_low_hz = Some(100.0);
+        moved.bandwidth_hz = Some(2_600.0);
+        assert_eq!(moved.bandwidth(), chan(1, 0.0, Demod::Usb).bandwidth() + 200.0);
+        let mut changed = plan(2_400_000.0, Hz::mhz(14));
+        changed.channels = vec![moved.clone()];
+        assert!(!rx.params_only(&changed), "a low edge change was taken as a parameter tweak");
+        assert_ne!(
+            chan_stage_id("chan_demod", &p.channels[0], p.eff_rate()),
+            chan_stage_id("chan_demod", &moved, p.eff_rate()),
+        );
+    }
+
+    #[test]
+    fn a_join_below_an_upper_sideband_channel_is_not_under_it() {
+        let mut p = plan(2_400_000.0, Hz::mhz(14));
+        p.channels = vec![chan(1, 100_000.0, Demod::Usb)];
+        let dial = 14_100_000.0;
+        p.seams = vec![dial - 1_000.0];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+
+        p.seams = vec![dial + 1_000.0];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let said = rx.refused.clone().expect("a join inside the sideband is named");
+        assert!(said.contains("sits across the join"), "{said}");
+
+        p.channels = vec![chan(1, 100_000.0, Demod::Lsb)];
+        let rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
     }
 
     #[test]
@@ -8534,6 +8603,7 @@ mod refusal_tests {
             offset_hz: 0.0,
             mode: ChanMode::Audio(Demod::Am),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -8592,6 +8662,7 @@ mod refusal_tests {
             offset_hz: 1_000_000.0,
             mode: ChanMode::Decode("ais".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -8634,6 +8705,7 @@ mod refusal_tests {
             offset_hz: 25_000.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -8673,6 +8745,7 @@ mod tx_in_graph_tests {
             offset_hz: 49_000.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -8749,6 +8822,7 @@ mod tx_in_graph_tests {
             offset_hz: 0.0,
             mode: ChanMode::Audio(Demod::Wfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -9082,6 +9156,7 @@ mod tx_in_graph_tests {
             offset_hz: 0.0,
             mode: ChanMode::Decode("dvbt".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -9149,6 +9224,7 @@ mod tx_in_graph_tests {
                 offset_hz: 0.0,
                 mode: ChanMode::Decode(id.into()),
                 bandwidth_hz: None,
+                audio_low_hz: None,
                 squelch_db: None,
                 agc: true,
                 voice: false,
@@ -9186,6 +9262,7 @@ mod tx_in_graph_tests {
             offset_hz: 0.0,
             mode: ChanMode::Decode("aprs".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -9268,6 +9345,7 @@ vectors:
             offset_hz: 0.0,
             mode: ChanMode::Decode("chain-link".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -9365,6 +9443,7 @@ vectors:
             offset_hz: 0.0,
             mode: ChanMode::Decode("dvbt".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -9467,6 +9546,7 @@ vectors:
             offset_hz: 0.0,
             mode: ChanMode::Decode("dvbt".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -9582,6 +9662,7 @@ vectors:
             offset_hz: 0.0,
             mode: ChanMode::Decode("dvbt".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -10090,6 +10171,7 @@ vectors:
             offset_hz: 0.0,
             mode: ChanMode::Decode("dvbt".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,

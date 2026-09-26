@@ -340,8 +340,11 @@ impl Strip<'_> {
     /// stronger one, an auto channel that should watch the 40 kHz somebody
     /// pointed at rather than a band a scanner block named.
     fn channel_bandwidth(ui: &mut egui::Ui, ch: &mut Channel) -> bool {
+        if let Some(d) = ch.mode.demod().filter(|d| d.is_ssb()) {
+            return Self::channel_edges(ui, ch, d);
+        }
         let mut changed = false;
-        let mut khz = ch.bandwidth() / 1e3;
+        let mut khz = ch.passband().width() / 1e3;
         ui.horizontal(|ui| {
             Line::new().legend("bw").show(ui);
             // Proportional, so the same drag is a few hundred hertz on a CW
@@ -362,10 +365,7 @@ impl Strip<'_> {
             if r.changed() {
                 ch.bandwidth_hz = Some(khz * 1e3);
             }
-            let settled = r.drag_stopped()
-                || r.lost_focus()
-                || (r.changed() && !r.dragged() && !r.has_focus());
-            if settled && ch.bandwidth_hz.is_some() {
+            if settled(&r) && ch.bandwidth_hz.is_some() {
                 changed = true;
             }
             if ch.bandwidth_hz.is_some() {
@@ -379,6 +379,51 @@ impl Strip<'_> {
                     .clicked()
                 {
                     ch.bandwidth_hz = None;
+                    changed = true;
+                }
+            } else {
+                Line::new().note("mode default").show(ui);
+            }
+        });
+        changed
+    }
+
+    fn channel_edges(ui: &mut egui::Ui, ch: &mut Channel, d: Demod) -> bool {
+        let mut changed = false;
+        let (mut low, mut high) = d.audio_edges(ch.bandwidth_hz, ch.audio_low_hz);
+        ui.horizontal(|ui| {
+            Line::new().legend("pass").show(ui);
+            let edge = |ui: &mut egui::Ui, hz: &mut f64| {
+                ui.add(
+                    egui::DragValue::new(hz)
+                        .speed(10.0)
+                        .range(common::demod::AUDIO_EDGE_RANGE_HZ)
+                        .max_decimals(0)
+                        .suffix(" Hz"),
+                )
+            };
+            let lo = edge(ui, &mut low);
+            let hi = edge(ui, &mut high);
+            if lo.changed() || hi.changed() {
+                let (low, high) = common::demod::clamp_audio(low, high);
+                ch.audio_low_hz = Some(low);
+                ch.bandwidth_hz = Some(high - low);
+            }
+            if settled(&lo) || settled(&hi) {
+                changed = true;
+            }
+            if ch.bandwidth_hz.is_some() || ch.audio_low_hz.is_some() {
+                let (low, high) = d.audio_edges(None, None);
+                if ui
+                    .small_button("RESET")
+                    .on_hover_text(format!(
+                        "back to the {low:.0} to {high:.0} Hz {} asks for",
+                        d.label()
+                    ))
+                    .clicked()
+                {
+                    ch.bandwidth_hz = None;
+                    ch.audio_low_hz = None;
                     changed = true;
                 }
             } else {
@@ -1339,6 +1384,7 @@ impl Strip<'_> {
                                                     freq: ch.freq,
                                                     mode: ch.mode.clone(),
                                                     bandwidth_hz: ch.bandwidth_hz,
+                                                    audio_low_hz: ch.audio_low_hz,
                                                     tx: ch.tx,
                                                     tone: ch.tone,
                                                 });
@@ -1781,7 +1827,11 @@ impl TxControls {
     }
 }
 
-const WIDEST_KHZ: f64 = 100_000.0;
+pub(super) const WIDEST_KHZ: f64 = 100_000.0;
+
+fn settled(r: &egui::Response) -> bool {
+    r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged() && !r.has_focus())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1819,6 +1869,7 @@ mod tests {
                 offset_hz: 0.0,
                 mode: ChanMode::Decode(proto.id().into()),
                 bandwidth_hz: None,
+                audio_low_hz: None,
                 squelch_db: None,
                 agc: true,
                 voice: false,

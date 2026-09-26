@@ -462,6 +462,7 @@ impl Columns {
                 freq,
                 mode,
                 bandwidth_hz,
+                audio_low_hz: None,
                 tx: (shift != 0.0 || sends.is_some()).then(|| TxSpec {
                     shift_hz: shift,
                     tone: sends,
@@ -532,6 +533,7 @@ fn freqman(text: &str, group: &str) -> Read {
             freq,
             mode: mode.unwrap_or(ChanMode::Audio(Demod::Nfm)),
             bandwidth_hz,
+            audio_low_hz: None,
             tx: (shift != 0.0).then(|| TxSpec { shift_hz: shift, ..TxSpec::default() }),
             tone,
         });
@@ -560,6 +562,7 @@ fn sdrsharp(text: &str, group: &str) -> Read {
             freq,
             mode,
             bandwidth_hz: tag(body, "FilterBandwidth").and_then(|b| width(&b)).or(default_bw),
+            audio_low_hz: None,
             tx: (shift != 0.0).then(|| TxSpec { shift_hz: shift, ..TxSpec::default() }),
             tone: None,
         });

@@ -32,6 +32,7 @@ pub struct Channel {
     pub(super) mode: ChanMode,
     /// The channel's width, or None for whatever the mode asks for.
     pub(super) bandwidth_hz: Option<f64>,
+    pub(super) audio_low_hz: Option<f64>,
     pub(super) label: String,
     /// Whether this channel is being demodulated into the mix.
     pub(super) on: bool,
@@ -62,9 +63,48 @@ pub struct Channel {
 impl Channel {
     /// The width this channel is really built at, which is what the marker on
     /// the spectrum has to be drawn from as well.
-    pub(super) fn bandwidth(&self) -> f64 {
-        self.bandwidth_hz.filter(|b| *b >= 100.0).unwrap_or_else(|| self.mode.bandwidth())
+    pub(super) fn passband(&self) -> common::Passband {
+        self.mode.passband(self.bandwidth_hz, self.audio_low_hz)
     }
+
+    pub(super) fn drag_edge(&mut self, edge: Edge, offset_hz: f64) {
+        use common::demod::NARROWEST_HZ;
+        let band = self.passband();
+        match self.mode.demod().filter(|d| d.is_ssb()) {
+            Some(d) => {
+                let moved = match edge {
+                    Edge::Low => common::Passband {
+                        low_hz: offset_hz.min(band.high_hz - NARROWEST_HZ),
+                        ..band
+                    },
+                    Edge::High => common::Passband {
+                        high_hz: offset_hz.max(band.low_hz + NARROWEST_HZ),
+                        ..band
+                    },
+                };
+                let (low, high) = d.audio_of(moved);
+                self.audio_low_hz = Some(low);
+                self.bandwidth_hz = Some(high - low);
+            }
+            None => {
+                let width =
+                    (2.0 * offset_hz.abs()).clamp(NARROWEST_HZ, super::strip::WIDEST_KHZ * 1e3);
+                self.bandwidth_hz = Some(width);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Edge {
+    Low,
+    High,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Grab {
+    Channel(usize),
+    Edge(usize, Edge),
 }
 
 /// The spectrum and the waterfall: what is being drawn, and how.
@@ -112,7 +152,7 @@ pub(super) struct ScopeState {
     pub plot_frac: f32,
     pub splitting: bool,
     /// Channel whose marker is being dragged.
-    pub drag_ch: Option<usize>,
+    pub drag: Option<Grab>,
     pub scrub: Wheel,
     /// Spectrum stages the operator added, from the last frame. Each covers
     /// whatever was wired into it rather than the span.
@@ -151,7 +191,7 @@ impl Default for ScopeState {
             fft_size: 2048,
             plot_frac: super::DEFAULT_PLOT_FRAC,
             splitting: false,
-            drag_ch: None,
+            drag: None,
             scrub: Wheel::default(),
             extra: Vec::new(),
             adc: nodes::AdcHealth::default(),

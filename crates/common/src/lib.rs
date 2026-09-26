@@ -24,7 +24,7 @@ pub use decode::{
     Airtime, CONTROL_CHANNELS, ChannelPlan, ChannelUse, Cpr, Decoded, Identity, Link, Party,
     PartyKind, Position, ReportDetail, Secrecy, SondeSensors, media,
 };
-pub use demod::Demod;
+pub use demod::{Demod, Passband};
 pub use device::{
     Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, Number, RxStream, Toggle,
     TunerRange, Tuning, TxInfo, TxStream,

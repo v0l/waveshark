@@ -78,6 +78,24 @@ impl ChanMode {
         }
     }
 
+    pub fn passband(&self, width_hz: Option<f64>, low_hz: Option<f64>) -> common::Passband {
+        match self {
+            ChanMode::Audio(d) => d.passband(width_hz, low_hz),
+            ChanMode::Decode(_) | ChanMode::Auto => common::Passband::around(
+                width_hz
+                    .filter(|w| *w >= common::demod::NARROWEST_HZ)
+                    .unwrap_or_else(|| self.bandwidth()),
+            ),
+        }
+    }
+
+    pub fn if_reach(&self, p: common::Passband) -> f64 {
+        match self {
+            ChanMode::Audio(d) => d.if_reach(p),
+            ChanMode::Decode(_) | ChanMode::Auto => p.reach(),
+        }
+    }
+
     /// The least span this channel can be built in, at a given width.
     pub fn min_rate_for(&self, bandwidth: f64) -> f64 {
         match self {
@@ -673,6 +691,7 @@ pub struct ChannelSpec {
     /// operator picked off the spectrum rather than one a scanner block was
     /// written about.
     pub bandwidth_hz: Option<f64>,
+    pub audio_low_hz: Option<f64>,
     /// None leaves the mode's own default.
     pub squelch_db: Option<f32>,
     pub agc: bool,
@@ -727,16 +746,22 @@ impl ChannelSpec {
         self.tx.unwrap_or_default()
     }
 
+    pub fn passband(&self) -> common::Passband {
+        self.mode.passband(self.bandwidth_hz, self.audio_low_hz)
+    }
+
     /// The width this channel is really built at.
     pub fn bandwidth(&self) -> f64 {
-        // A width below a hundred hertz is a mis-set control rather than a
-        // channel, and it would design a filter with thousands of taps.
-        self.bandwidth_hz.filter(|b| *b >= 100.0).unwrap_or_else(|| self.mode.bandwidth())
+        self.passband().width()
+    }
+
+    pub fn if_reach(&self) -> f64 {
+        self.mode.if_reach(self.passband())
     }
 
     /// The least span this channel can be built in, at its own width.
     pub fn min_rate(&self) -> f64 {
-        self.mode.min_rate_for(self.bandwidth())
+        self.mode.min_rate_for(2.0 * self.if_reach())
     }
 
     /// Whether a span at this rate covers the channel and can hold it.
@@ -2176,19 +2201,27 @@ pub struct Audio {
 #[cfg_attr(not(test), allow(dead_code))]
 impl Audio {
     pub fn new(offset: f64, rate: f64, mode: Demod, _target: f64) -> Self {
-        let spec = ChannelSpec {
+        Self::of(Self::spec(offset, mode), rate)
+    }
+
+    fn spec(offset: f64, mode: Demod) -> ChannelSpec {
+        ChannelSpec {
             id: 1,
             label: String::new(),
             offset_hz: offset,
             mode: ChanMode::Audio(mode),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             voice: false,
             reads: None,
             agc: true,
             tx: None,
             tone: None,
-        };
+        }
+    }
+
+    fn of(spec: ChannelSpec, rate: f64) -> Self {
         let plan = Plan {
             center: Hz(0),
             rate,
@@ -4184,6 +4217,7 @@ pub(crate) mod tests {
             offset_hz: offset,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             voice: false,
             reads: None,
@@ -4222,6 +4256,7 @@ pub(crate) mod tests {
             offset_hz: offset,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice: false,
@@ -5022,6 +5057,7 @@ pub(crate) mod tests {
             offset_hz: -400_000.0,
             mode: ChanMode::Audio(Demod::Wfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             voice: false,
             reads: None,
@@ -5191,6 +5227,37 @@ pub(crate) mod tests {
         }
         let off = audio_rms(cw2.process(&ssb_signal(rate, offset, 2_000.0, 3 * N, N), 1.0));
         assert!(off < on / 10.0, "a station 2 kHz away was audible at {off:.4} against {on:.4}");
+    }
+
+    fn heard(spec: &ChannelSpec, rate: f64, tone_hz: f64) -> f32 {
+        const N: usize = 262_144;
+        let mut a = Audio::of(spec.clone(), rate);
+        for k in 0..3 {
+            a.process(&ssb_signal(rate, spec.offset_hz, tone_hz, k * N, N), 1.0);
+        }
+        audio_rms(a.process(&ssb_signal(rate, spec.offset_hz, tone_hz, 3 * N, N), 1.0))
+    }
+
+    #[test]
+    fn a_narrowed_cw_filter_still_hears_the_carrier_on_the_dial() {
+        let rate = 2_304_000.0;
+        let mut spec = Audio::spec(120_000.0, Demod::Cw);
+        spec.bandwidth_hz = Some(200.0);
+        let on = heard(&spec, rate, 0.0);
+        assert!(on > 0.02, "a carrier on the dial through a 200 Hz filter gave {on:.4}");
+        let off = heard(&spec, rate, 400.0);
+        assert!(off < on / 10.0, "400 Hz off a 200 Hz filter gave {off:.4} against {on:.4}");
+    }
+
+    #[test]
+    fn a_sideband_high_edge_set_by_hand_cuts_what_is_above_it() {
+        let rate = 2_304_000.0;
+        let mut spec = Audio::spec(120_000.0, Demod::Usb);
+        spec.bandwidth_hz = Some(900.0);
+        let inside = heard(&spec, rate, 800.0);
+        let above = heard(&spec, rate, 2_000.0);
+        assert!(inside > 0.02, "800 Hz inside a 300-1200 Hz filter gave {inside:.4}");
+        assert!(above < inside / 10.0, "2 kHz gave {above:.4} against {inside:.4}");
     }
 
     fn fixture() -> Option<common::IqBuf> {
@@ -6793,6 +6860,7 @@ pub(crate) mod tests {
             offset_hz: 433_475_000.0 - buf.center.as_f64(),
             mode: ChanMode::Decode("m17".into()),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             voice: false,
             reads: None,
@@ -6852,6 +6920,7 @@ pub(crate) mod tests {
             offset_hz: 433_475_000.0 - buf.center.as_f64(),
             mode: ChanMode::Auto,
             bandwidth_hz: Some(100_000.0),
+            audio_low_hz: None,
             squelch_db: None,
             voice: false,
             reads: None,
@@ -6934,6 +7003,7 @@ pub(crate) mod tests {
             offset_hz: 0.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: Some(-200.0),
             agc: false,
             voice: false,
@@ -7340,6 +7410,7 @@ pub(crate) mod tests {
             offset_hz: CHANNEL_HZ - buf.center.as_f64(),
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             // Open: the transmission is what the file holds, and a squelch
             // decision is not what this test is about.
             squelch_db: Some(-200.0),
@@ -7412,6 +7483,7 @@ pub(crate) mod tests {
             offset_hz: 446_049_100.0 - buf.center.as_f64(),
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: None,
             agc: true,
             voice,
@@ -7535,6 +7607,7 @@ pub(crate) mod tests {
             offset_hz: CHANNEL_HZ - buf.center.as_f64(),
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: Some(-200.0),
             agc: true,
             voice: true,
@@ -7763,6 +7836,7 @@ mod zoom_tests {
             offset_hz: 0.0,
             mode: ChanMode::Audio(Demod::Nfm),
             bandwidth_hz: None,
+            audio_low_hz: None,
             squelch_db: Some(-200.0),
             agc: false,
             voice: false,

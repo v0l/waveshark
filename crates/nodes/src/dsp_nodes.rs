@@ -616,8 +616,10 @@ impl Simple for SsbDemodNode {
 
     fn params(&self) -> Vec<Param> {
         vec![
-            Param::float(LOW_HZ, self.low_hz, 50.0..=3_000.0).unit("Hz").label("Filter low edge"),
-            Param::float(HIGH_HZ, self.high_hz, 100.0..=6_000.0)
+            Param::float(LOW_HZ, self.low_hz, common::demod::AUDIO_EDGE_RANGE_HZ)
+                .unit("Hz")
+                .label("Filter low edge"),
+            Param::float(HIGH_HZ, self.high_hz, common::demod::AUDIO_EDGE_RANGE_HZ)
                 .unit("Hz")
                 .label("Filter high edge"),
         ]
