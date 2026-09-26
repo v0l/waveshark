@@ -142,9 +142,9 @@ mod tests {
         assert_eq!(state(addr), None);
         until("withdrawn", || reader.list(WAIT).unwrap().is_empty().then_some(()));
 
-        std::thread::sleep(Duration::from_millis(1_100));
+        std::thread::sleep(Duration::from_millis(2_100));
         list(addr, Some(listing));
-        until("listed again, a second after the deletion that covers its own second", || {
+        until("listed again, past a deletion dated a second ahead by the relisting", || {
             matches!(state(addr), Some(ListingState::Listed { .. })).then_some(())
         });
         let started = Instant::now();
