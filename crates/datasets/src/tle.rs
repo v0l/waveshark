@@ -217,6 +217,19 @@ pub static GNSS: Group = Group {
     terms: CELESTRAK_TERMS,
 };
 
+pub static GEO: Group = Group {
+    name: "Geostationary",
+    feed: Feed::CelesTrak("geo"),
+    file: "celestrak-geo.csv",
+    about: "Active geostationary satellites: the TV, data and weather birds \
+            over the equator, for pointing a dish at one.",
+    publisher: CELESTRAK,
+    page: CELESTRAK_PAGE,
+    credit_name: "CelesTrak",
+    credit_licence: "Dr. T.S. Kelso",
+    terms: CELESTRAK_TERMS,
+};
+
 /// The satellites the TinyGS network listens to.
 ///
 /// A list rather than a category: these are the ones somebody is decoding
@@ -274,7 +287,7 @@ pub static SPACE_TRACK: Group = Group {
 
 /// Every group that is offered, in the order a view lists them.
 pub static GROUPS: &[&Group] =
-    &[&AMATEUR, &WEATHER, &CUBESATS, &STATIONS, &GNSS, &TINYGS, &SPACE_TRACK];
+    &[&AMATEUR, &WEATHER, &CUBESATS, &STATIONS, &GNSS, &GEO, &TINYGS, &SPACE_TRACK];
 
 pub fn group(name: &str) -> Option<&'static Group> {
     GROUPS.iter().copied().find(|g| g.name.eq_ignore_ascii_case(name))

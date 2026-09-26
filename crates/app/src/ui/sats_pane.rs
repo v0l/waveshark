@@ -71,7 +71,7 @@ pub(super) enum Action {
 }
 
 impl Sats<'_> {
-    pub(super) fn show(self, ui: &mut egui::Ui) -> Vec<Action> {
+    pub(super) fn show(mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let mut acts = Vec::new();
         let now = crate::sats::now_s();
         ui.add_space(8.0);
@@ -126,14 +126,22 @@ impl Sats<'_> {
         // emptying the pane.
         let tx = crate::data::transmitters();
         let passes = crate::sats::passes(self.st.group, station, now, self.st.min_el_deg);
+        let fixed = sky
+            .as_ref()
+            .map(|s| crate::sats::fixed_now(self.st.group, s, station, now, self.st.min_el_deg))
+            .unwrap_or_default();
         // A search takes a moment and a table that is empty while it runs
         // reads as "nothing is coming", which is the opposite of the truth.
         let heading = match (&passes, sky.as_ref()) {
             (_, None) => "downloading elements".to_string(),
             (None, Some(s)) => format!("searching {} objects", s.sats().len()),
             (Some(p), Some(s)) => format!(
-                "{} passes over the next day, from {} objects{}",
+                "{} passes over the next day{}, from {} objects{}",
                 p.len(),
+                match fixed.len() {
+                    0 => String::new(),
+                    n => format!(" and {n} fixed in the sky"),
+                },
                 s.sats().len(),
                 if crate::sats::computing() { ", refreshing" } else { "" }
             ),
@@ -180,6 +188,34 @@ impl Sats<'_> {
         let mut selected = self.st.selected;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
+                for f in fixed.iter() {
+                    let picked = selected == Some(f.norad);
+                    let (live_tx, down) = choose(tx.as_deref(), &self.st.downlink, f.norad);
+                    let (belt, others) = match picked {
+                        true => (
+                            orbit::clarke_belt(station, BELT_POINTS),
+                            fixed.iter().filter(|o| o.norad != f.norad).map(|o| o.look).collect(),
+                        ),
+                        false => (Vec::new(), Vec::new()),
+                    };
+                    let tracking = self.st.tracking.map(|t| t.norad) == Some(f.norad);
+                    let out = fixed_card(
+                        ui,
+                        f,
+                        station,
+                        down.as_ref(),
+                        &live_tx,
+                        &belt,
+                        &others,
+                        picked,
+                        tracking,
+                    );
+                    if out.response.clicked() {
+                        selected = (!picked).then_some(f.norad);
+                    }
+                    self.pressed(&mut acts, tx.as_deref(), f.norad, &f.name, tracking, out.inner);
+                    ui.add_space(4.0);
+                }
                 for u in passes.iter().take(200) {
                     let up = u.pass.rise_s <= now && now <= u.pass.set_s;
                     let picked = selected == Some(u.norad);
@@ -193,23 +229,7 @@ impl Sats<'_> {
                                 .and_then(|s| s.look(station, now))
                         })
                         .flatten();
-                    // What this satellite transmits on, and which of them
-                    // the operator picked. A choice made once stands until
-                    // it is changed: the ISS has forty-one live transmitters
-                    // and a card that reset to the lowest frequency every
-                    // frame would be unusable.
-                    let live_tx: Vec<datasets::satnogs::Transmitter> =
-                        tx.as_ref().map(|t| t.live(u.norad).cloned().collect()).unwrap_or_default();
-                    let chosen = self.st.downlink.get(&u.norad).cloned();
-                    let down = tx
-                        .as_ref()
-                        .and_then(|t| {
-                            chosen
-                                .as_deref()
-                                .and_then(|uuid| t.by_uuid(u.norad, uuid))
-                                .or_else(|| t.best(u.norad))
-                        })
-                        .cloned();
+                    let (live_tx, down) = choose(tx.as_deref(), &self.st.downlink, u.norad);
                     // The sky plot is only drawn for the picked card: it is
                     // the shape of one pass, and thirty of them stacked is a
                     // page of circles nobody reads.
@@ -236,41 +256,10 @@ impl Sats<'_> {
                     if out.response.clicked() {
                         selected = (!picked).then_some(u.norad);
                     }
-                    // Listening is asked for on the row of the transmitter
-                    // it is about, so the satellite it belongs to is picked
-                    // in the same press: the operator pointed at a
-                    // downlink, not at a satellite.
-                    match out.inner.listen {
-                        Some(Listen::Stop) => acts.push(Action::Untrack),
-                        Some(Listen::Start(uuid)) => {
-                            let link = tx
-                                .as_ref()
-                                .and_then(|t| t.by_uuid(u.norad, &uuid))
-                                .and_then(|d| downlink(u.norad, &u.name, d));
-                            if let Some(link) = link {
-                                self.st.downlink.insert(u.norad, uuid);
-                                acts.push(Action::Track(link));
-                            }
-                        }
-                        None => {}
-                    }
-                    // Picking another transmitter while one is being
-                    // followed moves the channel to it rather than waiting
-                    // to be asked twice: the operator asked to listen to
-                    // this satellite, and has now said on what.
-                    if let Some(uuid) = out.inner.pick {
-                        let moved = tx
-                            .as_ref()
-                            .and_then(|t| t.by_uuid(u.norad, &uuid))
-                            .and_then(|d| downlink(u.norad, &u.name, d));
-                        self.st.downlink.insert(u.norad, uuid);
-                        if let (true, Some(m)) = (tracking, moved) {
-                            acts.push(Action::Track(m));
-                        }
-                    }
+                    self.pressed(&mut acts, tx.as_deref(), u.norad, &u.name, tracking, out.inner);
                     ui.add_space(4.0);
                 }
-                if passes.is_empty() {
+                if passes.is_empty() && fixed.is_empty() {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
                         hint(
@@ -287,6 +276,195 @@ impl Sats<'_> {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         acts
     }
+
+    fn pressed(
+        &mut self,
+        acts: &mut Vec<Action>,
+        tx: Option<&datasets::satnogs::Transmitters>,
+        norad: u64,
+        name: &str,
+        tracking: bool,
+        out: Pressed,
+    ) {
+        // Listening is asked for on the row of the transmitter
+        // it is about, so the satellite it belongs to is picked
+        // in the same press: the operator pointed at a
+        // downlink, not at a satellite.
+        match out.listen {
+            Some(Listen::Stop) => acts.push(Action::Untrack),
+            Some(Listen::Start(uuid)) => {
+                let link =
+                    tx.and_then(|t| t.by_uuid(norad, &uuid)).and_then(|d| downlink(norad, name, d));
+                if let Some(link) = link {
+                    self.st.downlink.insert(norad, uuid);
+                    acts.push(Action::Track(link));
+                }
+            }
+            None => {}
+        }
+        // Picking another transmitter while one is being
+        // followed moves the channel to it rather than waiting
+        // to be asked twice: the operator asked to listen to
+        // this satellite, and has now said on what.
+        if let Some(uuid) = out.pick {
+            let moved =
+                tx.and_then(|t| t.by_uuid(norad, &uuid)).and_then(|d| downlink(norad, name, d));
+            self.st.downlink.insert(norad, uuid);
+            if let (true, Some(m)) = (tracking, moved) {
+                acts.push(Action::Track(m));
+            }
+        }
+    }
+}
+
+// What this satellite transmits on, and which of them
+// the operator picked. A choice made once stands until
+// it is changed: the ISS has forty-one live transmitters
+// and a card that reset to the lowest frequency every
+// frame would be unusable.
+fn choose(
+    tx: Option<&datasets::satnogs::Transmitters>,
+    chosen: &std::collections::HashMap<u64, String>,
+    norad: u64,
+) -> (Vec<datasets::satnogs::Transmitter>, Option<datasets::satnogs::Transmitter>) {
+    let live_tx = tx.map(|t| t.live(norad).cloned().collect()).unwrap_or_default();
+    let down = tx
+        .and_then(|t| {
+            chosen.get(&norad).and_then(|uuid| t.by_uuid(norad, uuid)).or_else(|| t.best(norad))
+        })
+        .cloned();
+    (live_tx, down)
+}
+
+fn slot(lon_deg: f64) -> String {
+    let lon = (lon_deg + 540.0) % 360.0 - 180.0;
+    match lon < 0.0 {
+        true => format!("{:.1}\u{b0}W", -lon),
+        false => format!("{lon:.1}\u{b0}E"),
+    }
+}
+
+fn skew(deg: f64) -> String {
+    match deg < 0.0 {
+        true => format!("{:.1}\u{b0} anticlockwise", -deg),
+        false => format!("{deg:.1}\u{b0} clockwise"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fixed_card(
+    ui: &mut egui::Ui,
+    f: &crate::sats::Fixed,
+    station: orbit::Station,
+    down: Option<&datasets::satnogs::Transmitter>,
+    live_tx: &[datasets::satnogs::Transmitter],
+    belt: &[orbit::Look],
+    others: &[orbit::Look],
+    picked: bool,
+    tracking: bool,
+) -> egui::InnerResponse<Pressed> {
+    let rail = picked.then_some(theme::READOUT);
+    let mut pressed = Pressed { listen: None, pick: None, table: Rect::NOTHING };
+    let tracked = tracking.then(|| down.map(|d| d.uuid.as_str())).flatten();
+    let l = &f.look;
+    let inner = panel::card(
+        ui,
+        rail,
+        |ui| {
+            Line::new()
+                .legend(&format!("#{}", f.norad))
+                .value(f.name.clone())
+                .tint(theme::VALUE)
+                .size(12.0)
+                .show(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                Line::new().legend("slot").value(slot(l.lon_deg)).size(12.0).show(ui);
+                if tracking {
+                    Line::new().legend("listening").tint(theme::READOUT).show(ui);
+                }
+            });
+        },
+        |ui| {
+            Line::new()
+                .legend("az")
+                .value(format!("{:.1}\u{b0}", l.az_deg))
+                .size(12.0)
+                .gap(14.0)
+                .legend("el")
+                .value(format!("{:.1}\u{b0}", l.el_deg))
+                .size(12.0)
+                .gap(14.0)
+                .legend("skew")
+                .value(skew(l.skew_deg(station)))
+                .size(12.0)
+                .show(ui);
+            let mut link = Line::new()
+                .legend("range")
+                .value(format!("{:.0} km", l.range_km))
+                .size(12.0)
+                .gap(14.0)
+                .legend("delay")
+                .value(format!("{:.1} ms", l.delay_ms()))
+                .size(12.0);
+            if let Some(hz) = down.and_then(|d| d.downlink_hz) {
+                link = link
+                    .gap(14.0)
+                    .legend("free space")
+                    .value(format!("{:.1} dB", l.path_loss_db(hz as f64)))
+                    .size(12.0);
+            }
+            link.show(ui);
+            let inclined = f.inclination_deg >= WANDER_SHOWN_DEG;
+            let drifting = f.drift_deg_per_day.abs() >= DRIFT_SHOWN_DEG;
+            if inclined || drifting {
+                let mut wander = Line::new();
+                if inclined {
+                    wander = wander
+                        .legend("inclined")
+                        .value(format!("{:.1}\u{b0}", f.inclination_deg))
+                        .size(12.0)
+                        .gap(14.0);
+                }
+                if drifting {
+                    wander = wander
+                        .legend("drifts")
+                        .value(format!(
+                            "{:.1}\u{b0} {} a day",
+                            f.drift_deg_per_day.abs(),
+                            if f.drift_deg_per_day > 0.0 { "east" } else { "west" }
+                        ))
+                        .size(12.0);
+                }
+                wander.show(ui);
+            }
+            if let Some(d) = down {
+                Line::new()
+                    .legend("downlink")
+                    .value(d.label())
+                    .size(12.0)
+                    .tint(if d.alive { theme::VALUE } else { theme::LEGEND })
+                    .show(ui);
+                if let Some(up) = d.uplink_label() {
+                    Line::new().legend("uplink").value(up).size(12.0).show(ui);
+                }
+            }
+            if !picked {
+                return;
+            }
+            ui.columns(2, |col| {
+                if !live_tx.is_empty() {
+                    let out = transmitter_table(&mut col[0], live_tx, down, tracked, Some(l));
+                    pressed.pick = out.pick;
+                    pressed.listen = out.listen;
+                    pressed.table = out.rect;
+                }
+                sky_plot(&mut col[1], &[], belt, others, Some(l));
+            });
+        },
+    );
+    let id = ui.id().with(f.norad).with("fixed");
+    let table = pressed.table;
+    egui::InnerResponse::new(pressed, card_hit(ui, id, inner.response.rect, table))
 }
 
 /// One pass, as a card.
@@ -428,7 +606,7 @@ fn pass_card(
                         pressed.table = out.rect;
                     }
                     if !arc.is_empty() {
-                        sky_plot(&mut col[1], arc, live);
+                        sky_plot(&mut col[1], arc, &[], &[], live);
                     }
                 });
             }
@@ -478,13 +656,17 @@ fn pass_card(
     // interaction added over the icons takes every press, so the card claims
     // the pointer only where no icon is under it.
     let id = ui.id().with(u.norad).with(u.pass.rise_s);
+    let table = pressed.table;
+    egui::InnerResponse::new(pressed, card_hit(ui, id, inner.response.rect, table))
+}
+
+fn card_hit(ui: &mut egui::Ui, id: egui::Id, card: Rect, table: Rect) -> egui::Response {
     let over_button =
-        ui.ctx().pointer_interact_pos().is_some_and(|p| pressed.table.expand(2.0).contains(p));
-    let hit = match over_button {
+        ui.ctx().pointer_interact_pos().is_some_and(|p| table.expand(2.0).contains(p));
+    match over_button {
         true => ui.interact(Rect::NOTHING, id, Sense::hover()),
-        false => ui.interact(inner.response.rect, id, Sense::click()),
-    };
-    egui::InnerResponse::new(pressed, hit)
+        false => ui.interact(card, id, Sense::click()),
+    }
 }
 
 /// What the transmitter table was asked to do this frame, with its rect so
@@ -725,6 +907,12 @@ const TX_LIST_H: f32 = 96.0;
 /// drawn at.
 const ARC_POINTS: usize = 50;
 
+const BELT_POINTS: usize = 181;
+
+const WANDER_SHOWN_DEG: f64 = 1.0;
+
+const DRIFT_SHOWN_DEG: f64 = 0.1;
+
 /// Size of the sky plot, in points: the least it is drawn at, and the most.
 const SKY_D: f32 = 150.0;
 const SKY_MAX_D: f32 = 240.0;
@@ -736,7 +924,13 @@ const SKY_MAX_D: f32 = 240.0;
 /// which is the convention every satellite program uses and the one a
 /// rotator's own display shows. A row of azimuths cannot say whether a pass
 /// goes behind the house; this can.
-fn sky_plot(ui: &mut egui::Ui, arc: &[orbit::Look], live: Option<&orbit::Look>) {
+fn sky_plot(
+    ui: &mut egui::Ui,
+    arc: &[orbit::Look],
+    belt: &[orbit::Look],
+    others: &[orbit::Look],
+    live: Option<&orbit::Look>,
+) {
     // Square, and as big as its half of the card allows up to a size where
     // more pixels say nothing more about a pass, sitting in the middle of
     // the half rather than against the table.
@@ -768,6 +962,12 @@ fn sky_plot(ui: &mut egui::Ui, arc: &[orbit::Look], live: Option<&orbit::Look>) 
             font.clone(),
             theme::LEGEND,
         );
+    }
+    for w in belt.windows(2) {
+        p.line_segment([at(&w[0]), at(&w[1])], Stroke::new(1.0, theme::LEGEND));
+    }
+    for o in others {
+        p.circle_filled(at(o), 1.5, theme::LEGEND);
     }
     for w in arc.windows(2) {
         p.line_segment([at(&w[0]), at(&w[1])], Stroke::new(1.5, theme::READOUT));

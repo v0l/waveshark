@@ -43,6 +43,12 @@ const A_KM: f64 = 6378.137;
 const F: f64 = 1.0 / 298.257_223_563;
 const E2: f64 = F * (2.0 - F);
 
+const SIDEREAL_REVS_PER_DAY: f64 = 1.002_737_909;
+const GEO_RADIUS_KM: f64 = 42_164.0;
+const STATIONARY_DRIFT_DEG_PER_DAY: f64 = 1.0;
+const STATIONARY_INCLINATION_DEG: f64 = 15.0;
+const STATIONARY_ECCENTRICITY: f64 = 0.01;
+
 /// Speed of light, for the Doppler shift.
 const C_KMS: f64 = 299_792.458;
 
@@ -68,6 +74,8 @@ pub struct Sat {
     pub epoch_s: i64,
     /// Revolutions a day, which is what an orbit's length comes from.
     pub mean_motion: f64,
+    pub inclination_deg: f64,
+    pub eccentricity: f64,
     constants: sgp4::Constants,
 }
 
@@ -125,6 +133,23 @@ impl Look {
     pub fn footprint_km(&self) -> f64 {
         footprint_km(self.alt_km)
     }
+
+    pub fn skew_deg(&self, from: Station) -> f64 {
+        let sat = geodetic_to_ecef(self.lat_deg, self.lon_deg, self.alt_km);
+        let obs = geodetic_to_ecef(from.lat_deg, from.lon_deg, from.alt_km);
+        let d = sub(sat, obs);
+        let r = dot(d, d).sqrt();
+        let los = [d[0] / r, d[1] / r, d[2] / r];
+        let (lat, lon) = (from.lat_deg * RAD, from.lon_deg * RAD);
+        let plumb = across([lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()], los);
+        let axis = across([0.0, 0.0, 1.0], los);
+        let deg = dot(los, vector_product(plumb, axis)).atan2(dot(plumb, axis)) * DEG;
+        match deg {
+            d if d > 90.0 => d - 180.0,
+            d if d <= -90.0 => d + 180.0,
+            d => d,
+        }
+    }
 }
 
 /// The radius on the ground, in kilometres, of the circle that can see a
@@ -132,6 +157,23 @@ impl Look {
 /// observer, because a footprint is a fact about the satellite.
 pub fn footprint_km(alt_km: f64) -> f64 {
     A_KM * (A_KM / (A_KM + alt_km)).clamp(-1.0, 1.0).acos()
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn vector_product(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn across(v: [f64; 3], los: [f64; 3]) -> [f64; 3] {
+    let along = dot(v, los);
+    [v[0] - along * los[0], v[1] - along * los[1], v[2] - along * los[2]]
 }
 
 /// Where an observer is.
@@ -241,8 +283,20 @@ impl Sat {
             norad: e.norad_id,
             epoch_s: e.datetime.and_utc().timestamp(),
             mean_motion: e.mean_motion,
+            inclination_deg: e.inclination,
+            eccentricity: e.eccentricity,
             constants,
         })
+    }
+
+    pub fn drift_deg_per_day(&self) -> f64 {
+        (self.mean_motion - SIDEREAL_REVS_PER_DAY) * 360.0
+    }
+
+    pub fn stationary(&self) -> bool {
+        self.drift_deg_per_day().abs() < STATIONARY_DRIFT_DEG_PER_DAY
+            && self.inclination_deg < STATIONARY_INCLINATION_DEG
+            && self.eccentricity < STATIONARY_ECCENTRICITY
     }
 
     /// How far the elements are being stretched, in days. Past a week or so
@@ -258,25 +312,7 @@ impl Sat {
         let gmst = gmst_rad(at_s);
         let pos = teme_to_ecef(p.position, gmst);
         let vel = teme_vel_to_ecef(p.position, p.velocity, gmst);
-        let (lat_deg, lon_deg, alt_km) = ecef_to_geodetic(pos);
-        let obs = geodetic_to_ecef(from.lat_deg, from.lon_deg, from.alt_km);
-        let d = [pos[0] - obs[0], pos[1] - obs[1], pos[2] - obs[2]];
-        let (e, n, u) = enu(from.lat_deg, from.lon_deg, d);
-        let range_km = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-        if range_km <= 0.0 {
-            return None;
-        }
-        let az = e.atan2(n) * DEG;
-        Some(Look {
-            az_deg: (az + 360.0) % 360.0,
-            el_deg: (u / range_km).asin() * DEG,
-            range_km,
-            // The component of the relative velocity along the line of sight.
-            range_rate_kms: (d[0] * vel[0] + d[1] * vel[1] + d[2] * vel[2]) / range_km,
-            lat_deg,
-            lon_deg,
-            alt_km,
-        })
+        look_at(from, pos, vel)
     }
 
     /// Where on the ground it is overhead, without needing to know where
@@ -396,6 +432,41 @@ impl Sat {
             set_az_deg: self.look(from, set as i64)?.az_deg,
         })
     }
+}
+
+fn look_at(from: Station, pos: [f64; 3], vel: [f64; 3]) -> Option<Look> {
+    let (lat_deg, lon_deg, alt_km) = ecef_to_geodetic(pos);
+    let obs = geodetic_to_ecef(from.lat_deg, from.lon_deg, from.alt_km);
+    let d = [pos[0] - obs[0], pos[1] - obs[1], pos[2] - obs[2]];
+    let (e, n, u) = enu(from.lat_deg, from.lon_deg, d);
+    let range_km = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if range_km <= 0.0 {
+        return None;
+    }
+    let az = e.atan2(n) * DEG;
+    Some(Look {
+        az_deg: (az + 360.0) % 360.0,
+        el_deg: (u / range_km).asin() * DEG,
+        range_km,
+        // The component of the relative velocity along the line of sight.
+        range_rate_kms: (d[0] * vel[0] + d[1] * vel[1] + d[2] * vel[2]) / range_km,
+        lat_deg,
+        lon_deg,
+        alt_km,
+    })
+}
+
+pub fn slot_look(from: Station, slot_deg: f64) -> Option<Look> {
+    let lon = slot_deg * RAD;
+    look_at(from, [GEO_RADIUS_KM * lon.cos(), GEO_RADIUS_KM * lon.sin(), 0.0], [0.0; 3])
+}
+
+pub fn clarke_belt(from: Station, count: usize) -> Vec<Look> {
+    (0..count)
+        .map(|i| from.lon_deg - 90.0 + 180.0 * i as f64 / (count.max(2) - 1) as f64)
+        .filter_map(|slot| slot_look(from, slot))
+        .filter(|l| l.el_deg >= 0.0)
+        .collect()
 }
 
 /// Squeeze a horizon crossing out of a step known to hold one.
@@ -765,5 +836,102 @@ ISS (ZARYA),1998-067A,2024-01-15T12:40:32.999800,15.49514029,.0006703,51.6416,24
         for p in s.passes(far, epoch(), 86_400, 0.0) {
             assert!(p.max_el_deg < 45.0, "{} deg from 70 south", p.max_el_deg);
         }
+    }
+
+    const ASTRA_2E: (&str, &str) = (
+        "1 39285U 13056A   26269.06850502  .00000153  00000+0  00000+0 0  9990",
+        "2 39285   0.0856 308.9232 0002152 236.4121 232.6975  1.00271910 47426",
+    );
+
+    const BEIDOU_IGSO_1: (&str, &str) = (
+        "1 36828U 10036A   26256.66970756 -.00000130  00000+0  00000+0 0  9997",
+        "2 36828  54.3037 162.1610 0058541 217.4777 320.7749  1.00289463 58981",
+    );
+
+    fn astra() -> Sat {
+        Sat::from_lines("ASTRA 2E", ASTRA_2E.0, ASTRA_2E.1).expect("elements")
+    }
+
+    fn simple_skew_deg(from: Station, slot_deg: f64) -> f64 {
+        let dl = (slot_deg - from.lon_deg) * RAD;
+        -(dl.sin() / (from.lat_deg * RAD).tan()).atan() * DEG
+    }
+
+    #[test]
+    fn london_to_astra_2e_is_az_145_el_25_skew_21_anticlockwise() {
+        let s = astra();
+        let london = Station::new(51.5074, -0.1278);
+        let l = s.look(london, s.epoch_s).unwrap();
+        assert!((l.lon_deg - 28.45).abs() < 0.05, "slot {}", l.lon_deg);
+        assert!((l.az_deg - 145.12).abs() < 0.1, "az {}", l.az_deg);
+        assert!((l.el_deg - 25.35).abs() < 0.1, "el {}", l.el_deg);
+        let skew = l.skew_deg(london);
+        assert!((skew + 21.02).abs() < 0.1, "skew {skew}");
+        let simple = simple_skew_deg(london, l.lon_deg);
+        assert!((skew - simple).abs() < 0.3, "{skew} against the spherical {simple}");
+    }
+
+    #[test]
+    fn skew_is_zero_on_the_slot_and_mirrors_east_west_and_north_south() {
+        let s = astra();
+        let slot = s.look(Station::new(0.0, 0.0), s.epoch_s).unwrap().lon_deg;
+        let skew = |lat: f64, lon: f64| {
+            let st = Station::new(lat, lon);
+            s.look(st, s.epoch_s).unwrap().skew_deg(st)
+        };
+        assert!(skew(50.0, slot).abs() < 0.05, "{} on the meridian", skew(50.0, slot));
+        let (west, east) = (skew(50.0, slot - 20.0), skew(50.0, slot + 20.0));
+        assert!(west < -10.0 && east > 10.0, "west {west} east {east}");
+        assert!((west + east).abs() < 0.1, "west {west} east {east}");
+        let south_west = skew(-50.0, slot - 20.0);
+        assert!((south_west + west).abs() < 0.1, "north {west} south {south_west}");
+        for (lat, dl) in [(51.5, 28.6), (35.0, -40.0), (-33.9, 10.0), (65.0, 15.0)] {
+            let st = Station::new(lat, slot - dl);
+            let simple = simple_skew_deg(st, slot);
+            let exact = skew(lat, slot - dl);
+            assert!((exact - simple).abs() < 0.3, "{lat} {dl}: {exact} against {simple}");
+        }
+    }
+
+    #[test]
+    fn stationary_takes_geostationary_and_refuses_low_and_inclined_orbits() {
+        let astra = astra();
+        assert!(astra.drift_deg_per_day().abs() < 0.01, "{}", astra.drift_deg_per_day());
+        assert!(astra.stationary());
+        assert!(Sat::from_lines("GEO", GEO.0, GEO.1).unwrap().stationary());
+        assert!(!iss().stationary());
+        let igso = Sat::from_lines("BEIDOU-2 IGSO-1", BEIDOU_IGSO_1.0, BEIDOU_IGSO_1.1).unwrap();
+        assert!(igso.drift_deg_per_day().abs() < 0.1, "{}", igso.drift_deg_per_day());
+        assert!(!igso.stationary(), "inclined {}", igso.inclination_deg);
+    }
+
+    #[test]
+    fn a_nominal_slot_points_where_the_elements_do() {
+        let s = astra();
+        let london = Station::new(51.5074, -0.1278);
+        let real = s.look(london, s.epoch_s).unwrap();
+        let slot = slot_look(london, real.lon_deg).unwrap();
+        assert!(
+            (slot.az_deg - real.az_deg).abs() < 0.05,
+            "{} against {}",
+            slot.az_deg,
+            real.az_deg
+        );
+        assert!((slot.el_deg - real.el_deg).abs() < 0.1, "{} against {}", slot.el_deg, real.el_deg);
+        assert!((slot.skew_deg(london) - real.skew_deg(london)).abs() < 0.05);
+        assert_eq!(slot.range_rate_kms, 0.0);
+    }
+
+    #[test]
+    fn the_belt_from_london_spans_75_degrees_either_side_and_peaks_due_south() {
+        let london = Station::new(51.5074, -0.1278);
+        let belt = clarke_belt(london, 181);
+        assert_eq!(belt.len(), 151);
+        let top = belt.iter().max_by(|a, b| a.el_deg.total_cmp(&b.el_deg)).unwrap();
+        assert!((top.az_deg - 180.0).abs() < 1.0, "peaks at {}", top.az_deg);
+        assert!((top.el_deg - 31.1).abs() < 0.2, "peaks at {} el", top.el_deg);
+        assert!(belt.iter().all(|l| l.el_deg >= 0.0 && l.lat_deg.abs() < 1e-6));
+        let (east, west) = (belt.last().unwrap(), belt.first().unwrap());
+        assert!(east.az_deg < 110.0 && west.az_deg > 250.0, "{} to {}", east.az_deg, west.az_deg);
     }
 }

@@ -13,7 +13,7 @@
 //! away and recomputed when either changes.
 
 use datasets::tle::Group;
-use orbit::{Pass, Sat, Station};
+use orbit::{Look, Pass, Sat, Station};
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -136,7 +136,7 @@ fn recompute(
     };
     let _ = std::thread::Builder::new().name("sat-passes".into()).spawn(move || {
         let mut out: Vec<Upcoming> = Vec::new();
-        for s in sky.sats() {
+        for s in sky.sats().iter().filter(|s| !s.stationary()) {
             for pass in s.passes(at, now_s, WINDOW_S, min_el_deg) {
                 out.push(Upcoming { norad: s.norad, name: s.name.clone(), pass });
             }
@@ -147,6 +147,63 @@ fn recompute(
         *COMPUTED_FOR.lock() = Some(key);
         COMPUTING.store(false, Ordering::SeqCst);
     });
+}
+
+pub struct Fixed {
+    pub norad: u64,
+    pub name: String,
+    pub look: Look,
+    pub inclination_deg: f64,
+    pub drift_deg_per_day: f64,
+}
+
+pub fn fixed(sats: &[Arc<Sat>], at: Station, now_s: i64, min_el_deg: f64) -> Vec<Fixed> {
+    let mut out: Vec<Fixed> = sats
+        .iter()
+        .filter(|s| s.stationary())
+        .filter_map(|s| {
+            let look = s.look(at, now_s).filter(|l| l.el_deg >= min_el_deg)?;
+            Some(Fixed {
+                norad: s.norad,
+                name: s.name.clone(),
+                look,
+                inclination_deg: s.inclination_deg,
+                drift_deg_per_day: s.drift_deg_per_day(),
+            })
+        })
+        .collect();
+    let east_of_here = |f: &Fixed| (f.look.lon_deg - at.lon_deg + 540.0) % 360.0 - 180.0;
+    out.sort_by(|a, b| east_of_here(b).total_cmp(&east_of_here(a)));
+    out
+}
+
+type FixedKey = (&'static Group, i64, i64, i64, i64);
+
+static FIXED: Mutex<Option<(FixedKey, Arc<Vec<Fixed>>)>> = Mutex::new(None);
+
+pub fn fixed_now(
+    group: &'static Group,
+    sky: &Sky,
+    at: Station,
+    now_s: i64,
+    min_el_deg: f64,
+) -> Arc<Vec<Fixed>> {
+    let key = (
+        group,
+        (at.lat_deg * 1000.0) as i64,
+        (at.lon_deg * 1000.0) as i64,
+        min_el_deg as i64,
+        now_s,
+    );
+    let mut held = FIXED.lock();
+    if let Some((k, v)) = held.as_ref()
+        && *k == key
+    {
+        return v.clone();
+    }
+    let v = Arc::new(fixed(sky.sats(), at, now_s, min_el_deg));
+    *held = Some((key, v.clone()));
+    v
 }
 
 /// Whether a search is running, for a view that would otherwise look empty
@@ -203,5 +260,52 @@ mod tests {
     fn a_time_of_day_is_utc_and_wraps() {
         assert_eq!(utc_hms(0), "00:00:00");
         assert_eq!(utc_hms(1_705_322_433), "12:40:33");
+    }
+
+    fn sat(name: &str, lines: (&str, &str)) -> Arc<Sat> {
+        Arc::new(Sat::from_lines(name, lines.0, lines.1).unwrap())
+    }
+
+    #[test]
+    fn fixed_lists_what_stands_above_london_east_to_west() {
+        let sky = [
+            sat(
+                "ES'HAIL 2",
+                (
+                    "1 43700U 18090A   26269.19856919  .00000148  00000+0  00000+0 0  9996",
+                    "2 43700   0.0213 149.4735 0001212  42.4684 270.3494  1.00273261 28695",
+                ),
+            ),
+            sat(
+                "GOES 18",
+                (
+                    "1 51850U 22021A   26269.23760735  .00000100  00000+0  00000+0 0  9993",
+                    "2 51850   0.0419 338.0013 0000538 265.9831  69.6229  1.00272852  7607",
+                ),
+            ),
+            sat(
+                "ISS (ZARYA)",
+                (
+                    "1 25544U 98067A   24015.52815972  .00016717  00000-0  30074-3 0  9990",
+                    "2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.49514029431344",
+                ),
+            ),
+            sat(
+                "ASTRA 2E",
+                (
+                    "1 39285U 13056A   26269.06850502  .00000153  00000+0  00000+0 0  9990",
+                    "2 39285   0.0856 308.9232 0002152 236.4121 232.6975  1.00271910 47426",
+                ),
+            ),
+        ];
+        let london = Station::new(51.5074, -0.1278);
+        let at = sky[3].epoch_s;
+        let up = fixed(&sky, london, at, 10.0);
+        let names: Vec<&str> = up.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["ASTRA 2E", "ES'HAIL 2"]);
+        assert_eq!(up[0].norad, 39285);
+        assert!((up[1].look.lon_deg - 25.8).abs() < 0.2, "QO-100 at {}", up[1].look.lon_deg);
+        let high: Vec<u64> = fixed(&sky, london, at, 26.0).iter().map(|f| f.norad).collect();
+        assert_eq!(high, [43700]);
     }
 }
