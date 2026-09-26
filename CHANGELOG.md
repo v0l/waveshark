@@ -21,7 +21,7 @@ the code is in the commit log.
 - Channel passband edges dragged on the spectrum, and SSB and CW low and high edges on the strip.
 - Chain view stages dragged from a searchable list onto a port or wire, set before wiring, and CLEAR.
 - Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.
-- DAB and DAB+ sound, one station of the ensemble picked in the chain view.
+- DAB and DAB+ sound, the station picked from the ensemble on the channel strip.
 
 ### Changed
 

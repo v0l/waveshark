@@ -645,6 +645,7 @@ pub struct StripState {
     /// The listening channel feeding it, when one does. A strip with none
     /// is a chain the operator drew.
     pub channel: Option<u64>,
+    pub offers: Option<crate::mix::fader::Offer>,
 }
 
 /// One input of the video bus, as a pane offers it.
@@ -1957,6 +1958,7 @@ impl Receiver {
                     level: f.peak(),
                     voice: f.is_voice(),
                     channel: st.settings.get("channel").and_then(|v| v.as_i64()).map(|v| v as u64),
+                    offers: f.offers().cloned(),
                 })
             })
             .collect()
@@ -6504,6 +6506,29 @@ pub(crate) mod tests {
         let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
         assert!(rx.refused.is_none(), "{:?}", rx.refused);
         assert!(rx.fader(1).is_some(), "the strip has no fader to meter");
+    }
+
+    #[test]
+    fn an_ensemble_is_heard_through_its_channel_fader_straight_off_the_sound_port() {
+        let mut p = plan(2_048_000.0, Hz(202_928_000));
+        p.fronts.clear();
+        let mut dab = chan(1, 0.0, Demod::Nfm);
+        dab.mode = ChanMode::Decode("dab".into());
+        p.channels = vec![dab];
+        let patch = derived_patch(&p);
+        let stage = patch.stages().iter().find(|s| s.kind == "dab").expect("the ensemble");
+        let port = heard_port("dab").expect("a dab channel has sound on it");
+        assert_eq!(port, 1, "the sound port, where the stations are published");
+        assert!(
+            patch.links().iter().any(|l| {
+                l.to.0 == fader_id(1)
+                    && matches!(l.from, crate::patch::Source::Stage(f, o) if f == stage.id && o == port)
+            }),
+            "a stage between the ensemble and the fader would have to carry its station list"
+        );
+        let rx = Receiver::build(&p, Sinks::default()).expect("the graph");
+        assert!(rx.refused.is_none(), "{:?}", rx.refused);
+        assert!(rx.fader(1).is_some());
     }
 
     #[test]

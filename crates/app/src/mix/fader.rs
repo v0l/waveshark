@@ -53,7 +53,10 @@ pub struct FaderNode {
     feed: Feed,
     /// Peak of the last block after the fader, for the meter beside it.
     peak: f32,
+    offers: Option<Offer>,
 }
+
+pub type Offer = (usize, std::sync::Arc<pipeline::Programmes>);
 
 impl FaderNode {
     pub fn new() -> Self {
@@ -64,6 +67,7 @@ impl FaderNode {
             speech: false,
             feed: Feed::Silent,
             peak: 0.0,
+            offers: None,
         }
     }
 
@@ -86,6 +90,10 @@ impl FaderNode {
 
     pub fn peak(&self) -> f32 {
         self.peak
+    }
+
+    pub fn offers(&self) -> Option<&Offer> {
+        self.offers.as_ref()
     }
 
     /// Whether this passes speech rather than audio.
@@ -142,8 +150,14 @@ impl Node for FaderNode {
         &mut self,
         inputs: &[&Payload],
         outputs: &mut [Payload],
-        _ctx: &mut NodeCtx<'_>,
+        ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
+        self.offers = match ctx.meta(0) {
+            Some(pipeline::Published { from, meta: pipeline::Meta::Programmes(p) }) => {
+                Some((*from, p.clone()))
+            }
+            None => None,
+        };
         let gain = self.gain();
         let (out, tap) = match outputs {
             [out, tap, ..] => (out, tap),
@@ -247,6 +261,45 @@ mod tests {
             center: common::Hz(145_500_000),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn what_the_stage_upstream_offers_is_kept_for_the_strip() {
+        let offered = std::sync::Arc::new(pipeline::Programmes {
+            system: "DAB",
+            channel_hz: 202.928e6,
+            param: "service",
+            wanted: ParamValue::Text("Nova 100".into()),
+            on: Some(0x10BB),
+            idle: ParamValue::Int(-1),
+            any: ParamValue::Int(0),
+            list: vec![pipeline::Programme {
+                label: "Nova 100".into(),
+                setting: ParamValue::Text("Nova 100".into()),
+                service: None,
+            }],
+        });
+        let published =
+            pipeline::Published { from: 7, meta: pipeline::Meta::Programmes(offered.clone()) };
+        let mut n = FaderNode::new();
+        let ins = [PortSpec { spec: stereo(), latency: 0 }];
+        let specs = n.negotiate(&ins).unwrap();
+        let feed = |n: &mut FaderNode, meta: Option<&pipeline::Published>| {
+            let mut out: Vec<Payload> = specs.iter().map(|s| Payload::empty_of(s.kind)).collect();
+            let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
+            let (in_meta, mut out_meta) = ([meta], Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags)
+                .with_meta(&in_meta, &mut out_meta);
+            n.process(&[&Payload::Real(vec![0.0; 4])], &mut out, &mut ctx).unwrap();
+        };
+        feed(&mut n, Some(&published));
+        assert_eq!(n.offers().map(|(from, p)| (*from, p.list.len())), Some((7, 1)));
+        assert_eq!(
+            n.offers().map(|(_, p)| p.chosen().map(|c| c.label.clone())),
+            Some(Some("Nova 100".into()))
+        );
+        feed(&mut n, None);
+        assert!(n.offers().is_none(), "an input that stops offering takes the picker away");
     }
 
     #[test]

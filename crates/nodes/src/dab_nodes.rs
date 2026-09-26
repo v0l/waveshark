@@ -126,6 +126,7 @@ pub struct DabNode {
     frames: Vec<Vec<u8>>,
     pcm: Vec<f32>,
     playout: Playout,
+    listing: Option<std::sync::Arc<pipeline::Programmes>>,
     #[cfg(test)]
     kept: Vec<Vec<u8>>,
 }
@@ -171,6 +172,7 @@ impl DabNode {
             frames: Vec::new(),
             pcm: Vec::new(),
             playout: Playout::default(),
+            listing: None,
             #[cfg(test)]
             kept: Vec::new(),
         }
@@ -251,6 +253,46 @@ impl DabNode {
         self.rx.listen(sub);
         self.listener = Listener::new(audio.map(|(_, a)| a));
         self.playout.clear();
+    }
+
+    pub fn programmes(&self) -> pipeline::Programmes {
+        let list = self
+            .stations()
+            .iter()
+            .map(|s| {
+                let want = s.name.clone().map_or(Want::Id(s.id as u16), Want::Named);
+                pipeline::Programme {
+                    label: s.name.clone().unwrap_or_else(|| format!("{:04X}", s.id)),
+                    setting: want.setting(),
+                    service: Some(pipeline::Service {
+                        id: s.id as u16,
+                        name: s.name.clone(),
+                        running: true,
+                        ..Default::default()
+                    }),
+                }
+            })
+            .collect();
+        pipeline::Programmes {
+            system: "DAB",
+            channel_hz: self.channel_hz,
+            param: SERVICE,
+            wanted: self.wanted.setting(),
+            on: self.station.map(|id| id as u16),
+            idle: Want::Off.setting(),
+            any: Want::Any.setting(),
+            list,
+        }
+    }
+
+    fn publish(&mut self, c: &mut NodeCtx<'_>) {
+        let now = self.programmes();
+        let listing = match &self.listing {
+            Some(held) if **held == now => held.clone(),
+            _ => std::sync::Arc::new(now),
+        };
+        self.listing = Some(listing.clone());
+        c.publish(1, pipeline::Meta::Programmes(listing));
     }
 
     fn stations(&self) -> Vec<&Service> {
@@ -372,6 +414,7 @@ impl pipeline::node::Node for DabNode {
             self.playout.arrive(None, &self.pcm);
         }
         outputs[1].real_mut().extend(self.playout.sound_for(c.block_seconds));
+        self.publish(c);
 
         let named = self.rx.ensemble().name.clone();
         if named.is_some()
@@ -716,6 +759,35 @@ mod tests {
         assert_eq!(n.listening().and_then(|s| s.name.as_deref()), Some("Reef Radio"));
         assert_eq!(n.kept.len(), 61);
         assert_eq!(follows(&n.kept, &programme(1, 100)), Some(4));
+    }
+
+    #[test]
+    fn the_stations_are_offered_as_a_list_a_picker_can_set() {
+        let mut n = DabNode::new(DEFAULT_HZ);
+        n.want(Want::Named("Reef Radio".into()));
+        replay(&mut n, &transmit(2.0), RATE_HZ, DEFAULT_HZ);
+        let offered = n.programmes();
+        let listed: Vec<(&str, pipeline::ParamValue)> =
+            offered.list.iter().map(|p| (p.label.as_str(), p.setting.clone())).collect();
+        let named = |n: &str| pipeline::ParamValue::Text(n.into());
+        assert_eq!(listed, [("Shark FM", named("Shark FM")), ("Reef Radio", named("Reef Radio"))]);
+        assert_eq!(offered.wanted, named("Reef Radio"));
+        assert_eq!(offered.chosen().map(|p| p.label.as_str()), Some("Reef Radio"));
+        assert_eq!(offered.on, n.listening().map(|s| s.id as u16));
+        assert_eq!((offered.system, offered.param), ("DAB", SERVICE));
+        assert_eq!(
+            (offered.any.clone(), offered.idle.clone()),
+            (pipeline::ParamValue::Int(0), pipeline::ParamValue::Int(-1))
+        );
+        for (setting, want) in [
+            (named("Shark FM"), Want::Named("Shark FM".into())),
+            (offered.any.clone(), Want::Any),
+            (offered.idle.clone(), Want::Off),
+        ] {
+            pipeline::node::Node::set_param(&mut n, SERVICE, setting)
+                .expect("a setting it offered");
+            assert_eq!(n.wanted(), &want);
+        }
     }
 
     #[test]

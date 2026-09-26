@@ -118,6 +118,29 @@ impl Strip<'_> {
             });
     }
 
+    fn station_pick(
+        ui: &mut egui::Ui,
+        id: u64,
+        offer: &crate::mix::fader::Offer,
+        cmds: &mut Vec<Cmd>,
+    ) {
+        let (from, p) = offer;
+        if p.list.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            Line::new().legend("station").show(ui);
+            let mut picked = p.wanted.clone();
+            let options = std::iter::once((p.any.clone(), "first".to_string()))
+                .chain(p.list.iter().map(|x| (x.setting.clone(), x.label.clone())))
+                .chain(std::iter::once((p.idle.clone(), "off".to_string())));
+            if form::choice(ui, ("station", id), &mut picked, options) {
+                cmds.push(Cmd::NodeParam(*from, p.param.to_string(), picked));
+            }
+        });
+    }
+
     /// Gain and squelch, for the modes that have them.
     ///
     /// Worth a line of its own because on a weak signal these two are the
@@ -1549,6 +1572,14 @@ impl Strip<'_> {
                                         ));
                                     }
                                 });
+                                if let Some(offer) = strips
+                                    .inputs
+                                    .iter()
+                                    .find(|s| s.channel == Some(ch.id))
+                                    .and_then(|s| s.offers.as_ref())
+                                {
+                                    Self::station_pick(ui, ch.id, offer, self.cmds);
+                                }
                                 if ch.mode == ChanMode::Audio(Demod::Wfm) {
                                     // Each channel's own RDS, not the first
                                     // channel's: two WFM channels are usually
@@ -1648,6 +1679,9 @@ impl Strip<'_> {
                                         ));
                                     }
                                 });
+                                if let Some(offer) = &s.offers {
+                                    Self::station_pick(ui, s.stage, offer, self.cmds);
+                                }
                             });
                         ui.add_space(6.0);
                     }
