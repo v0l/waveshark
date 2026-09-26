@@ -95,6 +95,7 @@ impl PointingModal<'_> {
                 modal_title(ui, &sat.name);
                 let w = ui.available_width();
                 egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
                     .max_height(super::settings::share_of_screen(ui, 0.7, 320.0, 760.0))
                     .show(ui, |ui| {
                         ui.set_max_width(w);
@@ -111,9 +112,11 @@ impl PointingModal<'_> {
                             ui.add_space(6.0);
                         }
                         let listenable = down.as_ref().is_some_and(|d| d.downlink_hz.is_some());
-                        let told = Advice { listenable, following };
-                        receiver_card(ui, &heard, on_downlink, shifted, &span, st.best, told);
-                        ui.add_space(6.0);
+                        let told = Advice { listenable, following, fixed };
+                        if listenable || fixed || !heard.is_empty() {
+                            receiver_card(ui, &heard, on_downlink, shifted, &span, st.best, told);
+                            ui.add_space(6.0);
+                        }
                         elements_card(ui, sat, now);
                     });
                 footer(ui, |ui| {
@@ -146,7 +149,7 @@ impl PointingModal<'_> {
                     if ui.button("SHOW ON MAP").clicked() {
                         out.push(Out::ShowOnMap);
                     }
-                    if ui.button("RESET BEST").clicked() {
+                    if st.best.is_some() && ui.button("RESET BEST").clicked() {
                         st.best = None;
                     }
                 });
@@ -179,7 +182,7 @@ fn point_card(
             ("azimuth", format!("{:.1}\u{b0} {}", l.az_deg, compass(l.az_deg)), tint),
             ("elevation", format!("{:.1}\u{b0}", l.el_deg), tint),
         ];
-        let skew = (fixed || up).then(|| l.skew_deg(station));
+        let skew = fixed.then(|| l.skew_deg(station));
         if let Some(d) = skew {
             big.push(("skew", sats_pane::skew(d), tint));
         }
@@ -255,36 +258,19 @@ fn pass_card(
         let at = |t: i64| sat.look(station, t);
         ui.columns(2, |col| {
             let ui = &mut col[0];
-            reading(
-                ui,
-                "rises",
-                format!(
-                    "{} {}, {:.0}\u{b0} {}",
-                    crate::sats::utc_hms(p.rise_s),
-                    crate::sats::in_when(p.rise_s - now),
-                    p.rise_az_deg,
-                    compass(p.rise_az_deg)
-                ),
-            );
+            let when_az = |t: i64, az: f64| {
+                format!("{}, {:.0}\u{b0} {}", crate::sats::utc_hms(t), az, compass(az))
+            };
+            reading(ui, "rises", when_az(p.rise_s, p.rise_az_deg));
             let peak_az = at(p.peak_s).map_or(String::new(), |l| {
-                format!(", {:.0}\u{b0} {}", l.az_deg, compass(l.az_deg))
+                format!(" at {:.0}\u{b0} {}", l.az_deg, compass(l.az_deg))
             });
             reading(
                 ui,
                 "peaks",
-                format!("{} at {:.0}\u{b0}{peak_az}", crate::sats::utc_hms(p.peak_s), p.max_el_deg),
+                format!("{}, {:.0}\u{b0}{peak_az}", crate::sats::utc_hms(p.peak_s), p.max_el_deg),
             );
-            reading(
-                ui,
-                "sets",
-                format!(
-                    "{} {}, {:.0}\u{b0} {}",
-                    crate::sats::utc_hms(p.set_s),
-                    crate::sats::in_when(p.set_s - now),
-                    p.set_az_deg,
-                    compass(p.set_az_deg)
-                ),
-            );
+            reading(ui, "sets", when_az(p.set_s, p.set_az_deg));
             reading(ui, "lasts", format!("{}m {:02}s", p.duration_s() / 60, p.duration_s() % 60));
             let arc = sat.arc(station, p.rise_s, p.set_s, sats_pane::ARC_POINTS);
             sats_pane::sky_plot(&mut col[1], &arc, &[], &[], look.as_ref());
@@ -372,9 +358,11 @@ fn receiver_card(
                 (span.center_hz + span.rate_hz / 2.0) / 1e6
             ),
             (Some(_), None) => "no spectrum yet".into(),
-            (None, _) => "no downlink to measure".into(),
+            (None, _) => String::new(),
         };
-        reading(ui, "on downlink", at_downlink);
+        if shifted.is_some() {
+            reading(ui, "level", at_downlink);
+        }
         for h in heard {
             let mut said = Vec::new();
             if let Some(db) = h.level_db {
@@ -410,6 +398,9 @@ fn receiver_card(
             (false, true, _) => {
                 (false, "not listening, LISTEN puts a channel on the downlink".into())
             }
+            (false, false, _) if !told.fixed => {
+                (true, "no downlink listed, measured on the channels above".into())
+            }
             (false, false, 0) => (
                 false,
                 "no downlink listed, tune a DVB-S2 channel to a transponder and peak on its MER"
@@ -426,6 +417,7 @@ fn receiver_card(
 struct Advice {
     listenable: bool,
     following: bool,
+    fixed: bool,
 }
 
 fn elements_card(ui: &mut egui::Ui, sat: &orbit::Sat, now: i64) {
