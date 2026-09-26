@@ -7,6 +7,7 @@ use super::*;
 const ZOOM: std::ops::RangeInclusive<f32> = 0.2..=2.0;
 const CANVAS_MAX: f32 = 100_000.0;
 const FIT_MARGIN: f32 = 24.0;
+const ZOOM_STEPS: f32 = 4.0;
 
 /// The chain view, over the graph the receiver is running and the one the
 /// operator has drawn.
@@ -97,7 +98,9 @@ impl Chain<'_> {
             .zoom_range(ZOOM)
             .max_inner_size(egui::Vec2::splat(CANVAS_MAX))
             .show(ui, &mut scene, |ui| {
-                crate::chainview::draw(
+                let layer = ui.layer_id();
+                let from = ui.ctx().graphics_mut(|g| g.entry(layer).next_idx().0);
+                let act = crate::chainview::draw(
                     ui,
                     &topo,
                     self.st.latency,
@@ -109,7 +112,10 @@ impl Chain<'_> {
                     &elsewhere,
                     &self.st.scopes,
                     &self.st.waiting,
-                )
+                );
+                let zoom = ui.ctx().layer_transform_to_global(layer).map_or(1.0, |t| t.scaling);
+                sharpen_text(ui, layer, from, zoom);
+                act
             })
             .inner;
         if manual && drawn.pan != egui::Vec2::ZERO {
@@ -384,4 +390,58 @@ fn one_side(topo: &pipeline::graph::Topology, side: ChainSide) -> pipeline::grap
         }
     });
     out
+}
+
+fn sharpen_text(ui: &egui::Ui, layer: egui::LayerId, from: usize, zoom: f32) {
+    let step = (zoom * ZOOM_STEPS).round() / ZOOM_STEPS;
+    if step <= 0.0 || step == 1.0 {
+        return;
+    }
+    let texts: Vec<(usize, egui::epaint::TextShape)> = ui.ctx().graphics_mut(|g| {
+        let list = g.entry(layer);
+        (from..list.next_idx().0)
+            .filter_map(|i| {
+                let mut found = None;
+                list.mutate_shape(egui::layers::ShapeIdx(i), |c| {
+                    if let egui::Shape::Text(t) = &c.shape {
+                        found = Some(t.clone());
+                    }
+                });
+                found.map(|t| (i, t))
+            })
+            .collect()
+    });
+    let painter = ui.painter();
+    let sharp: Vec<(usize, egui::Shape)> = texts
+        .into_iter()
+        .map(|(i, t)| {
+            let galley = painter.layout_job(scaled_job(&t.galley.job, step));
+            let (pos, underline) = (t.pos, t.underline);
+            let mut t = egui::epaint::TextShape { galley, ..t };
+            t.transform(egui::emath::TSTransform::from_scaling(1.0 / step));
+            t.pos = pos;
+            t.underline = underline;
+            (i, egui::Shape::Text(t))
+        })
+        .collect();
+    ui.ctx().graphics_mut(|g| {
+        let list = g.entry(layer);
+        for (i, shape) in sharp {
+            list.mutate_shape(egui::layers::ShapeIdx(i), |c| c.shape = shape);
+        }
+    });
+}
+
+fn scaled_job(job: &egui::text::LayoutJob, by: f32) -> egui::text::LayoutJob {
+    let mut job = job.clone();
+    job.wrap.max_width *= by;
+    job.first_row_min_height *= by;
+    for s in &mut job.sections {
+        s.leading_space *= by;
+        s.format.font_id.size *= by;
+        s.format.extra_letter_spacing *= by;
+        s.format.line_height = s.format.line_height.map(|h| h * by);
+        s.format.expand_bg *= by;
+    }
+    job
 }
