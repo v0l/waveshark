@@ -1440,6 +1440,10 @@ impl App {
         // graph. Two slots because they are different in kind, and one banner
         // because there is one place to read a sentence: what went wrong wins
         // over a standing verdict on the chain.
+        let left_out = radio.status.refused.lock().clone();
+        if left_out.is_some() {
+            self.chain.refusal = left_out.clone();
+        }
         let fault = radio.status.error.lock().take().or_else(|| radio.status.refused.lock().take());
         if let Some(e) = fault {
             self.err = Some(e);
@@ -1500,6 +1504,7 @@ impl App {
         let (rev, running) = radio.status.patch();
         if rev != self.chain.patch_rev {
             self.chain.patch_rev = rev;
+            self.chain.refusal = left_out;
             let (running, base) = running.unwrap_or_default();
             // The graph the receiver drew underneath the edits is always
             // taken: it is what the next edit is read against. The running

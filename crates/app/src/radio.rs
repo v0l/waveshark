@@ -4806,6 +4806,35 @@ pub(crate) mod tests {
         assert!(watch.keyed(), "the device was never asked to transmit");
     }
 
+    #[test]
+    fn a_stage_left_out_says_why_on_every_rebuild_until_it_builds() {
+        let center = Hz(145_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        let mut edits = crate::patch::Edits::default();
+        edits.stages.push(crate::patch::Stage {
+            id: 1,
+            kind: "tempest".into(),
+            settings: pipeline::registry::Settings::new(),
+        });
+        edits.links.push(crate::patch::Link { from: crate::patch::Source::Span, to: (1, 0) });
+        radio.send(Cmd::Edits(edits.clone()));
+        until("the stage to be left out", || radio.status.refused.lock().is_some());
+        let why = radio.status.refused.lock().take().unwrap_or_default();
+        assert!(why.contains("left out"), "{why}");
+        radio.send(Cmd::Center(Hz(145_100_000)));
+        until("a rebuild to say it again", || radio.status.refused.lock().is_some());
+        edits.stages.clear();
+        edits.links.clear();
+        radio.send(Cmd::Edits(edits));
+        let rev = radio.status.patch().0;
+        until("the edit that builds", || radio.status.patch().0 > rev);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(radio.status.refused.lock().clone(), None);
+    }
+
     /// The dial and the span move under a running receiver.
     ///
     /// Both go through the radio thread and both redraw the graph: a retune

@@ -265,6 +265,9 @@ pub(super) struct ChainState {
     pub topo: Option<pipeline::graph::Topology>,
     pub waiting: Vec<crate::chain::Waiting>,
     pub find: String,
+    pub scene: Option<egui::Rect>,
+    pub fit: bool,
+    pub refusal: Option<String>,
     pub latency: f64,
     /// What each scope stage is seeing, by node id, refreshed with the
     /// spectrum.

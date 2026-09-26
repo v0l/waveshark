@@ -4,6 +4,10 @@
 use super::state::{ChainSide, ChainState};
 use super::*;
 
+const ZOOM: std::ops::RangeInclusive<f32> = 0.2..=2.0;
+const CANVAS_MAX: f32 = 100_000.0;
+const FIT_MARGIN: f32 = 24.0;
+
 /// The chain view, over the graph the receiver is running and the one the
 /// operator has drawn.
 pub(super) struct Chain<'a> {
@@ -85,22 +89,14 @@ impl Chain<'_> {
                 egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 10)),
             )
             .show(ui, |ui| self.palette(ui));
-        // Dragged, not only scrolled: the graph is wider and taller than the
-        // pane on any real chain, and reaching for a scrollbar to see a branch
-        // is not how anyone reads a diagram. In manual mode a drag moves a
-        // stage instead, since dragging is how the graph is edited and the
-        // two cannot both own the gesture.
         let manual = self.st.edit.manual;
-        let drawn = egui::ScrollArea::both()
-            .scroll_source(egui::containers::scroll_area::ScrollSource {
-                drag: if manual {
-                    egui::containers::scroll_area::DragScroll::Never
-                } else {
-                    egui::containers::scroll_area::DragScroll::Always
-                },
-                ..Default::default()
-            })
-            .show(ui, |ui| {
+        let mut scene = *self.st.scene.get_or_insert_with(|| {
+            egui::Rect::from_min_size(egui::Pos2::ZERO, ui.available_size())
+        });
+        let drawn = egui::Scene::new()
+            .zoom_range(ZOOM)
+            .max_inner_size(egui::Vec2::splat(CANVAS_MAX))
+            .show(ui, &mut scene, |ui| {
                 crate::chainview::draw(
                     ui,
                     &topo,
@@ -116,6 +112,15 @@ impl Chain<'_> {
                 )
             })
             .inner;
+        if manual && drawn.pan != egui::Vec2::ZERO {
+            scene = scene.translate(-drawn.pan);
+        }
+        if std::mem::take(&mut self.st.fit)
+            && let Some(b) = drawn.bounds
+        {
+            scene = b.expand(FIT_MARGIN);
+        }
+        self.st.scene = Some(scene);
         self.st.sel = drawn.selected;
         if let Some((kind, at, attach)) = drawn.dropped.clone() {
             self.st.add_stage(self.cmds, &kind, at, attach);
@@ -245,6 +250,15 @@ impl Chain<'_> {
             {
                 self.st.edit.arrange();
             }
+            if ui
+                .button("FIT")
+                .on_hover_text(
+                    "Show the whole graph. Ctrl and the wheel zoom, the wheel or a drag pans",
+                )
+                .clicked()
+            {
+                self.st.fit = true;
+            }
             let picked = self.st.pick.filter(|id| self.st.patch.stage(*id).is_some());
             if ui
                 .add_enabled(
@@ -299,6 +313,9 @@ impl Chain<'_> {
             "drag a stage onto the graph, a port or a wire"
         };
         text::hint(ui, hint);
+        if let Some(why) = &self.st.refusal {
+            panel::status(ui, false, why);
+        }
         ui.add_space(6.0);
         egui_bench::form::field(ui, &mut self.st.find, "find a stage");
         ui.add_space(6.0);

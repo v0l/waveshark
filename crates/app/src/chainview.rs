@@ -431,6 +431,7 @@ pub struct Interaction {
     pub pan: Vec2,
     pub dropped: Option<(String, Pos2, Attach)>,
     pub blank: bool,
+    pub bounds: Option<Rect>,
 }
 
 /// The selected node's settings, as controls.
@@ -828,7 +829,6 @@ pub fn draw(
         // manual mode so that a stage can be moved, which leaves the scroll
         // area nothing to scroll with, so the drag is handed back to it here.
         if act.pan != Vec2::ZERO {
-            ui.scroll_with_delta(act.pan);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
         for i in 0..topo.nodes.len() {
@@ -852,6 +852,7 @@ pub fn draw(
     for g in &ghosts {
         edit.drawn.insert(g.id, g.r);
     }
+    act.bounds = Some(edit.drawn.values().fold(src, |all, r| all.union(*r)));
 
     for (i, node) in topo.nodes.iter().enumerate() {
         for (k, (slot, spec)) in node.inputs.iter().enumerate() {
