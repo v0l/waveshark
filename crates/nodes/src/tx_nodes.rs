@@ -1744,16 +1744,89 @@ mod vox_tests {
 /// sits between the source and the modulator, passes the audio through, and
 /// says through [`Self::sending`] whether the key still has to be held down.
 pub struct RogerNode {
+    style: RogerStyle,
     ms: f64,
     hz: f64,
     rate: f64,
-    left: usize,
-    phase: f64,
+    intro: Burst,
+    outro: Burst,
+    held: std::collections::VecDeque<f32>,
+    pushed_back: bool,
+    ended: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RogerStyle {
+    #[default]
+    Tone,
+    Quindar,
+}
+
+impl RogerStyle {
+    pub const ALL: [RogerStyle; 2] = [RogerStyle::Tone, RogerStyle::Quindar];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RogerStyle::Tone => "Tone",
+            RogerStyle::Quindar => "Quindar",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            RogerStyle::Tone => 0,
+            RogerStyle::Quindar => 1,
+        }
+    }
+
+    pub fn from_index(i: i64) -> Self {
+        usize::try_from(i).ok().and_then(|i| Self::ALL.get(i).copied()).unwrap_or_default()
+    }
+}
+
+pub const QUINDAR_MS: f64 = 250.0;
+pub const QUINDAR_KEY_DOWN_HZ: f64 = 2_525.0;
+pub const QUINDAR_KEY_UP_HZ: f64 = 2_475.0;
+
+#[derive(Default)]
+struct Burst {
+    hz: f64,
+    len: usize,
+    sent: usize,
+}
+
+impl Burst {
+    fn new(hz: f64, len: usize) -> Self {
+        Self { hz, len, sent: 0 }
+    }
+
+    fn left(&self) -> usize {
+        self.len - self.sent
+    }
+
+    fn next(&mut self, rate: f64) -> Option<f32> {
+        if self.sent >= self.len {
+            return None;
+        }
+        let t = self.sent as f64 / rate.max(1.0);
+        self.sent += 1;
+        Some(0.5 * (std::f64::consts::TAU * self.hz * t).sin() as f32)
+    }
 }
 
 impl Default for RogerNode {
     fn default() -> Self {
-        Self { ms: 0.0, hz: 1_000.0, rate: 0.0, left: 0, phase: 0.0 }
+        Self {
+            style: RogerStyle::Tone,
+            ms: 0.0,
+            hz: 1_000.0,
+            rate: 0.0,
+            intro: Burst::default(),
+            outro: Burst::default(),
+            held: std::collections::VecDeque::new(),
+            pushed_back: false,
+            ended: false,
+        }
     }
 }
 
@@ -1762,21 +1835,54 @@ impl RogerNode {
         Self { ms: ms.clamp(0.0, ROGER_MAX_MS), hz, ..Self::default() }
     }
 
+    pub fn quindar() -> Self {
+        Self { style: RogerStyle::Quindar, ..Self::default() }
+    }
+
+    fn samples(&self, ms: f64) -> usize {
+        (self.rate * ms / 1_000.0) as usize
+    }
+
     /// The over has ended. True when there is a tone to send, which is the
     /// answer to whether the key may come up yet.
     pub fn end_over(&mut self) -> bool {
-        self.left = (self.rate * self.ms / 1_000.0) as usize;
-        self.phase = 0.0;
-        self.left > 0
+        self.outro = match self.style {
+            RogerStyle::Tone => Burst::new(self.hz, self.samples(self.ms)),
+            RogerStyle::Quindar => Burst::new(QUINDAR_KEY_UP_HZ, self.samples(QUINDAR_MS)),
+        };
+        self.ended = true;
+        self.sending()
     }
 
     pub fn sending(&self) -> bool {
-        self.left > 0
+        self.ended && self.intro.left() + self.held.len() + self.outro.left() > 0
     }
 
     pub fn ms(&self) -> f64 {
         self.ms
     }
+
+    pub fn style(&self) -> RogerStyle {
+        self.style
+    }
+
+    fn next(&mut self, s: f32) -> f32 {
+        if self.pushed_back && !self.ended {
+            self.held.push_back(s);
+        }
+        if let Some(v) = self.intro.next(self.rate) {
+            return v;
+        }
+        if let Some(v) = self.held.pop_front() {
+            return v;
+        }
+        self.outro.next(self.rate).unwrap_or(s)
+    }
+}
+
+pub fn roger_sends(s: &Settings) -> bool {
+    RogerStyle::from_index(s.i64_or(ROGER_STYLE, 0)) == RogerStyle::Quindar
+        || s.f64_or(ROGER_MS, 0.0) > 0.0
 }
 
 impl Simple for RogerNode {
@@ -1787,10 +1893,15 @@ impl Simple for RogerNode {
     fn readings(&self) -> Vec<(String, String)> {
         vec![(
             "roger".into(),
-            match (self.ms > 0.0, self.sending()) {
-                (false, _) => "off".into(),
-                (true, false) => format!("{:.0} ms at {:.0} Hz", self.ms, self.hz),
-                (true, true) => "sending".into(),
+            match (self.sending(), self.style) {
+                (true, _) => "sending".into(),
+                (false, RogerStyle::Quindar) => {
+                    format!("Quindar, {QUINDAR_KEY_DOWN_HZ:.0} and {QUINDAR_KEY_UP_HZ:.0} Hz")
+                }
+                (false, RogerStyle::Tone) if self.ms > 0.0 => {
+                    format!("{:.0} ms at {:.0} Hz", self.ms, self.hz)
+                }
+                (false, RogerStyle::Tone) => "off".into(),
             },
         )]
     }
@@ -1815,31 +1926,37 @@ impl Simple for RogerNode {
         let Some(audio) = input.as_real() else {
             return Ok(());
         };
-        let out = output.real_mut();
-        out.extend_from_slice(audio);
-        if self.left == 0 {
-            return Ok(());
-        }
         // The tone replaces the audio rather than adding to it: what it is
         // laid over is an over that has already finished, and a courtesy
         // tone mixed with the last syllable is neither.
-        let n = self.left.min(out.len());
-        let step = std::f64::consts::TAU * self.hz / self.rate.max(1.0);
-        for s in out.iter_mut().take(n) {
-            *s = 0.5 * self.phase.sin() as f32;
-            self.phase += step;
-        }
-        self.left -= n;
+        output.real_mut().extend(audio.iter().map(|&s| self.next(s)));
         Ok(())
     }
 
     fn reset(&mut self) {
-        self.left = 0;
-        self.phase = 0.0;
+        self.intro = Burst::default();
+        self.outro = Burst::default();
+        self.held.clear();
+        self.pushed_back = false;
+        self.ended = false;
+    }
+
+    fn over_began(&mut self) {
+        Simple::reset(self);
+        if self.style == RogerStyle::Quindar {
+            self.intro = Burst::new(QUINDAR_KEY_DOWN_HZ, self.samples(QUINDAR_MS));
+            self.pushed_back = true;
+        }
     }
 
     fn params(&self) -> Vec<Param> {
         vec![
+            Param::choice(
+                ROGER_STYLE,
+                self.style.index(),
+                RogerStyle::ALL.iter().map(|s| s.label().to_string()).collect(),
+            )
+            .label("Roger beep style"),
             Param::float(ROGER_MS, self.ms, 0.0..=ROGER_MAX_MS).label("Roger beep").unit("ms"),
             Param::float(ROGER_HZ, self.hz, 300.0..=3_000.0).label("Roger beep pitch").unit("Hz"),
         ]
@@ -1847,6 +1964,7 @@ impl Simple for RogerNode {
 
     fn set_param(&mut self, name: &str, value: ParamValue) -> Result<()> {
         match name {
+            ROGER_STYLE => self.style = RogerStyle::from_index(value.as_i64().unwrap_or(0)),
             ROGER_MS => self.ms = value.as_f64().unwrap_or(0.0).clamp(0.0, ROGER_MAX_MS),
             ROGER_HZ => self.hz = value.as_f64().unwrap_or(1_000.0).clamp(300.0, 3_000.0),
             _ => return Err(common::Error::other(format!("roger: unknown parameter {name:?}"))),
@@ -1945,6 +2063,85 @@ mod roger_tests {
         let after = &tone[(RATE * 0.1) as usize..];
         assert_eq!(after.iter().filter(|s| s.abs() > 1e-6).count(), 0);
     }
+
+    fn through(node: &mut RogerNode, audio: &[f32]) -> Vec<f32> {
+        let mut out = Payload::Real(Vec::new());
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let ins = [spec()];
+        let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+        Simple::process(node, &Payload::Real(audio.to_vec()), &mut out, &mut ctx).unwrap();
+        let Payload::Real(v) = out else { unreachable!() };
+        v
+    }
+
+    fn rising(x: &[f32]) -> usize {
+        x.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
+    }
+
+    #[test]
+    fn quindar_sends_2525_hz_before_the_speech_and_2475_hz_after_it() {
+        let quarter = (RATE * QUINDAR_MS / 1_000.0) as usize;
+        assert_eq!(quarter, 12_000);
+        let mut node = RogerNode::quindar();
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        Simple::over_began(&mut node);
+
+        let speech: Vec<f32> =
+            (0..30 * BLOCK).map(|i| 0.3 * ((i % 97) as f32 / 97.0 - 0.5)).collect();
+        let mut over = Vec::new();
+        for b in speech.chunks(BLOCK) {
+            over.extend(through(&mut node, b));
+            assert!(!node.sending(), "the key was held for a tone before the over ended");
+        }
+        let intro = &over[..quarter];
+        assert_eq!(rising(intro), 632, "250 ms of 2525 Hz");
+        let peak = intro.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "the key-down tone went out at {peak}");
+        assert!(intro[1].abs() > 0.1, "the key-down tone was ramped in: {}", intro[1]);
+        assert_eq!(&over[quarter..], &speech[..speech.len() - quarter], "speech not 250 ms behind");
+
+        assert!(node.end_over(), "Quindar had nothing to send at the end of the over");
+        let mut after = Vec::new();
+        let mut held = 0;
+        for _ in 0..40 {
+            after.extend(through(&mut node, &[0.9; BLOCK]));
+            if node.sending() {
+                held += 1;
+            }
+        }
+        assert_eq!(held, 24, "250 ms of speech and 250 ms of tone, in blocks of 20 ms");
+        assert_eq!(
+            &after[..quarter],
+            &speech[speech.len() - quarter..],
+            "the last 250 ms of speech"
+        );
+        let outro = &after[quarter..2 * quarter];
+        assert_eq!(rising(outro), 619, "250 ms of 2475 Hz");
+        let peak = outro.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "the key-up tone went out at {peak}");
+        assert_eq!(after[2 * quarter..].iter().filter(|&&s| s != 0.9).count(), 0);
+    }
+
+    #[test]
+    fn quindar_is_sent_whatever_the_single_tone_length_says() {
+        let mut node = RogerNode::quindar();
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        assert_eq!(node.ms(), 0.0);
+        assert!(node.end_over(), "a zero single-tone length silenced Quindar");
+        let mut settings = Settings::new();
+        assert!(!roger_sends(&settings));
+        settings.insert(ROGER_STYLE.into(), ParamValue::Choice(RogerStyle::Quindar.index()));
+        assert!(roger_sends(&settings));
+    }
+
+    #[test]
+    fn a_single_tone_leaves_the_start_of_the_over_alone() {
+        let mut node = RogerNode::new(100.0, 1_000.0);
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        Simple::over_began(&mut node);
+        let speech: Vec<f32> = (0..BLOCK).map(|i| i as f32 / BLOCK as f32).collect();
+        assert_eq!(through(&mut node, &speech), speech);
+    }
 }
 
 /// The head of a transmit chain: a block of time, from a block of samples.
@@ -2013,6 +2210,7 @@ const TAIL_MS: &str = "tail_ms";
 const ANTI_TRIP: &str = "anti_trip";
 const ROGER_MS: &str = "roger_ms";
 const ROGER_HZ: &str = "roger_hz";
+const ROGER_STYLE: &str = "roger_style";
 
 /// The longest courtesy tone that is a courtesy rather than a transmission
 /// of its own.
@@ -2094,7 +2292,9 @@ pub const ROGER: StageDesc = StageDesc {
 };
 
 pub fn build_roger(s: &Settings) -> Result<Box<dyn Node>> {
-    Ok(Box::new(RogerNode::new(s.f64_or(ROGER_MS, 0.0), s.f64_or(ROGER_HZ, 1_000.0))))
+    let mut n = RogerNode::new(s.f64_or(ROGER_MS, 0.0), s.f64_or(ROGER_HZ, 1_000.0));
+    n.style = RogerStyle::from_index(s.i64_or(ROGER_STYLE, 0));
+    Ok(Box::new(n))
 }
 
 pub const SUBTONE_LEVEL: f64 = 0.15;

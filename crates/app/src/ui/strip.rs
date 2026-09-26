@@ -642,6 +642,24 @@ impl Strip<'_> {
         let mut changed = false;
         ui.horizontal(|ui| {
             Line::new().legend("roger").show(ui);
+            for style in nodes::RogerStyle::ALL {
+                if ui
+                    .selectable_label(tx.roger_style == style, style.label().to_uppercase())
+                    .on_hover_text(match style {
+                        nodes::RogerStyle::Tone => "One tone as the key comes up",
+                        nodes::RogerStyle::Quindar => {
+                            "NASA's Quindar tones: 2525 Hz before the speech, 2475 Hz after it"
+                        }
+                    })
+                    .clicked()
+                {
+                    tx.roger_style = style;
+                    changed = true;
+                }
+            }
+            if tx.roger_style == nodes::RogerStyle::Quindar {
+                return;
+            }
             let mut ms = tx.roger_ms;
             if ui
                 .add(

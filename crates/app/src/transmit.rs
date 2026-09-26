@@ -228,13 +228,12 @@ impl Transmitter {
     /// here. Reported from the chain that was built rather than from the
     /// thread, since whoever asks has to know before the thread runs again.
     pub fn end_over(&mut self) -> bool {
-        let ms = self
+        let sends = self
             .built
             .as_ref()
             .and_then(|p| p.stage(crate::chain::derived::ROGER))
-            .map(|s| s.settings.get("roger_ms").and_then(|v| v.as_f64()).unwrap_or(0.0))
-            .unwrap_or(0.0);
-        if ms <= 0.0 || !self.armed {
+            .is_some_and(|s| nodes::roger_sends(&s.settings));
+        if !sends || !self.armed {
             return false;
         }
         self.readings.roger.store(true, Ordering::Relaxed);

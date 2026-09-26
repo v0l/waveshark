@@ -779,6 +779,7 @@ pub struct TxSpec {
     /// pitch it is sent at. On a channel with no squelch tail the far end
     /// has nothing else to tell it the over finished, and the end of an over
     /// is the same end whether a voice, a hand or the agent let the key up.
+    pub roger_style: nodes::RogerStyle,
     pub roger_ms: f64,
     pub roger_hz: f64,
     pub tone: Option<dsp::squelch::Coded>,
@@ -827,6 +828,7 @@ impl Default for TxSpec {
             tone_hz: 1_000.0,
             trim_db: 0.0,
             vox: VoxSpec::default(),
+            roger_style: nodes::RogerStyle::Tone,
             roger_ms: 0.0,
             roger_hz: 1_000.0,
             tone: None,

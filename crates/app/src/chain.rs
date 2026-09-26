@@ -3339,8 +3339,12 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             // and the agent all transmit through. A recording and a `.sub`
             // took the branch above: what they send is somebody else's
             // transmission, and a tone on the end of it is not in it.
-            if tx.spec.roger_ms > 0.0 {
+            if tx.spec.roger_ms > 0.0 || tx.spec.roger_style == nodes::RogerStyle::Quindar {
                 let mut s = Settings::new();
+                s.insert(
+                    "roger_style".into(),
+                    pipeline::ParamValue::Choice(tx.spec.roger_style.index()),
+                );
                 s.insert("roger_ms".into(), pipeline::ParamValue::Float(tx.spec.roger_ms));
                 s.insert("roger_hz".into(), pipeline::ParamValue::Float(tx.spec.roger_hz));
                 p.add_derived(derived::ROGER, "roger", s);
@@ -9824,6 +9828,53 @@ vectors:
             roger,
             "the courtesy tone was broken up rather than sent in one piece"
         );
+    }
+
+    #[test]
+    fn a_quindar_over_opens_and_closes_with_its_tones() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let spec = TxSpec {
+            source: TxSource::Tone,
+            tone_hz: 700.0,
+            roger_style: nodes::RogerStyle::Quindar,
+            roger_ms: 0.0,
+            ..Default::default()
+        };
+        plan.channels[0].tx = Some(spec);
+        plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())));
+        until("an over on the air", || radio.samples() > 1_200_000);
+        assert!(rx.end_over(), "Quindar was not sent with the single tone at zero");
+        until("the key-up tone to go out", || !rx.sending_roger());
+        rx.unkey();
+        assert!(rx.tx_settled());
+
+        let air = radio.transmitted();
+        let mut demod = dsp::FmDemod::new(plan.rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&air, &mut audio);
+        let window = (plan.rate * 0.01) as usize;
+        let pitches: Vec<f64> = audio
+            .chunks_exact(window)
+            .map(|w| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f64 / 0.01)
+            .collect();
+        let quindar = |hz: &f64| (hz - 2_500.0).abs() < 120.0;
+        let voice = |hz: &f64| (hz - 700.0).abs() < 120.0;
+        let first_voice = pitches.iter().position(voice).unwrap();
+        let last_voice = pitches.iter().rposition(voice).unwrap();
+        let before: Vec<f64> = pitches[..first_voice].iter().copied().filter(quindar).collect();
+        let after: Vec<f64> = pitches[last_voice + 1..].iter().copied().filter(quindar).collect();
+        let between = pitches[first_voice..=last_voice].iter().filter(|h| quindar(h)).count();
+        assert_eq!(before.len(), 25, "250 ms of key-down tone before the speech: {pitches:?}");
+        assert_eq!(after.len(), 25, "250 ms of key-up tone after the speech: {pitches:?}");
+        assert_eq!(between, 0, "a Quindar tone in the middle of the over: {pitches:?}");
+        let mean = |x: &[f64]| x.iter().sum::<f64>() / x.len() as f64;
+        assert!((mean(&before) - 2_525.0).abs() < 10.0, "key-down at {} Hz", mean(&before));
+        assert!((mean(&after) - 2_475.0).abs() < 10.0, "key-up at {} Hz", mean(&after));
     }
 
     /// An agent channel transmits the agent, not the room.
