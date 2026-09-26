@@ -98,3 +98,89 @@ fn the_band_with_the_screen_off_holds_no_raster() {
         assert_eq!(reader.frames(), 0);
     }
 }
+
+#[test]
+fn the_screen_gathers_at_its_line_rate_and_the_band_without_it_does_not() {
+    let (Some(on), Some(off)) = (capture(ON), capture(OFF)) else { return };
+    let line_hz = 67_501.0;
+    let window = 1 << 19;
+    for skip in [0, 3_000_000, 8_000_000] {
+        let lit = dsp::raster::comb_contrast(&on[skip..skip + window], RATE, line_hz, 3, 3e-4);
+        let dark = dsp::raster::comb_contrast(&off[skip..skip + window], RATE, line_hz, 3, 3e-4);
+        let (lit, dark) = (lit.expect("a spectrum"), dark.expect("a spectrum"));
+        assert!(lit > 35.0, "the screen gathered {lit:.1} dB at {skip}, 37.8 to 39.0 measured");
+        assert!(dark < 4.0, "the band without it {dark:.1} dB at {skip}, 2.0 to 2.4 measured");
+    }
+}
+
+#[test]
+fn a_locked_screen_is_read_faster_than_it_arrives() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Some(iq) = capture(ON) else { return };
+    let mode = display::by_label("1920x1080 60 Hz").expect("the mode");
+    let t = std::time::Instant::now();
+    let reader = read(&iq, Some(mode));
+    let speed = iq.len() as f64 / RATE / t.elapsed().as_secs_f64();
+    assert!(reader.locked().is_some(), "the screen was not locked");
+    assert!(speed > 1.5, "{speed:.2} times real time, 2.6 measured");
+}
+
+fn tuned(iq: &[C32], rate: f64, offset_hz: f64, down: usize) -> Vec<C32> {
+    let step = -std::f64::consts::TAU * offset_hz / rate;
+    let by = C32::new(step.cos() as f32, step.sin() as f32);
+    let mut turn = C32::new(1.0, 0.0);
+    let mixed: Vec<C32> = iq
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let out = *s * turn;
+            turn *= by;
+            if i % 4096 == 0 {
+                turn /= turn.norm();
+            }
+            out
+        })
+        .collect();
+    let mut out = Vec::new();
+    dsp::resample::Rational::with_ratio(1, down).process(&mixed, &mut out);
+    out
+}
+
+#[test]
+fn the_busy_24_ghz_band_holds_no_screen_on_the_channels_the_table_watches() {
+    let name = "ism24_busy_2431M_61440k.cs16";
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(name);
+    let Ok(bytes) = std::fs::read(&p) else {
+        eprintln!("skipping: {name} absent, run testdata/fetch.sh to enable");
+        return;
+    };
+    let mut iq = Vec::new();
+    SampleFormat::Cs16.convert(&bytes, &mut iq);
+    drop(bytes);
+    let (rate, centre) = (61.44e6, 2431e6);
+    let mut read = Vec::new();
+    for dial in [2410e6, 2415e6, 2418e6, 2420e6] {
+        for down in [3, 6] {
+            let span = tuned(&iq, rate, dial - centre, down);
+            let mut reader = Reader::new(rate / down as f64);
+            reader.set_dial(dial);
+            let (mut locks, mut pictures) = (0, 0);
+            for block in span.chunks(131_072) {
+                let r = reader.push(block);
+                locks += r.locked as usize;
+                pictures += r.picture.is_some() as usize;
+            }
+            read.push(((dial / 1e6) as u32, down, locks, pictures));
+        }
+    }
+    let locks: usize = read.iter().map(|r| r.2).sum();
+    let pictures: usize = read.iter().map(|r| r.3).sum();
+    assert_eq!(
+        (read.len(), locks, pictures),
+        (8, 0, 0),
+        "spans, locks and pictures, where the envelope alone locked four times and painted \
+         37: {read:?}"
+    );
+}

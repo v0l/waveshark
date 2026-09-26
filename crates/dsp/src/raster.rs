@@ -130,6 +130,48 @@ pub fn find_comb(
     Some(Carrier { offset_hz: offset, over_db: 10.0 * (weakest(at) / median).log10() })
 }
 
+pub fn comb_contrast(
+    iq: &[C32],
+    rate: f64,
+    spacing_hz: f64,
+    teeth: usize,
+    slack: f64,
+) -> Option<f32> {
+    let (power, n) = spectrum(iq)?;
+    let bin_hz = rate / n as f64;
+    let step = spacing_hz / bin_hz;
+    if step < 8.0 || 2.0 * teeth as f64 * step >= n as f64 {
+        return None;
+    }
+    let wrap = |b: i64| -> usize { b.rem_euclid(n as i64) as usize };
+    let gaps: Vec<i64> =
+        [0.25, 0.375, 0.5, 0.625, 0.75].iter().map(|f| (f * step).round() as i64).collect();
+    let reach: Vec<(i64, i64)> = (-(teeth as i64)..=teeth as i64)
+        .map(|t| {
+            let at = (t as f64 * step).round() as i64;
+            let spread = 1 + (t.unsigned_abs() as f64 * step * slack).ceil() as i64;
+            (at, spread)
+        })
+        .collect();
+    let mut best = 0.0f32;
+    for b in 0..n as i64 {
+        let mut weakest = f32::MAX;
+        for (at, spread) in &reach {
+            let c = b + at;
+            let peak =
+                |at: i64| (at - spread..=at + spread).map(|k| power[wrap(k)]).fold(0.0, f32::max);
+            let tooth = peak(c);
+            let floor = gaps.iter().map(|g| peak(c + g)).sum::<f32>() / gaps.len() as f32;
+            weakest = weakest.min(tooth / floor.max(f32::MIN_POSITIVE));
+            if weakest <= best {
+                break;
+            }
+        }
+        best = best.max(weakest);
+    }
+    Some(10.0 * best.max(f32::MIN_POSITIVE).log10())
+}
+
 fn spectrum(iq: &[C32]) -> Option<(Vec<f32>, usize)> {
     let n = iq.len().next_power_of_two() / 2;
     if n < 4096 {
@@ -654,14 +696,17 @@ impl Raster {
     /// `None` where no dark run stands out, which is a screen with no
     /// blanking to find and nothing to leave out.
     fn lit_cells(&self, canvas: &[f32]) -> Option<Vec<f32>> {
-        let cols = dark_run(&profile(canvas, self.width, Axis::Column))?;
-        let rows = dark_run(&profile(canvas, self.width, Axis::Row))?;
+        let blanked = |axis: Axis, len: usize| -> Option<Vec<bool>> {
+            let mut mask = vec![false; len];
+            dark_run(&profile(canvas, self.width, axis))?.into_iter().for_each(|i| mask[i] = true);
+            Some(mask)
+        };
+        let cols = blanked(Axis::Column, self.width)?;
+        let rows = blanked(Axis::Row, self.height)?;
         let lit: Vec<f32> = canvas
             .iter()
             .enumerate()
-            .filter(|(at, _)| {
-                !cols.contains(&(at % self.width)) && !rows.contains(&(at / self.width))
-            })
+            .filter(|(at, _)| !cols[at % self.width] && !rows[at / self.width])
             .map(|(_, v)| *v)
             .collect();
         (lit.len() > canvas.len() / 4).then_some(lit)
@@ -986,6 +1031,45 @@ mod tests {
         let noise: Vec<C32> = (0..1 << 19).map(|_| C32::new(rand() * 4.0, rand() * 4.0)).collect();
         let none = find_carrier(&noise, rate, (-400e3, 400e3)).expect("a strongest bin");
         assert!(none.over_db < 20.0, "noise peaked {:.1} dB over its own median", none.over_db);
+    }
+
+    fn repeating_burst(rate: f64, frame_hz: f64, seconds: f64) -> Vec<C32> {
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let frame = (rate / frame_hz) as usize;
+        let burst: Vec<f32> = (0..frame / 3).map(|_| 2.0 + 4.0 * rand()).collect();
+        (0..(rate * seconds) as usize)
+            .map(|i| {
+                let at = ((i as f64 * frame_hz / rate).fract() * frame as f64) as usize;
+                let a = burst.get(at).copied().unwrap_or(0.0);
+                C32::new(a + rand() * 0.8, rand() * 0.8)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_raster_gathers_at_its_line_rate_and_a_repeating_burst_does_not() {
+        let rate = 12e6;
+        let line_hz = XGA.clock_hz / XGA.htotal as f64;
+        let screen = real(&XGA.emit(rate, 0.05, 0.5, &desktop));
+        let at_line = comb_contrast(&screen, rate, line_hz, 3, 3e-4).expect("a spectrum");
+        let off_line = comb_contrast(&screen, rate, line_hz * 1.37, 3, 3e-4).expect("a spectrum");
+        let burst = repeating_burst(rate, 130.621, 0.05);
+        let bursts = comb_contrast(&burst, rate, 160_402.0, 3, 3e-4).expect("a spectrum");
+        assert!(
+            at_line > 25.0,
+            "an XGA screen gathered {at_line:.1} dB at its line rate, 31.4 measured"
+        );
+        assert!(off_line < 5.0, "and {off_line:.1} dB at another, 1.8 measured");
+        assert!(
+            bursts < 5.0,
+            "a burst repeating at 130.6 Hz gathered {bursts:.1} dB, 3.1 measured"
+        );
     }
 
     #[test]

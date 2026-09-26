@@ -105,6 +105,10 @@ const COMB_TEETH: usize = 3;
 /// off.
 const MIN_COMB_DB: f32 = 15.0;
 
+const MIN_LINE_COMB_DB: f32 = 15.0;
+
+const LINE_SLACK: f64 = 3e-4;
+
 /// How much of the turn measured between a frame and the average is taken
 /// out of the mixing frequency.
 const PHASE_GAIN: f64 = 0.5;
@@ -252,6 +256,7 @@ impl Reader {
         self.paint(iq);
         if let Some(r) = self.raster.as_ref()
             && r.frames() >= self.published + PUBLISH_FRAMES
+            && self.frames_hold_still()
         {
             self.published = r.frames();
             self.sequence += 1;
@@ -394,6 +399,9 @@ impl Reader {
             Some(m) => Some(m),
             None => display::match_mode(frame_hz, periods.lines),
         };
+        if self.forced.is_none() && !self.gathers_at(periods.line_hz(rate)) {
+            return None;
+        }
         Some(Locked {
             periods,
             frame_hz,
@@ -426,6 +434,11 @@ impl Reader {
         )?;
         (found.over_db >= MIN_COMB_DB)
             .then(|| ((self.dial_hz + found.offset_hz) / harmonic, found.offset_hz))
+    }
+
+    fn gathers_at(&self, line_hz: f64) -> bool {
+        raster::comb_contrast(&self.in_order(), self.rate_hz, line_hz, COMB_TEETH, LINE_SLACK)
+            .is_some_and(|db| db >= MIN_LINE_COMB_DB)
     }
 
     /// Where in the span this mode's harmonic should be, as an offset from
@@ -849,6 +862,36 @@ mod tests {
         }
         assert_eq!((pictures, locks), (0, 0), "pictures and locks off three minutes of noise");
         assert_eq!(reader.frames(), 0);
+    }
+
+    fn repeating(rate: f64, frame_hz: f64, seconds: f64) -> Vec<C32> {
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / 16_777_216.0 - 0.5
+        };
+        let frame: Vec<f32> = (0..(rate / frame_hz) as usize / 16).map(|_| rand() + 0.5).collect();
+        (0..(rate * seconds) as usize)
+            .map(|i| {
+                let at = ((i as f64 * frame_hz / rate).fract() * frame.len() as f64) as usize;
+                C32::new(frame[at] + rand() * 0.8, rand() * 0.8)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_burst_repeating_at_130_hz_whose_frames_hold_is_not_a_screen() {
+        let rate = 20e6;
+        let mut reader = Reader::new(rate);
+        reader.set_dial(2415e6);
+        let (pictures, locks, _) = run(&mut reader, &repeating(rate, 130.621, 1.5));
+        assert_eq!(
+            (pictures.len(), locks),
+            (0, 0),
+            "pictures and locks, where the envelope alone locked on it, held 91 of 97 frames and painted 8"
+        );
     }
 
     #[test]
