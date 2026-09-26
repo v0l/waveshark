@@ -11,7 +11,7 @@
 //! whichever node actually produced each input.
 
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use egui_bench::text::{Line, legend};
+use egui_bench::text::Line;
 use egui_bench::theme;
 use pipeline::cost::Cost;
 use pipeline::graph::Topology;
@@ -260,8 +260,28 @@ pub struct Edit {
     /// a stage without repeating the layout arithmetic.
     pub drawn: HashMap<u64, Rect>,
     pub drawn_src: Rect,
+    origin: Pos2,
+    view: Rect,
     /// What the pointer took hold of, if anything.
     drag: Option<Drag>,
+}
+
+pub struct Carried(pub String);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Attach {
+    Nothing,
+    Feeds((u64, usize)),
+    Reads(crate::patch::Source),
+    Splice(crate::patch::Source, (u64, usize)),
+}
+
+#[derive(Clone, Copy)]
+struct Ghost {
+    id: u64,
+    r: Rect,
+    ins: usize,
+    outs: usize,
 }
 
 /// What a drag in progress is doing.
@@ -331,6 +351,8 @@ impl Default for Edit {
             size: HashMap::new(),
             drawn: HashMap::new(),
             drawn_src: Rect::NOTHING,
+            origin: Pos2::ZERO,
+            view: Rect::NOTHING,
             drag: None,
         }
     }
@@ -347,6 +369,39 @@ impl Edit {
     /// Whether anything has been moved by hand.
     pub fn moved(&self) -> bool {
         !self.pos.is_empty()
+    }
+
+    pub fn arrange_keeping(&mut self, keep: impl Fn(u64) -> bool) {
+        self.pos.retain(|k, _| keep(*k));
+        self.size.retain(|k, _| keep(*k));
+        self.drag = None;
+    }
+
+    pub fn free_spot(&self) -> Pos2 {
+        self.free_spot_among(&[])
+    }
+
+    fn free_spot_among(&self, also: &[Rect]) -> Pos2 {
+        let view = if self.view.is_positive() {
+            self.view
+        } else {
+            Rect::from_min_size(self.origin, Vec2::new(BOX_W * 3.0, BOX_H * 6.0))
+        };
+        let start = view.center();
+        let step = BOX_H + GAP / 2.0;
+        let taken = |c: Pos2| {
+            let r = Rect::from_center_size(c, Vec2::new(BOX_W, BOX_H)).expand(GAP / 4.0);
+            self.drawn.values().chain(also).any(|d| d.intersects(r))
+        };
+        let spot = (0..24)
+            .map(|i| {
+                let n = (i as f32 + 1.0) / 2.0;
+                let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+                start + Vec2::new(0.0, dir * n.floor() * step)
+            })
+            .find(|c| !taken(*c))
+            .unwrap_or(start);
+        spot - self.origin.to_vec2()
     }
 }
 
@@ -374,6 +429,8 @@ pub struct Interaction {
     pub wire: Option<(u64, usize)>,
     /// How far the canvas was dragged this frame.
     pub pan: Vec2,
+    pub dropped: Option<(String, Pos2, Attach)>,
+    pub blank: bool,
 }
 
 /// The selected node's settings, as controls.
@@ -391,32 +448,21 @@ pub fn inspector(
     browse: &mut Option<(usize, String)>,
     off: &mut Option<(u64, bool)>,
 ) -> Option<(usize, String, pipeline::param::ParamValue)> {
-    use pipeline::param::{ParamRange, ParamValue};
     if selected == SOURCE {
         source_inspector(ui, topo, off);
         return None;
     }
     let node = topo.nodes.iter().find(|n| n.id.0 == selected)?;
-    let mut out = None;
 
-    ui.label(legend(&node.label));
-    ui.label(egui::RichText::new(&node.kind).font(theme::figure(10.0)).color(theme::LEGEND));
+    Line::new().legend(&node.label).elided(ui);
+    small(ui, &node.kind, theme::LEGEND);
     ui.add_space(6.0);
     for (slot, spec) in &node.inputs {
-        ui.label(
-            egui::RichText::new(format!("in  {}", wire_label(spec, topo.rate_of(*slot))))
-                .font(theme::figure(10.0))
-                .color(theme::LEGEND),
-        );
-        let _ = slot;
+        small(ui, &format!("in  {}", wire_label(spec, topo.rate_of(*slot))), theme::LEGEND);
     }
     if !node.sink {
         for (slot, spec) in &node.outputs {
-            ui.label(
-                egui::RichText::new(format!("out {}", wire_label(spec, topo.rate_of(*slot))))
-                    .font(theme::figure(10.0))
-                    .color(theme::TRACE),
-            );
+            small(ui, &format!("out {}", wire_label(spec, topo.rate_of(*slot))), theme::TRACE);
         }
     }
     if !node.readings.is_empty() {
@@ -427,24 +473,14 @@ pub fn inspector(
     }
     if let Some(text) = cost_label(&node.cost) {
         ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(format!("p95 {text}"))
-                .font(theme::figure(10.0))
-                .color(cost_colour(&node.cost)),
-        );
+        small(ui, &format!("p95 {text}"), cost_colour(&node.cost));
         for (name, c) in &node.phases {
             if let Some(t) = cost_label(c) {
-                ui.label(
-                    egui::RichText::new(format!("  {name}  {t}"))
-                        .font(theme::figure(10.0))
-                        .color(cost_colour(c)),
-                );
+                small(ui, &format!("  {name}  {t}"), cost_colour(c));
             }
         }
     }
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    ui.add_space(12.0);
 
     if let Some(tag) = node.tag {
         let mut on = !node.off;
@@ -459,101 +495,173 @@ pub fn inspector(
     }
 
     if node.params.is_empty() {
-        ui.label(
-            egui::RichText::new("This stage has nothing to set.").size(11.0).color(theme::LEGEND),
-        );
+        Line::new().note("This stage has nothing to set.").show(ui);
         return None;
     }
 
+    let mut out = None;
     for prm in &node.params {
-        let name = if prm.label.is_empty() { prm.name.clone() } else { prm.label.clone() };
-        ui.label(legend(&name));
-        match (&prm.value, &prm.range) {
-            (ParamValue::Float(v), ParamRange::Float { range, log }) => {
-                let mut x = *v;
-                let mut w = egui::Slider::new(&mut x, range.clone()).suffix(unit(prm));
-                if *log {
-                    w = w.logarithmic(true);
-                }
-                if ui.add(w).changed() {
-                    out = Some((node.id.0, prm.name.clone(), ParamValue::Float(x)));
-                }
-            }
-            (ParamValue::Int(v), ParamRange::Int { range }) => {
-                let mut x = *v;
-                if ui.add(egui::Slider::new(&mut x, range.clone()).suffix(unit(prm))).changed() {
-                    out = Some((node.id.0, prm.name.clone(), ParamValue::Int(x)));
-                }
-            }
-            (ParamValue::Bool(v), _) => {
-                let mut x = *v;
-                if ui.checkbox(&mut x, "").changed() {
-                    out = Some((node.id.0, prm.name.clone(), ParamValue::Bool(x)));
-                }
-            }
-            (ParamValue::Choice(i), ParamRange::Choices(choices)) => {
-                let mut pick = *i;
-                egui::ComboBox::from_id_salt((node.id.0, &prm.name))
-                    .selected_text(choices.get(pick).cloned().unwrap_or_default())
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for (k, c) in choices.iter().enumerate() {
-                            ui.selectable_value(&mut pick, k, c);
-                        }
-                    });
-                if pick != *i {
-                    out = Some((node.id.0, prm.name.clone(), ParamValue::Choice(pick)));
-                }
-            }
-            (ParamValue::Text(s), _) => {
-                let mut t = s.clone();
-                // A path gets a dialog beside the box. Typing one in still
-                // works, and is the only way to reach a file on a machine
-                // with no file manager behind the dialog.
-                let file = prm.name == "path";
-                ui.horizontal(|ui| {
-                    let w = (ui.available_width() - if file { 30.0 } else { 0.0 }).max(40.0);
-                    let r = egui_bench::form::clipboard_menu(
-                        ui.add(egui::TextEdit::singleline(&mut t).desired_width(w)),
-                    );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        out = Some((node.id.0, prm.name.clone(), ParamValue::Text(t)));
-                    }
-                    if file && ui.button("…").on_hover_text("Choose a file").clicked() {
-                        *browse = Some((node.id.0, prm.name.clone()));
-                    }
-                });
-            }
-            // A value whose range says something else about it: show the
-            // number rather than a control that would write the wrong type.
-            (v, _) => {
-                ui.label(egui::RichText::new(format!("{v:?}")).size(11.0).color(theme::VALUE));
-            }
+        match param_control(ui, node.id.0 as u64, prm, &prm.value, true) {
+            Control::Set(v, _) => out = Some((node.id.0, prm.name.clone(), v)),
+            Control::Browse => *browse = Some((node.id.0, prm.name.clone())),
+            Control::Nothing => {}
         }
-        if prm.affects_rate {
-            ui.label(
-                egui::RichText::new("changing this rebuilds the chain")
-                    .size(10.0)
-                    .color(theme::LEGEND),
-            );
-        }
-        ui.add_space(8.0);
     }
     out
 }
 
+pub fn waiting_inspector(
+    ui: &mut egui::Ui,
+    stage: &crate::patch::Stage,
+    waiting: Option<&crate::chain::Waiting>,
+) -> Option<(String, pipeline::param::ParamValue)> {
+    Line::new().legend(&stage.kind).elided(ui);
+    small(ui, "not connected", theme::LEGEND);
+    ui.add_space(6.0);
+    let Some(w) = waiting else {
+        Line::new().note("Its settings show once the receiver has built it.").wrapped(ui);
+        return None;
+    };
+    small(ui, &format!("{} in  {} out", w.inputs, w.outputs), theme::LEGEND);
+    ui.add_space(12.0);
+    if w.params.is_empty() {
+        Line::new().note("This stage has nothing to set.").show(ui);
+        return None;
+    }
+    let mut out = None;
+    for prm in &w.params {
+        let shown = stage.settings.get(&prm.name).unwrap_or(&prm.value);
+        if let Control::Set(v, true) = param_control(ui, stage.id, prm, shown, false) {
+            out = Some((prm.name.clone(), v));
+        }
+    }
+    out
+}
+
+fn small(ui: &mut egui::Ui, text: &str, colour: Color32) {
+    Line::new().value(text).size(10.0).tint(colour).elided(ui);
+}
+
+enum Control {
+    Nothing,
+    Set(pipeline::param::ParamValue, bool),
+    Browse,
+}
+
+fn param_control(
+    ui: &mut egui::Ui,
+    salt: u64,
+    prm: &pipeline::param::Param,
+    shown: &pipeline::param::ParamValue,
+    can_browse: bool,
+) -> Control {
+    use pipeline::param::{ParamRange, ParamValue};
+    let name = if prm.label.is_empty() { prm.name.clone() } else { prm.label.clone() };
+    let key = ui.id().with(("draft", salt, &prm.name));
+    let mut out = Control::Nothing;
+    let rebuilds = "Changing this rebuilds the chain.";
+    if !matches!(shown, ParamValue::Bool(_)) {
+        Line::new().legend(&name).elided(ui);
+    }
+    match (shown, &prm.range) {
+        (ParamValue::Float(v), ParamRange::Float { range, log }) => {
+            let mut x = ui.data(|d| d.get_temp::<f64>(key)).unwrap_or(*v);
+            let r = ui
+                .add(egui::Slider::new(&mut x, range.clone()).suffix(unit(prm)).logarithmic(*log));
+            out = slid(ui, key, &r, x, ParamValue::Float);
+        }
+        (ParamValue::Int(v), ParamRange::Int { range }) => {
+            let mut x = ui.data(|d| d.get_temp::<i64>(key)).unwrap_or(*v);
+            let r = ui.add(egui::Slider::new(&mut x, range.clone()).suffix(unit(prm)));
+            out = slid(ui, key, &r, x, ParamValue::Int);
+        }
+        (ParamValue::Bool(v), _) => {
+            let mut x = *v;
+            let help = if prm.affects_rate { rebuilds } else { name.as_str() };
+            if egui_bench::form::switch(ui, "", &mut x, &name, help) {
+                out = Control::Set(ParamValue::Bool(x), true);
+            }
+        }
+        (ParamValue::Choice(i), ParamRange::Choices(choices)) => {
+            let mut pick = *i;
+            let options = choices.iter().cloned().enumerate();
+            if egui_bench::form::choice(ui, (key, "choice"), &mut pick, options) {
+                out = Control::Set(ParamValue::Choice(pick), true);
+            }
+        }
+        (ParamValue::Text(s), _) => {
+            let mut t = ui.data(|d| d.get_temp::<String>(key)).unwrap_or_else(|| s.clone());
+            // A path gets a dialog beside the box. Typing one in still
+            // works, and is the only way to reach a file on a machine
+            // with no file manager behind the dialog.
+            let file = can_browse && prm.name == "path";
+            let mut browse = false;
+            let r = ui
+                .horizontal(|ui| {
+                    egui_bench::form::field_then(
+                        ui,
+                        &mut t,
+                        "",
+                        if file { 30.0 } else { 0.0 },
+                        |ui| {
+                            if file && ui.button("…").on_hover_text("Choose a file").clicked() {
+                                browse = true;
+                            }
+                        },
+                    )
+                })
+                .inner;
+            if r.has_focus() {
+                ui.data_mut(|d| d.insert_temp(key, t.clone()));
+            } else {
+                ui.data_mut(|d| d.remove::<String>(key));
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                out = Control::Set(ParamValue::Text(t), true);
+            } else if browse {
+                out = Control::Browse;
+            }
+        }
+        // A value whose range says something else about it: show the
+        // number rather than a control that would write the wrong type.
+        (v, _) => {
+            Line::new().value(format!("{v:?}")).size(11.0).show(ui);
+        }
+    }
+    if prm.affects_rate && !matches!(shown, ParamValue::Bool(_)) {
+        egui_bench::text::hint(ui, "changing this rebuilds the chain");
+    }
+    ui.add_space(8.0);
+    out
+}
+
+fn slid<T: Clone + Send + Sync + 'static>(
+    ui: &egui::Ui,
+    key: egui::Id,
+    r: &egui::Response,
+    x: T,
+    wrap: fn(T) -> pipeline::param::ParamValue,
+) -> Control {
+    if r.dragged() {
+        ui.data_mut(|d| d.insert_temp(key, x.clone()));
+    } else {
+        ui.data_mut(|d| d.remove::<T>(key));
+    }
+    if r.drag_stopped() {
+        return Control::Set(wrap(x), true);
+    }
+    if r.changed() {
+        return Control::Set(wrap(x), !r.dragged());
+    }
+    Control::Nothing
+}
+
 fn source_inspector(ui: &mut egui::Ui, topo: &Topology, off: &mut Option<(u64, bool)>) {
-    ui.label(legend("Source"));
-    ui.label(egui::RichText::new("device").font(theme::figure(10.0)).color(theme::LEGEND));
+    Line::new().legend("Source").show(ui);
+    small(ui, "device", theme::LEGEND);
     ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(format!("out {}", wire_label(&topo.input, topo.rate_of(0))))
-            .font(theme::figure(10.0))
-            .color(theme::TRACE),
-    );
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
+    small(ui, &format!("out {}", wire_label(&topo.input, topo.rate_of(0))), theme::TRACE);
+    ui.add_space(12.0);
     let mut on = !topo.input_off;
     let help = "Off stops every receive stage: the spectrum, the channels and the decoders. \
                 The transmitter keeps running. Kept across restarts.";
@@ -575,8 +683,10 @@ pub fn draw(
     edit: &mut Edit,
     patch: Option<&crate::patch::Patch>,
     wire: Option<(u64, usize)>,
+    picked_ghost: Option<u64>,
     elsewhere: &[u64],
     scopes: &[(usize, nodes::ScopeFrame)],
+    waiting: &[crate::chain::Waiting],
 ) -> Interaction {
     let places = layout(topo);
     // Depth runs left to right and a branch takes a lane of its own down the
@@ -597,6 +707,8 @@ pub fn draw(
     );
     let p = ui.painter_at(rect);
     let mut act = Interaction { selected, ..Default::default() };
+    edit.origin = rect.min;
+    edit.view = ui.clip_rect().intersect(rect);
     let pointer = resp.hover_pos();
 
     p.text(
@@ -669,7 +781,7 @@ pub fn draw(
     // Stages that have been added but are not running: a stage whose inputs
     // are not all fed is left out of the built graph, so without these the
     // one thing you cannot do is wire up a stage you just added.
-    let mut ghosts: Vec<(u64, Rect)> = Vec::new();
+    let mut ghosts: Vec<Ghost> = Vec::new();
     if edit.manual {
         if let Some(patch) = patch {
             // Not running here and not running in the other half either.
@@ -677,22 +789,26 @@ pub fn draw(
             // is not a stage waiting to be wired just because the transmit
             // half is showing: every one of them appeared as a ghost under
             // the source the moment manual mode was entered on that view.
-            for (n, st) in patch
-                .stages()
-                .iter()
-                .filter(|s| {
-                    !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id)
-                })
-                .enumerate()
-            {
-                // Under the source, out of the way of the chain that is
-                // running, until it is dragged somewhere better.
-                let seed = Pos2::new(12.0 + box_w / 2.0, height - 40.0 - n as f32 * (BOX_H + GAP));
-                let at = *edit.pos.entry(st.id).or_insert(seed);
-                ghosts.push((
-                    st.id,
-                    Rect::from_center_size(rect.min + at.to_vec2(), Vec2::new(box_w, BOX_H)),
-                ));
+            for st in patch.stages().iter().filter(|s| {
+                !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id)
+            }) {
+                let at = match edit.pos.get(&st.id) {
+                    Some(at) => *at,
+                    None => {
+                        let placed: Vec<Rect> =
+                            rects.iter().copied().chain(ghosts.iter().map(|g| g.r)).collect();
+                        let seed = edit.free_spot_among(&placed);
+                        edit.pos.insert(st.id, seed);
+                        seed
+                    }
+                };
+                let desc = waiting.iter().find(|w| w.id == st.id);
+                ghosts.push(Ghost {
+                    id: st.id,
+                    r: Rect::from_center_size(rect.min + at.to_vec2(), Vec2::new(box_w, BOX_H)),
+                    ins: desc.map_or(1, |w| w.inputs),
+                    outs: desc.map_or(1, |w| w.outputs),
+                });
             }
         }
     }
@@ -702,7 +818,7 @@ pub fn draw(
         edit.pos.retain(|k, _| {
             *k == crate::patch::builtin::SPAN
                 || node_keys.contains(k)
-                || ghosts.iter().any(|(id, _)| id == k)
+                || ghosts.iter().any(|g| g.id == *k)
         });
         let press = ui.input(|i| i.pointer.press_origin());
         interact(
@@ -720,9 +836,9 @@ pub fn draw(
                 rects[i] = Rect::from_center_size(rect.min + p.to_vec2(), rects[i].size());
             }
         }
-        for (id, r) in ghosts.iter_mut() {
-            if let Some(p) = edit.pos.get(id) {
-                *r = Rect::from_center_size(rect.min + p.to_vec2(), r.size());
+        for g in ghosts.iter_mut() {
+            if let Some(p) = edit.pos.get(&g.id) {
+                g.r = Rect::from_center_size(rect.min + p.to_vec2(), g.r.size());
             }
         }
     }
@@ -733,8 +849,8 @@ pub fn draw(
     for i in 0..topo.nodes.len() {
         edit.drawn.insert(node_keys[i], rects[i]);
     }
-    for (id, r) in &ghosts {
-        edit.drawn.insert(*id, *r);
+    for g in &ghosts {
+        edit.drawn.insert(g.id, g.r);
     }
 
     for (i, node) in topo.nodes.iter().enumerate() {
@@ -780,10 +896,10 @@ pub fn draw(
     // because it does not contain them, and they are most of what the
     // operator is looking at while wiring something up.
     if let Some(patch) = patch.filter(|_| edit.manual) {
-        for (id, r) in &ghosts {
-            for l in patch.links().iter().filter(|l| l.to.0 == *id) {
+        for g in &ghosts {
+            for l in patch.links().iter().filter(|l| l.to.0 == g.id) {
                 let from = wire_start(topo, &rects, &ghosts, src, l.from);
-                loose(&p, from, port(*r, l.to.1, 1, Side::In));
+                loose(&p, from, port(g.r, l.to.1, g.ins.max(1), Side::In));
             }
         }
     }
@@ -796,9 +912,7 @@ pub fn draw(
             (Some(from), _) => wire_start(topo, &rects, &ghosts, src, from),
             // Pulled off an input that had nothing on it: the wire hangs from
             // the port it is looking for a source for.
-            (None, Some((tag, k))) => {
-                edit.drawn.get(&tag).map(|r| port(*r, k, 1, Side::In)).unwrap_or(at)
-            }
+            (None, Some((tag, k))) => in_port_of(topo, &rects, &ghosts, tag, k).unwrap_or(at),
             (None, None) => at,
         };
         loose(&p, anchor, at);
@@ -828,9 +942,17 @@ pub fn draw(
         }
     }
 
-    for (id, r) in &ghosts {
-        let kind = patch.and_then(|p| p.stage(*id)).map(|s| s.kind.clone()).unwrap_or_default();
-        p.rect(*r, 3.0, theme::WELL, Stroke::new(1.0, theme::READOUT), StrokeKind::Inside);
+    for g in &ghosts {
+        let r = &g.r;
+        let kind = patch.and_then(|p| p.stage(g.id)).map(|s| s.kind.clone()).unwrap_or_default();
+        let picked = picked_ghost == Some(g.id);
+        p.rect(
+            *r,
+            3.0,
+            theme::WELL,
+            Stroke::new(if picked { 2.0 } else { 1.0 }, theme::READOUT),
+            StrokeKind::Inside,
+        );
         p.text(
             Pos2::new(r.center().x, r.top() + 9.0),
             egui::Align2::CENTER_TOP,
@@ -845,10 +967,14 @@ pub fn draw(
             theme::figure(10.0),
             theme::LEGEND,
         );
-        knob(&p, port(*r, 0, 1, Side::In), true, pointer);
-        knob(&p, port(*r, 0, 1, Side::Out), true, pointer);
+        for k in 0..g.ins {
+            knob(&p, port(*r, k, g.ins, Side::In), true, pointer);
+        }
+        for k in 0..g.outs {
+            knob(&p, port(*r, k, g.outs, Side::Out), true, pointer);
+        }
         if pointer.is_some_and(|q| r.contains(q)) && resp.clicked() {
-            act.picked = Some(*id);
+            act.picked = Some(g.id);
         }
     }
 
@@ -982,8 +1108,104 @@ pub fn draw(
         act.selected = if selected == Some(SOURCE) { None } else { Some(SOURCE) };
     } else if resp.clicked() && !rects.iter().any(|r| pointer.is_some_and(|q| r.contains(q))) {
         act.selected = None;
+        act.blank = !ghosts.iter().any(|g| pointer.is_some_and(|q| g.r.contains(q)));
+    }
+
+    let dropping = pointer.or_else(|| ui.ctx().pointer_latest_pos());
+    if let (Some(carried), Some(q)) = (resp.dnd_hover_payload::<Carried>(), dropping) {
+        let onto = attach_at(topo, &rects, &ghosts, src, patch, q);
+        let target = match onto {
+            Attach::Feeds((tag, _)) | Attach::Splice(_, (tag, _)) => edit.drawn.get(&tag),
+            Attach::Reads(crate::patch::Source::Stage(tag, _)) => edit.drawn.get(&tag),
+            Attach::Reads(crate::patch::Source::Span) => Some(&src),
+            Attach::Nothing => None,
+        };
+        if let Some(r) = target {
+            target_ring(&p, *r);
+        }
+        let r = Rect::from_center_size(q, Vec2::new(box_w, BOX_H));
+        p.rect_stroke(r, 3.0, Stroke::new(1.0, theme::READOUT), StrokeKind::Inside);
+        p.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            &carried.0,
+            FontId::new(12.0, FontFamily::Proportional),
+            theme::READOUT,
+        );
+        if let Some(carried) = resp.dnd_release_payload::<Carried>() {
+            act.dropped = Some((carried.0.clone(), q - rect.min.to_vec2(), onto));
+        }
     }
     act
+}
+
+fn attach_at(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[Ghost],
+    src: Rect,
+    patch: Option<&crate::patch::Patch>,
+    q: Pos2,
+) -> Attach {
+    if let Some(to) = input_at(topo, rects, ghosts, q) {
+        return Attach::Feeds(to);
+    }
+    if let Some(from) = output_at(topo, rects, ghosts, src, q) {
+        return Attach::Reads(from);
+    }
+    match wire_at(topo, rects, src, patch, q) {
+        Some((from, to)) => Attach::Splice(from, to),
+        None => Attach::Nothing,
+    }
+}
+
+fn wire_at(
+    topo: &Topology,
+    rects: &[Rect],
+    src: Rect,
+    patch: Option<&crate::patch::Patch>,
+    q: Pos2,
+) -> Option<(crate::patch::Source, (u64, usize))> {
+    use crate::patch::Source;
+    for (i, node) in topo.nodes.iter().enumerate() {
+        let Some(tag) = node.tag else { continue };
+        for (k, (slot, _)) in node.inputs.iter().enumerate() {
+            let to = port(rects[i], k, node.inputs.len(), Side::In);
+            let from = match topo.producer(*slot) {
+                Some(prod) => match topo.nodes.iter().position(|x| x.id == prod.id) {
+                    Some(j) => {
+                        let out = prod.outputs.iter().position(|(s, _)| s == slot).unwrap_or(0);
+                        port(rects[j], out, prod.outputs.len(), Side::Out)
+                    }
+                    None => port(src, 0, 1, Side::Out),
+                },
+                None => port(src, 0, 1, Side::Out),
+            };
+            if !near_wire(from, to, q) {
+                continue;
+            }
+            let source = match patch.and_then(|p| p.feeding((tag, k))) {
+                Some(s) => s,
+                None if crate::patch::builtin::is(tag) => Source::Span,
+                None => continue,
+            };
+            return Some((source, (tag, k)));
+        }
+    }
+    None
+}
+
+fn in_port_of(
+    topo: &Topology,
+    rects: &[Rect],
+    ghosts: &[Ghost],
+    tag: u64,
+    k: usize,
+) -> Option<Pos2> {
+    if let Some(i) = topo.nodes.iter().position(|n| n.tag == Some(tag)) {
+        return Some(port(rects[i], k, topo.nodes[i].inputs.len().max(1), Side::In));
+    }
+    ghosts.iter().find(|g| g.id == tag).map(|g| port(g.r, k, g.ins.max(1), Side::In))
 }
 
 /// How near a port the pointer has to be for the drag to be about that port
@@ -1003,7 +1225,7 @@ fn interact(
     topo: &Topology,
     node_keys: &[u64],
     rects: &[Rect],
-    ghosts: &[(u64, Rect)],
+    ghosts: &[Ghost],
     src: Rect,
     origin: Pos2,
     edit: &mut Edit,
@@ -1055,8 +1277,8 @@ fn interact(
                 };
                 return Drag::Wire { from, to: Some((tag, port)), at: q };
             }
-            if let Some((id, r)) = ghosts.iter().find(|(_, r)| r.contains(q)) {
-                return Drag::Node(*id, r.center() - q);
+            if let Some(g) = ghosts.iter().find(|g| g.r.contains(q)) {
+                return Drag::Node(g.id, g.r.center() - q);
             }
             if src.contains(q) {
                 return Drag::Node(crate::patch::builtin::SPAN, src.center() - q);
@@ -1157,12 +1379,7 @@ fn knob(p: &egui::Painter, at: Pos2, live: bool, pointer: Option<Pos2>) {
 /// Only a stage the operator drew: the head of the chain, the spectrum and
 /// the listening channels are the receiver's own wiring, and a wire dropped
 /// on one of them would describe a graph the patch cannot express.
-fn input_at(
-    topo: &Topology,
-    rects: &[Rect],
-    ghosts: &[(u64, Rect)],
-    q: Pos2,
-) -> Option<(u64, usize)> {
+fn input_at(topo: &Topology, rects: &[Rect], ghosts: &[Ghost], q: Pos2) -> Option<(u64, usize)> {
     for (i, node) in topo.nodes.iter().enumerate() {
         let Some(tag) = node.tag else { continue };
         let n = node.inputs.len().max(1);
@@ -1172,7 +1389,9 @@ fn input_at(
             }
         }
     }
-    ghosts.iter().find(|(_, r)| near(port(*r, 0, 1, Side::In), q)).map(|(id, _)| (*id, 0))
+    ghosts.iter().find_map(|g| {
+        (0..g.ins).find(|k| near(port(g.r, *k, g.ins, Side::In), q)).map(|k| (g.id, k))
+    })
 }
 
 /// The output port under a point, as something a wire can start at or land
@@ -1180,7 +1399,7 @@ fn input_at(
 fn output_at(
     topo: &Topology,
     rects: &[Rect],
-    ghosts: &[(u64, Rect)],
+    ghosts: &[Ghost],
     src: Rect,
     q: Pos2,
 ) -> Option<crate::patch::Source> {
@@ -1199,17 +1418,18 @@ fn output_at(
             }
         }
     }
-    ghosts
-        .iter()
-        .find(|(_, r)| near(port(*r, 0, 1, Side::Out), q))
-        .map(|(id, _)| Source::Stage(*id, 0))
+    ghosts.iter().find_map(|g| {
+        (0..g.outs)
+            .find(|k| near(port(g.r, *k, g.outs, Side::Out), q))
+            .map(|k| Source::Stage(g.id, k))
+    })
 }
 
 /// The stage whose box a point is inside, as something a wire can read.
 fn body_output(
     topo: &Topology,
     rects: &[Rect],
-    ghosts: &[(u64, Rect)],
+    ghosts: &[Ghost],
     src: Rect,
     q: Pos2,
 ) -> Option<crate::patch::Source> {
@@ -1223,17 +1443,12 @@ fn body_output(
             return Some(Source::Stage(tag, 0));
         }
     }
-    ghosts.iter().find(|(_, r)| r.contains(q)).map(|(id, _)| Source::Stage(*id, 0))
+    ghosts.iter().find(|g| g.outs > 0 && g.r.contains(q)).map(|g| Source::Stage(g.id, 0))
 }
 
 /// The operator's stage whose box a point is inside, and the input port
 /// nearest to where the wire was let go.
-fn body_input(
-    topo: &Topology,
-    rects: &[Rect],
-    ghosts: &[(u64, Rect)],
-    q: Pos2,
-) -> Option<(u64, usize)> {
+fn body_input(topo: &Topology, rects: &[Rect], ghosts: &[Ghost], q: Pos2) -> Option<(u64, usize)> {
     for (i, node) in topo.nodes.iter().enumerate() {
         let Some(tag) = node.tag else { continue };
         if rects[i].contains(q) {
@@ -1247,14 +1462,21 @@ fn body_input(
             return Some((tag, k));
         }
     }
-    ghosts.iter().find(|(_, r)| r.contains(q)).map(|(id, _)| (*id, 0))
+    let g = ghosts.iter().find(|g| g.ins > 0 && g.r.contains(q))?;
+    let k = (0..g.ins)
+        .min_by(|a, b| {
+            let d = |k: &usize| port(g.r, *k, g.ins, Side::In).distance(q);
+            d(a).total_cmp(&d(b))
+        })
+        .unwrap_or(0);
+    Some((g.id, k))
 }
 
 /// Where a wire being drawn starts on screen.
 fn wire_start(
     topo: &Topology,
     rects: &[Rect],
-    ghosts: &[(u64, Rect)],
+    ghosts: &[Ghost],
     src: Rect,
     from: crate::patch::Source,
 ) -> Pos2 {
@@ -1272,8 +1494,8 @@ fn wire_start(
     }
     ghosts
         .iter()
-        .find(|(id, _)| *id == tag)
-        .map(|(_, r)| port(*r, 0, 1, Side::Out))
+        .find(|g| g.id == tag)
+        .map(|g| port(g.r, k, g.outs.max(1), Side::Out))
         .unwrap_or(src.center_bottom())
 }
 
@@ -1728,6 +1950,7 @@ mod tests {
         topo: Topology,
         edit: Edit,
         patch: crate::patch::Patch,
+        waiting: Vec<crate::chain::Waiting>,
         at: Pos2,
     }
 
@@ -1740,6 +1963,7 @@ mod tests {
                 topo,
                 edit: Edit { manual: true, ..Default::default() },
                 patch,
+                waiting: Vec::new(),
                 at: Pos2::ZERO,
             }
         }
@@ -1754,10 +1978,12 @@ mod tests {
             let mut act = Interaction::default();
             let topo = self.topo.clone();
             let patch = self.patch.clone();
+            let waiting = self.waiting.clone();
             let edit = &mut self.edit;
             let out = &mut act;
             let _ = self.ctx.run_ui(input, |ui| {
-                *out = draw(ui, &topo, 0.0, None, edit, Some(&patch), None, &[], &[]);
+                *out =
+                    draw(ui, &topo, 0.0, None, edit, Some(&patch), None, None, &[], &[], &waiting);
             });
             act
         }
@@ -1804,6 +2030,13 @@ mod tests {
 
         fn source_port(&self) -> Pos2 {
             port(self.edit.drawn_src, 0, 1, Side::Out)
+        }
+
+        fn drop_carried(&mut self, kind: &str, at: Pos2) -> Interaction {
+            self.move_to(at);
+            egui::DragAndDrop::set_payload(&self.ctx, Carried(kind.into()));
+            self.move_to(at);
+            self.release(at)
         }
     }
 
@@ -2024,7 +2257,7 @@ mod tests {
         crate::ui::install(&ctx);
         let frame = |edit: &mut Edit| {
             let _ = ctx.run_ui(Default::default(), |ui| {
-                draw(ui, &topo, 0.0, None, edit, None, None, &[], &[]);
+                draw(ui, &topo, 0.0, None, edit, None, None, None, &[], &[], &[]);
             });
         };
         frame(&mut edit);
@@ -2062,5 +2295,108 @@ mod tests {
         t.nodes[2].inner = Vec::new();
         let without = lane_height(&t, &places, lane);
         assert!(with > without, "a bank's channel chain has to fit somewhere");
+    }
+
+    #[test]
+    fn a_stage_dropped_from_the_palette_lands_where_it_was_let_go() {
+        let (topo, patch, _) = with_patch_stage();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let empty = Pos2::new(
+            h.edit.drawn_src.center().x,
+            h.edit.drawn.values().fold(0.0f32, |a, r| a.max(r.bottom())) + 60.0,
+        );
+        let act = h.drop_carried("mixer", empty);
+        assert_eq!(
+            act.dropped,
+            Some(("mixer".into(), empty - h.edit.origin.to_vec2(), Attach::Nothing))
+        );
+    }
+
+    #[test]
+    fn a_stage_dropped_on_an_input_feeds_it_and_on_an_output_reads_it() {
+        use crate::patch::Source;
+        let (topo, patch, id) = with_patch_stage();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let at = h.in_port(id);
+        let act = h.drop_carried("mixer", at);
+        assert_eq!(act.dropped.map(|d| d.2), Some(Attach::Feeds((id, 0))));
+        let at = h.out_port(id);
+        let act = h.drop_carried("mixer", at);
+        assert_eq!(act.dropped.map(|d| d.2), Some(Attach::Reads(Source::Stage(id, 0))));
+        let at = h.source_port();
+        let act = h.drop_carried("mixer", at);
+        assert_eq!(act.dropped.map(|d| d.2), Some(Attach::Reads(Source::Span)));
+    }
+
+    #[test]
+    fn a_stage_dropped_on_a_wire_is_spliced_into_it() {
+        use crate::patch::Source;
+        let (topo, mut patch, _, sink) = with_two_stages();
+        patch.connect(Source::Span, (sink, 0));
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        let from = h.out_port(keys(&h.topo)[0]);
+        let to = h.in_port(sink);
+        let middle = from + (to - from) / 2.0;
+        let act = h.drop_carried("mixer", middle);
+        assert_eq!(act.dropped.map(|d| d.2), Some(Attach::Splice(Source::Span, (sink, 0))));
+    }
+
+    #[test]
+    fn a_waiting_stage_offers_the_ports_the_receiver_built_it_with() {
+        use crate::patch::Source;
+        let (topo, mut patch, _) = with_patch_stage();
+        let rds = patch.add("rds_tx");
+        let feed = patch.add("feed");
+        let mut h = Harness::new(topo, patch);
+        h.waiting = vec![
+            crate::chain::Waiting { id: rds, inputs: 2, outputs: 1, params: Vec::new() },
+            crate::chain::Waiting { id: feed, inputs: 0, outputs: 1, params: Vec::new() },
+        ];
+        h.frame(vec![]);
+        let second = port(h.edit.drawn[&rds], 1, 2, Side::In);
+        let src = h.source_port();
+        h.press(src);
+        h.move_to(src + Vec2::new(0.0, 20.0));
+        h.move_to(second);
+        let act = h.release(second);
+        assert_eq!(act.link, Some((Source::Span, rds, 1)), "the second input of two");
+
+        let r = h.edit.drawn[&feed];
+        let act = h.drop_carried("mixer", port(r, 0, 1, Side::In));
+        assert_eq!(
+            act.dropped.map(|d| d.2),
+            Some(Attach::Nothing),
+            "a stage with no inputs has no input port to land on"
+        );
+    }
+
+    #[test]
+    fn stages_waiting_to_be_wired_are_placed_in_view_and_clear_of_each_other() {
+        let (topo, mut patch, _) = with_patch_stage();
+        let added: Vec<u64> = (0..3).map(|_| patch.add("mixer")).collect();
+        let mut h = Harness::new(topo, patch);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        for id in &added {
+            let r = h.edit.drawn[id];
+            assert!(h.edit.view.contains(r.center()), "stage {id} at {r:?} is out of view");
+            let overlaps = h.edit.drawn.iter().filter(|(k, o)| *k != id && o.intersects(r)).count();
+            assert_eq!(overlaps, 0, "stage {id} is drawn on top of another");
+        }
+    }
+
+    #[test]
+    fn locking_keeps_where_the_operators_stages_were_put() {
+        let mut edit = Edit::default();
+        let mine = 7;
+        let receivers = crate::patch::builtin::SPAN;
+        edit.pos.insert(mine, Pos2::new(40.0, 50.0));
+        edit.pos.insert(receivers, Pos2::new(10.0, 10.0));
+        edit.arrange_keeping(|k| k == mine);
+        assert_eq!(edit.pos.len(), 1);
+        assert_eq!(edit.pos[&mine], Pos2::new(40.0, 50.0));
     }
 }

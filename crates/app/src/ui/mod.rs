@@ -1464,6 +1464,7 @@ impl App {
         // away between drains, and the history visibly changed contrast for as
         // long as the drag lasted.
         self.chain.topo = radio.status.chain();
+        self.chain.waiting = radio.status.waiting();
         self.chain.latency = radio.status.chain_latency();
         self.chain.scopes = radio.status.scopes();
         // An edit that will not build is refused and the last one that did

@@ -289,6 +289,7 @@ pub struct Receiver {
     patch_spectra: Vec<(u64, NodeId)>,
     /// Channels that could not be built, for the status line.
     pub refused: Option<String>,
+    pub waiting: Vec<Waiting>,
     /// What was said, which outlives every graph that heard it. Held here
     /// and lent to the transcriber on each rebuild: the node is a stage on
     /// the audio bus, and the bus is rebuilt whenever a channel comes or
@@ -752,6 +753,7 @@ impl Receiver {
             requests: Vec::new(),
             patch_spectra: Vec::new(),
             refused: None,
+            waiting: Vec::new(),
             transcript: Default::default(),
             homeassistant: nodes::HomeAssistantFeed::running(),
         };
@@ -1012,7 +1014,7 @@ impl Receiver {
             &mut sinks,
             false,
         )
-        .and_then(|(.., out)| {
+        .and_then(|(_, _, _, out, _)| {
             left_out = out;
             b.build()
         });
@@ -1307,7 +1309,7 @@ impl Receiver {
         // `self.patch` is still the one the pooled nodes were built from,
         // which is what says whether a stage that kept its id still asks for
         // the same kind of node.
-        let (patch_packets, patch_ids, reused, left_out) = match add_patch(
+        let (patch_packets, patch_ids, reused, left_out, waiting) = match add_patch(
             &mut b,
             &mut pool,
             &self.patch,
@@ -1320,7 +1322,7 @@ impl Receiver {
             Ok(v) => v,
             Err(e) => {
                 refused = Some(format!("the patch cannot be built: {e}"));
-                (Vec::new(), HashMap::new(), Vec::new(), Vec::new())
+                (Vec::new(), HashMap::new(), Vec::new(), Vec::new(), Vec::new())
             }
         };
         retire(std::mem::take(&mut pool));
@@ -1606,6 +1608,7 @@ impl Receiver {
         self.sources = sources;
         self.chans = chans;
         self.refused = refused;
+        self.waiting = waiting;
         Ok(())
     }
 
@@ -4821,7 +4824,15 @@ fn describe(r: &pipeline::Request) -> String {
 
 /// What building a patch produced: the stages that put packets on the bus,
 /// where every stage ended up, and which of them kept the node they had.
-type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>, Vec<String>);
+type Built = (Vec<NodeId>, HashMap<u64, NodeId>, Vec<u64>, Vec<String>, Vec<Waiting>);
+
+#[derive(Clone, Debug)]
+pub struct Waiting {
+    pub id: u64,
+    pub inputs: usize,
+    pub outputs: usize,
+    pub params: Vec<pipeline::param::Param>,
+}
 
 /// The same registry, built once, for the questions a patch answers about a
 /// stage before any node of it exists.
@@ -4985,6 +4996,7 @@ fn add_patch(
         let reusable = was.stage(st.id).is_some_and(|s| s.kind == st.kind)
             && pool.get(&st.id).is_some_and(|p| p.node.survives_rebuild(retuned, &st.settings));
         let pooled = if reusable { pool.remove(&st.id) } else { None };
+        let fresh = pooled.is_none();
         let mut node = match pooled {
             Some(p) => {
                 reused.push(st.id);
@@ -5062,7 +5074,7 @@ fn add_patch(
         // still followed the old dial put a whole band in the wrong place.
         // Settings a node cannot take as a parameter, such as a filter's
         // designed passband, are refused here and belong to the id instead.
-        if crate::patch::Patch::is_derived(st.id) {
+        if crate::patch::Patch::is_derived(st.id) || fresh {
             for (name, value) in &st.settings {
                 let _ = node.set_param(name, value.clone());
             }
@@ -5101,6 +5113,16 @@ fn add_patch(
         live.retain(|id| !drop.contains(id));
     }
 
+    let waiting = made
+        .iter()
+        .filter(|(id, ..)| !live.contains(id))
+        .map(|(id, _, n)| Waiting {
+            id: *id,
+            inputs: n.num_inputs(),
+            outputs: if n.is_sink() { 0 } else { n.num_outputs() },
+            params: n.params(),
+        })
+        .collect();
     let mut ids: HashMap<u64, NodeId> = HashMap::new();
     let mut packets = Vec::new();
     for (id, kind, node) in made.into_iter().filter(|(id, ..)| live.contains(id)) {
@@ -5153,7 +5175,7 @@ fn add_patch(
             }
         }
     }
-    Ok((packets, ids, reused, left_out))
+    Ok((packets, ids, reused, left_out, waiting))
 }
 
 /// A rate as a person reads it, for a node label.
@@ -5625,6 +5647,33 @@ pub(crate) mod tests {
         let topo = rx.topology();
         assert!(topo.nodes.iter().any(|n| n.tag == Some(mix)), "the wired stage runs");
         assert!(!topo.nodes.iter().any(|n| n.tag == Some(env)), "the unwired one waits");
+    }
+
+    #[test]
+    fn a_waiting_stage_says_what_ports_and_settings_it_was_built_with() {
+        use crate::patch::Source;
+        let mut patch = crate::patch::Patch::default();
+        let mix = patch.add("mixer");
+        let route = patch.add("burst_route");
+        let wired = patch.add("envelope");
+        patch.connect(Source::Span, (wired, 0));
+        patch
+            .stage_mut(mix)
+            .unwrap()
+            .settings
+            .insert("shift_hz".into(), pipeline::ParamValue::Float(12_500.0));
+        let rx = Receiver::build(&manual(patch), Default::default()).expect("a half-drawn patch");
+        let mut waiting: Vec<(u64, usize, usize)> =
+            rx.waiting.iter().map(|w| (w.id, w.inputs, w.outputs)).collect();
+        waiting.sort();
+        assert_eq!(waiting, vec![(mix, 1, 1), (route, 1, 2)], "the wired envelope is not waiting");
+        let shift = rx
+            .waiting
+            .iter()
+            .find(|w| w.id == mix)
+            .and_then(|w| w.params.iter().find(|p| p.name == "shift_hz"))
+            .map(|p| p.value.clone());
+        assert_eq!(shift, Some(pipeline::ParamValue::Float(12_500.0)));
     }
 
     /// A channel marked as voice is audio like any other, played through its

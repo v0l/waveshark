@@ -1393,6 +1393,7 @@ pub struct Status {
     pictures: parking_lot::Mutex<Vec<std::path::PathBuf>>,
     /// Shape of the chain currently demodulating, republished on every rebuild.
     chain: parking_lot::Mutex<Option<pipeline::graph::Topology>>,
+    waiting: parking_lot::Mutex<Vec<crate::chain::Waiting>>,
     /// What each scope stage in the chain is seeing, by node id.
     scopes: parking_lot::Mutex<Vec<(usize, nodes::ScopeFrame)>>,
     /// Delay through that chain in milliseconds, as f32 bits.
@@ -1711,6 +1712,7 @@ impl Default for Status {
             programmes: parking_lot::Mutex::new(Vec::new()),
             pictures: parking_lot::Mutex::new(Vec::new()),
             chain: parking_lot::Mutex::new(None),
+            waiting: parking_lot::Mutex::new(Vec::new()),
             scopes: parking_lot::Mutex::new(Vec::new()),
             chain_latency: AtomicU32::new(0),
             decoded: AtomicU64::new(0),
@@ -1890,6 +1892,10 @@ impl Status {
 
     pub fn chain(&self) -> Option<pipeline::graph::Topology> {
         self.chain.lock().clone()
+    }
+
+    pub fn waiting(&self) -> Vec<crate::chain::Waiting> {
+        self.waiting.lock().clone()
     }
 
     fn push_speed(&self, x: f32) {
@@ -4090,6 +4096,7 @@ fn publish_chain(status: &Status, rx: &crate::chain::Receiver) {
         Some(crate::transmit::merged(&rx.topology(), rx.tx_topology().as_ref())),
         rx.latency_ms(0),
     );
+    *status.waiting.lock() = rx.waiting.clone();
 }
 
 /// A plan that only scans, for tests about the shape of the receiver.

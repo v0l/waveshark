@@ -19,6 +19,7 @@ the code is in the commit log.
 - Geostationary dish pointing on the Satellites view: azimuth, elevation, LNB skew and the Clarke belt.
 - Quindar tones as a roger beep style, before and after each over.
 - Channel passband edges dragged on the spectrum, and SSB and CW low and high edges on the strip.
+- Chain view stages dragged from a searchable list onto a port or wire, set before wiring, and CLEAR.
 
 ### Changed
 
@@ -49,6 +50,7 @@ the code is in the commit log.
 - LimeSDR left busy until a restart after a span change or USB fault.
 - 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
 - SSB and CW channel markers shading both sides of the dial instead of the passband.
+- Chain view text settings dropping what was typed, and Backspace in one deleting the stage.
 - 802.15.4 beacons read out of frames too short for their own address lists.
 - Inmarsat STD-C decoding nothing off the air.
 - DRM service labels missing from transmissions that send them in 16-QAM.

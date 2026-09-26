@@ -48,7 +48,13 @@ impl Chain<'_> {
         let mut act = crate::chainview::Interaction { selected: self.st.sel, ..Default::default() };
         let mut browse = None;
         let mut off = None;
-        if self.st.sel.is_some() {
+        let waiting = self
+            .st
+            .pick
+            .filter(|id| self.st.edit.manual && !full.nodes.iter().any(|n| n.tag == Some(*id)))
+            .and_then(|id| self.st.patch.stage(id).cloned());
+        let mut setting = None;
+        if self.st.sel.is_some() || waiting.is_some() {
             Panel::right("chain-inspector")
                 .default_size(260.0)
                 // Capped, because the panel takes its width from what is in
@@ -62,7 +68,11 @@ impl Chain<'_> {
                 )
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        if let Some(sel) = self.st.sel {
+                        if let Some(stage) = &waiting {
+                            let desc = self.st.waiting.iter().find(|w| w.id == stage.id);
+                            setting = crate::chainview::waiting_inspector(ui, stage, desc)
+                                .map(|(name, value)| (stage.id, name, value));
+                        } else if let Some(sel) = self.st.sel {
                             act.changed =
                                 crate::chainview::inspector(ui, &topo, sel, &mut browse, &mut off);
                         }
@@ -70,7 +80,7 @@ impl Chain<'_> {
                 });
         }
         Panel::left("chain-palette")
-            .default_size(190.0)
+            .default_size(210.0)
             .frame(
                 egui::Frame::NONE.fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 10)),
             )
@@ -99,15 +109,24 @@ impl Chain<'_> {
                     &mut self.st.edit,
                     Some(&self.st.patch),
                     self.st.wire,
+                    self.st.pick,
                     &elsewhere,
                     &self.st.scopes,
+                    &self.st.waiting,
                 )
             })
             .inner;
         self.st.sel = drawn.selected;
+        if let Some((kind, at, attach)) = drawn.dropped.clone() {
+            self.st.add_stage(self.cmds, &kind, at, attach);
+        }
+        let typing = ui.ctx().egui_wants_keyboard_input();
         if manual {
             if drawn.picked.is_some() {
                 self.st.pick = drawn.picked;
+                self.st.wire = None;
+            } else if drawn.blank {
+                self.st.pick = None;
                 self.st.wire = None;
             }
             if drawn.wire.is_some() {
@@ -115,8 +134,10 @@ impl Chain<'_> {
             }
             // Delete takes out whichever of the two is selected, which is
             // what the key does in every editor.
-            let del = ui
-                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+            let del = !typing
+                && ui.input(|i| {
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
+                });
             if del {
                 if let Some(to) = self.st.wire.take() {
                     self.st.edit(self.cmds, |p| p.disconnect(to));
@@ -125,13 +146,15 @@ impl Chain<'_> {
                     self.st.sel = None;
                 }
             }
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
-                self.st.undo(self.cmds);
-            }
-            if ui.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
-            }) {
+            if !typing
+                && ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
+                })
+            {
                 self.st.redo(self.cmds);
+            }
+            if !typing && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+                self.st.undo(self.cmds);
             }
             // Unwiring first: taking hold of a wire reports both in the same
             // frame when the drag is short, and doing it the other way round
@@ -160,6 +183,13 @@ impl Chain<'_> {
         if let Some((id, name, value)) = act.changed.or(drawn.changed) {
             self.cmds.push(Cmd::NodeParam(id, name, value));
         }
+        if let Some((id, name, value)) = setting {
+            self.st.edit(self.cmds, |p| {
+                if let Some(s) = p.stage_mut(id) {
+                    s.settings.insert(name, value);
+                }
+            });
+        }
         self.st.save_places();
     }
 
@@ -171,7 +201,9 @@ impl Chain<'_> {
     /// which stages exist at all is worth being able to read.
     fn palette(&mut self, ui: &mut egui::Ui) {
         let mut manual = self.st.edit.manual;
-        if ui.checkbox(&mut manual, "MANUAL").clicked() {
+        let help = "Unlocked, stages can be added, moved and wired. Locked, the graph follows \
+                    the dial and the scanner table. Edits stay on the graph either way.";
+        if egui_bench::form::switch(ui, "graph", &mut manual, "edit", help) {
             self.st.set_manual(manual, self.cmds);
         }
         ui.add_space(6.0);
@@ -246,44 +278,62 @@ impl Chain<'_> {
             {
                 self.st.redo(self.cmds);
             }
+            if ui
+                .add_enabled(!self.st.edits.is_empty(), egui::Button::new("CLEAR"))
+                .on_hover_text(
+                    "Throw away every edit, settings included, and go back to the graph \
+                     the receiver draws. UNDO brings them back.",
+                )
+                .clicked()
+            {
+                self.st.clear(self.cmds);
+            }
         });
 
         ui.add_space(8.0);
-        // Which gestures exist, and the one thing that is not editable: only
-        // the stages added here have live ports.
         let hint = if !self.st.edit.manual {
-            "locked; what is drawn follows the dial and the scanner table"
+            "locked; adding a stage unlocks it"
         } else if self.st.wire.is_some() {
             "wire selected; DELETE removes it"
         } else {
-            "drag a port to wire, drag a wire off an input to move it"
+            "drag a stage onto the graph, a port or a wire"
         };
         text::hint(ui, hint);
-        ui.add_space(8.0);
-        ui.separator();
+        ui.add_space(6.0);
+        egui_bench::form::field(ui, &mut self.st.find, "find a stage");
         ui.add_space(6.0);
 
         // The list comes from the node registry rather than from anything
         // written here, so a decoder added to the build appears in it without
         // this file being touched.
         let reg = crate::chain::registry();
+        let find = self.st.find.trim().to_lowercase();
         let mut by_category: Vec<(pipeline::Category, Vec<(&str, &str)>)> = Vec::new();
-        for d in reg.list() {
+        for d in reg.list().filter(|d| {
+            find.is_empty()
+                || d.name.to_lowercase().contains(&find)
+                || d.summary.to_lowercase().contains(&find)
+        }) {
             match by_category.iter_mut().find(|(c, _)| *c == d.category) {
                 Some((_, v)) => v.push((d.name, d.summary)),
                 None => by_category.push((d.category, vec![(d.name, d.summary)])),
             }
         }
-        let manual = self.st.edit.manual;
         let mut add: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if by_category.is_empty() {
+                Line::new().note("No stage matches.").show(ui);
+            }
             for (category, stages) in &by_category {
                 Line::new().legend(category.label()).show(ui);
                 for (name, summary) in stages {
                     let w = egui::Button::new(egui::RichText::new(*name).size(12.0))
                         .fill(theme::WELL)
+                        .sense(egui::Sense::click_and_drag())
                         .min_size(egui::Vec2::new(ui.available_width(), 20.0));
-                    if ui.add_enabled(manual, w).on_hover_text(*summary).clicked() {
+                    let r = ui.add(w).on_hover_text(*summary);
+                    r.dnd_set_drag_payload(crate::chainview::Carried(name.to_string()));
+                    if r.clicked() {
                         add = Some(name.to_string());
                     }
                 }
@@ -291,10 +341,8 @@ impl Chain<'_> {
             }
         });
         if let Some(kind) = add {
-            let mut added = None;
-            self.st.edit(self.cmds, |p| added = Some(p.add(&kind)));
-            self.st.pick = added;
-            self.st.wire = None;
+            let at = self.st.edit.free_spot();
+            self.st.add_stage(self.cmds, &kind, at, crate::chainview::Attach::Nothing);
         }
     }
 }

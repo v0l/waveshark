@@ -372,8 +372,7 @@ impl App {
                 Expect::Whatever
             }
             Action::ResetGraph => {
-                let base = self.chain.base.clone();
-                self.chain.edit(&mut self.cmds, |p| *p = base);
+                self.chain.clear(&mut self.cmds);
                 Expect::Whatever
             }
             _ => return Ok(None),

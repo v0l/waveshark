@@ -263,6 +263,8 @@ pub(super) struct ChainState {
     /// it rebuilds one. Cloned rather than shared so drawing never blocks the
     /// thread that has to keep draining USB.
     pub topo: Option<pipeline::graph::Topology>,
+    pub waiting: Vec<crate::chain::Waiting>,
+    pub find: String,
     pub latency: f64,
     /// What each scope stage is seeing, by node id, refreshed with the
     /// spectrum.
@@ -343,6 +345,47 @@ impl ChainState {
             self.undo.remove(0);
         }
         self.send_patch(cmds);
+    }
+
+    pub fn clear(&mut self, cmds: &mut Vec<Cmd>) {
+        let base = self.base.clone();
+        self.edit(cmds, |p| *p = base);
+        self.pick = None;
+        self.wire = None;
+    }
+
+    pub fn add_stage(
+        &mut self,
+        cmds: &mut Vec<Cmd>,
+        kind: &str,
+        at: egui::Pos2,
+        attach: crate::chainview::Attach,
+    ) -> Option<u64> {
+        use crate::chainview::Attach;
+        use crate::patch::Source;
+        if !self.edit.manual {
+            self.set_manual(true, cmds);
+        }
+        let mut added = None;
+        self.edit(cmds, |p| {
+            let id = p.add(kind);
+            match attach {
+                Attach::Nothing => {}
+                Attach::Feeds(to) => p.connect(Source::Stage(id, 0), to),
+                Attach::Reads(from) => p.connect(from, (id, 0)),
+                Attach::Splice(from, to) => {
+                    p.connect(from, (id, 0));
+                    p.connect(Source::Stage(id, 0), to);
+                }
+            }
+            added = Some(id);
+        });
+        let id = added?;
+        self.edit.pos.insert(id, at);
+        self.pick = Some(id);
+        self.sel = None;
+        self.wire = None;
+        Some(id)
     }
 
     pub fn undo(&mut self, cmds: &mut Vec<Cmd>) {
@@ -442,7 +485,9 @@ impl ChainState {
     pub fn set_manual(&mut self, on: bool, cmds: &mut Vec<Cmd>) {
         self.edit.manual = on;
         if !on {
-            self.edit.arrange();
+            self.edit.arrange_keeping(|k| {
+                !crate::patch::builtin::is(k) && !crate::patch::Patch::is_derived(k)
+            });
             self.pick = None;
             self.wire = None;
         }
@@ -1290,6 +1335,62 @@ mod tests {
     /// gives an empty set, and adopting it wrote an empty file over the one
     /// just loaded: every setting changed by parameter had to be found again
     /// at the next start.
+    #[test]
+    fn a_stage_added_while_locked_unlocks_the_graph_and_is_spliced_in() {
+        use crate::chainview::Attach;
+        use crate::patch::Source;
+        let mut c = ChainState::default();
+        let mut cmds = Vec::new();
+        let sink = c.patch.add("spectrum");
+        c.patch.connect(Source::Span, (sink, 0));
+        c.base = c.patch.clone();
+        let at = egui::Pos2::new(300.0, 120.0);
+        let id = c
+            .add_stage(&mut cmds, "mixer", at, Attach::Splice(Source::Span, (sink, 0)))
+            .expect("a stage was added");
+        assert!(c.edit.manual, "adding a stage unlocks the graph");
+        assert!(matches!(cmds.first(), Some(Cmd::Manual(true))));
+        assert_eq!(c.edit.pos[&id], at);
+        assert_eq!(c.pick, Some(id));
+        assert_eq!(c.patch.feeding((id, 0)), Some(Source::Span));
+        assert_eq!(c.patch.feeding((sink, 0)), Some(Source::Stage(id, 0)));
+        assert_eq!(c.patch.links().len(), 2);
+    }
+
+    #[test]
+    fn clear_goes_back_to_the_drawn_graph_and_undo_brings_the_edits_back() {
+        use crate::patch::Source;
+        let mut c = ChainState { base: drawn(), patch: drawn(), ..Default::default() };
+        let mut cmds = Vec::new();
+        c.edit(&mut cmds, |p| {
+            let id = p.add("mixer");
+            p.connect(Source::Span, (id, 0));
+            p.stage_mut(derived::SPECTRUM)
+                .unwrap()
+                .settings
+                .insert("smoothing".into(), V::Float(0.9));
+        });
+        let edited = c.patch.clone();
+        c.clear(&mut cmds);
+        assert_eq!(c.patch, c.base);
+        assert!(c.edits.is_empty(), "settings go as well as stages and wires");
+        c.undo(&mut cmds);
+        assert_eq!(c.patch, edited);
+    }
+
+    #[test]
+    fn locking_forgets_the_receivers_layout_and_keeps_the_operators() {
+        let mut c = ChainState::default();
+        let mut cmds = Vec::new();
+        let mine = c.patch.add("mixer");
+        c.set_manual(true, &mut cmds);
+        c.edit.pos.insert(mine, egui::Pos2::new(40.0, 50.0));
+        c.edit.pos.insert(derived::SPECTRUM, egui::Pos2::new(10.0, 10.0));
+        c.edit.pos.insert(crate::patch::builtin::SPAN, egui::Pos2::new(5.0, 5.0));
+        c.set_manual(false, &mut cmds);
+        assert_eq!(c.edit.pos.keys().copied().collect::<Vec<_>>(), vec![mine]);
+    }
+
     #[test]
     fn a_saved_edit_survives_the_graph_published_before_it_lands() {
         let mut c = ChainState { edits: crate::patch::Edits::default(), ..Default::default() };
