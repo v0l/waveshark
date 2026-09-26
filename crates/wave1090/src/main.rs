@@ -1239,7 +1239,7 @@ mod tests {
     /// dump1090's Beast output over the same file, as ticks and payload
     fn reference() -> Vec<(u64, Vec<u8>)> {
         std::fs::read_to_string(BUSY_REFERENCE)
-            .expect("the reference decode is committed, unlike the capture")
+            .expect("the reference decode is absent, run testdata/fetch.sh")
             .lines()
             .filter_map(|l| {
                 let (ts, hex) = l.split_once(' ')?;

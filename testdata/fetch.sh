@@ -9,6 +9,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+only=("$@")
+
+wanted() {
+    (( ${#only[@]} == 0 )) && return 0
+    local n
+    for n in "${only[@]}"; do
+        [[ "$n" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 fetch() {
     local name="$1" sha="$2" url="$3" comp="$4"
 
@@ -44,35 +55,6 @@ fetch() {
     echo "ok      $name"
 }
 
-# Minimal manifest reader: enough for this flat structure, and avoids making
-# a shell script depend on a TOML parser.
-name=""; sha=""; url=""; comp=""
-while IFS= read -r line; do
-    case "$line" in
-        '[[capture]]')
-            [[ -n "$name" ]] && fetch "$name" "$sha" "$url" "$comp"
-            name=""; sha=""; url=""; comp="none"
-            ;;
-        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-    esac
-done < fixtures.toml
-[[ -n "$name" ]] && fetch "$name" "$sha" "$url" "$comp"
-
-# The rtl_433 corpus: an uncompressed capture and the reference decode beside
-# it, into their own directory so a capture that came from somewhere else is
-# never confused with one that has an independent decode to check against.
-mkdir -p rtl433
-
-fetch_pair() {
-    local name="$1" sha="$2" url="$3" rsha="$4" rurl="$5"
-    local json="rtl433/${name%.cu8}.json"
-    fetch_verified "rtl433/$name" "$sha" "$url"
-    fetch_verified "$json" "$rsha" "$rurl"
-}
-
 fetch_verified() {
     local path="$1" sha="$2" url="$3"
     if [[ -f "$path" ]]; then
@@ -92,6 +74,46 @@ fetch_verified() {
     fi
     mv "$path.part" "$path"
     echo "ok      $path"
+}
+
+fetch_capture() {
+    wanted "$name" || return 0
+    fetch "$name" "$sha" "$url" "$comp"
+    [[ -n "$rname" ]] && fetch_verified "$rname" "$rsha" "$rurl"
+    return 0
+}
+
+# Minimal manifest reader: enough for this flat structure, and avoids making
+# a shell script depend on a TOML parser.
+name=""; sha=""; url=""; comp=""; rname=""; rsha=""; rurl=""
+while IFS= read -r line; do
+    case "$line" in
+        '[[capture]]')
+            [[ -n "$name" ]] && fetch_capture
+            name=""; sha=""; url=""; comp="none"; rname=""; rsha=""; rurl=""
+            ;;
+        reference_name*=*)   rname=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        reference_sha256*=*) rsha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        reference_url*=*)    rurl=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+    esac
+done < fixtures.toml
+[[ -n "$name" ]] && fetch_capture
+
+# The rtl_433 corpus: an uncompressed capture and the reference decode beside
+# it, into their own directory so a capture that came from somewhere else is
+# never confused with one that has an independent decode to check against.
+mkdir -p rtl433
+
+fetch_pair() {
+    local name="$1" sha="$2" url="$3" rsha="$4" rurl="$5"
+    local json="rtl433/${name%.cu8}.json"
+    wanted "rtl433/$name" || return 0
+    fetch_verified "rtl433/$name" "$sha" "$url"
+    fetch_verified "$json" "$rsha" "$rurl"
 }
 
 name=""; sha=""; url=""; rsha=""; rurl=""
@@ -120,7 +142,7 @@ name=""; sha=""; url=""; comp=""
 while IFS= read -r line; do
     case "$line" in
         '[[capture]]')
-            [[ -n "$name" ]] && fetch "offair/$name" "$sha" "$url" "$comp"
+            [[ -n "$name" ]] && wanted "offair/$name" && fetch "offair/$name" "$sha" "$url" "$comp"
             name=""; sha=""; url=""; comp="none"
             ;;
         name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
@@ -129,7 +151,7 @@ while IFS= read -r line; do
         compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
     esac
 done < offair.toml
-[[ -n "$name" ]] && fetch "offair/$name" "$sha" "$url" "$comp"
+[[ -n "$name" ]] && wanted "offair/$name" && fetch "offair/$name" "$sha" "$url" "$comp"
 
 # Published survey measurements, into their own directory: these are levels and
 # positions somebody else recorded and surveyed, not recordings made here.
@@ -139,7 +161,7 @@ name=""; sha=""; url=""; comp=""
 while IFS= read -r line; do
     case "$line" in
         '[[dataset]]')
-            [[ -n "$name" ]] && fetch "survey/$name" "$sha" "$url" "$comp"
+            [[ -n "$name" ]] && wanted "survey/$name" && fetch "survey/$name" "$sha" "$url" "$comp"
             name=""; sha=""; url=""; comp="none"
             ;;
         name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
@@ -148,7 +170,12 @@ while IFS= read -r line; do
         compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
     esac
 done < survey.toml
-[[ -n "$name" ]] && fetch "survey/$name" "$sha" "$url" "$comp"
+[[ -n "$name" ]] && wanted "survey/$name" && fetch "survey/$name" "$sha" "$url" "$comp"
+
+if (( ${#only[@]} > 0 )); then
+    echo "done"
+    exit 0
+fi
 
 # The protocol descriptions are published apart from the build, so the tests
 # read the same files a receiver fetches rather than a copy kept in step by

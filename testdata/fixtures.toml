@@ -111,6 +111,9 @@ compression = "xz"
 center_hz = 1_090_000_000
 rate_sps = 2_400_000
 format = "cu8"
+reference_name = "adsb_1090M_2400k.dump1090.hex"
+reference_sha256 = "828edd77556b0738af2c90ffac0e56e5714154dc88e0426a4f80d6cfa929cdbd"
+reference_url = "https://nostr.download/828edd77556b0738af2c90ffac0e56e5714154dc88e0426a4f80d6cfa929cdbd.txt"
 license = "CC-BY-4.0"
 description = """
 Four seconds of 1090 MHz, RTL-SDR at 49.6 dB gain on a telescopic antenna
@@ -133,7 +136,6 @@ frame that dump1090 did not also see.
 """
 
 [capture.expect]
-reference = "adsb_1090M_2400k.dump1090.hex"
 reference_frames = 40
 matched_min = 25
 false_positives = 0
@@ -147,6 +149,9 @@ compression = "xz"
 center_hz = 1_090_000_000
 rate_sps = 2_400_000
 format = "cu8"
+reference_name = "adsb_radarpi_1090M_2400k.dump1090.ts"
+reference_sha256 = "58d86d96cb01de453c0919c253b1480e3b5730d893621428657d1d4d2324d207"
+reference_url = "https://nostr.download/58d86d96cb01de453c0919c253b1480e3b5730d893621428657d1d4d2324d207.txt"
 license = "CC-BY-4.0"
 description = """
 Ten seconds of 1090 MHz off radarpi, a Nooelec FlyCatcher on an outdoor
@@ -178,7 +183,6 @@ cost it mlat sync on radarpi.
 """
 
 [capture.expect]
-reference = "adsb_radarpi_1090M_2400k.dump1090.ts"
 reference_frames = 4091
 # Per downlink format, as dump1090-rb 1.0.15 read them.
 reference_df11 = 1181

@@ -61,6 +61,12 @@ jobs:
       - name: Protocol descriptions
         run: git clone --quiet --depth 1 https://github.com/v0l/waveshark-protocols testdata/protocols
 
+      - name: Audio fixtures
+        run: |
+          testdata/fetch.sh acars_acarsdec_12500.wav vdl2_model_136.975M_1050k.wav \
+            sstv_martin1_44100.wav sstv_martin2_bars_44100.wav sstv_robot36_bars_44100.wav \
+            sstv_scottie1_bars_44100.wav sstv_scottie2_bars_44100.wav sstv_scottiedx_bars_44100.wav
+
       - name: Test
         env:
           CUDA_COMPUTE_CAP: '80'

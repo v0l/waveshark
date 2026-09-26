@@ -48,7 +48,7 @@ static PREAMBLE_ONLY: LazyLock<Option<Vec<String>>> =
 /// What dump1090 made of the same file.
 fn reference() -> HashSet<String> {
     std::fs::read_to_string(testdata(REFERENCE))
-        .expect("reference decode is committed, unlike the capture")
+        .expect("the reference decode is absent, run testdata/fetch.sh")
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())

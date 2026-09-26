@@ -6,7 +6,7 @@
 //! open decoder implements them. What is here was measured off a RadioMaster
 //! RP2 by transmitting payloads chosen one bit at a time and reading where
 //! each bit landed, then confirmed against a TX16S off air. The measurement
-//! itself is in `testdata/sx1280_cr_li_*_map.json`.
+//! itself is in `lora_li/sx1280_cr_li_*_map.json`.
 //!
 //! # What it turned out to be
 //!
@@ -83,18 +83,7 @@ pub fn decode(symbols: &[u16], sf: u8, cr: u8, len: usize) -> Option<Decoded> {
     if cr != 8 || sf != 7 || len == 0 {
         return None;
     }
-    let widths = symbol_widths(sf, symbols.len());
-    let mut bits: Vec<u8> = Vec::with_capacity(symbols.len() * sf as usize);
-    for (s, w) in symbols.iter().zip(&widths) {
-        // The demodulator reports the bin; the codeword is its Gray code one
-        // step down, shifted to drop the bits a reduced-rate symbol does not
-        // carry.
-        let v = (s.wrapping_sub(1)) & ((1 << sf) - 1);
-        let c = (v >> (sf - w)) ^ ((v >> (sf - w)) >> 1);
-        for k in 0..*w {
-            bits.push(((c >> k) & 1) as u8);
-        }
-    }
+    let bits = coded_bits(symbols, sf);
 
     let nibbles = 2 * len;
     if bits.len() < 8 * nibbles {
@@ -148,6 +137,22 @@ pub fn decode(symbols: &[u16], sf: u8, cr: u8, len: usize) -> Option<Decoded> {
     Some(Decoded { bytes: out, corrected })
 }
 
+fn coded_bits(symbols: &[u16], sf: u8) -> Vec<u8> {
+    let widths = symbol_widths(sf, symbols.len());
+    let mut bits: Vec<u8> = Vec::with_capacity(symbols.len() * sf as usize);
+    for (s, w) in symbols.iter().zip(&widths) {
+        // The demodulator reports the bin; the codeword is its Gray code one
+        // step down, shifted to drop the bits a reduced-rate symbol does not
+        // carry.
+        let v = (s.wrapping_sub(1)) & ((1 << sf) - 1);
+        let c = (v >> (sf - w)) ^ ((v >> (sf - w)) >> 1);
+        for k in 0..*w {
+            bits.push(((c >> k) & 1) as u8);
+        }
+    }
+    bits
+}
+
 /// The symbols a transmitter would send for this payload. Here so the decoder
 /// can be tested against something other than itself, and so a bench
 /// transmitter can be checked without a radio.
@@ -175,7 +180,7 @@ pub fn encode(payload: &[u8], sf: u8, cr: u8) -> Option<Vec<u16>> {
     for w in widths {
         let mut c = 0u16;
         for k in 0..w {
-            let bit = if at < bits.len() { bits[at] } else { 0 };
+            let bit = if at < bits.len() { bits[at] } else { bits[1 + at - bits.len()] };
             c |= u16::from(bit) << k;
             at += 1;
         }
@@ -272,6 +277,74 @@ mod tests {
         }
         assert_eq!(seeds[0], seeds[1], "two packets of one link disagree on the seed");
         assert_eq!(seeds[0], 0x6b37, "the seed this link was recorded with");
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Walk {
+        symbol_bits: Vec<u8>,
+        offset_c: Vec<u8>,
+        columns: std::collections::BTreeMap<String, Vec<usize>>,
+    }
+
+    const WALK_SF7_8BYTE: &str = include_str!("lora_li/sx1280_cr_li_4_8_sf7_map.json");
+    const WALK_SF7_13BYTE: &str = include_str!("lora_li/sx1280_cr_li_4_8_sf7_13byte_map.json");
+    const WALK_SF5_CR5: &str = include_str!("lora_li/sx1280_cr_li_4_5_sf5_13byte_map.json");
+    const WALK_SF5_CR6: &str = include_str!("lora_li/sx1280_cr_li_4_6_sf5_13byte_map.json");
+
+    fn walk(json: &str) -> Walk {
+        serde_yaml_ng::from_str(json).expect("a walk written by tools/walk_rate.py")
+    }
+
+    impl Walk {
+        fn predict(&self, payload: &[u8]) -> Vec<u8> {
+            let mut bits = self.offset_c.clone();
+            for i in 0..payload.len() * 8 {
+                if payload[i / 8] >> (i % 8) & 1 == 1 {
+                    for &at in &self.columns[&format!("bit{i}")] {
+                        bits[at] ^= 1;
+                    }
+                }
+            }
+            bits
+        }
+    }
+
+    #[test]
+    fn the_encoder_matches_every_payload_walked_off_an_rp2_spare_bits_and_all() {
+        let mut agreed = Vec::new();
+        for (json, len) in [(WALK_SF7_8BYTE, 8usize), (WALK_SF7_13BYTE, 13)] {
+            let w = walk(json);
+            assert_eq!(w.symbol_bits, symbol_widths(7, symbol_count(7, len)), "{len} bytes");
+            let mut payloads = vec![vec![0u8; len]];
+            for i in 0..len * 8 {
+                let mut p = vec![0u8; len];
+                p[i / 8] = 1 << (i % 8);
+                payloads.push(p);
+            }
+            if len == 13 {
+                payloads.extend(OFF_AIR.iter().map(|(_, bytes)| bytes.to_vec()));
+            }
+            let matched = payloads
+                .iter()
+                .filter(|p| coded_bits(&encode(p, 7, 8).unwrap(), 7) == w.predict(p))
+                .count();
+            agreed.push((len, matched, payloads.len()));
+        }
+        assert_eq!(agreed, [(8, 65, 65), (13, 107, 107)]);
+    }
+
+    #[test]
+    fn sf5_opens_on_two_reduced_symbols_where_sf7_opens_on_eight() {
+        let reduced = |json: &str, sf: u8| {
+            let w = walk(json);
+            w.symbol_bits.iter().take_while(|&&b| b == sf - 2).count()
+        };
+        assert_eq!(reduced(WALK_SF7_8BYTE, 7), REDUCED_SYMBOLS);
+        assert_eq!(reduced(WALK_SF7_13BYTE, 7), REDUCED_SYMBOLS);
+        assert_eq!(reduced(WALK_SF5_CR5, 5), 2);
+        assert_eq!(reduced(WALK_SF5_CR6, 5), 2);
+        assert!(decode(&[1u16; 29], 5, 5, 13).is_none());
+        assert!(decode(&[1u16; 35], 5, 6, 13).is_none());
     }
 
     #[test]

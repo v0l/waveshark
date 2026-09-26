@@ -4,7 +4,7 @@ record, walk the payload a bit at a time, and solve for the encoder.
 
     tools/walk_rate.py --sf 7 --cr 8 --li 1 --bytes 13
 
-Writes testdata/sx1280_cr_li_<cr>_sf<sf>_<n>byte_map.json when the columns come
+Writes crates/decode/src/lora_li/sx1280_cr_li_<cr>_sf<sf>_<n>byte_map.json when the columns come
 out full rank, and prints a line saying what was found either way. The symbol
 widths are measured rather than assumed: each symbol is tried at every width
 from SF-2 to SF, and the one under which single payload bits move that symbol
@@ -186,7 +186,7 @@ def main():
         "offset_c": base,
         "columns": {f"bit{i}": [j for j, b in enumerate(c) if b] for i, c in enumerate(cols)},
     }
-    out = f"{REPO}/testdata/sx1280_{tag}_map.json"
+    out = f"{REPO}/crates/decode/src/lora_li/sx1280_{tag}_map.json"
     open(out, "w").write(json.dumps(doc, indent=1))
     print(f"  solved -> {os.path.relpath(out, REPO)}")
     return 0
