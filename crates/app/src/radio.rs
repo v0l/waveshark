@@ -407,6 +407,8 @@ const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 /// nothing beside the DSP.
 const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
 
+const DISPLAY_PUBLISH: std::time::Duration = std::time::Duration::from_millis(33);
+
 /// Overridable so the benchmark can measure what happens without the spacing.
 fn tune_gap() -> std::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
@@ -2382,6 +2384,7 @@ struct RadioThread<'a, R: Fn()> {
     last_tune: std::time::Instant,
     tune_gap: std::time::Duration,
     last_chain: std::time::Instant,
+    last_display: std::time::Instant,
     /// The last edits that built, to fall back on when an edit does not.
     last_edits: Option<crate::patch::Edits>,
     needs_rebuild: bool,
@@ -2569,6 +2572,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             last_tune: std::time::Instant::now() - gap,
             tune_gap: gap,
             last_chain: std::time::Instant::now(),
+            last_display: std::time::Instant::now(),
             last_edits: None,
             needs_rebuild: false,
             protocols_gen: decode::script::generation(),
@@ -3685,9 +3689,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
     /// The spectrum frame, and everything else read at the display's rate.
     fn publish_spectrum(&mut self) -> Flow {
-        if !self.rx.spectrum_ready() {
+        let fresh = self.rx.spectrum_ready();
+        if !fresh && self.last_display.elapsed() < DISPLAY_PUBLISH {
             return Flow::Go;
         }
+        self.last_display = std::time::Instant::now();
         // The fix is read at the display's rate rather than per block: a GPS
         // reports once a second and a block is seven milliseconds, so asking
         // per block is two hundred locks for one new number.
@@ -3784,6 +3790,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         let scopes = self.rx.scopes();
         if !scopes.is_empty() || !self.status.scopes.lock().is_empty() {
             *self.status.scopes.lock() = scopes;
+        }
+        if !fresh {
+            (self.repaint)();
+            return Flow::Go;
         }
         // The rate the spectrum sees rather than the one the radio delivers:
         // in manual mode a stage can sit between the two, and an axis drawn
@@ -4685,6 +4695,35 @@ pub(crate) mod tests {
         assert_eq!(radio.status.keyed.load(Ordering::Relaxed), 0);
         assert!(!watch.keyed(), "the device was asked to transmit");
         assert_eq!(watch.transmitted_len(), sent);
+    }
+
+    #[test]
+    fn the_chain_keeps_its_timings_with_the_spectrum_off() {
+        let center = Hz(145_000_000);
+        let rate = Sps(2_400_000);
+        let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+        let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+        until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+        let mut edits = crate::patch::Edits::default();
+        edits.off.push(crate::chain::derived::SPECTRUM);
+        radio.send(Cmd::Edits(edits));
+        let spectrum_off = |t: &pipeline::graph::Topology| {
+            t.nodes.iter().any(|n| n.tag == Some(crate::chain::derived::SPECTRUM) && n.off)
+        };
+        until("the spectrum to be off", || radio.status.chain().is_some_and(|t| spectrum_off(&t)));
+        let calls = || {
+            radio
+                .status
+                .chain()
+                .filter(spectrum_off)
+                .and_then(|t| t.nodes.iter().map(|n| n.cost.calls).max())
+                .unwrap_or(0)
+        };
+        let before = calls();
+        until("the timings to be published again", || calls() > before);
+        while radio.frames.try_recv().is_ok() {}
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(radio.frames.try_iter().count(), 0, "the spectrum went on drawing");
     }
 
     /// A key goes on air even when a stage in the graph refuses the span it

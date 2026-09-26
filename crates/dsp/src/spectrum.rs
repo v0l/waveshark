@@ -181,6 +181,15 @@ pub struct Spectrum {
     pub smoothing: f32,
 }
 
+fn fold_bins(bins: &[C32], scale: f32, peak: &mut [f32], sum: &mut [f32], last: &mut [f32]) {
+    for (((c, p), s), l) in bins.iter().zip(peak).zip(sum).zip(last) {
+        let v = c.norm_sqr() * scale * scale;
+        *p = p.max(v);
+        *s += v;
+        *l = v;
+    }
+}
+
 impl Spectrum {
     pub fn new(size: usize) -> Self {
         assert!(size.is_power_of_two() && size >= 16, "fft size must be a power of two >= 16");
@@ -236,27 +245,23 @@ impl Spectrum {
     /// Windows `size` samples starting at `pos` in `pending`. Taking an index
     /// rather than a slice keeps the borrow checker happy without unsafe.
     fn frame_at(&mut self, pos: usize) {
-        for i in 0..self.size {
-            self.buf[i] = self.pending[pos + i] * self.win[i];
+        let src = &self.pending[pos..pos + self.size];
+        for ((b, &x), &w) in self.buf.iter_mut().zip(src).zip(&self.win) {
+            *b = x * w;
         }
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
 
         let half = self.size / 2;
-        let slot = self.taken.is_multiple_of(self.step).then(|| self.slots * self.size);
-        for i in 0..self.size {
-            // Rotate so DC lands in the middle, matching how the span is drawn.
-            let src_bin = (i + half) % self.size;
-            let p = self.buf[src_bin].norm_sqr() * self.scale * self.scale;
-            if p > self.peak[i] {
-                self.peak[i] = p;
-            }
-            self.sum[i] += p;
-            self.last[i] = p;
-            if let Some(base) = slot {
-                self.keep[base + i] = p;
-            }
-        }
-        if slot.is_some() {
+        let scale = self.scale;
+        let (neg, pos_bins) = self.buf.split_at(half);
+        let (peak_lo, peak_hi) = self.peak.split_at_mut(half);
+        let (sum_lo, sum_hi) = self.sum.split_at_mut(half);
+        let (last_lo, last_hi) = self.last.split_at_mut(half);
+        fold_bins(pos_bins, scale, peak_lo, sum_lo, last_lo);
+        fold_bins(neg, scale, peak_hi, sum_hi, last_hi);
+        if self.taken.is_multiple_of(self.step) {
+            let base = self.slots * self.size;
+            self.keep[base..base + self.size].copy_from_slice(&self.last);
             self.slots += 1;
             if self.slots == KEPT {
                 self.thin();

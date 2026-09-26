@@ -90,6 +90,40 @@ pub struct AudioSink {
 }
 
 impl AudioSink {
+    fn on(
+        tx: Sender<Vec<f32>>,
+        recycle: Receiver<Vec<f32>>,
+        stats: Arc<AudioStats>,
+        rate: u32,
+        channels: u16,
+        block: usize,
+    ) -> Self {
+        Self {
+            tx,
+            recycle,
+            stats,
+            rate,
+            channels,
+            staging: Vec::with_capacity(4096),
+            block,
+            resampler: None,
+            resampler_r: None,
+            resampled_r: Vec::new(),
+            deint_l: Vec::new(),
+            deint_r: Vec::new(),
+            trim: 0.0,
+            resampled: Vec::new(),
+            muted: false,
+            volume: 1.0,
+        }
+    }
+
+    pub fn unplayed(rate: u32, channels: u16) -> Self {
+        let (tx, _) = bounded::<Vec<f32>>(QUEUE_DEPTH);
+        let (_, recycle) = bounded::<Vec<f32>>(QUEUE_DEPTH * 2);
+        Self::on(tx, recycle, Arc::default(), rate, channels, 2048 * channels as usize)
+    }
+
     /// Rate the sink expects; anything else plays at the wrong pitch.
     pub fn rate(&self) -> u32 {
         self.rate
@@ -448,24 +482,7 @@ impl AudioPlayer {
         let block = 2048 * channels as usize;
         stream.play().map_err(|e| AudioError::Cpal(e.to_string()))?;
 
-        let sink = AudioSink {
-            tx,
-            recycle: recycle_rx,
-            stats: stats.clone(),
-            rate,
-            channels,
-            staging: Vec::with_capacity(4096),
-            block,
-            resampler: None,
-            resampler_r: None,
-            resampled_r: Vec::new(),
-            deint_l: Vec::new(),
-            deint_r: Vec::new(),
-            trim: 0.0,
-            resampled: Vec::new(),
-            muted: false,
-            volume: 1.0,
-        };
+        let sink = AudioSink::on(tx, recycle_rx, stats.clone(), rate, channels, block);
 
         Ok((Self { _stream: stream, stats, rate, channels, device_name }, sink))
     }

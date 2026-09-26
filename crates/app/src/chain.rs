@@ -1070,6 +1070,10 @@ impl Receiver {
         // The node holding the count is about to be replaced, and a counter
         // that restarted on every retune would be worse than no counter.
         self.logged = self.logged();
+        let held = self.speaker_mut().and_then(|s| s.take_sink());
+        if self.pending_speaker.is_none() {
+            self.pending_speaker = held.map(Some);
+        }
         let graph = std::mem::replace(
             &mut self.graph,
             Graph::builder(StreamSpec::iq(plan.rate, plan.center)).build()?,
@@ -7309,6 +7313,28 @@ pub(crate) mod tests {
         let bus = topo.nodes.iter().find(|n| n.label == "Audio").unwrap();
         let spk = topo.nodes.iter().find(|n| n.kind == "speaker").expect("drawn");
         assert!(spk.inputs.iter().any(|(o, _)| *o == bus.outputs[0].0));
+    }
+
+    #[test]
+    fn the_sound_card_survives_a_rebuild_that_failed() {
+        let mut p = plan(2_400_000.0, Hz::mhz(433));
+        p.fronts.clear();
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        rx.set_speaker(Some(audio::AudioSink::unplayed(48_000, 2)));
+        assert!(rx.speaker().is_some_and(|s| s.has_sink()));
+
+        p.edits.links.push(crate::patch::Link {
+            from: crate::patch::Source::Stage(derived::SPEAKER, 0),
+            to: (derived::AUDIO, 0),
+        });
+        assert!(rx.rebuild(&p).is_err(), "a speaker feeding its own bus is a cycle");
+        p.edits.links.clear();
+        rx.rebuild(&p).unwrap();
+        assert!(rx.speaker().is_some_and(|s| s.has_sink()), "the rebuild after lost the device");
+
+        p.center = Hz::mhz(434);
+        rx.rebuild(&p).unwrap();
+        assert!(rx.speaker().is_some_and(|s| s.has_sink()), "lost on retune");
     }
 
     #[test]

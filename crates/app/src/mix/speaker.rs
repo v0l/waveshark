@@ -51,6 +51,14 @@ impl SpeakerNode {
         self.drive();
     }
 
+    pub fn take_sink(&mut self) -> Option<audio::AudioSink> {
+        self.sink.take()
+    }
+
+    pub fn has_sink(&self) -> bool {
+        self.sink.is_some()
+    }
+
     pub fn set_keyed(&mut self, keyed: bool) {
         if keyed != self.keyed {
             self.keyed = keyed;

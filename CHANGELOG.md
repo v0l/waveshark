@@ -29,10 +29,13 @@ the code is in the commit log.
 - IQStream serving only from a radio attached here, never a capture file or a remote tuner.
 - IQStream server idle with nobody subscribed, spare radios left stopped until someone is.
 - Video pane shows the first picture when nothing is picked, no longer a best picture choice.
+- Spectrum at half the processor time on a wide span.
 
 ### Fixed
 
 - Video pane best picture flickering between two channels received at once.
+- Sound lost for good after a patch edit the graph refused.
+- Chain view timings frozen while the spectrum is switched off.
 - DVB-T pictures stopping for good after one damaged packet.
 - Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
 - DVB-T sound cutting out every second and out of step with the picture.
