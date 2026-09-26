@@ -1165,7 +1165,8 @@ struct Args {
     run: bool,
 
     /// Open with a settings dialog up: agent, radio, spectrum, waterfall,
-    /// log, scanners, memory, data, app or spyservers. For looking at one in a
+    /// log, scanners, memory, data, app, spyservers or pointing:GROUP:NORAD
+    /// (the ISS when bare). For looking at one in a
     /// screenshot
     #[arg(long, value_name = "NAME")]
     settings: Option<String>,
@@ -1722,6 +1723,11 @@ fn main() -> eframe::Result<()> {
                     ("spyservers", None) => app.find_spyservers(),
                     ("network", None) => app.open_network_settings(),
                     ("iqstreams", None) => app.find_iqstreams(),
+                    (n, None) if n.starts_with("pointing") => {
+                        if !app.point_at(n.trim_start_matches("pointing").trim_start_matches(':')) {
+                            eprintln!("--settings {name}: expected pointing:GROUP:NORAD");
+                        }
+                    }
                     (_, None) => eprintln!("--settings {name}: no such dialog"),
                 }
             }

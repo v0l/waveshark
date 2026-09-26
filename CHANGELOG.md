@@ -16,7 +16,7 @@ the code is in the commit log.
 - IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
 - DVB-S2 off a satellite LNB: QPSK to 32APSK, symbol rate measured, pictures and sound.
 - Chain view switch turning off one stage, or all of receive with transmit left on.
-- Geostationary dish pointing on the Satellites view: azimuth, elevation, LNB skew and the Clarke belt.
+- Satellite pointing window for any satellite: azimuth, elevation, pass, Doppler, LNB skew and a level to peak on.
 - Quindar tones as a roger beep style, before and after each over.
 - Channel passband edges dragged on the spectrum, and SSB and CW low and high edges on the strip.
 - Chain view stages dragged from a searchable list onto a port or wire, set before wiring, and CLEAR.

@@ -41,6 +41,7 @@ mod map_pane;
 mod mapview;
 mod messages_pane;
 mod packets;
+mod pointing;
 mod sats_pane;
 mod scope;
 mod scope_settings;
@@ -332,6 +333,10 @@ const HEAT_ROWS: [(&str, f32); 5] =
     [("4/s", 4.0), ("2/s", 2.0), ("1/s", 1.0), ("every 2 s", 0.5), ("every 10 s", 0.1)];
 /// What the readings may take, in megabytes.
 const HEAT_CAPS: [u64; 5] = [8, 32, 128, 512, 2048];
+
+const NEAR_DOWNLINK_HZ: f64 = 2_000.0;
+
+const ISS_NORAD: u64 = 25_544;
 
 /// What the channel the scripts panel keys is called. Found by its name, so
 /// keying a second file reuses the one channel rather than leaving a strip of
@@ -1170,6 +1175,28 @@ impl App {
     pub fn open_network_settings(&mut self) {
         self.open = Some(Settings::App);
         self.setup_tab = SetupTab::Network;
+    }
+
+    pub fn point_at(&mut self, what: &str) -> bool {
+        let (group, norad) = match what.rsplit_once(':') {
+            None if what.is_empty() => (&datasets::tle::STATIONS, ISS_NORAD),
+            None => return false,
+            Some((g, n)) => {
+                let g = g.to_lowercase();
+                let found = datasets::tle::GROUPS
+                    .iter()
+                    .copied()
+                    .find(|x| x.name.to_lowercase().starts_with(&g));
+                match (found, n.parse()) {
+                    (Some(g), Ok(n)) => (g, n),
+                    _ => return false,
+                }
+            }
+        };
+        self.sats.group = group;
+        self.sats.pointing = Some(state::Pointing::new(norad, group));
+        self.set_view(View::Satellites);
+        true
     }
 
     pub fn find_iqstreams(&mut self) {
@@ -2399,6 +2426,92 @@ impl App {
         }
     }
 
+    fn pointing_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.sats.pointing.take() else {
+            return;
+        };
+        let Some((lat, lon)) = self.setting(|s| s.location) else {
+            return;
+        };
+        let Some(sky) = crate::sats::sky(st.group) else {
+            self.sats.pointing = Some(st);
+            return;
+        };
+        let Some(sat) = sky.get(st.norad).cloned() else {
+            return;
+        };
+        let station = orbit::Station::new(lat, lon);
+        let now = crate::sats::now_s();
+        let tx = crate::data::transmitters();
+        let (_, down) = sats_pane::choose(tx.as_deref(), &self.sats.downlink, st.norad);
+        let followed = self.sats.tracking.filter(|t| t.norad == st.norad).map(|t| t.channel);
+        let arriving = sat
+            .look(station, now)
+            .zip(down.as_ref().and_then(|d| d.downlink_hz))
+            .map(|(l, hz)| l.doppler_hz(hz as f64));
+        let status = self.radio.as_ref().map(|r| &r.status);
+        let heard = self
+            .audio
+            .channels
+            .iter()
+            .filter_map(|c| {
+                let band = c.passband();
+                let near = arriving.is_some_and(|hz| {
+                    (c.freq + band.low_hz - NEAR_DOWNLINK_HZ
+                        ..=c.freq + band.high_hz + NEAR_DOWNLINK_HZ)
+                        .contains(&hz)
+                });
+                let mer = status
+                    .and_then(|s| s.decoding_for(c.id))
+                    .and_then(|d| pointing::mer_of(&d.readings));
+                let following = followed == Some(c.id);
+                if !(near || following || (sat.stationary() && mer.is_some())) {
+                    return None;
+                }
+                let level_db = status
+                    .filter(|_| c.mode.demod().is_some())
+                    .and_then(|s| s.channel_state(c.id))
+                    .map(|s| s.squelch_db);
+                let label = match c.label.is_empty() {
+                    true => format!("channel {}", c.id),
+                    false => c.label.clone(),
+                };
+                Some(pointing::Heard { label, hz: c.freq, level_db, mer_db: mer, following })
+            })
+            .collect();
+        let norad = st.norad;
+        let (close, outs) = pointing::PointingModal {
+            st: &mut st,
+            sat: &sat,
+            station,
+            now,
+            down,
+            following: followed.is_some(),
+            span: pointing::Span {
+                db: &self.scope.db,
+                center_hz: self.scope.db_center,
+                rate_hz: self.rate,
+            },
+            heard,
+        }
+        .show(ctx);
+        let mut close = close;
+        for o in outs {
+            match o {
+                pointing::Out::Listen(d) => self.listen_to_satellite(&d),
+                pointing::Out::Stop => self.stop_tracking(),
+                pointing::Out::ShowOnMap => {
+                    self.sats.selected = Some(norad);
+                    self.set_view(View::Map);
+                    close = true;
+                }
+            }
+        }
+        if !close {
+            self.sats.pointing = Some(st);
+        }
+    }
+
     /// Put a channel on a satellite's downlink and follow it down.
     ///
     /// Always following, because there is no useful other kind: a downlink
@@ -3032,6 +3145,7 @@ impl eframe::App for App {
         self.remote_modal(ui.ctx());
         self.find_modal(ui.ctx());
         self.iqfind_modal(ui.ctx());
+        self.pointing_modal(ui.ctx());
         self.capture_modal(ui.ctx());
         self.wigle_modal(ui.ctx());
         self.beacondb_modal(ui.ctx());

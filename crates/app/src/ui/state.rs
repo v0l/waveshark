@@ -707,6 +707,21 @@ pub struct SatsState {
     pub downlink: std::collections::HashMap<u64, String>,
     /// The channel that is following a satellite down, if one is.
     pub tracking: Option<Tracking>,
+    pub pointing: Option<Pointing>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Pointing {
+    pub norad: u64,
+    pub group: &'static datasets::tle::Group,
+    pub pass: Option<(i64, Option<orbit::Pass>)>,
+    pub best: Option<(f32, &'static str)>,
+}
+
+impl Pointing {
+    pub fn new(norad: u64, group: &'static datasets::tle::Group) -> Self {
+        Self { norad, group, pass: None, best: None }
+    }
 }
 
 /// A listening channel tied to a satellite's downlink.
@@ -738,6 +753,7 @@ impl Default for SatsState {
             selected: None,
             downlink: std::collections::HashMap::new(),
             tracking: None,
+            pointing: None,
         }
     }
 }

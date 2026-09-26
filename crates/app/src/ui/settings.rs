@@ -91,7 +91,7 @@ fn voices(dir: &str) -> Vec<(String, String)> {
 
 /// A scroll area's height as a share of the screen, so a modal with two
 /// growing lists in it still fits a laptop panel.
-fn share_of_screen(ui: &egui::Ui, share: f32, least: f32, most: f32) -> f32 {
+pub(super) fn share_of_screen(ui: &egui::Ui, share: f32, least: f32, most: f32) -> f32 {
     (ui.ctx().input(|i| i.content_rect().height()) * share).clamp(least, most)
 }
 

@@ -46,7 +46,11 @@ pub(super) struct Downlink {
 
 /// One of a satellite's transmitters as everything downstream wants it, or
 /// `None` where it has no downlink to listen to.
-fn downlink(norad: u64, sat: &str, t: &datasets::satnogs::Transmitter) -> Option<Downlink> {
+pub(super) fn downlink(
+    norad: u64,
+    sat: &str,
+    t: &datasets::satnogs::Transmitter,
+) -> Option<Downlink> {
     Some(Downlink {
         norad,
         sat: sat.to_string(),
@@ -210,7 +214,10 @@ impl Sats<'_> {
                         picked,
                         tracking,
                     );
-                    if out.response.clicked() {
+                    if out.inner.point {
+                        self.st.pointing =
+                            Some(super::state::Pointing::new(f.norad, self.st.group));
+                    } else if out.response.clicked() {
                         selected = (!picked).then_some(f.norad);
                     }
                     self.pressed(&mut acts, tx.as_deref(), f.norad, &f.name, tracking, out.inner);
@@ -253,7 +260,10 @@ impl Sats<'_> {
                         picked,
                         tracking,
                     );
-                    if out.response.clicked() {
+                    if out.inner.point {
+                        self.st.pointing =
+                            Some(super::state::Pointing::new(u.norad, self.st.group));
+                    } else if out.response.clicked() {
                         selected = (!picked).then_some(u.norad);
                     }
                     self.pressed(&mut acts, tx.as_deref(), u.norad, &u.name, tracking, out.inner);
@@ -322,7 +332,7 @@ impl Sats<'_> {
 // it is changed: the ISS has forty-one live transmitters
 // and a card that reset to the lowest frequency every
 // frame would be unusable.
-fn choose(
+pub(super) fn choose(
     tx: Option<&datasets::satnogs::Transmitters>,
     chosen: &std::collections::HashMap<u64, String>,
     norad: u64,
@@ -336,7 +346,7 @@ fn choose(
     (live_tx, down)
 }
 
-fn slot(lon_deg: f64) -> String {
+pub(super) fn slot(lon_deg: f64) -> String {
     let lon = (lon_deg + 540.0) % 360.0 - 180.0;
     match lon < 0.0 {
         true => format!("{:.1}\u{b0}W", -lon),
@@ -344,11 +354,18 @@ fn slot(lon_deg: f64) -> String {
     }
 }
 
-fn skew(deg: f64) -> String {
-    match deg < 0.0 {
-        true => format!("{:.1}\u{b0} anticlockwise", -deg),
-        false => format!("{deg:.1}\u{b0} clockwise"),
-    }
+pub(super) fn skew(deg: f64) -> String {
+    format!("{deg:+.1}\u{b0}")
+}
+
+pub(super) fn skew_help(deg: f64) -> String {
+    let turn = if deg < 0.0 { "clockwise" } else { "anticlockwise" };
+    format!(
+        "Turn the LNB {:.1}\u{b0} {turn}, standing in front of the dish and facing it. \
+         Negative is clockwise and positive anticlockwise from there, which is the \
+         opposite way round when seen from behind the dish.",
+        deg.abs()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -364,7 +381,8 @@ fn fixed_card(
     tracking: bool,
 ) -> egui::InnerResponse<Pressed> {
     let rail = picked.then_some(theme::READOUT);
-    let mut pressed = Pressed { listen: None, pick: None, table: Rect::NOTHING };
+    let mut pressed = Pressed::default();
+    let mut point = (false, Rect::NOTHING);
     let tracked = tracking.then(|| down.map(|d| d.uuid.as_str())).flatten();
     let l = &f.look;
     let inner = panel::card(
@@ -378,6 +396,7 @@ fn fixed_card(
                 .size(12.0)
                 .show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                point = point_button(ui);
                 Line::new().legend("slot").value(slot(l.lon_deg)).size(12.0).show(ui);
                 if tracking {
                     Line::new().legend("listening").tint(theme::READOUT).show(ui);
@@ -385,19 +404,23 @@ fn fixed_card(
             });
         },
         |ui| {
-            Line::new()
-                .legend("az")
-                .value(format!("{:.1}\u{b0}", l.az_deg))
-                .size(12.0)
-                .gap(14.0)
-                .legend("el")
-                .value(format!("{:.1}\u{b0}", l.el_deg))
-                .size(12.0)
-                .gap(14.0)
-                .legend("skew")
-                .value(skew(l.skew_deg(station)))
-                .size(12.0)
-                .show(ui);
+            let skewed = l.skew_deg(station);
+            ui.horizontal(|ui| {
+                Line::new()
+                    .legend("az")
+                    .value(format!("{:.1}\u{b0}", l.az_deg))
+                    .size(12.0)
+                    .gap(14.0)
+                    .legend("el")
+                    .value(format!("{:.1}\u{b0}", l.el_deg))
+                    .size(12.0)
+                    .gap(14.0)
+                    .legend("skew")
+                    .value(skew(skewed))
+                    .size(12.0)
+                    .show(ui);
+                help(ui, &skew_help(skewed));
+            });
             let mut link = Line::new()
                 .legend("range")
                 .value(format!("{:.0} km", l.range_km))
@@ -463,8 +486,9 @@ fn fixed_card(
         },
     );
     let id = ui.id().with(f.norad).with("fixed");
-    let table = pressed.table;
-    egui::InnerResponse::new(pressed, card_hit(ui, id, inner.response.rect, table))
+    (pressed.point, pressed.point_at) = point;
+    let hit = card_hit(ui, id, inner.response.rect, &[pressed.table, pressed.point_at]);
+    egui::InnerResponse::new(pressed, hit)
 }
 
 /// One pass, as a card.
@@ -487,6 +511,20 @@ struct Pressed {
     /// all and merely selected itself. The card's own click is skipped where
     /// the pointer is over the table.
     table: Rect,
+    point: bool,
+    point_at: Rect,
+}
+
+impl Default for Pressed {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            pick: None,
+            table: Rect::NOTHING,
+            point: false,
+            point_at: Rect::NOTHING,
+        }
+    }
 }
 
 /// A press on a row's listen icon.
@@ -514,7 +552,8 @@ fn pass_card(
         (false, true) => Some(theme::TRACE),
         _ => None,
     };
-    let mut pressed = Pressed { listen: None, pick: None, table: Rect::NOTHING };
+    let mut pressed = Pressed::default();
+    let mut point = (false, Rect::NOTHING);
     // Which row is the one being listened to: the followed downlink is
     // always the chosen one, since picking another while tracking moves the
     // channel to it.
@@ -530,6 +569,7 @@ fn pass_card(
                 .size(12.0)
                 .show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                point = point_button(ui);
                 let when = match live.is_some() {
                     true => format!("up now, sets {}", crate::sats::in_when(u.pass.set_s - now)),
                     false => crate::sats::in_when(u.pass.rise_s - now),
@@ -656,13 +696,23 @@ fn pass_card(
     // interaction added over the icons takes every press, so the card claims
     // the pointer only where no icon is under it.
     let id = ui.id().with(u.norad).with(u.pass.rise_s);
-    let table = pressed.table;
-    egui::InnerResponse::new(pressed, card_hit(ui, id, inner.response.rect, table))
+    (pressed.point, pressed.point_at) = point;
+    let hit = card_hit(ui, id, inner.response.rect, &[pressed.table, pressed.point_at]);
+    egui::InnerResponse::new(pressed, hit)
 }
 
-fn card_hit(ui: &mut egui::Ui, id: egui::Id, card: Rect, table: Rect) -> egui::Response {
-    let over_button =
-        ui.ctx().pointer_interact_pos().is_some_and(|p| table.expand(2.0).contains(p));
+fn point_button(ui: &mut egui::Ui) -> (bool, Rect) {
+    let b = ui
+        .small_button(legend("POINT"))
+        .on_hover_text("where to point an antenna at it, with what the receiver hears");
+    (b.clicked(), b.rect)
+}
+
+fn card_hit(ui: &mut egui::Ui, id: egui::Id, card: Rect, avoid: &[Rect]) -> egui::Response {
+    let over_button = ui
+        .ctx()
+        .pointer_interact_pos()
+        .is_some_and(|p| avoid.iter().any(|r| r.expand(2.0).contains(p)));
     match over_button {
         true => ui.interact(Rect::NOTHING, id, Sense::hover()),
         false => ui.interact(card, id, Sense::click()),
@@ -905,9 +955,9 @@ const TX_LIST_H: f32 = 96.0;
 /// How finely a pass is sampled for the sky plot. Fifty points across a pass
 /// of a few minutes is a curve rather than a polygon at any size this is
 /// drawn at.
-const ARC_POINTS: usize = 50;
+pub(super) const ARC_POINTS: usize = 50;
 
-const BELT_POINTS: usize = 181;
+pub(super) const BELT_POINTS: usize = 181;
 
 const WANDER_SHOWN_DEG: f64 = 1.0;
 
@@ -924,7 +974,7 @@ const SKY_MAX_D: f32 = 240.0;
 /// which is the convention every satellite program uses and the one a
 /// rotator's own display shows. A row of azimuths cannot say whether a pass
 /// goes behind the house; this can.
-fn sky_plot(
+pub(super) fn sky_plot(
     ui: &mut egui::Ui,
     arc: &[orbit::Look],
     belt: &[orbit::Look],
