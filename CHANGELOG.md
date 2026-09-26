@@ -21,7 +21,7 @@ the code is in the commit log.
 
 ### Changed
 
-- Video pane programme table across every multiplex, with scrambling and codecs, only the watched one decoded.
+- Video pane programme table across every multiplex, with scrambling, codecs and now and next, only the watched one decoded.
 - Video pane details on an overlay over the picture, shown on hover, tap or a change of channel.
 - Scanner front ends and channels run out to the span edge, with no rolloff held back.
 - XN297 remotes read at a quarter of the processor time on a quiet band.

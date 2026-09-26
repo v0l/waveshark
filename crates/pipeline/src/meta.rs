@@ -34,6 +34,16 @@ pub struct Service {
     pub running: bool,
     pub video: Option<&'static str>,
     pub audio: Option<&'static str>,
+    pub now: Option<Showing>,
+    pub next: Option<Showing>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Showing {
+    pub title: String,
+    pub summary: String,
+    pub start_utc: Option<i64>,
+    pub duration_s: u32,
 }
 
 impl Programmes {

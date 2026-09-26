@@ -152,6 +152,16 @@ pub struct Service {
     /// ever come out of it.
     pub scrambled: bool,
     pub streams: Vec<Stream>,
+    pub now: Option<Showing>,
+    pub next: Option<Showing>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Showing {
+    pub title: String,
+    pub summary: String,
+    pub start_utc: Option<i64>,
+    pub duration_s: u32,
 }
 
 impl Service {
@@ -312,6 +322,7 @@ impl Mux {
         let table = h.pid == PID_PAT
             || h.pid == PID_SDT
             || h.pid == PID_NIT
+            || h.pid == PID_EIT
             || self.maps.contains_key(&h.pid);
         let (Some(at), true) = (h.payload, table) else { return };
 
@@ -327,6 +338,7 @@ impl Mux {
             (PID_PAT, 0x00) => self.pat(s),
             (PID_SDT, 0x42) => self.sdt(s),
             (PID_NIT, 0x40) => self.nit(s),
+            (PID_EIT, 0x4E) => self.present_following(s),
             (_, 0x02) => self.pmt(pid, s),
             _ => {}
         }
@@ -347,14 +359,8 @@ impl Mux {
                 continue;
             }
             self.maps.insert(pid, number);
-            match self.services.iter_mut().find(|x| x.id == number) {
-                Some(service) => service.map_pid = pid,
-                None => {
-                    self.services.push(Service { id: number, map_pid: pid, ..Default::default() })
-                }
-            }
+            self.service_mut(number).map_pid = pid;
         }
-        self.services.sort_by_key(|s| s.id);
     }
 
     /// A programme map: the streams one service is made of.
@@ -409,13 +415,7 @@ impl Mux {
                     }
                 }
             }
-            let service = match self.services.iter_mut().find(|x| x.id == id) {
-                Some(service) => service,
-                None => {
-                    self.services.push(Service { id, ..Default::default() });
-                    self.services.last_mut().expect("just pushed")
-                }
-            };
+            let service = self.service_mut(id);
             // Four is "running"; anything else is not on the air yet.
             service.running = running == 4;
             service.scrambled = scrambled;
@@ -427,7 +427,29 @@ impl Mux {
             }
             at += 5 + len;
         }
-        self.services.sort_by_key(|s| s.id);
+    }
+
+    fn service_mut(&mut self, id: u16) -> &mut Service {
+        let at = match self.services.binary_search_by_key(&id, |s| s.id) {
+            Ok(at) => at,
+            Err(at) => {
+                self.services.insert(at, Service { id, ..Default::default() });
+                at
+            }
+        };
+        &mut self.services[at]
+    }
+
+    fn present_following(&mut self, s: &[u8]) {
+        if s.len() < 18 || s[5] & 0x01 == 0 || s[6] > 1 {
+            return;
+        }
+        let showing = first_event(&s[14..s.len() - 4]);
+        let service = self.service_mut(u16::from_be_bytes([s[3], s[4]]));
+        match s[6] {
+            0 => service.now = showing,
+            _ => service.next = showing,
+        }
     }
 
     /// The network information table: who runs the multiplex and where the
@@ -467,6 +489,42 @@ impl Mux {
             at += 6 + len;
         }
     }
+}
+
+fn first_event(events: &[u8]) -> Option<Showing> {
+    if events.len() < 12 {
+        return None;
+    }
+    let len = (((events[10] & 0x0F) as usize) << 8) | events[11] as usize;
+    let body = &events[12..(12 + len).min(events.len())];
+    let (_, short) = descriptors(body).into_iter().find(|(tag, _)| *tag == 0x4D)?;
+    let (&title_len, rest) = short.get(3..)?.split_first()?;
+    let title = rest.get(..title_len as usize)?;
+    let (&summary_len, rest) = rest[title_len as usize..].split_first().unwrap_or((&0, &[]));
+    let summary = &rest[..(summary_len as usize).min(rest.len())];
+    Some(Showing {
+        title: text(title),
+        summary: text(summary),
+        start_utc: mjd_utc(&events[2..7]),
+        duration_s: bcd_seconds(&events[7..10]).unwrap_or(0),
+    })
+}
+
+const UNIX_EPOCH_MJD: i64 = 40_587;
+
+fn mjd_utc(raw: &[u8]) -> Option<i64> {
+    if raw.iter().all(|&b| b == 0xFF) {
+        return None;
+    }
+    let mjd = i64::from(u16::from_be_bytes([raw[0], raw[1]]));
+    Some((mjd - UNIX_EPOCH_MJD) * 86_400 + i64::from(bcd_seconds(&raw[2..5])?))
+}
+
+fn bcd_seconds(hms: &[u8]) -> Option<u32> {
+    let digits = |b: u8| {
+        (b >> 4 < 10 && b & 0x0F < 10).then(|| u32::from(b >> 4) * 10 + u32::from(b & 0x0F))
+    };
+    Some(digits(hms[0])? * 3600 + digits(hms[1])? * 60 + digits(hms[2])?)
 }
 
 /// One PES packet: a picture, or a run of coded audio, as the transport
@@ -614,7 +672,8 @@ pub fn service_read(protocol: &'static str, mux: &Mux, id: u16) -> Option<common
     Some(
         Proto::new(protocol, "service")
             .by(Entity::new("dvb-service", Id::Num(u64::from(id))).named(name))
-            .saying(Fact::Named(named)),
+            .saying(Fact::Named(named))
+            .maybe(service.now.as_ref().map(|now| Fact::Playing(now.title.clone()))),
     )
 }
 
@@ -877,6 +936,105 @@ mod tests {
         let mut bad = s.clone();
         bad[4] ^= 0x01;
         assert_ne!(crc32(&bad, 0x04C1_1DB7, 0xFFFF_FFFF), 0);
+    }
+
+    fn present_following(
+        service: u16,
+        slot: u8,
+        current: bool,
+        event: Option<(&str, &str, [u8; 5], [u8; 3])>,
+    ) -> Vec<u8> {
+        let mut body = vec![(service >> 8) as u8, service as u8, 0xC0 | current as u8, slot, 1];
+        body.extend_from_slice(&[0x08, 0x02, 0x00, 0x02, 1, 0x4E]);
+        if let Some((title, summary, start, duration)) = event {
+            let mut short = b"eng".to_vec();
+            short.push(title.len() as u8);
+            short.extend_from_slice(title.as_bytes());
+            short.push(summary.len() as u8);
+            short.extend_from_slice(summary.as_bytes());
+            let mut descriptors = vec![0x50, 3, 0xF1, 0x01, 0x0B, 0x4D, short.len() as u8];
+            descriptors.extend_from_slice(&short);
+            body.extend_from_slice(&[0x12, 0x22]);
+            body.extend_from_slice(&start);
+            body.extend_from_slice(&duration);
+            body.push(0x80 | (descriptors.len() >> 8) as u8);
+            body.push(descriptors.len() as u8);
+            body.extend_from_slice(&descriptors);
+        }
+        section(0x4E, &body)
+    }
+
+    #[test]
+    fn now_and_next_come_from_the_present_following_table() {
+        let mut mux = Mux::new();
+        let mut counter = 0u8;
+        for p in multiplex() {
+            mux.push(&p);
+        }
+        let annex_c_example = [0xC0, 0x79, 0x12, 0x45, 0x00];
+        let tables = [
+            present_following(
+                100,
+                0,
+                true,
+                Some(("Antiques Road Trip", "Two experts", annex_c_example, [0x00, 0x45, 0x00])),
+            ),
+            present_following(
+                100,
+                1,
+                true,
+                Some(("New: Pointless", "", [0xFF; 5], [0x01, 0x30, 0x15])),
+            ),
+            present_following(101, 0, true, Some(("Lois Cernyw", "", [0; 5], [0x03, 0, 0]))),
+            present_following(101, 1, true, None),
+            present_following(101, 0, false, Some(("Not yet", "", [0; 5], [0; 3]))),
+            present_following(102, 0, true, Some(("Teen Titans Go!", "", [0; 5], [0, 0x10, 0]))),
+        ];
+        for table in &tables {
+            for p in packets(PID_EIT, table, &mut counter) {
+                mux.push(&p);
+            }
+        }
+
+        let one = mux.service(100).expect("the first service");
+        assert_eq!(
+            one.now,
+            Some(Showing {
+                title: "Antiques Road Trip".into(),
+                summary: "Two experts".into(),
+                start_utc: Some(750_516_300),
+                duration_s: 45 * 60,
+            }),
+            "EN 300 468 Annex C: 0xC079124500 is 1993-10-13 12:45:00 UTC"
+        );
+        assert_eq!(
+            one.next,
+            Some(Showing {
+                title: "New: Pointless".into(),
+                summary: String::new(),
+                start_utc: None,
+                duration_s: 5415,
+            })
+        );
+
+        let two = mux.service(101).expect("the second service");
+        assert_eq!(two.now.as_ref().map(|s| s.title.as_str()), Some("Lois Cernyw"));
+        assert_eq!(two.now.as_ref().and_then(|s| s.start_utc), Some(-40_587 * 86_400));
+        assert_eq!(two.next, None, "an empty following section says nothing follows");
+
+        assert_eq!(
+            mux.services.iter().map(|s| s.id).collect::<Vec<_>>(),
+            [100, 101, 102],
+            "a service the event table names first is added in order"
+        );
+        assert_eq!(mux.service(102).and_then(|s| s.now.clone()).map(|s| s.duration_s), Some(600));
+
+        let said = service_read("dvbt", &mux, 100).expect("a named service");
+        assert_eq!(
+            said.facts.iter().filter(|f| matches!(f, common::packet::Fact::Playing(_))).count(),
+            1
+        );
+        assert!(said.facts.contains(&common::packet::Fact::Playing("Antiques Road Trip".into())));
     }
 
     /// A name with a character table byte in front of it loses the byte and

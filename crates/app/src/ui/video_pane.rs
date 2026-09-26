@@ -32,8 +32,10 @@ const OSD_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
 const DEFAULT_PICTURE_FRAC: f32 = 0.65;
 const PICTURE_FRAC_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.9;
 
-const COLS: [(&str, f32); 8] = [
+const COLS: [(&str, f32); 10] = [
     ("name", 200.0),
+    ("on now", 220.0),
+    ("next (UTC)", 240.0),
     ("provider", 130.0),
     ("access", 80.0),
     ("video", 90.0),
@@ -345,25 +347,25 @@ impl Osd {
 struct Row {
     pick: Pick,
     cells: [(String, Color32); COLS.len()],
+    summary: Option<String>,
+}
+
+fn blank_cells() -> [(String, Color32); COLS.len()] {
+    std::array::from_fn(|_| (String::new(), theme::LEGEND))
+}
+
+fn clock(start_utc: Option<i64>) -> String {
+    let at = start_utc.and_then(|t| chrono::DateTime::from_timestamp(t, 0));
+    at.map_or_else(String::new, |t| t.format("%H:%M ").to_string())
 }
 
 fn rows(inputs: &[crate::chain::VideoInput], muxes: &[crate::videobus::Offered]) -> Vec<Row> {
-    let blank = || (String::new(), theme::LEGEND);
     let mut out = Vec::new();
     for i in inputs.iter().filter(|i| !muxes.iter().any(|o| o.key() == i.key)) {
-        out.push(Row {
-            pick: Pick::Channel(i.key.clone()),
-            cells: [
-                (i.label.clone(), theme::VALUE),
-                blank(),
-                blank(),
-                (format!("{:.0}%", i.completeness * 100.0), theme::TRACE),
-                blank(),
-                blank(),
-                blank(),
-                blank(),
-            ],
-        });
+        let mut cells = blank_cells();
+        cells[0] = (i.label.clone(), theme::VALUE);
+        cells[5] = (format!("{:.0}%", i.completeness * 100.0), theme::TRACE);
+        out.push(Row { pick: Pick::Channel(i.key.clone()), cells, summary: None });
     }
     for o in muxes {
         let system = (o.programmes.system.to_string(), theme::LEGEND);
@@ -371,37 +373,42 @@ fn rows(inputs: &[crate::chain::VideoInput], muxes: &[crate::videobus::Offered])
         for p in &o.programmes.list {
             let stream = |s: Option<&'static str>, suffix: &str| match s {
                 Some(s) => (s.trim_end_matches(suffix).to_string(), theme::VALUE),
-                None => blank(),
+                None => (String::new(), theme::LEGEND),
             };
-            let cells = match &p.service {
-                Some(s) => [
-                    (
+            let mut cells = blank_cells();
+            cells[8] = system.clone();
+            cells[9] = hz.clone();
+            let mut summary = None;
+            match &p.service {
+                Some(s) => {
+                    cells[0] = (
                         s.name.clone().unwrap_or_else(|| format!("service {}", s.id)),
                         if s.scrambled { theme::LEGEND } else { theme::TRACE },
-                    ),
-                    (s.provider.clone().unwrap_or_default(), theme::LEGEND),
-                    match s.scrambled {
+                    );
+                    if let Some(now) = &s.now {
+                        cells[1] = (now.title.clone(), theme::TRACE);
+                        summary = Some(now.summary.clone()).filter(|t| !t.is_empty());
+                    }
+                    if let Some(next) = &s.next {
+                        cells[2] =
+                            (format!("{}{}", clock(next.start_utc), next.title), theme::LEGEND);
+                    }
+                    cells[3] = (s.provider.clone().unwrap_or_default(), theme::LEGEND);
+                    cells[4] = match s.scrambled {
                         true => ("scrambled".to_string(), theme::FAULT),
                         false => ("clear".to_string(), theme::OK),
-                    },
-                    stream(s.video, " video"),
-                    stream(s.audio, " audio"),
-                    (s.id.to_string(), theme::LEGEND),
-                    system.clone(),
-                    hz.clone(),
-                ],
-                None => [
-                    (p.label.clone(), theme::VALUE),
-                    blank(),
-                    blank(),
-                    blank(),
-                    blank(),
-                    blank(),
-                    system.clone(),
-                    hz.clone(),
-                ],
-            };
-            out.push(Row { pick: Pick::Programme(o.key(), o.from, p.setting.clone()), cells });
+                    };
+                    cells[5] = stream(s.video, " video");
+                    cells[6] = stream(s.audio, " audio");
+                    cells[7] = (s.id.to_string(), theme::LEGEND);
+                }
+                None => cells[0] = (p.label.clone(), theme::VALUE),
+            }
+            out.push(Row {
+                pick: Pick::Programme(o.key(), o.from, p.setting.clone()),
+                cells,
+                summary,
+            });
         }
     }
     out
@@ -454,6 +461,10 @@ fn table(ui: &mut egui::Ui, rows: &[Row], chosen: &Pick) -> Option<Pick> {
                         table::cell(&p, rect, x, w, t, *c);
                         x += w;
                     }
+                    let resp = match &row.summary {
+                        Some(summary) => resp.on_hover_text(summary),
+                        None => resp,
+                    };
                     if resp.clicked() {
                         picked = Some(row.pick.clone());
                     }
@@ -707,6 +718,50 @@ mod tests {
             [(7, "service".into(), Int(0))],
             "with nothing picked a stopped multiplex goes back to its first picture"
         );
+    }
+
+    #[test]
+    fn a_service_row_says_what_is_on_now_and_when_the_next_starts() {
+        let mut mux = offered(3, 1_097e6, pipeline::ParamValue::Int(0));
+        let listing = std::sync::Arc::make_mut(&mut mux.programmes);
+        listing.list.push(listing.list[0].clone());
+        listing.list[0].service = Some(pipeline::Service {
+            id: 6943,
+            name: Some("BBC One NI HD".into()),
+            now: Some(pipeline::Showing {
+                title: "Antiques Road Trip".into(),
+                summary: "Two experts".into(),
+                start_utc: Some(1_790_350_200),
+                duration_s: 2700,
+            }),
+            next: Some(pipeline::Showing {
+                title: "New: Pointless".into(),
+                start_utc: Some(1_790_352_900),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let listed = rows(&[], &[mux]);
+        assert_eq!(listed.len(), 2);
+        let bbc = &listed[0];
+        let cells: Vec<&str> = bbc.cells.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            cells,
+            [
+                "BBC One NI HD",
+                "Antiques Road Trip",
+                "16:15 New: Pointless",
+                "",
+                "clear",
+                "",
+                "",
+                "6943",
+                "DVB-S2",
+                "1097.000 MHz"
+            ]
+        );
+        assert_eq!(bbc.summary.as_deref(), Some("Two experts"));
+        assert_eq!(listed[1].summary, None, "a programme with no service says nothing");
     }
 
     #[test]

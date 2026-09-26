@@ -70,6 +70,19 @@ fn named(node: &Dvbs2Node) -> Vec<String> {
     node.services().iter().filter_map(|s| s.name.clone()).collect()
 }
 
+type Slot = Option<(String, Option<i64>, u32)>;
+
+fn now_and_next(node: &Dvbs2Node) -> Vec<(u16, Slot, Slot)> {
+    let slot = |s: &Option<decode::mpegts::Showing>| {
+        s.as_ref().map(|s| (s.title.clone(), s.start_utc, s.duration_s))
+    };
+    node.services()
+        .iter()
+        .filter(|s| s.now.is_some() || s.next.is_some())
+        .map(|s| (s.id, slot(&s.now), slot(&s.next)))
+        .collect()
+}
+
 #[test]
 fn tg4_off_astra_2g_on_a_hackrf() {
     let _alone = alone();
@@ -87,6 +100,11 @@ fn tg4_off_astra_2g_on_a_hackrf() {
         "{stats:?}"
     );
     assert_eq!(read.stream.len() / 188, 30_716);
+    assert_eq!(
+        now_and_next(&read.node),
+        [],
+        "TSDuck 3.45 reads one present section for service 1 with no event in it"
+    );
 }
 
 #[test]
@@ -126,6 +144,32 @@ fn bbc_hd_off_astra_2e_on_a_limesdr_with_its_17_mhz_spur() {
     );
     assert_eq!((stats.frames, stats.ldpc_failed + stats.bch_failed), (828, 0), "{stats:?}");
     assert_eq!(read.stream.len() / 188, 26_605);
+    let at = |title: &str, start: i64, minutes: u32| {
+        Some((title.to_string(), Some(start), minutes * 60))
+    };
+    let (t1530, t1545, t1550, t1600, t1615) =
+        (1_790_350_200, 1_790_351_100, 1_790_351_400, 1_790_352_000, 1_790_352_900);
+    assert_eq!(
+        now_and_next(&read.node),
+        [
+            (6911, at("Antiques Road Trip", t1530, 45), None),
+            (
+                6940,
+                at("UEFA Nations League: Georgia v...", t1545, 135),
+                at("Newsnight, followed by Weather", t1545 + 135 * 60, 30)
+            ),
+            (6943, at("Antiques Road Trip", t1530, 45), at("New: Pointless", t1615, 45)),
+            (6945, at("UEFA Nations League: Georgia v...", t1545, 135), None),
+            (6963, at("Antiques Road Trip", t1530, 45), at("New: Pointless", t1615, 45)),
+            (
+                6972,
+                at("Teen Titans Go!", t1550, 10),
+                at("New: Blue Peter: Shaun the...", t1600, 30)
+            ),
+            (6987, at("Lois Cernyw", t1530 - 150 * 60, 180), None),
+        ],
+        "TSDuck 3.45 tstables --all-sections; 6911 and 6945 sent only their present section in the window"
+    );
 }
 
 #[cfg(feature = "ffmpeg")]

@@ -99,6 +99,15 @@ pub fn service_label(s: &mpegts::Service) -> String {
     }
 }
 
+fn showing(s: &mpegts::Showing) -> pipeline::Showing {
+    pipeline::Showing {
+        title: s.title.clone(),
+        summary: s.summary.clone(),
+        start_utc: s.start_utc,
+        duration_s: s.duration_s,
+    }
+}
+
 /// What was still in flight when the samples ran out: transport packets the
 /// decoding thread had not finished reading, and the sound that had no block
 /// left to go out in. A live receiver never sees either; a recording that
@@ -143,7 +152,7 @@ pub struct Broadcast {
     playing: bool,
     #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
     sequence: u64,
-    named: Vec<u16>,
+    told: std::collections::HashMap<u16, Option<String>>,
     listing: Option<std::sync::Arc<pipeline::Programmes>>,
 }
 
@@ -169,7 +178,7 @@ impl Broadcast {
             #[cfg(feature = "ffmpeg")]
             playing: false,
             sequence: 0,
-            named: Vec::new(),
+            told: std::collections::HashMap::new(),
             listing: None,
         }
     }
@@ -183,12 +192,12 @@ impl Broadcast {
             self.restart_clock();
         }
         self.watching = None;
-        self.named.clear();
+        self.told.clear();
     }
 
     pub fn retune(&mut self) {
         self.mux = Mux::new();
-        self.named.clear();
+        self.told.clear();
     }
 
     /// Watch one service by its identifier, or none to take whichever the
@@ -300,6 +309,8 @@ impl Broadcast {
                     running: s.running,
                     video: s.video().map(|v| v.kind.label()),
                     audio: s.audio().map(|a| a.kind.label()),
+                    now: s.now.as_ref().map(showing),
+                    next: s.next.as_ref().map(showing),
                 }),
             });
         }
@@ -433,14 +444,14 @@ impl Broadcast {
     }
 
     pub fn fresh_services(&mut self) -> Vec<u16> {
-        let fresh: Vec<u16> = self
-            .mux
-            .services
-            .iter()
-            .filter(|s| s.name.is_some() && !self.named.contains(&s.id))
-            .map(|s| s.id)
-            .collect();
-        self.named.extend_from_slice(&fresh);
+        let mut fresh = Vec::new();
+        for s in self.mux.services.iter().filter(|s| s.name.is_some()) {
+            let now = s.now.as_ref().map(|n| n.title.clone());
+            if self.told.get(&s.id) != Some(&now) {
+                self.told.insert(s.id, now);
+                fresh.push(s.id);
+            }
+        }
         fresh
     }
 
@@ -721,6 +732,29 @@ mod tests {
         assert_eq!((tv.wanted(), tv.asked), (&Want::Id(21010), Some(21010)));
         tv.set_service("test", pipeline::ParamValue::Int(21060)).expect("the third by id");
         assert_eq!((tv.wanted(), tv.asked), (&Want::Id(21060), Some(21060)));
+    }
+
+    #[test]
+    fn a_service_is_announced_once_named_and_again_each_time_its_programme_changes() {
+        let mut tv = Broadcast::new("test", 0.0);
+        let on = |title: &str| mpegts::Showing { title: title.into(), ..Default::default() };
+        tv.mux.services = vec![
+            mpegts::Service { id: 1, ..Default::default() },
+            mpegts::Service { id: 2, name: Some("BBC Two HD".into()), ..Default::default() },
+        ];
+        assert_eq!(tv.fresh_services(), [2]);
+        assert_eq!(tv.fresh_services(), [0u16; 0], "nothing changed");
+        tv.mux.services[1].now = Some(on("Newsnight"));
+        tv.mux.services[0].now = Some(on("Unnamed"));
+        assert_eq!(tv.fresh_services(), [2], "a service without a name is never announced");
+        tv.mux.services[1].next = Some(on("Weather"));
+        assert_eq!(tv.fresh_services(), [0u16; 0], "what follows is not what is on");
+        tv.mux.services[1].now = Some(on("Weather"));
+        assert_eq!(tv.fresh_services(), [2]);
+        let listed = tv.programmes();
+        let bbc = listed[2].service.as_ref().expect("the named service");
+        assert_eq!(bbc.now.as_ref().map(|s| s.title.as_str()), Some("Weather"));
+        assert_eq!(bbc.next.as_ref().map(|s| s.title.as_str()), Some("Weather"));
     }
 
     fn bars(seconds: f64) -> Vec<TsPacket> {
