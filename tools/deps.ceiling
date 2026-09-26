@@ -1,0 +1,4 @@
+x86_64-unknown-linux-gnu limesdr,stt,cuda,mcp 499
+aarch64-unknown-linux-gnu limesdr,stt,mcp 482
+aarch64-apple-darwin limesdr,stt,mcp,ffmpeg 427
+x86_64-pc-windows-msvc limesdr,stt,cuda,mcp 429

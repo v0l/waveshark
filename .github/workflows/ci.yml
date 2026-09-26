@@ -78,6 +78,14 @@ jobs:
       - name: Build the shipped feature set
         run: cargo build --release -p app --no-default-features --features limesdr,stt,mcp
 
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Crates in each release build
+        run: tools/deps.sh
+
   changelog:
     runs-on: ubuntu-latest
     steps:
