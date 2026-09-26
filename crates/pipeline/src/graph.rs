@@ -1697,6 +1697,7 @@ mod tests {
                     wanted: crate::ParamValue::Int(0),
                     on: None,
                     idle: crate::ParamValue::Int(-1),
+                    any: crate::ParamValue::Int(0),
                     list: vec![crate::meta::Programme {
                         label: format!("left {}", self.0),
                         setting: crate::ParamValue::Int(0),

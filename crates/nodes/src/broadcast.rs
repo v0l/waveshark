@@ -287,11 +287,7 @@ impl Broadcast {
     }
 
     fn programmes(&self) -> Vec<pipeline::Programme> {
-        let mut list = vec![pipeline::Programme {
-            label: ANY.to_string(),
-            setting: Want::Any.setting(),
-            service: None,
-        }];
+        let mut list = Vec::new();
         for s in &self.mux.services {
             list.push(pipeline::Programme {
                 label: service_label(s),
@@ -319,6 +315,7 @@ impl Broadcast {
             wanted: self.wanted.setting(),
             on: self.asked,
             idle: Want::Off.setting(),
+            any: Want::Any.setting(),
             list,
         };
         let listing = match &self.listing {
@@ -719,10 +716,7 @@ mod tests {
         let listed: Vec<(String, pipeline::ParamValue)> =
             tv.programmes().iter().map(|p| (p.label.clone(), p.setting.clone())).collect();
         let itv1 = |id: i64| ("ITV1 HD".to_string(), pipeline::ParamValue::Int(id));
-        assert_eq!(
-            listed,
-            [(ANY.to_string(), Want::Any.setting()), itv1(21000), itv1(21010), itv1(21060)]
-        );
+        assert_eq!(listed, [itv1(21000), itv1(21010), itv1(21060)]);
         tv.set_service("test", pipeline::ParamValue::Choice(2)).expect("the second variant");
         assert_eq!((tv.wanted(), tv.asked), (&Want::Id(21010), Some(21010)));
         tv.set_service("test", pipeline::ParamValue::Int(21060)).expect("the third by id");

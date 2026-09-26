@@ -105,6 +105,10 @@ pub(super) struct VideoPane<'a> {
 impl VideoPane<'_> {
     pub fn show(self, ui: &mut egui::Ui) {
         let st = self.st;
+        if st.watching.as_deref().is_some_and(|k| !offered(k, &self.inputs, &self.muxes)) {
+            st.watch(None);
+            self.cmds.push(Cmd::WatchVideo(st.rules()));
+        }
         let before = pick_of(st.watching.as_deref(), &self.muxes);
         ui.add_space(4.0);
         if let Some(f) = self.frame {
@@ -132,7 +136,7 @@ impl VideoPane<'_> {
             .unwrap_or(DEFAULT_PICTURE_FRAC)
             .clamp(*PICTURE_FRAC_RANGE.start(), *PICTURE_FRAC_RANGE.end());
         let on = playing(&before, st.shown.as_ref(), &self.muxes);
-        let osd = Osd::of(&before, &on, st, &self.inputs, &self.muxes, &self.saved);
+        let osd = Osd::of(&on, st, &self.inputs, &self.muxes, &self.saved);
         ui.allocate_ui(Vec2::new(ui.available_width(), usable * frac), |ui| {
             ui.set_min_size(ui.available_size());
             picture(ui, st, &osd);
@@ -161,7 +165,7 @@ impl VideoPane<'_> {
                 _ => None,
             };
             st.watching = match &want {
-                Pick::Best => None,
+                Pick::First => None,
                 Pick::Channel(k) | Pick::Programme(k, _, _) => Some(k.clone()),
             };
             self.cmds.push(Cmd::WatchVideo(st.rules()));
@@ -230,7 +234,6 @@ struct Osd {
 
 impl Osd {
     fn of(
-        pick: &Pick,
         on: &Pick,
         st: &VideoState,
         inputs: &[crate::chain::VideoInput],
@@ -261,11 +264,8 @@ impl Osd {
             .or_else(|| f.and_then(|f| f.label.clone()))
             .or_else(|| input.map(|i| i.label.clone()))
             .or_else(|| st.watching_label.clone())
-            .unwrap_or_else(|| "best picture".to_string());
+            .unwrap_or_default();
         let mut facts = Vec::new();
-        if *pick == Pick::Best && f.is_some() {
-            facts.push(("watching", "best picture".to_string(), theme::READOUT));
-        }
         if let Some(s) = service.and_then(|p| p.service.as_ref()) {
             if let Some(p) = &s.provider {
                 facts.push(("provider", p.clone(), theme::VALUE));
@@ -318,11 +318,13 @@ impl Osd {
     }
 
     fn rows(&self, ui: &mut egui::Ui) {
-        let mut title = Line::new().value(&self.title).size(20.0);
-        if let Some(n) = self.number {
-            title = title.gap(16.0).legend("service").value(n.to_string());
+        if !self.title.is_empty() {
+            let mut title = Line::new().value(&self.title).size(20.0);
+            if let Some(n) = self.number {
+                title = title.gap(16.0).legend("service").value(n.to_string());
+            }
+            title.show(ui);
         }
-        title.show(ui);
         ui.horizontal_wrapped(|ui| {
             for (legend, value, tint) in &self.facts {
                 Line::new().legend(legend).value(value).tint(*tint).show(ui);
@@ -347,19 +349,7 @@ struct Row {
 
 fn rows(inputs: &[crate::chain::VideoInput], muxes: &[crate::videobus::Offered]) -> Vec<Row> {
     let blank = || (String::new(), theme::LEGEND);
-    let mut out = vec![Row {
-        pick: Pick::Best,
-        cells: [
-            ("best picture".to_string(), theme::VALUE),
-            blank(),
-            blank(),
-            blank(),
-            blank(),
-            blank(),
-            blank(),
-            blank(),
-        ],
-    }];
+    let mut out = Vec::new();
     for i in inputs.iter().filter(|i| !muxes.iter().any(|o| o.key() == i.key)) {
         out.push(Row {
             pick: Pick::Channel(i.key.clone()),
@@ -520,13 +510,21 @@ fn upload(
 
 #[derive(Clone, Debug, PartialEq)]
 enum Pick {
-    Best,
+    First,
     Channel(String),
     Programme(String, usize, pipeline::ParamValue),
 }
 
+fn offered(
+    key: &str,
+    inputs: &[crate::chain::VideoInput],
+    muxes: &[crate::videobus::Offered],
+) -> bool {
+    inputs.iter().any(|i| i.key == key) || muxes.iter().any(|o| o.key() == key)
+}
+
 fn pick_of(watching: Option<&str>, muxes: &[crate::videobus::Offered]) -> Pick {
-    let Some(k) = watching else { return Pick::Best };
+    let Some(k) = watching else { return Pick::First };
     match muxes.iter().find(|o| o.key() == k) {
         Some(o) => Pick::Programme(k.to_string(), o.from, o.programmes.wanted.clone()),
         None => Pick::Channel(k.to_string()),
@@ -534,9 +532,9 @@ fn pick_of(watching: Option<&str>, muxes: &[crate::videobus::Offered]) -> Pick {
 }
 
 fn playing(want: &Pick, shown: Option<&VideoFrame>, muxes: &[crate::videobus::Offered]) -> Pick {
-    let Some(f) = shown.filter(|_| *want == Pick::Best) else { return want.clone() };
+    let Some(f) = shown.filter(|_| *want == Pick::First) else { return want.clone() };
     match pick_of(Some(&crate::videobus::key_of(f)), muxes) {
-        Pick::Channel(_) => Pick::Best,
+        Pick::Channel(_) => Pick::First,
         on => on,
     }
 }
@@ -544,7 +542,15 @@ fn playing(want: &Pick, shown: Option<&VideoFrame>, muxes: &[crate::videobus::Of
 fn orders(muxes: &[crate::videobus::Offered], pick: &Pick) -> Vec<Cmd> {
     let mut out = Vec::new();
     let playing = match pick {
-        Pick::Best => return out,
+        Pick::First => {
+            return muxes
+                .iter()
+                .filter(|o| o.programmes.is_idle())
+                .map(|o| {
+                    Cmd::NodeParam(o.from, o.programmes.param.to_string(), o.programmes.any.clone())
+                })
+                .collect();
+        }
         Pick::Programme(_, from, setting) => Some((*from, setting)),
         Pick::Channel(_) => None,
     };
@@ -617,10 +623,11 @@ mod tests {
                 wanted,
                 on: None,
                 idle: pipeline::ParamValue::Int(-1),
-                list: vec![
-                    programme("first with a picture", pipeline::ParamValue::Int(0)),
-                    programme("BBC Two HD", pipeline::ParamValue::Text("BBC Two HD".into())),
-                ],
+                any: pipeline::ParamValue::Int(0),
+                list: vec![programme(
+                    "BBC Two HD",
+                    pipeline::ParamValue::Text("BBC Two HD".into()),
+                )],
             }),
         }
     }
@@ -635,10 +642,10 @@ mod tests {
     }
 
     #[test]
-    fn the_osd_over_the_best_picture_names_the_service_the_multiplex_is_decoding() {
+    fn the_osd_over_the_first_picture_names_the_service_the_multiplex_is_decoding() {
         let mut mux = offered(3, 1_097e6, pipeline::ParamValue::Int(0));
         let list = &mut std::sync::Arc::get_mut(&mut mux.programmes).expect("one owner").list;
-        list[1].service = Some(pipeline::Service {
+        list[0].service = Some(pipeline::Service {
             id: 6940,
             name: Some("BBC Two HD".into()),
             provider: Some("BSkyB".into()),
@@ -652,14 +659,13 @@ mod tests {
         (shown.system, shown.channel_hz, shown.width, shown.height) =
             ("DVB-S2", 1_097e6, 1920, 1080);
         let st = VideoState { shown: Some(shown.clone()), ..Default::default() };
-        let on = playing(&Pick::Best, Some(&shown), &muxes);
-        let osd = Osd::of(&Pick::Best, &on, &st, &[], &muxes, &[]);
+        let on = playing(&Pick::First, Some(&shown), &muxes);
+        let osd = Osd::of(&on, &st, &[], &muxes, &[]);
         assert_eq!((osd.title.as_str(), osd.number), ("BBC Two HD", Some(6940)));
         let facts: Vec<(&str, &str)> = osd.facts.iter().map(|(l, v, _)| (*l, v.as_str())).collect();
         assert_eq!(
             facts,
             [
-                ("watching", "best picture"),
                 ("provider", "BSkyB"),
                 ("coding", "H.264 MPEG-2"),
                 ("tuned", "1097.000 MHz"),
@@ -669,8 +675,8 @@ mod tests {
             ]
         );
 
-        let idle = Osd::of(&Pick::Best, &Pick::Best, &VideoState::default(), &[], &[], &[]);
-        assert_eq!((idle.title.as_str(), idle.facts.len()), ("best picture", 0));
+        let idle = Osd::of(&Pick::First, &VideoState::default(), &[], &[], &[]);
+        assert_eq!((idle.title.as_str(), idle.facts.len()), ("", 0));
     }
 
     #[test]
@@ -688,7 +694,7 @@ mod tests {
             [(3, "service".into(), Int(-1)), (7, "service".into(), Int(-1))],
             "a picture that is not a programme stops every multiplex"
         );
-        assert!(said(orders(&muxes, &Pick::Best)).is_empty());
+        assert!(said(orders(&muxes, &Pick::First)).is_empty());
         let settled =
             [offered(3, 1_097e6, Text("BBC Two HD".into())), offered(7, 1_068e6, Int(-1))];
         assert!(said(orders(&settled, &bbc_two)).is_empty(), "nothing more to ask once it is so");
@@ -696,19 +702,24 @@ mod tests {
             pick_of(Some(&muxes[1].key()), &settled),
             Pick::Programme(muxes[1].key(), 7, Int(-1))
         );
+        assert_eq!(
+            said(orders(&settled, &Pick::First)),
+            [(7, "service".into(), Int(0))],
+            "with nothing picked a stopped multiplex goes back to its first picture"
+        );
     }
 
     #[test]
-    fn the_best_picture_keeps_its_multiplex_and_stops_the_others() {
+    fn the_first_picture_keeps_its_multiplex_and_stops_the_others() {
         use pipeline::ParamValue::Int;
         let muxes = [offered(3, 1_097e6, Int(0)), offered(7, 1_068e6, Int(0))];
         let mut shown = frame(1, 288);
         shown.system = "DVB-S2";
         shown.channel_hz = 1_068e6;
-        let pick = playing(&Pick::Best, Some(&shown), &muxes);
+        let pick = playing(&Pick::First, Some(&shown), &muxes);
         assert_eq!(said(orders(&muxes, &pick)), [(3, "service".into(), Int(-1))]);
         let camera = frame(1, 288);
-        assert_eq!(playing(&Pick::Best, Some(&camera), &muxes), Pick::Best);
-        assert_eq!(playing(&Pick::Best, None, &muxes), Pick::Best);
+        assert_eq!(playing(&Pick::First, Some(&camera), &muxes), Pick::First);
+        assert_eq!(playing(&Pick::First, None, &muxes), Pick::First);
     }
 }

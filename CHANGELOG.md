@@ -27,6 +27,7 @@ the code is in the commit log.
 - TETRA calls several sites send at once, heard and listed once with every site.
 - IQStream serving only from a radio attached here, never a capture file or a remote tuner.
 - IQStream server idle with nobody subscribed, spare radios left stopped until someone is.
+- Video pane shows the first picture when nothing is picked, no longer a best picture choice.
 
 ### Fixed
 

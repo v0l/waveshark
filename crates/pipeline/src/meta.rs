@@ -14,6 +14,7 @@ pub struct Programmes {
     pub wanted: ParamValue,
     pub on: Option<u16>,
     pub idle: ParamValue,
+    pub any: ParamValue,
     pub list: Vec<Programme>,
 }
 

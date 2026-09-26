@@ -6506,8 +6506,8 @@ pub(crate) mod tests {
         assert_eq!(
             sources,
             [
-                ("DVB-T:428000".to_string(), "service", vec![nodes::dvbt_nodes::ANY]),
-                ("DVB-T:430000".to_string(), "service", vec![nodes::dvbt_nodes::ANY]),
+                ("DVB-T:428000".to_string(), "service", vec![]),
+                ("DVB-T:430000".to_string(), "service", vec![]),
             ]
         );
         for o in &offered {
