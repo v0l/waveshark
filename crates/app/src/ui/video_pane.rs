@@ -27,6 +27,20 @@ use common::{Pixels, VideoFrame};
 /// second for a camera and an hour for a picture that was built and finished.
 const HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
+const DEFAULT_PICTURE_FRAC: f32 = 0.65;
+const PICTURE_FRAC_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.9;
+
+const COLS: [(&str, f32); 8] = [
+    ("name", 200.0),
+    ("provider", 130.0),
+    ("access", 80.0),
+    ("video", 90.0),
+    ("audio", 90.0),
+    ("service", 70.0),
+    ("system", 70.0),
+    ("frequency", 110.0),
+];
+
 #[derive(Default)]
 pub(super) struct VideoState {
     /// The texture the last field was uploaded into, kept so a redraw that
@@ -41,6 +55,8 @@ pub(super) struct VideoState {
     /// What that channel was called when it was picked, so the chooser still
     /// names it after it has faded out of the live list.
     watching_label: Option<String>,
+    split: Option<f32>,
+    splitting: bool,
 }
 
 impl VideoState {
@@ -85,15 +101,10 @@ pub(super) struct VideoPane<'a> {
 impl VideoPane<'_> {
     pub fn show(self, ui: &mut egui::Ui) {
         let st = self.st;
-        // The chooser is always there, including with nothing on the air: a
-        // pane whose only control appears once two transmitters happen to be
-        // up at once looks like a pane with no controls at all.
+        let before = pick_of(st.watching.as_deref(), &self.muxes);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
-            Line::new().legend("watching").show(ui);
-            let before = pick_of(st.watching.as_deref(), &self.muxes);
-            let mut want = before.clone();
-            let shown = match &want {
+            let shown = match &before {
                 Pick::Programme(k, from, setting) => self
                     .muxes
                     .iter()
@@ -102,7 +113,6 @@ impl VideoPane<'_> {
                     .map_or_else(|| k.clone(), |p| p.label.clone()),
                 Pick::Channel(k) => match self.inputs.iter().find(|i| &i.key == k) {
                     Some(i) => format!("{}  {:.0}%", i.label, i.completeness * 100.0),
-                    // Off the air, but still what was asked for.
                     None => format!(
                         "{}  (waiting)",
                         st.watching_label.clone().unwrap_or_else(|| k.clone())
@@ -110,54 +120,7 @@ impl VideoPane<'_> {
                 },
                 Pick::Best => "best picture".to_string(),
             };
-            egui::ComboBox::from_id_salt("video-channel")
-                .selected_text(value(shown))
-                .width(300.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut want, Pick::Best, "best picture");
-                    for i in &self.inputs {
-                        if self.muxes.iter().any(|o| o.key() == i.key) {
-                            continue;
-                        }
-                        ui.selectable_value(
-                            &mut want,
-                            Pick::Channel(i.key.clone()),
-                            format!("{}  {:.0}%", i.label, i.completeness * 100.0),
-                        );
-                    }
-                    for o in &self.muxes {
-                        let on = format!(
-                            "{} {:.3} MHz",
-                            o.programmes.system,
-                            o.programmes.channel_hz / 1e6
-                        );
-                        for p in &o.programmes.list {
-                            ui.selectable_value(
-                                &mut want,
-                                Pick::Programme(o.key(), o.from, p.setting.clone()),
-                                format!("{}  {on}", p.label),
-                            );
-                        }
-                    }
-                    if self.inputs.is_empty() && self.muxes.is_empty() {
-                        Line::new().note("nothing receiving").size(11.0).show(ui);
-                    }
-                });
-            if want != before {
-                st.watching_label = match &want {
-                    Pick::Channel(k) => {
-                        self.inputs.iter().find(|i| &i.key == k).map(|i| i.label.clone())
-                    }
-                    _ => None,
-                };
-                st.watching = match &want {
-                    Pick::Best => None,
-                    Pick::Channel(k) | Pick::Programme(k, _, _) => Some(k.clone()),
-                };
-                self.cmds.push(Cmd::WatchVideo(st.rules()));
-            }
-            let playing = playing(&want, self.frame.as_ref(), &self.muxes);
-            self.cmds.extend(orders(&self.muxes, &playing));
+            Line::new().legend("watching").value(shown).show(ui);
             ui.add_space(12.0);
             let count = match self.inputs.len() {
                 0 => "no channels".to_string(),
@@ -165,8 +128,6 @@ impl VideoPane<'_> {
                 n => format!("{n} channels"),
             };
             Line::new().legend(&count).show(ui);
-            // Every finished still is written out without being asked, so
-            // the only thing a person needs from the pane is where they went.
             if let Some(last) = self.saved.last() {
                 ui.add_space(12.0);
                 let n = self.saved.len();
@@ -201,58 +162,233 @@ impl VideoPane<'_> {
             st.last = None;
         }
 
-        let (Some(tex), Some(f)) = (st.texture.as_ref(), st.shown.as_ref()) else {
-            ui.centered_and_justified(|ui| {
-                Line::new().note("no picture").size(14.0).show(ui);
-            });
-            return;
-        };
+        let top = ui.cursor().top();
+        let usable = (ui.available_height() - SPLIT_GRIP_H).max(200.0);
+        let frac = st
+            .split
+            .unwrap_or(DEFAULT_PICTURE_FRAC)
+            .clamp(*PICTURE_FRAC_RANGE.start(), *PICTURE_FRAC_RANGE.end());
+        ui.allocate_ui(Vec2::new(ui.available_width(), usable * frac), |ui| {
+            ui.set_min_size(ui.available_size());
+            picture(ui, st.texture.as_ref(), st.shown.as_ref());
+        });
+        st.split = Some(split_divider(
+            ui,
+            top,
+            usable,
+            frac,
+            &mut st.splitting,
+            PICTURE_FRAC_RANGE,
+            DEFAULT_PICTURE_FRAC,
+        ));
+        ui.add_space(4.0);
 
-        // The shape the transmission says, not the shape of the sample grid.
-        // Drawn from its own numbers a 640 by 288 field is 10:9, which is a
-        // 4:3 picture with the sides pushed in: how many samples a line was
-        // cut into is a fact about the receiver's clock, and a field is half
-        // a frame.
-        let aspect = if f.aspect > 0.0 { f.aspect } else { 4.0 / 3.0 };
-        let space = ui.available_size();
-        let size = if space.x / space.y > aspect {
-            egui::vec2(space.y * aspect, space.y)
-        } else {
-            egui::vec2(space.x, space.x / aspect)
-        };
-        ui.centered_and_justified(|ui| {
-            // The ratio is told, not taken from the texture: `fit_to_exact_size`
-            // still keeps the image's own proportions unless this is off, so a
-            // 640 by 288 field was drawn at 20:9 whatever shape was asked for.
-            let r =
-                ui.add(egui::Image::new(tex).maintain_aspect_ratio(false).fit_to_exact_size(size));
-            // What it is, where it is, and what was actually received: the
-            // grid it was sampled into, then the lines that arrived out of
-            // the lines a field has. A picture assembled from a third of its
-            // lines is a picture of a fade, and analogue video has nothing
-            // else to judge it by.
-            let where_ = match &f.label {
-                Some(l) => format!("{l}  {:.3} MHz", f.channel_hz / 1e6),
-                None => format!("{:.3} MHz", f.channel_hz / 1e6),
+        let rows = rows(&self.inputs, &self.muxes);
+        let mut want = before.clone();
+        if let Some(picked) = table(ui, &rows, &before) {
+            want = picked;
+        }
+        if want != before {
+            st.watching_label = match &want {
+                Pick::Channel(k) => {
+                    self.inputs.iter().find(|i| &i.key == k).map(|i| i.label.clone())
+                }
+                _ => None,
             };
-            let caption = format!(
-                "{where_}  {}x{}  {} of {} lines",
-                f.width, f.height, f.lines_seen, f.height
-            );
-            // Over the picture rather than beside it, so the image keeps the
-            // whole pane and the caption cannot push it about as the text
-            // changes width.
-            ui.painter().text(
-                r.rect.left_bottom() + egui::vec2(6.0, -6.0),
-                egui::Align2::LEFT_BOTTOM,
-                caption,
-                egui::FontId::monospace(12.0),
-                // A partial picture is worth flagging: a fade looks like a
-                // picture until the count is read.
-                if f.completeness() > 0.9 { theme::READOUT } else { theme::FAULT },
-            );
+            st.watching = match &want {
+                Pick::Best => None,
+                Pick::Channel(k) | Pick::Programme(k, _, _) => Some(k.clone()),
+            };
+            self.cmds.push(Cmd::WatchVideo(st.rules()));
+        }
+        let playing = playing(&want, st.shown.as_ref(), &self.muxes);
+        self.cmds.extend(orders(&self.muxes, &playing));
+    }
+}
+
+fn picture(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, f: Option<&VideoFrame>) {
+    let (Some(tex), Some(f)) = (tex, f) else {
+        ui.centered_and_justified(|ui| {
+            Line::new().note("no picture").size(14.0).show(ui);
+        });
+        return;
+    };
+
+    // The shape the transmission says, not the shape of the sample grid.
+    // Drawn from its own numbers a 640 by 288 field is 10:9, which is a
+    // 4:3 picture with the sides pushed in: how many samples a line was
+    // cut into is a fact about the receiver's clock, and a field is half
+    // a frame.
+    let aspect = if f.aspect > 0.0 { f.aspect } else { 4.0 / 3.0 };
+    let space = ui.available_size();
+    let size = if space.x / space.y > aspect {
+        egui::vec2(space.y * aspect, space.y)
+    } else {
+        egui::vec2(space.x, space.x / aspect)
+    };
+    ui.centered_and_justified(|ui| {
+        // The ratio is told, not taken from the texture: `fit_to_exact_size`
+        // still keeps the image's own proportions unless this is off, so a
+        // 640 by 288 field was drawn at 20:9 whatever shape was asked for.
+        let r = ui.add(egui::Image::new(tex).maintain_aspect_ratio(false).fit_to_exact_size(size));
+        // What it is, where it is, and what was actually received: the
+        // grid it was sampled into, then the lines that arrived out of
+        // the lines a field has. A picture assembled from a third of its
+        // lines is a picture of a fade, and analogue video has nothing
+        // else to judge it by.
+        let where_ = match &f.label {
+            Some(l) => format!("{l}  {:.3} MHz", f.channel_hz / 1e6),
+            None => format!("{:.3} MHz", f.channel_hz / 1e6),
+        };
+        let caption =
+            format!("{where_}  {}x{}  {} of {} lines", f.width, f.height, f.lines_seen, f.height);
+        // Over the picture rather than beside it, so the image keeps the
+        // whole pane and the caption cannot push it about as the text
+        // changes width.
+        ui.painter().text(
+            r.rect.left_bottom() + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            caption,
+            egui::FontId::monospace(12.0),
+            // A partial picture is worth flagging: a fade looks like a
+            // picture until the count is read.
+            if f.completeness() > 0.9 { theme::READOUT } else { theme::FAULT },
+        );
+    });
+}
+
+struct Row {
+    pick: Pick,
+    cells: [(String, Color32); COLS.len()],
+}
+
+fn rows(inputs: &[crate::chain::VideoInput], muxes: &[crate::videobus::Offered]) -> Vec<Row> {
+    let blank = || (String::new(), theme::LEGEND);
+    let mut out = vec![Row {
+        pick: Pick::Best,
+        cells: [
+            ("best picture".to_string(), theme::VALUE),
+            blank(),
+            blank(),
+            blank(),
+            blank(),
+            blank(),
+            blank(),
+            blank(),
+        ],
+    }];
+    for i in inputs.iter().filter(|i| !muxes.iter().any(|o| o.key() == i.key)) {
+        out.push(Row {
+            pick: Pick::Channel(i.key.clone()),
+            cells: [
+                (i.label.clone(), theme::VALUE),
+                blank(),
+                blank(),
+                (format!("{:.0}%", i.completeness * 100.0), theme::TRACE),
+                blank(),
+                blank(),
+                blank(),
+                blank(),
+            ],
         });
     }
+    for o in muxes {
+        let system = (o.programmes.system.to_string(), theme::LEGEND);
+        let hz = (format!("{:.3} MHz", o.programmes.channel_hz / 1e6), theme::VALUE);
+        for p in &o.programmes.list {
+            let stream = |s: Option<&'static str>, suffix: &str| match s {
+                Some(s) => (s.trim_end_matches(suffix).to_string(), theme::VALUE),
+                None => blank(),
+            };
+            let cells = match &p.service {
+                Some(s) => [
+                    (
+                        s.name.clone().unwrap_or_else(|| format!("service {}", s.id)),
+                        if s.scrambled { theme::LEGEND } else { theme::TRACE },
+                    ),
+                    (s.provider.clone().unwrap_or_default(), theme::LEGEND),
+                    match s.scrambled {
+                        true => ("scrambled".to_string(), theme::FAULT),
+                        false => ("clear".to_string(), theme::OK),
+                    },
+                    stream(s.video, " video"),
+                    stream(s.audio, " audio"),
+                    (s.id.to_string(), theme::LEGEND),
+                    system.clone(),
+                    hz.clone(),
+                ],
+                None => [
+                    (p.label.clone(), theme::VALUE),
+                    blank(),
+                    blank(),
+                    blank(),
+                    blank(),
+                    blank(),
+                    system.clone(),
+                    hz.clone(),
+                ],
+            };
+            out.push(Row { pick: Pick::Programme(o.key(), o.from, p.setting.clone()), cells });
+        }
+    }
+    out
+}
+
+fn table(ui: &mut egui::Ui, rows: &[Row], chosen: &Pick) -> Option<Pick> {
+    let width: f32 = COLS.iter().map(|(_, w)| w).sum::<f32>() + 24.0;
+    let mut picked = None;
+    egui::ScrollArea::horizontal().id_salt("video-table").auto_shrink([false, false]).show(
+        ui,
+        |ui| {
+            ui.set_min_width(width);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::hover());
+            let p = ui.painter_at(rect);
+            let mut x = rect.left() + 12.0;
+            for (name, w) in COLS {
+                table::cell(&p, rect, x, w, name, theme::LEGEND);
+                x += w;
+            }
+            p.line_segment(
+                [Pos2::new(rect.left(), rect.bottom()), Pos2::new(rect.right(), rect.bottom())],
+                Stroke::new(1.0, theme::ETCH),
+            );
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for (n, row) in rows.iter().enumerate() {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    let p = ui.painter_at(rect);
+                    if n % 2 == 1 {
+                        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                    }
+                    if resp.hovered() {
+                        p.rect_filled(rect, 0.0, theme::WELL);
+                    }
+                    if row.pick == *chosen {
+                        p.rect_filled(
+                            Rect::from_min_max(
+                                rect.left_top(),
+                                Pos2::new(rect.left() + 3.0, rect.bottom()),
+                            ),
+                            0.0,
+                            theme::READOUT,
+                        );
+                    }
+                    let mut x = rect.left() + 12.0;
+                    for ((t, c), (_, w)) in row.cells.iter().zip(COLS) {
+                        table::cell(&p, rect, x, w, t, *c);
+                        x += w;
+                    }
+                    if resp.clicked() {
+                        picked = Some(row.pick.clone());
+                    }
+                }
+            });
+        },
+    );
+    picked
 }
 
 /// Whether this picture is worth uploading over the one on screen.
@@ -384,7 +520,8 @@ mod tests {
     }
 
     fn offered(from: usize, hz: f64, wanted: pipeline::ParamValue) -> crate::videobus::Offered {
-        let programme = |label: &str, setting| pipeline::Programme { label: label.into(), setting };
+        let programme =
+            |label: &str, setting| pipeline::Programme { label: label.into(), setting, service: None };
         crate::videobus::Offered {
             from,
             programmes: std::sync::Arc::new(pipeline::Programmes {

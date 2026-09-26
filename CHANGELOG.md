@@ -19,7 +19,7 @@ the code is in the commit log.
 
 ### Changed
 
-- Video pane programme list covering every multiplex, with only the one watched decoded.
+- Video pane programme table across every multiplex, with scrambling and codecs, only the watched one decoded.
 - Scanner front ends and channels run out to the span edge, with no rolloff held back.
 - XN297 remotes read at a quarter of the processor time on a quiet band.
 - FT8 and FT4 read more stations on a crowded band.

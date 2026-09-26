@@ -295,11 +295,23 @@ impl Broadcast {
     }
 
     pub fn publish(&mut self, c: &mut pipeline::NodeCtx<'_>, port: usize) {
-        let mut list =
-            vec![pipeline::Programme { label: ANY.to_string(), setting: Want::Any.setting() }];
+        let mut list = vec![pipeline::Programme {
+            label: ANY.to_string(),
+            setting: Want::Any.setting(),
+            service: None,
+        }];
         list.extend(self.mux.services.iter().map(|s| pipeline::Programme {
             label: service_label(s),
             setting: Want::of(s).setting(),
+            service: Some(pipeline::Service {
+                id: s.id,
+                name: s.name.clone(),
+                provider: s.provider.clone(),
+                scrambled: s.scrambled,
+                running: s.running,
+                video: s.video().map(|v| v.kind.label()),
+                audio: s.audio().map(|a| a.kind.label()),
+            }),
         }));
         let now = pipeline::Programmes {
             system: self.system,

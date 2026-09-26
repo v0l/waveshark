@@ -20,6 +20,18 @@ pub struct Programmes {
 pub struct Programme {
     pub label: String,
     pub setting: ParamValue,
+    pub service: Option<Service>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Service {
+    pub id: u16,
+    pub name: Option<String>,
+    pub provider: Option<String>,
+    pub scrambled: bool,
+    pub running: bool,
+    pub video: Option<&'static str>,
+    pub audio: Option<&'static str>,
 }
 
 impl Programmes {
