@@ -44,6 +44,15 @@ pub enum Out {
     Sound(Sound),
 }
 
+impl Out {
+    fn service(&self) -> Option<u16> {
+        match self {
+            Out::Picture(p) => p.service,
+            Out::Sound(s) => s.service,
+        }
+    }
+}
+
 /// A run of decoded sound, one channel at [`SOUND_HZ`].
 pub struct Sound {
     pub pcm: Vec<f32>,
@@ -80,6 +89,7 @@ enum Ask {
 pub struct Media {
     feed: Option<SyncSender<Vec<u8>>>,
     ask: SyncSender<Ask>,
+    watching: Option<u16>,
     out: Receiver<Out>,
     heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -105,7 +115,7 @@ impl Media {
                 }
             })
             .ok();
-        Self { feed: Some(feed), ask, out, heard, thread, fault }
+        Self { feed: Some(feed), ask, watching: None, out, heard, thread, fault }
     }
 
     pub fn hear(&self, at_s: Option<f64>) {
@@ -128,7 +138,12 @@ impl Media {
     /// Watch one programme by its service identifier, or none for the first
     /// with a picture on it.
     pub fn watch(&mut self, service: Option<u16>) {
+        self.watching = service;
         let _ = self.ask.try_send(Ask::Watch(service));
+    }
+
+    fn wanted(&self, o: &Out) -> bool {
+        self.watching.is_none() || o.service() == self.watching
     }
 
     /// Stop feeding it and take everything it still holds.
@@ -140,7 +155,9 @@ impl Media {
     pub fn finish(&mut self, out: &mut Vec<Out>) {
         self.feed = None;
         while let Ok(p) = self.out.recv() {
-            out.push(p);
+            if self.wanted(&p) {
+                out.push(p);
+            }
         }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -151,7 +168,8 @@ impl Media {
     pub fn take(&mut self, out: &mut Vec<Out>) {
         loop {
             match self.out.try_recv() {
-                Ok(p) => out.push(p),
+                Ok(p) if self.wanted(&p) => out.push(p),
+                Ok(_) => {}
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
             }
         }
