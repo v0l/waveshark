@@ -80,7 +80,7 @@ fn every_capture_says_what_it_may_be_used_for() {
     let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
     let offair = parse(&manifest("offair.toml"), "[[capture]]");
     let survey = parse(&manifest("survey.toml"), "[[dataset]]");
-    assert_eq!(fixtures.len(), 39, "captures in fixtures.toml");
+    assert_eq!(fixtures.len(), 40, "captures in fixtures.toml");
     assert_eq!(offair.len(), 13, "captures in offair.toml");
     assert_eq!(survey.len(), 1, "datasets in survey.toml");
 
@@ -104,6 +104,7 @@ fn every_capture_says_what_it_may_be_used_for() {
         names,
         [
             "acars_acarsdec_12500.wav",
+            "aero_oqpsk_1546M_48k.cs16",
             "dab_melbourne_9a_202.928M_2500k.cs16",
             "drm_b_3.965M_48k.cs16",
             "dvbt_hd_429M_9142857.cs8",
@@ -122,6 +123,7 @@ fn every_capture_says_what_it_may_be_used_for() {
         stated,
         [
             &Licence::Upstream("LGPL-2.0-only".into()),
+            &Licence::Unstated,
             &Licence::Unstated,
             &Licence::Unstated,
             &Licence::Unstated,
@@ -145,7 +147,7 @@ fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
     let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
     let rehosted: Vec<&Entry> =
         fixtures.iter().filter(|e| e.url.contains("nostr.download")).collect();
-    assert_eq!(rehosted.len(), 36, "fixtures re-hosted on nostr.download");
+    assert_eq!(rehosted.len(), 37, "fixtures re-hosted on nostr.download");
     for entry in &rehosted {
         match entry.licence {
             Some(Licence::CcBy4) => {}

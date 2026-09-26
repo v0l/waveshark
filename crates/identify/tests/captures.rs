@@ -440,3 +440,87 @@ fn a_zigbee_join_reads_as_wireshark_4_4_18_read_it() {
         ]
     );
 }
+
+#[test]
+fn an_aero_10500_channel_reads_as_jaero_read_it() {
+    use decode::inmarsat::{OQPSK, aero};
+    let Some(buf) = fixture("aero_oqpsk_1546M_48k.cs16") else { return };
+    let (rate, center) = (buf.rate.as_f64(), buf.center.as_f64());
+    let (factor, mut resample) = dsp::resample::stage(rate, OQPSK.rate(), 4096).unwrap();
+    let mut chan = identify::Channel::new(
+        rate,
+        center,
+        center,
+        identify::aero::WIDE_CHANNEL_HZ,
+        rate / factor as f64,
+    )
+    .unwrap();
+    let mut demod = dsp::qpsk::QpskDemod::new(OQPSK);
+    let mut framer = aero::Framer::new(aero::Rate::P10500);
+    let mut assembler = aero::Assembler::new();
+    let (mut narrow, mut at_rate, mut symbols, mut soft) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut frames, mut messages) = (Vec::new(), Vec::new());
+    for b in buf.samples.chunks(8192) {
+        chan.process(b, &mut narrow);
+        at_rate.clear();
+        resample.as_mut().unwrap().process(&narrow, &mut at_rate);
+        symbols.clear();
+        demod.process(&at_rate, &mut symbols);
+        soft.clear();
+        soft.extend(symbols.iter().flat_map(|s| [s.re, s.im]));
+        let at = frames.len();
+        framer.process_soft(&soft, &mut frames);
+        for f in &frames[at..] {
+            for su in f.sus.iter().filter(|s| s.crc_ok) {
+                messages.extend(assembler.update(su.data()));
+            }
+        }
+    }
+    let units: usize = frames.iter().map(|f| f.sus.len()).sum();
+    let checked: usize = frames.iter().map(|f| f.sus.iter().filter(|s| s.crc_ok).count()).sum();
+    assert_eq!(
+        (frames.len(), units, checked),
+        (86, 2236, 2236),
+        "frames, units, units that checked"
+    );
+
+    let read: Vec<(String, char, usize)> = messages
+        .iter()
+        .map(|m| {
+            let block = aero::acars_block(&m.bytes).expect("an ACARS block whose check agrees");
+            let acars = decode::acars::parse(&block).expect("an ACARS message");
+            (acars.registration, acars.block_id, m.bytes.len())
+        })
+        .collect();
+    let sent = |reg: &str, id: char, len: usize| (reg.to_string(), id, len);
+    assert_eq!(
+        read,
+        [
+            sent("N531QS", 'R', 19),
+            sent("N642UA", 'R', 240),
+            sent("N642UA", 'S', 240),
+            sent("N531QS", 'S', 19),
+            sent("N642UA", 'T', 235),
+            sent("N531QS", 'T', 19),
+            sent("N531QS", 'U', 19),
+            sent("N701WH", 'F', 19),
+            sent("N531QS", 'V', 19),
+        ],
+        "inmarsat-sniffer c5e767e read the same bytes for all but N642UA's blocks S and T"
+    );
+    assert_eq!(
+        messages[0].bytes,
+        [
+            0xFF, 0xFF, 0x01, 0x32, 0xAE, 0xCE, 0xB5, 0xB3, 0x31, 0x51, 0xD3, 0xB9, 0xDF, 0x7F,
+            0x52, 0x83, 0x56, 0x31, 0x7F
+        ],
+        "as inmarsat-sniffer c5e767e read it through JAERO's OqpskDemodulator and AeroL"
+    );
+
+    let got = identify::identify(&buf.samples, rate, center).expect("an Aero channel");
+    assert_eq!(got.protocol, "aero");
+    assert_eq!(got.frames, 2245, "every unit that checked and the nine messages");
+    assert_eq!(got.center_hz, 1_546_000_000.0);
+    assert_eq!(got.identities, ["a6b593", "N531QS", "a86e6c", "N642UA", "a95a41", "N701WH"]);
+}

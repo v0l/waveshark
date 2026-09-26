@@ -1253,6 +1253,40 @@ and the text of an enhanced group call broadcast, all sent in the clear.
 """
 
 [[capture]]
+name = "aero_oqpsk_1546M_48k.cs16"
+sha256 = "9535c6cf378036152bd2616b249ad3d7112154e79bf102bbdd1d30744edf1d42"
+url = "https://nostr.download/9535c6cf378036152bd2616b249ad3d7112154e79bf102bbdd1d30744edf1d42.xz"
+compression = "xz"
+center_hz = 1_546_000_000
+rate_sps = 48_000
+format = "cs16"
+license = "unstated"
+license_source = "Signal Identification Wiki, Inmarst_Aero_10500_Bd_OQPSK_IQ.zip uploaded by Cartoonman on 13 January 2016"
+description = """
+Not this project's recording: 44 seconds of an Inmarsat Aero 10500 bit/s P
+channel from the Signal Identification Wiki's
+`Inmarst_Aero_10500_Bd_OQPSK_IQ.zip`, uploaded by Cartoonman on 13 January
+2016. 48 kS/s of 16-bit IQ with the carrier at the centre, converted from the
+WAV unchanged. The wiki gives no frequency; it says the 10500 channels sit
+around 1546 MHz, so that is the centre in the name and not a measurement.
+
+inmarsat-sniffer at c5e767e, which runs JAERO's OqpskDemodulator and AeroL
+without Qt, fed the same samples through `jaero_oqpsk_cont_feed_iq`, reads
+seven ACARS messages. `crates/identify/tests/captures.rs` reads those seven
+with the same bytes and two more that inmarsat-sniffer missed, blocks S and T
+of a three block uplink to N642UA, whose ACARS checks agree. It also reads
+all 2236 signal units of 86 frames with their checks agreeing. This capture
+is what found that the first unit of a frame was lost to a trellis started
+cold, that assembled messages were counted one unit short, and that the
+parity and the check were left on the ACARS block, so that no satellite
+ACARS message had been read off the air.
+
+What it holds is real traffic: the Mode S addresses and registrations of
+N531QS, N642UA and N701WH and the text of the uplinks to them, all sent in
+the clear.
+"""
+
+[[capture]]
 name = "drm_b_3.965M_48k.cs16"
 sha256 = "39642bc51c32898e22547e27adb91b51a15fd8539a5caf3eb0e7d508f0df053a"
 url = "https://nostr.download/39642bc51c32898e22547e27adb91b51a15fd8539a5caf3eb0e7d508f0df053a.xz"

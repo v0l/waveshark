@@ -18,14 +18,17 @@ use crate::protocol::{FrameClaim, Placed, Placement, Protocol, Shape};
 use common::Result;
 pub use decode::inmarsat::aero_read;
 use decode::inmarsat::{BAND_HZ, aero};
-pub use decode::inmarsat::{CARRIER_RATIO, config};
+pub use decode::inmarsat::{CARRIER_RATIO, OQPSK, config};
 use dsp::msk::MskDemod;
+use dsp::qpsk::QpskDemod;
+use dsp::resample::Rational;
 use dsp::{FirDecim, Mixer};
 use identify::Signal;
 pub use identify::aero::Aero;
 pub use identify::aero::CHANNEL_WIDTH_HZ;
 pub use identify::aero::DEFAULT_HZ;
 pub use identify::aero::FEED_HZ;
+pub use identify::aero::WIDE_CHANNEL_HZ;
 pub use identify::aero::WORK_HZ;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -41,21 +44,118 @@ pub struct AeroNode {
     rate: aero::Rate,
     mixer: Mixer,
     decim: FirDecim,
-    /// Puts the channel on an audio carrier, where the demodulator wants it.
-    upmix: Mixer,
-    msk: MskDemod,
+    demod: Demod,
     framer: aero::Framer,
     assembler: aero::Assembler,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
-    shifted: Vec<common::C32>,
-    audio: Vec<f32>,
-    bits: Vec<bool>,
-    hard: Vec<u8>,
+    soft: Vec<f32>,
     frames: Vec<aero::Frame>,
     meter: crate::FrameMeter,
     units: u64,
     messages: u64,
+}
+
+enum Demod {
+    Msk {
+        /// Puts the channel on an audio carrier, where the demodulator wants it.
+        upmix: Mixer,
+        msk: MskDemod,
+        shifted: Vec<common::C32>,
+        audio: Vec<f32>,
+        bits: Vec<bool>,
+    },
+    Oqpsk {
+        resample: Option<Rational>,
+        qpsk: Box<QpskDemod>,
+        at_rate: Vec<common::C32>,
+        symbols: Vec<common::C32>,
+    },
+}
+
+impl Demod {
+    fn new(rate: aero::Rate, work_hz: f64) -> Result<Self> {
+        Ok(match rate {
+            aero::Rate::P600 | aero::Rate::P1200 => Demod::Msk {
+                upmix: Mixer::new(rate.baud() * CARRIER_RATIO, work_hz),
+                msk: MskDemod::new(work_hz, config(rate)),
+                shifted: Vec::new(),
+                audio: Vec::new(),
+                bits: Vec::new(),
+            },
+            aero::Rate::P10500 => {
+                let resample = match dsp::resample::stage(work_hz, OQPSK.rate(), 4096) {
+                    Some((1, resample)) => resample,
+                    _ => return Err(common::Error::other("aero 10500 needs 21 kS/s or more")),
+                };
+                Demod::Oqpsk {
+                    resample,
+                    qpsk: Box::new(QpskDemod::new(OQPSK)),
+                    at_rate: Vec::new(),
+                    symbols: Vec::new(),
+                }
+            }
+        })
+    }
+
+    fn work_hz(rate: aero::Rate, stream_hz: f64) -> f64 {
+        match rate {
+            aero::Rate::P600 | aero::Rate::P1200 => {
+                stream_hz / (stream_hz / WORK_HZ).round().max(1.0)
+            }
+            aero::Rate::P10500 => stream_hz / (stream_hz / OQPSK.rate()).floor().max(1.0),
+        }
+    }
+
+    fn modulation(rate: aero::Rate) -> common::Modulation {
+        match rate {
+            aero::Rate::P600 | aero::Rate::P1200 => common::Modulation::Msk,
+            aero::Rate::P10500 => common::Modulation::Psk4,
+        }
+    }
+
+    fn process(&mut self, narrow: &[common::C32], soft: &mut Vec<f32>) {
+        soft.clear();
+        match self {
+            Demod::Msk { upmix, msk, shifted, audio, bits } => {
+                shifted.clear();
+                upmix.process(narrow, shifted);
+                audio.clear();
+                audio.extend(shifted.iter().map(|s| s.re));
+                bits.clear();
+                msk.process(audio, bits);
+                soft.extend(bits.iter().map(|b| if *b { -1.0 } else { 1.0 }));
+            }
+            Demod::Oqpsk { resample, qpsk, at_rate, symbols } => {
+                let feed = match resample {
+                    Some(r) => {
+                        at_rate.clear();
+                        r.process(narrow, at_rate);
+                        &at_rate[..]
+                    }
+                    None => narrow,
+                };
+                symbols.clear();
+                qpsk.process(feed, symbols);
+                soft.extend(symbols.iter().flat_map(|s| [s.re, s.im]));
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Demod::Msk { upmix, msk, .. } => {
+                upmix.reset();
+                msk.reset();
+            }
+            Demod::Oqpsk { resample, qpsk, .. } => {
+                if let Some(r) = resample {
+                    r.reset();
+                }
+                qpsk.reset();
+            }
+        }
+    }
 }
 
 impl Default for AeroNode {
@@ -66,25 +166,22 @@ impl Default for AeroNode {
 
 impl AeroNode {
     pub fn new(channel_hz: f64, rate: aero::Rate) -> Self {
+        let work = Demod::work_hz(rate, FEED_HZ);
         Self {
             channel_hz,
             rate,
             // All replaced at negotiation, when the real rate is known.
             mixer: Mixer::new(0.0, 1.0),
-            decim: FirDecim::design_hz(WORK_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
-            upmix: Mixer::new(rate.baud() * CARRIER_RATIO, WORK_HZ),
-            msk: MskDemod::new(WORK_HZ, config(rate)),
+            decim: FirDecim::design_hz(FEED_HZ, 1, width_of(rate) / 2.0, 60.0),
+            demod: Demod::new(rate, work).expect("the feed rate reads every rate"),
             framer: aero::Framer::new(rate),
             assembler: aero::Assembler::new(),
             mixed: Vec::new(),
             narrow: Vec::new(),
-            shifted: Vec::new(),
-            audio: Vec::new(),
-            bits: Vec::new(),
-            hard: Vec::new(),
+            soft: Vec::new(),
             frames: Vec::new(),
-            meter: crate::FrameMeter::new(WORK_HZ, channel_hz as u64, 10.0)
-                .keyed_as(common::Modulation::Msk),
+            meter: crate::FrameMeter::new(work, channel_hz as u64, 10.0)
+                .keyed_as(Demod::modulation(rate)),
             units: 0,
             messages: 0,
         }
@@ -101,6 +198,13 @@ impl AeroNode {
     }
 }
 
+fn width_of(rate: aero::Rate) -> f64 {
+    match rate {
+        aero::Rate::P600 | aero::Rate::P1200 => CHANNEL_WIDTH_HZ,
+        aero::Rate::P10500 => WIDE_CHANNEL_HZ,
+    }
+}
+
 impl Simple for AeroNode {
     fn name(&self) -> &str {
         "aero"
@@ -111,23 +215,23 @@ impl Simple for AeroNode {
             return Err(common::Error::other("aero reads complex baseband"));
         }
         let (rate, center) = (i.spec.rate, i.spec.center.as_f64());
-        if (self.channel_hz - center).abs() > rate / 2.0 - CHANNEL_WIDTH_HZ / 2.0 {
+        let width = width_of(self.rate);
+        if (self.channel_hz - center).abs() > rate / 2.0 - width / 2.0 {
             return Err(common::Error::other("aero needs its channel inside the span"));
         }
-        let factor = (rate / WORK_HZ).round().max(1.0) as usize;
-        let work = rate / factor as f64;
+        let work = Demod::work_hz(self.rate, rate);
+        let factor = (rate / work).round().max(1.0) as usize;
+        self.demod = Demod::new(self.rate, work)?;
         self.mixer = Mixer::new(center - self.channel_hz, rate);
-        self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.upmix = Mixer::new(self.rate.baud() * CARRIER_RATIO, work);
-        self.msk = MskDemod::new(work, config(self.rate));
+        self.decim = FirDecim::design_hz(rate, factor, width / 2.0, 60.0);
         self.framer.reset();
         self.assembler.reset();
         self.meter = crate::FrameMeter::new(work, self.channel_hz as u64, 10.0)
-            .keyed_as(common::Modulation::Msk);
+            .keyed_as(Demod::modulation(self.rate));
 
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
-        out.bandwidth = CHANNEL_WIDTH_HZ;
+        out.bandwidth = width;
         Ok(out)
     }
 
@@ -139,24 +243,12 @@ impl Simple for AeroNode {
         self.decim.process(&self.mixed, &mut self.narrow);
         self.meter.feed(&self.narrow);
 
-        self.shifted.clear();
-        self.upmix.process(&self.narrow, &mut self.shifted);
-        self.audio.clear();
-        self.audio.extend(self.shifted.iter().map(|s| s.re));
-
-        self.bits.clear();
-        let mut bits = std::mem::take(&mut self.bits);
-        self.msk.process(&self.audio, &mut bits);
-        self.hard.clear();
-        self.hard.extend(bits.iter().map(|b| u8::from(*b)));
-        self.bits = bits;
-
+        self.demod.process(&self.narrow, &mut self.soft);
         self.frames.clear();
-        let mut frames = std::mem::take(&mut self.frames);
-        self.framer.process(&self.hard, &mut frames);
+        self.framer.process_soft(&self.soft, &mut self.frames);
 
         let out = o.packets_mut();
-        for f in &frames {
+        for f in &self.frames {
             for su in &f.sus {
                 if !su.crc_ok || su.kind() == aero::SuType::Fill {
                     continue;
@@ -169,15 +261,13 @@ impl Simple for AeroNode {
                 }
             }
         }
-        self.frames = frames;
         Ok(())
     }
 
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
-        self.upmix.reset();
-        self.msk.reset();
+        self.demod.reset();
         self.framer.reset();
         self.assembler.reset();
         self.meter.reset();
@@ -226,14 +316,38 @@ impl Protocol for Aero {
         }
         Some(aero_read(bytes).into_iter().collect())
     }
+    fn widths_for(&self, _hz: f64, _source_width_hz: f64) -> Vec<f64> {
+        vec![CHANNEL_WIDTH_HZ, WIDE_CHANNEL_HZ]
+    }
+
+    fn dedupe_key(&self, p: &common::packet::Packet) -> Option<Vec<u8>> {
+        let bytes = p.bytes();
+        let user = matches!(
+            aero::SuType::of(*bytes.first()?),
+            aero::SuType::UserDataInitial | aero::SuType::UserDataSubsequent
+        );
+        (bytes.len() == aero::SU_BYTES && !user).then(|| [b"aero".as_slice(), bytes].concat())
+    }
+
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
-        vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
+        vec![
+            NodeSpec::new(DESC.name)
+                .f(CHANNEL_HZ, at.center_hz)
+                .f(RATE_BPS, rate_for_width(at.width_hz).baud()),
+        ]
+    }
+}
+
+fn rate_for_width(width_hz: f64) -> aero::Rate {
+    match width_hz < (CHANNEL_WIDTH_HZ * WIDE_CHANNEL_HZ).sqrt() {
+        true => aero::Rate::P1200,
+        false => aero::Rate::P10500,
     }
 }
 
 pub const DESC: StageDesc = StageDesc {
     name: "aero",
-    summary: "One Inmarsat Aero P channel: 600 or 1200 bps MSK, satellite ACARS",
+    summary: "One Inmarsat Aero P channel: 600 or 1200 bps MSK or 10500 bps OQPSK, satellite ACARS",
     category: Category::Decode,
     feeds_bus: true,
 };
@@ -241,6 +355,7 @@ pub const DESC: StageDesc = StageDesc {
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
     let rate = match s.f64_or(RATE_BPS, 1200.0) as u32 {
         600 => aero::Rate::P600,
+        10500 => aero::Rate::P10500,
         _ => aero::Rate::P1200,
     };
     Ok(Box::new(AeroNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), rate)))
@@ -295,8 +410,7 @@ mod tests {
     #[test]
     fn assembled_user_data_reads_as_acars() {
         let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
-        let mut user: Vec<u8> = vec![0xFF, 0xFF, 0x01];
-        user.extend(block.iter().copied());
+        let user = aero::acars_user_data(block);
         let d = aero_read(&user).expect("a row");
         assert_eq!(d.id, "aero-acars");
         // The aircraft either way: an uplink is addressed to the aeroplane,
@@ -314,9 +428,16 @@ mod tests {
     /// Six units a frame, five of them the halves of one satellite ACARS
     /// block, so the assembled message is the sixth row.
     fn a_keyed_frame(rate: aero::Rate) -> (Vec<Vec<u8>>, u64, u64) {
+        a_keyed_frame_off(rate, 0.0, 1)
+    }
+
+    fn a_keyed_frame_off(
+        rate: aero::Rate,
+        off_hz: f64,
+        idle_frames: usize,
+    ) -> (Vec<Vec<u8>>, u64, u64) {
         let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
-        let mut user: Vec<u8> = vec![0xFF, 0xFF, 0x01];
-        user.extend(block.iter().copied());
+        let user = aero::acars_user_data(block);
         let rest = user.len() - 2;
         let follow = rest.div_ceil(8) as u8;
         let last = rest - (follow as usize - 1) * 8;
@@ -335,29 +456,46 @@ mod tests {
         for k in 0..follow as usize {
             let from = 2 + k * 8;
             let take = if k + 1 == follow as usize { last } else { 8 };
-            let mut ssu = vec![0xC0 | (follow - k as u8), 0x35];
+            let mut ssu = vec![0xC0 | (follow - 1 - k as u8), 0x35];
             ssu.extend_from_slice(&user[from..from + take]);
             ssu.resize(10, 0);
             sus.push(aero::su_with_crc(&ssu));
         }
-        while sus.len() < 6 {
-            sus.push(aero::su_with_crc(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
-        }
+        let fill = aero::su_with_crc(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let per_frame = rate.coded_bits() / 2 / 8 / aero::SU_BYTES;
+        sus.resize(per_frame, fill);
+        let idle = vec![fill; per_frame];
+        let mut frames: Vec<(u16, &[[u8; aero::SU_BYTES]])> = vec![(0x1000, &idle); idle_frames];
+        frames.push((0x1234, &sus));
+        let keyed = aero::encode_frames(rate, &frames);
+        let iq = match rate {
+            aero::Rate::P600 | aero::Rate::P1200 => {
+                let mut bits: Vec<bool> = vec![false; 32];
+                bits.extend(keyed.iter().map(|b| *b == 1));
+                bits.extend(std::iter::repeat_n(false, 32));
+                dsp::msk::modulate(&bits, FEED_HZ, config(rate), 0.0, 0.5)
+            }
+            aero::Rate::P10500 => {
+                let mut bits = vec![0u8; 64];
+                bits.extend(&keyed);
+                bits.extend(std::iter::repeat_n(0, 256));
+                let at_rate = dsp::qpsk::modulate(&bits, OQPSK);
+                let mut iq = Vec::new();
+                Rational::new(OQPSK.rate(), FEED_HZ, 4096).unwrap().process(&at_rate, &mut iq);
+                iq
+            }
+        };
 
-        let keyed = aero::encode_frame(rate, 0x1234, &sus);
-        let mut bits: Vec<bool> = vec![false; 32];
-        bits.extend(keyed.iter().map(|b| *b == 1));
-        bits.extend(std::iter::repeat_n(false, 32));
-        let iq = dsp::msk::modulate(&bits, FEED_HZ, config(rate), 0.0, 0.5);
-
+        let mut mixed = Vec::new();
+        Mixer::new(-off_hz, FEED_HZ).process(&iq, &mut mixed);
         let mut n = AeroNode::new(DEFAULT_HZ, rate);
-        let got = read(&mut n, FEED_HZ, &iq);
+        let got = read(&mut n, FEED_HZ, &mixed);
         (got, n.units(), n.messages())
     }
 
     #[test]
     fn a_frame_keyed_on_the_channel_is_read_back() {
-        for rate in [aero::Rate::P600, aero::Rate::P1200] {
+        for rate in [aero::Rate::P600, aero::Rate::P1200, aero::Rate::P10500] {
             let (rows, units, messages) = a_keyed_frame(rate);
             assert_eq!(units, 6, "{rate:?}: signal units whose CRC agreed");
             assert_eq!(messages, 1, "{rate:?}: messages assembled");
@@ -369,6 +507,54 @@ mod tests {
             assert_eq!(who.id.to_string(), "EI-DEO");
             assert_eq!(who.name.as_deref(), Some("EIN123"));
         }
+    }
+
+    #[test]
+    fn a_source_is_tried_at_both_widths_and_each_reads_at_its_own_rate() {
+        assert_eq!(Aero.widths_for(DEFAULT_HZ, 3_000.0), [CHANNEL_WIDTH_HZ, WIDE_CHANNEL_HZ]);
+        let rate_at = |width_hz| {
+            let at = Placed {
+                center_hz: DEFAULT_HZ,
+                width_hz,
+                rate: FEED_HZ,
+                snr_db: 20.0,
+                origin: None,
+            };
+            Aero.chain(at)[0].settings.f64_or(RATE_BPS, 0.0)
+        };
+        assert_eq!(rate_at(CHANNEL_WIDTH_HZ), 1200.0);
+        assert_eq!(rate_at(WIDE_CHANNEL_HZ), 10500.0);
+    }
+
+    #[test]
+    fn the_network_talking_about_itself_is_logged_once_and_user_data_every_time() {
+        let packet = |bytes: Vec<u8>| {
+            crate::FrameMeter::new(WORK_HZ, DEFAULT_HZ as u64, 1.0).packet_now(bytes)
+        };
+        let key =
+            |data: &[u8]| Aero.dedupe_key(&packet(aero::su_with_crc(data).to_vec())).is_some();
+        assert!(key(&[0x0A, 0x3D, 0, 0, 0, 0, 0, 0, 0, 0]), "a system table");
+        assert!(key(&[0x26, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]), "the 10500 channel's padding");
+        assert!(!key(&[0x71, 0xA6, 0xB5, 0x93, 0x44, 0x72, 0x03, 0x10, 0xFF, 0xFF]), "user data");
+        assert!(
+            !key(&[0xC2, 0x72, 0x01, 0x32, 0xAE, 0xCE, 0xB5, 0xB3, 0x31, 0x51]),
+            "its continuation"
+        );
+        let message = aero::acars_user_data(b"2.N531QS9_\x7fR\x03");
+        assert!(Aero.dedupe_key(&packet(message)).is_none(), "a message");
+    }
+
+    #[test]
+    fn a_10500_channel_pulls_in_500_hz_off_in_five_seconds_and_not_700() {
+        let read = |off_hz, idle_frames| {
+            let (_, units, messages) = a_keyed_frame_off(aero::Rate::P10500, off_hz, idle_frames);
+            (units, messages)
+        };
+        assert_eq!(read(100.0, 1), (6, 1), "100 Hz off after one frame");
+        assert_eq!(read(300.0, 1), (0, 0), "300 Hz off after one frame");
+        assert_eq!(read(300.0, 4), (6, 1), "300 Hz off after four frames");
+        assert_eq!(read(500.0, 10), (6, 1), "500 Hz off after ten frames");
+        assert_eq!(read(700.0, 10), (0, 0), "700 Hz off, past an eighth of the symbol rate");
     }
 
     /// Ten minutes of noise on the channel, and nothing reaches the bus:
@@ -387,9 +573,10 @@ mod tests {
                 C32::new(next(), next())
             })
             .collect();
-        let mut n = AeroNode::default();
-        assert_eq!(read(&mut n, rate, &iq).len(), 0);
-        assert_eq!(n.units(), 0);
-        assert_eq!(n.messages(), 0);
+        for speed in [aero::Rate::P600, aero::Rate::P1200, aero::Rate::P10500] {
+            let mut n = AeroNode::new(DEFAULT_HZ, speed);
+            assert_eq!(read(&mut n, rate, &iq).len(), 0, "{speed:?}");
+            assert_eq!((n.units(), n.messages()), (0, 0), "{speed:?}");
+        }
     }
 }

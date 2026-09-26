@@ -24,6 +24,7 @@ use crate::bits::crc16le;
 use common::packet::{Alert, AlertKind, Entity, Fact, Id, Proto, Severity};
 use dsp::conv::{self, Viterbi};
 use dsp::msk::MskConfig;
+use dsp::qpsk::{Coding, Keying, QpskConfig};
 
 /// The service band: the satellites' L-band downlinks to mobiles.
 pub const BAND_HZ: (f64, f64) = (1_525_000_000.0, 1_559_000_000.0);
@@ -579,11 +580,9 @@ pub mod aero {
     pub const MAX_UW_ERRORS: u32 = 4;
     /// The frame header: format id, superframe marker and two counters.
     pub const HEADER_BITS: usize = 16;
-    /// Coded bits in a frame, whatever the rate: a second of air at 1200,
-    /// two at 600.
-    pub const FRAME_CODED_BITS: usize = 1152;
     /// A signal unit, the thing a frame is made of.
     pub const SU_BYTES: usize = 12;
+    const LEAD: usize = 64;
     /// Rows of the interleaver, always.
     const ROWS: usize = 64;
     /// The row sent `i`th holds row `(i * 27) % 64` of the block.
@@ -596,6 +595,7 @@ pub mod aero {
         P600,
         /// 1200 bits a second: nine.
         P1200,
+        P10500,
     }
 
     impl Rate {
@@ -603,6 +603,7 @@ pub mod aero {
             match self {
                 Rate::P600 => 600.0,
                 Rate::P1200 => 1200.0,
+                Rate::P10500 => 10_500.0,
             }
         }
 
@@ -612,11 +613,37 @@ pub mod aero {
             match self {
                 Rate::P600 => 6,
                 Rate::P1200 => 9,
+                Rate::P10500 => 78,
             }
         }
 
         pub fn block_bits(&self) -> usize {
             ROWS * self.columns()
+        }
+
+        pub fn coded_bits(&self) -> usize {
+            match self {
+                Rate::P600 | Rate::P1200 => 1152,
+                Rate::P10500 => 4992,
+            }
+        }
+
+        pub fn gap_bits(&self) -> usize {
+            match self {
+                Rate::P600 | Rate::P1200 => 0,
+                Rate::P10500 => 178,
+            }
+        }
+
+        pub fn rails(&self) -> usize {
+            match self {
+                Rate::P600 | Rate::P1200 => 1,
+                Rate::P10500 => 2,
+            }
+        }
+
+        pub fn frame_bits(&self) -> usize {
+            HEADER_BITS + self.gap_bits() + self.coded_bits()
         }
     }
 
@@ -751,26 +778,50 @@ pub mod aero {
         pub sus: Vec<Su>,
     }
 
+    fn unique_word_sense(window: u32) -> Option<bool> {
+        let wrong = (window ^ UNIQUE_WORD).count_ones();
+        match (wrong <= MAX_UW_ERRORS, 32 - wrong <= MAX_UW_ERRORS) {
+            (true, _) => Some(false),
+            (_, true) => Some(true),
+            _ => None,
+        }
+    }
+
     /// Frame synchronisation and decoding: bits in, frames out.
     pub struct Framer {
         rate: Rate,
         /// The last 32 bits seen, for the unique word search.
-        window: u32,
+        windows: [u32; 2],
+        seen: usize,
         /// Bits of the frame being read, after the unique word.
-        frame: Vec<u8>,
+        frame: Vec<f32>,
         reading: bool,
-        inverted: bool,
+        inverted: [bool; 2],
+        since: usize,
+        tail: Vec<f32>,
     }
 
     impl Framer {
         pub fn new(rate: Rate) -> Self {
-            Self { rate, window: 0, frame: Vec::new(), reading: false, inverted: false }
+            Self {
+                rate,
+                windows: [0; 2],
+                seen: 0,
+                frame: Vec::new(),
+                reading: false,
+                inverted: [false; 2],
+                since: 0,
+                tail: Vec::new(),
+            }
         }
 
         pub fn reset(&mut self) {
-            self.window = 0;
+            self.windows = [0; 2];
+            self.seen = 0;
             self.frame.clear();
             self.reading = false;
+            self.since = 0;
+            self.tail.clear();
         }
 
         pub fn rate(&self) -> Rate {
@@ -781,59 +832,83 @@ pub mod aero {
         /// arrived.
         pub fn process(&mut self, bits: &[u8], out: &mut Vec<Frame>) {
             for &bit in bits {
-                if self.reading {
-                    self.frame.push(bit ^ u8::from(self.inverted));
-                    if self.frame.len() == HEADER_BITS + FRAME_CODED_BITS {
-                        if let Some(f) = self.decode() {
-                            out.push(f);
-                        }
-                        self.reading = false;
-                        self.frame.clear();
-                    }
-                    continue;
-                }
-                self.window = self.window << 1 | u32::from(bit & 1);
-                let wrong = (self.window ^ UNIQUE_WORD).count_ones();
-                // The demodulator cannot say which way up the stream is, so
-                // the word is searched for both ways.
-                if wrong <= MAX_UW_ERRORS {
-                    self.reading = true;
-                    self.inverted = false;
-                    self.frame.clear();
-                } else if 32 - wrong <= MAX_UW_ERRORS {
-                    self.reading = true;
-                    self.inverted = true;
-                    self.frame.clear();
-                }
+                self.push(if bit & 1 == 1 { -1.0 } else { 1.0 }, out);
             }
         }
 
-        fn decode(&self) -> Option<Frame> {
-            let header = self.frame[..HEADER_BITS].iter().fold(0u16, |a, b| a << 1 | u16::from(*b));
-            let sus = decode_payload(self.rate, &self.frame[HEADER_BITS..]);
-            Some(Frame {
+        pub fn process_soft(&mut self, soft: &[f32], out: &mut Vec<Frame>) {
+            for &v in soft {
+                self.push(v, out);
+            }
+        }
+
+        fn push(&mut self, soft: f32, out: &mut Vec<Frame>) {
+            let rail = self.seen % self.rate.rails();
+            self.seen = self.seen.wrapping_add(1);
+            if self.reading {
+                self.frame.push(if self.inverted[rail] { -soft } else { soft });
+                if self.frame.len() == self.rate.frame_bits() {
+                    out.push(self.decode());
+                    self.reading = false;
+                    self.frame.clear();
+                    self.since = 0;
+                }
+                return;
+            }
+            self.since = self.since.saturating_add(1);
+            self.windows[rail] = self.windows[rail] << 1 | u32::from(soft < 0.0);
+            // The demodulator cannot say which way up the stream is, so
+            // the word is searched for both ways.
+            let Some(here) = unique_word_sense(self.windows[rail]) else { return };
+            let other = match self.rate.rails() {
+                1 => here,
+                _ => match unique_word_sense(self.windows[1 - rail]) {
+                    Some(other) => other,
+                    None => return,
+                },
+            };
+            self.inverted = [here, other];
+            if rail == 1 {
+                self.inverted.swap(0, 1);
+            }
+            if self.since != 32 * self.rate.rails() {
+                self.tail.clear();
+            }
+            self.reading = true;
+            self.frame.clear();
+        }
+
+        fn decode(&mut self) -> Frame {
+            let header =
+                self.frame[..HEADER_BITS].iter().fold(0u16, |a, b| a << 1 | u16::from(*b < 0.0));
+            let coded = deinterleaved(self.rate, &self.frame[HEADER_BITS + self.rate.gap_bits()..]);
+            let sus = decode_after(&self.tail, &coded);
+            self.tail.clear();
+            self.tail.extend_from_slice(&coded[coded.len().saturating_sub(LEAD)..]);
+            Frame {
                 format_id: (header >> 12 & 0x0F) as u8,
                 superframe: (header >> 8 & 0x0F) as u8,
                 counter: (header >> 4 & 0x0F) as u8,
                 sus,
-            })
+            }
         }
     }
 
     /// A frame's coded bits into its signal units: deinterleave each block,
     /// decode the code across the frame, unscramble, and cut into twelves.
     pub fn decode_payload(rate: Rate, coded: &[u8]) -> Vec<Su> {
-        let mut soft = Vec::with_capacity(coded.len());
-        for block in coded.chunks(rate.block_bits()) {
-            if block.len() < rate.block_bits() {
-                break;
-            }
-            for v in deinterleave(rate, block) {
-                soft.push(if v == 1 { -1.0 } else { 1.0 });
-            }
-        }
+        let soft: Vec<f32> = coded.iter().map(|b| if *b & 1 == 1 { -1.0 } else { 1.0 }).collect();
+        decode_after(&[], &deinterleaved(rate, &soft))
+    }
+
+    fn deinterleaved(rate: Rate, coded: &[f32]) -> Vec<f32> {
+        coded.chunks_exact(rate.block_bits()).flat_map(|block| deinterleave(rate, block)).collect()
+    }
+
+    fn decode_after(lead: &[f32], coded: &[f32]) -> Vec<Su> {
+        let soft: Vec<f32> = lead.iter().chain(coded).copied().collect();
         let bits = Viterbi::decode_block(CODE, &soft, &[1], soft.len() / 2, conv::Ends::Anywhere);
-        let bits = descramble(&bits);
+        let bits = descramble(&bits[lead.len() / 2..]);
         pack_lsb(&bits)
             .chunks(SU_BYTES)
             .filter(|c| c.len() == SU_BYTES)
@@ -847,7 +922,7 @@ pub mod aero {
 
     /// One interleaver block, read back out: the rows were sent permuted and
     /// the block is filled by column.
-    pub fn deinterleave(rate: Rate, block: &[u8]) -> Vec<u8> {
+    pub fn deinterleave<T: Copy>(rate: Rate, block: &[T]) -> Vec<T> {
         let cols = rate.columns();
         let mut out = Vec::with_capacity(block.len());
         for j in 0..cols {
@@ -859,9 +934,9 @@ pub mod aero {
     }
 
     /// The other way, for a test and for a transmitter.
-    pub fn interleave(rate: Rate, block: &[u8]) -> Vec<u8> {
+    pub fn interleave<T: Copy + Default>(rate: Rate, block: &[T]) -> Vec<T> {
         let cols = rate.columns();
-        let mut out = vec![0u8; block.len()];
+        let mut out = vec![T::default(); block.len()];
         let mut k = 0;
         for j in 0..cols {
             for i in 0..ROWS {
@@ -966,7 +1041,7 @@ pub mod aero {
             }
             let (seq, queue, reference) = (data[0] & 0x3F, data[1] >> 4, data[1] & 0x0F);
             let idx = self.parts.iter().position(|p| {
-                p.remaining == seq && p.data.queue == queue && p.data.reference == reference
+                p.remaining == seq + 1 && p.data.queue == queue && p.data.reference == reference
             })?;
             let part = &mut self.parts[idx];
             part.remaining -= 1;
@@ -985,30 +1060,50 @@ pub mod aero {
     /// Satellite ACARS is the same ARINC 618 block a VHF channel carries,
     /// behind two 0xFF bytes and a start of header, so what reads one reads
     /// the other.
-    pub fn acars_block(data: &[u8]) -> Option<&[u8]> {
-        if data.len() < 17 || data[0] != 0xFF || data[1] != 0xFF || data[2] != 0x01 {
+    pub fn acars_block(data: &[u8]) -> Option<Vec<u8>> {
+        if data.len() < 19 || data[..3] != [0xFF, 0xFF, 0x01] || data[data.len() - 1] != 0x7F {
             return None;
         }
-        Some(&data[3..])
+        let (text, check) = data[3..data.len() - 1].split_at(data.len() - 6);
+        if crate::acars::crc(text, &[check[0], check[1]]) != 0 {
+            return None;
+        }
+        Some(text.iter().map(|b| b & 0x7F).collect())
+    }
+
+    pub fn acars_user_data(block: &[u8]) -> Vec<u8> {
+        let text: Vec<u8> = block
+            .iter()
+            .map(|b| (b & 0x7F) | (u8::from((b & 0x7F).count_ones() % 2 == 0) << 7))
+            .collect();
+        let check = crate::bits::crc16le(&text, 0x8408, 0).to_le_bytes();
+        [&[0xFF, 0xFF, 0x01], &text[..], &check, &[0x7F]].concat()
     }
 
     /// Key a frame the way a ground station would: the transmitter's side of
     /// everything above, which is what proves it.
     pub fn encode_frame(rate: Rate, header: u16, sus: &[[u8; SU_BYTES]]) -> Vec<u8> {
-        let mut info: Vec<u8> = Vec::new();
-        for su in sus {
-            for b in su {
-                info.extend((0..8).map(|i| b >> i & 1));
-            }
-        }
-        info.resize(FRAME_CODED_BITS / 2, 0);
-        let info = descramble(&info);
-        let coded = conv::Encoder::new(CODE).punctured(&info, &[1]);
+        encode_frames(rate, &[(header, sus)])
+    }
 
-        let mut bits: Vec<u8> = (0..32).rev().map(|i| (UNIQUE_WORD >> i & 1) as u8).collect();
-        bits.extend((0..HEADER_BITS).rev().map(|i| (header >> i & 1) as u8));
-        for block in coded.chunks(rate.block_bits()) {
-            bits.extend(interleave(rate, block));
+    pub fn encode_frames(rate: Rate, frames: &[(u16, &[[u8; SU_BYTES]])]) -> Vec<u8> {
+        let mut encoder = conv::Encoder::new(CODE);
+        let mut bits = Vec::new();
+        for (header, sus) in frames {
+            let mut info: Vec<u8> =
+                sus.iter().flatten().flat_map(|b| (0..8).map(move |i| b >> i & 1)).collect();
+            info.resize(rate.coded_bits() / 2, 0);
+            let coded = encoder.punctured(&descramble(&info), &[1]);
+            bits.extend(
+                (0..32)
+                    .rev()
+                    .flat_map(|i| std::iter::repeat_n((UNIQUE_WORD >> i & 1) as u8, rate.rails())),
+            );
+            bits.extend((0..HEADER_BITS).rev().map(|i| (header >> i & 1) as u8));
+            bits.extend(std::iter::repeat_n(0, rate.gap_bits()));
+            for block in coded.chunks(rate.block_bits()) {
+                bits.extend(interleave(rate, block));
+            }
         }
         bits
     }
@@ -1077,7 +1172,7 @@ fn severity(s: stdc::Service) -> Severity {
 /// assembled message is ACARS, which is the aircraft speaking.
 pub fn aero_read(bytes: &[u8]) -> Option<Proto> {
     if let Some(block) = aero::acars_block(bytes) {
-        let m = crate::acars::parse(block)?;
+        let m = crate::acars::parse(&block)?;
         let mut p = crate::acars::read(&m);
         p.id = "aero-acars";
         return Some(p);
@@ -1095,6 +1190,14 @@ pub fn aero_read(bytes: &[u8]) -> Option<Proto> {
     }
     Some(p)
 }
+
+pub const OQPSK: QpskConfig = QpskConfig {
+    baud: 5_250.0,
+    sps: 4,
+    alpha: 1.0,
+    keying: Keying::Offset,
+    coding: Coding::Direct,
+};
 
 pub fn config(rate: aero::Rate) -> MskConfig {
     MskConfig { baud: rate.baud(), carrier_hz: rate.baud() * CARRIER_RATIO, change_is_upper: false }
@@ -1262,8 +1365,7 @@ mod tests {
         // The ACARS block an aircraft sends, as satellite user data: two
         // 0xFF bytes, a start of header, and then the ARINC 618 block.
         let block = b"2.EI-DEO\x15Q01\x02S01AEIN123ENGINE OK\x03";
-        let mut user: Vec<u8> = vec![0xFF, 0xFF, 0x01];
-        user.extend(block.iter().copied());
+        let user = aero::acars_user_data(block);
 
         // An initial unit carrying two bytes, then eight a unit until the
         // last, which says how much of itself is data.
@@ -1286,7 +1388,7 @@ mod tests {
         for k in 0..follow as usize {
             let from = 2 + k * 8;
             let take = if k + 1 == follow as usize { last } else { 8 };
-            let mut ssu = vec![0xC0 | (follow - k as u8), 0x35];
+            let mut ssu = vec![0xC0 | (follow - 1 - k as u8), 0x35];
             ssu.extend_from_slice(&user[from..from + take]);
             ssu.resize(10, 0);
             sus.push(aero::su_with_crc(&ssu));
@@ -1296,23 +1398,27 @@ mod tests {
             sus.push(aero::su_with_crc(&[0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
         }
 
-        for rate in [Rate::P600, Rate::P1200] {
+        for rate in [Rate::P600, Rate::P1200, Rate::P10500] {
             let header = 0x1234u16;
             let keyed = aero::encode_frame(rate, header, &sus);
-            assert_eq!(keyed.len(), 32 + aero::HEADER_BITS + aero::FRAME_CODED_BITS);
+            assert_eq!(keyed.len(), 32 * rate.rails() + rate.frame_bits());
+            let units = rate.coded_bits() / 2 / 8 / aero::SU_BYTES;
 
-            for inverted in [false, true] {
-                let mut stream = vec![0u8, 1, 1, 0, 1, 0, 0, 1];
-                stream.extend(keyed.iter().map(|b| b ^ u8::from(inverted)));
+            for (flip, lead) in [([0, 0], 8), ([1, 1], 8), ([1, 0], 8), ([0, 1], 9)] {
+                if rate.rails() == 1 && flip[0] != flip[1] {
+                    continue;
+                }
+                let mut stream = vec![0u8, 1, 1, 0, 1, 0, 0, 1, 1][..lead].to_vec();
+                stream.extend(keyed.iter().enumerate().map(|(i, b)| b ^ flip[(lead + i) % 2]));
                 let mut frames = Vec::new();
                 aero::Framer::new(rate).process(&stream, &mut frames);
-                assert_eq!(frames.len(), 1, "{rate:?} inverted={inverted}");
+                assert_eq!(frames.len(), 1, "{rate:?} flip={flip:?} lead={lead}");
                 let f = &frames[0];
                 assert_eq!(f.format_id, 1);
                 assert_eq!(f.superframe, 2);
                 assert_eq!(f.counter, 3);
-                assert_eq!(f.sus.len(), 6);
-                assert_eq!(f.sus.iter().filter(|s| s.crc_ok).count(), 6);
+                assert_eq!(f.sus.len(), units, "{rate:?}: 6 units at the low rates, 26 at 10500");
+                assert_eq!(f.sus.iter().filter(|s| s.crc_ok).count(), units);
                 assert_eq!(f.sus[0].kind(), SuType::UserDataInitial);
                 assert_eq!(
                     f.sus.iter().filter(|s| s.kind() == SuType::UserDataSubsequent).count(),
@@ -1332,11 +1438,74 @@ mod tests {
                 assert_eq!(done[0].bytes, user);
 
                 let inner = aero::acars_block(&done[0].bytes).expect("an ACARS block");
-                let m = crate::acars::parse(inner).expect("an ACARS message");
+                let m = crate::acars::parse(&inner).expect("an ACARS message");
                 assert_eq!(m.registration, "EI-DEO");
                 assert_eq!(m.flight.as_deref(), Some("EIN123"));
             }
         }
+    }
+
+    #[test]
+    fn a_frame_following_another_is_read_on_from_its_tail() {
+        use aero::Rate;
+        for rate in [Rate::P600, Rate::P1200, Rate::P10500] {
+            let units = rate.coded_bits() / 2 / 8 / aero::SU_BYTES;
+            let frame = |tag: u8| -> Vec<[u8; aero::SU_BYTES]> {
+                (0..units as u8)
+                    .map(|i| {
+                        aero::su_with_crc(&[0x34, 0x40, 0x62, 0x1A, 0x2A, tag, 0x11, 0x22, 0x33, i])
+                    })
+                    .collect()
+            };
+            let (first, second) = (frame(0), frame(3));
+            let keyed = aero::encode_frames(rate, &[(0x1000, &first), (0x1010, &second)]);
+
+            let mut frames = Vec::new();
+            aero::Framer::new(rate).process(&keyed, &mut frames);
+            let checked: Vec<usize> =
+                frames.iter().map(|f| f.sus.iter().filter(|s| s.crc_ok).count()).collect();
+            assert_eq!(checked, [units, units], "{rate:?}: units that checked in each frame");
+
+            let mut alone = Vec::new();
+            aero::Framer::new(rate).process(&keyed[keyed.len() / 2..], &mut alone);
+            let checked: Vec<usize> =
+                alone.iter().map(|f| f.sus.iter().filter(|s| s.crc_ok).count()).collect();
+            assert_eq!(checked, [units - 1], "{rate:?}: the second frame read without the first");
+        }
+    }
+
+    #[test]
+    fn a_message_off_the_air_assembles_as_jaero_assembled_it() {
+        let units: [[u8; 10]; 4] = [
+            [0x71, 0xA6, 0xB5, 0x93, 0x44, 0x72, 0x03, 0x10, 0xFF, 0xFF],
+            [0xC2, 0x72, 0x01, 0x32, 0xAE, 0xCE, 0xB5, 0xB3, 0x31, 0x51],
+            [0xC1, 0x72, 0xD3, 0xB9, 0xDF, 0x7F, 0x52, 0x83, 0x56, 0x31],
+            [0xC0, 0x72, 0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        let mut assembler = aero::Assembler::new();
+        let done: Vec<aero::UserData> = units.iter().filter_map(|u| assembler.update(u)).collect();
+        assert_eq!(done.len(), 1, "three continuations counted down to zero");
+        assert_eq!(
+            (done[0].aes, done[0].ges, done[0].queue, done[0].reference),
+            (0xA6B593, 0x44, 7, 2)
+        );
+        assert_eq!(
+            done[0].bytes,
+            [
+                0xFF, 0xFF, 0x01, 0x32, 0xAE, 0xCE, 0xB5, 0xB3, 0x31, 0x51, 0xD3, 0xB9, 0xDF, 0x7F,
+                0x52, 0x83, 0x56, 0x31, 0x7F
+            ],
+            "inmarsat-sniffer c5e767e, JAERO's AeroL, read these bytes off the same units"
+        );
+        let d = aero_read(&done[0].bytes).expect("an ACARS row");
+        assert_eq!(
+            (d.id, d.subject.expect("the aircraft").id.to_string()),
+            ("aero-acars", "N531QS".into())
+        );
+
+        let mut corrupt = done[0].bytes.clone();
+        corrupt[10] ^= 0x01;
+        assert_eq!(aero::acars_block(&corrupt), None, "a block whose check fails");
     }
 
     /// Noise is not an Aero frame either: a 32 bit word four bits of slack
@@ -1352,9 +1521,11 @@ mod tests {
             })
             .collect();
         let mut frames = Vec::new();
-        let mut framer = aero::Framer::new(aero::Rate::P1200);
-        for chunk in bits.chunks(1200) {
-            framer.process(chunk, &mut frames);
+        for rate in [aero::Rate::P600, aero::Rate::P1200, aero::Rate::P10500] {
+            let mut framer = aero::Framer::new(rate);
+            for chunk in bits.chunks(1200) {
+                framer.process(chunk, &mut frames);
+            }
         }
         let checked: usize = frames.iter().map(|f| f.sus.iter().filter(|s| s.crc_ok).count()).sum();
         assert_eq!(checked, 0, "{checked} units checked out of ten minutes of noise");

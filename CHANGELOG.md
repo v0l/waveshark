@@ -20,6 +20,7 @@ the code is in the commit log.
 - Quindar tones as a roger beep style, before and after each over.
 - Channel passband edges dragged on the spectrum, and SSB and CW low and high edges on the strip.
 - Chain view stages dragged from a searchable list onto a port or wire, set before wiring, and CLEAR.
+- Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.
 
 ### Changed
 
@@ -53,6 +54,7 @@ the code is in the commit log.
 - Chain view text settings dropping what was typed, and Backspace in one deleting the stage.
 - 802.15.4 beacons read out of frames too short for their own address lists.
 - Inmarsat STD-C decoding nothing off the air.
+- Aero satellite ACARS messages never read off the air.
 - DRM service labels missing from transmissions that send them in 16-QAM.
 - Bluetooth LE and 802.15.4 frames a few megahertz apart dropped as one burst.
 - TETRA speech coming out silent, or muted as enciphered, on clear calls.
