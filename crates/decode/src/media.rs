@@ -34,6 +34,10 @@ const PICTURE_DEPTH: usize = 4;
 /// Resampling once here beats every stage below guessing.
 pub const SOUND_HZ: u32 = 48_000;
 
+const AHEAD_S: f64 = 0.2;
+
+const APART_S: f64 = 3.0;
+
 /// What the decoder produced: a picture, or the sound that goes with it.
 pub enum Out {
     Picture(Picture),
@@ -77,6 +81,7 @@ pub struct Media {
     feed: Option<SyncSender<Vec<u8>>>,
     ask: SyncSender<Ask>,
     out: Receiver<Out>,
+    heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// What the thread last said it could not do, so a caller can show it
     /// rather than watching an empty pane.
@@ -90,15 +95,22 @@ impl Media {
         let (send, out) = sync_channel::<Out>(PICTURE_DEPTH);
         let fault = std::sync::Arc::new(parking_lot::Mutex::new(None));
         let mine = fault.clone();
+        let heard = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()));
+        let clock = heard.clone();
         let thread = std::thread::Builder::new()
             .name("mpegts decode".into())
             .spawn(move || {
-                if let Err(e) = run(blocks, asked, send) {
+                if let Err(e) = run(blocks, asked, send, &clock) {
                     *mine.lock() = Some(e.to_string());
                 }
             })
             .ok();
-        Self { feed: Some(feed), ask, out, thread, fault }
+        Self { feed: Some(feed), ask, out, heard, thread, fault }
+    }
+
+    pub fn hear(&self, at_s: Option<f64>) {
+        let bits = at_s.unwrap_or(f64::NAN).to_bits();
+        self.heard.store(bits, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Hand over transport packets. Never blocks for long: a decoder that
@@ -200,6 +212,7 @@ fn run(
     blocks: Receiver<Vec<u8>>,
     asked: Receiver<Ask>,
     out: SyncSender<Out>,
+    heard: &std::sync::atomic::AtomicU64,
 ) -> anyhow::Result<()> {
     // A broadcast off the air is damaged by definition: a cut recording
     // starts mid-picture and a fade loses packets, and ffmpeg says so on
@@ -222,6 +235,7 @@ fn run(
     // The programme being decoded: its picture, its sound, and the number
     // the tables call it.
     let mut on: Option<Programme> = None;
+    let mut held = Held::new();
 
     loop {
         // What was asked for since the last packet.
@@ -229,6 +243,7 @@ fn run(
             if want != service {
                 want = service;
                 on = None;
+                held.clear();
             }
         }
         if on.is_none() {
@@ -246,35 +261,64 @@ fn run(
             // The stream ended: take whatever the decoders still hold and
             // stop.
             let service = on.as_ref().and_then(|p| p.service);
-            for (frame, index) in decoder.decode_pkt(None).unwrap_or_default() {
-                let clock = clock(&demux, index);
-                if !send(
-                    &mut scaler,
-                    &mut resample,
-                    &frame,
-                    index,
-                    on.as_ref(),
-                    service,
-                    clock,
-                    &out,
-                ) {
+            let sound = on.as_ref().and_then(|p| p.sound);
+            let frames = decoder.decode_pkt(None).unwrap_or_default();
+            if !sort(frames, sound, service, &demux, &mut resample, &mut held, &out) {
+                return Ok(());
+            }
+            for (at_s, frame) in held.drain(..) {
+                if !send_picture(&mut scaler, &frame, service, at_s, &out) {
                     break;
                 }
             }
             return Ok(());
         };
         let Some(p) = &on else { continue };
-        if Some(pkt.stream_index) != p.video && Some(pkt.stream_index) != p.sound {
-            continue;
-        }
-        let service = p.service;
-        let Ok(frames) = decoder.decode_pkt(Some(&pkt)) else { continue };
-        for (frame, index) in frames {
-            let clock = clock(&demux, index);
-            if !send(&mut scaler, &mut resample, &frame, index, on.as_ref(), service, clock, &out) {
+        let (service, sound) = (p.service, p.sound);
+        if Some(pkt.stream_index) == p.video || Some(pkt.stream_index) == sound {
+            let frames = decoder.decode_pkt(Some(&pkt)).unwrap_or_default();
+            if !sort(frames, sound, service, &demux, &mut resample, &mut held, &out) {
                 return Ok(());
             }
         }
+        let now = f64::from_bits(heard.load(std::sync::atomic::Ordering::Relaxed));
+        let now = (!now.is_nan()).then_some(now);
+        while held.front().is_some_and(|(at_s, _)| due(*at_s, now)) {
+            let Some((at_s, frame)) = held.pop_front() else { break };
+            if !send_picture(&mut scaler, &frame, service, at_s, &out) {
+                return Ok(());
+            }
+        }
+    }
+}
+
+type Held = std::collections::VecDeque<(Option<f64>, ffmpeg_rs_raw::AvFrameRef)>;
+
+#[must_use]
+fn sort(
+    frames: Vec<(ffmpeg_rs_raw::AvFrameRef, i32)>,
+    sound: Option<i32>,
+    service: Option<u16>,
+    demux: &Demuxer,
+    resample: &mut Resample,
+    held: &mut Held,
+    out: &SyncSender<Out>,
+) -> bool {
+    for (frame, index) in frames {
+        let at_s = stamp(&frame, clock(demux, index));
+        if Some(index) != sound {
+            held.push_back((at_s, frame));
+        } else if !send_sound(resample, &frame, service, at_s, out) {
+            return false;
+        }
+    }
+    true
+}
+
+fn due(at_s: Option<f64>, heard_s: Option<f64>) -> bool {
+    match (at_s, heard_s) {
+        (Some(at), Some(now)) => at <= now + AHEAD_S || at > now + APART_S,
+        _ => true,
     }
 }
 
@@ -412,22 +456,14 @@ fn clock(demux: &Demuxer, index: i32) -> Rational {
     }
 }
 
-/// One decoded frame, as the buses carry it: a picture scaled to RGB, or
-/// sound resampled to one channel at the bus's rate.
 #[must_use]
-fn send(
+fn send_picture(
     scaler: &mut Scaler,
-    resample: &mut Resample,
     frame: &ffmpeg_rs_raw::AvFrameRef,
-    index: i32,
-    on: Option<&Programme>,
     service: Option<u16>,
-    clock: Rational,
+    at_s: Option<f64>,
     out: &SyncSender<Out>,
 ) -> bool {
-    if on.is_some_and(|p| p.sound == Some(index)) {
-        return sound(resample, frame, service, clock, out);
-    }
     let (w, h) = (frame.width as u16, frame.height as u16);
     if w == 0 || h == 0 {
         return true;
@@ -450,7 +486,6 @@ fn send(
             std::ptr::copy_nonoverlapping(from, pixels.as_mut_ptr().add(y * row), row);
         }
     }
-    let at_s = stamp(frame, clock);
     // Blocking, so the thread is held by whoever is taking pictures rather
     // than dropping one it has already paid for. A receiver that has gone
     // ends the thread.
@@ -466,11 +501,11 @@ fn send(
 
 /// One decoded audio frame as samples the bus can mix.
 #[must_use]
-fn sound(
+fn send_sound(
     resample: &mut Resample,
     frame: &ffmpeg_rs_raw::AvFrameRef,
     service: Option<u16>,
-    clock: Rational,
+    at_s: Option<f64>,
     out: &SyncSender<Out>,
 ) -> bool {
     let Ok(flat) = resample.process_frame(frame) else {
@@ -490,7 +525,7 @@ fn sound(
         }
         std::ptr::copy_nonoverlapping(src, pcm.as_mut_ptr(), n);
     }
-    out.send(Out::Sound(Sound { pcm, at_s: stamp(frame, clock), service })).is_ok()
+    out.send(Out::Sound(Sound { pcm, at_s, service })).is_ok()
 }
 
 #[cfg(test)]
@@ -637,6 +672,45 @@ mod tests {
             (100..=110).contains(&heard),
             "{heard} sounds after the change, floor 100, ceiling 110"
         );
+    }
+
+    #[test]
+    fn a_picture_waits_in_the_decoder_until_the_sound_is_within_a_fifth_of_a_second_of_it() {
+        let ts = two_services_sharing_one_picture(8_000);
+        let mut probe = Media::new();
+        let mut all = Vec::new();
+        for block in ts.chunks(PACKET * 64) {
+            probe.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        probe.finish(&mut all);
+        let first = all
+            .iter()
+            .find_map(|o| match o {
+                Out::Picture(p) => p.at_s,
+                _ => None,
+            })
+            .expect("a stamped picture");
+
+        let mut media = Media::new();
+        media.hear(Some(first));
+        let mut early = Vec::new();
+        for block in ts.chunks(PACKET * 64) {
+            media.push(block);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            media.take(&mut early);
+        }
+        let shown: Vec<f64> = early
+            .iter()
+            .filter_map(|o| match o {
+                Out::Picture(p) => p.at_s,
+                _ => None,
+            })
+            .collect();
+        let mut rest = Vec::new();
+        media.finish(&mut rest);
+        assert_eq!((shown.len(), pictures(&rest, 1)), (6, 70), "pictures before and after finish");
+        assert!(shown.iter().all(|t| *t <= first + AHEAD_S + 1e-9), "{shown:?} from {first}");
     }
 
     #[test]

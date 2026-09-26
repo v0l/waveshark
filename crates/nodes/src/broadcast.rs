@@ -53,14 +53,6 @@ pub enum Want {
 }
 
 impl Want {
-    /// A service as something to ask for again: its name where it has one.
-    pub fn of(s: &mpegts::Service) -> Self {
-        match &s.name {
-            Some(n) => Want::Named(n.clone()),
-            None => Want::Id(s.id),
-        }
-    }
-
     pub fn matches(&self, s: &mpegts::Service) -> bool {
         match self {
             Want::Any => s.name.is_some() && s.video().is_some() && !s.scrambled,
@@ -294,25 +286,32 @@ impl Broadcast {
         self.mux.services.iter().position(|s| self.wanted.matches(s)).map_or(0, |n| n + 1)
     }
 
-    pub fn publish(&mut self, c: &mut pipeline::NodeCtx<'_>, port: usize) {
+    fn programmes(&self) -> Vec<pipeline::Programme> {
         let mut list = vec![pipeline::Programme {
             label: ANY.to_string(),
             setting: Want::Any.setting(),
             service: None,
         }];
-        list.extend(self.mux.services.iter().map(|s| pipeline::Programme {
-            label: service_label(s),
-            setting: Want::of(s).setting(),
-            service: Some(pipeline::Service {
-                id: s.id,
-                name: s.name.clone(),
-                provider: s.provider.clone(),
-                scrambled: s.scrambled,
-                running: s.running,
-                video: s.video().map(|v| v.kind.label()),
-                audio: s.audio().map(|a| a.kind.label()),
-            }),
-        }));
+        for s in &self.mux.services {
+            list.push(pipeline::Programme {
+                label: service_label(s),
+                setting: Want::Id(s.id).setting(),
+                service: Some(pipeline::Service {
+                    id: s.id,
+                    name: s.name.clone(),
+                    provider: s.provider.clone(),
+                    scrambled: s.scrambled,
+                    running: s.running,
+                    video: s.video().map(|v| v.kind.label()),
+                    audio: s.audio().map(|a| a.kind.label()),
+                }),
+            });
+        }
+        list
+    }
+
+    pub fn publish(&mut self, c: &mut pipeline::NodeCtx<'_>, port: usize) {
+        let list = self.programmes();
         let now = pipeline::Programmes {
             system: self.system,
             channel_hz: self.channel_hz,
@@ -339,18 +338,20 @@ impl Broadcast {
             // a menu sends. Resolved here and kept as an identity, because
             // the list it indexes grows as the multiplex describes itself.
             pipeline::ParamValue::Choice(n) if n == self.mux.services.len() + 1 => Want::Off,
-            pipeline::ParamValue::Choice(n) => {
-                match n.checked_sub(1) {
-                    None => Want::Any,
-                    Some(i) => Want::of(self.mux.services.get(i).ok_or_else(|| {
-                        common::Error::other(format!("{system}: no such service"))
-                    })?),
-                }
-            }
+            pipeline::ParamValue::Choice(n) => match n.checked_sub(1) {
+                None => Want::Any,
+                Some(i) => Want::Id(
+                    self.mux
+                        .services
+                        .get(i)
+                        .ok_or_else(|| common::Error::other(format!("{system}: no such service")))?
+                        .id,
+                ),
+            },
             pipeline::ParamValue::Int(id) if id < 0 => Want::Off,
             pipeline::ParamValue::Int(id) => match u16::try_from(id).ok().filter(|id| *id != 0) {
                 None => Want::Any,
-                Some(id) => self.mux.service(id).map_or(Want::Id(id), Want::of),
+                Some(id) => Want::Id(id),
             },
             pipeline::ParamValue::Text(ref t) if t == ANY || t.is_empty() => Want::Any,
             pipeline::ParamValue::Text(ref t) if t == OFF => Want::Off,
@@ -425,6 +426,7 @@ impl Broadcast {
         {
             self.gather();
             let pcm = self.sound_for(block_s);
+            self.media.hear(self.heard_s);
             for frame in self.due(block_s) {
                 video.video_mut().push(frame);
             }
@@ -705,6 +707,25 @@ mod tests {
             })
             .map(|n| n + 1);
         assert_eq!(blocks, Some(100), "shown after a second of blocks, not held for the sound");
+    }
+
+    #[test]
+    fn regional_variants_sharing_a_name_are_each_listed_and_picked_by_service_id() {
+        let mut tv = Broadcast::new("test", 0.0);
+        let itv =
+            |id: u16| mpegts::Service { id, name: Some("ITV1 HD".into()), ..Default::default() };
+        tv.mux.services = vec![itv(21000), itv(21010), itv(21060)];
+        let listed: Vec<(String, pipeline::ParamValue)> =
+            tv.programmes().iter().map(|p| (p.label.clone(), p.setting.clone())).collect();
+        let itv1 = |id: i64| ("ITV1 HD".to_string(), pipeline::ParamValue::Int(id));
+        assert_eq!(
+            listed,
+            [(ANY.to_string(), Want::Any.setting()), itv1(21000), itv1(21010), itv1(21060)]
+        );
+        tv.set_service("test", pipeline::ParamValue::Choice(2)).expect("the second variant");
+        assert_eq!((tv.wanted(), tv.asked), (&Want::Id(21010), Some(21010)));
+        tv.set_service("test", pipeline::ParamValue::Int(21060)).expect("the third by id");
+        assert_eq!((tv.wanted(), tv.asked), (&Want::Id(21060), Some(21060)));
     }
 
     fn bars(seconds: f64) -> Vec<TsPacket> {

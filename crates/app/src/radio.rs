@@ -1967,7 +1967,7 @@ impl Status {
     /// still, so an SSTV transmission keeps one number for two minutes while
     /// its lines fill in: comparing numbers alone published the first line
     /// and nothing after it.
-    fn set_video(&self, frame: Option<common::VideoFrame>) {
+    fn set_video(&self, frame: Option<common::VideoFrame>) -> bool {
         let mut cur = self.video.lock();
         let same = match (cur.as_ref(), frame.as_ref()) {
             (Some(a), Some(b)) => {
@@ -1982,6 +1982,7 @@ impl Status {
         if !same {
             *cur = frame;
         }
+        !same
     }
 
     /// Drop the stations of channels that are no longer running, so a name
@@ -3832,7 +3833,9 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         }
         self.rx.refresh_log_folder();
         self.status.logged.store(self.rx.logged(), Ordering::Relaxed);
-        self.status.set_video(self.rx.watched_video());
+        if self.status.set_video(self.rx.watched_video()) {
+            (self.repaint)();
+        }
         self.status.set_video_inputs(self.rx.video_inputs());
         *self.status.programmes.lock() = self.rx.programmes();
         if let Some(saved) = self.rx.pictures_saved() {
