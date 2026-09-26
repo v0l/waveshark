@@ -103,13 +103,22 @@ impl<D: SdrDirectory + 'static> Lister<D> {
         listing: Offer<D::Config>,
         pace: Pace,
     ) -> std::io::Result<Lister<D>> {
+        Lister::mapping(find, listing, pace, PortMap::open)
+    }
+
+    fn mapping(
+        find: impl Fn() -> Option<Arc<iqstream::Server>> + Send + 'static,
+        listing: Offer<D::Config>,
+        pace: Pace,
+        open: impl Fn(NonZeroU16) -> Result<PortMap, String> + Send + 'static,
+    ) -> std::io::Result<Lister<D>> {
         let wanted = Arc::new(Wanted::new());
         wanted.set(Some(listing), false);
         let state = Arc::new(Mutex::new(ListingState::Waiting));
         let (shown, asked) = (state.clone(), wanted.clone());
         let thread = std::thread::Builder::new()
             .name("iqstream-list".into())
-            .spawn(move || run::<D>(find, &asked, &shown, pace))?;
+            .spawn(move || run::<D>(find, &asked, &shown, pace, &open))?;
         Ok(Lister { wanted, state, thread })
     }
 
@@ -158,7 +167,12 @@ fn set(state: &Mutex<ListingState>, now: ListingState) {
     if let Ok(mut s) = state.lock()
         && *s != now
     {
-        tracing::info!("iqstream directory: {}", now.describe());
+        match now {
+            ListingState::Unreachable(_) | ListingState::Refused(_) => {
+                tracing::warn!("iqstream directory: {}", now.describe())
+            }
+            _ => tracing::info!("iqstream directory: {}", now.describe()),
+        }
         *s = now;
     }
 }
@@ -219,11 +233,12 @@ fn reach<C>(
     server: &iqstream::Server,
     map: &mut Option<PortMap>,
     state: &Mutex<ListingState>,
+    open: &impl Fn(NonZeroU16) -> Result<PortMap, String>,
 ) -> Result<Reach, String> {
     let local = server.addr().port();
     let (host, port, data_port) = match &listing.public_host {
         Some(host) => (host.clone(), local, Some(local)),
-        None => mapped(map, local, state)?,
+        None => mapped(map, local, state, open)?,
     };
     server.set_public(listing.public_host.is_none().then(|| iqstream::Public {
         addr: SocketAddr::new(host.parse().unwrap_or(server.addr().ip()), port),
@@ -241,6 +256,7 @@ fn run<D: SdrDirectory>(
     wanted: &Wanted<D::Config>,
     state: &Mutex<ListingState>,
     pace: Pace,
+    open: &impl Fn(NonZeroU16) -> Result<PortMap, String>,
 ) {
     let Some(server) = wait_for_server(&find, wanted) else { return };
     let mut map: Option<PortMap> = None;
@@ -265,9 +281,12 @@ fn run<D: SdrDirectory>(
         let drift = settled && last.elapsed() >= pace.apart;
         if tried != Some(seen) || drift || Instant::now() >= due {
             (tried, moved, last) = (Some(seen), None, Instant::now());
-            let now = match reach(&listing, &server, &mut map, state) {
+            let now = match reach(&listing, &server, &mut map, state, open) {
                 Err(why) => {
                     listed = None;
+                    if let Some((_, d)) = &dir {
+                        withdraw(d, &mut announced);
+                    }
                     ListingState::Unreachable(why)
                 }
                 Ok(r) => {
@@ -281,8 +300,8 @@ fn run<D: SdrDirectory>(
                 Some(_) => Duration::from_secs(ANNOUNCE_EVERY_SECS),
                 None => RETRY,
             };
-            if let Some(m) = &map {
-                next = next.min(m.renew_in());
+            if let Some(renew) = map.as_ref().and_then(PortMap::renew_in) {
+                next = next.min(renew);
             }
             due = Instant::now() + next;
             set(state, now);
@@ -329,25 +348,32 @@ fn mapped(
     map: &mut Option<PortMap>,
     local: u16,
     state: &Mutex<ListingState>,
+    open: &impl Fn(NonZeroU16) -> Result<PortMap, String>,
 ) -> Result<(String, u16, Option<u16>), String> {
     let m = match map.as_mut() {
         None => {
             set(state, ListingState::Mapping);
             let port = NonZeroU16::new(local).ok_or("the server has no port")?;
-            map.insert(PortMap::open(port)?).mapped()
+            map.insert(open(port)?).mapped()
         }
-        Some(m) if m.renew_in().is_zero() => m.renew()?,
+        Some(m) if m.renew_in().is_none_or(|d| d.is_zero()) => m.renew()?,
         Some(m) => m.mapped(),
     };
     let tcp = m.tcp.ok_or("the router did not open the port")?;
     Ok((tcp.ip().to_string(), tcp.port(), m.udp.map(|u| u.port())))
 }
 
-fn close<D: SdrDirectory>(dir: D, announced: bool) {
-    if announced && let Err(e) = dir.withdraw() {
+fn close<D: SdrDirectory>(dir: D, mut announced: bool) {
+    withdraw(&dir, &mut announced);
+    dir.close();
+}
+
+fn withdraw<D: SdrDirectory>(dir: &D, announced: &mut bool) {
+    if std::mem::take(announced)
+        && let Err(e) = dir.withdraw()
+    {
         tracing::warn!("iqstream listing: withdraw: {e}");
     }
-    dir.close();
 }
 
 fn announce<D: SdrDirectory>(
@@ -390,7 +416,7 @@ mod tests {
         assert!(at("0.0.0.0:1234").is_none_or(|a| a.port() == 1234 && private(a.ip())));
     }
 
-    type Heard = Arc<Mutex<Vec<(Instant, Entry)>>>;
+    type Heard = Arc<Mutex<Vec<(Instant, Option<Entry>)>>>;
 
     #[derive(Clone, Default)]
     struct Log(Heard);
@@ -421,11 +447,12 @@ mod tests {
         }
 
         fn announce(&self, entry: &Entry) -> Result<crate::Published, crate::Error> {
-            self.0.lock().unwrap().push((Instant::now(), entry.clone()));
+            self.0.lock().unwrap().push((Instant::now(), Some(entry.clone())));
             Ok(crate::Published { accepted: 1, refused: Vec::new() })
         }
 
         fn withdraw(&self) -> Result<crate::Published, crate::Error> {
+            self.0.lock().unwrap().push((Instant::now(), None));
             Ok(crate::Published { accepted: 1, refused: Vec::new() })
         }
 
@@ -444,7 +471,8 @@ mod tests {
         let heard = log.0.lock().unwrap();
         heard
             .iter()
-            .map(|(at, e)| (*at, e.station.tuners[0].center_hz, e.station.location.is_some()))
+            .filter_map(|(at, e)| Some((*at, e.as_ref()?)))
+            .map(|(at, e)| (at, e.station.tuners[0].center_hz, e.station.location.is_some()))
             .collect()
     }
 
@@ -509,5 +537,122 @@ mod tests {
         std::thread::sleep(pace.apart + Duration::from_millis(500));
         assert_eq!(centres(&log).len(), 3, "a tuner holding still is not listed again");
         lister.withdraw(Duration::from_secs(2));
+    }
+
+    type Asked = Arc<Mutex<Vec<(Instant, u8, u16)>>>;
+
+    fn fake_nat_pmp(lease_secs: u32, grants: Vec<Option<u16>>) -> (std::net::SocketAddrV4, Asked) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let std::net::SocketAddr::V4(at) = sock.local_addr().unwrap() else { unreachable!() };
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let log = heard.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let mut tcp_asked = 0;
+            while let Ok((n, from)) = sock.recv_from(&mut buf) {
+                let r = &buf[..n];
+                let mut answer = vec![0, 128 + r[1], 0, 0, 0, 0, 0, 1];
+                match r[1] {
+                    0 => answer.extend([203, 0, 113, 9]),
+                    op => {
+                        let asked = u16::from_be_bytes([r[6], r[7]]);
+                        log.lock().unwrap().push((Instant::now(), op, asked));
+                        if op == 2 {
+                            tcp_asked += 1;
+                        }
+                        let grant = grants[(tcp_asked - 1).min(grants.len() - 1)];
+                        let (code, port) = match grant {
+                            Some(p) => (0u16, p + u16::from(op == 1)),
+                            None => (3, 0),
+                        };
+                        answer[2..4].copy_from_slice(&code.to_be_bytes());
+                        answer.extend_from_slice(&r[4..6]);
+                        answer.extend_from_slice(&port.to_be_bytes());
+                        answer.extend_from_slice(&lease_secs.to_be_bytes());
+                    }
+                }
+                let _ = sock.send_to(&answer, from);
+            }
+        });
+        (at, heard)
+    }
+
+    #[test]
+    fn a_lease_is_renewed_before_it_lapses_a_moved_port_relisted_and_a_refusal_withdrawn() {
+        let server = iqstream::Server::start(
+            "127.0.0.1:0".parse().unwrap(),
+            iqstream::ServerConfig { name: "test".into(), streams: Vec::new() },
+        )
+        .unwrap();
+        server.stream_named(iqstream::StreamConfig {
+            name: "span".into(),
+            center_hz: 1_090_000_000,
+            sample_rate: 2_400_000,
+            ..Default::default()
+        });
+        let lease = Duration::from_secs(2);
+        let (gateway, asked) = fake_nat_pmp(
+            lease.as_secs() as u32,
+            vec![Some(41_000), Some(41_000), Some(42_000), None],
+        );
+        let log = Log::default();
+        let offer = Offer {
+            name: "radarpi".into(),
+            description: String::new(),
+            antenna: String::new(),
+            location: None,
+            public_host: None,
+            directory: log.clone(),
+        };
+        let found = server.clone();
+        let lister = Lister::<Recorder>::mapping(
+            move || Some(found.clone()),
+            offer,
+            Pace::LIVE,
+            move |port| PortMap::nat_pmp_at(gateway, port),
+        )
+        .unwrap();
+        let started = Instant::now();
+        while !matches!(lister.state(), ListingState::Unreachable(_)) {
+            assert!(started.elapsed() < Duration::from_secs(10), "the refusal was never shown");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            lister.state().describe(),
+            "not listed: the router did not open the port: NAT-PMP result 3"
+        );
+        lister.withdraw(Duration::from_secs(2));
+
+        let heard: Vec<Option<(String, Option<u16>)>> = log
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, e)| e.as_ref().map(|e| (e.addr(), e.data_port)))
+            .collect();
+        assert_eq!(
+            heard,
+            [
+                Some(("203.0.113.9:41000".to_string(), Some(41_001))),
+                Some(("203.0.113.9:41000".to_string(), Some(41_001))),
+                Some(("203.0.113.9:42000".to_string(), Some(42_001))),
+                None,
+            ],
+            "listed, renewed, relisted on the new port, withdrawn when the router refused"
+        );
+
+        let asked = asked.lock().unwrap().clone();
+        let tcp: Vec<(Instant, u16)> =
+            asked.iter().filter(|(_, op, _)| *op == 2).map(|(at, _, port)| (*at, *port)).collect();
+        assert_eq!(
+            tcp.iter().map(|(_, port)| *port).collect::<Vec<_>>(),
+            [server.addr().port(), 41_000, 41_000, 42_000, 0],
+            "each renewal asks for the port it holds, then for any port once that is refused"
+        );
+        for pair in tcp[..4].windows(2) {
+            let gap = pair[1].0 - pair[0].0;
+            assert!(gap < lease, "ceiling: renewed {gap:?} after a {lease:?} lease was granted");
+            assert!(gap >= lease / 2 - Duration::from_millis(50), "floor: renewed after {gap:?}");
+        }
     }
 }

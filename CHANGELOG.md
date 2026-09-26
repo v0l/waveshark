@@ -50,6 +50,7 @@ the code is in the commit log.
 - IQStream directory tuners listed as reaching only the edges of the span being served.
 - DVB-T multiplexes not locking on a tuner more than a few kHz out, or reading badly through its DC spike.
 - IQStream directory listing not updated after a retune, or with the receiver stopped.
+- IQStream directory listing left up on a dead port when the router's port mapping lapsed.
 - sub-ghz-modem DETECT hanging, and taking over or reconfiguring serial ports other programs had open.
 - Display leakage locking on 2.4 GHz traffic and painting it as a screen.
 
