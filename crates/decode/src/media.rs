@@ -236,6 +236,7 @@ fn run(
     // the tables call it.
     let mut on: Option<Programme> = None;
     let mut held = Held::new();
+    let mut fields = crate::deinterlace::Deinterlace::new();
 
     loop {
         // What was asked for since the last packet.
@@ -244,6 +245,7 @@ fn run(
                 want = service;
                 on = None;
                 held.clear();
+                fields = crate::deinterlace::Deinterlace::new();
             }
         }
         if on.is_none() {
@@ -263,9 +265,13 @@ fn run(
             let service = on.as_ref().and_then(|p| p.service);
             let sound = on.as_ref().and_then(|p| p.sound);
             let frames = decoder.decode_pkt(None).unwrap_or_default();
-            if !sort(frames, sound, service, &demux, &mut resample, &mut held, &out) {
+            let mut sorting = Sorting { sound, service, demux: &demux, resample: &mut resample };
+            if !sorting.sort(frames, &mut fields, &mut held, &out) {
                 return Ok(());
             }
+            let mut last = Vec::new();
+            fields.drain(&mut last);
+            held.extend(last.into_iter().map(|(f, clock)| (stamp(&f, clock), f)));
             for (at_s, frame) in held.drain(..) {
                 if !send_picture(&mut scaler, &frame, service, at_s, &out) {
                     break;
@@ -277,7 +283,8 @@ fn run(
         let (service, sound) = (p.service, p.sound);
         if Some(pkt.stream_index) == p.video || Some(pkt.stream_index) == sound {
             let frames = decoder.decode_pkt(Some(&pkt)).unwrap_or_default();
-            if !sort(frames, sound, service, &demux, &mut resample, &mut held, &out) {
+            let mut sorting = Sorting { sound, service, demux: &demux, resample: &mut resample };
+            if !sorting.sort(frames, &mut fields, &mut held, &out) {
                 return Ok(());
             }
         }
@@ -294,25 +301,34 @@ fn run(
 
 type Held = std::collections::VecDeque<(Option<f64>, ffmpeg_rs_raw::AvFrameRef)>;
 
-#[must_use]
-fn sort(
-    frames: Vec<(ffmpeg_rs_raw::AvFrameRef, i32)>,
+struct Sorting<'a> {
     sound: Option<i32>,
     service: Option<u16>,
-    demux: &Demuxer,
-    resample: &mut Resample,
-    held: &mut Held,
-    out: &SyncSender<Out>,
-) -> bool {
-    for (frame, index) in frames {
-        let at_s = stamp(&frame, clock(demux, index));
-        if Some(index) != sound {
-            held.push_back((at_s, frame));
-        } else if !send_sound(resample, &frame, service, at_s, out) {
-            return false;
+    demux: &'a Demuxer,
+    resample: &'a mut Resample,
+}
+
+impl Sorting<'_> {
+    #[must_use]
+    fn sort(
+        &mut self,
+        frames: Vec<(ffmpeg_rs_raw::AvFrameRef, i32)>,
+        fields: &mut crate::deinterlace::Deinterlace,
+        held: &mut Held,
+        out: &SyncSender<Out>,
+    ) -> bool {
+        let mut pictures = Vec::new();
+        for (frame, index) in frames {
+            let clock = clock(self.demux, index);
+            if Some(index) != self.sound {
+                fields.push(frame, clock, &mut pictures);
+            } else if !send_sound(self.resample, &frame, self.service, stamp(&frame, clock), out) {
+                return false;
+            }
         }
+        held.extend(pictures.into_iter().map(|(f, clock)| (stamp(&f, clock), f)));
+        true
     }
-    true
 }
 
 fn due(at_s: Option<f64>, heard_s: Option<f64>) -> bool {

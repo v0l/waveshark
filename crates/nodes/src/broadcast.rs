@@ -460,7 +460,7 @@ impl Broadcast {
         let mut decoded = std::mem::take(&mut self.decoded);
         decoded.clear();
         self.media.take(&mut decoded);
-        for d in &decoded {
+        for d in decoded.drain(..) {
             match d {
                 decode::media::Out::Picture(p) if self.keeps(p.service) => {
                     let at = p.at_s;
@@ -586,7 +586,7 @@ impl Broadcast {
             let mut decoded = std::mem::take(&mut self.decoded);
             decoded.clear();
             self.media.finish(&mut decoded);
-            for d in &decoded {
+            for d in decoded.drain(..) {
                 match d {
                     decode::media::Out::Picture(p) => {
                         let frame = self.frame(p);
@@ -604,7 +604,7 @@ impl Broadcast {
 
     /// A decoded picture as the video bus carries it.
     #[cfg(feature = "ffmpeg")]
-    fn frame(&mut self, p: &decode::media::Picture) -> common::VideoFrame {
+    fn frame(&mut self, p: decode::media::Picture) -> common::VideoFrame {
         self.sequence += 1;
         // Named by the service the container says it came from, which is the
         // same number the multiplex's own tables use.
@@ -626,7 +626,7 @@ impl Broadcast {
             // this size, so the grid is the shape.
             aspect: p.width as f32 / p.height as f32,
             pixels: common::Pixels::Rgba8,
-            samples: std::sync::Arc::new(p.rgb.clone()),
+            samples: std::sync::Arc::new(p.rgb),
             lines_seen: p.height,
             sequence: self.sequence,
             update: common::Update::Whole,
@@ -696,7 +696,7 @@ mod tests {
             at_s: Some(30.0),
             service: None,
         };
-        let frame = tv.frame(&picture);
+        let frame = tv.frame(picture);
         tv.queue.push((Some(30.0), frame, 0.0));
         let blocks = (0..200)
             .position(|_| {

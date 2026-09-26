@@ -67,6 +67,8 @@ pub mod m10;
 pub mod m17;
 pub mod mdc1200;
 #[cfg(feature = "ffmpeg")]
+pub mod deinterlace;
+#[cfg(feature = "ffmpeg")]
 pub mod media;
 pub mod meisei;
 pub mod meshcore;
