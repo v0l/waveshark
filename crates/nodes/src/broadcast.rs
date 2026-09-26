@@ -752,7 +752,7 @@ mod tests {
         tv.mux.services[1].now = Some(on("Weather"));
         assert_eq!(tv.fresh_services(), [2]);
         let listed = tv.programmes();
-        let bbc = listed[2].service.as_ref().expect("the named service");
+        let bbc = listed[1].service.as_ref().expect("the named service");
         assert_eq!(bbc.now.as_ref().map(|s| s.title.as_str()), Some("Weather"));
         assert_eq!(bbc.next.as_ref().map(|s| s.title.as_str()), Some("Weather"));
     }
