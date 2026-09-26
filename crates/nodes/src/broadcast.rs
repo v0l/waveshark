@@ -63,7 +63,7 @@ impl Want {
 
     pub fn matches(&self, s: &mpegts::Service) -> bool {
         match self {
-            Want::Any => s.video().is_some(),
+            Want::Any => s.name.is_some() && s.video().is_some() && !s.scrambled,
             Want::Id(id) => s.id == *id,
             Want::Named(n) => s.name.as_deref() == Some(n.as_str()) || &service_label(s) == n,
             Want::Off => false,
@@ -220,9 +220,9 @@ impl Broadcast {
     /// multiplex's tables and the container both call it.
     fn tell_media(&mut self) {
         self.asked = match &self.wanted {
-            Want::Any | Want::Off => None,
+            Want::Off => None,
             Want::Id(id) => Some(*id),
-            Want::Named(_) => {
+            Want::Any | Want::Named(_) => {
                 self.mux.services.iter().find(|s| self.wanted.matches(s)).map(|s| s.id)
             }
         };
@@ -362,13 +362,25 @@ impl Broadcast {
     /// Point the demux at the video of whichever service is wanted, as soon
     /// as the programme map names it.
     fn follow_video(&mut self) {
+        if self.wanted == Want::Any {
+            let clear = self.mux.services.iter().find(|s| Want::Any.matches(s)).map(|s| s.id);
+            if clear.is_some() && clear != self.asked {
+                if let Some(pid) = self.watching.take() {
+                    self.mux.unfollow(pid);
+                }
+                self.tell_media();
+                #[cfg(feature = "ffmpeg")]
+                self.restart_clock();
+            }
+        }
         if self.watching.is_some() {
             return;
         }
-        let service = match &self.wanted {
-            Want::Off => None,
-            Want::Any => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
-            w => self.mux.services.iter().find(|s| w.matches(s)).cloned(),
+        let service = match (&self.wanted, self.asked) {
+            (Want::Off, _) => None,
+            (Want::Any, Some(id)) => self.mux.service(id).cloned(),
+            (Want::Any, None) => self.mux.services.iter().find(|s| s.video().is_some()).cloned(),
+            (w, _) => self.mux.services.iter().find(|s| w.matches(s)).cloned(),
         };
         let Some(pid) = service.as_ref().and_then(|s| s.video()).map(|v| v.pid) else {
             return;
@@ -727,5 +739,27 @@ mod tests {
         assert_eq!((none, listed), (0, 1), "pictures while asked for nothing, services listed");
         assert_eq!(after, fresh, "woken, it reads as a multiplex just opened does");
         assert!((20..=37).contains(&fresh), "{fresh} of 37 pictures, floor 20");
+    }
+
+    #[test]
+    fn the_first_picture_is_the_first_service_in_the_clear_once_the_sdt_says_which() {
+        let service = |id: u16, name: &str, pid: u16| mpegts::Service {
+            id,
+            name: Some(name.into()),
+            streams: vec![mpegts::Stream { pid, kind: mpegts::StreamKind::H264Video }],
+            ..Default::default()
+        };
+        let mut tv = Broadcast::new("test", 0.0);
+        tv.mux.services =
+            vec![service(1, "Sky HistoryHD", 0x100), service(2, "Ideal World HD", 0x200)];
+        tv.push(&[], &mut Vec::new());
+        assert_eq!((tv.asked, tv.watching), (Some(1), Some(0x100)), "before the SDT is read");
+        tv.mux.services[0].scrambled = true;
+        tv.push(&[], &mut Vec::new());
+        assert_eq!(
+            (tv.asked, tv.watching),
+            (Some(2), Some(0x200)),
+            "the scrambled one passed over"
+        );
     }
 }
