@@ -1,22 +1,8 @@
+#[cfg(feature = "ffmpeg")]
+use crate::playout::Playout;
 use decode::dvbt::TsPacket;
 use decode::mpegts::{self, Mux};
 use pipeline::port::Payload;
-
-/// How much sound to have in hand before any of it is played, so a gap in
-/// the decoding is not a gap in the sound.
-#[cfg(feature = "ffmpeg")]
-const PRIME_S: f64 = 0.3;
-
-/// How far ahead of what is being played the decoder may get before the
-/// receiver admits it is behind and throws the oldest sound away.
-#[cfg(feature = "ffmpeg")]
-const BEHIND_S: f64 = 1.5;
-
-#[cfg(feature = "ffmpeg")]
-const GAP_S: f64 = 0.005;
-
-#[cfg(feature = "ffmpeg")]
-const RESYNC_S: f64 = 1.0;
 
 #[cfg(feature = "ffmpeg")]
 const HOLD_S: f64 = 1.0;
@@ -137,19 +123,14 @@ pub struct Broadcast {
     asked: Option<u16>,
     #[cfg(feature = "ffmpeg")]
     decoded: Vec<decode::media::Out>,
-    /// Sound decoded and not yet handed to the bus.
+    /// Sound decoded and not yet handed to the bus, and where it has got to
+    /// on the stream's own clock, which is what says when a picture is
+    /// shown.
     #[cfg(feature = "ffmpeg")]
-    pcm: std::collections::VecDeque<f32>,
-    /// Where the sound has got to on the stream's own clock, which is what
-    /// says when a picture is shown.
-    #[cfg(feature = "ffmpeg")]
-    heard_s: Option<f64>,
+    sound: Playout,
     /// Pictures decoded and waiting for their moment, with the moment.
     #[cfg(feature = "ffmpeg")]
     queue: Vec<(Option<f64>, common::VideoFrame, f64)>,
-    /// Whether enough sound has been decoded to start playing it.
-    #[cfg(feature = "ffmpeg")]
-    playing: bool,
     #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
     sequence: u64,
     told: std::collections::HashMap<u16, Option<String>>,
@@ -170,13 +151,9 @@ impl Broadcast {
             #[cfg(feature = "ffmpeg")]
             decoded: Vec::new(),
             #[cfg(feature = "ffmpeg")]
-            pcm: std::collections::VecDeque::new(),
-            #[cfg(feature = "ffmpeg")]
-            heard_s: None,
+            sound: Playout::default(),
             #[cfg(feature = "ffmpeg")]
             queue: Vec::new(),
-            #[cfg(feature = "ffmpeg")]
-            playing: false,
             sequence: 0,
             told: std::collections::HashMap::new(),
             listing: None,
@@ -233,10 +210,8 @@ impl Broadcast {
 
     #[cfg(feature = "ffmpeg")]
     fn restart_clock(&mut self) {
-        self.pcm.clear();
+        self.sound.clear();
         self.queue.clear();
-        self.heard_s = None;
-        self.playing = false;
     }
 
     #[cfg(feature = "ffmpeg")]
@@ -434,8 +409,8 @@ impl Broadcast {
         #[cfg(feature = "ffmpeg")]
         {
             self.gather();
-            let pcm = self.sound_for(block_s);
-            self.media.hear(self.heard_s);
+            let pcm = self.sound.sound_for(block_s);
+            self.media.hear(self.sound.heard_s);
             for frame in self.due(block_s) {
                 video.video_mut().push(frame);
             }
@@ -463,7 +438,7 @@ impl Broadcast {
     /// dropped transport packet is a hole in the middle of a coded picture,
     /// so the sound breaks up rather than merely arriving late. What is
     /// bounded instead is how far behind the sound may fall: see
-    /// [`Broadcast::sound_for`].
+    /// [`Playout::sound_for`].
     #[cfg(feature = "ffmpeg")]
     fn gather(&mut self) {
         let mut decoded = std::mem::take(&mut self.decoded);
@@ -477,79 +452,12 @@ impl Broadcast {
                     self.queue.push((at, frame, 0.0));
                 }
                 decode::media::Out::Sound(s) if self.keeps(s.service) => {
-                    self.arrive(s.at_s, &s.pcm)
+                    self.sound.arrive(s.at_s, &s.pcm)
                 }
                 _ => {}
             }
         }
         self.decoded = decoded;
-    }
-
-    #[cfg(feature = "ffmpeg")]
-    fn arrive(&mut self, at_s: Option<f64>, pcm: &[f32]) {
-        let rate = decode::media::SOUND_HZ as f64;
-        if self.pcm.is_empty() {
-            self.heard_s = at_s;
-        } else if let (Some(front), Some(at)) = (self.heard_s, at_s) {
-            let gap = at - (front + self.pcm.len() as f64 / rate);
-            if gap.abs() >= RESYNC_S {
-                self.pcm.clear();
-                self.heard_s = Some(at);
-            } else if gap > GAP_S {
-                self.pcm.extend(std::iter::repeat_n(0.0, (gap * rate).round() as usize));
-            }
-        }
-        self.pcm.extend(pcm.iter().copied());
-    }
-
-    /// One block's worth of sound, and the clock moved on by it.
-    ///
-    /// Exactly what the block covers, because the bus mixes a block at a
-    /// time: handing it four seconds of sound in one block does not play
-    /// four seconds, it throws most of it away. Short is silence, which is
-    /// what a service that has not started yet sounds like.
-    #[cfg(feature = "ffmpeg")]
-    fn sound_for(&mut self, block_s: f64) -> Vec<f32> {
-        let rate = decode::media::SOUND_HZ as f64;
-        let want = (block_s * rate).round() as usize;
-        if want == 0 {
-            return Vec::new();
-        }
-        // Decoded further ahead than this and the receiver is not keeping
-        // up: the oldest sound goes and the clock jumps with it, so the
-        // pictures stay with the sound instead of the pair drifting apart
-        // for as long as the channel is open.
-        let most = (rate * BEHIND_S) as usize;
-        if self.pcm.len() > most {
-            let drop = self.pcm.len() - most;
-            self.pcm.drain(..drop);
-            if let Some(at) = &mut self.heard_s {
-                *at += drop as f64 / rate;
-            }
-        }
-        // Nothing is played until there is enough in hand to play through
-        // the next hiccup. A decoder is not a steady producer: a picture and
-        // its sound arrive when the multiplex sends them.
-        if !self.playing {
-            if self.pcm.len() < (rate * PRIME_S) as usize {
-                return vec![0.0; want];
-            }
-            self.playing = true;
-        }
-        let n = want.min(self.pcm.len());
-        let mut pcm: Vec<f32> = self.pcm.drain(..n).collect();
-        pcm.resize(want, 0.0);
-        // Run dry and it fills again before playing rather than stuttering
-        // a block at a time for as long as the decoder is behind.
-        if n < want {
-            self.playing = false;
-        }
-        // The clock only moves on sound that was really heard. A gap in the
-        // sound holds the picture rather than running past it.
-        if let Some(at) = &mut self.heard_s {
-            *at += n as f64 / rate;
-        }
-        pcm
     }
 
     /// The pictures whose moment has come.
@@ -561,7 +469,7 @@ impl Broadcast {
     /// every picture goes out as it is decoded.
     #[cfg(feature = "ffmpeg")]
     fn due(&mut self, block_s: f64) -> Vec<common::VideoFrame> {
-        let Some(now) = self.heard_s else {
+        let Some(now) = self.sound.heard_s else {
             return self.queue.drain(..).map(|(_, f, _)| f).collect();
         };
         let mut out = Vec::new();
@@ -591,7 +499,7 @@ impl Broadcast {
         #[cfg(feature = "ffmpeg")]
         {
             out.extend(self.queue.drain(..).map(|(_, f, _)| f));
-            pcm.extend(self.pcm.drain(..));
+            pcm.extend(self.sound.pcm.drain(..));
             let mut decoded = std::mem::take(&mut self.decoded);
             decoded.clear();
             self.media.finish(&mut decoded);
@@ -660,44 +568,48 @@ mod tests {
     #[test]
     fn sound_lost_on_the_air_is_held_as_silence_so_the_clock_keeps_the_stream_time() {
         let mut tv = Broadcast::new("test", 0.0);
-        tv.arrive(Some(10.0), &tenth());
-        tv.arrive(Some(10.1), &tenth());
-        tv.arrive(Some(10.3), &tenth());
-        assert_eq!(tv.pcm.len(), (0.4 * RATE) as usize, "a tenth of a second missing, filled");
+        tv.sound.arrive(Some(10.0), &tenth());
+        tv.sound.arrive(Some(10.1), &tenth());
+        tv.sound.arrive(Some(10.3), &tenth());
+        assert_eq!(
+            tv.sound.pcm.len(),
+            (0.4 * RATE) as usize,
+            "a tenth of a second missing, filled"
+        );
         let played: usize =
-            (0..40).map(|_| tv.sound_for(0.01).iter().filter(|v| **v != 0.0).count()).sum();
+            (0..40).map(|_| tv.sound.sound_for(0.01).iter().filter(|v| **v != 0.0).count()).sum();
         assert_eq!(played, (0.3 * RATE) as usize - (0.3 * RATE) as usize % 1);
-        let now = tv.heard_s.unwrap();
+        let now = tv.sound.heard_s.unwrap();
         assert!((now - 10.4).abs() < 1e-6, "clock at {now}, the stream says 10.4");
     }
 
     #[test]
     fn a_jump_in_the_stream_clock_starts_the_sound_again_from_it() {
         let mut tv = Broadcast::new("test", 0.0);
-        tv.arrive(Some(10.0), &tenth());
-        tv.arrive(Some(50.0), &tenth());
-        assert_eq!(tv.pcm.len(), (0.1 * RATE) as usize);
-        assert_eq!(tv.heard_s, Some(50.0));
+        tv.sound.arrive(Some(10.0), &tenth());
+        tv.sound.arrive(Some(50.0), &tenth());
+        assert_eq!(tv.sound.pcm.len(), (0.1 * RATE) as usize);
+        assert_eq!(tv.sound.heard_s, Some(50.0));
     }
 
     #[test]
     fn a_change_of_service_starts_its_clock_afresh_and_drops_what_the_last_one_left() {
         let mut tv = Broadcast::new("test", 0.0);
         tv.want(Want::Id(1));
-        tv.arrive(Some(10.0), &tenth());
-        assert_eq!(tv.sound_for(0.01).len(), (0.01 * RATE) as usize);
+        tv.sound.arrive(Some(10.0), &tenth());
+        assert_eq!(tv.sound.sound_for(0.01).len(), (0.01 * RATE) as usize);
         tv.want(Want::Id(2));
-        assert_eq!((tv.pcm.len(), tv.heard_s, tv.playing), (0, None, false));
+        assert_eq!((tv.sound.pcm.len(), tv.sound.heard_s, tv.sound.playing), (0, None, false));
         assert!(!tv.keeps(Some(1)), "a picture still in the decoder from the last service");
         assert!(tv.keeps(Some(2)));
-        tv.arrive(Some(3.0), &tenth());
-        assert_eq!(tv.heard_s, Some(3.0));
+        tv.sound.arrive(Some(3.0), &tenth());
+        assert_eq!(tv.sound.heard_s, Some(3.0));
     }
 
     #[test]
     fn a_picture_whose_sound_is_late_is_shown_within_a_second_rather_than_never() {
         let mut tv = Broadcast::new("test", 0.0);
-        tv.arrive(Some(10.0), &vec![0.5; (0.5 * RATE) as usize]);
+        tv.sound.arrive(Some(10.0), &vec![0.5; (0.5 * RATE) as usize]);
         let picture = decode::media::Picture {
             width: 2,
             height: 2,

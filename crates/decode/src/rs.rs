@@ -135,6 +135,10 @@ impl ReedSolomon {
         Self::new(6, 0x43, 1, 1, 8, 39)
     }
 
+    pub fn dab_plus() -> Self {
+        Self::new(8, 0x11D, 0, 1, 10, 135)
+    }
+
     /// RS(255,249) as VDL Mode 2 keys it: GF(256) with field polynomial 0x187
     /// and the six roots from alpha^120.
     pub fn vdl2() -> Self {

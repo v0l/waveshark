@@ -14,8 +14,8 @@
 //! it is protected by. A receiver that has read those knows what is on the
 //! air without decoding a note of audio.
 //!
-//! Nothing here touches the main service channel, so no sound comes out of
-//! it: this is the station list and the tuning table, not the radio.
+pub mod msc;
+pub mod superframe;
 
 use crate::bits::crc16;
 use crate::whiten::Prbs9;
@@ -945,6 +945,10 @@ pub struct DabReceiver {
     fic: Fic,
     symbols: Vec<Symbol>,
     snr_db: f32,
+    listening: Option<msc::SubChannelReader>,
+    cif: Vec<f32>,
+    last_frame: Option<u64>,
+    heard: Vec<Vec<u8>>,
 }
 
 impl Default for DabReceiver {
@@ -955,7 +959,16 @@ impl Default for DabReceiver {
 
 impl DabReceiver {
     pub fn new(mode: Mode) -> Self {
-        Self { front: Dab::new(mode), fic: Fic::new(), symbols: Vec::new(), snr_db: f32::NAN }
+        Self {
+            front: Dab::new(mode),
+            fic: Fic::new(),
+            symbols: Vec::new(),
+            snr_db: f32::NAN,
+            listening: None,
+            cif: Vec::new(),
+            last_frame: None,
+            heard: Vec::new(),
+        }
     }
 
     /// The ensemble as its tables describe it so far.
@@ -985,6 +998,27 @@ impl DabReceiver {
         self.front.offset_hz()
     }
 
+    pub fn listen(&mut self, sub: Option<SubChannel>) -> bool {
+        if self.listening.as_ref().map(|l| l.sub_channel()) == sub.as_ref() {
+            return sub.is_none() || self.listening.is_some();
+        }
+        self.listening = sub.and_then(msc::SubChannelReader::new);
+        self.heard.clear();
+        self.listening.is_some() || sub.is_none()
+    }
+
+    pub fn listening(&self) -> Option<&SubChannel> {
+        self.listening.as_ref().map(|l| l.sub_channel())
+    }
+
+    pub fn msc_stats(&self) -> Option<msc::Stats> {
+        self.listening.as_ref().map(|l| l.stats)
+    }
+
+    pub fn take_heard(&mut self, out: &mut Vec<Vec<u8>>) {
+        out.append(&mut self.heard);
+    }
+
     /// Read what `iq` holds. Returns the blocks that passed their check.
     pub fn push(&mut self, iq: &[C32]) -> usize {
         let mut symbols = std::mem::take(&mut self.symbols);
@@ -994,14 +1028,33 @@ impl DabReceiver {
         let mut good = 0;
         for symbol in &symbols {
             self.snr_db = symbol.snr_db;
-            // The fast information channel is the first symbols of a frame;
-            // the rest is the main service channel, which nothing here reads.
             if symbol.index <= fic_symbols {
                 good += self.fic.push(&symbol.soft);
+            } else {
+                self.main_service(symbol, fic_symbols);
             }
         }
         self.symbols = symbols;
         good
+    }
+
+    fn main_service(&mut self, symbol: &Symbol, fic_symbols: usize) {
+        let Some(reader) = &mut self.listening else { return };
+        if symbol.index == fic_symbols + 1 {
+            if self.last_frame.is_none_or(|last| symbol.frame != last + 1) {
+                reader.reset();
+            }
+            self.last_frame = Some(symbol.frame);
+            self.cif.clear();
+        }
+        self.cif.extend_from_slice(&symbol.soft);
+        if self.cif.len() >= msc::CIF_BITS {
+            let rest = self.cif.split_off(msc::CIF_BITS);
+            if let Some(frame) = reader.push(&self.cif) {
+                self.heard.push(frame);
+            }
+            self.cif = rest;
+        }
     }
 }
 

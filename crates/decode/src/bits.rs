@@ -249,6 +249,12 @@ pub fn crc_bits(bits: &[bool], width: u32, poly: u32, init: u32) -> u32 {
     crc & mask
 }
 
+pub const FIRECODE: u16 = 0x782F;
+
+pub fn firecode(data: &[u8]) -> u16 {
+    crc16(data, FIRECODE, 0)
+}
+
 /// LSB-first CRC-16, `poly` in its reflected representation: 0x8408 is the
 /// CCITT polynomial as X.25, ARINC 618 and a dozen packet radios use it.
 pub fn crc16le(data: &[u8], poly: u16, init: u16) -> u16 {
@@ -1202,6 +1208,14 @@ pub fn conv_threshold_lsb(info: &mut [u8], parity: &[u8], taps: &[u32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_firecode_polynomial_is_the_product_ts_102_563_gives() {
+        let product = (0..=16u32).fold(0u32, |acc, i| {
+            if (0b1000_0000_0001u32 >> i) & 1 == 1 { acc ^ (0b10_1111u32 << i) } else { acc }
+        });
+        assert_eq!(product, 0x1_0000 | FIRECODE as u32);
+    }
 
     /// Encode a message as a BCH(63,51) codeword: the remainder of the
     /// message shifted up, divided by the generator, put in the low bits.

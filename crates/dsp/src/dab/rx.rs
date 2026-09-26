@@ -31,6 +31,7 @@ pub struct Symbol {
     /// Where it sits in the frame: 1 is the first symbol after the phase
     /// reference, and the fast information channel is the first few.
     pub index: usize,
+    pub frame: u64,
     /// The soft bits it carries, deinterleaved: 2K of them, positive for a
     /// zero bit. The first K are the real axis and the rest the imaginary,
     /// which is the order the standard's own bit numbering puts them in.
@@ -150,7 +151,8 @@ impl Dab {
             // Unlocked, the search needs two frames whole, so only what is
             // beyond that goes.
             None => self.buf.len().saturating_sub(2 * self.mode.frame()),
-        };
+        }
+        .min(self.buf.len());
         if keep == 0 {
             return;
         }
@@ -264,7 +266,7 @@ impl Dab {
         // The impulse sits at the delay the window is late by, wrapped.
         let late = if at < n / 2 { at as isize } else { at as isize - n as isize };
         let timed = start as isize + late;
-        if timed < 0 || timed as usize + self.mode.frame() > self.buf.len() {
+        if timed < 0 {
             return None;
         }
         Some((timed as usize, shift))
@@ -388,7 +390,7 @@ impl Dab {
             true => -10.0 * mean.log10(),
             false => 60.0,
         };
-        Symbol { index, soft, snr_db: snr_db.clamp(-20.0, 60.0) }
+        Symbol { index, frame: self.frames, soft, snr_db: snr_db.clamp(-20.0, 60.0) }
     }
 }
 

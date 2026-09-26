@@ -63,6 +63,7 @@ pub mod nrf24_nodes;
 pub mod nxdn_nodes;
 pub mod p25_nodes;
 pub mod packet_nodes;
+pub mod playout;
 pub mod pocsag_nodes;
 pub mod protocol;
 pub mod rs41_nodes;

@@ -91,6 +91,8 @@ pub mod rs41;
 pub mod rtty;
 pub mod script;
 pub mod slicer;
+#[cfg(feature = "ffmpeg")]
+pub mod sound;
 pub mod sstv;
 pub mod subghz;
 #[cfg(feature = "tea")]

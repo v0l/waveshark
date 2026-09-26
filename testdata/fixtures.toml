@@ -1133,6 +1133,11 @@ same 29 service ids and labels, read at the recording's own rate through the
 resampler. Three seconds is the shortest cut that names all 29: two seconds
 names 27.
 
+welle-cli from the same package, run with `-D` on that resampled file played
+three times over, dumps the subchannels it decodes. `crates/nodes/src/dab_nodes.rs`
+asserts the CRC-32 of the logical frames it reads for Nova 100 (57 frames,
+EEP 3-A) and LightDigital (69 frames, EEP 3-B) against that dump.
+
 Nothing in it identifies a person; the service labels are broadcasters'.
 """
 
