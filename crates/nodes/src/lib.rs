@@ -155,9 +155,9 @@ pub use survey_nodes::SurveyNode;
 pub use tetra_nodes::TetraNode;
 pub use tx_nodes::{
     DEFAULT_VOX_TAIL_MS, DEFAULT_VOX_THRESHOLD, Heard, MIC_GAIN_MAX, MicNode, MorseKeyNode,
-    MorseTxNode, QUINDAR_KEY_DOWN_HZ, QUINDAR_KEY_UP_HZ, QUINDAR_MS, ROGER_MAX_MS, RogerNode,
-    RogerStyle, SUBTONE_LEVEL, SubToneNode, ToneNode, TxClockNode, TxMonitorNode, TxSinkNode,
-    VoxNode, roger_sends,
+    MorseTxNode, QUINDAR_KEY_DOWN_HZ, QUINDAR_KEY_UP_HZ, QUINDAR_LEAD_MAX_MS, QUINDAR_LEAD_MS,
+    QUINDAR_MS, ROGER_MAX_MS, RogerNode, RogerStyle, SUBTONE_LEVEL, SubToneNode, ToneNode,
+    TxClockNode, TxMonitorNode, TxSinkNode, VoxNode, roger_sends,
 };
 pub use vdl2_nodes::Vdl2Node;
 pub use video_nodes::VideoNode;

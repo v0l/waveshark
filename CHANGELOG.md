@@ -17,7 +17,7 @@ the code is in the commit log.
 - DVB-S2 off a satellite LNB: QPSK to 32APSK, symbol rate measured, pictures and sound.
 - Chain view switch turning off one stage, or all of receive with transmit left on.
 - Satellite pointing window for any satellite: azimuth, elevation, pass, Doppler, LNB skew and a level to peak on.
-- Quindar tones as a roger beep style, before and after each over.
+- Quindar tones as a roger beep style, before and after each over, after a lead for the far squelch.
 - Channel passband edges dragged on the spectrum, and SSB and CW low and high edges on the strip.
 - Chain view editing: stages dragged from a searchable list onto a port or wire, CLEAR, zoom, FIT, and why a stage was left out.
 - Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.

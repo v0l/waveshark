@@ -807,6 +807,7 @@ pub struct TxSpec {
     pub roger_style: nodes::RogerStyle,
     pub roger_ms: f64,
     pub roger_hz: f64,
+    pub roger_lead_ms: f64,
     pub tone: Option<dsp::squelch::Coded>,
 }
 
@@ -856,6 +857,7 @@ impl Default for TxSpec {
             roger_style: nodes::RogerStyle::Tone,
             roger_ms: 0.0,
             roger_hz: 1_000.0,
+            roger_lead_ms: nodes::QUINDAR_LEAD_MS,
             tone: None,
         }
     }

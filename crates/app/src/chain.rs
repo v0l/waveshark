@@ -3352,6 +3352,10 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
                     pipeline::ParamValue::Choice(tx.spec.roger_style.index()),
                 );
                 s.insert("roger_ms".into(), pipeline::ParamValue::Float(tx.spec.roger_ms));
+                s.insert(
+                    "roger_lead_ms".into(),
+                    pipeline::ParamValue::Float(tx.spec.roger_lead_ms),
+                );
                 s.insert("roger_hz".into(), pipeline::ParamValue::Float(tx.spec.roger_hz));
                 p.add_derived(derived::ROGER, "roger", s);
                 p.connect(modulates, (derived::ROGER, 0));

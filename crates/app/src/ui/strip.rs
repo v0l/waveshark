@@ -726,6 +726,23 @@ impl Strip<'_> {
                 }
             }
             if tx.roger_style == nodes::RogerStyle::Quindar {
+                let mut lead = tx.roger_lead_ms;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut lead)
+                            .speed(10.0)
+                            .range(0.0..=nodes::QUINDAR_LEAD_MAX_MS)
+                            .suffix(" ms"),
+                    )
+                    .on_hover_text(
+                        "Carrier alone before the opening tone, so the far radio's squelch \
+                         is open when it arrives",
+                    )
+                    .changed()
+                {
+                    tx.roger_lead_ms = lead;
+                    changed = true;
+                }
                 return;
             }
             let mut ms = tx.roger_ms;

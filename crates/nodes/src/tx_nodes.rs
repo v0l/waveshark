@@ -1748,6 +1748,8 @@ pub struct RogerNode {
     ms: f64,
     hz: f64,
     rate: f64,
+    lead_ms: f64,
+    lead: usize,
     intro: Burst,
     outro: Burst,
     held: std::collections::VecDeque<f32>,
@@ -1787,6 +1789,8 @@ impl RogerStyle {
 pub const QUINDAR_MS: f64 = 250.0;
 pub const QUINDAR_KEY_DOWN_HZ: f64 = 2_525.0;
 pub const QUINDAR_KEY_UP_HZ: f64 = 2_475.0;
+pub const QUINDAR_LEAD_MS: f64 = 300.0;
+pub const QUINDAR_LEAD_MAX_MS: f64 = 2_000.0;
 
 #[derive(Default)]
 struct Burst {
@@ -1821,6 +1825,8 @@ impl Default for RogerNode {
             ms: 0.0,
             hz: 1_000.0,
             rate: 0.0,
+            lead_ms: QUINDAR_LEAD_MS,
+            lead: 0,
             intro: Burst::default(),
             outro: Burst::default(),
             held: std::collections::VecDeque::new(),
@@ -1855,7 +1861,7 @@ impl RogerNode {
     }
 
     pub fn sending(&self) -> bool {
-        self.ended && self.intro.left() + self.held.len() + self.outro.left() > 0
+        self.ended && self.lead + self.intro.left() + self.held.len() + self.outro.left() > 0
     }
 
     pub fn ms(&self) -> f64 {
@@ -1866,9 +1872,17 @@ impl RogerNode {
         self.style
     }
 
+    pub fn lead_ms(&self) -> f64 {
+        self.lead_ms
+    }
+
     fn next(&mut self, s: f32) -> f32 {
         if self.pushed_back && !self.ended {
             self.held.push_back(s);
+        }
+        if self.lead > 0 {
+            self.lead -= 1;
+            return 0.0;
         }
         if let Some(v) = self.intro.next(self.rate) {
             return v;
@@ -1934,6 +1948,7 @@ impl Simple for RogerNode {
     }
 
     fn reset(&mut self) {
+        self.lead = 0;
         self.intro = Burst::default();
         self.outro = Burst::default();
         self.held.clear();
@@ -1944,6 +1959,7 @@ impl Simple for RogerNode {
     fn over_began(&mut self) {
         Simple::reset(self);
         if self.style == RogerStyle::Quindar {
+            self.lead = self.samples(self.lead_ms);
             self.intro = Burst::new(QUINDAR_KEY_DOWN_HZ, self.samples(QUINDAR_MS));
             self.pushed_back = true;
         }
@@ -1959,6 +1975,9 @@ impl Simple for RogerNode {
             .label("Roger beep style"),
             Param::float(ROGER_MS, self.ms, 0.0..=ROGER_MAX_MS).label("Roger beep").unit("ms"),
             Param::float(ROGER_HZ, self.hz, 300.0..=3_000.0).label("Roger beep pitch").unit("Hz"),
+            Param::float(ROGER_LEAD_MS, self.lead_ms, 0.0..=QUINDAR_LEAD_MAX_MS)
+                .label("Quindar lead")
+                .unit("ms"),
         ]
     }
 
@@ -1967,6 +1986,10 @@ impl Simple for RogerNode {
             ROGER_STYLE => self.style = RogerStyle::from_index(value.as_i64().unwrap_or(0)),
             ROGER_MS => self.ms = value.as_f64().unwrap_or(0.0).clamp(0.0, ROGER_MAX_MS),
             ROGER_HZ => self.hz = value.as_f64().unwrap_or(1_000.0).clamp(300.0, 3_000.0),
+            ROGER_LEAD_MS => {
+                self.lead_ms =
+                    value.as_f64().unwrap_or(QUINDAR_LEAD_MS).clamp(0.0, QUINDAR_LEAD_MAX_MS)
+            }
             _ => return Err(common::Error::other(format!("roger: unknown parameter {name:?}"))),
         }
         Ok(())
@@ -2083,6 +2106,7 @@ mod roger_tests {
         let quarter = (RATE * QUINDAR_MS / 1_000.0) as usize;
         assert_eq!(quarter, 12_000);
         let mut node = RogerNode::quindar();
+        Simple::set_param(&mut node, ROGER_LEAD_MS, ParamValue::Float(0.0)).unwrap();
         Simple::negotiate(&mut node, &spec()).unwrap();
         Simple::over_began(&mut node);
 
@@ -2120,6 +2144,47 @@ mod roger_tests {
         let peak = outro.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - 0.5).abs() < 0.01, "the key-up tone went out at {peak}");
         assert_eq!(after[2 * quarter..].iter().filter(|&&s| s != 0.9).count(), 0);
+    }
+
+    #[test]
+    fn quindar_waits_its_lead_in_silence_so_the_far_squelch_opens_before_the_tone() {
+        let (lead, quarter) = ((RATE * 0.3) as usize, (RATE * QUINDAR_MS / 1_000.0) as usize);
+        let mut node = RogerNode::quindar();
+        assert_eq!(node.lead_ms(), QUINDAR_LEAD_MS);
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        Simple::over_began(&mut node);
+        let speech: Vec<f32> =
+            (0..40 * BLOCK).map(|i| 0.3 * ((i % 97) as f32 / 97.0 - 0.5)).collect();
+        let mut over = Vec::new();
+        for b in speech.chunks(BLOCK) {
+            over.extend(through(&mut node, b));
+        }
+        assert_eq!(
+            over[..lead].iter().filter(|s| **s != 0.0).count(),
+            0,
+            "300 ms of carrier alone"
+        );
+        assert_eq!(rising(&over[lead..lead + quarter]), 632, "then 250 ms of 2525 Hz");
+        assert_eq!(
+            &over[lead + quarter..],
+            &speech[..speech.len() - lead - quarter],
+            "speech 550 ms behind"
+        );
+        assert!(node.end_over());
+        let mut held = 0;
+        for _ in 0..60 {
+            through(&mut node, &[0.9; BLOCK]);
+            if node.sending() {
+                held += 1;
+            }
+        }
+        assert_eq!(held, 39, "550 ms of held speech and 250 ms of tone, in blocks of 20 ms");
+
+        let mut none = RogerNode::quindar();
+        Simple::set_param(&mut none, ROGER_LEAD_MS, ParamValue::Float(0.0)).unwrap();
+        Simple::negotiate(&mut none, &spec()).unwrap();
+        Simple::over_began(&mut none);
+        assert!(through(&mut none, &[0.0; BLOCK])[1].abs() > 0.1, "no lead, the tone at once");
     }
 
     #[test]
@@ -2211,6 +2276,7 @@ const ANTI_TRIP: &str = "anti_trip";
 const ROGER_MS: &str = "roger_ms";
 const ROGER_HZ: &str = "roger_hz";
 const ROGER_STYLE: &str = "roger_style";
+const ROGER_LEAD_MS: &str = "roger_lead_ms";
 
 /// The longest courtesy tone that is a courtesy rather than a transmission
 /// of its own.
@@ -2294,6 +2360,7 @@ pub const ROGER: StageDesc = StageDesc {
 pub fn build_roger(s: &Settings) -> Result<Box<dyn Node>> {
     let mut n = RogerNode::new(s.f64_or(ROGER_MS, 0.0), s.f64_or(ROGER_HZ, 1_000.0));
     n.style = RogerStyle::from_index(s.i64_or(ROGER_STYLE, 0));
+    n.lead_ms = s.f64_or(ROGER_LEAD_MS, QUINDAR_LEAD_MS).clamp(0.0, QUINDAR_LEAD_MAX_MS);
     Ok(Box::new(n))
 }
 
