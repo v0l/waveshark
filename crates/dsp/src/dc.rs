@@ -85,24 +85,20 @@ impl DcBlock {
 
 #[derive(Clone, Debug)]
 pub struct SpurCancel {
-    step: C32,
-    phasor: C32,
+    phase: f64,
+    turn: f64,
     amplitude: C32,
     alpha: f32,
-    count: u32,
 }
+
+const SPUR_LANES: usize = 8;
+const SPUR_ANCHOR: usize = 1024;
 
 impl SpurCancel {
     pub fn new(offset_hz: f64, rate: f64, cutoff_hz: f64) -> Self {
         let turn = std::f64::consts::TAU * offset_hz / rate.max(1.0);
         let a = (std::f64::consts::TAU * cutoff_hz / rate.max(1.0)).clamp(1e-9, 0.5);
-        Self {
-            step: C32::new(turn.cos() as f32, turn.sin() as f32),
-            phasor: C32::new(1.0, 0.0),
-            amplitude: C32::new(0.0, 0.0),
-            alpha: a as f32,
-            count: 0,
-        }
+        Self { phase: 0.0, turn, amplitude: C32::new(0.0, 0.0), alpha: a as f32 }
     }
 
     pub fn amplitude(&self) -> C32 {
@@ -110,17 +106,62 @@ impl SpurCancel {
     }
 
     pub fn process(&mut self, buf: &mut [C32]) {
-        for s in buf.iter_mut() {
-            let tone = self.phasor;
-            self.amplitude += (*s * tone.conj() - self.amplitude) * self.alpha;
-            *s -= self.amplitude * tone;
-            self.phasor *= self.step;
-            self.count = self.count.wrapping_add(1);
-            if self.count.is_multiple_of(1024) {
-                self.phasor /= self.phasor.norm();
+        use wide::f32x8;
+        let alpha = self.alpha;
+        let beta = 1.0 - alpha;
+        let mut power = 1.0f32;
+        let carry = f32x8::new(std::array::from_fn(|_| {
+            power *= beta;
+            power
+        }));
+        let (b1, b2, b4) =
+            (f32x8::splat(beta), f32x8::splat(beta.powi(2)), f32x8::splat(beta.powi(4)));
+        let (sin, cos) = (self.turn * SPUR_LANES as f64).sin_cos();
+        let (step_re, step_im) = (f32x8::splat(cos as f32), f32x8::splat(sin as f32));
+        let mut a = self.amplitude;
+        for chunk in buf.chunks_mut(SPUR_ANCHOR) {
+            let tones: [(f64, f64); SPUR_LANES] =
+                std::array::from_fn(|k| (self.phase + self.turn * k as f64).sin_cos());
+            let mut pr = f32x8::new(tones.map(|(_, cos)| cos as f32));
+            let mut pi = f32x8::new(tones.map(|(sin, _)| sin as f32));
+            let mut blocks = chunk.chunks_exact_mut(SPUR_LANES);
+            for block in &mut blocks {
+                let xr = f32x8::new(std::array::from_fn(|k| block[k].re));
+                let xi = f32x8::new(std::array::from_fn(|k| block[k].im));
+                let mut sr = (xr * pr + xi * pi) * alpha;
+                let mut si = (xi * pr - xr * pi) * alpha;
+                sr += shifted::<1>(sr) * b1;
+                si += shifted::<1>(si) * b1;
+                sr += shifted::<2>(sr) * b2;
+                si += shifted::<2>(si) * b2;
+                sr += shifted::<4>(sr) * b4;
+                si += shifted::<4>(si) * b4;
+                let ar = carry * a.re + sr;
+                let ai = carry * a.im + si;
+                let yr = (xr - (ar * pr - ai * pi)).to_array();
+                let yi = (xi - (ar * pi + ai * pr)).to_array();
+                for (k, s) in block.iter_mut().enumerate() {
+                    *s = C32::new(yr[k], yi[k]);
+                }
+                a = C32::new(ar.to_array()[SPUR_LANES - 1], ai.to_array()[SPUR_LANES - 1]);
+                (pr, pi) = (pr * step_re - pi * step_im, pr * step_im + pi * step_re);
             }
+            let (pr, pi) = (pr.to_array(), pi.to_array());
+            for (k, s) in blocks.into_remainder().iter_mut().enumerate() {
+                let tone = C32::new(pr[k], pi[k]);
+                a = a * beta + *s * tone.conj() * alpha;
+                *s -= a * tone;
+            }
+            self.phase =
+                (self.phase + self.turn * chunk.len() as f64).rem_euclid(std::f64::consts::TAU);
         }
+        self.amplitude = a;
     }
+}
+
+fn shifted<const N: usize>(v: wide::f32x8) -> wide::f32x8 {
+    let a = v.to_array();
+    wide::f32x8::new(std::array::from_fn(|k| if k >= N { a[k - N] } else { 0.0 }))
 }
 
 #[cfg(test)]

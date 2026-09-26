@@ -77,6 +77,9 @@ impl Mixer {
 
     /// In-place variant.
     pub fn process_in_place(&mut self, buf: &mut [C32]) {
+        if self.step == 0.0 && self.phase == 0.0 {
+            return;
+        }
         let rot = Rotate::pick();
         for chunk in buf.chunks_mut(ANCHOR) {
             let (phasors, step4) = self.anchor();

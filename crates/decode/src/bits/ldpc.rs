@@ -1,13 +1,168 @@
 use super::ldpc_tables as t;
 use dsp::dvbs2::{FecFrame, Rate};
 use std::sync::OnceLock;
+use wide::i16x16;
 
 const GROUP: usize = 360;
 const TOP: i16 = i16::MAX;
 const LIMIT: f32 = 2047.0;
 const TYPICAL: f32 = 100.0;
 
-type Lanes = [i16; GROUP];
+const CHUNKS: usize = GROUP.div_ceil(16);
+
+type Lanes = [i16x16; CHUNKS];
+
+const EMPTY: Lanes = [i16x16::ZERO; CHUNKS];
+
+fn flat(v: &Lanes) -> &[i16] {
+    &bytemuck::cast_slice(v)[..GROUP]
+}
+
+fn flat_mut(v: &mut Lanes) -> &mut [i16] {
+    &mut bytemuck::cast_slice_mut(v)[..GROUP]
+}
+
+trait Word: Copy {
+    fn splat(v: i16) -> Self;
+    fn load(v: &i16x16) -> Self;
+    fn store(self, to: &mut i16x16);
+    fn saturating_sub(self, o: Self) -> Self;
+    fn min(self, o: Self) -> Self;
+    fn max(self, o: Self) -> Self;
+    fn abs(self) -> Self;
+    fn less(self, o: Self) -> Self;
+    fn equal(self, o: Self) -> Self;
+    fn select(self, yes: Self, no: Self) -> Self;
+    fn xor(self, o: Self) -> Self;
+    fn sub(self, o: Self) -> Self;
+    fn shr<const N: i32>(self) -> Self;
+}
+
+impl Word for i16x16 {
+    #[inline(always)]
+    fn splat(v: i16) -> Self {
+        i16x16::splat(v)
+    }
+    #[inline(always)]
+    fn load(v: &i16x16) -> Self {
+        *v
+    }
+    #[inline(always)]
+    fn store(self, to: &mut i16x16) {
+        *to = self;
+    }
+    #[inline(always)]
+    fn saturating_sub(self, o: Self) -> Self {
+        i16x16::saturating_sub(self, o)
+    }
+    #[inline(always)]
+    fn min(self, o: Self) -> Self {
+        i16x16::min(self, o)
+    }
+    #[inline(always)]
+    fn max(self, o: Self) -> Self {
+        i16x16::max(self, o)
+    }
+    #[inline(always)]
+    fn abs(self) -> Self {
+        i16x16::abs(self)
+    }
+    #[inline(always)]
+    fn less(self, o: Self) -> Self {
+        self.simd_lt(o)
+    }
+    #[inline(always)]
+    fn equal(self, o: Self) -> Self {
+        self.simd_eq(o)
+    }
+    #[inline(always)]
+    fn select(self, yes: Self, no: Self) -> Self {
+        i16x16::select(self, yes, no)
+    }
+    #[inline(always)]
+    fn xor(self, o: Self) -> Self {
+        self ^ o
+    }
+    #[inline(always)]
+    fn sub(self, o: Self) -> Self {
+        self - o
+    }
+    #[inline(always)]
+    fn shr<const N: i32>(self) -> Self {
+        self >> N
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy)]
+struct Avx2(std::arch::x86_64::__m256i);
+
+#[cfg(target_arch = "x86_64")]
+impl Word for Avx2 {
+    #[inline(always)]
+    fn splat(v: i16) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_set1_epi16(v)) }
+    }
+    #[inline(always)]
+    fn load(v: &i16x16) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_load_si256(v as *const i16x16 as *const _)) }
+    }
+    #[inline(always)]
+    fn store(self, to: &mut i16x16) {
+        unsafe { std::arch::x86_64::_mm256_store_si256(to as *mut i16x16 as *mut _, self.0) }
+    }
+    #[inline(always)]
+    fn saturating_sub(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_subs_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn min(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_min_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn max(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_max_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn abs(self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_abs_epi16(self.0)) }
+    }
+    #[inline(always)]
+    fn less(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_cmpgt_epi16(o.0, self.0)) }
+    }
+    #[inline(always)]
+    fn equal(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_cmpeq_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn select(self, yes: Self, no: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_blendv_epi8(no.0, yes.0, self.0)) }
+    }
+    #[inline(always)]
+    fn xor(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_xor_si256(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn sub(self, o: Self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_sub_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn shr<const N: i32>(self) -> Self {
+        unsafe { Avx2(std::arch::x86_64::_mm256_srai_epi16::<N>(self.0)) }
+    }
+}
+
+fn avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Block {
@@ -23,6 +178,7 @@ pub struct Ldpc {
     layers: Vec<u32>,
     blocks: Vec<Block>,
     widest: usize,
+    avx2: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -88,7 +244,7 @@ impl Ldpc {
             blocks.extend(layer);
             layers.push(blocks.len() as u32);
         }
-        Ldpc { n, k, q, layers, blocks, widest }
+        Ldpc { n, k, q, layers, blocks, widest, avx2: avx2() }
     }
 
     pub fn dvbs2(frame: FecFrame, rate: Rate) -> Option<&'static Ldpc> {
@@ -116,15 +272,6 @@ impl Ldpc {
 
     pub fn edges(&self) -> usize {
         self.blocks.len() * GROUP - 1
-    }
-
-    fn lane_of(&self, bit: usize) -> (usize, usize) {
-        if bit < self.k {
-            (bit / GROUP, bit % GROUP)
-        } else {
-            let c = bit - self.k;
-            (self.k / GROUP + c % self.q, c / self.q)
-        }
     }
 
     fn bit_of(&self, group: usize, lane: usize) -> usize {
@@ -160,31 +307,38 @@ impl Ldpc {
     pub fn satisfied(&self, bits: &[u8]) -> bool {
         let groups: Vec<Lanes> = (0..self.n / GROUP)
             .map(|g| {
-                std::array::from_fn(|lane| if bits[self.bit_of(g, lane)] == 1 { -1 } else { 1 })
+                let mut lanes = EMPTY;
+                for (lane, v) in flat_mut(&mut lanes).iter_mut().enumerate() {
+                    *v = if bits[self.bit_of(g, lane)] == 1 { -1 } else { 1 };
+                }
+                lanes
             })
             .collect();
         self.checks_hold(&groups)
     }
 
+    #[inline(always)]
     fn checks_hold(&self, groups: &[Lanes]) -> bool {
         self.unsatisfied(groups, 1) == 0
     }
 
+    #[inline(always)]
     fn unsatisfied(&self, groups: &[Lanes], enough: usize) -> usize {
         let mut failed = 0;
+        let mut turned = EMPTY;
         for s in 0..self.q {
-            let mut parity = [0i16; GROUP];
+            let mut parity = EMPTY;
             for b in &self.blocks[self.layers[s] as usize..self.layers[s + 1] as usize] {
-                let v = &groups[b.var as usize];
-                let shift = b.shift as usize;
-                for t in 0..GROUP {
-                    parity[t] ^= (v[(t + GROUP - shift) % GROUP] < 0) as i16;
+                let v = flat(&groups[b.var as usize]);
+                rotate(v, b.shift as usize, flat_mut(&mut turned));
+                for (p, t) in parity.iter_mut().zip(&turned) {
+                    *p ^= *t;
                 }
                 if b.masked {
-                    parity[0] ^= (v[GROUP - 1] < 0) as i16;
+                    flat_mut(&mut parity)[0] ^= v[GROUP - 1];
                 }
             }
-            failed += parity.iter().filter(|&&p| p != 0).count();
+            failed += flat(&parity).iter().filter(|&&p| p < 0).count();
             if failed >= enough {
                 return failed;
             }
@@ -195,19 +349,41 @@ impl Ldpc {
     pub fn decode(&self, llr: &[f32], work: &mut Workspace, max_iterations: usize) -> Decoded {
         assert_eq!(llr.len(), self.n);
         let groups = self.n / GROUP;
-        work.posterior.resize(groups, [0; GROUP]);
+        work.posterior.resize(groups, EMPTY);
         work.messages.clear();
-        work.messages.resize(self.blocks.len(), [0; GROUP]);
-        work.scratch.resize(self.widest, [0; GROUP]);
+        work.messages.resize(self.blocks.len(), EMPTY);
+        work.scratch.resize(self.widest, EMPTY);
         let mean = llr.iter().map(|x| x.abs()).sum::<f32>() / llr.len() as f32;
         let scale = TYPICAL / mean.max(1e-6);
-        for (bit, &x) in llr.iter().enumerate() {
-            let (g, lane) = self.lane_of(bit);
-            work.posterior[g][lane] = (x * scale).round().clamp(-LIMIT, LIMIT) as i16;
+        let info = self.k / GROUP;
+        for (g, lanes) in work.posterior[..info].iter_mut().enumerate() {
+            for (v, &x) in flat_mut(lanes).iter_mut().zip(&llr[g * GROUP..]) {
+                *v = quantise(x * scale);
+            }
         }
+        for (lane, row) in llr[self.k..].chunks_exact(self.q).enumerate() {
+            for (lanes, &x) in work.posterior[info..].iter_mut().zip(row) {
+                flat_mut(lanes)[lane] = quantise(x * scale);
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        if self.avx2 {
+            return unsafe { self.iterate_avx2(work, max_iterations) };
+        }
+        self.iterate::<i16x16>(work, max_iterations)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn iterate_avx2(&self, work: &mut Workspace, max_iterations: usize) -> Decoded {
+        self.iterate::<Avx2>(work, max_iterations)
+    }
+
+    #[inline(always)]
+    fn iterate<W: Word>(&self, work: &mut Workspace, max_iterations: usize) -> Decoded {
         for iteration in 1..=max_iterations {
             for s in 0..self.q {
-                self.layer(s, work);
+                self.layer::<W>(s, work);
             }
             if self.checks_hold(&work.posterior) {
                 return Decoded { iterations: iteration, converged: true, unsatisfied: 0 };
@@ -221,64 +397,67 @@ impl Ldpc {
         out.clear();
         out.resize(self.n, 0);
         for (g, lanes) in work.posterior.iter().enumerate() {
-            for (lane, &v) in lanes.iter().enumerate() {
+            for (lane, &v) in flat(lanes).iter().enumerate() {
                 out[self.bit_of(g, lane)] = (v < 0) as u8;
             }
         }
     }
 
-    fn layer(&self, s: usize, work: &mut Workspace) {
+    #[inline(always)]
+    fn layer<W: Word>(&self, s: usize, work: &mut Workspace) {
         let blocks = &self.blocks[self.layers[s] as usize..self.layers[s + 1] as usize];
         let first = self.layers[s] as usize;
-        let mut min1 = [TOP; GROUP];
-        let mut min2 = [TOP; GROUP];
-        let mut at = [0i16; GROUP];
-        let mut sign = [0i16; GROUP];
-        for (i, b) in blocks.iter().enumerate() {
-            let v = &work.posterior[b.var as usize];
-            let r = &work.messages[first + i];
-            let q = &mut work.scratch[i];
-            let shift = b.shift as usize;
-            rotate(v, shift, q);
+        let messages = &mut work.messages[first..first + blocks.len()];
+        let mut min1 = [W::splat(TOP); CHUNKS];
+        let mut min2 = [W::splat(TOP); CHUNKS];
+        let mut at = [W::splat(0); CHUNKS];
+        let mut sign = [W::splat(0); CHUNKS];
+        let floor = W::splat(-TOP);
+        for (i, ((b, r), q)) in
+            blocks.iter().zip(messages.iter()).zip(work.scratch.iter_mut()).enumerate()
+        {
+            rotate(flat(&work.posterior[b.var as usize]), b.shift as usize, flat_mut(q));
             if b.masked {
-                q[0] = TOP;
+                flat_mut(q)[0] = TOP;
             }
-            let idx = i as i16;
-            for t in 0..GROUP {
-                let x = q[t].saturating_sub(r[t]);
-                q[t] = x;
-                let a = x.saturating_abs();
-                let lower = a < min1[t];
+            let idx = W::splat(i as i16);
+            for t in 0..CHUNKS {
+                let x = W::load(&q[t]).saturating_sub(W::load(&r[t]));
+                x.store(&mut q[t]);
+                let a = x.max(floor).abs();
+                let lower = a.less(min1[t]);
                 min2[t] = min2[t].min(min1[t].max(a));
                 min1[t] = min1[t].min(a);
-                at[t] = if lower { idx } else { at[t] };
-                sign[t] ^= x >> 15;
+                at[t] = lower.select(idx, at[t]);
+                sign[t] = sign[t].xor(x.shr::<15>());
             }
             if b.masked {
-                q[0] = TOP;
+                flat_mut(q)[0] = TOP;
             }
         }
-        for t in 0..GROUP {
-            min1[t] -= min1[t] >> 2;
-            min2[t] -= min2[t] >> 2;
+        for t in 0..CHUNKS {
+            min1[t] = min1[t].sub(min1[t].shr::<2>());
+            min2[t] = min2[t].sub(min2[t].shr::<2>());
         }
-        for (i, b) in blocks.iter().enumerate() {
-            let q = &work.scratch[i];
-            let r = &mut work.messages[first + i];
-            let idx = i as i16;
-            let mut delta = [0i16; GROUP];
-            for t in 0..GROUP {
-                let mag = if at[t] == idx { min2[t] } else { min1[t] };
-                let negative = sign[t] ^ (q[t] >> 15);
-                let out = (mag ^ negative) - negative;
-                delta[t] = out.saturating_sub(r[t]);
-                r[t] = out;
+        let mut delta = EMPTY;
+        for (i, ((b, r), q)) in
+            blocks.iter().zip(messages.iter_mut()).zip(work.scratch.iter()).enumerate()
+        {
+            let idx = W::splat(i as i16);
+            for t in 0..CHUNKS {
+                let old = W::load(&r[t]);
+                let mag = at[t].equal(idx).select(min2[t], min1[t]);
+                let negative = sign[t].xor(W::load(&q[t]).shr::<15>());
+                let out = mag.xor(negative).sub(negative);
+                out.saturating_sub(old).store(&mut delta[t]);
+                out.store(&mut r[t]);
             }
             if b.masked {
-                delta[0] = 0;
-                r[0] = 0;
+                flat_mut(&mut delta)[0] = 0;
+                flat_mut(r)[0] = 0;
             }
-            let v = &mut work.posterior[b.var as usize];
+            let v = flat_mut(&mut work.posterior[b.var as usize]);
+            let delta = flat(&delta);
             let shift = b.shift as usize;
             let (head, tail) = v.split_at_mut(GROUP - shift);
             for (x, d) in head.iter_mut().zip(&delta[shift..]) {
@@ -291,7 +470,14 @@ impl Ldpc {
     }
 }
 
-fn rotate(v: &Lanes, shift: usize, out: &mut Lanes) {
+fn quantise(x: f32) -> i16 {
+    let whole = x as i32;
+    let rest = x - whole as f32;
+    let rounded = whole + (rest >= 0.5) as i32 - (rest <= -0.5) as i32;
+    rounded.clamp(-LIMIT as i32, LIMIT as i32) as i16
+}
+
+fn rotate(v: &[i16], shift: usize, out: &mut [i16]) {
     out[shift..].copy_from_slice(&v[..GROUP - shift]);
     out[..shift].copy_from_slice(&v[GROUP - shift..]);
 }
@@ -399,5 +585,34 @@ mod tests {
         assert_eq!(got, word);
         assert!((2_000..2_900).contains(&wrong), "raw errors {wrong}, Q(1.78) of 64800 is 2437");
         assert!(d.iterations <= 20, "took {} iterations", d.iterations);
+    }
+
+    #[test]
+    fn sixteen_lanes_in_avx2_read_what_the_portable_lanes_do() {
+        if !avx2() {
+            eprintln!("no avx2 here, only the portable lanes run");
+            return;
+        }
+        let mut seed = 5;
+        let wide = build(FecFrame::Normal, Rate::R3_4).unwrap();
+        let mut portable = build(FecFrame::Normal, Rate::R3_4).unwrap();
+        portable.avx2 = false;
+        let info: Vec<u8> = (0..wide.k()).map(|_| (lcg(&mut seed) & 1) as u8).collect();
+        let word = wide.encode(&info);
+        let mut read = Vec::new();
+        for snr_db in [4.0, 2.5] {
+            let (llr, _) = bpsk(&word, snr_db, &mut seed);
+            let run = |code: &Ldpc| {
+                let mut work = Workspace::new();
+                let d = code.decode(&llr, &mut work, 30);
+                let mut bits = Vec::new();
+                code.hard(&work, &mut bits);
+                (d.converged, d.iterations, d.unsatisfied, bits)
+            };
+            let (a, b) = (run(&wide), run(&portable));
+            assert!(a == b, "{snr_db} dB decoded differently in avx2");
+            read.push((a.0, a.1, a.2));
+        }
+        assert_eq!(read, [(true, 22, 0), (false, 30, 4257)]);
     }
 }

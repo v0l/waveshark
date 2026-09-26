@@ -1523,6 +1523,7 @@ dependencies = [
  "sources",
  "tracing",
  "wgpu",
+ "wide",
 ]
 
 [[package]]

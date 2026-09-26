@@ -126,15 +126,15 @@ impl Timing {
             let mut count = 0;
             while count < RUN {
                 let at = self.at + count as f64 * step;
-                let n = at as usize;
-                let start = (n + 1 - half) * 2;
+                let n = at as i64;
+                let start = (n as usize + 1 - half) * 2;
                 if start + row > flat.len() {
                     break;
                 }
-                let p = ((at - n as f64) * PHASES as f64 + 0.5) as usize;
+                let p = ((at - n as f64) * PHASES as f64 + 0.5) as i64 as usize;
                 let taps = &self.phases[p * row..(p + 1) * row];
                 let x = &flat[start..start + row];
-                ys[count] = if AVX { unsafe { dot_avx2(x, taps) } } else { dot_portable(x, taps) };
+                ys[count] = dot::<AVX>(x, taps);
                 count += 1;
             }
             let mut nudge = 0.0;
@@ -187,6 +187,15 @@ unsafe fn dot_avx2(x: &[f32], taps: &[f32]) -> C32 {
         let v = _mm_add_ps(v, _mm_movehl_ps(v, v));
         C32::new(_mm_cvtss_f32(v), _mm_cvtss_f32(_mm_shuffle_ps(v, v, 1)))
     }
+}
+
+#[inline(always)]
+fn dot<const AVX: bool>(x: &[f32], taps: &[f32]) -> C32 {
+    #[cfg(target_arch = "x86_64")]
+    if AVX {
+        return unsafe { dot_avx2(x, taps) };
+    }
+    dot_portable(x, taps)
 }
 
 #[inline(always)]
@@ -542,25 +551,28 @@ impl Framed {
         track(&v, &self.points, self.w, &mut aligned);
         let constellation = header.modcod.points();
         let bps = header.modcod.constellation.bits();
-        let mut llr = Vec::with_capacity(header.frame.bits());
         let mut dd = if header.pilots {
             Directed::new(DD_PILOTS, 0.0)
         } else {
             Directed::new(DD_FIRST, DD_SECOND)
         };
         let (scale, gain) = (1.0 / self.sigma2, 1.0 / self.amplitude);
+        let mut data = Vec::with_capacity(header.frame.bits() / bps);
         for run in pl::runs(header) {
             for i in run.span {
                 let s = aligned[HEADER + i] * pl::rotation(self.scramble[i]).conj();
                 let z = dd.correct(s * gain);
-                let nearest = if run.pilot {
+                let decided = if run.pilot {
                     pl::pilot()
                 } else {
-                    demap(z, constellation, bps, scale, &mut llr)
+                    data.push(z);
+                    constellation[nearest(z, constellation)]
                 };
-                dd.learn(z, nearest);
+                dd.learn(z, decided);
             }
         }
+        let mut llr = Vec::with_capacity(header.frame.bits());
+        soft_bits(&data, constellation, bps, scale, &mut llr);
         Received { header, llr, mer_db: self.mer_db, offset_hz: self.offset_hz }
     }
 }
@@ -681,42 +693,90 @@ fn header_slope(s: &[C32], reference: &[C32]) -> f64 {
     num / den
 }
 
-fn demap(y: C32, points: &[C32], bps: usize, scale: f32, out: &mut Vec<f32>) -> C32 {
-    match bps {
-        2 => demap_n::<4, 2>(y, points, scale, out),
-        3 => demap_n::<8, 3>(y, points, scale, out),
-        4 => demap_n::<16, 4>(y, points, scale, out),
-        _ => demap_n::<32, 5>(y, points, scale, out),
+fn nearest(y: C32, points: &[C32]) -> usize {
+    match points.len() {
+        4 => nearest_n::<4>(y, points),
+        8 => nearest_n::<8>(y, points),
+        16 => nearest_n::<16>(y, points),
+        _ => nearest_n::<32>(y, points),
     }
 }
 
-fn demap_n<const N: usize, const B: usize>(
-    y: C32,
+fn nearest_n<const N: usize>(y: C32, points: &[C32]) -> usize {
+    let mut d: [f32; N] = std::array::from_fn(|i| (y - points[i]).norm_sqr());
+    let mut at: [usize; N] = std::array::from_fn(|i| i);
+    let mut n = N;
+    while n > 1 {
+        n /= 2;
+        for i in 0..n {
+            let right = d[2 * i + 1] < d[2 * i];
+            at[i] = if right { at[2 * i + 1] } else { at[2 * i] };
+            d[i] = if right { d[2 * i + 1] } else { d[2 * i] };
+        }
+    }
+    at[0]
+}
+
+fn soft_bits(symbols: &[C32], points: &[C32], bps: usize, scale: f32, out: &mut Vec<f32>) {
+    match bps {
+        2 => soft_bits_n::<4, 2>(symbols, points, scale, out),
+        3 => soft_bits_n::<8, 3>(symbols, points, scale, out),
+        4 => soft_bits_n::<16, 4>(symbols, points, scale, out),
+        _ => soft_bits_n::<32, 5>(symbols, points, scale, out),
+    }
+}
+
+fn soft_bits_n<const N: usize, const B: usize>(
+    symbols: &[C32],
     points: &[C32],
     scale: f32,
     out: &mut Vec<f32>,
-) -> C32 {
-    let mut d = [0f32; N];
-    let (mut nearest, mut best) = (0, f32::MAX);
-    for (i, (d, p)) in d.iter_mut().zip(&points[..N]).enumerate() {
-        *d = (y - p).norm_sqr();
-        if *d < best {
-            best = *d;
-            nearest = i;
-        }
-    }
-    for b in 0..B {
-        let (mut zero, mut one) = (f32::MAX, f32::MAX);
-        for (i, &v) in d.iter().enumerate() {
-            if (i >> (B - 1 - b)) & 1 == 0 {
-                zero = zero.min(v);
-            } else {
-                one = one.min(v);
+) {
+    use wide::f32x8;
+    let points: [C32; N] = std::array::from_fn(|i| points[i]);
+    let scales = f32x8::splat(scale);
+    let mut chunks = symbols.chunks_exact(8);
+    let mut bits = [[0f32; 8]; B];
+    for chunk in &mut chunks {
+        let re = f32x8::new(std::array::from_fn(|k| chunk[k].re));
+        let im = f32x8::new(std::array::from_fn(|k| chunk[k].im));
+        let mut zero = [f32x8::splat(f32::MAX); B];
+        let mut one = [f32x8::splat(f32::MAX); B];
+        for (i, p) in points.iter().enumerate() {
+            let (dr, di) = (re - f32x8::splat(p.re), im - f32x8::splat(p.im));
+            let d = dr * dr + di * di;
+            for b in 0..B {
+                if (i >> (B - 1 - b)) & 1 == 0 {
+                    zero[b] = zero[b].min(d);
+                } else {
+                    one[b] = one[b].min(d);
+                }
             }
         }
-        out.push((one - zero) * scale);
+        for b in 0..B {
+            bits[b] = ((one[b] - zero[b]) * scales).to_array();
+        }
+        for k in 0..8 {
+            out.extend(bits.iter().map(|b| b[k]));
+        }
     }
-    points[nearest]
+    for &y in chunks.remainder() {
+        let mut d = [0f32; N];
+        for (d, p) in d.iter_mut().zip(&points) {
+            *d = (y - p).norm_sqr();
+        }
+        for b in 0..B {
+            let (mut zero, mut one) = (f32::MAX, f32::MAX);
+            for (i, &v) in d.iter().enumerate() {
+                if (i >> (B - 1 - b)) & 1 == 0 {
+                    zero = zero.min(v);
+                } else {
+                    one = one.min(v);
+                }
+            }
+            out.push((one - zero) * scale);
+        }
+    }
 }
 
 #[cfg(test)]
