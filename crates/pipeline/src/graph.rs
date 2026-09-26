@@ -1695,10 +1695,12 @@ mod tests {
                     channel_hz: 0.0,
                     param: "service",
                     wanted: crate::ParamValue::Int(0),
+                    on: None,
                     idle: crate::ParamValue::Int(-1),
                     list: vec![crate::meta::Programme {
                         label: format!("left {}", self.0),
                         setting: crate::ParamValue::Int(0),
+                        service: None,
                     }],
                 };
                 c.publish(0, Meta::Programmes(std::sync::Arc::new(listing)));

@@ -27,6 +27,8 @@ use common::{Pixels, VideoFrame};
 /// second for a camera and an hour for a picture that was built and finished.
 const HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
+const OSD_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+
 const DEFAULT_PICTURE_FRAC: f32 = 0.65;
 const PICTURE_FRAC_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.9;
 
@@ -57,6 +59,8 @@ pub(super) struct VideoState {
     watching_label: Option<String>,
     split: Option<f32>,
     splitting: bool,
+    osd_until: Option<std::time::Instant>,
+    osd_title: String,
 }
 
 impl VideoState {
@@ -102,47 +106,6 @@ impl VideoPane<'_> {
     pub fn show(self, ui: &mut egui::Ui) {
         let st = self.st;
         let before = pick_of(st.watching.as_deref(), &self.muxes);
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            let shown = match &before {
-                Pick::Programme(k, from, setting) => self
-                    .muxes
-                    .iter()
-                    .find(|o| o.from == *from)
-                    .and_then(|o| o.programmes.list.iter().find(|p| &p.setting == setting))
-                    .map_or_else(|| k.clone(), |p| p.label.clone()),
-                Pick::Channel(k) => match self.inputs.iter().find(|i| &i.key == k) {
-                    Some(i) => format!("{}  {:.0}%", i.label, i.completeness * 100.0),
-                    None => format!(
-                        "{}  (waiting)",
-                        st.watching_label.clone().unwrap_or_else(|| k.clone())
-                    ),
-                },
-                Pick::Best => "best picture".to_string(),
-            };
-            Line::new().legend("watching").value(shown).show(ui);
-            ui.add_space(12.0);
-            let count = match self.inputs.len() {
-                0 => "no channels".to_string(),
-                1 => "1 channel".to_string(),
-                n => format!("{n} channels"),
-            };
-            Line::new().legend(&count).show(ui);
-            if let Some(last) = self.saved.last() {
-                ui.add_space(12.0);
-                let n = self.saved.len();
-                let what = match n {
-                    1 => "1 picture saved".to_string(),
-                    n => format!("{n} pictures saved"),
-                };
-                let dir = last.parent().unwrap_or(last).display().to_string();
-                let r = Line::new().legend(&what).show(ui);
-                r.on_hover_text(dir.clone());
-                if ui.small_button("open").clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
-                }
-            }
-        });
         ui.add_space(4.0);
         if let Some(f) = self.frame {
             if is_new(st.shown.as_ref(), &f) {
@@ -168,9 +131,11 @@ impl VideoPane<'_> {
             .split
             .unwrap_or(DEFAULT_PICTURE_FRAC)
             .clamp(*PICTURE_FRAC_RANGE.start(), *PICTURE_FRAC_RANGE.end());
+        let on = playing(&before, st.shown.as_ref(), &self.muxes);
+        let osd = Osd::of(&before, &on, st, &self.inputs, &self.muxes, &self.saved);
         ui.allocate_ui(Vec2::new(ui.available_width(), usable * frac), |ui| {
             ui.set_min_size(ui.available_size());
-            picture(ui, st.texture.as_ref(), st.shown.as_ref());
+            picture(ui, st, &osd);
         });
         st.split = Some(split_divider(
             ui,
@@ -206,55 +171,173 @@ impl VideoPane<'_> {
     }
 }
 
-fn picture(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, f: Option<&VideoFrame>) {
-    let (Some(tex), Some(f)) = (tex, f) else {
-        ui.centered_and_justified(|ui| {
-            Line::new().note("no picture").size(14.0).show(ui);
-        });
-        return;
+fn picture(ui: &mut egui::Ui, st: &mut VideoState, osd: &Osd) {
+    let area = ui.available_rect_before_wrap();
+    let shown = match (st.texture.as_ref(), st.shown.as_ref()) {
+        (Some(tex), Some(f)) => {
+            let aspect = if f.aspect > 0.0 { f.aspect } else { 4.0 / 3.0 };
+            let size = if area.width() / area.height() > aspect {
+                egui::vec2(area.height() * aspect, area.height())
+            } else {
+                egui::vec2(area.width(), area.width() / aspect)
+            };
+            let rect = Rect::from_center_size(area.center(), size);
+            egui::Image::new(tex).maintain_aspect_ratio(false).paint_at(ui, rect);
+            Some(rect)
+        }
+        _ => {
+            let mut note = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(area)
+                    .layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)),
+            );
+            Line::new().note("no picture").size(14.0).show(&mut note);
+            None
+        }
     };
+    let rect = shown.unwrap_or(area);
+    let resp = ui.interact(rect, ui.id().with("osd"), Sense::click());
+    ui.allocate_rect(area, Sense::hover());
 
-    // The shape the transmission says, not the shape of the sample grid.
-    // Drawn from its own numbers a 640 by 288 field is 10:9, which is a
-    // 4:3 picture with the sides pushed in: how many samples a line was
-    // cut into is a fact about the receiver's clock, and a field is half
-    // a frame.
-    let aspect = if f.aspect > 0.0 { f.aspect } else { 4.0 / 3.0 };
-    let space = ui.available_size();
-    let size = if space.x / space.y > aspect {
-        egui::vec2(space.y * aspect, space.y)
-    } else {
-        egui::vec2(space.x, space.x / aspect)
-    };
-    ui.centered_and_justified(|ui| {
-        // The ratio is told, not taken from the texture: `fit_to_exact_size`
-        // still keeps the image's own proportions unless this is off, so a
-        // 640 by 288 field was drawn at 20:9 whatever shape was asked for.
-        let r = ui.add(egui::Image::new(tex).maintain_aspect_ratio(false).fit_to_exact_size(size));
-        // What it is, where it is, and what was actually received: the
-        // grid it was sampled into, then the lines that arrived out of
-        // the lines a field has. A picture assembled from a third of its
-        // lines is a picture of a fade, and analogue video has nothing
-        // else to judge it by.
-        let where_ = match &f.label {
-            Some(l) => format!("{l}  {:.3} MHz", f.channel_hz / 1e6),
-            None => format!("{:.3} MHz", f.channel_hz / 1e6),
+    let now = std::time::Instant::now();
+    if osd.title != st.osd_title {
+        st.osd_title = osd.title.clone();
+        st.osd_until = Some(now + OSD_HOLD);
+    }
+    let timed = st.osd_until.is_some_and(|t| t > now);
+    if resp.clicked() {
+        st.osd_until = if timed { None } else { Some(now + OSD_HOLD) };
+    }
+    let timed = st.osd_until.is_some_and(|t| t > now);
+    if let Some(left) = st.osd_until.and_then(|t| t.checked_duration_since(now)) {
+        ui.ctx().request_repaint_after(left);
+    }
+    let visible = shown.is_none() || resp.hovered() || timed;
+    let alpha = ui.ctx().animate_bool_with_time(resp.id, visible, 0.2);
+    if alpha > 0.0 {
+        osd.show(ui, rect, alpha);
+    }
+}
+
+/// What the picture is, drawn over it on demand: what a set top box puts up
+/// on a change of channel. A guide's now and next are rows on it.
+struct Osd {
+    title: String,
+    number: Option<u16>,
+    facts: Vec<(&'static str, String, Color32)>,
+    saved: Option<(String, String)>,
+}
+
+impl Osd {
+    fn of(
+        pick: &Pick,
+        on: &Pick,
+        st: &VideoState,
+        inputs: &[crate::chain::VideoInput],
+        muxes: &[crate::videobus::Offered],
+        saved: &[std::path::PathBuf],
+    ) -> Self {
+        let f = st.shown.as_ref();
+        let service = match on {
+            Pick::Programme(_, from, setting) => {
+                muxes.iter().find(|o| o.from == *from).and_then(|o| {
+                    let list = &o.programmes.list;
+                    list.iter().find(|p| &p.setting == setting && p.service.is_some()).or_else(
+                        || {
+                            let id = o.programmes.on?;
+                            list.iter().find(|p| p.service.as_ref().is_some_and(|s| s.id == id))
+                        },
+                    )
+                })
+            }
+            _ => None,
         };
-        let caption =
-            format!("{where_}  {}x{}  {} of {} lines", f.width, f.height, f.lines_seen, f.height);
-        // Over the picture rather than beside it, so the image keeps the
-        // whole pane and the caption cannot push it about as the text
-        // changes width.
-        ui.painter().text(
-            r.rect.left_bottom() + egui::vec2(6.0, -6.0),
-            egui::Align2::LEFT_BOTTOM,
-            caption,
-            egui::FontId::monospace(12.0),
-            // A partial picture is worth flagging: a fade looks like a
-            // picture until the count is read.
-            if f.completeness() > 0.9 { theme::READOUT } else { theme::FAULT },
-        );
-    });
+        let input = match on {
+            Pick::Channel(k) => inputs.iter().find(|i| &i.key == k),
+            _ => None,
+        };
+        let title = service
+            .map(|p| p.label.clone())
+            .or_else(|| f.and_then(|f| f.label.clone()))
+            .or_else(|| input.map(|i| i.label.clone()))
+            .or_else(|| st.watching_label.clone())
+            .unwrap_or_else(|| "best picture".to_string());
+        let mut facts = Vec::new();
+        if *pick == Pick::Best && f.is_some() {
+            facts.push(("watching", "best picture".to_string(), theme::READOUT));
+        }
+        if let Some(s) = service.and_then(|p| p.service.as_ref()) {
+            if let Some(p) = &s.provider {
+                facts.push(("provider", p.clone(), theme::VALUE));
+            }
+            if s.scrambled {
+                facts.push(("access", "scrambled".to_string(), theme::FAULT));
+            }
+            let codecs: Vec<&str> = [
+                s.video.map(|v| v.trim_end_matches(" video")),
+                s.audio.map(|a| a.trim_end_matches(" audio")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !codecs.is_empty() {
+                facts.push(("coding", codecs.join(" "), theme::VALUE));
+            }
+        }
+        if let Some(f) = f {
+            facts.push(("tuned", format!("{:.3} MHz", f.channel_hz / 1e6), theme::READOUT));
+            facts.push(("system", f.system.to_string(), theme::VALUE));
+            facts.push(("picture", format!("{}x{}", f.width, f.height), theme::TRACE));
+            let lines = format!("{} of {}", f.lines_seen, f.height);
+            let tint = if f.completeness() > 0.9 { theme::TRACE } else { theme::FAULT };
+            facts.push(("lines", lines, tint));
+        }
+        let saved = saved.last().map(|last| {
+            let what = match saved.len() {
+                1 => "1 picture saved".to_string(),
+                n => format!("{n} pictures saved"),
+            };
+            (what, last.parent().unwrap_or(last).display().to_string())
+        });
+        Self { title, number: service.and_then(|p| p.service.as_ref()).map(|s| s.id), facts, saved }
+    }
+
+    fn show(&self, ui: &mut egui::Ui, over: Rect, alpha: f32) {
+        let inner = over.shrink2(Vec2::new(14.0, 9.0));
+        let mut sizing =
+            ui.new_child(egui::UiBuilder::new().max_rect(inner).sizing_pass().invisible());
+        self.rows(&mut sizing);
+        let h = sizing.min_rect().height();
+        let at =
+            Rect::from_min_max(Pos2::new(inner.left(), inner.bottom() - h), inner.right_bottom());
+        let band = Rect::from_min_max(Pos2::new(over.left(), at.top() - 9.0), over.right_bottom());
+        ui.painter().rect_filled(band, 0.0, theme::CHASSIS.gamma_multiply(0.85 * alpha));
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(at));
+        ui.set_opacity(alpha);
+        self.rows(&mut ui);
+    }
+
+    fn rows(&self, ui: &mut egui::Ui) {
+        let mut title = Line::new().value(&self.title).size(20.0);
+        if let Some(n) = self.number {
+            title = title.gap(16.0).legend("service").value(n.to_string());
+        }
+        title.show(ui);
+        ui.horizontal_wrapped(|ui| {
+            for (legend, value, tint) in &self.facts {
+                Line::new().legend(legend).value(value).tint(*tint).show(ui);
+                ui.add_space(10.0);
+            }
+        });
+        if let Some((what, dir)) = &self.saved {
+            ui.horizontal(|ui| {
+                Line::new().legend(what).show(ui).on_hover_text(dir.clone());
+                if ui.small_button("OPEN").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
+                }
+            });
+        }
+    }
 }
 
 struct Row {
@@ -520,8 +603,11 @@ mod tests {
     }
 
     fn offered(from: usize, hz: f64, wanted: pipeline::ParamValue) -> crate::videobus::Offered {
-        let programme =
-            |label: &str, setting| pipeline::Programme { label: label.into(), setting, service: None };
+        let programme = |label: &str, setting| pipeline::Programme {
+            label: label.into(),
+            setting,
+            service: None,
+        };
         crate::videobus::Offered {
             from,
             programmes: std::sync::Arc::new(pipeline::Programmes {
@@ -529,6 +615,7 @@ mod tests {
                 channel_hz: hz,
                 param: "service",
                 wanted,
+                on: None,
                 idle: pipeline::ParamValue::Int(-1),
                 list: vec![
                     programme("first with a picture", pipeline::ParamValue::Int(0)),
@@ -545,6 +632,45 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_osd_over_the_best_picture_names_the_service_the_multiplex_is_decoding() {
+        let mut mux = offered(3, 1_097e6, pipeline::ParamValue::Int(0));
+        let list = &mut std::sync::Arc::get_mut(&mut mux.programmes).expect("one owner").list;
+        list[1].service = Some(pipeline::Service {
+            id: 6940,
+            name: Some("BBC Two HD".into()),
+            provider: Some("BSkyB".into()),
+            video: Some("H.264 video"),
+            audio: Some("MPEG-2 audio"),
+            ..Default::default()
+        });
+        std::sync::Arc::get_mut(&mut mux.programmes).expect("one owner").on = Some(6940);
+        let muxes = [mux];
+        let mut shown = frame(1, 1080);
+        (shown.system, shown.channel_hz, shown.width, shown.height) =
+            ("DVB-S2", 1_097e6, 1920, 1080);
+        let st = VideoState { shown: Some(shown.clone()), ..Default::default() };
+        let on = playing(&Pick::Best, Some(&shown), &muxes);
+        let osd = Osd::of(&Pick::Best, &on, &st, &[], &muxes, &[]);
+        assert_eq!((osd.title.as_str(), osd.number), ("BBC Two HD", Some(6940)));
+        let facts: Vec<(&str, &str)> = osd.facts.iter().map(|(l, v, _)| (*l, v.as_str())).collect();
+        assert_eq!(
+            facts,
+            [
+                ("watching", "best picture"),
+                ("provider", "BSkyB"),
+                ("coding", "H.264 MPEG-2"),
+                ("tuned", "1097.000 MHz"),
+                ("system", "DVB-S2"),
+                ("picture", "1920x1080"),
+                ("lines", "1080 of 1080"),
+            ]
+        );
+
+        let idle = Osd::of(&Pick::Best, &Pick::Best, &VideoState::default(), &[], &[], &[]);
+        assert_eq!((idle.title.as_str(), idle.facts.len()), ("best picture", 0));
     }
 
     #[test]

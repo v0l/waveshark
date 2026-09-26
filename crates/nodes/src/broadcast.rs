@@ -317,6 +317,7 @@ impl Broadcast {
             channel_hz: self.channel_hz,
             param: SERVICE,
             wanted: self.wanted.setting(),
+            on: self.asked,
             idle: Want::Off.setting(),
             list,
         };

@@ -12,6 +12,7 @@ pub struct Programmes {
     pub channel_hz: f64,
     pub param: &'static str,
     pub wanted: ParamValue,
+    pub on: Option<u16>,
     pub idle: ParamValue,
     pub list: Vec<Programme>,
 }
