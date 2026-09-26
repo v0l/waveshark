@@ -203,11 +203,12 @@ fn the_service_streams_reassemble_into_pes_packets() {
 fn the_pictures_come_out_of_the_multiplex() {
     let Some(samples) = samples() else { return skip() };
     let (_, frames, pcm) = run(&samples, None);
-    // One, not the eleven video packets the stream carries: this cut holds a
-    // single sequence header, and nothing before it can be decoded because
-    // nothing has said what size the pictures are. The packets after the
+    // Two, the fields of one picture, not the eleven video packets the
+    // stream carries: this cut holds a single sequence header, and nothing
+    // before it can be decoded because nothing has said what size the
+    // pictures are. The packets after the
     // intra picture are differences from pictures the cut does not contain.
-    assert_eq!(frames.len(), 1, "pictures in the window");
+    assert_eq!(frames.len(), 2, "fields of the one picture in the window");
     for f in &frames {
         assert_eq!((f.width, f.height), (1920, 1080));
         assert_eq!(f.pixels, common::Pixels::Rgba8);
@@ -274,7 +275,7 @@ fn the_stage_puts_a_picture_on_the_video_port() {
     assert_eq!(node.watching(), Some(49), "the video of the only service");
     #[cfg(feature = "ffmpeg")]
     {
-        assert_eq!(frames.len(), 1, "pictures on the video port");
+        assert_eq!(frames.len(), 2, "fields of the one picture on the video port");
         let f = &frames[0];
         assert_eq!((f.width, f.height), (1920, 1080));
         assert_eq!(f.pixels, common::Pixels::Rgba8);
@@ -309,7 +310,7 @@ fn the_service_can_be_asked_for_by_number_or_by_position() {
     // A picture is decoded by the container reader, so a build without
     // ffmpeg watches the same service and hands over no frames. What is
     // pinned either way is where the node points.
-    let showing = usize::from(cfg!(feature = "ffmpeg"));
+    let showing = 2 * usize::from(cfg!(feature = "ffmpeg"));
     // The tables, and the pictures, for whatever the node was asked for.
     let one = |want: Option<ParamValue>| -> (DvbtNode, usize) {
         let (node, frames, _) = run(&samples, want);
