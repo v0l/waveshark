@@ -18,7 +18,7 @@ fn main() {
     let took = t.elapsed().as_secs_f64();
     for r in &out {
         println!(
-            "{:.1} MHz frames {} in {:.3} s  snr {:.1} dB  rssi {:.1} dBFS  offset {:.0} Hz  {:?}  MER {:?}  balance {:?}  counter {:?}",
+            "{:.1} MHz frames {} in {:.3} s  snr {:.1} dB  rssi {:.1} dBFS  offset {:.0} Hz  {:?}  MER {:?}  balance {:?}  counter {:?}  uplinks {} at {:?}",
             r.center_hz / 1e6,
             r.frames,
             r.seconds,
@@ -28,7 +28,9 @@ fn main() {
             r.constellation,
             r.mer_db,
             r.balance_db,
-            r.counter
+            r.counter,
+            r.uplinks,
+            r.uplink_offset_hz
         );
     }
     println!("{:.2} s of air in {took:.2} s", iq.len() as f64 / 20e6);

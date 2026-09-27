@@ -2,7 +2,7 @@ use common::packet::{Fact, Named, Proto, ThingKind};
 use dsp::artosyn::Constellation;
 
 pub const TAG: [u8; 4] = *b"WSNK";
-const LEN: usize = TAG.len() + 24;
+const LEN: usize = TAG.len() + 30;
 const ABSENT: i16 = i16::MIN;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,6 +18,8 @@ pub struct Link {
     pub balance_db: Option<f32>,
     pub counter: Option<u8>,
     pub missed: u16,
+    pub uplinks: u16,
+    pub uplink_offset_hz: Option<i32>,
 }
 
 impl Link {
@@ -77,6 +79,8 @@ pub fn link(r: &dsp::artosyn::Report) -> Link {
         balance_db: r.balance_db,
         counter: r.counter,
         missed: r.missed.min(u32::from(u16::MAX)) as u16,
+        uplinks: r.uplinks.min(u32::from(u16::MAX)) as u16,
+        uplink_offset_hz: r.uplink_offset_hz.map(|o| o.round() as i32),
     }
 }
 
@@ -97,6 +101,8 @@ pub fn wrap(l: &Link) -> Vec<u8> {
     );
     v.push(l.counter.map_or(0xff, |c| c & 0x3f));
     v.extend(l.missed.to_le_bytes());
+    v.extend(l.uplinks.to_le_bytes());
+    v.extend(l.uplink_offset_hz.unwrap_or(i32::MIN).to_le_bytes());
     v
 }
 
@@ -123,6 +129,11 @@ pub fn parse(bytes: &[u8]) -> Option<Link> {
         },
         counter: (b[21] < 64).then_some(b[21]),
         missed: u16le(22),
+        uplinks: u16le(24),
+        uplink_offset_hz: match i32::from_le_bytes(b[26..30].try_into().ok()?) {
+            i32::MIN => None,
+            o => Some(o),
+        },
     })
 }
 
@@ -151,6 +162,8 @@ mod tests {
             balance_db: Some(2.62),
             counter: Some(58),
             missed: 3,
+            uplinks: 139,
+            uplink_offset_hz: Some(-78_201),
         }
     }
 
@@ -164,6 +177,7 @@ mod tests {
         assert_eq!(back.balance_db, Some(2.62));
         assert_eq!(back.counter, Some(58));
         assert_eq!(back.missed, 3);
+        assert_eq!((back.uplinks, back.uplink_offset_hz), (139, Some(-78_201)));
         assert_eq!(back.snr_db, 17.3);
         let fps = back.frames_per_second().expect("a period");
         assert!((fps - 139.6).abs() < 0.05, "{fps}");

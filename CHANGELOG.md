@@ -23,7 +23,7 @@ the code is in the commit log.
 - Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.
 - DAB and DAB+ sound, the station picked from the ensemble on the channel strip.
 - Trilateration list and map LOCATED layer of surveyed transmitters placed within a chosen accuracy.
-- Walksnail Avatar 20 MHz video links: channel, frame rate, frame counter, modulation, MER and antenna balance.
+- Walksnail Avatar 20 MHz video links: channel, frame rate, frame counter, modulation, MER, antenna balance and the goggles' bursts.
 
 ### Changed
 

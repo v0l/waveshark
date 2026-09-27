@@ -107,6 +107,9 @@ impl Simple for WalksnailNode {
             if l.missed > 0 {
                 out.push(("missed".into(), l.missed.to_string()));
             }
+            if l.uplinks > 0 {
+                out.push(("goggles".into(), format!("{} bursts", l.uplinks)));
+            }
             out.push(("offset".into(), format!("{:+.1} kHz", r.offset_hz / 1e3)));
         }
         out

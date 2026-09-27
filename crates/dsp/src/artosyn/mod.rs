@@ -1,4 +1,5 @@
 mod header_table;
+mod uplink_table;
 
 use common::C32;
 use rayon::prelude::*;
@@ -23,6 +24,11 @@ pub const OCCUPIED_HALF_HZ: f64 = (DC as f64 + 0.5) * SPACING_HZ;
 pub const REPORT_S: f64 = 1.0;
 
 pub type HeaderBit = (u16, u8);
+pub type SyncBit = (u16, u8, u8);
+pub const UPLINK_SYMBOLS: usize = 6;
+pub const UPLINK: usize = PREAMBLE + UPLINK_SYMBOLS * SYMBOL;
+const UPLINK_SEARCH: i64 = 12;
+const UPLINK_SYNC: f32 = 0.85;
 const COUNTER_PERIOD: u8 = 64;
 const COUNTER_MARGIN: f32 = 0.1;
 
@@ -236,6 +242,17 @@ impl Demodulator {
         let head = spectra(self, 0..6);
         let (dc, coherence) = carrier_offset(&head);
         let offset_hz = frac + dc as f64 * SPACING_HZ;
+        if coherence < PILOT_COHERENCE {
+            let (shift, sync) = uplink_sync(&head);
+            if sync >= UPLINK_SYNC {
+                return Some(Measured {
+                    offset_hz: frac + shift as f64 * SPACING_HZ,
+                    snr_db,
+                    coherence: -sync,
+                    demodulated: None,
+                });
+            }
+        }
         if coherence < PILOT_COHERENCE || !demodulate {
             return Some(Measured { offset_hz, snr_db, coherence, demodulated: None });
         }
@@ -252,6 +269,28 @@ impl Demodulator {
         self.fft.process(&mut self.scratch);
         self.scratch.iter().zip(&self.ramp).map(|(s, r)| C32::new(s.re, s.im) * r).collect()
     }
+}
+
+fn uplink_sync(head: &[Vec<C32>]) -> (i64, f32) {
+    let steps: Vec<Vec<C32>> = (3..5)
+        .map(|q| head[q + 1].iter().zip(&head[q]).map(|(a, b)| a * b.conj()).collect())
+        .collect();
+    (-UPLINK_SEARCH..=UPLINK_SEARCH)
+        .map(|shift| {
+            let (mut agree, mut total) = (0usize, 0usize);
+            for &(n, b3, b4) in uplink_table::UPLINK_SYNC {
+                let k = bin(shift, usize::from(n));
+                for (step, want) in [(0, b3), (1, b4)] {
+                    let got = u8::from(steps[step][k].im < 0.0);
+                    agree += usize::from(got == want);
+                    total += 1;
+                }
+            }
+            let frac = agree as f32 / total.max(1) as f32;
+            (shift, frac.max(1.0 - frac))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0, 0.0))
 }
 
 fn bin(dc: i64, n: usize) -> usize {
@@ -483,6 +522,8 @@ pub struct Report {
     pub balance_db: Option<f32>,
     pub counter: Option<u8>,
     pub missed: u32,
+    pub uplinks: u32,
+    pub uplink_offset_hz: Option<f64>,
     pub samples: Vec<C32>,
     pub rate: f64,
 }
@@ -501,6 +542,8 @@ struct Tally {
     demodulated: u32,
     counter: Option<u8>,
     missed: u32,
+    uplinks: u32,
+    uplink_offset: f64,
     samples: Vec<C32>,
 }
 
@@ -530,12 +573,17 @@ impl Tally {
         }
     }
 
+    fn add_uplink(&mut self, m: &Measured) {
+        self.uplinks += 1;
+        self.uplink_offset += m.offset_hz;
+    }
+
     fn report(&mut self, center_hz: f64, seconds: f64) -> Option<Report> {
         let t = std::mem::take(self);
-        if t.frames == 0 {
+        if t.frames == 0 && t.uplinks == 0 {
             return None;
         }
-        let n = f64::from(t.frames);
+        let n = f64::from(t.frames.max(1));
         let d = f64::from(t.demodulated.max(1));
         let demodulated = t.demodulated > 0;
         Some(Report {
@@ -554,6 +602,8 @@ impl Tally {
             balance_db: demodulated.then_some((t.balance / d) as f32),
             counter: t.counter,
             missed: t.missed,
+            uplinks: t.uplinks,
+            uplink_offset_hz: (t.uplinks > 0).then(|| t.uplink_offset / f64::from(t.uplinks)),
             samples: t.samples,
             rate: RATE,
         })
@@ -697,6 +747,10 @@ impl Channel {
             }
             let full = self.counted.is_multiple_of(self.stride);
             i = match self.demod.measure(&self.buf, peak, full) {
+                Some(m) if m.coherence <= -UPLINK_SYNC => {
+                    self.tally.add_uplink(&m);
+                    peak - base + UPLINK
+                }
                 Some(m) if m.coherence >= PILOT_COHERENCE => {
                     let frame = &self.buf[peak..peak + FRAME];
                     let pow = frame.iter().map(|c| c.norm_sqr()).sum::<f32>() / FRAME as f32;
@@ -989,6 +1043,11 @@ mod tests {
         let reports = read(&iq, RATE);
         let frames: u32 = reports.iter().map(|r| r.frames).sum();
         assert_eq!(frames, 6, "frames found of six sent");
+        assert_eq!(
+            reports.iter().map(|r| r.uplinks).sum::<u32>(),
+            0,
+            "a VTX frame is not a goggles burst"
+        );
         let r = reports.iter().find(|r| r.mer_db.is_some()).expect("a demodulated frame");
         assert_eq!(r.constellation, Some(Constellation::Qam64));
         let mer = r.mer_db.unwrap();
@@ -1025,7 +1084,8 @@ mod tests {
         let mut rng = Rng(3);
         let iq: Vec<C32> =
             (0..(0.03 * RATE) as usize).map(|_| C32::new(rng.gauss(), rng.gauss())).collect();
-        let frames: u32 = read(&iq, RATE).iter().map(|r| r.frames).sum();
-        assert_eq!(frames, 0);
+        let reports = read(&iq, RATE);
+        assert_eq!(reports.iter().map(|r| r.frames).sum::<u32>(), 0);
+        assert_eq!(reports.iter().map(|r| r.uplinks).sum::<u32>(), 0);
     }
 }
