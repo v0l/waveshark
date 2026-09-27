@@ -108,16 +108,16 @@ fn a_drive_past_a_surveyed_gateway_lands_within_its_radius() {
     let err = metres(est.lat, est.lon, glat, glon);
     // 224 m measured; the bounds are a band around it, not a target.
     assert!((200.0..250.0).contains(&err), "{err} m off: {est:?}");
-    // 4041 m: 31 independent places rather than 112 sightings, and levels
+    // 6616 m: 20 independent places rather than 112 sightings, and levels
     // that wander by 9.8 dB over ground the model does not describe.
-    assert!((3900.0..4200.0).contains(&est.radius_m), "{est:?}");
+    assert!((6500.0..6750.0).contains(&est.radius_m), "{est:?}");
     assert!(err < est.radius_m, "radius misses the gateway: {err} m off, {est:?}");
 }
 
 /// The other two devices on the same gateway, which is where the model runs
 /// out. Both land about a kilometre away and both say so: device 2's region
 /// was 177 m across a 1041 m error while the tolerance was divided by 110
-/// sightings, and is 1750 m now that it is divided by the 31 places those
+/// sightings, and is 1764 m now that it is divided by the 17 places those
 /// sightings were taken from.
 #[test]
 fn a_drive_that_does_not_fit_says_so_in_its_radius() {
@@ -132,7 +132,7 @@ fn a_drive_that_does_not_fit_says_so_in_its_radius() {
         // the fitter sit under 4 dB.
         assert!((9.0..12.5).contains(&est.residual_db), "{est:?}");
     }
-    assert_eq!(told, vec![(70, 934, 5959), (110, 1041, 1750)]);
+    assert_eq!(told, vec![(70, 934, 7773), (110, 1041, 1764)]);
     for (n, err, radius) in told {
         assert!(err < radius, "{n} sightings: {radius} m radius misses a {err} m error");
     }
@@ -163,8 +163,8 @@ fn a_transmitter_never_approached_is_kilometres_out() {
 }
 
 /// Four sightings fit anything. Device 6 transmitted nine times, gateway 1
-/// heard five and the thinning leaves four, which fall in three cells of the
-/// decorrelation distance: three places against the three parameters the fit
+/// heard five and the thinning leaves four, from two places the
+/// decorrelation distance apart: two places against the three parameters the fit
 /// solves, nothing left over to measure the noise with, and a 911 m error
 /// once reported with a 363 m radius and a residual of a fifth of a decibel.
 /// Nothing is said now. Device 7 transmitted twice from one place and is
@@ -181,21 +181,11 @@ fn fewer_places_than_the_fit_has_parameters_say_nothing() {
     assert!(locate(&few).is_none());
 }
 
-/// One place more than the fit has parameters is the least that is reported
-/// at all, and it is still wrong: device 6 on gateway 2 is eight sightings
-/// from four places, 3803 m from the gateway with a 3132 m radius. A fit
-/// with one degree of freedom cannot measure the noise it was fitted
-/// through, so the region comes from `NOISE_FLOOR_DB2` and is a lower bound
-/// on what the drive could not see.
 #[test]
-fn the_fewest_places_reported_are_still_short_of_the_error() {
+fn eight_sightings_from_three_places_say_nothing_where_grid_cells_counted_four_and_missed_by_3803_m()
+ {
     let Some(csv) = read() else { return };
-    let (glat, glon, _) = GATEWAYS[1];
     let s = sightings(&csv, "6", 1);
     assert_eq!(s.len(), 8);
-    let est = locate(&s).expect("an estimate");
-    let err = metres(est.lat, est.lon, glat, glon);
-    assert!((3750.0..3850.0).contains(&err), "{err} m off: {est:?}");
-    assert!((3050.0..3200.0).contains(&est.radius_m), "{est:?}");
-    assert!(est.residual_db < 1.5, "{est:?}");
+    assert!(locate(&s).is_none(), "{:?}", locate(&s));
 }

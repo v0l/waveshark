@@ -29,11 +29,11 @@
 //!
 //! Sightings are thinned rather than kept in full. A beacon advertising ten
 //! times a second for an hour is thirty-six thousand rows that all say the
-//! same thing, so a new row is written when the receiver has moved, when the
-//! level has changed enough to be worth having, or when enough time has
-//! passed; otherwise the existing row's time and level are updated. What is
-//! never thinned away is the first and last time a device was heard, because
-//! those are on the device row.
+//! same thing, so a new row is written only from a place the device has not
+//! been heard from before, `MOVED_M` from every row it already has. A
+//! receiver that is not moving writes nothing new. What is never thinned
+//! away is the first and last time a device was heard, because those are on
+//! the device row.
 //!
 //! # SQLite, and why a file rather than a format
 //!
@@ -50,8 +50,12 @@ use std::path::{Path, PathBuf};
 
 pub mod beacondb;
 mod locate;
+mod located;
+mod places;
 pub mod wigle;
 pub use locate::{Estimate, locate};
+pub use located::{Located, Locator};
+pub use places::{Places, distinct};
 pub use wigle::{Account, Receipt, write_wigle};
 
 /// Schema version, written into the file. A file from a newer version is
@@ -62,15 +66,6 @@ const VERSION: i64 = 1;
 /// the last one, in metres. Below it the two sightings say the same thing
 /// about the same place.
 pub const MOVED_M: f64 = 25.0;
-
-/// Or once the level has changed by this much, which is what says the
-/// distance changed even when the position did not: a device driving past a
-/// parked receiver.
-pub const LEVEL_DB: f32 = 6.0;
-
-/// Or once this many seconds have passed, so a long stationary survey still
-/// records that something kept transmitting.
-pub const INTERVAL_S: u64 = 60;
 
 /// One thing that transmits.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,7 +145,7 @@ pub struct Db {
     /// The last sighting written per device, for the thinning decision. Held
     /// here rather than read back per packet: a busy band is thousands of
     /// packets a second and each would otherwise be a query.
-    last: std::collections::HashMap<i64, Sighting>,
+    kept: std::collections::HashMap<i64, Kept>,
     devices: std::collections::HashMap<(String, String), i64>,
     written: u64,
 }
@@ -181,7 +176,7 @@ impl Db {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(sql)?;
-        Ok(Self { conn, path, last: Default::default(), devices: Default::default(), written: 0 })
+        Ok(Self { conn, path, kept: Default::default(), devices: Default::default(), written: 0 })
     }
 
     /// A survey held in memory, for a test or a replay whose result nobody
@@ -244,7 +239,7 @@ impl Db {
                 .map_err(sql)?;
             }
         }
-        Ok(Self { conn, path, last: Default::default(), devices: Default::default(), written: 0 })
+        Ok(Self { conn, path, kept: Default::default(), devices: Default::default(), written: 0 })
     }
 
     pub fn path(&self) -> &Path {
@@ -261,10 +256,22 @@ impl Db {
     pub fn record(&mut self, r: &Report) -> Result<bool> {
         let id = self.device_id(r)?;
         let s = r.sighting;
-        let fresh = match self.last.get(&id) {
-            None => true,
-            Some(prev) => worth_keeping(prev, &s),
+        if !self.kept.contains_key(&id) {
+            let had = self.sightings(id)?;
+            let mut places = Places::default();
+            for h in &had {
+                if let (Some(lat), Some(lon)) = (h.lat, h.lon) {
+                    places.add(lat, lon);
+                }
+            }
+            self.kept.insert(id, Kept { places, any: !had.is_empty() });
+        }
+        let kept = self.kept.get_mut(&id).expect("just inserted");
+        let fresh = match (s.lat, s.lon) {
+            (Some(lat), Some(lon)) => kept.places.add(lat, lon),
+            _ => !kept.any,
         };
+        kept.any |= fresh;
         self.conn
             .execute(
                 "UPDATE devices SET last_us = MAX(last_us, ?2), packets = packets + 1,
@@ -319,7 +326,6 @@ impl Db {
                 ],
             )
             .map_err(sql)?;
-        self.last.insert(id, s);
         self.written += 1;
         Ok(true)
     }
@@ -414,6 +420,17 @@ impl Db {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql)
     }
 
+    pub fn sighting_counts(&self) -> Result<std::collections::HashMap<i64, u64>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT device, COUNT(*) FROM sightings GROUP BY device")
+            .map_err(sql)?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)))
+            .map_err(sql)?;
+        rows.collect::<std::result::Result<_, _>>().map_err(sql)
+    }
+
     /// How many devices and sightings the survey holds.
     pub fn counts(&self) -> Result<(u64, u64)> {
         let d: i64 =
@@ -424,22 +441,19 @@ impl Db {
     }
 }
 
+struct Kept {
+    places: Places,
+    any: bool,
+}
+
 /// Whether a reception says something the last one did not.
 pub fn worth_keeping(prev: &Sighting, now: &Sighting) -> bool {
-    if now.at_us.saturating_sub(prev.at_us) >= INTERVAL_S * 1_000_000 {
-        return true;
-    }
-    if let (Some(a), Some(b)) = (prev.rssi_dbfs, now.rssi_dbfs) {
-        if (a - b).abs() >= LEVEL_DB {
-            return true;
-        }
-    }
     match ((prev.lat, prev.lon), (now.lat, now.lon)) {
         ((Some(alat), Some(alon)), (Some(blat), Some(blon))) => {
             metres(alat, alon, blat, blon) >= MOVED_M
         }
         // A position appearing where there was none is new information; both
-        // missing is the stationary case the interval covers.
+        // missing says nothing new.
         ((None, _) | (_, None), (Some(_), Some(_))) => true,
         _ => false,
     }
@@ -520,14 +534,50 @@ mod tests {
         assert_eq!(db.counts().unwrap().1, 2);
     }
 
-    /// A device driving past a parked receiver never moves the receiver, and
-    /// the level is the only thing that says it happened.
     #[test]
-    fn a_level_change_writes_even_without_movement() {
+    fn a_parked_receiver_writes_nothing_however_the_level_or_the_hour_changes() {
         let mut db = Db::in_memory().unwrap();
-        db.record(&report("AA:BB", 0, 53.0, -6.0, -70.0)).unwrap();
-        assert!(!db.record(&report("AA:BB", 1, 53.0, -6.0, -68.0)).unwrap(), "2 dB is noise");
-        assert!(db.record(&report("AA:BB", 2, 53.0, -6.0, -55.0)).unwrap(), "15 dB is an approach");
+        assert!(db.record(&report("AA:BB", 0, 53.0, -6.0, -70.0)).unwrap());
+        assert!(!db.record(&report("AA:BB", 1, 53.0, -6.0, -40.0)).unwrap(), "30 dB louder");
+        assert!(!db.record(&report("AA:BB", 7_200, 53.0001, -6.0, -70.0)).unwrap(), "2 h, 11 m");
+        assert_eq!(db.counts().unwrap(), (1, 1));
+        let d = &db.devices(Query::default()).unwrap()[0];
+        assert_eq!(d.last_us, 7_200_000_000, "the device row still says when it was last heard");
+        assert_eq!(d.packets, 3);
+    }
+
+    #[test]
+    fn coming_back_to_a_place_already_kept_writes_nothing_even_after_a_restart() {
+        let dir = std::env::temp_dir().join(format!("survey-places-{}", std::process::id()));
+        let path = dir.join("survey.sqlite");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut db = Db::open(&path).unwrap();
+            assert!(db.record(&report("AA:BB", 0, 53.0, -6.0, -50.0)).unwrap());
+            assert!(db.record(&report("AA:BB", 10, 53.001, -6.0, -50.0)).unwrap());
+            assert!(
+                !db.record(&report("AA:BB", 20, 53.0, -6.0, -50.0)).unwrap(),
+                "back at the first"
+            );
+        }
+        let mut db = Db::open(&path).unwrap();
+        assert!(!db.record(&report("AA:BB", 30, 53.00005, -6.0, -50.0)).unwrap(), "6 m from it");
+        assert!(!db.record(&report("AA:BB", 40, 53.001, -6.0, -50.0)).unwrap(), "at the second");
+        assert!(db.record(&report("AA:BB", 50, 53.002, -6.0, -50.0)).unwrap(), "a third place");
+        assert_eq!(db.counts().unwrap(), (1, 3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_device_never_given_a_position_keeps_one_sighting_until_it_has_one() {
+        let mut db = Db::in_memory().unwrap();
+        let mut r = report("AA:BB", 0, 0.0, 0.0, -50.0);
+        r.sighting.lat = None;
+        r.sighting.lon = None;
+        assert!(db.record(&r).unwrap());
+        r.sighting.at_us = 600_000_000;
+        assert!(!db.record(&r).unwrap(), "a second sighting from nowhere says nothing");
+        assert!(db.record(&report("AA:BB", 700, 53.0, -6.0, -50.0)).unwrap(), "a fix is a place");
     }
 
     /// The closest approach is where a device is worth drawing, so the

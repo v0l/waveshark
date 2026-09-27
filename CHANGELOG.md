@@ -37,9 +37,11 @@ the code is in the commit log.
 - Spectrum at half the processor time on a wide span.
 - GSM downlinks read in real time at 20 MS/s, with no burst classifier on cellular allocations.
 - SSB channel width as the sideband filter's, 2.4 kHz by default rather than 6, in memories too.
+- Survey sightings written only from places not yet heard from, none while parked.
 
 ### Fixed
 
+- Survey device locations landing on the receiver from GPS wander while parked.
 - Video pane best picture flickering between two channels received at once.
 - Sound lost for good after a patch edit the graph refused.
 - Chain view timings frozen while the spectrum is switched off.

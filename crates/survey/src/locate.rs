@@ -138,17 +138,18 @@ fn cost(points: &[Point], e: f64, n: f64) -> f64 {
     sum_sq / points.len() as f64
 }
 
-/// How many independent places the receiver stood: the number of cells of
-/// `DECORRELATION_M` the sightings fall in, never more than the sightings
-/// themselves and never fewer than one.
+/// How many independent places the receiver stood: sightings at least
+/// `DECORRELATION_M` from every place already counted, never more than the
+/// sightings themselves and never fewer than one.
 fn independent(points: &[Point]) -> usize {
-    let mut cells: Vec<(i64, i64)> = points
-        .iter()
-        .map(|p| ((p.e / DECORRELATION_M).floor() as i64, (p.n / DECORRELATION_M).floor() as i64))
-        .collect();
-    cells.sort_unstable();
-    cells.dedup();
-    cells.len().max(1)
+    let mut kept: Vec<&Point> = Vec::new();
+    for p in points {
+        let far = |k: &&Point| (k.e - p.e).powi(2) + (k.n - p.n).powi(2) >= DECORRELATION_M.powi(2);
+        if kept.iter().all(far) {
+            kept.push(p);
+        }
+    }
+    kept.len().max(1)
 }
 
 /// The least a level of this much scatter can pin a position to. A residual
@@ -327,6 +328,13 @@ mod tests {
         assert_eq!(independent(&road), 5);
         let parked: Vec<Point> = (0..50).map(|_| Point { e: 10.0, n: -10.0, db: -40.0 }).collect();
         assert_eq!(independent(&parked), 1);
+        let wander: Vec<Point> = (0..60)
+            .map(|k| {
+                let a = f64::from(k) * 0.7;
+                Point { e: 35.0 * a.cos(), n: 30.0 * a.sin(), db: -40.0 }
+            })
+            .collect();
+        assert_eq!(independent(&wander), 1, "GPS wander across a cell corner is one place");
         let around: Vec<Point> = [(0.0, 0.0), (250.0, 0.0), (0.0, 250.0), (250.0, 250.0)]
             .into_iter()
             .map(|(e, n)| Point { e, n, db: -40.0 })

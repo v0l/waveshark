@@ -91,9 +91,12 @@ pub struct SurveyNode {
     /// with no position rather than no sighting: what was heard is still
     /// evidence.
     station: Option<gps::Fix>,
+    parked: Option<(f64, f64)>,
     heard: u64,
     failures: u64,
 }
+
+const STOPPED_MS: f64 = 1.0;
 
 impl Default for SurveyNode {
     fn default() -> Self {
@@ -106,7 +109,7 @@ impl SurveyNode {
     /// none. A node with no database still sits in the graph: turning the
     /// survey on is opening a file, not rebuilding the receiver.
     pub fn new(db: Option<Db>) -> Self {
-        Self { db, station: None, heard: 0, failures: 0 }
+        Self { db, station: None, parked: None, heard: 0, failures: 0 }
     }
 
     pub fn set_db(&mut self, db: Option<Db>) {
@@ -124,7 +127,16 @@ impl SurveyNode {
     /// Where the receiver is now, as the station position, carrying the
     /// quality fields when a fix supplied it.
     pub fn set_station(&mut self, at: Option<gps::Fix>) {
-        self.station = at;
+        self.station = at.map(|f| match f.speed_ms {
+            Some(v) if v < STOPPED_MS => {
+                let (lat, lon) = *self.parked.get_or_insert((f.lat, f.lon));
+                gps::Fix { lat, lon, ..f }
+            }
+            _ => {
+                self.parked = None;
+                f
+            }
+        });
     }
 
     pub fn station(&self) -> Option<gps::Fix> {
@@ -302,6 +314,27 @@ mod tests {
         let mut out = Payload::Packets(Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
         node.process(&Payload::Packets(packets), &mut out, &mut ctx).unwrap();
+    }
+
+    #[test]
+    fn a_parked_receiver_stays_where_it_stopped_however_its_fix_wanders() {
+        let mut node = SurveyNode::default();
+        let fix = |lat: f64, speed: Option<f64>| gps::Fix {
+            lat,
+            lon: -6.65,
+            speed_ms: speed,
+            ..Default::default()
+        };
+        node.set_station(Some(fix(53.6370, Some(0.3))));
+        node.set_station(Some(fix(53.6375, Some(0.4))));
+        assert_eq!(node.station().map(|f| f.lat), Some(53.6370), "56 m of wander at 0.4 m/s");
+        node.set_station(Some(fix(53.6380, Some(8.0))));
+        assert_eq!(node.station().map(|f| f.lat), Some(53.6380), "driving is where the fix says");
+        node.set_station(Some(fix(53.6390, Some(0.1))));
+        node.set_station(Some(fix(53.6391, Some(0.2))));
+        assert_eq!(node.station().map(|f| f.lat), Some(53.6390), "parked again, somewhere new");
+        node.set_station(Some(fix(53.6395, None)));
+        assert_eq!(node.station().map(|f| f.lat), Some(53.6395), "no speed, no guess");
     }
 
     /// A real advertising PDU off the bus becomes a device with the position
