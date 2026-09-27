@@ -375,22 +375,19 @@ fn receiver_card(
                 said.push("nothing measured yet".into());
             }
             let who = format!("{} {:.3}", h.label, h.hz / 1e6);
-            Line::new()
-                .legend(&who)
-                .column(ui, egui_bench::readout::LABEL_W + 8.0)
-                .value(said.join(", "))
-                .tint(if h.following { theme::TRACE } else { theme::VALUE })
-                .size(11.0)
-                .show(ui);
+            let tint = if h.following { theme::TRACE } else { theme::VALUE };
+            Line::new().legend(&who).hanging(
+                ui,
+                egui_bench::readout::LABEL_W + 8.0,
+                Line::new().value(said.join(", ")).tint(tint).size(11.0),
+            );
         }
         if let Some((v, kind)) = best {
-            Line::new()
-                .legend("best")
-                .column(ui, egui_bench::readout::LABEL_W + 8.0)
-                .value(format!("{v:.1} dB {kind}"))
-                .tint(theme::READOUT)
-                .size(11.0)
-                .show(ui);
+            Line::new().legend("best").hanging(
+                ui,
+                egui_bench::readout::LABEL_W + 8.0,
+                Line::new().value(format!("{v:.1} dB {kind}")).tint(theme::READOUT).size(11.0),
+            );
         }
         let mer = heard.iter().filter(|h| h.mer_db.is_some()).count();
         let (ok, said) = match (told.following, told.listenable, mer) {

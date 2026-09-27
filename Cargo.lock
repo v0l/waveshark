@@ -1791,7 +1791,7 @@ dependencies = [
 [[package]]
 name = "egui_bench"
 version = "0.1.0"
-source = "git+https://github.com/v0l/egui_bench?rev=636c2d64723b69490882c3159716025a4848eae7#636c2d64723b69490882c3159716025a4848eae7"
+source = "git+https://github.com/v0l/egui_bench?rev=be81079c15cd3b8dda1abcdf8ff9e2c958fa364e#be81079c15cd3b8dda1abcdf8ff9e2c958fa364e"
 dependencies = [
  "egui",
 ]
