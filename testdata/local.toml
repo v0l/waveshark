@@ -1,0 +1,79 @@
+# Captures kept on this machine only, never uploaded: they carry identities
+# or are somebody else's. A test using one skips when it is absent. The hash
+# and size are of the file itself, so ./testdata/fetch.sh can say whether the
+# copy here is the one the tests were written against.
+
+[[capture]]
+name = "offair/meshcore_advert_868.9M_2048k.cu8"
+sha256 = "f6b52fe07c29355d3202eb1e84f2ea7758bf9532b98e827defe2b13babb6ff9b"
+size = 18_432_000
+
+[[capture]]
+name = "offair/gfsk_ble_2426M_20000k.cs8"
+sha256 = "dff77e89f26693574e72da1364777fae15f2fe3fbc88d036362a91a3c83f2f7a"
+size = 4_620_800
+
+[[capture]]
+name = "offair/flipper_ansonic_433.355M_2000k.cs8"
+sha256 = "4afd1e07e1d594889f5b01517d880c56982b65d9488c9c940e1b606a2dff4aa7"
+size = 3_919_600
+
+[[capture]]
+name = "offair/flipper_bett_434.2M_2000k.cs8"
+sha256 = "c99584b467330eedac9325487669776ecc6eb4e74dd461fbcbef7df460a486a8"
+size = 4_000_000
+
+[[capture]]
+name = "offair/flipper_came_434.2M_2000k.cs8"
+sha256 = "f9df9b96ae243234ae69f424c9fb3d656f9b0d2665739036e86d6eaa230082cf"
+size = 2_890_400
+
+[[capture]]
+name = "offair/flipper_holtek_434.2M_2000k.cs8"
+sha256 = "1ae2b035bb264f23bcba4704825ecdbbb8ed95ff6bb0666e3351fa3c7c1cbf66"
+size = 4_000_000
+
+[[capture]]
+name = "offair/flipper_holtek_ht12x_434.2M_2000k.cs8"
+sha256 = "a303a7822aff8f9cd8684a553dfa5a4ffd97c499f2a3cbe2ce1394acf3e7b2a1"
+size = 2_622_800
+
+[[capture]]
+name = "offair/flipper_keeloq_434.2M_2000k.cs8"
+sha256 = "3ec20ff712c9b46b7cf8797cdc48641228f121121b181a1f3e994cfa79a22dd8"
+size = 4_000_000
+
+[[capture]]
+name = "offair/flipper_linear_434.2M_2000k.cs8"
+sha256 = "bb3b15c65c50110d05dbdcb1431ee6daba225818897c977775a935b58476f83d"
+size = 3_955_600
+
+[[capture]]
+name = "offair/flipper_nice_flo_434.2M_2000k.cs8"
+sha256 = "45d4b10ee58a0c70d067e507d73abb79a5e36712c7566ac70da280f59a8d8fb2"
+size = 4_000_000
+
+[[capture]]
+name = "offair/flipper_pocsag_434.2M_2000k.cf32"
+sha256 = "e1a9814eae74d2d19eefa78a248a6506d3366ea76dd8563c4df4953fa1cf85b1"
+size = 93_323_264
+
+[[capture]]
+name = "offair/flipper_princeton_434.2M_2000k.cs8"
+sha256 = "0642ce4b3a9ab7fc6d9396194da587ac8d2efd496eb354923ca9bae45303a443"
+size = 2_783_600
+
+[[capture]]
+name = "offair/flipper_somfy_433.7M_2000k.cs8"
+sha256 = "3fc8af31320aa486ed642b080f000b72318abbd019c5866fcd1522c90f9548ee"
+size = 4_000_000
+
+[[capture]]
+name = "offair/tetra_band_392.8013M_6000k.cu8"
+sha256 = "4aa9f27fe9f01024947cfda29af42d6880cc01725d99cea46ae5ccfd09aa6b1a"
+size = 114_556_928
+
+[[capture]]
+name = "offair/tetra_voice_390.9M_250k.cu8"
+sha256 = "9598fa87143750d732b9f614863a7dc78397d4de16ef14f91bbfd4c35de8eaa8"
+size = 4_773_204

@@ -17,7 +17,7 @@ testdata/rtl433/
 testdata/protocols/
 
 # Off-air captures and generated datasets: fetched or regenerated, never
-# committed. See testdata/offair.toml and crates/amc-data.
+# committed. See testdata/fixture.toml, testdata/local.toml and crates/amc-data.
 testdata/offair/
 out/
 
@@ -40,7 +40,7 @@ crates/app/whisper-base.en/tokenizer.json
 # The same model fetched from the workspace root, where a test run leaves it.
 whisper-base.en/
 
-# Published survey measurements: fetched, never committed. See testdata/survey.toml.
+# Published survey measurements: fetched, never committed. See testdata/fixture.toml.
 testdata/survey/
 
 # Editor state, one per machine.

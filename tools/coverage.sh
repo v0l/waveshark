@@ -32,7 +32,7 @@ fixture_notice() {
     while read -r name; do
         total=$((total + 1))
         [[ -f "testdata/$name" ]] || missing=$((missing + 1))
-    done < <(sed -n 's/^name = "\(.*\)"$/\1/p' testdata/fixtures.toml testdata/offair.toml)
+    done < <(sed -n 's/^name = "\(.*\)"$/\1/p' testdata/decode.toml testdata/fixture.toml)
 
     if ((missing > 0)); then
         echo

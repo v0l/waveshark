@@ -418,19 +418,26 @@ synthesised signals do not.
    The response carries the sha256; the URL is that hash with the compression
    suffix, and the manifest hash is of the compressed upload.
 
-4. **Add the manifest entry** to `testdata/fixtures.toml`, or
-   `testdata/offair.toml` for a capture labelled by what it demonstrates rather
-   than by an independent decode. Both take `name`, `sha256`, `url`,
-   `compression`, `center_hz`, `rate_sps`, `format` and a description of what
-   the capture is evidence of and how that was established. A `fixtures.toml`
-   entry adds a `[capture.expect]` block of asserted values; an `offair.toml`
-   entry adds `family` and `receiver` and asserts nothing beyond the
-   classifier's verdict.
+4. **Add the manifest entry.** `name` is the path under `testdata/`, and the
+   entry takes `sha256`, `url`, `compression`, `license` and a description
+   of what the capture is evidence of and how that was established. It goes
+   in one of three files:
+
+   - `testdata/decode.toml` when what the receiver reads off it can be said
+     as rows: which protocol, how many, from whom, where, with what check.
+     Each `[[capture.read]]` is checked by `crates/app/src/corpus.rs`, which
+     replays the capture through the whole receiver, and no test repeats it.
+   - `testdata/fixture.toml` when a test says what it expects in its own
+     code: a picture, a track, a timing, a decoder called directly.
+   - `testdata/local.toml` when it must not be published, because it
+     carries somebody's identity or is somebody else's. Only `name`,
+     `sha256` and `size`: nothing is uploaded, and a test using it skips
+     elsewhere and says the capture is local only.
 
 5. **Verify the round trip.** Delete the local file, run `./testdata/fetch.sh`,
    and check the hash of what comes back.
 
 6. **Write the test against the receiver** where the capture is evidence about
-   the receiver: `crates/app/src/radio.rs` has `replay_receiver` and
-   `replay_blocks`, which run the live radio's path including the scanner
-   table. Skip cleanly when the fixture is absent.
+   the receiver and `decode.toml` cannot say it: `crates/app/src/radio.rs` has
+   `replay_receiver` and `replay_blocks`, which run the live radio's path
+   including the scanner table. Skip cleanly when the fixture is absent.

@@ -11,7 +11,7 @@
 //! it sends a location message every second whose position is the
 //! specification's "unset", and a decoder that turns those zeros into a
 //! position off the coast of Africa has invented evidence. See
-//! `testdata/fixtures.toml` for what else this capture is and is not.
+//! `testdata/fixture.toml` for what else this capture is and is not.
 
 use common::C32;
 use decode::odid::{self, IdType, Message};

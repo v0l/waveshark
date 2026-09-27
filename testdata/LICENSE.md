@@ -14,15 +14,16 @@ you make, as long as you credit where they came from:
 
 > IQ recording by the WaveShark project, https://github.com/v0l/waveshark, CC BY 4.0
 
-Every entry in [`fixtures.toml`](fixtures.toml) and
-[`offair.toml`](offair.toml) carries a `license` field, and `CC-BY-4.0` there
-means this: recorded, or generated, for this project by its authors.
+Every entry in [`decode.toml`](decode.toml) and
+[`fixture.toml`](fixture.toml) carries a `license` field, and `CC-BY-4.0` there
+with no `license_source` means this: recorded, or generated, for this project
+by its authors. The captures in [`local.toml`](local.toml) are not published
+and carry no licence.
 
 Two things these recordings contain that the licence does not change. They are
 recordings of real bands at real places and times, so identities are in them:
-aircraft registrations, a Meshtastic node named "Kieran" and its position, the
-hardware addresses of whatever was advertising in the room, the serial of a
-radiosonde over Sussex. Each manifest entry says which, because that is what
+aircraft registrations, a Meshtastic node's address, the hardware addresses
+of the Wi-Fi devices in the room, the serial of a radiosonde over Sussex. Each manifest entry says which, because that is what
 makes the capture evidence. Nothing about the licence makes the law of the
 place you are in stop applying to what is in the recording, and nothing in it
 is a permission from the people or the transmitters heard.
@@ -56,7 +57,8 @@ first. Ask the publisher rather than this project if you need terms for the
 nine `unstated` files.
 
 Neither the rtl_433 corpus ([`rtl433.toml`](rtl433.toml)) nor the LoRa survey
-dataset ([`survey.toml`](survey.toml)) is redistributed here at all: both are
+dataset (`survey/lora_salvora.csv` in [`fixture.toml`](fixture.toml)) is
+redistributed here at all: both are
 fetched from their publisher. The rtl_433 corpus is contributed recordings
 under no stated licence; the survey dataset is CC BY 4.0 from the Universidade
 de Vigo, doi 10.5281/zenodo.13835721.

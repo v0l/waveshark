@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fetch recorded IQ fixtures listed in fixtures.toml, and the rtl_433 corpus
-# samples listed in rtl433.toml.
+# Fetch the captures listed in decode.toml and fixture.toml and the rtl_433
+# corpus samples listed in rtl433.toml, and check the local.toml captures
+# already here.
 #
 # Every file is verified against the SHA-256 in the manifest. A capture that
 # silently changed would invalidate every expected decode that references it,
@@ -33,6 +34,7 @@ fetch() {
     fi
 
     echo "fetch   $name"
+    mkdir -p "$(dirname "$name")"
     local tmp="${name}.${comp}"
     curl -fsSL -o "$tmp" "$url"
 
@@ -85,23 +87,29 @@ fetch_capture() {
 
 # Minimal manifest reader: enough for this flat structure, and avoids making
 # a shell script depend on a TOML parser.
-name=""; sha=""; url=""; comp=""; rname=""; rsha=""; rurl=""
-while IFS= read -r line; do
-    case "$line" in
-        '[[capture]]')
-            [[ -n "$name" ]] && fetch_capture
-            name=""; sha=""; url=""; comp="none"; rname=""; rsha=""; rurl=""
-            ;;
-        reference_name*=*)   rname=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        reference_sha256*=*) rsha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        reference_url*=*)    rurl=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-    esac
-done < fixtures.toml
-[[ -n "$name" ]] && fetch_capture
+read_captures() {
+    name=""; sha=""; url=""; comp=""; rname=""; rsha=""; rurl=""
+    while IFS= read -r line; do
+        case "$line" in
+            '[[capture]]')
+                [[ -n "$name" ]] && fetch_capture
+                name=""; sha=""; url=""; comp="none"; rname=""; rsha=""; rurl=""
+                ;;
+            'reference_name = '*)   rname=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+            'reference_sha256 = '*) rsha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+            'reference_url = '*)    rurl=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+            'name = '*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+            'sha256 = '*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+            'url = '*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+            'compression = '*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        esac
+    done < "$1"
+    [[ -n "$name" ]] && fetch_capture
+    return 0
+}
+
+read_captures decode.toml
+read_captures fixture.toml
 
 # The rtl_433 corpus: an uncompressed capture and the reference decode beside
 # it, into their own directory so a capture that came from somewhere else is
@@ -132,45 +140,37 @@ while IFS= read -r line; do
 done < rtl433.toml
 [[ -n "$name" ]] && fetch_pair "$name" "$sha" "$url" "$rsha" "$rurl"
 
-# Off-air captures for the signal identification model, into their own
-# directory: these are labelled by what the capture demonstrates rather than by
-# an independent decode, so they must never be mistaken for corpus material
-# that has one.
-mkdir -p offair
+# Captures that are never uploaded: nothing to fetch, only a check that the
+# copy here is the one the tests were written against.
+check_local() {
+    wanted "$name" || return 0
+    if [[ ! -f "$name" ]]; then
+        echo "absent  $name (local only)"
+        return 0
+    fi
+    local have_size have_sha
+    have_size=$(stat -c %s "$name")
+    have_sha=$(sha256sum "$name" | cut -d' ' -f1)
+    if [[ "$have_size" != "$size" || "$have_sha" != "$sha" ]]; then
+        echo "DIFFERS $name: $have_size bytes, sha256 $have_sha" >&2
+        return 0
+    fi
+    echo "ok      $name (local)"
+}
 
-name=""; sha=""; url=""; comp=""
+name=""; sha=""; size=""
 while IFS= read -r line; do
     case "$line" in
         '[[capture]]')
-            [[ -n "$name" ]] && wanted "offair/$name" && fetch "offair/$name" "$sha" "$url" "$comp"
-            name=""; sha=""; url=""; comp="none"
+            [[ -n "$name" ]] && check_local
+            name=""; sha=""; size=""
             ;;
-        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        'name = '*)   name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        'sha256 = '*) sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
+        'size = '*)   size=$(sed 's/.*= *\([0-9_]*\).*/\1/; s/_//g' <<<"$line") ;;
     esac
-done < offair.toml
-[[ -n "$name" ]] && wanted "offair/$name" && fetch "offair/$name" "$sha" "$url" "$comp"
-
-# Published survey measurements, into their own directory: these are levels and
-# positions somebody else recorded and surveyed, not recordings made here.
-mkdir -p survey
-
-name=""; sha=""; url=""; comp=""
-while IFS= read -r line; do
-    case "$line" in
-        '[[dataset]]')
-            [[ -n "$name" ]] && wanted "survey/$name" && fetch "survey/$name" "$sha" "$url" "$comp"
-            name=""; sha=""; url=""; comp="none"
-            ;;
-        name*=*)        name=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        sha256*=*)      sha=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        url*=*)         url=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-        compression*=*) comp=$(sed 's/.*= *"\(.*\)".*/\1/' <<<"$line") ;;
-    esac
-done < survey.toml
-[[ -n "$name" ]] && wanted "survey/$name" && fetch "survey/$name" "$sha" "$url" "$comp"
+done < local.toml
+[[ -n "$name" ]] && check_local
 
 if (( ${#only[@]} > 0 )); then
     echo "done"

@@ -546,7 +546,7 @@ mod tests {
 
     /// The corpus capture against what the transmission says about itself:
     /// one over, talkgroup 9, radio 1234567, three and a half seconds of it.
-    /// `testdata/fixtures.toml` says what the capture is evidence of and how
+    /// `testdata/fixture.toml` says what the capture is evidence of and how
     /// those values were established. Skips cleanly without the file.
     #[test]
     fn reads_one_over_and_its_link_control_off_air() {

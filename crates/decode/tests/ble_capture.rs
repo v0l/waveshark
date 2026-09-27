@@ -20,7 +20,7 @@ const CENTER: f64 = 2.426e9;
 fn read() -> Option<Vec<BleFrame>> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     if !p.exists() {
-        eprintln!("skipping: {FIXTURE} absent, run testdata/fetch.sh to enable");
+        eprintln!("skipping: {FIXTURE} is local only");
         return None;
     }
     let bytes = std::fs::read(&p).ok()?;

@@ -295,6 +295,7 @@ dependencies = [
  "stt",
  "survey",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "tts",

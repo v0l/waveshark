@@ -10,7 +10,7 @@
 //! The aircraft was indoors with no fix, which is the more interesting half:
 //! it broadcasts its serial twice a second with every position field zero,
 //! and a decoder that turns those into a position has invented evidence. See
-//! `testdata/fixtures.toml` for what else this capture is and is not.
+//! `testdata/fixture.toml` for what else this capture is and is not.
 
 use common::{C32, Hz};
 use pipeline::node::{NodeCtx, PortSpec, Simple};

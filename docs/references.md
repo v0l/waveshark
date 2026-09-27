@@ -264,10 +264,12 @@ footprint circle, and free-space loss with one-way delay.
 
 ## Test fixtures
 
-Recorded IQ is not committed. `testdata/fixtures.toml`,
-`testdata/offair.toml` and `testdata/survey.toml` carry the manifest: a name, a sha256 of the compressed
-upload, the URL on nostr.download, the centre and rate, and a description
-saying what the capture is evidence of and how that was established. The
+Recorded IQ is not committed. `testdata/decode.toml` and
+`testdata/fixture.toml` carry the manifest: a name, a sha256 of the compressed
+upload, the URL on nostr.download or upstream, and a description saying what
+the capture is evidence of and how that was established. `decode.toml` also
+says what the receiver reads off each one. `testdata/local.toml` lists the
+captures that are never published, by name, hash and size. The
 procedure for adding one, including why a capture earns its place only by
 failing something, is in `AGENTS.md`.
 
@@ -294,6 +296,7 @@ somewhere else.
 | `aero_oqpsk_1546M_48k.cs16` | Signal Identification Wiki | no terms stated, converted here and re-hosted |
 
 The rtl_433 corpus (`testdata/rtl433.toml`) is contributed recordings under no
-stated licence and the LoRa survey table (`testdata/survey.toml`) is CC BY 4.0
+stated licence and the LoRa survey table (`survey/lora_salvora.csv` in
+`testdata/fixture.toml`) is CC BY 4.0
 from the Universidade de Vigo; both are fetched from their publisher and
 neither is re-hosted.

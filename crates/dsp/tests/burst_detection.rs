@@ -69,7 +69,7 @@ fn opened(cfg: SourceConfig, samples: &[C32], rate: f64) -> Vec<f64> {
 #[test]
 fn an_advertisement_opens_a_source_too_narrow_to_be_read_as_one() {
     let Some(buf) = capture() else {
-        eprintln!("skipping: {FIXTURE} absent, run testdata/fetch.sh");
+        eprintln!("skipping: {FIXTURE} is local only");
         return;
     };
     let rate = buf.rate.as_f64();

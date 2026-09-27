@@ -1,55 +1,19 @@
-# Recorded IQ captures used by tests.
+# Captures read by tests that say what they expect in their own code.
 #
-# These live on nostr.download rather than in git: IQ is close to incompressible
-# (this one only shrinks 20% under xz -9) and committing captures would bloat
-# history permanently for data that never changes.
+# IQ lives on nostr.download or upstream rather than in git, and
+# ./testdata/fetch.sh fetches it and checks each hash. `name` is the path under
+# testdata/, and the hash is of what `url` serves. A test skips when its file
+# is absent, so a fresh clone builds and passes without the network.
 #
-# Fetch them with:  ./testdata/fetch.sh
-# Tests that need a fixture skip cleanly when it is absent, so a fresh clone
-# still builds and passes without network access.
-#
-# Every entry carries a `license`. CC-BY-4.0 is a recording made for this
-# project; anything else came from somewhere else and names it in
-# `license_source`. Terms and the attribution line are in testdata/LICENSE.md.
-
-[[capture]]
-name = "fineoffset_wh1080_433.92M_250k.cu8"
-sha256 = "5d54aea229037bafe7f8aa1bffeb90fd938632cb5c289f2846b9491cc0ac3f19"
-url = "https://nostr.download/5d54aea229037bafe7f8aa1bffeb90fd938632cb5c289f2846b9491cc0ac3f19.xz"
-compression = "xz"
-center_hz = 433_920_000
-rate_sps = 250_000
-format = "cu8"
-license = "CC-BY-4.0"
-description = """
-Fine Offset WH1080 weather station, OOK PWM at 433.92 MHz. Captured on an
-RTL-SDR with an R820T tuner at 49.6 dB gain. Contains one complete
-transmission. Independently decoded by rtl_433 25.02, which is what makes it
-useful: the expected values below come from a different implementation, so a
-decoder agreeing with them is real evidence rather than a restatement of our
-own assumptions.
-"""
-
-[capture.expect]
-model = "Fineoffset-WHx080"
-station_id = 196
-temperature_c = 16.2
-humidity_pct = 89
-wind_direction_deg = 180
-wind_avg_ms = 0.0
-wind_gust_ms = 0.0
-rain_total_mm = 84.3
-battery_ok = true
-crc_valid = true
+# `license` is CC-BY-4.0 for a recording made for this project; anything else
+# came from somewhere else and names it in `license_source`. Terms and the
+# attribution line are in testdata/LICENSE.md.
 
 [[capture]]
 name = "wfm_stereo_95.5M_1024k.cu8"
 sha256 = "659e95cd8458fba622e40cb31b118318ce5eac7e7d1ada0e39fcd9c11c46e837"
 url = "https://nostr.download/659e95cd8458fba622e40cb31b118318ce5eac7e7d1ada0e39fcd9c11c46e837.xz"
 compression = "xz"
-center_hz = 95_500_000
-rate_sps = 1_024_000
-format = "cu8"
 license = "CC-BY-4.0"
 description = """
 Broadcast stereo FM at 95.8 MHz, captured with the receiver tuned 300 kHz low
@@ -64,25 +28,17 @@ that merely sounds plausible can still be wrong; one that puts the pilot at
 19000.0 Hz is not.
 """
 
-[capture.expect]
-station_offset_hz = 300_000
-pilot_hz = 19_000
-pilot_snr_db_min = 30.0
-
 [[capture]]
 name = "rds_92.4M_1024k.cu8"
 sha256 = "8ce11d7d31bfa4208de002090f34a1f5a99447744eedfbe1922c8c35ff65a7d3"
 url = "https://nostr.download/8ce11d7d31bfa4208de002090f34a1f5a99447744eedfbe1922c8c35ff65a7d3.xz"
 compression = "xz"
-center_hz = 92_400_000
-rate_sps = 1_024_000
-format = "cu8"
 license = "CC-BY-4.0"
 description = """
 Eighteen seconds of Spirit Radio on 92.4 MHz, carrying RDS. RTL-SDR with an
 R820T tuner at 40.2 dB gain, telescopic antenna. The first eighteen seconds of
 a forty second recording, which is what a radiotext cycle needs: at twelve
-seconds the text has not come round in full and the assertion below fails, so
+seconds the text has not come round in full and the test fails, so
 the length is a measurement and not a preference.
 
 This exists because the earlier FM fixture does not. Development against
@@ -97,24 +53,15 @@ constant for a station, so one that changes between runs is the signature of a
 decoder reading noise through valid-looking syndromes rather than decoding.
 """
 
-[capture.expect]
-pi = 0x2208
-station_name = "SPIRIT"
-radiotext_contains = "Spirit"
-group_yield_min_pct = 60.0
-
 [[capture]]
 name = "adsb_1090M_2400k.cu8"
 sha256 = "fc3821a72532469b2ef001daf324b2492786467a164144f7aa5491e4b65fdb58"
 url = "https://nostr.download/fc3821a72532469b2ef001daf324b2492786467a164144f7aa5491e4b65fdb58.xz"
 compression = "xz"
-center_hz = 1_090_000_000
-rate_sps = 2_400_000
-format = "cu8"
+license = "CC-BY-4.0"
 reference_name = "adsb_1090M_2400k.dump1090.hex"
 reference_sha256 = "828edd77556b0738af2c90ffac0e56e5714154dc88e0426a4f80d6cfa929cdbd"
 reference_url = "https://nostr.download/828edd77556b0738af2c90ffac0e56e5714154dc88e0426a4f80d6cfa929cdbd.txt"
-license = "CC-BY-4.0"
 description = """
 Four seconds of 1090 MHz, RTL-SDR at 49.6 dB gain on a telescopic antenna
 indoors, so the aircraft are the loud ones and the rest of the band is noise.
@@ -135,24 +82,15 @@ distinct frames; the tests require most of those and, more importantly, no
 frame that dump1090 did not also see.
 """
 
-[capture.expect]
-reference_frames = 40
-matched_min = 25
-false_positives = 0
-icao = 0x4b1880
-
 [[capture]]
 name = "adsb_radarpi_1090M_2400k.cu8"
 sha256 = "f4b197f408b1f2173b044f92ac26ccba4c5ee3a73dd092758e097ddcf789feb4"
 url = "https://nostr.download/f4b197f408b1f2173b044f92ac26ccba4c5ee3a73dd092758e097ddcf789feb4.xz"
 compression = "xz"
-center_hz = 1_090_000_000
-rate_sps = 2_400_000
-format = "cu8"
+license = "CC-BY-4.0"
 reference_name = "adsb_radarpi_1090M_2400k.dump1090.ts"
 reference_sha256 = "58d86d96cb01de453c0919c253b1480e3b5730d893621428657d1d4d2324d207"
 reference_url = "https://nostr.download/58d86d96cb01de453c0919c253b1480e3b5730d893621428657d1d4d2324d207.txt"
-license = "CC-BY-4.0"
 description = """
 Ten seconds of 1090 MHz off radarpi, a Nooelec FlyCatcher on an outdoor
 antenna at 49.6 dB, recorded by rtl_sdr straight to file at Dublin approach
@@ -182,62 +120,11 @@ than zero. Reading only the zero ones left this receiver with 411 of them and
 cost it mlat sync on radarpi.
 """
 
-[capture.expect]
-reference_frames = 4091
-# Per downlink format, as dump1090-rb 1.0.15 read them.
-reference_df11 = 1181
-reference_df17 = 1013
-frames_min = 3700
-df11_min = 1100
-df17_min = 1050
-# Ticks RMS against the reference, over frames matched by payload.
-jitter_ticks_max = 1.5
-false_aircraft = 0
-
-[[capture]]
-name = "m17_openrtx_434.02M_2400k.cu8"
-sha256 = "37e304fe3bb526c96c9a6148814c02350d346307d0722b88719701e5639daf6a"
-url = "https://nostr.download/37e304fe3bb526c96c9a6148814c02350d346307d0722b88719701e5639daf6a.xz"
-compression = "xz"
-center_hz = 434_020_000
-rate_sps = 2_400_000
-format = "cu8"
-license = "CC-BY-4.0"
-description = """
-Three seconds of 433 MHz ISM with one M17 transmission in it, from an OpenRTX
-handheld on the 433.475 MHz calling channel. HackRF One, tuned 550 kHz above
-the channel so the transmission is nowhere near the centre and nothing about
-its position is convenient.
-
-This is here because the receiver failed on it while the operator watched. The
-band is busy: sensors, remotes and a wideband burst that crosses the M17
-channel, and the auto node found the transmission, cut it out, and read nothing
-from it. Three separate faults had to be fixed before it decoded, and every one
-of them was invisible on synthesised M17, which is measured wide enough to
-avoid all three. A capture of the real thing on a real band is the only test
-that would have caught them.
-
-The callsign is the assertion worth making. It is carried in the link setup
-frame at the start of the transmission and repeated across the link information
-channel, so reading it back means the demodulator, the framing, the Golay and
-the CRC all worked on a signal nobody synthesised.
-"""
-
-[capture.expect]
-protocol = "M17"
-from = "OPNRTX"
-to = "BROADCAST"
-channel_hz = 433_475_000
-frames_min = 20
-
 [[capture]]
 name = "tetra_downlink_391.5M_2400k.cu8"
 sha256 = "db00a32871adb721fa84ebb1b23d2f803068de5ab9534371e7438d090018d2cd"
 url = "https://nostr.download/db00a32871adb721fa84ebb1b23d2f803068de5ab9534371e7438d090018d2cd.xz"
 compression = "xz"
-center_hz = 391_500_000
-rate_sps = 2_400_000
-format = "cu8"
 license = "CC-BY-4.0"
 description = """
 Eight seconds of the TETRA downlink band, HackRF One at 52 dB of tuner gain,
@@ -267,26 +154,17 @@ and is not what is uploaded here.
 
 What is uploaded is seconds 4 to 12 of a twelve second recording, cut with
 `cargo run -p sources --example iq_clipper -- <file> <out> --skip 4 --seconds 8`. The
-window is not arbitrary and is worth leaving alone: the group addresses below
-arrive late, so a cut ending before eight seconds has no call rows in it at
+window is not arbitrary and is worth leaving alone: the group addresses the test
+asserts arrive late, so a cut ending before eight seconds has no call rows in it at
 all, and the sync and network broadcast are each expected exactly once across
 the two halves the test replays, which a different split does not give.
 """
-
-[capture.expect]
-carrier_hz = [391_181_000, 391_704_500]
-tolerance_hz = 12_500
-snr_min_db = 20
-always_on = true
 
 [[capture]]
 name = "dmr_tg9_433.45M_2048k.cu8"
 sha256 = "800f4371a08cc940b40c10fc10f1373c7eff226f90246facc3eeac750ddc96f3"
 url = "https://nostr.download/800f4371a08cc940b40c10fc10f1373c7eff226f90246facc3eeac750ddc96f3.xz"
 compression = "xz"
-center_hz = 433_450_000
-rate_sps = 2_048_000
-format = "cu8"
 license = "CC-BY-4.0"
 description = """
 One DMR transmission on 433.900 MHz, 450 kHz up in a span tuned to 433.45,
@@ -321,22 +199,11 @@ other, so the sync alone cannot say which is which, and reading this capture
 the wrong way up turns a voice call into signalling that never decodes.
 """
 
-[capture.expect]
-channel_hz = 433_900_000
-talkgroup = 9
-radio_id = 1_234_567
-call_type = "group"
-overs = 1
-seconds_min = 3.0
-
 [[capture]]
 name = "odid_holybro_2431M_20000k.cs8"
 sha256 = "599fa5231b16844230c6589462dbb13254ed6e8050fec0a7a77b4101a937f287"
 url = "https://nostr.download/599fa5231b16844230c6589462dbb13254ed6e8050fec0a7a77b4101a937f287.xz"
 compression = "xz"
-center_hz = 2_431_000_000
-rate_sps = 20_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 Open Drone ID over Bluetooth legacy advertising, from a Holybro RemoteID
@@ -355,7 +222,7 @@ The evidence is the transmitter's, twice over: every packet passed a CRC-24
 this project did not compute the input to, and the message layout is ASTM
 F3411 as `opendroneid/opendroneid-core-c` implements it. What the module is
 saying is its shipped configuration rather than anything set for the test, so
-the expectations below are deliberately thin: the UAS ID, the ID type, the
+the expectations are deliberately thin: the UAS ID, the ID type, the
 aircraft type, and that a location message arrives with its position marked
 absent. It has no fix, so it says so, and a decoder that reports a position
 here has invented one.
@@ -365,22 +232,11 @@ it rotated between two recordings ten minutes apart; the UAS ID is what
 identifies the aircraft.
 """
 
-[capture.expect]
-channel = 38
-packets_min = 20
-uas_id = "123"
-id_type = "utm uuid"
-ua_type = "aeroplane"
-position_reported = false
-
 [[capture]]
 name = "odid_bt5lr_holybro_2474M_20000k.cs8"
 sha256 = "aa0167c38ac118a852ea37682234a35c51f37b167d124a91c968fce10ab202f0"
 url = "https://nostr.download/aa0167c38ac118a852ea37682234a35c51f37b167d124a91c968fce10ab202f0.xz"
 compression = "xz"
-center_hz = 2_474_000_000
-rate_sps = 20_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 Open Drone ID over Bluetooth 5 Long Range, from the same Holybro RemoteID
@@ -415,21 +271,11 @@ decoded. A receiver that reads the primary channel and reports nothing from
 the auxiliary one is showing that symptom.
 """
 
-[capture.expect]
-packs_min = 8
-messages_per_pack = 4
-coding = "S8"
-data_channels = [31, 32, 33, 34, 35, 36]
-uas_id = "123"
-
 [[capture]]
 name = "pal_camera_5865M_20000k.cs8"
 sha256 = "48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59"
 url = "https://nostr.download/48d6f54d511185ac827cb242aa98efb11618205cf0f17899b12b603344d64b59.xz"
 compression = "xz"
-center_hz = 5_865_000_000
-rate_sps = 20_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 Analogue video: an AKK RaceRunner transmitting a PAL camera on 5865 MHz,
@@ -468,66 +314,11 @@ transmitter at all. Audio is present on a 6.5 MHz subcarrier and is not
 decoded.
 """
 
-[capture.expect]
-standard = "PAL"
-fields_min = 4
-full_lines_min = 250
-colour = true
-channel = "A1 or B8"
-
-[[capture]]
-name = "droneid_mini4k_2444.5M_15360k.cs8"
-sha256 = "626b82be90c7f1bc56c7f4dd8fba925c54e757a4d9571ab41a8fd023a569c109"
-url = "https://nostr.download/626b82be90c7f1bc56c7f4dd8fba925c54e757a4d9571ab41a8fd023a569c109.xz"
-compression = "xz"
-center_hz = 2_444_500_000
-rate_sps = 15_360_000
-format = "cs8"
-license = "CC-BY-4.0"
-description = """
-DJI DroneID from a DJI Mini 4K on the bench, powered up indoors with no GNSS
-fix and no controller linked. Recorded with a LimeSDR at 61.44 MS/s centred on
-2442 MHz, which covers the whole 2.4 GHz band, then tuned to 2444.5 MHz and
-decimated to the 15.36 MS/s the frame is defined at and cut to its bursts:
-
-    iq_clipper capture_2442.0000M_61440k.cs16 droneid_mini4k_2444.5M_15360k.cs8 \\
-        --center-hz 2444500000 --rate 15360000 --bursts --min-us 600 \\
-        --margin-ms 1.5 --threshold-db 14
-
-Five thousand times smaller than the recording, and unlike every other capture
-here it is not the same samples: it has been mixed, filtered and resampled, so
-it is evidence about one 10 MHz channel rather than about the band. The
-untuned recording holds the same bursts at 4.1 to 11.8 seconds, 639 ms apart,
-alongside the Wi-Fi that made cutting it any other way pointless.
-
-What makes it evidence: every frame carries a CRC-16 over 89 bytes, inside a
-code block whose own CRC-24 also checks, neither of which this project
-constructed, and the serial number they carry is the one printed on the
-airframe. The aircraft was indoors, so it reports no position at all, which is
-the correct behaviour and is asserted below: an aircraft with no fix sends
-zeros and a decoder that turns those into a position off Africa has invented
-evidence.
-
-Thirteen bursts correlate in the recording and seven decode to this packet
-type. The rest are the other packet type DJI sends interleaved with it, whose
-layout differs and which is not read yet.
-"""
-
-[capture.expect]
-frames = 7
-serial = "F8PJC254J001JR4R"
-sequence_first = 437
-sequence_last = 444
-position_reported = false
-
 [[capture]]
 name = "pmr446_test_446.0M_512k.cs8"
 sha256 = "9f74a09ed04446b90db006c86136bd99e7070a227b58c01c576faa514f6da793"
 url = "https://nostr.download/9f74a09ed04446b90db006c86136bd99e7070a227b58c01c576faa514f6da793.xz"
 compression = "xz"
-center_hz = 446_000_000
-rate_sps = 512_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 A PMR446 handheld on channel 1, 446.04915 MHz, saying "one two three, test,
@@ -549,19 +340,11 @@ reads the whole transmission as "123 test 123", and a larger model that
 punctuates it differently still has to contain those digits and that word.
 """
 
-[capture.expect]
-channel_hz = 446_049_100
-words = ["123", "test"]
-utterances = 1
-
 [[capture]]
 name = "ism24_busy_2431M_61440k.cs16"
 sha256 = "6f255fb491a4b7235cc69917661a55c73e92d20aa1015f95e26eb508a03d9e52"
 url = "https://nostr.download/6f255fb491a4b7235cc69917661a55c73e92d20aa1015f95e26eb508a03d9e52.xz"
 compression = "xz"
-center_hz = 2_431_000_000
-rate_sps = 61_440_000
-format = "cs16"
 license = "CC-BY-4.0"
 description = """
 Two seconds of a busy 2.4 GHz band, the whole of it: a LimeSDR at 61.44 MS/s
@@ -597,20 +380,11 @@ flat, and the Bluetooth advertisements the addresses of whatever was in the
 room; treat them as published.
 """
 
-[capture.expect]
-elrs_link = "6f37"
-elrs_rows = 107
-elrs_hop_visits = 30
-sources_opened = 53
-
 [[capture]]
 name = "acars_acarsdec_12500.wav"
 sha256 = "752acabede3f96e8f137567e8218fe3cd9aab61130b9198d0cbce6cf2cf53b80"
 url = "https://raw.githubusercontent.com/TLeconte/acarsdec/339f63eb91a890cfe5b199ad70814cfe86702d1e/test.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 12_500
-format = "wav"
 license = "LGPL-2.0-only"
 license_source = "TLeconte/acarsdec, test.wav, fetched from that repository"
 description = """
@@ -639,9 +413,6 @@ name = "vdl2_model_136.975M_1050k.wav"
 sha256 = "50a8dc2b270362d0f85f92c7dcf458fb3706e2ce0221ba2dfa86b6a5128a124b"
 url = "https://raw.githubusercontent.com/szpajder/dumpvdl2/686e87f2294ef6275855ba7364bd4bb9a0f8f56a/test/vdl2_model_16b_1050kHz.wav"
 compression = "none"
-center_hz = 136_975_000
-rate_sps = 1_050_000
-format = "s16"
 license = "GPL-3.0"
 license_source = "szpajder/dumpvdl2, test/vdl2_model_16b_1050kHz.wav, fetched from that repository"
 description = """
@@ -668,9 +439,6 @@ name = "sstv_martin1_44100.wav"
 sha256 = "7022216f09c71794a9d29d45dd2ba2fb734e0f99295f443702932a9b3cf8b675"
 url = "https://nostr.download/7022216f09c71794a9d29d45dd2ba2fb734e0f99295f443702932a9b3cf8b675.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 44_100
-format = "wav"
 license = "GPL-3.0"
 license_source = "colaclanth/sstv, examples/m1.ogg, converted and re-hosted"
 description = """
@@ -697,9 +465,6 @@ name = "sstv_robot36_bars_44100.wav"
 sha256 = "dae1b85a0b9822ee0c941d8161941ddac533cb0cca7c7eccd954c3f95ea97dfe"
 url = "https://nostr.download/dae1b85a0b9822ee0c941d8161941ddac533cb0cca7c7eccd954c3f95ea97dfe.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 44_100
-format = "wav"
 license = "CC-BY-4.0"
 description = """
 Not IQ and not off the air: 36 seconds of Robot 36 audio generated by
@@ -727,9 +492,6 @@ name = "sstv_martin2_bars_44100.wav"
 sha256 = "98954fed1d016d00bbb3d1e29b44b6ab67cba37cb39ddf3a021d8ed2d19e0ad9"
 url = "https://nostr.download/98954fed1d016d00bbb3d1e29b44b6ab67cba37cb39ddf3a021d8ed2d19e0ad9.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 44_100
-format = "wav"
 license = "CC-BY-4.0"
 description = """
 Martin 2 audio generated by pySSTV from the same colour bars as
@@ -751,9 +513,6 @@ name = "sstv_scottie1_bars_44100.wav"
 sha256 = "5c095f81fcb8fc39ece4e6990eac11a61adb8d944f195f8ac487e083a6fa802e"
 url = "https://nostr.download/5c095f81fcb8fc39ece4e6990eac11a61adb8d944f195f8ac487e083a6fa802e.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 44_100
-format = "wav"
 license = "CC-BY-4.0"
 description = """
 Scottie 1 audio generated by pySSTV from the same colour bars as
@@ -775,9 +534,6 @@ name = "sstv_scottie2_bars_44100.wav"
 sha256 = "7c52963587543f429d489ba412534b1d192aac3cf06f69b3624d5f7083334471"
 url = "https://nostr.download/7c52963587543f429d489ba412534b1d192aac3cf06f69b3624d5f7083334471.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 44_100
-format = "wav"
 license = "CC-BY-4.0"
 description = """
 Scottie 2 audio generated by pySSTV from the same colour bars as
@@ -799,9 +555,6 @@ name = "sstv_scottiedx_bars_44100.wav"
 sha256 = "e40e80d93118dacbc3e622478fcef31f449d41def37bfd7a1443150f58579b0d"
 url = "https://nostr.download/e40e80d93118dacbc3e622478fcef31f449d41def37bfd7a1443150f58579b0d.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 44_100
-format = "wav"
 license = "CC-BY-4.0"
 description = """
 Scottie DX audio generated by pySSTV from the same colour bars as
@@ -823,9 +576,6 @@ name = "dvbt_hd_429M_9142857.cs8"
 sha256 = "0347bb58cc331f4a6b23d89de15c6aff4b6a8b0fb223c68af8a949e87c7af61e"
 url = "https://nostr.download/0347bb58cc331f4a6b23d89de15c6aff4b6a8b0fb223c68af8a949e87c7af61e.xz"
 compression = "xz"
-center_hz = 429_000_000
-rate_sps = 9_142_857
-format = "cs8"
 license = "unstated"
 license_source = "Ron Economos, w6rz.net/adv16.cfile, cut and requantised and re-hosted"
 description = """
@@ -851,121 +601,11 @@ sample reaches 127, which clips nothing and costs no packets: the whole cut
 reads with no Reed-Solomon corrections at either depth.
 """
 
-[capture.expect]
-mode = "8k"
-guard = "1/32"
-constellation = "16-QAM"
-code_rate = "2/3"
-cell_id = 0
-uncorrectable = 0
-corrected = 0
-service_id = 1
-map_pid = 48
-video_pid = 49
-audio_pid = 52
-picture_width = 1920
-picture_height = 1080
-
-[[capture]]
-name = "rs41_herstmonceux_405.80024M_31.25k.cs16"
-sha256 = "56c441feb1ea430e3bdb80ed69e4a2d1e92565403bebf8c8813abee651696a30"
-url = "https://nostr.download/56c441feb1ea430e3bdb80ed69e4a2d1e92565403bebf8c8813abee651696a30.xz"
-compression = "xz"
-center_hz = 405_800_240
-rate_sps = 31_250
-format = "cs16"
-license = "unstated"
-license_source = "SDRangel, sdrangel.org/iq-files radiosonde.zip, cut and converted and re-hosted"
-description = """
-Vaisala RS41 radiosonde S1720982, recorded 2022-02-15 at 13:23 UTC near
-London and published by SDRangel as its radiosonde example
-(https://www.sdrangel.org/iq-files/, radiosonde.zip). The first 40 seconds of
-that recording, converted from the WAV's data chunk without resampling or
-retuning; the centre here is the one the recorder wrote into the file's auxi
-chunk. The sonde sits 9.76 kHz above it.
-
-It is over Sussex at 10.3 km climbing at 5 to 7 m/s, which puts its launch at
-Herstmonceux for the 12 UTC sounding about an hour earlier. SDRangel's own
-radiosonde demodulator reads this file, which is what the serial and the
-telemetry below are checked against.
-
-What it demonstrates that a synthesised signal does not, and what it was kept
-at 40 seconds and at its original centre for, is everything between the
-antenna and the decoder. The transmission is only 4 dB over the floor, so the
-detector opens it late and measures its centre a few kilohertz differently
-every second; the 10 kHz raster on the band is what turns those into one
-channel rather than forty. The sonde is off centre by two thirds of the span,
-which is what caught a remembered channel being dropped for not fitting
-inside it. And the duty cycle is real: 534 ms of carrier a second, so the
-decoder has to survive the gaps.
-"""
-
-[capture.expect]
-serial = "S1720982"
-# Frames the whole receiver reads, not what is on the air: about forty
-# transmissions are here and the first seven go to finding the channel.
-frames = 28
-first_frame_no = 3409
-last_frame_no = 3441
-longest_unbroken_run = 20
-bad_blocks = 0
-# Where it was on the last frame read.
-lat_deg = 50.7898
-lon_deg = 0.9226
-altitude_m = 10500.5
-climb_ms = 4.30
-battery_v = 2.7
-
-[[capture]]
-name = "ais_nijmegen_162M_768k.cu8"
-sha256 = "3caaac9675213a9defab1b4bdbb3c22dce209affd0c8c1b60d5c6f2c1d5d4d35"
-url = "https://nostr.download/3caaac9675213a9defab1b4bdbb3c22dce209affd0c8c1b60d5c6f2c1d5d4d35.xz"
-compression = "xz"
-center_hz = 162_000_000
-rate_sps = 768_000
-format = "cu8"
-license = "CC-BY-4.0"
-description = """
-44 seconds of both AIS channels from the Waal at Nijmegen, written by the
-receiver's own raw span capture off a LimeSDR-USB on 2026-09-23. It holds the
-MMSIs and positions of the barges passing the city that afternoon.
-
-The level is the point of it. The samples spread over about half a
-least significant bit, four distinct byte values in the first 200 000, so
-every frame is read out of what is nearly a one-bit stream. Uncut, because a
-cut on energy found 4 to 34 bursts depending on its threshold, and each cut
-changed what both decoders read.
-
-Independently read by gnuais 0.3.3, fed each channel's discriminator
-through scipy: 12 frames passed their CRC, from 244690403, 205581490,
-244133678, 244670443, 244013030 and 211664370. This receiver reads 24, 11 on
-channel A and 13 on B, from nine vessels. Eleven of gnuais's twelve are among
-them; the one missed is 244133678's binary broadcast.
-
-It first read five, and none with the DC block on. Its channel filter passed
-everything that did not alias, so the discriminator heard about three times
-the channel's bandwidth of noise, and the dedupe took a frame on one channel
-for a copy of one heard on the other.
-"""
-
-[capture.expect]
-frames = 24
-frames_channel_a = 11
-frames_channel_b = 13
-frames_with_dc_block = 24
-vessels = [205581490, 211664370, 244013030, 244038327, 244650495, 244650878, 244670443, 244690403, 244700331]
-reference = "gnuais 0.3.3"
-reference_frames = 12
-reference_frames_read_here = 11
-
 [[capture]]
 name = "screen_1080p60_595M_20000k.cs16"
 sha256 = "6b333bc10f2fea68d60dd72b5990ee57e936263a3f8a18e54e0c06f17dc5c55b"
 url = "https://nostr.download/6b333bc10f2fea68d60dd72b5990ee57e936263a3f8a18e54e0c06f17dc5c55b.xz"
 compression = "xz"
-center_hz = 595_000_000
-rate_sps = 20_000_000
-format = "cs16"
 license = "CC-BY-4.0"
 description = """
 The unintentional emissions of a monitor's cable, at 595 MHz, which is the
@@ -1000,23 +640,11 @@ successive tries, all at that one correct line rate, and painted a picture
 that rolled.
 """
 
-[capture.expect]
-line_hz = 67_501.0
-forced_mode = "1920x1080 60 Hz"
-forced_lines = 1125
-forced_frame_hz = 60.0007
-forced_frames_held = 30
-forced_frames_judged = 31
-auto_locks = false
-
 [[capture]]
 name = "screen_off_595M_20000k.cs16"
 sha256 = "694fef5cfc6ed69adf78eab0dcf96bc7418bc1f889673ea2e9a8e23756ef8c9b"
 url = "https://nostr.download/694fef5cfc6ed69adf78eab0dcf96bc7418bc1f889673ea2e9a8e23756ef8c9b.xz"
 compression = "xz"
-center_hz = 595_000_000
-rate_sps = 20_000_000
-format = "cs16"
 license = "CC-BY-4.0"
 description = """
 The same band as screen_1080p60_595M_20000k.cs16, at the same dial, the same
@@ -1029,17 +657,11 @@ of this is reading the receiver, the band or itself: there is no line period
 to find here at all, where the other gives 67.501 kHz at a score of 733.
 """
 
-[capture.expect]
-line_found = false
-
 [[capture]]
 name = "zigbee_join_ch11_2405M_8000k.cs8"
 sha256 = "45afc3336a1515dcb3a6c35effa4f78b624273d51147940c10a11a9ec177ca8f"
 url = "https://nostr.download/45afc3336a1515dcb3a6c35effa4f78b624273d51147940c10a11a9ec177ca8f.xz"
 compression = "xz"
-center_hz = 2_405_000_000
-rate_sps = 8_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 A Zigbee device joining a home network on channel 11, off air. Recorded with a
@@ -1054,7 +676,7 @@ router's association response, and the network traffic around it: 31 frames,
 every one with a good frame check.
 
 Each frame was dissected by Wireshark 4.4.18 through rawshark, and the counts
-below are what it reported. Our own decode agrees with it frame by frame,
+the test asserts are what it reported. Our own decode agrees with it frame by frame,
 including the network layer and the EUI-64 of each hop's sender.
 
 The coordinator sends the network key to a joining device inside a key
@@ -1067,29 +689,11 @@ ID of this network (41:0E:3A:D6:A1:CF:ED:BD) and of a neighbour's
 (F1:4F:EF:31:2C:69:DE:F7).
 """
 
-[capture.expect]
-frames = 31
-mac_beacon = 6
-mac_data = 9
-mac_ack = 7
-mac_command = 9
-beacon_requests = 2
-association_requests = 1
-association_responses = 1
-data_requests = 5
-zigbee_data = 5
-zigbee_command = 4
-hop_sender = "A4:C1:38:01:D4:FD:FF:FF"
-joining = "94:A0:81:FF:FE:86:DD:48"
-
 [[capture]]
 name = "ft8_wsjtx_210703_133430_12000.wav"
 sha256 = "9feb99c275770a6618538026da7decc6b09eb6cf63121e5168fa86dcdf00c2f5"
 url = "https://raw.githubusercontent.com/WSJTX/wsjtx/00b0e4c1c92ff409bcce633a241409441a010340/samples/FT8/210703_133430.wav"
 compression = "none"
-center_hz = 0
-rate_sps = 12_000
-format = "wav"
 license = "GPL-3.0"
 license_source = "WSJTX/wsjtx, samples/FT8/210703_133430.wav, fetched from that repository"
 description = """
@@ -1114,9 +718,6 @@ name = "dab_melbourne_9a_202.928M_2500k.cs16"
 sha256 = "5748293c44e1654810a48cfa267d8992644aa74de0d78f2068e5a777e548a11a"
 url = "https://nostr.download/5748293c44e1654810a48cfa267d8992644aa74de0d78f2068e5a777e548a11a.xz"
 compression = "xz"
-center_hz = 202_928_000
-rate_sps = 2_500_000
-format = "cs16"
 license = "unstated"
 license_source = "Signal Identification Wiki, DAB+9A.zip uploaded by Griffonboi on 3 January 2021, cut here"
 description = """
@@ -1146,9 +747,6 @@ name = "nxdn48_453M_48k.cs16"
 sha256 = "2496c07730c6385c68dd9f54d723f4b6ff0bc7b49c5408c2fcf14dfb1afbb626"
 url = "https://nostr.download/2496c07730c6385c68dd9f54d723f4b6ff0bc7b49c5408c2fcf14dfb1afbb626.xz"
 compression = "xz"
-center_hz = 453_000_000
-rate_sps = 48_000
-format = "cs16"
 license = "unstated"
 license_source = "Signal Identification Wiki, NXDN_IQ.zip uploaded by Cartoonman on 4 January 2016"
 description = """
@@ -1173,9 +771,6 @@ name = "nxdn96_453M_48k.cs16"
 sha256 = "48bba222129a43da7aae1c41aa2872b7adf9a3ea2d7bcbdcce5dd0ae3ad22af3"
 url = "https://nostr.download/48bba222129a43da7aae1c41aa2872b7adf9a3ea2d7bcbdcce5dd0ae3ad22af3.xz"
 compression = "xz"
-center_hz = 453_000_000
-rate_sps = 48_000
-format = "cs16"
 license = "unstated"
 license_source = "Signal Identification Wiki, NXDN_IQ.zip uploaded by Cartoonman on 4 January 2016"
 description = """
@@ -1201,9 +796,6 @@ name = "eas_tor_kilx_22050.wav"
 sha256 = "d747148b7c768abd3db4dacfa95596bfb27785cbf66456affd9ae81b03178876"
 url = "https://nostr.download/d747148b7c768abd3db4dacfa95596bfb27785cbf66456affd9ae81b03178876.xz"
 compression = "xz"
-center_hz = 0
-rate_sps = 22_050
-format = "wav"
 license = "unstated"
 license_source = "Signal Identification Wiki, EAS_Alert_Tornado_Warning.mp3 uploaded by Cartoonman on 2 June 2015, converted here"
 description = """
@@ -1232,9 +824,6 @@ name = "stdc_egc_1541.45M_48k.cs16"
 sha256 = "8c68fb5147395b0e0eb5025b99caeda667bc1cb2b47802297581dd61e7f08bc8"
 url = "https://nostr.download/8c68fb5147395b0e0eb5025b99caeda667bc1cb2b47802297581dd61e7f08bc8.xz"
 compression = "xz"
-center_hz = 1_541_450_000
-rate_sps = 48_000
-format = "cs16"
 license = "unstated"
 license_source = "Signal Identification Wiki, Inmarsat-C_TDM_EGC_IQ.zip uploaded by Cartoonman on 13 January 2016"
 description = """
@@ -1262,9 +851,6 @@ name = "aero_oqpsk_1546M_48k.cs16"
 sha256 = "9535c6cf378036152bd2616b249ad3d7112154e79bf102bbdd1d30744edf1d42"
 url = "https://nostr.download/9535c6cf378036152bd2616b249ad3d7112154e79bf102bbdd1d30744edf1d42.xz"
 compression = "xz"
-center_hz = 1_546_000_000
-rate_sps = 48_000
-format = "cs16"
 license = "unstated"
 license_source = "Signal Identification Wiki, Inmarst_Aero_10500_Bd_OQPSK_IQ.zip uploaded by Cartoonman on 13 January 2016"
 description = """
@@ -1296,9 +882,6 @@ name = "drm_b_3.965M_48k.cs16"
 sha256 = "39642bc51c32898e22547e27adb91b51a15fd8539a5caf3eb0e7d508f0df053a"
 url = "https://nostr.download/39642bc51c32898e22547e27adb91b51a15fd8539a5caf3eb0e7d508f0df053a.xz"
 compression = "xz"
-center_hz = 3_965_000
-rate_sps = 48_000
-format = "cs16"
 license = "unstated"
 license_source = "Signal Identification Wiki, DRM_B.zip uploaded by Voxo on 15 February 2026, converted and tuned here"
 description = """
@@ -1327,9 +910,6 @@ name = "dvbs2_tg4_1431.1M_20000k.cs8"
 sha256 = "e55abd6f05569b36f3d81fa7d2464c0ee9f1034ebe8a0b2224bea7f72a3c07cd"
 url = "https://nostr.download/e55abd6f05569b36f3d81fa7d2464c0ee9f1034ebe8a0b2224bea7f72a3c07cd.xz"
 compression = "xz"
-center_hz = 1_431_100_000
-rate_sps = 20_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 A DVB-S2 contribution feed off Astra 2G at 28.2E, 11181.1 GHz vertical, received
@@ -1349,23 +929,11 @@ Evidence for three faults: every frame read in real time on a HackRF, the
 service named, and a lost frame no longer stopping the picture for good.
 """
 
-[capture.expect]
-modcod = "8PSK 3/4"
-symbol_rate = "14.250 Msym/s"
-rolloff = 0.25
-frames = 962
-failed = 6
-packets = 30_716
-service = "TG4 Rasai BEO Lios Tuathail 2026"
-
 [[capture]]
 name = "dvbs2_centre_spur_1431M_20000k.cs8"
 sha256 = "17e6a6b86fc2c74dc1775b1f34f97dcab33c7dda303a5febbc6f225fc68848dc"
 url = "https://nostr.download/17e6a6b86fc2c74dc1775b1f34f97dcab33c7dda303a5febbc6f225fc68848dc.xz"
 compression = "xz"
-center_hz = 1_431_000_000
-rate_sps = 20_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 The same TG4 feed as dvbs2_tg4_1431.1M_20000k.cs8, recorded later the same day
@@ -1378,18 +946,11 @@ in, no frame decodes at a pilot MER of 4.4 dB; cancelled, the MER is about
 10 dB and all but a few frames read.
 """
 
-[capture.expect]
-frames = 231
-decoded_floor = 180
-
 [[capture]]
 name = "dvbs2_bbc_hd_1097M_40000k.cs8"
 sha256 = "ecd991cfe9fc06c460eaa0a6d3313e66441b1ef2bf3dede153760a9cd3720968"
 url = "https://nostr.download/ecd991cfe9fc06c460eaa0a6d3313e66441b1ef2bf3dede153760a9cd3720968.xz"
 compression = "xz"
-center_hz = 1_097_000_000
-rate_sps = 40_000_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 The BBC HD multiplex off Astra 2E at 28.2E, 10.847 GHz vertical, from the same
@@ -1408,21 +969,11 @@ signal. Taken for the symbol rate, the receiver's timing ran away towards
 31 Msym/s and took the whole process down with it.
 """
 
-[capture.expect]
-symbol_rate = "22.999 Msym/s"
-frames = 828
-failed = 0
-packets = 26_605
-services = 7
-
 [[capture]]
 name = "dvbs2_two_carriers_1083M_61440k.cs8"
 sha256 = "378a928617cfb674aec2af52bc6a73109ca9fb383be105f58fff7ee11903466a"
 url = "https://nostr.download/378a928617cfb674aec2af52bc6a73109ca9fb383be105f58fff7ee11903466a.xz"
 compression = "xz"
-center_hz = 1_083_000_000
-rate_sps = 61_440_000
-format = "cs8"
 license = "CC-BY-4.0"
 description = """
 Two neighbouring DVB-S2 transponders off 28.2E, 10.818 and 10.847 GHz vertical,
@@ -1439,8 +990,158 @@ carrier 290 kHz out, and every frame was too weak to read until the lock was
 thrown away and tried again.
 """
 
-[capture.expect]
-lower_offset = "-103 kHz"
-upper_offset = "+399 kHz"
-lower_frames = 306
-upper_frames = 310
+[[capture]]
+name = "offair/fm_broadcast_95.8M_2000k.cs16"
+sha256 = "972691eeffcb6a3067134d1ad733b0eae03aabb4c60ddcf2d2b5cc41d2a0097a"
+url = "https://nostr.download/972691eeffcb6a3067134d1ad733b0eae03aabb4c60ddcf2d2b5cc41d2a0097a.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+Broadcast FM, confirmed by what sits in the demodulated baseband rather than
+by the band it came from: a 19 kHz stereo pilot, the 38 kHz difference
+subcarrier and RDS at 57 kHz, all present together, which nothing but broadcast
+FM produces.
+
+Weak, at 6 to 8 dB over the local floor, because the antenna on this receiver
+is cut for 868 MHz. Usable as an FM example and not much else.
+
+One second of a three second recording. A carrier that never stops has nothing
+to cut around, so the only question is how much of it says the same thing, and
+one second holds the pilot, the subcarrier and the RDS.
+
+Recorded on a LimeSDR-USB, RX2/LNAL.
+"""
+
+[[capture]]
+name = "offair/fsk_sensor_868.3M_2000k.cs16"
+sha256 = "9eaf4247d78849d41d5b17e3bcff8f960bcae7775f358fdc8020bcdff03261c5"
+url = "https://nostr.download/9eaf4247d78849d41d5b17e3bcff8f960bcae7775f358fdc8020bcdff03261c5.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+An unidentified 868 MHz sensor, one 11.8 ms burst keyed between two tones 54
+kHz apart. Nothing here decodes it, so the device is unknown and only the
+modulation is labelled. Cut from a 30 second dwell in which it was the only
+transmission, and cut again to the burst with 20 ms of band either side, which
+is 5% of the two seconds that were uploaded before and reads the same.
+
+Recorded on a LimeSDR-USB, RX2/LNAL, 868 MHz antenna.
+"""
+
+[[capture]]
+name = "offair/impulsive_noise_474M_12000k.cs16"
+sha256 = "c5f87be71246b55750e5376a8553b88232cdbba13b955ecbd7b5ebdc5e01c3f4"
+url = "https://nostr.download/c5f87be71246b55750e5376a8553b88232cdbba13b955ecbd7b5ebdc5e01c3f4.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+Impulsive interference in the UHF television band, kept deliberately as a
+negative. It was recorded expecting a DVB-T multiplex and is not one: real-part
+kurtosis is 13.5 where OFDM sits near 3, and there is no cyclic-prefix
+structure at any DVB-T mode or guard interval.
+
+A classifier that has never been shown broadband noise with structure in it
+will confidently call this something.
+
+A quarter second of the two that were recorded. Not cut to its bursts: the
+quiet between the impulses is half of what a detector has to not fire on, so
+the whole window is kept and only its length is reduced.
+
+Recorded on a LimeSDR-USB, RX2/LNAL.
+"""
+
+[[capture]]
+name = "offair/ofdm_lte_762M_12000k.cs16"
+sha256 = "0e7400115fb688cf2f446ec2e94283fddef4a3e16ae90d97b37b94af75f77d04"
+url = "https://nostr.download/0e7400115fb688cf2f446ec2e94283fddef4a3e16ae90d97b37b94af75f77d04.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+LTE band 28 downlink, a continuous cell rather than a burst. Real-part
+kurtosis 3.30 and a cyclic-prefix peak of 1.23 to 1.28 at the LTE symbol
+period. Weaker and less clean than the Wi-Fi capture, which is why both are
+here: one OFDM signal is not evidence that a model learned OFDM.
+
+Three quarters of a second of an eight second recording. The cell transmits
+throughout, so the windows the classifier scores are slices of the same thing
+and more of them add little; six is what this length gives, and at half a
+second it falls to three, which is too few to mean much.
+
+Recorded on a LimeSDR-USB, RX2/LNAL.
+"""
+
+[[capture]]
+name = "offair/quiet_ism_869.525M_2000k.cs16"
+sha256 = "4b053b1b2a84d4655d74c401acff64c0e6a3653397b0a4e637731315a2c47cea"
+url = "https://nostr.download/4b053b1b2a84d4655d74c401acff64c0e6a3653397b0a4e637731315a2c47cea.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+One second of the 869 MHz band with nothing transmitting, from the same
+session and the same gain setting as the LoRa captures. The receiver's own
+noise floor and spurs, which is what a burst detector has to not fire on. Half
+of the two seconds recorded, and there is nothing in either half.
+
+Recorded on a LimeSDR-USB, RX2/LNAL, 868 MHz antenna.
+"""
+
+[[capture]]
+name = "offair/elrs_100hz_2415M_20000k.cs8"
+sha256 = "4591925dff4a435961abeef08f05432385b3e8d08668dcb188391d4ae60dcd00"
+url = "https://nostr.download/4591925dff4a435961abeef08f05432385b3e8d08668dcb188391d4ae60dcd00.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+An ExpressLRS handset, a RadioMaster TX16S at 100 Hz Full, on the bench with
+the sticks centred and the throttle low, disarmed. LoRa SF7 over 812.5 kHz,
+the SX1280's long interleaved 4/8 coding, thirteen byte packets, four on each
+channel of the hop set before it hops. Three tenths of a second cut from
+8.6 s with `cut --seconds 0.3 --skip 2.0`: four visits to channels inside the
+span, fifteen packets, and the floor between them.
+
+What it is evidence of: the classifier names the burst a chirp with a sweep
+of -5.04e9 Hz/s, which is SF7 over 812.5 kHz and nothing else; the auto node
+opens a source a megahertz wide on each visit and places the ExpressLRS front
+end on the verdict; the front end recovers the link from the CRC seeds of
+consecutive packets, since the sync channel at 2440.4 MHz is outside this
+span and no sync packet is in the capture; and every packet then reads as
+the same sticks under a CRC that agrees. The link is 6f37, which is bytes 4
+and 5 of a binding UID this author owns. Sample rate and centre are in the
+name, and the level is what a handset a metre away gives a HackRF at its
+default gain: 46 dB over the floor, which is why the sources measure up to
+1.7 MHz wide.
+
+Recorded on a HackRF One, 2.4 GHz whip.
+"""
+
+[[capture]]
+name = "survey/lora_salvora.csv"
+sha256 = "a0570a19657b337f6dca0c6ad774e77236462756a8ab6def106186bb0dd8912f"
+url = "https://zenodo.org/records/13835721/files/dataset.csv?download=1"
+compression = "none"
+license = "CC-BY-4.0"
+license_source = "Universidade de Vigo, doi 10.5281/zenodo.13835721"
+description = """
+LoRa signal quality and GPS positioning time series dataset, López Escobar,
+Fondo-Ferreiro, González-Castaño and Gil-Castiñeira, Universidade de Vigo,
+doi 10.5281/zenodo.13835721, CC BY 4.0.
+
+1210 messages from seven moving devices in the Sálvora Archipelago, Galicia,
+each row a position from the device's own GPS and the level three fixed LoRa
+gateways heard that transmission at. A level of 0 means that gateway did not
+hear it.
+
+The path loss is reciprocal, so a row reads as a sighting of the gateway from
+where the device stood, which is the same geometry as a drive past a
+transmitter. The gateways are what makes it evidence: they were placed and
+surveyed, and their positions are published with the data rather than fitted
+from it.
+
+  gateway 1  42.46972, -9.01345, 73 m
+  gateway 2  42.49955, -9.00654,  5 m
+  gateway 3  42.50893, -9.04902, 31 m
+
+Gateway 1 is the one the devices drove past, from 38 m to 1.6 km. Gateways 2
+and 3 were only ever heard from 2.1 km and 4.2 km away and never approached,
+which is the other half of the test.
+"""

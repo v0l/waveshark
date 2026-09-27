@@ -31,6 +31,8 @@ mod calls;
 mod chain;
 mod chainview;
 mod control;
+#[cfg(test)]
+mod corpus;
 mod data;
 mod devices;
 mod dial;

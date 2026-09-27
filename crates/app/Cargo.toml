@@ -91,6 +91,7 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 
 [dev-dependencies]
 hound = "3"
+toml = "1"
 nostr-directory = { workspace = true, features = ["mock-relay"] }
 
 [features]

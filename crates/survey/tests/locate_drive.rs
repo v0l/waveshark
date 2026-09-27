@@ -6,7 +6,7 @@
 //! moving around the Sálvora Archipelago, against three LoRa gateways whose
 //! positions were surveyed and published with the measurements: López
 //! Escobar, Fondo-Ferreiro, González-Castaño and Gil-Castiñeira,
-//! doi 10.5281/zenodo.13835721, CC BY 4.0. See `testdata/survey.toml`.
+//! doi 10.5281/zenodo.13835721, CC BY 4.0. See `testdata/fixture.toml`.
 //!
 //! Path loss is reciprocal, so a row reads as a sighting of a gateway from
 //! where the device stood. What comes out is not flattering and is the point

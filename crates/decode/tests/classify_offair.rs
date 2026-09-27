@@ -13,16 +13,16 @@
 //! Meshtastic node's spreading factor was set by hand, and a beacon interval
 //! of 102.4 ms is not something else.
 //!
-//! Two captures in `offair.toml` are deliberately not scored. One holds three
-//! systems at once and is labelled `mixed`, because no single family is true
-//! of it. The FM broadcast sits at 7 dB in an antenna cut for 868 MHz, and
+//! Two captures in `testdata/offair` are deliberately not scored. One holds
+//! three systems at once and is left out of `CAPTURES`, because no single
+//! family is true of it. The FM broadcast sits at 7 dB in an antenna cut for 868 MHz, and
 //! every measurement made of it says noise, which is arguably the right answer
 //! rather than a miss.
 //!
 //! The fixtures are absent from a fresh clone, so this skips when they are
 //! missing.
 
-use common::{C32, SampleFormat};
+use common::C32;
 use dsp::{Classifier, ClassifyConfig, Modulation};
 use std::path::{Path, PathBuf};
 
@@ -32,18 +32,25 @@ use std::path::{Path, PathBuf};
 /// exactly the signals that cannot be told apart without finding a repeat, and
 /// scoring it wrong for one of them would mark the classifier down for a
 /// distinction it says up front it does not always draw.
-fn accepts(m: Modulation, family: &str) -> bool {
+fn accepts(m: Modulation, family: Family) -> bool {
     matches!(
         (m, family),
-        (Modulation::Ook | Modulation::Ask, "ook_ask")
-            | (Modulation::Fsk2, "fsk")
-            | (Modulation::Fsk4, "mfsk")
-            | (Modulation::Msk, "msk_gmsk")
-            | (Modulation::Psk2 | Modulation::Psk4 | Modulation::Dsss, "psk")
-            | (Modulation::Chirp, "chirp")
-            | (Modulation::Ofdm | Modulation::NoiseLike, "ofdm")
-            | (Modulation::NoiseLike | Modulation::Carrier, "noise")
+        (Modulation::Fsk2, Family::Fsk)
+            | (Modulation::Msk, Family::MskGmsk)
+            | (Modulation::Chirp, Family::Chirp)
+            | (Modulation::Ofdm | Modulation::NoiseLike, Family::Ofdm)
+            | (Modulation::NoiseLike | Modulation::Carrier, Family::Noise)
     )
+}
+
+#[derive(Clone, Copy)]
+enum Family {
+    Fm,
+    Fsk,
+    MskGmsk,
+    Chirp,
+    Ofdm,
+    Noise,
 }
 
 /// Captures the classifier does not read, with the reason, checked in both
@@ -94,14 +101,49 @@ const KNOWN_MISSES: &[(&str, &str)] = &[
 ];
 
 struct Capture {
-    name: String,
-    family: String,
-    format: SampleFormat,
-    rate: f64,
+    name: &'static str,
+    family: Family,
     burst_us: Option<(f64, f64)>,
     occupancy_min: f32,
     bridge_us: f64,
 }
+
+const fn labelled(name: &'static str, family: Family) -> Capture {
+    Capture { name, family, burst_us: None, occupancy_min: 0.0, bridge_us: 2000.0 }
+}
+
+const CAPTURES: &[Capture] = &[
+    labelled("fm_broadcast_95.8M_2000k.cs16", Family::Fm),
+    labelled("fsk_sensor_868.3M_2000k.cs16", Family::Fsk),
+    Capture {
+        burst_us: Some((80.0, 500.0)),
+        ..labelled("gfsk_ble_2426M_20000k.cs8", Family::MskGmsk)
+    },
+    labelled("impulsive_noise_474M_12000k.cs16", Family::Noise),
+    labelled("lora_sf11_meshtastic_a_869.525M_2000k.cs16", Family::Chirp),
+    labelled("lora_sf11_meshtastic_b_869.525M_2000k.cs16", Family::Chirp),
+    Capture {
+        burst_us: Some((300_000.0, 700_000.0)),
+        ..labelled("lora_sf11_meshtastic_c_869.0M_2400k.cu8", Family::Chirp)
+    },
+    Capture {
+        burst_us: Some((900_000.0, 1_400_000.0)),
+        ..labelled("meshcore_advert_868.9M_2048k.cu8", Family::Chirp)
+    },
+    labelled("ofdm_lte_762M_12000k.cs16", Family::Ofdm),
+    Capture {
+        burst_us: Some((20.0, 500.0)),
+        occupancy_min: 0.25,
+        bridge_us: 200.0,
+        ..labelled("ofdm_wifi_frames_2462M_20000k.cs8", Family::Ofdm)
+    },
+    labelled("quiet_ism_869.525M_2000k.cs16", Family::Noise),
+    Capture {
+        burst_us: Some((3000.0, 12_000.0)),
+        bridge_us: 500.0,
+        ..labelled("elrs_100hz_2415M_20000k.cs8", Family::Chirp)
+    },
+];
 
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/offair")
@@ -109,39 +151,27 @@ fn dir() -> PathBuf {
 
 #[test]
 fn the_classifier_reads_what_was_recorded() {
-    let Ok(text) = std::fs::read_to_string(dir().join("../offair.toml")) else {
-        eprintln!("off-air manifest absent, skipping");
-        return;
-    };
-    let captures = parse(&text);
-    if captures.is_empty() {
-        eprintln!("no captures listed, skipping");
-        return;
-    }
-
     let mut seen = 0usize;
     let mut lines: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut unexpected_passes: Vec<&str> = Vec::new();
 
-    for cap in &captures {
-        if cap.family == "mixed" {
-            continue;
-        }
-        let Ok(raw) = std::fs::read(dir().join(&cap.name)) else {
+    for cap in CAPTURES {
+        let Ok(buf) = sources::FileSource::open(dir().join(cap.name)).and_then(|s| s.read_all())
+        else {
             continue;
         };
-        let mut iq: Vec<C32> = Vec::new();
-        cap.format.convert(&raw, &mut iq);
+        let rate = buf.rate.as_f64();
+        let iq = buf.samples;
         if iq.is_empty() {
             continue;
         }
         seen += 1;
 
         let mut cls = Classifier::new(
-            cap.rate,
+            rate,
             ClassifyConfig {
-                channel_hz: cap.rate as f32,
+                channel_hz: rate as f32,
                 // A capture, not a channel: the signal is a small part of the
                 // span and has to be brought to its own bandwidth first.
                 zoom_below: 0.25,
@@ -150,9 +180,9 @@ fn the_classifier_reads_what_was_recorded() {
         );
 
         let (mut ok, mut n) = (0usize, 0usize);
-        for (a, b) in bursts(&iq, cap) {
+        for (a, b) in bursts(&iq, cap, rate) {
             if let Some((lo, hi)) = cap.burst_us {
-                let us = (b - a) as f64 / cap.rate * 1e6;
+                let us = (b - a) as f64 / rate * 1e6;
                 if us < lo || us > hi {
                     continue;
                 }
@@ -160,12 +190,12 @@ fn the_classifier_reads_what_was_recorded() {
             let seg = &iq[a..b];
             let class = cls.classify(seg);
             if cap.occupancy_min > 0.0
-                && class.features.bandwidth_hz < cap.occupancy_min * cap.rate as f32
+                && class.features.bandwidth_hz < cap.occupancy_min * rate as f32
             {
                 continue;
             }
             n += 1;
-            if accepts(class.modulation, &cap.family) {
+            if accepts(class.modulation, cap.family) {
                 ok += 1;
             }
         }
@@ -176,7 +206,7 @@ fn the_classifier_reads_what_was_recorded() {
         let known = KNOWN_MISSES.iter().find(|(f, _)| *f == cap.name);
         lines.push(format!("  {:<44} {:>3}/{:<3} {:.2}", cap.name, ok, n, share));
         match known {
-            Some(_) if share >= 0.5 => unexpected_passes.push(&cap.name),
+            Some(_) if share >= 0.5 => unexpected_passes.push(cap.name),
             None if share < 0.5 => {
                 failures.push(format!("{} read {ok} of {n} correctly", cap.name))
             }
@@ -199,7 +229,7 @@ fn the_classifier_reads_what_was_recorded() {
 }
 
 /// Cut a capture the way a detector would, or slice it when nothing is bursty.
-fn bursts(iq: &[C32], cap: &Capture) -> Vec<(usize, usize)> {
+fn bursts(iq: &[C32], cap: &Capture, rate: f64) -> Vec<(usize, usize)> {
     const BLOCK: usize = 128;
     let power: Vec<f32> = iq
         .chunks_exact(BLOCK)
@@ -225,7 +255,7 @@ fn bursts(iq: &[C32], cap: &Capture) -> Vec<(usize, usize)> {
     }
 
     let threshold = floor * 10f32.powf(0.6);
-    let bridge = (cap.rate * cap.bridge_us * 1e-6) as usize;
+    let bridge = (rate * cap.bridge_us * 1e-6) as usize;
     let mut out: Vec<(usize, usize)> = Vec::new();
     let mut open: Option<usize> = None;
     let mut quiet = 0usize;
@@ -249,95 +279,5 @@ fn bursts(iq: &[C32], cap: &Capture) -> Vec<(usize, usize)> {
         out.push((s, iq.len()));
     }
     out.retain(|(a, b)| b - a >= 256);
-    out
-}
-
-/// Enough TOML for this flat manifest, and no dependency for it.
-fn parse(text: &str) -> Vec<Capture> {
-    let mut out = Vec::new();
-    let (mut name, mut family, mut format, mut rate) =
-        (String::new(), String::new(), String::new(), 0.0f64);
-    let (mut burst_us, mut occupancy_min, mut bridge_us) = (None, 0.0f32, 2000.0f64);
-    let value = |l: &str| l.split('=').nth(1).unwrap_or("").trim().trim_matches('"').to_string();
-    let flush = |name: &mut String,
-                 family: &mut String,
-                 format: &mut String,
-                 rate: f64,
-                 burst_us: Option<(f64, f64)>,
-                 occupancy_min: f32,
-                 bridge_us: f64,
-                 out: &mut Vec<Capture>| {
-        if name.is_empty() || family.is_empty() {
-            return;
-        }
-        out.push(Capture {
-            name: std::mem::take(name),
-            family: std::mem::take(family),
-            format: match std::mem::take(format).as_str() {
-                "cs8" => SampleFormat::Cs8,
-                "cu8" => SampleFormat::Cu8,
-                "cf32" => SampleFormat::Cf32,
-                _ => SampleFormat::Cs16,
-            },
-            rate,
-            burst_us,
-            occupancy_min,
-            bridge_us,
-        });
-    };
-    // A description is prose, and a line of prose that happens to start
-    // with "name" is not the name: the fm_broadcast entry lost its name to
-    // one and was never scored.
-    let mut in_description = false;
-    for line in text.lines() {
-        let l = line.trim();
-        if in_description {
-            if l.ends_with("\"\"\"") {
-                in_description = false;
-            }
-            continue;
-        }
-        if l.starts_with("description") && l.contains("\"\"\"") && !l.ends_with("\"\"\"\"") {
-            in_description = !l[l.find("\"\"\"").unwrap() + 3..].contains("\"\"\"");
-            continue;
-        }
-        if l == "[[capture]]" {
-            flush(
-                &mut name,
-                &mut family,
-                &mut format,
-                rate,
-                burst_us,
-                occupancy_min,
-                bridge_us,
-                &mut out,
-            );
-            rate = 0.0;
-            burst_us = None;
-            occupancy_min = 0.0;
-            bridge_us = 2000.0;
-        } else if l.starts_with("name") {
-            name = value(l);
-        } else if l.starts_with("family") {
-            family = value(l);
-        } else if l.starts_with("format") {
-            format = value(l);
-        } else if l.starts_with("rate_sps") {
-            rate = value(l).replace('_', "").parse().unwrap_or(0.0);
-        } else if l.starts_with("bridge_us") {
-            bridge_us = value(l).parse().unwrap_or(2000.0);
-        } else if l.starts_with("occupancy_min") {
-            occupancy_min = value(l).parse().unwrap_or(0.0);
-        } else if l.starts_with("burst_us") {
-            let v = value(l);
-            let mut p = v.trim_matches(['[', ']'].as_ref()).split(',');
-            if let (Some(a), Some(b)) = (p.next(), p.next())
-                && let (Ok(a), Ok(b)) = (a.trim().parse(), b.trim().parse())
-            {
-                burst_us = Some((a, b));
-            }
-        }
-    }
-    flush(&mut name, &mut family, &mut format, rate, burst_us, occupancy_min, bridge_us, &mut out);
     out
 }

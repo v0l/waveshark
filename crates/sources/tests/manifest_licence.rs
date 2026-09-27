@@ -75,27 +75,32 @@ fn manifest(name: &str) -> String {
     std::fs::read_to_string(testdata().join(name)).expect("manifest is committed")
 }
 
+fn published() -> Vec<Entry> {
+    let mut all = parse(&manifest("decode.toml"), "[[capture]]");
+    all.extend(parse(&manifest("fixture.toml"), "[[capture]]"));
+    all
+}
+
+fn ours(e: &Entry) -> bool {
+    e.licence == Some(Licence::CcBy4) && e.source.is_none()
+}
+
 #[test]
 fn every_capture_says_what_it_may_be_used_for() {
-    let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
-    let offair = parse(&manifest("offair.toml"), "[[capture]]");
-    let survey = parse(&manifest("survey.toml"), "[[dataset]]");
-    assert_eq!(fixtures.len(), 40, "captures in fixtures.toml");
-    assert_eq!(offair.len(), 13, "captures in offair.toml");
-    assert_eq!(survey.len(), 1, "datasets in survey.toml");
+    let decode = parse(&manifest("decode.toml"), "[[capture]]");
+    let fixture = parse(&manifest("fixture.toml"), "[[capture]]");
+    assert_eq!(decode.len(), 10, "captures in decode.toml");
+    assert_eq!(fixture.len(), 42, "captures in fixture.toml");
 
-    for entry in fixtures.iter().chain(&offair).chain(&survey) {
+    let all = published();
+    for entry in &all {
         assert!(entry.licence.is_some(), "{} carries no license field", entry.name);
     }
+    assert_eq!(all.iter().filter(|e| ours(e)).count(), 38, "CC BY 4.0 recordings of our own");
 
-    let ours = |set: &[Entry]| set.iter().filter(|e| e.licence == Some(Licence::CcBy4)).count();
-    // Eighteen recordings and five signals generated here from a known picture.
-    assert_eq!(ours(&fixtures), 27, "CC BY 4.0 fixtures");
-    assert_eq!(ours(&offair), 13, "CC BY 4.0 off-air captures");
-
-    let mut foreign: Vec<(&str, &Licence, &str)> = fixtures
+    let mut foreign: Vec<(&str, &Licence, &str)> = all
         .iter()
-        .filter(|e| e.licence != Some(Licence::CcBy4))
+        .filter(|e| !ours(e))
         .map(|e| (e.name.as_str(), e.licence.as_ref().unwrap(), e.source.as_deref().unwrap_or("")))
         .collect();
     foreign.sort_by_key(|(name, _, _)| *name);
@@ -115,6 +120,7 @@ fn every_capture_says_what_it_may_be_used_for() {
             "rs41_herstmonceux_405.80024M_31.25k.cs16",
             "sstv_martin1_44100.wav",
             "stdc_egc_1541.45M_48k.cs16",
+            "survey/lora_salvora.csv",
             "vdl2_model_136.975M_1050k.wav",
         ]
     );
@@ -134,6 +140,7 @@ fn every_capture_says_what_it_may_be_used_for() {
             &Licence::Unstated,
             &Licence::Upstream("GPL-3.0".into()),
             &Licence::Unstated,
+            &Licence::CcBy4,
             &Licence::Upstream("GPL-3.0".into()),
         ]
     );
@@ -144,20 +151,18 @@ fn every_capture_says_what_it_may_be_used_for() {
 
 #[test]
 fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
-    let fixtures = parse(&manifest("fixtures.toml"), "[[capture]]");
-    let rehosted: Vec<&Entry> =
-        fixtures.iter().filter(|e| e.url.contains("nostr.download")).collect();
-    assert_eq!(rehosted.len(), 37, "fixtures re-hosted on nostr.download");
+    let all = published();
+    let rehosted: Vec<&Entry> = all.iter().filter(|e| e.url.contains("nostr.download")).collect();
+    assert_eq!(rehosted.len(), 48, "captures re-hosted on nostr.download");
     for entry in &rehosted {
-        match entry.licence {
-            Some(Licence::CcBy4) => {}
-            _ => assert!(
-                entry.source.is_some(),
-                "{} is re-hosted under somebody else's terms with no source named",
-                entry.name
-            ),
-        }
+        assert!(
+            ours(entry) || entry.source.is_some(),
+            "{} is re-hosted under somebody else's terms with no source named",
+            entry.name
+        );
     }
+    let survey = all.iter().find(|e| e.name.starts_with("survey/")).expect("the survey dataset");
+    assert!(!survey.url.contains("nostr.download"), "the survey dataset has been re-hosted");
 
     // The rtl_433 corpus states no licence, so it is pointed at and never
     // copied: every URL in it is upstream's.
@@ -168,8 +173,14 @@ fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
         .count();
     assert_eq!(urls, 194, "URLs in rtl433.toml");
     assert!(!corpus.contains("nostr.download"), "an rtl_433 capture has been re-hosted");
-    assert!(
-        !manifest("survey.toml").contains("nostr.download"),
-        "the survey dataset has been re-hosted"
-    );
+}
+
+#[test]
+fn a_local_capture_names_no_place_it_was_published() {
+    let local = manifest("local.toml");
+    let entries = local.lines().filter(|l| l.trim() == "[[capture]]").count();
+    assert_eq!(entries, 15, "captures in local.toml");
+    let keys: std::collections::BTreeSet<&str> =
+        local.lines().filter_map(|l| l.split_once(" = ").map(|(k, _)| k.trim())).collect();
+    assert_eq!(keys, ["name", "sha256", "size"].into_iter().collect());
 }

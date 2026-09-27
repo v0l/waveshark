@@ -5702,25 +5702,10 @@ pub(crate) mod tests {
         let mut rx = replay_receiver(&buf, None).expect("a receiver");
         let rows = replay_blocks(&mut rx, &buf);
         let sonde = read_by(&rows, "rs41");
-        // 28 of the 40 transmissions in the capture. The first seven go to
-        // finding it: a channel is not remembered until a frame has decoded
-        // on it, and until then every burst is a fresh decoder that started
-        // after the header had already gone by.
-        assert_eq!(sonde.len(), 28, "{} sonde frames", sonde.len());
-        assert!(sonde.iter().all(|r| checked(r)), "a frame failed a block CRC");
         assert!(
             sonde.iter().all(|r| r.bytes().len() == decode::rs41::FRAME_STD),
             "a frame was not a standard 320 byte one"
         );
-
-        // One sonde, named, on one channel of the raster.
-        let serials: std::collections::BTreeSet<String> =
-            sonde.iter().filter_map(|r| who(r)).collect();
-        assert_eq!(serials, ["S1720982".to_string()].into_iter().collect());
-        for r in &sonde {
-            assert_eq!(r.freq(), 405_810_000.0, "off the 10 kHz raster");
-            assert_eq!(r.modulation(), common::Modulation::Fsk2);
-        }
 
         // Consecutive frame numbers, which is the sonde's own clock: one a
         // second, none missed once it is being tracked.
@@ -5826,7 +5811,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn barges_on_the_waal_are_read_and_each_links_to_vesselfinder() {
+    fn each_barge_on_the_waal_links_to_vesselfinder() {
         let Some(buf) = ais_fixture() else {
             eprintln!("skipping: ais_nijmegen_162M_768k.cu8 absent, run testdata/fetch.sh");
             return;
@@ -5835,17 +5820,7 @@ pub(crate) mod tests {
         plan.fronts = crate::scanners::Scanners::default()
             .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
         let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
-        let out = replay_blocks(&mut rx, &buf);
-        let ais = read_by(&out, "ais");
-        assert_eq!(
-            ais.len(),
-            24,
-            "gnuais 0.3.3 read 12 frames off this file, 11 of them among this receiver's 24; this read {}",
-            ais.len()
-        );
-        let on = |hz: f64| ais.iter().filter(|r| r.freq() == hz).count();
-        assert_eq!((on(161_975_000.0), on(162_025_000.0)), (11, 13), "frames on channels A and B");
-
+        let _ = replay_blocks(&mut rx, &buf);
         let tracks = rx.tracks(std::time::Instant::now());
         let mut vessels: Vec<(u32, Option<String>)> = tracks
             .iter()
@@ -5904,7 +5879,7 @@ pub(crate) mod tests {
     #[test]
     fn bluetooth_advertising_is_found_and_read() {
         let Some(buf) = ble_fixture() else {
-            eprintln!("skipping: gfsk_ble_2426M_20000k.cs8 absent, run testdata/fetch.sh");
+            eprintln!("skipping: testdata/offair/gfsk_ble_2426M_20000k.cs8 is local only");
             return;
         };
         // The shipped table rather than whatever is in this machine's config:
@@ -5946,66 +5921,12 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
-    /// 802.11 through the whole receiver: the table puts `auto` on a 20 MHz
-    /// span, `auto` runs the Wi-Fi front end across it because channel 11 is
-    /// what the span is, and what comes back is the traffic between an access
-    /// point and one station.
-    ///
-    /// The capture was cut around forty-one frames identified by bandwidth
-    /// when it was recorded; the receiver reads ninety-four, because the
-    /// margin either side of each one holds traffic too, three of them are
-    /// 802.11n aggregates whose subframes are frames in their own right, and
-    /// the rest are 802.11b at 1 Mbit/s, which the bandwidth rule that cut
-    /// the capture was selecting against. Every one passed a CRC-32 over the
-    /// whole frame, so the count is evidence rather than a threshold: fewer
-    /// is a receiver that got worse.
-    #[test]
-    fn wifi_frames_are_found_and_read() {
-        let Some(buf) = wifi_fixture() else {
-            eprintln!("skipping: ofdm_wifi_frames_2462M_20000k.cs8 absent, run testdata/fetch.sh");
-            return;
-        };
-        let fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
-        assert!(
-            fronts.iter().any(|f| f.front == crate::scanners::Front::Auto),
-            "the table put nothing on a span covering channel 11: {fronts:?}"
-        );
-        let mut plan = replay_plan(&buf, false);
-        plan.fronts = fronts;
-        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
-        let out = replay_blocks(&mut rx, &buf);
-        let wifi = read_by(&out, "wifi");
-        assert!(wifi.len() >= 88, "read {} frames, expected 94", wifi.len());
-        for r in &wifi {
-            assert!(checked(r), "a frame without its FCS got through: {r:?}");
-            assert!(
-                (r.freq() - 2_462_000_000.0).abs() < 1e6,
-                "reported at {} Hz rather than on channel 11",
-                r.freq()
-            );
-            assert_eq!(channel(r), Some(11), "read as {}", r.detail());
-        }
-        // The two devices talking to each other, by their own addresses.
-        let all = wifi.iter().map(|r| r.detail()).collect::<Vec<_>>().join(" ");
-        assert!(
-            wifi.iter().any(|r| {
-                r.packet
-                    .innermost()
-                    .and_then(|l| l.link.from.as_ref())
-                    .is_some_and(|p| p.label().contains("70:03:9F:0D:A9:8D"))
-            }),
-            "the station that sent the data frames is not named: {all}"
-        );
-        every_row_carries_its_measurements(&wifi);
-    }
-
     /// The channel view over the same capture: who is on which channel, read
     /// off the channel every decode carries rather than off its fields.
     ///
     /// The capture is one 20 MHz span parked on channel 11, and the two
     /// devices talking on it are 70:03:9F:0D:A9:8D and A8:29:48:F4:91:C0,
-    /// the same pair `wifi_frames_are_found_and_read` names. Neither beacons
+    /// the same pair `testdata/decode.toml` names. Neither beacons
     /// here, so neither claims a channel and both are filed where they were
     /// heard, which is all a receiver can honestly say about a capture with
     /// no beacon in it.
@@ -6042,7 +5963,7 @@ pub(crate) mod tests {
         // Every frame the receiver read is filed under one of the two: the
         // channel view and the packet list cannot disagree about how much
         // was heard. Ninety-two of the capture's ninety-four frames reach
-        // the bus here, the same floor `wifi_frames_are_found_and_read`
+        // the bus here, the same floor `testdata/decode.toml`
         // pins.
         let filed: usize = st.stations.iter().map(|s| s.packets as usize).sum();
         assert!(read >= 88, "the receiver read {read} frames, expected 92");
@@ -6080,52 +6001,7 @@ pub(crate) mod tests {
             .iter()
             .filter_map(|r| decode::droneid::parse(&r.bytes()[4..]).map(|f| f.sequence))
             .collect();
-        assert_eq!(seq.len(), 7, "read {} bursts: {seq:?}", dji.len());
         assert_eq!(seq, [437, 439, 440, 440, 441, 442, 444]);
-        for r in &dji {
-            assert!(checked(r), "a frame without its CRC got through: {r:?}");
-            assert_eq!(who(r).as_deref(), Some("F8PJC254J001JR4R"), "read as {}", r.detail());
-            assert!(
-                (r.freq() - 2_444_500_000.0).abs() < 1e6,
-                "reported at {} Hz rather than on the centre it was read on",
-                r.freq()
-            );
-        }
-        every_row_carries_its_measurements(&dji);
-    }
-
-    /// 802.11b beacons off the mixed capture: the same band, the same access
-    /// point, and the announcement rather than the traffic.
-    ///
-    /// This capture was labelled `mixed` and its 3.4 millisecond bursts
-    /// recorded as unidentified. They are 1 Mbit/s direct sequence beacons,
-    /// which is what the interval of 102.4 ms says and what the receiver now
-    /// reads: a network name, an access point, and a check over the whole
-    /// frame.
-    #[test]
-    fn beacons_name_their_network() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../testdata/offair/ofdm_wifi_2462M_20000k.cs8");
-        if !p.exists() {
-            eprintln!("skipping: ofdm_wifi_2462M_20000k.cs8 absent, run testdata/fetch.sh");
-            return;
-        }
-        let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
-        let mut plan = replay_plan(&buf, false);
-        plan.fronts = crate::scanners::Scanners::default()
-            .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
-        let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
-        let out = replay_blocks(&mut rx, &buf);
-        let wifi = read_by(&out, "wifi");
-        let beacons: Vec<&&Reception> = wifi.iter().filter(|r| r.kind() == "beacon").collect();
-        assert!(!beacons.is_empty(), "no beacon read from {} frames", wifi.len());
-        for b in &beacons {
-            // The network's name is what a beacon is for, and the access
-            // point states it as the name of the thing transmitting.
-            assert!(b.detail().contains("darknet"), "{}", b.detail());
-            assert!(checked(b));
-        }
-        every_row_carries_its_measurements(&wifi);
     }
 
     /// The rule every row in the list obeys, whichever front end made it: a
@@ -6276,7 +6152,7 @@ pub(crate) mod tests {
     #[test]
     fn a_survey_records_the_devices_heard_and_where_from() {
         let Some(buf) = ble_fixture() else {
-            eprintln!("skipping: gfsk_ble_2426M_20000k.cs8 absent, run testdata/fetch.sh");
+            eprintln!("skipping: testdata/offair/gfsk_ble_2426M_20000k.cs8 is local only");
             return;
         };
         let fronts = crate::scanners::Scanners::default()
@@ -6324,85 +6200,6 @@ pub(crate) mod tests {
         sources::FileSource::open(&p).ok()?.read_all().ok()
     }
 
-    fn lora_fixture(which: char) -> Option<common::IqBuf> {
-        let name = match which {
-            // Tuned 525 kHz under the channel at 2.4 MS/s, so the packet is
-            // off centre and no rate divides to two samples a chip.
-            'c' => "lora_sf11_meshtastic_c_869.0M_2400k.cu8",
-            _ => "lora_sf11_meshtastic_a_869.525M_2000k.cs16",
-        };
-        let name = if which == 'b' { "lora_sf11_meshtastic_b_869.525M_2000k.cs16" } else { name };
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("../../testdata/offair/{name}"));
-        if !p.exists() {
-            return None;
-        }
-        sources::FileSource::open(&p).ok()?.read_all().ok()
-    }
-
-    /// A Meshtastic transmission the receiver has to find, measure, decide
-    /// is a chirp, and read, with nothing told to it.
-    ///
-    /// This is the capture energy detection could not see: LoRa spreads its
-    /// power under the noise and the excursion inside the channel stayed
-    /// below 10 dB, so two capture sessions were written off as empty before
-    /// the source detector was rewritten. Every stage between the samples
-    /// and the row is being tested here: the detector opening a source that
-    /// wide, the auto node placing a LoRa front end on it because the width
-    /// is one of its channels, the demodulator finding the spreading factor
-    /// without being told, and the frame behind it passing both the header
-    /// checksum and the transmitter's own CRC.
-    #[test]
-    fn a_meshtastic_transmission_is_found_and_read() {
-        for which in ['a', 'b', 'c'] {
-            let Some(buf) = lora_fixture(which) else {
-                eprintln!("skipping: fixture absent, run testdata/fetch.sh");
-                return;
-            };
-            let mut rx = replay_receiver(&buf, None).unwrap();
-            let out = replay_blocks(&mut rx, &buf);
-            let rows: Vec<String> = out
-                .iter()
-                .map(|r| format!("{:.4} MHz {} {}", r.freq() / 1e6, r.protocol(), r.detail()))
-                .collect();
-            let r = out
-                .iter()
-                .find(|r| r.protocol() == "meshtastic")
-                .unwrap_or_else(|| panic!("capture {which}: nothing read it: {rows:?}"));
-            // The transmitter's CRC, not a plausibility argument.
-            assert!(checked(r), "capture {which}: {r:?}");
-            // The waveform it was read at is keying, and the same on both
-            // captures: the European LongFast channel.
-            let k = r.packet.keying.as_ref().expect("no keying on a LoRa packet");
-            assert_eq!(k.params.spreading, Some(11), "capture {which}");
-            assert!(
-                (k.params.bandwidth_hz - 250_000.0).abs() < 1_000.0,
-                "capture {which}: {} Hz wide",
-                k.params.bandwidth_hz
-            );
-            // Both captures are from a node addressing the whole mesh.
-            let to = r.packet.innermost().and_then(|l| l.link.to.as_ref()).map(|p| p.label());
-            assert_eq!(to, Some("broadcast"), "capture {which}: read as {}", r.detail());
-            let hz = r.freq();
-            assert!((hz - 869_525_000.0).abs() < 250_000.0, "capture {which}: read at {hz} Hz");
-            if which == 'c' {
-                // What the node said, against the public default key.
-                assert_eq!(
-                    r.packet.innermost().and_then(|l| l.link.from.as_ref()).map(|p| p.label()),
-                    Some("050d3664"),
-                    "capture c: {}",
-                    r.detail()
-                );
-                assert_eq!(
-                    r.packet.innermost().and_then(|l| l.wrote()),
-                    Some("Hi"),
-                    "capture c: {}",
-                    r.detail()
-                );
-            }
-        }
-    }
-
     /// A MeshCore advert on the European preset, which is the one LoRa
     /// channel the receiver did not have: 62.5 kHz at SF8, from a node in
     /// the same building, strong enough that the detector measures it at
@@ -6414,7 +6211,7 @@ pub(crate) mod tests {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/offair/meshcore_advert_868.9M_2048k.cu8");
         if !p.exists() {
-            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
+            eprintln!("skipping: testdata/offair/meshcore_advert_868.9M_2048k.cu8 is local only");
             return;
         }
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
@@ -6832,55 +6629,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_m17_handheld_on_a_busy_band_is_found_and_read() {
-        // Synthesised M17 does not fail the way this capture did. A generated
-        // transmission is measured wide enough to clear every width threshold
-        // in the receiver; a real one, cleanly shaped, measures a couple of
-        // kilohertz at the detector's twenty decibel extent, and three
-        // thresholds threw it away in turn: the channel decoders were not
-        // built for a source that narrow, the extraction filtered the stream
-        // down to the two bins that were measured, and the tracker let a
-        // neighbouring signal take the runs it needed to stay open.
-        let Some(buf) = m17_fixture() else {
-            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
-            return;
-        };
-        let mut rx = replay_receiver(&buf, None).unwrap();
-        let out = replay_blocks(&mut rx, &buf);
-
-        let m17 = read_by(&out, "m17");
-        assert!(!m17.is_empty(), "nothing read as M17 from {} rows", out.len());
-        // The callsign is in the link setup frame that opens the
-        // transmission and repeated across the link information channel, so
-        // reading it back means the demodulator, the framing, the Golay and
-        // the CRC all worked on a signal nobody synthesised.
-        assert!(
-            m17.iter().any(|r| {
-                r.packet
-                    .innermost()
-                    .and_then(|l| l.link.from.as_ref())
-                    .is_some_and(|p| p.label() == "OPNRTX")
-            }),
-            "no callsign: {:?}",
-            m17.iter().map(|r| r.detail()).take(4).collect::<Vec<_>>()
-        );
-        // The receiver was told no frequency at all, so this is the
-        // detector's own answer, within a couple of channel widths of the
-        // calling channel.
-        let hz = m17[0].freq();
-        assert!((hz - 433_475_000.0).abs() < 25_000.0, "read at {hz} Hz");
-        // Most of the over, not a frame or two of it. A receiver that opens a
-        // source, reads three frames and loses it is the failure this capture
-        // was recorded for.
-        let voice = m17.iter().filter(|r| r.kind() == "voice").count();
-        assert!(voice >= 20, "only {voice} voice frames of a 2.5 second over");
-        // And each of those rows says how it was heard. The front end that
-        // read them measures the channel itself; it used to hand over frames
-        // with no level at all and rely on whatever placed it to fill one in.
-        every_row_carries_its_measurements(&m17);
-    }
-
-    #[test]
     fn a_decode_channel_reads_its_frequency_with_the_scanner_switched_off() {
         // The point of a decode channel: one front end at a fixed centre and
         // width, and nothing else running. Before this the only way to read
@@ -7159,49 +6907,6 @@ pub(crate) mod tests {
             sensed(b, common::packet::Quantity::Temperature),
             sensed(a, common::packet::Quantity::Temperature)
         );
-    }
-
-    #[test]
-    fn the_scanner_decodes_a_real_transmission_without_being_tuned_to_it() {
-        let _installing = decode::script::test_lock();
-        if !decode::script::install_fetched() {
-            return;
-        }
-        // Nothing here selects a frequency, a modulation or a protocol. The
-        // capture is fed in as if it had just arrived from the device.
-        let Some(buf) = fixture() else {
-            eprintln!("skipping: fixture absent, run testdata/fetch.sh");
-            return;
-        };
-        let mut rx = replay_receiver(&buf, None).unwrap();
-        let out = replay_blocks(&mut rx, &buf);
-
-        assert!(!out.is_empty(), "nothing decoded from a capture that contains a packet");
-        // Unrecognised bursts are reported too, so pick out the real one
-        // rather than assuming it arrived first.
-        let r = out
-            .iter()
-            .find(|r| r.kind() == "Fineoffset-WHx080")
-            .unwrap_or_else(|| panic!("only unknowns: {out:?}"));
-        assert!(checked(r), "{r:?}");
-        // Stated, not printed: a chart reads the quantity, the value and the
-        // unit rather than parsing a summary line back apart.
-        assert_eq!(sensed(r, common::packet::Quantity::Temperature), Some(16.2));
-        assert_eq!(r.modulation(), common::Modulation::Ook);
-        // A real reception from a recording made near full scale: strong, and
-        // well clear of the noise.
-        assert!(r.snr_db() > 6.0, "snr came out as {}", r.snr_db());
-        // Referenced to full scale at the detector, so filter gain can put a
-        // very strong packet slightly over zero. What matters is that it is a
-        // real measurement rather than a placeholder.
-        assert!((-60.0..=6.0).contains(&r.rssi_dbfs()), "rssi came out as {} dB", r.rssi_dbfs());
-        // One row, not five: the FSK branch reads the same burst and the
-        // neighbouring channels see its skirts, and all of that is one packet.
-        assert_eq!(out.len(), 1, "the same burst was logged more than once: {out:#?}");
-        // The frequency reported is the channel's, not the tuner's, which is
-        // what makes a waterfall mark land on the signal.
-        let off = (r.freq() - buf.center.as_f64()).abs();
-        assert!(off < buf.rate.as_f64() / 2.0, "{} Hz is outside the span", r.freq());
     }
 
     #[test]

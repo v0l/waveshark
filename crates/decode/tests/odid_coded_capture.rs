@@ -9,7 +9,7 @@
 //! The packets are the auxiliary ones. What the primary channel carries is a
 //! pointer to a data channel chosen afresh each time, so these were recorded
 //! by parking on a stretch of data channels instead. See
-//! `testdata/fixtures.toml` for what else the capture is evidence of.
+//! `testdata/fixture.toml` for what else the capture is evidence of.
 
 use common::C32;
 use decode::odid::Message;
