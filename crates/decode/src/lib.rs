@@ -109,6 +109,7 @@ pub mod video_channels;
 pub mod videoleak;
 pub mod vocoder;
 pub mod voice;
+pub mod walksnail;
 pub mod wefax;
 pub mod whiten;
 pub mod wifi;

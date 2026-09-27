@@ -61,6 +61,7 @@ pub mod twotone;
 pub mod uat;
 pub mod vdl2;
 pub mod video;
+pub mod walksnail;
 pub mod wefax;
 pub mod wifi;
 pub mod wmbus;
@@ -195,6 +196,7 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &ieee802154::Ieee802154,
         &wifi::Wifi,
         &droneid::DroneId,
+        &walksnail::Walksnail,
         &video::Video,
         &tempest::Tempest,
         &acars::Acars,

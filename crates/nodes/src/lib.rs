@@ -84,6 +84,7 @@ pub mod tx_nodes;
 pub mod uat_nodes;
 pub mod vdl2_nodes;
 pub mod video_nodes;
+pub mod walksnail_nodes;
 pub mod wefax_nodes;
 pub mod wfm;
 pub mod wifi_nodes;
@@ -272,6 +273,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (iqstream_nodes::DESC, iqstream_nodes::build),
     (wifi_nodes::DESC, wifi_nodes::build),
     (droneid_nodes::DESC, droneid_nodes::build),
+    (walksnail_nodes::DESC, walksnail_nodes::build),
     (acars_nodes::DESC, acars_nodes::build),
     (aprs_nodes::DESC, aprs_nodes::build),
     (m17_nodes::DESC, m17_nodes::build),

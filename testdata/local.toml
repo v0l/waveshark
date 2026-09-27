@@ -77,3 +77,13 @@ size = 114_556_928
 name = "offair/tetra_voice_390.9M_250k.cu8"
 sha256 = "9598fa87143750d732b9f614863a7dc78397d4de16ef14f91bbfd4c35de8eaa8"
 size = 4_773_204
+
+[[capture]]
+name = "offair/walksnail_avatar_5805M_20000k.cs8"
+sha256 = "2c19b86e5de7feab49421d2bcb4552a1216129b71372d643f2c45317a6a74ef9"
+size = 48_000_000
+
+[[capture]]
+name = "offair/walksnail_avatar_covered_5805M_20000k.cs8"
+sha256 = "05cf065746780ca56817f51cd2bd9b9751691333b8213fb645ea17d7f825935d"
+size = 48_000_000

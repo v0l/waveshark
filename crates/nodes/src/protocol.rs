@@ -542,6 +542,7 @@ fn compiled() -> &'static [&'static dyn Protocol] {
         &crate::ieee802154_nodes::Ieee802154,
         &crate::wifi_nodes::Wifi,
         &crate::droneid_nodes::DroneId,
+        &crate::walksnail_nodes::Walksnail,
         &crate::video_nodes::Video,
         &crate::tempest_nodes::Tempest,
         &crate::acars_nodes::Acars,

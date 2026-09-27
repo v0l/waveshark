@@ -16,3 +16,6 @@ sources.workspace = true
 
 [[example]]
 name = "slice_cost"
+
+[[example]]
+name = "artosyn_probe"

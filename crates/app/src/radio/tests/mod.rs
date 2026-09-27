@@ -3,6 +3,7 @@ use crate::chain::OOK_CHANNEL_HZ;
 use crate::row::Reception;
 
 mod band_2g4;
+mod band_5g8;
 mod banks;
 mod captures;
 mod eas;

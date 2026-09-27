@@ -65,6 +65,16 @@ impl Rational {
         Self::with_ratio(l, m)
     }
 
+    pub fn approx_passband(
+        rate_in: f64,
+        rate_out: f64,
+        max_denominator: usize,
+        passband_hz: f64,
+    ) -> Self {
+        let (l, m) = approximate(rate_out / rate_in, max_denominator);
+        Self::with_cutoff(l, m, passband_hz / (rate_in * l as f64))
+    }
+
     /// Interpolate by `l` and decimate by `m`, whatever those mean in rates.
     pub fn with_ratio(l: usize, m: usize) -> Self {
         // Designed at the interpolated rate, stopping below whichever Nyquist

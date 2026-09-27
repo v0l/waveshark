@@ -7,6 +7,7 @@
 pub mod afsk;
 pub mod agc;
 pub mod ais;
+pub mod artosyn;
 pub mod ask;
 pub mod biphase;
 pub mod ble;
