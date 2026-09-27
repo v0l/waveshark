@@ -52,6 +52,7 @@ mod state;
 mod strip;
 mod timeline;
 mod transcript_pane;
+mod trilateration_pane;
 mod video_pane;
 pub(crate) mod widgets;
 
@@ -178,6 +179,7 @@ pub struct App {
     /// What was open before it. A look at the map and back is then one key,
     /// which is the thing an operator does most often with these views.
     prev_view: View,
+    group_view: [View; Group::ALL.len()],
     /// How much each view held when it was last looked at, by
     /// [`View::slot`]. A tab's dot is on when its view has more than this.
     view_seen: [u64; View::COUNT],
@@ -390,6 +392,7 @@ enum View {
     Messages,
     Links,
     Devices,
+    Trilateration,
     /// What is on each channel, and how crowded it is.
     Channels,
     Satellites,
@@ -413,6 +416,7 @@ impl View {
             View::Messages => "Messages",
             View::Links => "Data links",
             View::Devices => "Devices",
+            View::Trilateration => "Trilateration",
             View::Channels => "Channels",
             View::Satellites => "Satellites",
             View::Video => "Video",
@@ -436,6 +440,7 @@ impl View {
             View::Map => Icon::Map,
             View::Links => Icon::Links,
             View::Devices => Icon::Devices,
+            View::Trilateration => Icon::Map,
             View::Channels => Icon::Channels,
             View::Satellites => Icon::Satellite,
             View::Keys => Icon::Key,
@@ -458,6 +463,7 @@ impl View {
             View::Map => "Everything that reported a position",
             View::Links => "Who is talking to whom",
             View::Devices => "Transmitters seen, and where they were",
+            View::Trilateration => "Transmitters the survey has placed, tightest first",
             View::Channels => "What is on each channel, and how crowded it is",
             View::Satellites => "Passes overhead, and what they send",
             View::Keys => "Encryption seen, and the keys held",
@@ -466,37 +472,115 @@ impl View {
         }
     }
 
-    /// The strip, in two rows: what the receiver can do and what it heard on
-    /// the top row, who is out there on the bottom. The dashboard leads,
-    /// because it is where a receiver that has just been started is.
-    const ROWS: [&'static [View]; 2] = [
+    const ALL: [View; 16] = [
+        View::Dashboard,
+        View::Spectrum,
+        View::Chain,
+        View::Calls,
+        View::Transcript,
+        View::Messages,
+        View::Video,
+        View::Map,
+        View::Devices,
+        View::Trilateration,
+        View::Links,
+        View::Channels,
+        View::Control,
+        View::Keys,
+        View::Satellites,
+        View::Agent,
+    ];
+
+    const COUNT: usize = View::ALL.len();
+
+    fn slot(self) -> usize {
+        View::ALL.iter().position(|v| *v == self).unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Group {
+    Calls,
+    Survey,
+}
+
+impl Group {
+    const ALL: [Group; 2] = [Group::Calls, Group::Survey];
+
+    fn views(self) -> &'static [View] {
+        match self {
+            Group::Calls => &[View::Calls, View::Transcript],
+            Group::Survey => &[
+                View::Devices,
+                View::Trilateration,
+                View::Links,
+                View::Channels,
+                View::Control,
+                View::Keys,
+            ],
+        }
+    }
+
+    fn slot(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    One(View),
+    Group(Group),
+}
+
+impl Tab {
+    const ROWS: [&'static [Tab]; 2] = [
         &[
-            View::Dashboard,
-            View::Spectrum,
-            View::Chain,
-            View::Calls,
-            View::Transcript,
-            View::Messages,
-            View::Video,
+            Tab::One(View::Dashboard),
+            Tab::One(View::Spectrum),
+            Tab::One(View::Chain),
+            Tab::Group(Group::Calls),
+            Tab::One(View::Messages),
+            Tab::One(View::Video),
         ],
         &[
-            View::Map,
-            View::Links,
-            View::Devices,
-            View::Channels,
-            View::Control,
-            View::Satellites,
-            View::Keys,
-            View::Agent,
+            Tab::One(View::Map),
+            Tab::Group(Group::Survey),
+            Tab::One(View::Satellites),
+            Tab::One(View::Agent),
         ],
     ];
 
-    const COUNT: usize = View::ROWS[0].len() + View::ROWS[1].len();
+    fn of(v: View) -> Tab {
+        match Group::ALL.into_iter().find(|g| g.views().contains(&v)) {
+            Some(g) => Tab::Group(g),
+            None => Tab::One(v),
+        }
+    }
 
-    /// Where the view keeps what it has been seen holding. The strip's own
-    /// order, so a reader of one is a reader of the other.
-    fn slot(self) -> usize {
-        View::ROWS.into_iter().flatten().position(|v| *v == self).unwrap_or(0)
+    fn label(self) -> &'static str {
+        match self {
+            Tab::One(v) => v.label(),
+            Tab::Group(Group::Calls) => "Calls",
+            Tab::Group(Group::Survey) => "Survey",
+        }
+    }
+
+    fn icon(self) -> crate::icons::Icon {
+        match self {
+            Tab::One(v) => v.icon(),
+            Tab::Group(Group::Calls) => View::Calls.icon(),
+            Tab::Group(Group::Survey) => View::Devices.icon(),
+        }
+    }
+
+    fn about(self) -> &'static str {
+        match self {
+            Tab::One(v) => v.about(),
+            Tab::Group(Group::Calls) => "Who is talking, and what was said",
+            Tab::Group(Group::Survey) => {
+                "Devices, where they are, data links, channels, control links and keys heard"
+            }
+        }
     }
 }
 
@@ -681,6 +765,7 @@ impl Default for App {
             autostart: false,
             view: View::Dashboard,
             prev_view: View::Spectrum,
+            group_view: Group::ALL.map(|g| g.views()[0]),
             view_seen: [0; View::COUNT],
             video_seen: 0,
             video_live_was: false,
@@ -1867,10 +1952,13 @@ impl App {
             .selected
             .and_then(|id| self.survey.rows.iter().find(|d| d.id == id))
             .map(|d| d.ident.clone());
+        let located = self.survey.located();
         let trail = map_pane::Trail {
             points: &self.survey.trail,
             ident: ident.as_deref(),
             estimate: self.survey.estimate,
+            located: &located,
+            within: self.survey.within,
         };
         let home = self.setting(|s| s.location);
         let place = map_pane::Map {
@@ -2215,23 +2303,44 @@ impl App {
         }
         .show(ui);
         match act {
-            Some(devices_pane::Action::Select(id)) => {
-                self.survey.selected = id;
-                // The trail is fetched on the change rather than per frame:
-                // a device heard all afternoon has thousands of sightings and
-                // the map only redraws when one of them moves.
-                self.survey.trail = match (id, self.survey.db.as_ref()) {
-                    (Some(id), Some(db)) => db.sightings(id).unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-                self.survey.estimate = survey::locate(&self.survey.trail);
-            }
             Some(devices_pane::Action::Record(on)) => self.set_survey(!on, None),
             Some(devices_pane::Action::Export) => self.export_survey(),
             Some(devices_pane::Action::Wigle) => self.open_wigle(),
             Some(devices_pane::Action::BeaconDb) => self.survey.beacondb.open = true,
             Some(devices_pane::Action::HomeAssistant) => self.open_homeassistant(),
             None => {}
+        }
+    }
+
+    fn trilateration_view(&mut self, ui: &mut egui::Ui) {
+        self.refresh_survey();
+        let recording = self.setting(|s| s.survey_on);
+        let act = trilateration_pane::Trilateration { st: &mut self.survey, recording }.show(ui);
+        match act {
+            Some(trilateration_pane::Action::ShowOnMap(id)) => {
+                self.survey.selected = Some(id);
+                self.survey.trail = self
+                    .survey
+                    .db
+                    .as_ref()
+                    .and_then(|db| db.sightings(id).ok())
+                    .map(|s| survey::distinct(&s))
+                    .unwrap_or_default();
+                self.survey.estimate = survey::locate(&self.survey.trail);
+                self.set_view(View::Map);
+            }
+            None => {}
+        }
+    }
+
+    fn keep_locating(&mut self) {
+        let wanted = self.view == View::Trilateration
+            || (self.view == View::Map && self.map.map.layers.on("sightings"))
+            || self.survey.locating.is_some();
+        let path = self.setting(|s| s.survey_file()).filter(|_| wanted);
+        let running = self.survey.locating.as_ref().map(|l| &l.path);
+        if path.as_ref() != running {
+            self.survey.locating = path.map(state::Locating::start);
         }
     }
 
@@ -2284,7 +2393,7 @@ impl App {
                 self.survey.rows = rows;
             }
             if let Some(id) = self.survey.selected {
-                self.survey.trail = db.sightings(id).unwrap_or_default();
+                self.survey.trail = survey::distinct(&db.sightings(id).unwrap_or_default());
                 self.survey.estimate = survey::locate(&self.survey.trail);
             }
         }
@@ -3106,6 +3215,7 @@ impl eframe::App for App {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.view_keys(ui.ctx());
+        self.keep_locating();
         self.read_views();
         {
             let _s = tracing::info_span!("head").entered();
@@ -3127,6 +3237,9 @@ impl eframe::App for App {
         {
             let _s = tracing::info_span!("scope").entered();
             CentralPanel::default().frame(egui::Frame::NONE.fill(theme::CHASSIS)).show(ui, |ui| {
+                if let Tab::Group(g) = Tab::of(self.view) {
+                    self.group_tabs(ui, g);
+                }
                 match self.view {
                     View::Dashboard => self.dashboard_view(ui),
                     View::Spectrum => self.scope_view(ui),
@@ -3137,6 +3250,7 @@ impl eframe::App for App {
                     View::Messages => self.message_view(ui),
                     View::Links => self.links_view(ui),
                     View::Devices => self.devices_view(ui),
+                    View::Trilateration => self.trilateration_view(ui),
                     View::Channels => self.channels_view(ui),
                     View::Control => control_pane::ControlView { st: &mut self.control }.show(ui),
                     View::Satellites => self.sats_view(ui),
@@ -3257,10 +3371,39 @@ impl App {
 
     /// Open a view, remembering the one being left.
     fn set_view(&mut self, v: View) {
+        if let Tab::Group(g) = Tab::of(v) {
+            self.group_view[g.slot()] = v;
+        }
         if v != self.view {
             self.prev_view = self.view;
             self.view = v;
         }
+    }
+
+    fn tab_view(&self, t: Tab) -> View {
+        match t {
+            Tab::One(v) => v,
+            Tab::Group(g) => self.group_view[g.slot()],
+        }
+    }
+
+    fn tab_live(&self, t: Tab) -> bool {
+        View::ALL.into_iter().any(|v| Tab::of(v) == t && self.view_live(v))
+    }
+
+    fn group_tabs(&mut self, ui: &mut egui::Ui, g: Group) {
+        let labels: Vec<(View, String)> = g
+            .views()
+            .iter()
+            .copied()
+            .map(|v| (v, format!("{} {}", v.label(), self.view_mark(v))))
+            .collect();
+        let options: Vec<(View, &str)> = labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
+        let mut pick = self.view;
+        egui::Frame::NONE
+            .inner_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 0 })
+            .show(ui, |ui| egui_bench::panel::tabs(ui, &mut pick, &options));
+        self.set_view(pick);
     }
 
     /// How much a view is holding, as one number that moves when something
@@ -3279,6 +3422,7 @@ impl App {
             View::Map => self.map.tracks.len() as u64,
             View::Links => self.links.list.len() as u64,
             View::Devices => self.survey.rows.len() as u64,
+            View::Trilateration => self.survey.located_within() as u64,
             View::Channels => self
                 .radio
                 .as_ref()
@@ -3308,7 +3452,7 @@ impl App {
     /// were elsewhere, and you were not elsewhere before the program was
     /// running: a key saved last week is not news this morning.
     fn forget_what_was_already_here(&mut self) {
-        for v in View::ROWS.into_iter().flatten().copied() {
+        for v in View::ALL {
             self.view_seen[v.slot()] = self.view_mark(v);
         }
     }
@@ -3329,7 +3473,7 @@ impl App {
         } else if std::mem::take(&mut self.video_live_was) {
             self.video_seen += 1;
         }
-        for v in View::ROWS.into_iter().flatten().copied() {
+        for v in View::ALL {
             let mark = self.view_mark(v);
             let seen = &mut self.view_seen[v.slot()];
             if v == self.view || mark < *seen {
@@ -3340,10 +3484,10 @@ impl App {
 
     /// The tabs on the strip, in order, without the dashboard when it is not
     /// wanted. The dashboard leads the top row, so leaving it out is a slice.
-    fn tabs(&self) -> [&'static [View]; 2] {
-        let mut rows = View::ROWS;
+    fn tabs(&self) -> [&'static [Tab]; 2] {
+        let mut rows = Tab::ROWS;
         if !self.setting(|s| s.dashboard) {
-            rows[0] = &View::ROWS[0][1..];
+            rows[0] = &Tab::ROWS[0][1..];
         }
         rows
     }
@@ -3370,12 +3514,12 @@ impl App {
         let tabs = self.tabs();
         let mut pick = None;
         ctx.input_mut(|i| {
-            for (n, v) in tabs.into_iter().flatten().copied().enumerate() {
+            for (n, t) in tabs.into_iter().flatten().copied().enumerate() {
                 let Some((key, _)) = tab_digit(n) else {
                     continue;
                 };
                 if i.consume_key(egui::Modifiers::COMMAND, key) {
-                    pick = Some(v);
+                    pick = Some(self.tab_view(t));
                 }
             }
             if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Backtick) {
@@ -4659,8 +4803,8 @@ mod tests {
     /// glyph or a digit is a tab that opens the wrong one.
     #[test]
     fn every_view_has_a_tab_of_its_own() {
-        let tabs: Vec<View> = View::ROWS.into_iter().flatten().copied().collect();
-        assert_eq!(tabs.len(), 15);
+        let tabs: Vec<Tab> = Tab::ROWS.into_iter().flatten().copied().collect();
+        assert_eq!(tabs.len(), 10);
         for v in [
             View::Dashboard,
             View::Spectrum,
@@ -4677,9 +4821,11 @@ mod tests {
             View::Keys,
             View::Control,
             View::Agent,
+            View::Trilateration,
         ] {
-            assert!(tabs.contains(&v), "{} has no tab", v.label());
+            assert!(tabs.contains(&Tab::of(v)), "{} has no tab", v.label());
         }
+        assert_eq!(View::ALL.len(), 16);
         for (i, a) in tabs.iter().enumerate() {
             for b in &tabs[i + 1..] {
                 assert!(a.icon() != b.icon(), "{} and {} share a glyph", a.label(), b.label());
@@ -4693,25 +4839,64 @@ mod tests {
     #[test]
     fn the_shortcuts_follow_the_strip() {
         let mut a = app();
-        let with: Vec<View> = a.tabs().into_iter().flatten().copied().collect();
-        assert_eq!(with.first(), Some(&View::Dashboard));
+        let with: Vec<Tab> = a.tabs().into_iter().flatten().copied().collect();
+        assert_eq!(with.first(), Some(&Tab::One(View::Dashboard)));
         assert_eq!(tab_digit(0).map(|(_, d)| d), Some("1"));
 
         a.hide_dashboard();
-        let without: Vec<View> = a.tabs().into_iter().flatten().copied().collect();
+        let without: Vec<Tab> = a.tabs().into_iter().flatten().copied().collect();
         assert_eq!(without.len(), with.len() - 1);
-        assert!(!without.contains(&View::Dashboard), "a hidden view keeps its tab");
+        assert!(!without.contains(&Tab::One(View::Dashboard)), "a hidden view keeps its tab");
         // The spectrum is back on 1, which is where it was before there was a
         // dashboard to put in front of it.
-        assert_eq!(without.first(), Some(&View::Spectrum));
+        assert_eq!(without.first(), Some(&Tab::One(View::Spectrum)));
 
         let keys: Vec<_> = (0..with.len()).filter_map(tab_digit).collect();
-        assert_eq!(keys.len(), 10, "ten digits for thirteen tabs");
+        assert_eq!(keys.len(), 10, "a digit for each of ten tabs");
         for (i, x) in keys.iter().enumerate() {
             for y in &keys[i + 1..] {
                 assert_ne!(x.0, y.0, "two tabs answer to the same key");
             }
         }
+    }
+
+    #[test]
+    fn the_survey_tab_reopens_on_the_table_last_read_and_lights_for_any_of_them() {
+        let mut a = app();
+        a.read_views();
+        assert_eq!(a.tab_view(Tab::Group(Group::Survey)), View::Devices);
+        a.show_links();
+        assert_eq!(Tab::of(a.view), Tab::Group(Group::Survey));
+        a.set_view(View::Map);
+        assert_eq!(
+            a.tab_view(Tab::Group(Group::Survey)),
+            View::Links,
+            "the survey reopens on links"
+        );
+        assert_eq!(a.tab_view(Tab::Group(Group::Calls)), View::Calls);
+        a.show_transcript(None);
+        assert_eq!(Tab::of(a.view), Tab::Group(Group::Calls), "the transcript is a tab of calls");
+        a.set_view(View::Map);
+        assert_eq!(a.tab_view(Tab::Group(Group::Calls)), View::Transcript);
+        assert_eq!(a.tab_view(Tab::Group(Group::Survey)), View::Links, "each group keeps its own");
+        a.keys.store = crate::keystore::KeyStore::default();
+        a.forget_what_was_already_here();
+        assert!(!a.tab_live(Tab::Group(Group::Survey)));
+        a.keys.store.insert_channel(decode::channel_keys::ChannelKey {
+            system: decode::channel_keys::System::Meshtastic,
+            name: "PrivateRoom".into(),
+            key: vec![0x01; 16],
+        });
+        assert!(
+            a.tab_live(Tab::Group(Group::Survey)),
+            "a key heard lights the survey while the map is open"
+        );
+        a.show_links();
+        a.read_views();
+        assert!(a.tab_live(Tab::Group(Group::Survey)), "reading the links does not read the keys");
+        a.set_view(View::Keys);
+        a.read_views();
+        assert!(!a.tab_live(Tab::Group(Group::Survey)));
     }
 
     /// Hiding the dashboard while it is open has to leave the operator

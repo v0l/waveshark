@@ -451,6 +451,7 @@ pub mod args {
         Messages,
         Links,
         Devices,
+        Trilateration,
         Channels,
         Satellites,
         Video,

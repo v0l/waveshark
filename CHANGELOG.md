@@ -22,6 +22,7 @@ the code is in the commit log.
 - Chain view editing: stages dragged from a searchable list onto a port or wire, CLEAR, zoom, FIT, and why a stage was left out.
 - Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.
 - DAB and DAB+ sound, the station picked from the ensemble on the channel strip.
+- Trilateration list and map LOCATED layer of surveyed transmitters placed within a chosen accuracy.
 
 ### Changed
 
@@ -37,6 +38,8 @@ the code is in the commit log.
 - Spectrum at half the processor time on a wide span.
 - GSM downlinks read in real time at 20 MS/s, with no burst classifier on cellular allocations.
 - SSB channel width as the sideband filter's, 2.4 kHz by default rather than 6, in memories too.
+- Survey tab holding devices, trilateration, data links, channels, control links and keys.
+- Transcript as a tab of Calls.
 - Survey sightings written only from places not yet heard from, none while parked.
 
 ### Fixed

@@ -59,6 +59,8 @@ pub(super) struct Trail<'a> {
     pub ident: Option<&'a str>,
     /// Where the sightings put the device, when they can say.
     pub estimate: Option<survey::Estimate>,
+    pub located: &'a [survey::Located],
+    pub within: super::state::Within,
 }
 
 /// The map, over where it is looking and what is on it.
@@ -134,6 +136,8 @@ impl Map<'_> {
                     trail: self.trail.points,
                     ident: self.trail.ident,
                     estimate: self.trail.estimate,
+                    located: self.trail.located,
+                    within: self.trail.within,
                 };
                 let mut dispatch = DispatchLayer::new(self.messages.recent());
                 let mut layers: [&mut dyn Layer; 9] = [

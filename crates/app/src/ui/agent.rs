@@ -652,6 +652,7 @@ impl App {
                     args::ViewName::Messages => View::Messages,
                     args::ViewName::Links => View::Links,
                     args::ViewName::Devices => View::Devices,
+                    args::ViewName::Trilateration => View::Trilateration,
                     args::ViewName::Channels => View::Channels,
                     args::ViewName::Satellites => View::Satellites,
                     args::ViewName::Video => View::Video,

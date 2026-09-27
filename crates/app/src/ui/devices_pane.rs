@@ -5,11 +5,6 @@
 //! most of them. This is the other half of the same evidence, one row per
 //! transmitter, sorted by when it was last heard, with the place it was heard
 //! strongest and how many receptions there were.
-//!
-//! Selecting a row draws that device's sightings on the map, which is the
-//! only honest way to show where something is: a line of positions the
-//! receiver drove along with the level at each, rather than a pin claiming a
-//! coordinate nothing measured.
 
 use super::state::SurveyState;
 use super::*;
@@ -27,8 +22,6 @@ pub(super) struct Devices<'a> {
 }
 
 pub(super) enum Action {
-    /// Show this device's sightings on the map, or none.
-    Select(Option<i64>),
     /// Start or stop recording the survey, at its default path.
     Record(bool),
     /// Write the survey out as WiGLE CSV, beside the survey file.
@@ -67,23 +60,6 @@ impl Devices<'_> {
                 (false, None) => ("gps", "nothing answering".into()),
             };
             Line::new().legend(legend).value(value).size(11.0).show(ui);
-            // Where the selected device's sightings put it. A conclusion
-            // drawn from the levels along the drive, with how far it might
-            // be out, which is what makes it worth saying at all.
-            if self.st.selected.is_some() {
-                ui.add_space(12.0);
-                let (legend, value) = match &self.st.estimate {
-                    Some(e) => (
-                        "likely at",
-                        format!(
-                            "{:.5}, {:.5} within {:.0} m, from {} sightings",
-                            e.lat, e.lon, e.radius_m, e.sightings
-                        ),
-                    ),
-                    None => ("likely at", "not enough places heard from yet".into()),
-                };
-                Line::new().legend(legend).value(value).size(11.0).show(ui);
-            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
@@ -191,7 +167,6 @@ impl Devices<'_> {
             .collect();
 
         let now_us = now_us();
-        let selected = self.st.selected;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)).show(ui, |ui| {
                 egui::Grid::new("devices").num_columns(7).spacing([14.0, 4.0]).striped(true).show(
@@ -204,15 +179,7 @@ impl Devices<'_> {
                         }
                         ui.end_row();
                         for d in &rows {
-                            let hit = Some(d.id) == selected;
-                            let ident = egui::RichText::new(&d.ident).size(11.0).color(if hit {
-                                theme::READOUT
-                            } else {
-                                theme::TRACE
-                            });
-                            if ui.selectable_label(hit, ident).clicked() {
-                                act = Some(Action::Select(if hit { None } else { Some(d.id) }));
-                            }
+                            Line::new().value(&d.ident).size(11.0).tint(theme::TRACE).show(ui);
                             cell(ui, &d.protocol);
                             cell(ui, d.name.as_deref().unwrap_or(""));
                             cell(ui, d.vendor.as_deref().unwrap_or(""));

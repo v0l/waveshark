@@ -397,29 +397,29 @@ impl App {
                                 if i > 0 {
                                     ui.add_space(5.0);
                                 }
-                                for v in row.iter().copied() {
+                                for t in row.iter().copied() {
                                     let key = tab_digit(n);
                                     n += 1;
                                     let tip = match key {
                                         Some((_, d)) => format!(
                                             "{}  ({}{})\n{}",
-                                            v.label(),
+                                            t.label(),
                                             TAB_MOD,
                                             d,
-                                            v.about()
+                                            t.about()
                                         ),
-                                        None => format!("{}\n{}", v.label(), v.about()),
+                                        None => format!("{}\n{}", t.label(), t.about()),
                                     };
                                     let hit = crate::icons::icon_tab(
                                         ui,
-                                        v.icon(),
+                                        t.icon(),
                                         &tip,
-                                        self.view == v,
-                                        self.view_live(v),
+                                        Tab::of(self.view) == t,
+                                        self.tab_live(t),
                                         TAB,
                                     );
                                     if hit.clicked() {
-                                        pick = Some(v);
+                                        pick = Some(self.tab_view(t));
                                     }
                                 }
                             }

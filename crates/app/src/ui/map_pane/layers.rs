@@ -107,6 +107,18 @@ pub(super) struct SightingLayer<'a> {
     /// The device the trail belongs to, for the status line.
     pub ident: Option<&'a str>,
     pub estimate: Option<survey::Estimate>,
+    pub located: &'a [survey::Located],
+    pub within: super::super::state::Within,
+}
+
+fn draw_estimate(c: &Canvas, est: &survey::Estimate, ink: egui::Color32) {
+    let at = c.at(est.lat, est.lon);
+    let r = (est.radius_m / 1852.0 * c.nm_px_at(est.lat)) as f32;
+    c.p.circle_filled(at, r.max(4.0), ink.gamma_multiply(0.10));
+    c.p.circle_stroke(at, r.max(4.0), Stroke::new(1.0, ink.gamma_multiply(0.6)));
+    let arm = 7.0;
+    c.p.line_segment([at - Vec2::new(arm, 0.0), at + Vec2::new(arm, 0.0)], Stroke::new(1.5, ink));
+    c.p.line_segment([at - Vec2::new(0.0, arm), at + Vec2::new(0.0, arm)], Stroke::new(1.5, ink));
 }
 
 impl Layer for SightingLayer<'_> {
@@ -115,10 +127,21 @@ impl Layer for SightingLayer<'_> {
     }
 
     fn label(&self) -> &'static str {
-        "SIGHTINGS"
+        "LOCATED"
     }
 
     fn draw(&mut self, c: &Canvas) {
+        for l in self.located.iter().filter(|l| self.within.holds(l.estimate.radius_m)) {
+            draw_estimate(c, &l.estimate, theme::TRACE);
+            let at = c.at(l.estimate.lat, l.estimate.lon) + Vec2::new(9.0, -9.0);
+            c.p.text(
+                at,
+                egui::Align2::LEFT_BOTTOM,
+                &l.device.ident,
+                theme::figure(10.0),
+                theme::TRACE,
+            );
+        }
         let points: Vec<(Pos2, Option<f32>)> =
             self.trail.iter().filter_map(|s| Some((c.at(s.lat?, s.lon?), s.rssi_dbfs))).collect();
         if points.is_empty() {
@@ -153,26 +176,15 @@ impl Layer for SightingLayer<'_> {
         // in the readout colour rather than the trail's so a conclusion is
         // not mistaken for a measurement.
         if let Some(est) = &self.estimate {
-            let at = c.at(est.lat, est.lon);
-            let r = (est.radius_m / 1852.0 * c.nm_px_at(est.lat)) as f32;
-            c.p.circle_filled(at, r.max(4.0), theme::READOUT.gamma_multiply(0.10));
-            c.p.circle_stroke(at, r.max(4.0), Stroke::new(1.0, theme::READOUT.gamma_multiply(0.6)));
-            let arm = 7.0;
-            c.p.line_segment(
-                [at - Vec2::new(arm, 0.0), at + Vec2::new(arm, 0.0)],
-                Stroke::new(1.5, theme::READOUT),
-            );
-            c.p.line_segment(
-                [at - Vec2::new(0.0, arm), at + Vec2::new(0.0, arm)],
-                Stroke::new(1.5, theme::READOUT),
-            );
+            draw_estimate(c, est, theme::READOUT);
         }
     }
 
     fn status(&self) -> Option<String> {
         let n = self.trail.iter().filter(|s| s.lat.is_some()).count();
         if n == 0 {
-            return None;
+            let n = self.located.iter().filter(|l| self.within.holds(l.estimate.radius_m)).count();
+            return Some(format!("{n} located within {}", self.within.label()));
         }
         let mut s = match self.ident {
             Some(id) => format!("{id}: {n} sightings"),

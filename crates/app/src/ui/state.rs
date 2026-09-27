@@ -638,6 +638,126 @@ pub struct SurveyState {
     pub beacondb: BeaconDbState,
     /// The feed into Home Assistant: the broker, and what it has published.
     pub homeassistant: HomeAssistantState,
+    pub locating: Option<Locating>,
+    pub within: Within,
+}
+
+impl SurveyState {
+    pub fn located(&self) -> std::sync::Arc<Vec<survey::Located>> {
+        self.locating.as_ref().map(|l| l.found.lock().clone()).unwrap_or_default()
+    }
+
+    pub fn located_within(&self) -> usize {
+        let Some(l) = self.locating.as_ref() else { return 0 };
+        l.found.lock().iter().filter(|l| self.within.holds(l.estimate.radius_m)).count()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Within {
+    M25,
+    M50,
+    M100,
+    M250,
+    M500,
+    Km1,
+    Any,
+}
+
+impl Within {
+    pub const ALL: [Within; 7] = [
+        Within::M25,
+        Within::M50,
+        Within::M100,
+        Within::M250,
+        Within::M500,
+        Within::Km1,
+        Within::Any,
+    ];
+
+    pub fn metres(self) -> Option<f64> {
+        match self {
+            Within::M25 => Some(25.0),
+            Within::M50 => Some(50.0),
+            Within::M100 => Some(100.0),
+            Within::M250 => Some(250.0),
+            Within::M500 => Some(500.0),
+            Within::Km1 => Some(1_000.0),
+            Within::Any => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Within::M25 => "25 m",
+            Within::M50 => "50 m",
+            Within::M100 => "100 m",
+            Within::M250 => "250 m",
+            Within::M500 => "500 m",
+            Within::Km1 => "1 km",
+            Within::Any => "any",
+        }
+    }
+
+    pub fn holds(self, radius_m: f64) -> bool {
+        self.metres().is_none_or(|m| radius_m <= m)
+    }
+}
+
+pub struct Locating {
+    pub path: std::path::PathBuf,
+    found: std::sync::Arc<parking_lot::Mutex<std::sync::Arc<Vec<survey::Located>>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+const LOCATE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const LOCATED_SHOWN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl Locating {
+    pub fn start(path: std::path::PathBuf) -> Self {
+        let found = std::sync::Arc::new(parking_lot::Mutex::new(std::sync::Arc::new(Vec::new())));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (out, halt, file) = (found.clone(), stop.clone(), path.clone());
+        let threads = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 4));
+        let spawned = std::thread::Builder::new().name("locate".into()).spawn(move || {
+            let mut locator = survey::Locator::default();
+            let halted = || halt.load(std::sync::atomic::Ordering::Relaxed);
+            let mut db = None;
+            while !halted() {
+                if db.is_none() {
+                    db = survey::Db::open_read(&file).ok();
+                }
+                if let Some(db) = db.as_ref() {
+                    let mut shown: Option<Instant> = None;
+                    let pass = locator.pass(db, threads, |so_far| {
+                        if shown.is_none_or(|t| t.elapsed() >= LOCATED_SHOWN_EVERY) {
+                            *out.lock() = std::sync::Arc::new(so_far.to_vec());
+                            shown = Some(Instant::now());
+                        }
+                        !halted()
+                    });
+                    match pass {
+                        Ok(v) => *out.lock() = std::sync::Arc::new(v),
+                        Err(e) => tracing::warn!("locating the survey's devices: {e}"),
+                    }
+                }
+                let t0 = Instant::now();
+                while t0.elapsed() < LOCATE_EVERY && !halted() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("no locator thread: {e}");
+        }
+        Self { path, found, stop }
+    }
+}
+
+impl Drop for Locating {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The beaconDB feed, as the interface holds it.
@@ -795,6 +915,8 @@ impl Default for SurveyState {
             wigle: WigleState::default(),
             beacondb: BeaconDbState::default(),
             homeassistant: HomeAssistantState::default(),
+            locating: None,
+            within: Within::M100,
         }
     }
 }
