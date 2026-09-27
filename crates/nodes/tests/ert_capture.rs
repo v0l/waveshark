@@ -68,6 +68,7 @@ fn transmission(frame: Option<&[u8; 12]>) -> Vec<C32> {
 
 /// Every ERT decode the auto node produced, as `(protocol, id, consumption)`.
 fn meters(iq: &[C32]) -> Vec<(String, i64, i64)> {
+    common::bands::set_plan(common::bands::Plan::Americas);
     let mut g = build_chain(
         StreamSpec::iq(RATE, CENTER),
         &[NodeSpec::new("auto"), NodeSpec::new("protocols")],

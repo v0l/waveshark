@@ -35,6 +35,7 @@ the code is in the commit log.
 - IQStream server idle with nobody subscribed, spare radios left stopped until someone is.
 - Video pane shows the first picture when nothing is picked, no longer a best picture choice.
 - Spectrum at half the processor time on a wide span.
+- GSM downlinks read in real time at 20 MS/s, with no burst classifier on cellular allocations.
 - SSB channel width as the sideband filter's, 2.4 kHz by default rather than 6, in memories too.
 
 ### Fixed

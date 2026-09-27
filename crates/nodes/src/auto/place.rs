@@ -458,6 +458,7 @@ fn classifier(
 /// than that gets [`Evidence`] instead.
 pub(super) fn routable(b: &SourceBlock) -> bool {
     b.bandwidth_hz <= protocol::router_max_width_hz()
+        && protocol::router_reaches(b.center_hz as f64)
 }
 
 /// Whether a source at `hz`, measured `width_hz` wide and cut out at
@@ -587,6 +588,25 @@ mod tests {
         let (members, evidence) = at(2_462_000_000, 6.5e6, 20e6);
         assert!(members.iter().all(|m| m.router.is_none()), "a 6.5 MHz source was classified");
         assert!(evidence.is_some());
+    }
+
+    #[test]
+    fn a_source_on_a_gsm_downlink_is_left_to_gsm_and_the_detector_not_the_burst_router() {
+        common::bands::set_plan(common::bands::Plan::Europe);
+        let reg = registry();
+        let rate = 833_333.0;
+        let mut spec = StreamSpec::iq(rate, Hz(945_400_000));
+        spec.bandwidth = 300_000.0;
+        let mut b = block(SourceId(1), rate, SourceState::Opened, Vec::new());
+        (b.center_hz, b.bandwidth_hz, b.signal_hz) = (945_400_000, 300_000.0, 200_000.0);
+        let origin = Origin { span_sample: 0, span_rate_hz: rate };
+        let (members, evidence) = found(&b, spec, origin, &reg).expect("a placement");
+        let names: Vec<&str> = members.iter().map(|m| m.name).collect();
+        assert_eq!(names, ["gsm"]);
+        assert!(
+            evidence.is_some(),
+            "the detector's measurement is the row for what gsm cannot read"
+        );
     }
 
     #[test]

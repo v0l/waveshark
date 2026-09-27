@@ -220,6 +220,7 @@ pub struct SchDetector {
     /// advance on its own is not.
     buf: Vec<C32>,
     prod: Vec<C32>,
+    mag: Vec<f32>,
     /// Absolute index of `buf[0]` in the decimated stream.
     base: u64,
     /// How far the tone search has run, absolute.
@@ -245,6 +246,7 @@ pub struct SchDetector {
     /// it sat. Held back until a second one agrees with it about what time it
     /// is; see `corroborate`.
     held: Option<(SchHit, f64)>,
+    expected: Option<f64>,
     /// Where the samples added by the last call sit in `buf`, so a caller can
     /// measure the channel this cut out rather than the span it came from.
     last: std::ops::Range<usize>,
@@ -324,15 +326,15 @@ impl ToneWindow {
         Self { len, sum: C64 { re: 0.0, im: 0.0 }, power: 0.0, n: 0 }
     }
 
-    fn push(&mut self, add: C32, drop: Option<C32>) {
-        self.sum.re += f64::from(add.re);
-        self.sum.im += f64::from(add.im);
-        self.power += f64::from(add.norm());
+    fn push(&mut self, add: (C32, f32), drop: Option<(C32, f32)>) {
+        self.sum.re += f64::from(add.0.re);
+        self.sum.im += f64::from(add.0.im);
+        self.power += f64::from(add.1);
         self.n += 1;
-        if let Some(d) = drop {
+        if let Some((d, m)) = drop {
             self.sum.re -= f64::from(d.re);
             self.sum.im -= f64::from(d.im);
-            self.power -= f64::from(d.norm());
+            self.power -= f64::from(m);
             self.n -= 1;
         }
     }
@@ -363,6 +365,78 @@ impl ToneWindow {
     }
 }
 
+const CLOSE: f64 = 1e-9;
+
+struct Tone {
+    min: f64,
+    want: f64,
+    tol: f64,
+    turn: C64,
+    tan_tol: f64,
+    fast: bool,
+}
+
+impl Tone {
+    fn new(min: f64, want: f64, tol: f64) -> Self {
+        let fast = min > 0.0
+            && tol > 0.0
+            && tol < std::f64::consts::FRAC_PI_4
+            && want - tol > -std::f64::consts::PI
+            && want + tol < std::f64::consts::PI;
+        Self {
+            min,
+            want,
+            tol,
+            turn: C64 { re: want.cos(), im: -want.sin() },
+            tan_tol: tol.tan(),
+            fast,
+        }
+    }
+
+    fn exact(&self, w: &ToneWindow) -> bool {
+        w.coherence() > self.min && (w.advance() - self.want).abs() < self.tol
+    }
+
+    fn holds(&self, w: &ToneWindow) -> bool {
+        if !self.fast || w.power <= 0.0 {
+            return self.exact(w);
+        }
+        let n2 = w.sum.re * w.sum.re + w.sum.im * w.sum.im;
+        let t = self.min * w.power;
+        let t2 = t * t;
+        if n2 <= t2 * (1.0 - CLOSE) {
+            return false;
+        }
+        if n2 < t2 * (1.0 + CLOSE) {
+            return self.exact(w);
+        }
+        self.bearing(w.sum).unwrap_or_else(|| self.exact(w))
+    }
+
+    fn bearing(&self, sum: C64) -> Option<bool> {
+        if !self.fast {
+            return None;
+        }
+        let zr = sum.re * self.turn.re - sum.im * self.turn.im;
+        let zi = sum.re * self.turn.im + sum.im * self.turn.re;
+        let scale = zr.abs() + zi.abs();
+        if zr < -CLOSE * scale {
+            return Some(false);
+        }
+        if zr <= CLOSE * scale {
+            return None;
+        }
+        let margin = zi.abs() - self.tan_tol * zr;
+        if margin < -CLOSE * scale {
+            Some(true)
+        } else if margin > CLOSE * scale {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
 impl SchDetector {
     /// Watch `channel_hz` inside a span sampled at `rate` and tuned to
     /// `center_hz`.
@@ -387,6 +461,7 @@ impl SchDetector {
             mixed: Vec::new(),
             buf: Vec::new(),
             prod: Vec::new(),
+            mag: Vec::new(),
             base: 0,
             scanned: 0,
             win: ToneWindow::new(window.max(8)),
@@ -397,6 +472,7 @@ impl SchDetector {
             anchor: None,
             last_sync: None,
             held: None,
+            expected: None,
             last: 0..0,
         }
     }
@@ -447,6 +523,7 @@ impl SchDetector {
         self.decim.reset();
         self.buf.clear();
         self.prod.clear();
+        self.mag.clear();
         self.base = 0;
         self.scanned = 0;
         self.win.reset();
@@ -454,6 +531,7 @@ impl SchDetector {
         self.pending.clear();
         self.blocks.clear();
         self.held = None;
+        self.expected = None;
         self.last_sync = None;
         self.last = 0..0;
     }
@@ -540,9 +618,11 @@ impl SchDetector {
     /// burst that straddles a block boundary is not cut in half.
     fn extend_products(&mut self, from: usize) {
         self.prod.resize(self.buf.len(), C32::new(0.0, 0.0));
+        self.mag.resize(self.buf.len(), 0.0);
         for i in from..self.buf.len() {
             self.prod[i] =
                 if i == 0 { C32::new(0.0, 0.0) } else { self.buf[i] * self.buf[i - 1].conj() };
+            self.mag[i] = self.prod[i].norm();
         }
     }
 
@@ -552,17 +632,17 @@ impl SchDetector {
         let window = self.win.len;
         let start = self.scanned.max(self.base + 1);
         let end = self.base + self.buf.len() as u64;
+        let tone = Tone::new(f64::from(self.cfg.min_tone_coherence), want, tol);
         for abs in start..end {
             let i = (abs - self.base) as usize;
             // The window covers `[i - window + 1, i]`, and the first phase
             // advance in the buffer is at index one rather than zero.
-            let drop = (i > window).then(|| self.prod[i - window]);
-            self.win.push(self.prod[i], drop);
+            let drop = (i > window).then(|| (self.prod[i - window], self.mag[i - window]));
+            self.win.push((self.prod[i], self.mag[i]), drop);
             if !self.win.full() {
                 continue;
             }
-            let quiet = self.win.coherence() > f64::from(self.cfg.min_tone_coherence)
-                && (self.win.advance() - want).abs() < tol;
+            let quiet = tone.holds(&self.win);
             match (&mut self.run, quiet) {
                 (None, true) => {
                     // The window is what was quiet, so the tone reaches back
@@ -607,6 +687,9 @@ impl SchDetector {
         }
 
         let (from, to) = ((lo - self.base) as usize, (hi - self.base) as usize);
+        let want = TAU * FCCH_TONE_HZ / self.work;
+        let tol = TAU * self.cfg.tone_tolerance_hz / self.work;
+        let tone = Tone::new(f64::from(self.cfg.min_tone_coherence), want, tol);
         let mut sum = C64 { re: 0.0, im: 0.0 };
         let mut power = 0.0f64;
         let mut best: Option<(f64, usize, (C64, f64))> = None;
@@ -614,12 +697,12 @@ impl SchDetector {
             let p = self.prod[i];
             sum.re += f64::from(p.re);
             sum.im += f64::from(p.im);
-            power += f64::from(p.norm());
+            power += f64::from(self.mag[i]);
             if i >= from + len {
                 let d = self.prod[i - len];
                 sum.re -= f64::from(d.re);
                 sum.im -= f64::from(d.im);
-                power -= f64::from(d.norm());
+                power -= f64::from(self.mag[i - len]);
             } else {
                 continue;
             }
@@ -636,13 +719,19 @@ impl SchDetector {
             // without this the search walked off the frequency correction
             // burst and onto the direct current at the middle of the span,
             // reported a 70 kHz error, and threw every burst away.
-            let want = TAU * FCCH_TONE_HZ / self.work;
-            let tol = TAU * self.cfg.tone_tolerance_hz / self.work;
-            if (sum.arg() - want).abs() > tol {
+            let toward = tone.bearing(sum).unwrap_or_else(|| (sum.arg() - want).abs() <= tol);
+            if !toward {
                 continue;
             }
-            if best.as_ref().is_none_or(|(b, _, _)| sum.norm() > *b) {
-                best = Some((sum.norm(), i + 1 - len, (sum, power)));
+            let n2 = sum.re * sum.re + sum.im * sum.im;
+            let louder = match &best {
+                None => true,
+                Some((b2, _, _)) if n2 > b2 * (1.0 + CLOSE) => true,
+                Some((b2, _, _)) if n2 < b2 * (1.0 - CLOSE) => false,
+                Some((_, _, (b, _))) => sum.norm() > b.norm(),
+            };
+            if louder {
+                best = Some((n2, i + 1 - len, (sum, power)));
             }
         }
         let Some((_, start, (sum, power))) = best else { return };
@@ -670,6 +759,10 @@ impl SchDetector {
         // The synchronisation burst is one TDMA frame on from the frequency
         // correction burst, both being timeslot zero.
         let sch_start = (self.base + start as u64) as f64 + FRAME_SYMBOLS * self.sps;
+        if self.expected == Some(sch_start) {
+            return;
+        }
+        self.expected = Some(sch_start);
         self.pending.push(Pending { sch_start, freq_offset_hz });
     }
 
@@ -860,10 +953,9 @@ impl SchDetector {
         ))
     }
 
-    /// Sample 148 symbols from `start`, correct the frequency error,
-    /// derotate and align on `tsc`, the training sequence sitting at
-    /// `tsc_at`. Returns how well that sequence matched and a soft bit per
-    /// symbol of the burst.
+    /// Sample the symbols of `span` from `start`, correct the frequency
+    /// error, derotate and align on `known`, the training sequence sitting at
+    /// `tsc_at`. Returns the channel and how well that sequence matched.
     ///
     /// One routine for both burst types, because they differ only in where
     /// the training sequence is and how long it is: 64 bits in the middle of
@@ -872,9 +964,11 @@ impl SchDetector {
         &self,
         start: f64,
         foff_hz: f64,
-        tsc: &[u8],
+        known: &[f32],
         tsc_at: usize,
-    ) -> Option<(f32, [f32; BURST_BITS])> {
+        span: std::ops::Range<usize>,
+        sym: &mut [C32; BURST_BITS],
+    ) -> Option<([C32; equalise::TAPS], f32)> {
         // Positions are absolute and the buffer is not: the front of it has
         // been thrown away as often as the detector has run. Comparing an
         // absolute position against the buffer's length worked only until
@@ -883,15 +977,14 @@ impl SchDetector {
         if rel < 2.0 || (rel + BURST_BITS as f64 * self.sps) as usize + 2 >= self.buf.len() {
             return None;
         }
-        let mut sym = [C32::new(0.0, 0.0); BURST_BITS];
-        for (k, s) in sym.iter_mut().enumerate() {
+        for k in span.clone() {
             let at = start + k as f64 * self.sps;
             let x = interpolate(&self.buf, at - self.base as f64)?;
             // Two rotations undone at once: the tuner's error, measured on
             // the tone, and the quarter turn a symbol that MSK builds in.
             let t = at / self.work;
             let phase = -TAU * foff_hz * t - std::f64::consts::FRAC_PI_2 * k as f64;
-            *s = x * C32::new(phase.cos() as f32, phase.sin() as f32);
+            sym[k] = x * C32::new(phase.cos() as f32, phase.sin() as f32);
         }
 
         // The training sequence measures the channel the burst arrived over,
@@ -899,18 +992,15 @@ impl SchDetector {
         // the phase the burst arrived at, so nothing here has to resolve it
         // separately; what it adds beyond the phase is the spreading, which
         // GMSK has by construction and a reflection adds to.
-        let known: Vec<f32> = tsc.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
         // What the tone left behind. Measured on the burst itself, because
         // the tone is a frame old by now and a couple of kilohertz out is
         // enough to turn the far ends of the burst past reading.
-        if let Some(res) = equalise::residual(&sym, &known, tsc_at) {
-            equalise::derotate(&mut sym, res);
+        if let Some(res) = equalise::residual(sym, known, tsc_at) {
+            equalise::derotate_span(sym, res, span);
         }
-        let h = equalise::estimate(&sym, &known, tsc_at)?;
-        let quality = equalise::fit(&sym, &known, tsc_at, &h);
-        let mut soft = [0.0f32; BURST_BITS];
-        equalise::soft_bits(&sym, &h, &mut soft);
-        Some((quality, soft))
+        let h = equalise::estimate(sym, known, tsc_at)?;
+        let quality = equalise::fit(sym, known, tsc_at, &h);
+        Some((h, quality))
     }
 
     /// The best timing for a burst near `start`, and the soft bits at it.
@@ -927,15 +1017,26 @@ impl SchDetector {
         tsc: &[u8],
         tsc_at: usize,
     ) -> Option<(f32, [f32; BURST_BITS], f64)> {
-        let mut best: Option<(f32, [f32; BURST_BITS], f64)> = None;
+        let known: Vec<f32> = tsc.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
+        let training = tsc_at..tsc_at + tsc.len();
+        let mut sym = [C32::new(0.0, 0.0); BURST_BITS];
+        let mut best: Option<(f32, f64)> = None;
         for step in -24i32..=24 {
             let at = start + f64::from(step) * 0.25 * self.sps;
-            let Some((q, soft)) = self.read_symbols(at, foff_hz, tsc, tsc_at) else { continue };
-            if best.as_ref().is_none_or(|(b, _, _)| q > *b) {
-                best = Some((q, soft, at));
+            let Some((_, q)) =
+                self.read_symbols(at, foff_hz, &known, tsc_at, training.clone(), &mut sym)
+            else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(b, _)| q > *b) {
+                best = Some((q, at));
             }
         }
-        best.filter(|(q, _, _)| *q >= self.cfg.min_quality)
+        let (quality, at) = best.filter(|(q, _)| *q >= self.cfg.min_quality)?;
+        let (h, _) = self.read_symbols(at, foff_hz, &known, tsc_at, 0..BURST_BITS, &mut sym)?;
+        let mut soft = [0.0f32; BURST_BITS];
+        equalise::soft_bits(&sym, &h, &mut soft);
+        Some((quality, soft, at))
     }
 
     /// Drop what no longer has to be kept: the samples before the earliest
@@ -963,6 +1064,7 @@ impl SchDetector {
         }
         self.buf.drain(..drop);
         self.prod.drain(..drop);
+        self.mag.drain(..drop);
         self.base += drop as u64;
         self.last = self.last.start.saturating_sub(drop)..self.last.end.saturating_sub(drop);
     }

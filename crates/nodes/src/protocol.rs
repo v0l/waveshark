@@ -264,6 +264,10 @@ pub fn router_max_width_hz() -> f64 {
     widest * CHANNEL_WIDTH_TOLERANCE
 }
 
+pub fn router_reaches(hz: f64) -> bool {
+    common::bands::at(hz).is_none_or(|b| b.usage != common::bands::Usage::Cellular)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arrives {
     InBursts,

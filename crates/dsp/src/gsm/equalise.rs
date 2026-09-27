@@ -138,9 +138,13 @@ pub fn residual(y: &[C32], known: &[f32], at: usize) -> Option<f32> {
 /// Turn the burst by a fixed amount per symbol, undoing what [`residual`]
 /// measured.
 pub fn derotate(y: &mut [C32], per_symbol: f32) {
-    for (k, s) in y.iter_mut().enumerate() {
+    derotate_span(y, per_symbol, 0..y.len());
+}
+
+pub fn derotate_span(y: &mut [C32], per_symbol: f32, span: std::ops::Range<usize>) {
+    for k in span {
         let ph = -per_symbol * k as f32;
-        *s *= C32::new(ph.cos(), ph.sin());
+        y[k] *= C32::new(ph.cos(), ph.sin());
     }
 }
 
