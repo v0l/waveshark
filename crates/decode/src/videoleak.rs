@@ -323,7 +323,7 @@ impl Reader {
                 self.mix_phase =
                     (self.mix_phase + step * iq.len() as f64).rem_euclid(std::f64::consts::TAU);
             }
-            false => self.cells.extend(iq.iter().map(|s| C32::new(s.norm(), 0.0))),
+            false => self.cells.extend(iq.iter().map(|s| C32::new(raster::magnitude(*s), 0.0))),
         }
         let frames = r.push(&self.cells);
         if frames > 0 && self.coherent {

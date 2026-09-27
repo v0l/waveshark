@@ -72,6 +72,7 @@ the code is in the commit log.
 - IQStream directory listing left up on a dead port when the router's port mapping lapsed.
 - sub-ghz-modem DETECT hanging, and taking over or reconfiguring serial ports other programs had open.
 - Display leakage locking on 2.4 GHz traffic and painting it as a screen.
+- Display leakage stalling the receiver with a mode named, and each second while searching.
 
 ## [0.4.0] - 2026-09-24
 

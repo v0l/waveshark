@@ -1,8 +1,9 @@
 use crate::NodeSpec;
 use crate::protocol::{Placed, Placement, Protocol, Shape, Stickiness};
+use common::C32;
 use common::{Cadence, Pixels, Result, Update, VideoFrame};
 use decode::display;
-use decode::videoleak::Reader;
+use decode::videoleak::{Locked, Read, Reader};
 use identify::Signal;
 pub use identify::tempest::{DEFAULT_HZ, MIN_RATE_HZ, Tempest};
 use pipeline::event::Request;
@@ -13,8 +14,101 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 const SYSTEM: &str = "display leakage";
 
+pub const LAG_S: f64 = 0.05;
+
+enum Job {
+    Block(Vec<C32>),
+    Force(Option<&'static display::Mode>),
+    Depth(f64),
+    Nudge(isize, isize),
+    Align(bool),
+    Reset,
+}
+
+struct Done {
+    samples: usize,
+    us: u32,
+    read: Read,
+    seen: Seen,
+    spent: Vec<C32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Seen {
+    lock: Option<Locked>,
+    frames: u64,
+    held: (u64, u64),
+    drift_ppm: f64,
+}
+
+impl Seen {
+    fn of(r: &Reader) -> Self {
+        Self {
+            lock: r.locked().copied(),
+            frames: r.frames(),
+            held: r.held(),
+            drift_ppm: r.drift_ppm(),
+        }
+    }
+}
+
+struct Worker {
+    jobs: crossbeam_channel::Sender<Job>,
+    done: crossbeam_channel::Receiver<Done>,
+    ahead: usize,
+}
+
+impl Worker {
+    fn spawn(mut reader: Reader) -> Option<Self> {
+        let (jobs, work) = crossbeam_channel::unbounded::<Job>();
+        let (finished, done) = crossbeam_channel::unbounded::<Done>();
+        std::thread::Builder::new()
+            .name("tempest".into())
+            .spawn(move || {
+                while let Ok(job) = work.recv() {
+                    let block = match job {
+                        Job::Block(b) => b,
+                        Job::Force(m) => {
+                            reader.force(m);
+                            continue;
+                        }
+                        Job::Depth(d) => {
+                            reader.set_depth(d);
+                            continue;
+                        }
+                        Job::Nudge(x, y) => {
+                            reader.set_nudge(x, y);
+                            continue;
+                        }
+                        Job::Align(a) => {
+                            reader.set_align(a);
+                            continue;
+                        }
+                        Job::Reset => {
+                            reader.reset();
+                            continue;
+                        }
+                    };
+                    let t = std::time::Instant::now();
+                    let read = reader.push(&block);
+                    let us = t.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                    let seen = Seen::of(&reader);
+                    let done = Done { samples: block.len(), us, read, seen, spent: block };
+                    if finished.send(done).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, done, ahead: 0 })
+    }
+}
+
 pub struct TempestNode {
-    reader: Reader,
+    worker: Option<Worker>,
+    seen: Seen,
+    spare: Vec<Vec<C32>>,
+    reading: pipeline::cost::Ring,
     forced: Option<&'static display::Mode>,
     depth: i64,
     nudge: (i64, i64),
@@ -32,7 +126,10 @@ impl Default for TempestNode {
 impl TempestNode {
     pub fn new(forced: Option<&'static display::Mode>) -> Self {
         Self {
-            reader: Reader::new(MIN_RATE_HZ),
+            worker: None,
+            seen: Seen::default(),
+            spare: Vec::new(),
+            reading: pipeline::cost::Ring::default(),
             forced,
             depth: DEFAULT_DEPTH,
             nudge: (0, 0),
@@ -42,15 +139,48 @@ impl TempestNode {
         }
     }
 
-    pub fn reader(&self) -> &Reader {
-        &self.reader
+    fn send(&self, job: Job) {
+        if let Some(w) = &self.worker {
+            let _ = w.jobs.send(job);
+        }
     }
 
-    fn configure(&mut self) {
-        self.reader.force(self.forced);
-        self.reader.set_depth(self.depth as f64);
-        self.reader.set_nudge(self.nudge.0 as isize, self.nudge.1 as isize);
-        self.reader.set_align(self.align);
+    fn send_settings(&self) {
+        self.send(Job::Force(self.forced));
+        self.send(Job::Depth(self.depth as f64));
+        self.send(Job::Nudge(self.nudge.0 as isize, self.nudge.1 as isize));
+        self.send(Job::Align(self.align));
+    }
+
+    fn take(&mut self, done: Done, out: &mut Payload, c: &mut NodeCtx<'_>) {
+        self.seen = done.seen;
+        self.reading.push(done.us, done.samples as f64 / self.rate);
+        self.spare.push(done.spent);
+        if done.read.locked {
+            c.request(Request::Claim {
+                lo_hz: self.center_hz - self.rate / 2.0,
+                hi_hz: self.center_hz + self.rate / 2.0,
+            });
+        }
+        if done.read.released {
+            c.request(Request::Release);
+        }
+        let Some(p) = done.read.picture else { return };
+        out.video_mut().push(VideoFrame {
+            system: SYSTEM,
+            channel_hz: self.center_hz,
+            label: self.seen.lock.map(|l| l.label()),
+            width: p.width,
+            height: p.height,
+            aspect: p.aspect,
+            pixels: Pixels::Luma8,
+            lines_seen: p.height,
+            samples: std::sync::Arc::new(p.gray),
+            sequence: p.sequence,
+            update: Update::Whole,
+            cadence: Cadence::Live,
+            sent_at_us: None,
+        });
     }
 }
 
@@ -82,9 +212,11 @@ impl pipeline::node::Node for TempestNode {
         }
         self.rate = i.spec.rate;
         self.center_hz = i.spec.center.as_f64();
-        self.reader = Reader::new(self.rate);
-        self.reader.set_dial(self.center_hz);
-        self.configure();
+        let mut reader = Reader::new(self.rate);
+        reader.set_dial(self.center_hz);
+        self.worker = Worker::spawn(reader);
+        self.seen = Seen::default();
+        self.send_settings();
         let mut out = i.spec.with_kind(PortKind::Video);
         out.rate = 0.0;
         Ok(vec![out])
@@ -97,60 +229,56 @@ impl pipeline::node::Node for TempestNode {
         c: &mut NodeCtx<'_>,
     ) -> Result<()> {
         let Some(iq) = inputs[0].as_iq() else { return Ok(()) };
-        let read = self.reader.push(iq);
-        if read.locked {
-            c.request(Request::Claim {
-                lo_hz: self.center_hz - self.rate / 2.0,
-                hi_hz: self.center_hz + self.rate / 2.0,
-            });
+        let lag = (LAG_S * self.rate) as usize;
+        let mut block = self.spare.pop().unwrap_or_default();
+        block.clear();
+        block.extend_from_slice(iq);
+        let Some(w) = self.worker.as_mut() else { return Ok(()) };
+        if w.jobs.send(Job::Block(block)).is_err() {
+            self.worker = None;
+            return Ok(());
         }
-        if read.released {
-            c.request(Request::Release);
+        w.ahead += iq.len();
+        while self.worker.as_ref().is_some_and(|w| w.ahead > lag) {
+            let Some(w) = self.worker.as_mut() else { break };
+            let Ok(done) = w.done.recv() else {
+                self.worker = None;
+                break;
+            };
+            w.ahead -= done.samples;
+            self.take(done, &mut outputs[0], c);
         }
-        let Some(p) = read.picture else { return Ok(()) };
-        let label = self.reader.locked().map(|l| l.label());
-        outputs[0].video_mut().push(VideoFrame {
-            system: SYSTEM,
-            channel_hz: self.center_hz,
-            label,
-            width: p.width,
-            height: p.height,
-            aspect: p.aspect,
-            pixels: Pixels::Luma8,
-            lines_seen: p.height,
-            samples: std::sync::Arc::new(p.gray),
-            sequence: p.sequence,
-            update: Update::Whole,
-            cadence: Cadence::Live,
-            sent_at_us: None,
-        });
         Ok(())
     }
 
     fn acquisition(&self) -> Option<pipeline::Acquisition> {
-        Some(match (self.reader.locked(), self.reader.frames()) {
+        Some(match (self.seen.lock, self.seen.frames) {
             (None, _) => pipeline::Acquisition::Searching,
             (Some(_), 0..=1) => pipeline::Acquisition::Acquiring,
             (Some(_), _) => pipeline::Acquisition::Locked,
         })
     }
 
+    fn phases(&self) -> Vec<(String, pipeline::cost::Cost)> {
+        vec![("reading, on its own thread".into(), self.reading.cost())]
+    }
+
     fn readings(&self) -> Vec<(String, String)> {
-        let Some(l) = self.reader.locked() else { return Vec::new() };
+        let Some(l) = self.seen.lock else { return Vec::new() };
         vec![
             ("mode".into(), l.mode.map_or_else(|| "not in the table".to_string(), |m| m.label())),
             ("frame".into(), format!("{:.3} Hz", l.frame_hz)),
             ("lines".into(), format!("{} at {:.3} kHz", l.periods.lines, l.line_hz / 1e3)),
-            ("drift".into(), format!("{:+.2} ppm", self.reader.drift_ppm())),
+            ("drift".into(), format!("{:+.2} ppm", self.seen.drift_ppm)),
             ("held".into(), {
-                let (matched, judged) = self.reader.held();
+                let (matched, judged) = self.seen.held;
                 format!("{matched} of {judged} frames")
             }),
         ]
     }
 
     fn reset(&mut self) {
-        self.reader.reset();
+        self.send(Job::Reset);
     }
 
     fn params(&self) -> Vec<Param> {
@@ -178,7 +306,7 @@ impl pipeline::node::Node for TempestNode {
             ALIGN => self.align = v.as_bool().unwrap_or(true),
             other => return Err(common::Error::other(format!("tempest has no {other}"))),
         }
-        self.configure();
+        self.send_settings();
         Ok(())
     }
 }
@@ -318,13 +446,13 @@ mod tests {
         let mut n = TempestNode::default();
         let out = Node::negotiate(&mut n, &[spec(rate)]).expect("a span");
         assert_eq!(out[0].kind, PortKind::Video);
-        let (frames, asked) = run(&mut n, &sxga(rate, 0.5), rate);
+        let (frames, asked) = run(&mut n, &sxga(rate, 0.5 + LAG_S), rate);
         assert_eq!(
             asked.iter().filter(|r| matches!(r, Request::Claim { .. })).count(),
             1,
             "claims of the span"
         );
-        assert_eq!(frames.len(), 2, "pictures in half a second");
+        assert_eq!(frames.len(), 2, "pictures in half a second, read {LAG_S} s behind");
         let f = &frames[0];
         assert_eq!(f.system, "display leakage");
         assert_eq!(f.label.as_deref(), Some("1280x1024 60 Hz"));

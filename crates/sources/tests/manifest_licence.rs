@@ -90,13 +90,13 @@ fn every_capture_says_what_it_may_be_used_for() {
     let decode = parse(&manifest("decode.toml"), "[[capture]]");
     let fixture = parse(&manifest("fixture.toml"), "[[capture]]");
     assert_eq!(decode.len(), 10, "captures in decode.toml");
-    assert_eq!(fixture.len(), 42, "captures in fixture.toml");
+    assert_eq!(fixture.len(), 43, "captures in fixture.toml");
 
     let all = published();
     for entry in &all {
         assert!(entry.licence.is_some(), "{} carries no license field", entry.name);
     }
-    assert_eq!(all.iter().filter(|e| ours(e)).count(), 38, "CC BY 4.0 recordings of our own");
+    assert_eq!(all.iter().filter(|e| ours(e)).count(), 39, "CC BY 4.0 recordings of our own");
 
     let mut foreign: Vec<(&str, &Licence, &str)> = all
         .iter()
@@ -153,7 +153,7 @@ fn every_capture_says_what_it_may_be_used_for() {
 fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
     let all = published();
     let rehosted: Vec<&Entry> = all.iter().filter(|e| e.url.contains("nostr.download")).collect();
-    assert_eq!(rehosted.len(), 48, "captures re-hosted on nostr.download");
+    assert_eq!(rehosted.len(), 49, "captures re-hosted on nostr.download");
     for entry in &rehosted {
         assert!(
             ours(entry) || entry.source.is_some(),

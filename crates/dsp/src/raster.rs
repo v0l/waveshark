@@ -1,8 +1,24 @@
 use common::C32;
-use rustfft::FftPlanner;
+use rustfft::{Fft, FftPlanner};
+use std::sync::{Arc, LazyLock, Mutex};
+
+static PLANNER: LazyLock<Mutex<FftPlanner<f32>>> = LazyLock::new(|| Mutex::new(FftPlanner::new()));
+
+fn forward(n: usize) -> Arc<dyn Fft<f32>> {
+    PLANNER.lock().unwrap_or_else(|e| e.into_inner()).plan_fft_forward(n)
+}
+
+fn inverse(n: usize) -> Arc<dyn Fft<f32>> {
+    PLANNER.lock().unwrap_or_else(|e| e.into_inner()).plan_fft_inverse(n)
+}
+
+pub fn magnitude(c: C32) -> f32 {
+    let (re, im) = (c.re as f64, c.im as f64);
+    (re * re + im * im).sqrt() as f32
+}
 
 pub fn envelope(iq: &[C32], out: &mut Vec<f32>) {
-    out.extend(iq.iter().map(|s| s.norm()));
+    out.extend(iq.iter().map(|s| magnitude(*s)));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,14 +194,14 @@ fn spectrum(iq: &[C32]) -> Option<(Vec<f32>, usize)> {
         return None;
     }
     let mut buf: Vec<C32> = iq[..n].to_vec();
-    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    forward(n).process(&mut buf);
     Some((buf.iter().map(|v| v.norm_sqr()).collect(), n))
 }
 
 fn median_of(power: &[f32]) -> f32 {
     let mut sorted = power.to_vec();
-    sorted.sort_by(f32::total_cmp);
-    sorted[sorted.len() / 2].max(f32::MIN_POSITIVE)
+    let mid = sorted.len() / 2;
+    sorted.select_nth_unstable_by(mid, f32::total_cmp).1.max(f32::MIN_POSITIVE)
 }
 
 pub fn find_carrier(iq: &[C32], rate: f64, window_hz: (f64, f64)) -> Option<Carrier> {
@@ -194,12 +210,10 @@ pub fn find_carrier(iq: &[C32], rate: f64, window_hz: (f64, f64)) -> Option<Carr
         return None;
     }
     let mut buf: Vec<C32> = iq[..n].to_vec();
-    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    forward(n).process(&mut buf);
     let power: Vec<f32> = buf.iter().map(|v| v.norm_sqr()).collect();
     let bin_hz = rate / n as f64;
-    let mut sorted = power.clone();
-    sorted.sort_by(f32::total_cmp);
-    let median = sorted[sorted.len() / 2].max(f32::MIN_POSITIVE);
+    let median = median_of(&power);
     let bin_of = |hz: f64| -> i64 { (hz / bin_hz).round() as i64 };
     let (lo, hi) = (bin_of(window_hz.0), bin_of(window_hz.1));
     // Never the middle of the span: a direct conversion receiver puts its
@@ -222,7 +236,7 @@ pub fn find_carrier(iq: &[C32], rate: f64, window_hz: (f64, f64)) -> Option<Carr
 }
 
 pub fn find_line(env: &[f32], rate: f64, limits: Limits) -> Option<(f64, f32)> {
-    let r = autocorrelation(env);
+    let r = autocorrelation(env, longest_lag(rate, limits));
     let frame_lo = (rate / limits.frame_hz.1) as usize;
     let frame_hi = ((rate / limits.frame_hz.0) as usize).min(r.len().saturating_sub(2));
     if frame_lo + 2 >= frame_hi {
@@ -243,7 +257,7 @@ pub fn find_line(env: &[f32], rate: f64, limits: Limits) -> Option<(f64, f32)> {
 }
 
 pub fn find_periods(env: &[f32], rate: f64, limits: Limits) -> Option<Periods> {
-    let r = autocorrelation(env);
+    let r = autocorrelation(env, longest_lag(rate, limits));
     let frame_lo = (rate / limits.frame_hz.1) as usize;
     let frame_hi = ((rate / limits.frame_hz.0) as usize).min(r.len().saturating_sub(2));
     if frame_lo + 2 >= frame_hi {
@@ -260,7 +274,7 @@ pub fn find_periods(env: &[f32], rate: f64, limits: Limits) -> Option<Periods> {
     }
     let line = refine_line(&r, fundamental(&r, line_lo, line_hi)?, frame_hi);
     let edges = down_the_screen(env, line);
-    let e = autocorrelation(&edges);
+    let e = autocorrelation(&edges, longest_lag(rate, limits));
     let frame_hi = frame_hi.min(e.len().saturating_sub(2));
     if frame_lo + 2 >= frame_hi {
         return None;
@@ -375,8 +389,10 @@ fn fundamental(r: &[f32], lo: usize, hi: usize) -> Option<f64> {
 
 fn median(span: &[f32]) -> f32 {
     let mut sorted = span.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    sorted[sorted.len() / 2]
+    let mid = sorted.len() / 2;
+    *sorted
+        .select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .1
 }
 
 fn interpolate(r: &[f32], at: usize) -> f64 {
@@ -389,21 +405,25 @@ fn interpolate(r: &[f32], at: usize) -> f64 {
     at as f64 + offset
 }
 
-fn autocorrelation(x: &[f32]) -> Vec<f32> {
-    let n = (2 * x.len()).next_power_of_two();
+fn longest_lag(rate: f64, limits: Limits) -> usize {
+    (rate / limits.frame_hz.0) as usize + 3
+}
+
+fn autocorrelation(x: &[f32], lags: usize) -> Vec<f32> {
+    let lags = lags.min(x.len());
+    let n = (x.len() + lags).next_power_of_two();
     let mean = x.iter().sum::<f32>() / x.len().max(1) as f32;
     let mut buf: Vec<C32> = Vec::with_capacity(n);
     buf.extend(x.iter().map(|v| C32::new(v - mean, 0.0)));
     buf.resize(n, C32::new(0.0, 0.0));
-    let mut planner = FftPlanner::new();
-    planner.plan_fft_forward(n).process(&mut buf);
+    forward(n).process(&mut buf);
     for v in buf.iter_mut() {
         *v = C32::new(v.norm_sqr(), 0.0);
     }
-    planner.plan_fft_inverse(n).process(&mut buf);
+    inverse(n).process(&mut buf);
     let zero = buf[0].re.max(f32::MIN_POSITIVE);
     let len = x.len();
-    (0..len).map(|lag| buf[lag].re / zero * len as f32 / (len - lag).max(1) as f32).collect()
+    (0..lags).map(|lag| buf[lag].re / zero * len as f32 / (len - lag).max(1) as f32).collect()
 }
 
 pub struct Raster {
@@ -514,11 +534,13 @@ impl Raster {
         let mut down = self.phase * per_sample;
         let mut done = 0;
         for v in env {
-            let y = (down as usize).min(self.height - 1);
-            let x = (((down - y as f64) * w) as usize).min(self.width - 1);
-            let at = y * self.width + x;
-            self.sum[at] += *v;
-            self.count[at] += 1;
+            if down >= 0.0 {
+                let y = (down as usize).min(self.height - 1);
+                let x = (((down - y as f64) * w) as usize).min(self.width - 1);
+                let at = y * self.width + x;
+                self.sum[at] += *v;
+                self.count[at] += 1;
+            }
             down += per_sample;
             if down >= h {
                 self.phase = down / per_sample - self.period;
@@ -559,8 +581,7 @@ impl Raster {
             let pull = self.nominal * MAX_PULL;
             self.period =
                 (self.period + DRIFT_GAIN * shift).clamp(self.nominal - pull, self.nominal + pull);
-            self.phase -= shift;
-            self.phase = self.phase.rem_euclid(self.period);
+            self.phase = (self.phase - shift).min(self.period - 1.0);
         }
         let (dy, dx) = steps(shift, self.width, self.line_samples());
         let a = 1.0 / self.depth as f32;
@@ -604,7 +625,7 @@ impl Raster {
                 if c == 0 {
                     continue;
                 }
-                cols[x] += self.sum[at].norm();
+                cols[x] += magnitude(self.sum[at]);
                 seen[x] += c;
             }
         }
@@ -640,7 +661,7 @@ impl Raster {
     fn offset_from_average(&self) -> Option<f64> {
         let cols = self.profiles();
         let reach = (self.width as f64 * SEARCH_LINE_FRACTION) as isize;
-        let seen: Vec<f32> = self.average.iter().map(|v| v.norm()).collect();
+        let seen: Vec<f32> = self.average.iter().map(|v| magnitude(*v)).collect();
         let (dx, quality) = best_shift(&profile(&seen, self.width, Axis::Column), &cols, reach);
         if quality < MIN_CORRELATION {
             return None;
@@ -676,9 +697,10 @@ impl Raster {
             Some(lit) => lit,
             None => out.clone(),
         };
-        sorted.sort_by(f32::total_cmp);
         let cut = (sorted.len() as f64 * CONTRAST_TAIL) as usize;
-        let (lo, hi) = (sorted[cut], sorted[sorted.len() - 1 - cut]);
+        let top = sorted.len() - 1 - cut;
+        let lo = *sorted.select_nth_unstable_by(cut, f32::total_cmp).1;
+        let hi = *sorted.select_nth_unstable_by(top, f32::total_cmp).1;
         let range = (hi - lo).max(f32::MIN_POSITIVE);
         out.iter().map(|v| (((v - lo) / range) * 255.0).clamp(0.0, 255.0) as u8).collect()
     }
@@ -755,9 +777,13 @@ enum Axis {
 fn profile(canvas: &[f32], width: usize, axis: Axis) -> Vec<f32> {
     let height = canvas.len() / width.max(1);
     match axis {
-        Axis::Column => (0..width)
-            .map(|x| (0..height).map(|y| canvas[y * width + x]).sum::<f32>() / height as f32)
-            .collect(),
+        Axis::Column => {
+            let mut sums = vec![0.0f32; width];
+            for row in canvas.chunks_exact(width.max(1)).take(height) {
+                sums.iter_mut().zip(row).for_each(|(s, v)| *s += v);
+            }
+            sums.iter().map(|s| s / height as f32).collect()
+        }
         Axis::Row => {
             canvas.chunks(width).map(|row| row.iter().sum::<f32>() / width as f32).collect()
         }
@@ -1098,6 +1124,21 @@ mod tests {
         assert!(r.frames() >= 29, "{} frames of {seconds}s", r.frames());
         let ppm = (r.period() - truth) / truth * 1e6;
         assert!(ppm.abs() < 2.0, "{ppm} ppm out after {} frames", r.frames());
+    }
+
+    #[test]
+    fn a_frame_pulled_later_waits_for_its_start_rather_than_finishing_early() {
+        let rate = 8e6;
+        let seconds = 0.5;
+        let env = real(&VGA.emit(rate, seconds, 0.6, &desktop));
+        let truth = rate / VGA.frame_hz();
+        let mut r = Raster::new(254, 525, truth * (1.0 - 500e-6), 8.0);
+        let mut most = 0;
+        for block in env.chunks(131_072) {
+            most = most.max(r.push(block));
+        }
+        assert_eq!(most, 1, "frames finished in one block of 16 ms");
+        assert_eq!(r.frames(), 29, "frames in {seconds} s of a 59.94 Hz screen");
     }
 
     /// The grey scale is stretched over the picture, not over the blanking.

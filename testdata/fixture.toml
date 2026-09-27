@@ -631,7 +631,7 @@ field.
 
 So the receiver refuses it in auto and reads it when the mode is named: told
 1920x1080 60 Hz it measures 60.0007 Hz from the line period alone, seven
-parts in a million from the mode's own rate, and 30 of its 31 frames land
+parts in a million from the mode's own rate, and 27 of its 30 frames land
 where that period says they will. The picture that comes out is the raster's
 blanking, a bright band 12.7% of the line wide and 4% of the frame tall,
 which is 280 pixels of 2200 and 45 lines of 1125. Before the field was
@@ -655,6 +655,28 @@ missing from this one is the screen and nothing else.
 It is the negative the other capture needs. A decoder that reads a raster out
 of this is reading the receiver, the band or itself: there is no line period
 to find here at all, where the other gives 67.501 kHz at a score of 733.
+"""
+
+[[capture]]
+name = "screen_744M_20000k.cs8"
+sha256 = "caa413329bad3a9e128dbda5dcd1929335e23639a2ede8c5e967041837123c87"
+url = "https://nostr.download/caa413329bad3a9e128dbda5dcd1929335e23639a2ede8c5e967041837123c87.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+A 1920x1080 60 Hz screen on HDMI, heard at 744 MHz, near 742.5 MHz, which is
+the fifth harmonic of its 148.5 MHz pixel clock. Written by the receiver's own
+raw span capture on 2026-09-27 and cut to its first 1.2 s. The screen's
+picture may be recoverable from it.
+
+It is evidence about throughput, not about reading. The scanner table puts
+the screen decoder on 742.5 MHz here. In auto it searches once a second and
+never locks, and each search once took 25 ms of a 6.5 ms block. Named
+1920x1080 60 Hz it locks on the carrier, and a drift correction that pulled
+the frame start back used to wrap round and finish a frame a few dozen
+samples long, which then asked for the same correction again. That was
+thousands of frames a block and seconds a block, and it stopped the whole
+receiver.
 """
 
 [[capture]]

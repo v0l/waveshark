@@ -246,6 +246,21 @@ fn every_capture_runs_at_twice_real_time() {
                  inside it, so every advertisement lights that correlator as well",
         ),
         (
+            "dvbs2_two_carriers_1083M_61440k.cs8",
+            "no DVB-S2 front end is placed here; the span holds 1090 MHz and the 1065 MHz \
+                 screen clock. By --bench-iq, of a 2.13 ms block: Mode S 0.41 ms at 3.84 MS/s, \
+                 about 50 ns a sample as on any ADS-B capture, behind its mixer and /16 at 0.30; \
+                 the spectrum 0.44; and the screen decoder's mixer and /4 at 0.43, for a decoder \
+                 that itself costs 0.02 on its own thread",
+        ),
+        (
+            "dvbs2_bbc_hd_1097M_40000k.cs8",
+            "the same two front ends at 40 MS/s, 3.28 ms a block: Mode S 0.42 ms behind its \
+                 mixer and /16 at 0.60, the spectrum 0.45, and the screen decoder's mixer and /2 \
+                 to 1080 MHz at 0.47. About 2.5x at the median, with one block in three under 2x \
+                 on four threads",
+        ),
+        (
             "zigbee_join_ch11_2405M_8000k.cs8",
             "four front ends over one 8 MS/s channel, 8 ms of a 16.4 ms block at the \
                  median. By perf, BLE on advertising channel 37 and 802.15.4 take 7% of the \
@@ -324,5 +339,95 @@ fn every_capture_runs_at_twice_real_time() {
         recovered.is_empty(),
         "captures that keep up now and should come off KNOWN_SLOW:\n{}",
         recovered.join("\n")
+    );
+}
+
+struct ScreenRun {
+    speeds: Vec<f64>,
+    readings: Vec<(String, String)>,
+}
+
+fn screen_at_744(mode: Option<&str>) -> Option<ScreenRun> {
+    const NAME: &str = "screen_744M_20000k.cs8";
+    const BLOCK: usize = 131_072;
+    const PACE_X: f64 = 2.0;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata").join(NAME);
+    if !path.exists() {
+        eprintln!("skipping: {NAME} absent, run testdata/fetch.sh");
+        return None;
+    }
+    let buf = sources::FileSource::open(&path).and_then(|s| s.read_all()).expect(NAME);
+    let rate = buf.rate.as_f64();
+    let block_secs = BLOCK as f64 / rate;
+    let mut plan = replay_plan(&buf, false);
+    plan.fronts = crate::scanners::Scanners::default()
+        .fronts(crate::scanners::Span::new(buf.center.as_f64(), rate));
+    let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect(NAME);
+    let screen = rx
+        .topology()
+        .nodes
+        .iter()
+        .find(|n| n.kind == "tempest")
+        .map(|n| n.id.0)
+        .expect("the scanner table puts a screen decoder on the 742.5 MHz cable clock");
+    if let Some(m) = mode {
+        rx.set_node_param(screen, "mode", pipeline::ParamValue::Text(m.into()))
+            .expect("a mode the table knows");
+    }
+    let mut speeds = Vec::new();
+    let started = std::time::Instant::now();
+    for (i, chunk) in buf.samples.chunks_exact(BLOCK).enumerate() {
+        let due = started + std::time::Duration::from_secs_f64(i as f64 * block_secs / PACE_X);
+        std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+        let t = std::time::Instant::now();
+        rx.process(chunk).expect(NAME);
+        speeds.push(block_secs / t.elapsed().as_secs_f64().max(1e-9));
+        let _ = harvest(&mut rx, block_start(std::time::Instant::now(), chunk.len(), rate));
+        if started.elapsed().as_secs_f64() > 20.0 {
+            break;
+        }
+    }
+    let readings = rx
+        .topology()
+        .nodes
+        .into_iter()
+        .find(|n| n.id.0 == screen)
+        .map(|n| n.readings)
+        .unwrap_or_default();
+    Some(ScreenRun { speeds, readings })
+}
+
+fn lows(run: &ScreenRun, floor_x: f64) -> Vec<(usize, f64)> {
+    eprintln!(
+        "{} blocks, slowest {:.2}x real time",
+        run.speeds.len(),
+        run.speeds.iter().copied().fold(f64::INFINITY, f64::min)
+    );
+    run.speeds.iter().copied().enumerate().filter(|(_, x)| *x < floor_x).collect()
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
+fn the_screen_search_at_744_mhz_keeps_every_block_over_twice_real_time() {
+    const FLOOR_X: f64 = 2.0;
+    let Some(run) = screen_at_744(None) else { return };
+    assert_eq!(run.speeds.len(), 183, "blocks of 131072 in 1.2 s at 20 MS/s");
+    assert_eq!(lows(&run, FLOOR_X), [], "(block, speed) under {FLOOR_X}x");
+    assert_eq!(run.readings, [], "auto locked on the band");
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing test, run with --release")]
+fn a_screen_named_1080p60_at_744_mhz_keeps_every_block_over_twice_real_time() {
+    const FLOOR_X: f64 = 2.0;
+    let Some(run) = screen_at_744(Some("1920x1080 60 Hz")) else { return };
+    assert_eq!(run.speeds.len(), 183, "blocks of 131072 in 1.2 s at 20 MS/s");
+    assert_eq!(lows(&run, FLOOR_X), [], "(block, speed) under {FLOOR_X}x");
+    let held = run.readings.iter().find(|(k, _)| k == "held").map(|(_, v)| v.as_str());
+    assert_eq!(
+        held,
+        Some("47 of 63 frames"),
+        "frames on the fifth harmonic, read {} s behind",
+        nodes::tempest_nodes::LAG_S
     );
 }
