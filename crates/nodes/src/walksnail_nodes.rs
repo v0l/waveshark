@@ -101,6 +101,12 @@ impl Simple for WalksnailNode {
             if let Some(b) = l.balance_db {
                 out.push(("antennas".into(), format!("{b:+.1} dB")));
             }
+            if let Some(c) = l.counter {
+                out.push(("frame".into(), c.to_string()));
+            }
+            if l.missed > 0 {
+                out.push(("missed".into(), l.missed.to_string()));
+            }
             out.push(("offset".into(), format!("{:+.1} kHz", r.offset_hz / 1e3)));
         }
         out

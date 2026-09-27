@@ -79,6 +79,8 @@ fn both_antennas_open_is_139_frames_a_second_of_64_qam() {
     let iq = p.carrier.iq.as_ref().expect("the frame it was read from");
     assert_eq!(iq.samples.len(), dsp::artosyn::FRAME);
     assert_eq!(iq.rate, dsp::artosyn::RATE);
+    assert!(l.counter.is_some(), "the header's frame counter reads");
+    assert_eq!(l.missed, 0, "frames the counter says were skipped");
     let row = nodes::protocol::by_id("walksnail").and_then(|w| w.stated(p)).expect("a row");
     assert_eq!((row[0].id, row[0].kind), ("walksnail", "downlink"));
 }
@@ -121,4 +123,24 @@ fn a_whole_recording_reads_every_frame_the_python_reference_counted() {
     span.flush(&mut reports);
     let frames: u32 = reports.iter().map(|r| r.frames).sum();
     assert_eq!(frames, 167, "frames in 1.2 s; the Python reference counts 167");
+}
+
+#[test]
+fn the_frame_counter_steps_by_one_on_every_frame_of_both_captures() {
+    for name in [BOTH, COVERED] {
+        let Some(iq) = samples(name) else { continue };
+        let mut span =
+            dsp::artosyn::Span::new(RATE, CENTER as f64, &[CENTER as f64]).expect("the channel");
+        span.demodulate_every(1);
+        let mut reports = Vec::new();
+        for b in iq.chunks(262_144) {
+            span.process(b, &mut reports);
+        }
+        span.flush(&mut reports);
+        let frames: u32 = reports.iter().map(|r| r.frames).sum();
+        let missed: u32 = reports.iter().map(|r| r.missed).sum();
+        assert_eq!(frames, 167, "{name}");
+        assert_eq!(missed, 0, "{name}: every frame's counter followed the one before");
+        assert!(reports.iter().all(|r| r.counter.is_some()), "{name}: a counter in every report");
+    }
 }

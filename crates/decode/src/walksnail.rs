@@ -2,7 +2,7 @@ use common::packet::{Fact, Named, Proto, ThingKind};
 use dsp::artosyn::Constellation;
 
 pub const TAG: [u8; 4] = *b"WSNK";
-const LEN: usize = TAG.len() + 21;
+const LEN: usize = TAG.len() + 24;
 const ABSENT: i16 = i16::MIN;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,6 +16,8 @@ pub struct Link {
     pub constellation: Option<Constellation>,
     pub mer_db: Option<f32>,
     pub balance_db: Option<f32>,
+    pub counter: Option<u8>,
+    pub missed: u16,
 }
 
 impl Link {
@@ -73,6 +75,8 @@ pub fn link(r: &dsp::artosyn::Report) -> Link {
         constellation: r.constellation,
         mer_db: r.mer_db,
         balance_db: r.balance_db,
+        counter: r.counter,
+        missed: r.missed.min(u32::from(u16::MAX)) as u16,
     }
 }
 
@@ -91,6 +95,8 @@ pub fn wrap(l: &Link) -> Vec<u8> {
             .map_or(0u32, |p| (f64::from(p) * 1e9).round().clamp(1.0, 4e9) as u32)
             .to_le_bytes(),
     );
+    v.push(l.counter.map_or(0xff, |c| c & 0x3f));
+    v.extend(l.missed.to_le_bytes());
     v
 }
 
@@ -115,6 +121,8 @@ pub fn parse(bytes: &[u8]) -> Option<Link> {
             0 => None,
             t => Some((f64::from(t) / 1e9) as f32),
         },
+        counter: (b[21] < 64).then_some(b[21]),
+        missed: u16le(22),
     })
 }
 
@@ -141,6 +149,8 @@ mod tests {
             constellation: Some(Constellation::Qam64),
             mer_db: Some(15.76),
             balance_db: Some(2.62),
+            counter: Some(58),
+            missed: 3,
         }
     }
 
@@ -152,6 +162,8 @@ mod tests {
         assert_eq!(back.constellation, Some(Constellation::Qam64));
         assert_eq!(back.mer_db, Some(15.76));
         assert_eq!(back.balance_db, Some(2.62));
+        assert_eq!(back.counter, Some(58));
+        assert_eq!(back.missed, 3);
         assert_eq!(back.snr_db, 17.3);
         let fps = back.frames_per_second().expect("a period");
         assert!((fps - 139.6).abs() < 0.05, "{fps}");

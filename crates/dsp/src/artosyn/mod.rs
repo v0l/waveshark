@@ -1,3 +1,5 @@
+mod header_table;
+
 use common::C32;
 use rayon::prelude::*;
 use rustfft::{Fft, FftPlanner};
@@ -19,6 +21,10 @@ pub const DATA_CARRIERS: usize = 1536;
 pub const WIDTH_HZ: f64 = 20_000_000.0;
 pub const OCCUPIED_HALF_HZ: f64 = (DC as f64 + 0.5) * SPACING_HZ;
 pub const REPORT_S: f64 = 1.0;
+
+pub type HeaderBit = (u16, u8);
+const COUNTER_PERIOD: u8 = 64;
+const COUNTER_MARGIN: f32 = 0.1;
 
 const PILOT_SHIFT: [usize; 6] = [0, 3, 4, 1, 5, 2];
 const PILOT_PERIOD: usize = 2047;
@@ -142,6 +148,45 @@ pub struct Cells {
     pub constellation: Constellation,
     pub mer_db: f32,
     pub balance_db: f32,
+    pub counter: Option<u8>,
+}
+
+pub fn counter_template(bits: &[HeaderBit], counter: u8) -> impl Iterator<Item = (usize, u8)> + '_ {
+    bits.iter().map(move |&(n, mask)| {
+        let word = counter & (mask & 0x3f) | (mask & 0x40);
+        (usize::from(n), (word.count_ones() & 1) as u8)
+    })
+}
+
+fn counter_of(bits: &[(usize, [u8; 2])]) -> Option<u8> {
+    let tables = [header_table::HEADER_ANTENNA_0, header_table::HEADER_ANTENNA_1];
+    let mut best = [(usize::MAX, 0u8); 2];
+    let mut second = [usize::MAX; 2];
+    for (a, table) in tables.iter().enumerate() {
+        for c in 0..COUNTER_PERIOD {
+            let d = counter_template(table, c)
+                .filter(|&(n, want)| {
+                    bits.binary_search_by_key(&n, |b| b.0)
+                        .map(|i| bits[i].1[a] != want)
+                        .unwrap_or(false)
+                })
+                .count();
+            if d < best[a].0 {
+                second[a] = best[a].0;
+                best[a] = (d, c);
+            } else if d < second[a] {
+                second[a] = d;
+            }
+        }
+    }
+    let margin = |a: usize| (second[a] - best[a].0) as f32 / tables[a].len() as f32;
+    let sure: Vec<u8> =
+        (0..2).filter(|&a| margin(a) >= COUNTER_MARGIN).map(|a| best[a].1).collect();
+    match sure.as_slice() {
+        [c] => Some(*c),
+        [a, b] if a == b => Some(*a),
+        _ => None,
+    }
 }
 
 pub struct Demodulator {
@@ -309,30 +354,54 @@ fn pilot_estimates(spec: &[C32], symbol: usize, antenna: usize, dc: i64) -> Vec<
         .collect()
 }
 
+fn pair_channels(spectra: &[Vec<C32>], s: usize, dc: i64) -> ([Vec<C32>; 2], C32) {
+    let own: Vec<Vec<(usize, C32)>> =
+        (0..2).map(|a| pilot_estimates(&spectra[s], s, a, dc)).collect();
+    let next: Vec<Vec<(usize, C32)>> =
+        (0..2).map(|a| pilot_estimates(&spectra[s + 1], s + 1, a, dc)).collect();
+    let turn: C32 = (0..2)
+        .map(|a| {
+            let h0 = interpolate(&mut own[a].clone());
+            let h1 = interpolate(&mut next[a].clone());
+            h1.iter().zip(&h0).map(|(x, y)| x * y.conj()).sum::<C32>()
+        })
+        .sum();
+    let back = C32::from_polar(1.0, -turn.arg());
+    let h = std::array::from_fn(|a| {
+        let mut pts = own[a].clone();
+        pts.extend(next[a].iter().map(|&(n, v)| (n, v * back)));
+        interpolate(&mut pts)
+    });
+    (h, back.conj())
+}
+
+fn header_bits(spectra: &[Vec<C32>], dc: i64) -> Vec<(usize, [u8; 2])> {
+    let (h, _) = pair_channels(spectra, 0, dc);
+    let y = &spectra[0];
+    data_carriers(0)
+        .iter()
+        .map(|&n| {
+            let (a, b) = (h[0][n], h[1][n]);
+            let r = y[bin(dc, n)];
+            let (mut best, mut bits) = (f32::INFINITY, [0u8; 2]);
+            for (sa, sb) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                let e = (r - a * sa - b * sb).norm_sqr();
+                if e < best {
+                    best = e;
+                    bits = [u8::from(sa < 0.0), u8::from(sb < 0.0)];
+                }
+            }
+            (n, bits)
+        })
+        .collect()
+}
+
 fn alamouti_cells(spectra: &[Vec<C32>], dc: i64) -> Option<Cells> {
     let mut cells = Vec::with_capacity((SYMBOLS - HEADER_SYMBOLS) * DATA_CARRIERS);
     let (mut p0, mut p1) = (0.0f64, 0.0f64);
+    let counter = counter_of(&header_bits(spectra, dc));
     for s in (HEADER_SYMBOLS..SYMBOLS).step_by(2) {
-        let own: Vec<Vec<(usize, C32)>> =
-            (0..2).map(|a| pilot_estimates(&spectra[s], s, a, dc)).collect();
-        let next: Vec<Vec<(usize, C32)>> =
-            (0..2).map(|a| pilot_estimates(&spectra[s + 1], s + 1, a, dc)).collect();
-        let turn: C32 = (0..2)
-            .map(|a| {
-                let h0 = interpolate(&mut own[a].clone());
-                let h1 = interpolate(&mut next[a].clone());
-                h1.iter().zip(&h0).map(|(x, y)| x * y.conj()).sum::<C32>()
-            })
-            .sum();
-        let back = C32::from_polar(1.0, -turn.arg());
-        let h: Vec<Vec<C32>> = (0..2)
-            .map(|a| {
-                let mut pts = own[a].clone();
-                pts.extend(next[a].iter().map(|&(n, v)| (n, v * back)));
-                interpolate(&mut pts)
-            })
-            .collect();
-        let fwd = back.conj();
+        let (h, fwd) = pair_channels(spectra, s, dc);
         for &n in data_carriers(s) {
             let (a, b) = (h[0][n], h[1][n]);
             let (c, d) = (a * fwd, b * fwd);
@@ -364,6 +433,7 @@ fn alamouti_cells(spectra: &[Vec<C32>], dc: i64) -> Option<Cells> {
         constellation,
         mer_db: -10.0 * err.max(1e-12).log10(),
         balance_db: (10.0 * (p0 / p1.max(1e-30)).log10()) as f32,
+        counter,
     })
 }
 
@@ -411,6 +481,8 @@ pub struct Report {
     pub constellation: Option<Constellation>,
     pub mer_db: Option<f32>,
     pub balance_db: Option<f32>,
+    pub counter: Option<u8>,
+    pub missed: u32,
     pub samples: Vec<C32>,
     pub rate: f64,
 }
@@ -427,11 +499,13 @@ struct Tally {
     mer: f64,
     balance: f64,
     demodulated: u32,
+    counter: Option<u8>,
+    missed: u32,
     samples: Vec<C32>,
 }
 
 impl Tally {
-    fn add(&mut self, m: &Measured, at: u64, rssi: f32, samples: &[C32]) {
+    fn add(&mut self, m: &Measured, at: u64, rssi: f32, samples: &[C32], stride: u32) {
         self.frames += 1;
         self.first.get_or_insert(at);
         self.last = at;
@@ -442,6 +516,11 @@ impl Tally {
             self.demodulated += 1;
             self.mer += f64::from(c.mer_db);
             self.balance += f64::from(c.balance_db);
+            if let (Some(now), Some(before)) = (c.counter, self.counter) {
+                let step = u32::from(now.wrapping_sub(before) % COUNTER_PERIOD);
+                self.missed += step.saturating_sub(stride);
+            }
+            self.counter = c.counter;
             match self.kinds.iter_mut().find(|k| k.0 == c.constellation) {
                 Some(k) => k.1 += 1,
                 None => self.kinds.push((c.constellation, 1)),
@@ -473,6 +552,8 @@ impl Tally {
             constellation: t.kinds.iter().max_by_key(|k| k.1).map(|k| k.0),
             mer_db: demodulated.then_some((t.mer / d) as f32),
             balance_db: demodulated.then_some((t.balance / d) as f32),
+            counter: t.counter,
+            missed: t.missed,
             samples: t.samples,
             rate: RATE,
         })
@@ -491,6 +572,7 @@ pub struct Channel {
     demod: Demodulator,
     tally: Tally,
     counted: u32,
+    stride: u32,
     verified_at: Option<u64>,
     latest: Option<Report>,
 }
@@ -518,6 +600,7 @@ impl Channel {
             demod: Demodulator::new(),
             tally: Tally::default(),
             counted: 0,
+            stride: DEMOD_EVERY,
             verified_at: None,
             latest: None,
         })
@@ -525,6 +608,10 @@ impl Channel {
 
     pub fn center_hz(&self) -> f64 {
         self.center_hz
+    }
+
+    pub fn demodulate_every(&mut self, frames: u32) {
+        self.stride = frames.max(1);
     }
 
     pub fn reset(&mut self) {
@@ -608,13 +695,13 @@ impl Channel {
                 self.scan = base + hit;
                 return;
             }
-            let full = self.counted.is_multiple_of(DEMOD_EVERY);
+            let full = self.counted.is_multiple_of(self.stride);
             i = match self.demod.measure(&self.buf, peak, full) {
                 Some(m) if m.coherence >= PILOT_COHERENCE => {
                     let frame = &self.buf[peak..peak + FRAME];
                     let pow = frame.iter().map(|c| c.norm_sqr()).sum::<f32>() / FRAME as f32;
                     let at = self.consumed + peak as u64;
-                    self.tally.add(&m, at, 10.0 * pow.max(1e-20).log10(), frame);
+                    self.tally.add(&m, at, 10.0 * pow.max(1e-20).log10(), frame, self.stride);
                     self.counted = self.counted.wrapping_add(1);
                     self.verified_at = Some(self.consumed + (peak + FRAME) as u64);
                     peak - base + FRAME
@@ -643,6 +730,10 @@ impl Span {
 
     pub fn locked(&self) -> bool {
         self.channels.iter().any(Channel::locked)
+    }
+
+    pub fn demodulate_every(&mut self, frames: u32) {
+        self.channels.iter_mut().for_each(|c| c.demodulate_every(frames));
     }
 
     pub fn latest(&self) -> impl Iterator<Item = &Report> {
@@ -705,6 +796,31 @@ mod tests {
             .map(|&n| if pilot_value(0, n) > 0.0 { '+' } else { '-' })
             .collect();
         assert_eq!(formula, MEASURED_SYMBOL_0_ANTENNA_0);
+    }
+
+    #[test]
+    fn the_header_templates_decode_every_counter_through_five_percent_bit_errors() {
+        let mut rng = Rng(5);
+        for c in 0..COUNTER_PERIOD {
+            let mut bits: Vec<(usize, [u8; 2])> = data_carriers(0)
+                .iter()
+                .map(|&n| (n, [rng.next() as u8 & 1, rng.next() as u8 & 1]))
+                .collect();
+            for (a, table) in
+                [header_table::HEADER_ANTENNA_0, header_table::HEADER_ANTENNA_1].iter().enumerate()
+            {
+                for (n, want) in counter_template(table, c) {
+                    let i = bits.binary_search_by_key(&n, |b| b.0).expect("a data carrier");
+                    bits[i].1[a] = want ^ u8::from(rng.uniform() < 0.05);
+                }
+            }
+            assert_eq!(counter_of(&bits), Some(c), "counter {c}");
+        }
+        let noise: Vec<(usize, [u8; 2])> = data_carriers(0)
+            .iter()
+            .map(|&n| (n, [rng.next() as u8 & 1, rng.next() as u8 & 1]))
+            .collect();
+        assert_eq!(counter_of(&noise), None, "random bits are not a counter");
     }
 
     #[test]
