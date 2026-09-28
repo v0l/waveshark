@@ -664,9 +664,19 @@ mod tests {
         }
         let locked = seconds / (thread_seconds() - t);
         assert!(reader.locked().is_some(), "the benchmark never locked");
+        let mut fir = dsp::fir::Fir::new(vec![1.0 / 64.0; 64]);
+        let mut filtered = Vec::new();
+        let t = thread_seconds();
+        for b in screen.chunks(131_072) {
+            filtered.clear();
+            fir.process(b, &mut filtered);
+        }
+        let fir_rate = seconds / (thread_seconds() - t);
+        let cost = fir_rate / locked;
         assert!(
-            locked > 2.0,
-            "a locked screen reads at {locked:.2} times real time on its thread's clock"
+            locked > 1.0 && cost < 3.5,
+            "a locked screen reads at {locked:.2} times real time, floor 1, and costs {cost:.2} \
+             passes of a 64 tap filter, ceiling 3.5 against 2.6 measured"
         );
 
         let mut state = 0xABCD_1234_5678_9876u64;
@@ -684,9 +694,11 @@ mod tests {
             empty.push(&block);
         }
         let idle = seconds / (thread_seconds() - t);
+        let cost = fir_rate / idle;
         assert!(
-            idle > 3.0,
-            "an empty band reads at {idle:.2} times real time on its thread's clock"
+            idle > 1.0 && cost < 1.4,
+            "an empty band reads at {idle:.2} times real time, floor 1, and costs {cost:.2} \
+             passes of a 64 tap filter, ceiling 1.4 against 0.93 measured"
         );
     }
 
