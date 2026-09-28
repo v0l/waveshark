@@ -102,6 +102,7 @@ fn what_survives_the_narrowing_is_what_was_inside_it() {
         audio_low_hz: None,
         squelch_db: Some(-200.0),
         agc: false,
+        blanker: None,
         voice: false,
         reads: None,
         tx: None,

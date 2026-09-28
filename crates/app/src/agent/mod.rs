@@ -353,6 +353,12 @@ pub mod args {
         /// `list_channels` reports the range and what it is measuring.
         pub squelch_db: Option<f32>,
         pub agc: Option<bool>,
+        /// Cut ignition, power line and switching supply clicks out of the
+        /// channel before its filter. Off on every channel until asked for.
+        pub noise_blanker: Option<bool>,
+        /// How far over the average level a click has to stand to be cut,
+        /// 10 to 30 dB. Setting it turns the blanker on.
+        pub noise_blanker_db: Option<f32>,
         /// Treat what is heard here as speech: a row in the call list, and a
         /// transcript where a model is installed.
         pub voice: Option<bool>,

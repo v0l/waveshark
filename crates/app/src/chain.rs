@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use crate::scanners::Front;
 use common::{C32, Hz, Result};
 use dsp::rds::Station;
-use nodes::{AgcNode, BankNode, SpectrumNode, SquelchNode, WfmDemodNode};
+use nodes::{AgcNode, BankNode, NoiseBlankerNode, SpectrumNode, SquelchNode, WfmDemodNode};
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
@@ -145,6 +145,7 @@ pub struct Chan {
     key: ChanKey,
     tail: Out,
     agc: Option<NodeId>,
+    blanker: Option<NodeId>,
     squelch: Option<NodeId>,
     wfm: Option<NodeId>,
     pub audio_rate: f64,
@@ -152,6 +153,7 @@ pub struct Chan {
     /// What the chain cost, for the status line.
     pub detail: String,
     pub agc_gain_db: f32,
+    pub blanked: f32,
     pub squelch_open: bool,
     pub squelch_db: f32,
     pub squelch_code: Option<dsp::squelch::Coded>,
@@ -627,6 +629,7 @@ pub struct ChannelLevels {
     pub muted: bool,
     pub squelch_db: Option<f32>,
     pub agc: bool,
+    pub blanker: Option<f32>,
 }
 
 /// One fader, as the strip draws it.
@@ -1483,12 +1486,14 @@ impl Receiver {
                     ChanMode::Audio(_) => tail.o(),
                 },
                 agc: of("chan_agc"),
+                blanker: of("chan_blank"),
                 squelch: of("chan_squelch"),
                 wfm: stereo.then(|| of("chan_demod")).flatten(),
                 audio_rate: AUDIO_HZ,
                 channels: if stereo { 2 } else { 1 },
                 detail: String::new(),
                 agc_gain_db: 0.0,
+                blanked: 0.0,
                 squelch_open: false,
                 squelch_db: 0.0,
                 squelch_code: None,
@@ -1694,6 +1699,10 @@ impl Receiver {
         for c in &mut self.chans {
             if let Some(a) = c.agc.and_then(|id| downcast::<AgcNode>(&self.graph, id)) {
                 c.agc_gain_db = a.gain_db();
+            }
+            if let Some(b) = c.blanker.and_then(|id| downcast::<NoiseBlankerNode>(&self.graph, id))
+            {
+                c.blanked = b.blanked();
             }
             if let Some(sq) = c.squelch.and_then(|id| downcast::<SquelchNode>(&self.graph, id)) {
                 c.squelch_open = sq.is_open();
@@ -1971,6 +1980,7 @@ impl Receiver {
             .map(|c| crate::radio::ChannelState {
                 id: c.spec.id,
                 agc_gain_db: c.agc_gain_db,
+                blanked: c.blanked,
                 squelch_open: c.squelch_open,
                 squelch_db: c.squelch_db,
                 code: c.squelch_code,
@@ -2332,6 +2342,7 @@ impl Receiver {
                     muted: false,
                     squelch_db: c.spec.squelch_db,
                     agc: c.spec.agc,
+                    blanker: c.spec.blanker,
                 };
                 if let Some(f) = self.fader(c.spec.id) {
                     own.volume = f.volume();
@@ -2346,6 +2357,11 @@ impl Receiver {
                 }
                 if let Some(a) = c.agc.and_then(|id| downcast::<AgcNode>(&self.graph, id)) {
                     own.agc = a.is_enabled();
+                }
+                if let Some(b) =
+                    c.blanker.and_then(|id| downcast::<NoiseBlankerNode>(&self.graph, id))
+                {
+                    own.blanker = b.is_enabled().then(|| b.threshold_db());
                 }
                 own
             })
@@ -3820,8 +3836,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 /// The stages of one strip channel, in the order they are built. A decode
 /// channel uses the first two and then its front end; an audio one uses the
 /// rest.
-const CHAN_STAGES: [&str; 10] = [
+const CHAN_STAGES: [&str; 11] = [
     "chan_mix",
+    "chan_blank",
     "chan_ifdec",
     "chan_front",
     "chan_demod",
@@ -4477,6 +4494,17 @@ fn audio_channel_stages(
     mix.insert("shift_hz".into(), V::Float(chan_shift(spec)));
     let m = at(p, "chan_mix", "mixer", mix);
     p.connect(head, (m, 0));
+    let mut mixed = Source::Stage(m, 0);
+
+    if mode != Demod::Wfm {
+        let mut nb = Settings::new();
+        nb.insert("enabled".into(), V::Bool(spec.blanker.is_some()));
+        let db = spec.blanker.unwrap_or(dsp::blanker::DEFAULT_THRESHOLD_DB);
+        nb.insert("threshold_db".into(), V::Float(db as f64));
+        let b = at(p, "chan_blank", "noise_blanker", nb);
+        p.connect(mixed, (b, 0));
+        mixed = Source::Stage(b, 0);
+    }
 
     // Sized from the signal's bandwidth, not from the decimation factor: the
     // stopband has to land where the first alias folds down.
@@ -4486,7 +4514,7 @@ fn audio_channel_stages(
     ifd.insert("input_rate_hz".into(), V::Float(rate));
     ifd.insert("label".into(), V::Text("IF decimator".into()));
     let i = at(p, "chan_ifdec", "decimate", ifd);
-    p.connect(Source::Stage(m, 0), (i, 0));
+    p.connect(mixed, (i, 0));
 
     let stereo = mode == Demod::Wfm && if_rate >= 130_000.0;
     let mut d = Settings::new();
@@ -4754,6 +4782,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "fm_demod" => "FM discriminator".into(),
         "deemphasis" => "De-emphasis".into(),
         "agc" => "AGC".into(),
+        "noise_blanker" => "Noise blanker".into(),
         "squelch" => "Squelch".into(),
         "scope" => "Scope".into(),
         "pulse_detect" => "OOK pulses".into(),
@@ -6157,6 +6186,7 @@ pub(crate) mod tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: None,
@@ -7239,8 +7269,8 @@ pub(crate) mod tests {
         let chan_stages =
             rx.patch().stages().iter().filter(|s| s.settings.contains_key("channel")).count();
         assert_eq!(
-            chan_stages, 10,
-            "an NFM chain is nine stages and a fader, and no more were kept"
+            chan_stages, 11,
+            "an NFM chain is ten stages and a fader, and no more were kept"
         );
         // A fader drag in manual mode is a number on a stage, not a rebuild
         // that would drop every source the auto node had open.
@@ -7434,6 +7464,45 @@ pub(crate) mod tests {
         let edits = rx.edits();
         assert_eq!(edits.settings.len(), 1, "{edits:?}");
         assert_eq!(edits.settings[0].1, "vol");
+    }
+
+    #[test]
+    fn a_usb_channel_blanks_between_its_mixer_and_its_if_filter_and_switches_in_place() {
+        use crate::patch::Source;
+        let rate = 2_400_000.0;
+        let mut p = plan(rate, Hz::mhz(7));
+        p.fronts.clear();
+        let mut spec = chan(1, 100_000.0, Demod::Usb);
+        p.channels = vec![spec.clone(), chan(2, -300_000.0, Demod::Wfm)];
+        let drawn = derived_patch(&p);
+        let id = |what: &str, s: &ChannelSpec| chan_stage_id(what, s, p.eff_rate());
+        let nb = drawn.stage(id("chan_blank", &spec)).expect("a USB channel has a blanker");
+        assert_eq!(nb.kind, "noise_blanker");
+        assert_eq!(nb.settings.get("enabled"), Some(&pipeline::ParamValue::Bool(false)));
+        assert_eq!(drawn.feeding((nb.id, 0)), Some(Source::Stage(id("chan_mix", &spec), 0)));
+        assert_eq!(drawn.feeding((id("chan_ifdec", &spec), 0)), Some(Source::Stage(nb.id, 0)));
+        assert!(drawn.stage(id("chan_blank", &p.channels[1])).is_none(), "WFM has no blanker");
+
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        spec.blanker = Some(22.0);
+        p.channels[0] = spec;
+        assert!(rx.params_only(&p), "switching the blanker on rebuilt the channel");
+        rx.apply_params(&p);
+        let click = |k: usize| match k % 2_400 {
+            0 => C32::new(1.0, 0.0),
+            _ => C32::new(0.001, 0.0),
+        };
+        for b in 0..100 {
+            let iq: Vec<C32> = (b * 48_000..(b + 1) * 48_000).map(click).collect();
+            rx.process(&iq).unwrap();
+        }
+        let (_, chans) = rx.levels();
+        assert_eq!(chans[0].blanker, Some(22.0));
+        assert_eq!(chans[1].blanker, None);
+        let cut = rx.channel_states()[0].blanked * 100.0;
+        assert!((0.9..1.2).contains(&cut), "{cut:.2} % cut, 25 samples of every 2400");
+        assert_eq!(rx.channel_states()[1].blanked, 0.0);
+        assert!(rx.edits().settings.is_empty(), "{:?}", rx.edits());
     }
 
     #[test]
@@ -8684,6 +8753,7 @@ mod refusal_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: None,
@@ -8743,6 +8813,7 @@ mod refusal_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: None,
@@ -8786,6 +8857,7 @@ mod refusal_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: None,
@@ -8826,6 +8898,7 @@ mod tx_in_graph_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec { source, ..Default::default() }),
@@ -8903,6 +8976,7 @@ mod tx_in_graph_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec { source: TxSource::Tone, ..Default::default() }),
@@ -9237,6 +9311,7 @@ mod tx_in_graph_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9305,6 +9380,7 @@ mod tx_in_graph_tests {
                 audio_low_hz: None,
                 squelch_db: None,
                 agc: true,
+                blanker: None,
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),
@@ -9343,6 +9419,7 @@ mod tx_in_graph_tests {
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9426,6 +9503,7 @@ vectors:
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9524,6 +9602,7 @@ vectors:
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9627,6 +9706,7 @@ vectors:
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9743,6 +9823,7 @@ vectors:
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: None,
@@ -10252,6 +10333,7 @@ vectors:
             audio_low_hz: None,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),

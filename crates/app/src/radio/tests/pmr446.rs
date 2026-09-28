@@ -40,6 +40,7 @@ fn a_handheld_on_pmr446_arrives_as_words() {
         // decision is not what this test is about.
         squelch_db: Some(-200.0),
         agc: true,
+        blanker: None,
         voice: true,
         reads: None,
         tx: None,
@@ -111,6 +112,7 @@ fn pmr446_strip(
         audio_low_hz: None,
         squelch_db: None,
         agc: true,
+        blanker: None,
         voice,
         reads: None,
         tx: None,
@@ -232,6 +234,7 @@ fn a_handheld_on_pmr446_is_recorded_and_reads_back() {
         audio_low_hz: None,
         squelch_db: Some(-200.0),
         agc: true,
+        blanker: None,
         voice: true,
         reads: None,
         tx: None,

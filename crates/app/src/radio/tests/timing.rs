@@ -15,6 +15,7 @@ fn widest_chain() -> crate::chain::Receiver {
         audio_low_hz: None,
         squelch_db: Some(-200.0),
         agc: false,
+        blanker: None,
         voice: false,
         reads: None,
         tx: None,

@@ -34,6 +34,7 @@ fn a_decode_channel_reads_its_frequency_with_the_scanner_switched_off() {
         voice: false,
         reads: None,
         agc: true,
+        blanker: None,
         tx: None,
         tone: None,
     }];
@@ -94,6 +95,7 @@ fn an_auto_channel_finds_and_reads_what_is_in_its_own_bandwidth() {
         voice: false,
         reads: None,
         agc: true,
+        blanker: None,
         tx: None,
         tone: None,
     }];

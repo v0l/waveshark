@@ -172,6 +172,9 @@ impl Strip<'_> {
                 });
             });
         }
+        if demod != Demod::Wfm {
+            changed |= Self::channel_blanker(ui, ch, st.blanked);
+        }
         // What the channel carries, which the mode cannot say: the same NFM
         // channel holds a repeater, a telemetry link and a paging tone. Told
         // that it is speech, the channel puts each over on the packet bus
@@ -406,6 +409,39 @@ impl Strip<'_> {
                 }
             } else {
                 Line::new().note("mode default").show(ui);
+            }
+        });
+        changed
+    }
+
+    fn channel_blanker(ui: &mut egui::Ui, ch: &mut Channel, blanked: f32) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            Line::new().legend("nb").show(ui);
+            let on = ch.blanker.is_some();
+            if ui
+                .selectable_label(on, if on { "ON" } else { "OFF" })
+                .on_hover_text("Cut ignition, power line and switching supply clicks")
+                .clicked()
+            {
+                ch.blanker = (!on).then_some(dsp::blanker::DEFAULT_THRESHOLD_DB);
+                changed = true;
+            }
+            if let Some(db) = &mut ch.blanker {
+                let (lo, hi) = dsp::blanker::THRESHOLD_RANGE_DB;
+                let r = ui
+                    .add(
+                        egui::DragValue::new(db)
+                            .speed(0.2)
+                            .range(lo..=hi)
+                            .max_decimals(0)
+                            .suffix(" dB"),
+                    )
+                    .on_hover_text("How far over the average a click stands to be cut");
+                if settled(&r) {
+                    changed = true;
+                }
+                Line::new().value(format!("{:.1}% cut", blanked * 100.0)).size(11.0).show(ui);
             }
         });
         changed
@@ -1924,6 +1960,7 @@ mod tests {
                 audio_low_hz: None,
                 squelch_db: None,
                 agc: true,
+                blanker: None,
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),

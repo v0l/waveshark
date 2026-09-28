@@ -797,6 +797,14 @@ impl App {
         if let Some(g) = a.agc {
             c.agc = g;
         }
+        match (a.noise_blanker, a.noise_blanker_db) {
+            (Some(false), _) => c.blanker = None,
+            (_, Some(db)) => c.blanker = Some(db),
+            (Some(true), None) => {
+                c.blanker = c.blanker.or(Some(dsp::blanker::DEFAULT_THRESHOLD_DB));
+            }
+            (None, None) => {}
+        }
         if let Some(v) = a.voice {
             c.voice = v;
         }
@@ -1197,6 +1205,8 @@ impl App {
                     "squelch_open": st.map(|s| s.squelch_open),
                     "squelch_reading_db": st.map(|s| s.squelch_db),
                     "agc_gain_db": st.map(|s| s.agc_gain_db),
+                    "noise_blanker_db": c.blanker,
+                    "noise_blanked_fraction": st.map(|s| s.blanked),
                     "level": st.map(|s| s.level),
                     // What keying this channel would do, and whether it is
                     // doing it. A mode with no modulator behind it cannot be
@@ -2028,6 +2038,8 @@ mod tests {
                 muted: Some(true),
                 squelch_db: None,
                 agc: None,
+                noise_blanker: None,
+                noise_blanker_db: None,
                 voice: None,
             }),
         )
@@ -2053,6 +2065,8 @@ mod tests {
                     muted: None,
                     squelch_db: None,
                     agc: None,
+                    noise_blanker: None,
+                    noise_blanker_db: None,
                     voice: None,
                 })
             )

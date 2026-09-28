@@ -398,6 +398,7 @@ pub struct ChannelSpec {
     /// None leaves the mode's own default.
     pub squelch_db: Option<f32>,
     pub agc: bool,
+    pub blanker: Option<f32>,
     /// Treat what is heard here as speech: end an over on the squelch, put
     /// the transmission on the packet bus with its audio, and list it as a
     /// call.

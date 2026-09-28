@@ -5,6 +5,7 @@ use super::*;
 pub struct ChannelState {
     pub id: u64,
     pub agc_gain_db: f32,
+    pub blanked: f32,
     pub squelch_open: bool,
     pub squelch_db: f32,
     /// The coded squelch heard on the channel now, whatever it is set to:

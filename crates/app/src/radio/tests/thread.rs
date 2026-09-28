@@ -295,6 +295,7 @@ fn a_channel_outside_the_span_is_refused_rather_than_demodulated() {
         voice: false,
         reads: None,
         agc: true,
+        blanker: None,
         tx: None,
         tone: None,
     };

@@ -43,6 +43,7 @@ pub struct Channel {
     /// what an operator who has never touched the control should get.
     pub(super) squelch_db: Option<f32>,
     pub(super) agc: bool,
+    pub(super) blanker: Option<f32>,
     /// Treat what is heard here as speech: calls on the bus, a row in the
     /// call list, and a transcript where a model is installed.
     pub(super) voice: bool,

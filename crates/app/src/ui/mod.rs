@@ -1350,6 +1350,7 @@ impl App {
             muted: false,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: speaks(&ChanMode::Audio(demod)),
             reads: None,
             tx: None,
@@ -1620,6 +1621,7 @@ impl App {
                         c.muted = spec.muted;
                         c.squelch_db = spec.squelch_db;
                         c.agc = spec.agc;
+                        c.blanker = spec.blanker;
                         if !spec.label.is_empty() {
                             c.label = spec.label;
                         }
@@ -3011,6 +3013,7 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
         muted: false,
         squelch_db: None,
         agc: true,
+        blanker: None,
         tx: None,
         tone: None,
         doppler: false,
@@ -3052,6 +3055,7 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             audio_low_hz: c.audio_low_hz,
             squelch_db: c.squelch_db,
             agc: c.agc,
+            blanker: c.blanker,
             voice: c.voice,
             reads: c.reads.clone(),
             // Only what an operator changed about transmitting. Whether the
@@ -4236,6 +4240,7 @@ mod tests {
             muted: false,
             squelch_db: None,
             agc: true,
+            blanker: None,
             voice: false,
             reads: None,
             tx: None,
@@ -4426,6 +4431,7 @@ mod tests {
                 muted: false,
                 squelch_db: None,
                 agc: true,
+                blanker: None,
                 voice: false,
                 reads: None,
                 tx: None,

@@ -10,6 +10,7 @@ pub mod ais;
 pub mod artosyn;
 pub mod ask;
 pub mod biphase;
+pub mod blanker;
 pub mod ble;
 pub mod ble_coded;
 pub mod blend;

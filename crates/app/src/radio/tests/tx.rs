@@ -19,6 +19,7 @@ fn the_transmit_chain_follows_the_channel_going_on_air() {
         voice: false,
         reads: None,
         agc: true,
+        blanker: None,
         tx: Some(TxSpec { source, ..Default::default() }),
         tone: None,
     };

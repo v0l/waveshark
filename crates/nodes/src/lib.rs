@@ -109,7 +109,7 @@ pub use dfm_nodes::DfmNode;
 pub use dmr_nodes::DmrNode;
 pub use dsp_nodes::{
     AgcNode, AgcPreset, DecimateNode, DeemphasisNode, EnvelopeNode, FmDemodNode, HighBlendNode,
-    MixerNode, RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
+    MixerNode, NoiseBlankerNode, RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
 };
 pub use elrs_nodes::ElrsNode;
 pub use feed_nodes::{FEED_KINDS, FeedKind, FeedNode, FeedSpec, feed_kind};
@@ -238,6 +238,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (dsp_nodes::SSB_DEMOD, dsp_nodes::build_ssb_demod),
     (dsp_nodes::HIGH_BLEND, dsp_nodes::build_high_blend),
     (dsp_nodes::AGC, dsp_nodes::build_agc),
+    (dsp_nodes::NOISE_BLANKER, dsp_nodes::build_noise_blanker),
     (dsp_nodes::SQUELCH, dsp_nodes::build_squelch),
     (wfm::DESC, wfm::build),
     (wfm::RDS_TX, wfm::build_rds_tx),

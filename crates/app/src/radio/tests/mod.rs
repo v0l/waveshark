@@ -82,6 +82,7 @@ fn strip_channel(id: u64, offset: f64) -> ChannelSpec {
         audio_low_hz: None,
         squelch_db: None,
         agc: true,
+        blanker: None,
         voice: false,
         reads: None,
         // As the strip sends it: nobody has said anything about

@@ -7,6 +7,7 @@
 
 use common::{C32, Result};
 use dsp::agc::Agc;
+use dsp::blanker::Blanker;
 use dsp::squelch::{NoiseMeter, Squelch};
 use dsp::ssb::{Sideband, SsbDemod};
 use dsp::{Deemphasis, FirDecim, FmDemod, HighBlend, Mixer};
@@ -814,6 +815,115 @@ impl Simple for AgcNode {
     }
 }
 
+pub struct NoiseBlankerNode {
+    enabled: bool,
+    threshold_db: f32,
+    rate: f64,
+    blanker: Option<Blanker>,
+    blanked: f32,
+}
+
+impl NoiseBlankerNode {
+    pub fn new(enabled: bool, threshold_db: f32) -> Self {
+        Self { enabled, threshold_db, rate: 0.0, blanker: None, blanked: 0.0 }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn threshold_db(&self) -> f32 {
+        self.threshold_db
+    }
+
+    pub fn blanked(&self) -> f32 {
+        if self.enabled { self.blanked } else { 0.0 }
+    }
+
+    fn set_enabled(&mut self, on: bool) {
+        if on != self.enabled {
+            self.enabled = on;
+            self.blanker = None;
+            self.blanked = 0.0;
+        }
+    }
+}
+
+impl Simple for NoiseBlankerNode {
+    fn name(&self) -> &str {
+        "noise_blanker"
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Iq {
+            return Err(common::Error::other("noise blanker needs IQ"));
+        }
+        if self.rate != i.spec.rate {
+            self.rate = i.spec.rate;
+            self.blanker = None;
+        }
+        Ok(i.spec)
+    }
+
+    fn latency(&self) -> u64 {
+        match (self.enabled, self.rate > 0.0) {
+            (true, true) => dsp::blanker::delay_at(self.rate) as u64,
+            _ => 0,
+        }
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        let iq = i.as_iq().unwrap_or(&[]);
+        let out = o.iq_mut();
+        out.extend_from_slice(iq);
+        if !self.enabled || iq.is_empty() {
+            return Ok(());
+        }
+        let (rate, db) = (self.rate, self.threshold_db);
+        let b = self.blanker.get_or_insert_with(|| Blanker::new(rate, db));
+        let fraction = b.process(out) as f32 / iq.len() as f32;
+        let weight = (iq.len() as f64 / (rate * BLANKED_OVER_S)).min(1.0) as f32;
+        self.blanked += (fraction - self.blanked) * weight;
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.blanker = None;
+        self.blanked = 0.0;
+    }
+
+    fn params(&self) -> Vec<Param> {
+        let (lo, hi) = dsp::blanker::THRESHOLD_RANGE_DB;
+        vec![
+            Param::bool(ENABLED, self.enabled).label("Enabled"),
+            Param::float(THRESHOLD_DB, self.threshold_db as f64, lo as f64..=hi as f64)
+                .unit("dB")
+                .label("Over the average"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
+        match name {
+            ENABLED => self.set_enabled(v.as_bool().unwrap_or(false)),
+            THRESHOLD_DB => {
+                self.threshold_db =
+                    v.as_f64().map_or(dsp::blanker::DEFAULT_THRESHOLD_DB, |d| d as f32);
+                if let Some(b) = &mut self.blanker {
+                    b.set_threshold_db(self.threshold_db);
+                }
+            }
+            _ => {
+                return Err(common::Error::other(format!(
+                    "noise_blanker: unknown parameter {name:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+const BLANKED_OVER_S: f64 = 0.5;
+
 /// How a squelch decides whether a channel is busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SquelchKind {
@@ -1252,6 +1362,21 @@ pub fn build_agc(s: &Settings) -> Result<Box<dyn Node>> {
     Ok(Box::new(n))
 }
 
+pub const NOISE_BLANKER: StageDesc = StageDesc {
+    name: "noise_blanker",
+    summary: "Cut ignition, power line and switching supply clicks out of IQ \
+              before a channel filter smears them",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_noise_blanker(s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(NoiseBlankerNode::new(
+        s.bool_or(ENABLED, false),
+        s.f64_or(THRESHOLD_DB, dsp::blanker::DEFAULT_THRESHOLD_DB as f64) as f32,
+    )))
+}
+
 pub const SQUELCH: StageDesc = StageDesc {
     name: "squelch",
     summary: "Mute a channel with nothing on it, by noise for FM or by level",
@@ -1526,5 +1651,73 @@ mod squelch_tests {
         // whatever is there.
         s.insert("code".into(), ParamValue::Text("89.2".into()));
         assert!(build_squelch(&s).is_err(), "89.2 Hz is not a tone any radio sends");
+    }
+}
+
+#[cfg(test)]
+mod blanker_tests {
+    use super::*;
+    use common::C32;
+
+    const RATE: f64 = 240_000.0;
+
+    fn negotiated(on: bool) -> NoiseBlankerNode {
+        let mut n = NoiseBlankerNode::new(on, dsp::blanker::DEFAULT_THRESHOLD_DB);
+        let spec = StreamSpec { kind: PortKind::Iq, rate: RATE, ..Default::default() };
+        Simple::negotiate(&mut n, &PortSpec { spec, latency: 0 }).unwrap();
+        n
+    }
+
+    fn clicking(len: usize) -> Vec<C32> {
+        (0..len)
+            .map(|k| match k % 2_400 {
+                1_200 => C32::new(3.0, 0.0),
+                _ => C32::new(0.01, 0.0),
+            })
+            .collect()
+    }
+
+    fn run(n: &mut NoiseBlankerNode, iq: &[C32]) -> Vec<C32> {
+        let input = Payload::Iq(iq.to_vec());
+        let mut out = Payload::empty_of(PortKind::Iq);
+        let (mut ev, mut tg) = (Vec::new(), Vec::new());
+        let spec = StreamSpec { kind: PortKind::Iq, rate: RATE, ..Default::default() };
+        let ins = [PortSpec { spec, latency: 0 }];
+        let ctx = &mut NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+        Simple::process(n, &input, &mut out, ctx).unwrap();
+        out.as_iq().unwrap().to_vec()
+    }
+
+    #[test]
+    fn switched_off_it_passes_the_clicks_and_reports_nothing() {
+        let mut n = negotiated(false);
+        let iq = clicking(24_000);
+        assert_eq!(run(&mut n, &iq), iq);
+        assert_eq!(n.blanked(), 0.0);
+        assert_eq!(Simple::latency(&n), 0);
+    }
+
+    #[test]
+    fn switched_on_it_bridges_one_click_in_2400_and_reports_a_percent() {
+        let mut n = negotiated(false);
+        Simple::set_param(&mut n, ENABLED, ParamValue::Bool(true)).unwrap();
+        assert_eq!(Simple::latency(&n), 49);
+        let iq = clicking(RATE as usize);
+        let mut left = 0;
+        for c in iq.chunks(4_800) {
+            left += run(&mut n, c).iter().filter(|s| s.norm() > 0.02).count();
+        }
+        assert_eq!(left, 0, "a click got through");
+        let pct = n.blanked() * 100.0;
+        assert!((0.9..1.2).contains(&pct), "{pct:.2} % blanked, 25 samples of every 2400");
+        Simple::set_param(&mut n, ENABLED, ParamValue::Bool(false)).unwrap();
+        assert_eq!(n.blanked(), 0.0);
+    }
+
+    #[test]
+    fn it_refuses_audio() {
+        let mut n = NoiseBlankerNode::new(true, 18.0);
+        let spec = StreamSpec { kind: PortKind::Real, rate: RATE, ..Default::default() };
+        assert!(Simple::negotiate(&mut n, &PortSpec { spec, latency: 0 }).is_err());
     }
 }
