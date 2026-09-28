@@ -44,6 +44,13 @@ impl Demod {
         matches!(self, Demod::Usb | Demod::Lsb | Demod::Cw)
     }
 
+    pub fn has_auto_notch(self) -> bool {
+        match self {
+            Demod::Am | Demod::Usb | Demod::Lsb => true,
+            Demod::Wfm | Demod::Nfm | Demod::Cw => false,
+        }
+    }
+
     /// Whether this mode listens below the dial frequency. The sideband type
     /// itself belongs to the demodulator, so the receiver turns this into one.
     pub fn is_lower(self) -> bool {

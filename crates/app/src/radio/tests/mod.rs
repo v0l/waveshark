@@ -85,6 +85,7 @@ fn strip_channel(id: u64, offset: f64) -> ChannelSpec {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        notch: false,
         voice: false,
         reads: None,
         // As the strip sends it: nobody has said anything about

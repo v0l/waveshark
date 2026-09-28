@@ -26,6 +26,7 @@ the code is in the commit log.
 - Walksnail Avatar 20 MHz video links: channel, frame rate, frame counter, modulation, MER, antenna balance and the goggles' bursts.
 - Noise blanker on AM, SSB, CW and NFM channels, with its threshold and share cut on the strip.
 - Noise reduction on AM, SSB, CW and NFM channels, switched and set in depth on the strip.
+- Auto notch on AM, USB and LSB channels, a strip switch that removes heterodynes and steady carriers.
 
 ### Changed
 

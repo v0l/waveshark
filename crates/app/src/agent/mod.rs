@@ -361,6 +361,8 @@ pub mod args {
         pub noise_blanker_db: Option<f32>,
         pub denoise: Option<bool>,
         pub denoise_db: Option<f32>,
+        /// Remove steady tones such as heterodynes. AM, USB and LSB only.
+        pub notch: Option<bool>,
         /// Treat what is heard here as speech: a row in the call list, and a
         /// transcript where a model is installed.
         pub voice: Option<bool>,

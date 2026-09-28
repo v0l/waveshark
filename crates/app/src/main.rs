@@ -110,6 +110,7 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        notch: false,
         tx: None,
         tone: None,
     }]));
@@ -185,6 +186,7 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             tx: None,
             tone: None,
         }]));

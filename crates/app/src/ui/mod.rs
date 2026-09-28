@@ -1353,6 +1353,7 @@ impl App {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: speaks(&ChanMode::Audio(demod)),
             reads: None,
             tx: None,
@@ -1626,6 +1627,7 @@ impl App {
                         c.blanker = spec.blanker;
                         c.denoise = spec.denoise;
                         c.denoise_db = spec.denoise_db;
+                        c.notch = spec.notch;
                         if !spec.label.is_empty() {
                             c.label = spec.label;
                         }
@@ -3020,6 +3022,7 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        notch: false,
         tx: None,
         tone: None,
         doppler: false,
@@ -3064,6 +3067,7 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             blanker: c.blanker,
             denoise: c.denoise,
             denoise_db: c.denoise_db,
+            notch: c.notch,
             voice: c.voice,
             reads: c.reads.clone(),
             // Only what an operator changed about transmitting. Whether the
@@ -4251,6 +4255,7 @@ mod tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: None,
@@ -4444,6 +4449,7 @@ mod tests {
                 blanker: None,
                 denoise: false,
                 denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+                notch: false,
                 voice: false,
                 reads: None,
                 tx: None,

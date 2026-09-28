@@ -401,6 +401,7 @@ pub struct ChannelSpec {
     pub blanker: Option<f32>,
     pub denoise: bool,
     pub denoise_db: f32,
+    pub notch: bool,
     /// Treat what is heard here as speech: end an over on the squelch, put
     /// the transmission on the packet bus with its audio, and list it as a
     /// call.

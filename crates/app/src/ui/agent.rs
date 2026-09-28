@@ -812,6 +812,9 @@ impl App {
             let (lo, hi) = dsp::denoise::DEPTH_RANGE_DB.into_inner();
             c.denoise_db = db.clamp(lo as f32, hi as f32);
         }
+        if let Some(n) = a.notch {
+            c.notch = n;
+        }
         if let Some(v) = a.voice {
             c.voice = v;
         }
@@ -1206,6 +1209,7 @@ impl App {
                     "agc": c.agc,
                     "denoise": c.denoise,
                     "denoise_db": c.denoise_db,
+                    "notch": c.mode.demod().is_some_and(Demod::has_auto_notch).then_some(c.notch),
                     "voice": c.voice,
                     "doppler": c.doppler,
                     "squelch_db": c.squelch_db.or_else(|| c.mode.demod().and_then(|d| d.default_squelch_db())),
@@ -2051,6 +2055,7 @@ mod tests {
                 noise_blanker_db: None,
                 denoise: None,
                 denoise_db: None,
+                notch: None,
                 voice: None,
             }),
         )
@@ -2080,6 +2085,7 @@ mod tests {
                     noise_blanker_db: None,
                     denoise: None,
                     denoise_db: None,
+                    notch: None,
                     voice: None,
                 })
             )

@@ -37,6 +37,7 @@ fn a_decode_channel_reads_its_frequency_with_the_scanner_switched_off() {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        notch: false,
         tx: None,
         tone: None,
     }];
@@ -100,6 +101,7 @@ fn an_auto_channel_finds_and_reads_what_is_in_its_own_bandwidth() {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        notch: false,
         tx: None,
         tone: None,
     }];

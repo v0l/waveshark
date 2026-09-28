@@ -46,6 +46,7 @@ pub mod gmsk;
 pub mod gsm;
 pub mod hdlc;
 pub mod level;
+pub mod lms;
 pub mod lora;
 pub mod lte_turbo;
 pub mod m17;

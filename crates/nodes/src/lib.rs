@@ -114,7 +114,7 @@ pub use dsp_nodes::{
 };
 pub use elrs_nodes::ElrsNode;
 pub use feed_nodes::{FEED_KINDS, FeedKind, FeedNode, FeedSpec, feed_kind};
-pub use filter_nodes::{FirFilterNode, IirFilterNode, RealFir};
+pub use filter_nodes::{AutoNotchNode, FirFilterNode, IirFilterNode, RealFir};
 pub use flex_nodes::FlexNode;
 pub use frame_meter::{FrameMeter, locked, measured, off_audio};
 pub use homeassistant_nodes::{
@@ -246,6 +246,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (wfm::RDS_TX, wfm::build_rds_tx),
     (filter_nodes::FIR_FILTER, filter_nodes::build_fir),
     (filter_nodes::IIR_FILTER, filter_nodes::build_iir),
+    (filter_nodes::AUTO_NOTCH, filter_nodes::build_auto_notch),
     // The front ends the scanner table puts on a span. Registered like any
     // other stage so that the graph the receiver derives for itself is a
     // description rather than a special case, and so an operator can put one

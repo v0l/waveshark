@@ -176,6 +176,20 @@ impl Strip<'_> {
         if demod != Demod::Wfm {
             changed |= Self::channel_blanker(ui, ch, st.blanked);
         }
+        if demod.has_auto_notch() {
+            ui.horizontal(|ui| {
+                Line::new().legend("notch").show(ui);
+                let label = if ch.notch { "ON" } else { "OFF" };
+                if ui
+                    .selectable_label(ch.notch, label)
+                    .on_hover_text("Find and remove steady tones, such as a heterodyne")
+                    .clicked()
+                {
+                    ch.notch = !ch.notch;
+                    changed = true;
+                }
+            });
+        }
         // What the channel carries, which the mode cannot say: the same NFM
         // channel holds a repeater, a telemetry link and a paging tone. Told
         // that it is speech, the channel puts each over on the packet bus
@@ -1992,6 +2006,7 @@ mod tests {
                 blanker: None,
                 denoise: false,
                 denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+                notch: false,
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),

@@ -15,6 +15,7 @@
 use common::{C32, Result};
 use dsp::filter::{Biquad, Response, design};
 use dsp::fir::Fir;
+use dsp::lms::AutoNotch;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -304,12 +305,82 @@ impl Simple for IirFilterNode {
     }
 }
 
+pub struct AutoNotchNode {
+    enabled: bool,
+    rate: f64,
+    notches: Vec<AutoNotch>,
+}
+
+impl AutoNotchNode {
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled, rate: 48_000.0, notches: vec![AutoNotch::new(48_000.0)] }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, on: bool) {
+        if on && !self.enabled {
+            self.notches.iter_mut().for_each(AutoNotch::reset);
+        }
+        self.enabled = on;
+    }
+}
+
+impl Simple for AutoNotchNode {
+    fn name(&self) -> &str {
+        AUTO_NOTCH.name
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        if i.spec.kind != PortKind::Real {
+            return Err(common::Error::other("an automatic notch takes audio"));
+        }
+        self.rate = i.spec.frame_rate();
+        self.notches = (0..i.spec.channels.max(1)).map(|_| AutoNotch::new(self.rate)).collect();
+        Ok(i.spec)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        let out = o.real_mut();
+        out.extend_from_slice(i.as_real().unwrap_or(&[]));
+        if !self.enabled {
+            return Ok(());
+        }
+        let ch = self.notches.len();
+        for (k, x) in out.iter_mut().enumerate() {
+            *x = self.notches[k % ch].sample(*x);
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.notches.iter_mut().for_each(AutoNotch::reset);
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![Param::bool(ENABLED, self.enabled).label("Enabled")]
+    }
+
+    fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
+        match name {
+            ENABLED => {
+                self.set_enabled(v.as_bool().unwrap_or(false));
+                Ok(())
+            }
+            _ => Err(common::Error::other(format!("auto_notch: unknown parameter {name:?}"))),
+        }
+    }
+}
+
 /// The setting names these stages read.
 const RESPONSE: &str = "response";
 const FREQ_HZ: &str = "freq_hz";
 const WIDTH_HZ: &str = "width_hz";
 const TAPS: &str = "taps";
 const Q: &str = "q";
+const ENABLED: &str = "enabled";
 
 /// Where a filter sits and how wide it is before anything says otherwise.
 const DEFAULT_FREQ_HZ: f64 = 5_000.0;
@@ -353,6 +424,18 @@ pub fn build_iir(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
         None => s.f64_or(Q, DEFAULT_Q),
     };
     Ok(Box::new(IirFilterNode::new(response(s), freq, q)))
+}
+
+pub const AUTO_NOTCH: StageDesc = StageDesc {
+    name: "auto_notch",
+    summary: "Find and remove steady tones in audio, such as a heterodyne \
+              under an AM or SSB station",
+    category: Category::Filter,
+    feeds_bus: false,
+};
+
+pub fn build_auto_notch(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AutoNotchNode::new(s.bool_or(ENABLED, false))))
 }
 
 fn response(s: &Settings) -> Response {

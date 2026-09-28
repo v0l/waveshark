@@ -28,7 +28,9 @@ use std::collections::HashMap;
 use crate::scanners::Front;
 use common::{C32, Hz, Result};
 use dsp::rds::Station;
-use nodes::{AgcNode, BankNode, NoiseBlankerNode, SpectrumNode, SquelchNode, WfmDemodNode};
+use nodes::{
+    AgcNode, AutoNotchNode, BankNode, NoiseBlankerNode, SpectrumNode, SquelchNode, WfmDemodNode,
+};
 use pipeline::graph::{NodePart, Topology};
 use pipeline::{Graph, GraphBuilder, NodeId, Out, PortKind, StreamSpec};
 
@@ -147,6 +149,7 @@ pub struct Chan {
     agc: Option<NodeId>,
     blanker: Option<NodeId>,
     denoise: Option<NodeId>,
+    notch: Option<NodeId>,
     squelch: Option<NodeId>,
     wfm: Option<NodeId>,
     pub audio_rate: f64,
@@ -633,6 +636,7 @@ pub struct ChannelLevels {
     pub blanker: Option<f32>,
     pub denoise: bool,
     pub denoise_db: f32,
+    pub notch: bool,
 }
 
 /// One fader, as the strip draws it.
@@ -1491,6 +1495,7 @@ impl Receiver {
                 agc: of("chan_agc"),
                 blanker: of("chan_blank"),
                 denoise: of("chan_denoise"),
+                notch: of("chan_notch"),
                 squelch: of("chan_squelch"),
                 wfm: stereo.then(|| of("chan_demod")).flatten(),
                 audio_rate: AUDIO_HZ,
@@ -2349,6 +2354,7 @@ impl Receiver {
                     blanker: c.spec.blanker,
                     denoise: c.spec.denoise,
                     denoise_db: c.spec.denoise_db,
+                    notch: c.spec.notch,
                 };
                 if let Some(f) = self.fader(c.spec.id) {
                     own.volume = f.volume();
@@ -2374,6 +2380,9 @@ impl Receiver {
                 {
                     own.denoise = d.is_enabled();
                     own.denoise_db = d.depth_db();
+                }
+                if let Some(n) = c.notch.and_then(|id| downcast::<AutoNotchNode>(&self.graph, id)) {
+                    own.notch = n.is_enabled();
                 }
                 own
             })
@@ -3848,7 +3857,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
 /// The stages of one strip channel, in the order they are built. A decode
 /// channel uses the first two and then its front end; an audio one uses the
 /// rest.
-const CHAN_STAGES: [&str; 11] = [
+const CHAN_STAGES: [&str; 12] = [
     "chan_mix",
     "chan_blank",
     "chan_ifdec",
@@ -3858,6 +3867,7 @@ const CHAN_STAGES: [&str; 11] = [
     "chan_squelch",
     "chan_audiodec",
     "chan_deemph",
+    "chan_notch",
     "chan_agc",
     "chan_blend",
 ];
@@ -4628,6 +4638,14 @@ fn audio_channel_stages(
         tail = Source::Stage(d, 0);
     }
 
+    if mode.has_auto_notch() {
+        let mut s = Settings::new();
+        s.insert("enabled".into(), V::Bool(spec.notch));
+        let n = at(p, "chan_notch", "auto_notch", s);
+        p.connect(tail, (n, 0));
+        tail = Source::Stage(n, 0);
+    }
+
     // The gain control comes after the squelch, so what it sees is either a
     // signal or silence. The other order lets the AGC lift the noise on a
     // dead channel up to the threshold and hold the squelch open.
@@ -4809,6 +4827,7 @@ fn stage_label(kind: &str, settings: &pipeline::registry::Settings) -> String {
         "deemphasis" => "De-emphasis".into(),
         "agc" => "AGC".into(),
         "noise_blanker" => "Noise blanker".into(),
+        "auto_notch" => "Auto notch".into(),
         "squelch" => "Squelch".into(),
         "scope" => "Scope".into(),
         "pulse_detect" => "OOK pulses".into(),
@@ -6215,6 +6234,7 @@ pub(crate) mod tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: None,
@@ -7560,6 +7580,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_auto_notch_is_built_for_am_usb_and_lsb_off_and_switched_without_a_rebuild() {
+        let notches = |mode: Demod| {
+            let mut p = plan(2_400_000.0, Hz::mhz(7));
+            p.fronts.clear();
+            p.channels = vec![chan(1, 200_000.0, mode)];
+            derived_patch(&p).stages().iter().filter(|s| s.kind == "auto_notch").count()
+        };
+        let built: Vec<(Demod, usize)> = Demod::ALL.into_iter().map(|d| (d, notches(d))).collect();
+        assert_eq!(
+            built,
+            vec![
+                (Demod::Wfm, 0),
+                (Demod::Nfm, 0),
+                (Demod::Am, 1),
+                (Demod::Usb, 1),
+                (Demod::Lsb, 1),
+                (Demod::Cw, 0),
+            ]
+        );
+
+        let mut p = plan(2_400_000.0, Hz::mhz(7));
+        p.fronts.clear();
+        p.channels = vec![chan(1, 200_000.0, Demod::Usb)];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        let running = |rx: &Receiver| {
+            let id = rx.node_of_stage(chan_stage_id("chan_notch", &p.channels[0], p.eff_rate()));
+            downcast::<AutoNotchNode>(&rx.graph, NodeId(id.unwrap().0)).unwrap().is_enabled()
+        };
+        assert!(!running(&rx));
+        assert!(!rx.levels().1[0].notch);
+        let mut on = plan(2_400_000.0, Hz::mhz(7));
+        on.fronts.clear();
+        on.channels = vec![chan(1, 200_000.0, Demod::Usb)];
+        on.channels[0].notch = true;
+        assert!(rx.params_only(&on), "switching the notch rebuilt the channel");
+        rx.apply_params(&on);
+        assert!(running(&rx));
+        assert!(rx.levels().1[0].notch);
+        assert_eq!(rx.edits().settings.len(), 0, "the strip owns the notch");
+    }
+
+    #[test]
     fn a_setting_changed_by_hand_is_an_edit_the_strip_learns_of() {
         // A squelch threshold set in the chain view lands on the node. The
         // strip has to learn of it, or the next thing the strip sends puts
@@ -8878,6 +8940,7 @@ mod refusal_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: None,
@@ -8940,6 +9003,7 @@ mod refusal_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: None,
@@ -8986,6 +9050,7 @@ mod refusal_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: None,
@@ -9029,6 +9094,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec { source, ..Default::default() }),
@@ -9109,6 +9175,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec { source: TxSource::Tone, ..Default::default() }),
@@ -9446,6 +9513,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9517,6 +9585,7 @@ mod tx_in_graph_tests {
                 blanker: None,
                 denoise: false,
                 denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+                notch: false,
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),
@@ -9558,6 +9627,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9644,6 +9714,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9745,6 +9816,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9851,6 +9923,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9970,6 +10043,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: None,
@@ -10482,6 +10556,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            notch: false,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
