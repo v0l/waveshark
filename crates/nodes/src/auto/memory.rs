@@ -217,7 +217,9 @@ impl AutoNode {
         let mut out: Vec<(&'static str, f64, f64)> = self
             .wide
             .iter()
-            .filter_map(|m| m.band.map(|(lo, hi)| (m.name, (lo + hi) / 2.0, hi - lo)))
+            .flat_map(|m| {
+                m.band.iter().chain(&m.claims).map(|(lo, hi)| (m.name, (lo + hi) / 2.0, hi - lo))
+            })
             .collect();
         out.extend(self.remembered());
         out
@@ -244,7 +246,7 @@ impl AutoNode {
         let mut owned: Vec<Owned> = self
             .wide
             .iter()
-            .filter_map(|m| m.band)
+            .flat_map(|m| m.band.iter().chain(&m.claims).copied())
             .map(|(lo, hi)| Owned { lo_hz: lo - c, hi_hz: hi - c, max_width_hz: f64::INFINITY })
             .collect();
         owned.extend(self.memory.owned(c));

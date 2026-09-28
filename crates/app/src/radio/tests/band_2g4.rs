@@ -118,7 +118,7 @@ fn the_channel_view_lists_who_is_on_the_channel() {
 /// of the five centres is inside it, and what comes back is the aircraft
 /// naming itself.
 ///
-/// The count and the sequence numbers are the same seven bursts
+/// The count and the sequence numbers are the same nine bursts
 /// `nodes/tests/droneid_capture.rs` reads through the node alone, so a
 /// difference between the two is the receiver around the front end and
 /// not the front end. Nothing decoded here at all until the front end
@@ -144,7 +144,7 @@ fn a_drone_naming_itself_is_read_off_the_span() {
         .iter()
         .filter_map(|r| decode::droneid::parse(&r.bytes()[4..]).map(|f| f.sequence))
         .collect();
-    assert_eq!(seq, [437, 439, 440, 440, 441, 442, 444]);
+    assert_eq!(seq, [437, 438, 439, 440, 440, 441, 442, 444, 444]);
 }
 
 /// A survey built by replaying the BLE capture through the whole

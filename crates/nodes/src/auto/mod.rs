@@ -1746,6 +1746,29 @@ mod tests {
         assert!(n.claimed_whole_span());
     }
 
+    #[test]
+    fn lte_holds_each_carrier_it_found_and_not_the_band_around_them() {
+        let mut n = AutoNode::new("auto", SourceConfig::default());
+        Node::negotiate(&mut n, &[spec(20e6, Hz::mhz(806))]).unwrap();
+        assert!(n.wide.iter().any(|m| m.name == "lte"), "a span over band 20 reads LTE");
+        let mut said = Vec::new();
+        for (lo_hz, hi_hz) in [(791.5e6, 800.5e6), (801.5e6, 810.5e6)] {
+            assert!(
+                n.answer(AskAt::Span, "lte", Request::Claim { lo_hz, hi_hz }, &mut said).is_none()
+            );
+        }
+        let held: Vec<(f64, f64)> = n
+            .locked_channels()
+            .iter()
+            .filter(|(name, ..)| *name == "lte")
+            .map(|(_, hz, w)| (*hz, *w))
+            .collect();
+        assert_eq!(held, [(796e6, 9e6), (806e6, 9e6)], "two carriers, not the whole of band 20");
+        assert!(!n.claimed_whole_span());
+        n.answer(AskAt::Span, "lte", Request::Release, &mut said);
+        assert!(n.locked_channels().iter().all(|(name, ..)| *name != "lte"));
+    }
+
     /// A camera owns the span while it is reading a picture. Before this the
     /// detector opened the pieces of the carrier as sources and every front
     /// end ran on each of them, which cost more than the camera did.

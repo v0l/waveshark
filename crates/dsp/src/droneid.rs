@@ -702,11 +702,11 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
     // The first symbol was demodulated with the rest to keep one loop, and
     // is split off here: it is scrambled on its own and carries nothing.
     let head: Vec<u8> = bits.drain(..CARRIERS * 2).collect();
-    let first = gold_sequence(head.len(), SCRAMBLER_X2_INIT);
+    let first = crate::lte::gold::sequence(head.len(), SCRAMBLER_X2_INIT);
     let zeros =
         head.iter().zip(&first).filter(|(b, s)| *b == *s).count() as f32 / head.len() as f32;
 
-    let scrambler = gold_sequence(CODED_BITS, SCRAMBLER_X2_INIT);
+    let scrambler = crate::lte::gold::sequence(CODED_BITS, SCRAMBLER_X2_INIT);
     for (b, s) in bits.iter_mut().zip(scrambler) {
         *b ^= s;
     }
@@ -723,31 +723,24 @@ pub fn demodulate(iq: &[C32], start: usize, rate: f64) -> Option<Demodulated> {
 /// The frame a burst carries: 176 bytes, of which the first 91 are the
 /// DroneID frame proper and the rest is the block's padding and CRC-24.
 ///
-/// The systematic bits are read straight out of the rate matcher's stream 0
-/// rather than turbo decoded. That is not a shortcut around the code, it is
-/// what a systematic code is: the block itself is transmitted, and the parity
-/// only adds a way to correct it. A burst strong enough to demodulate cleanly
-/// needs no correction, and its CRC-24 says so.
-///
-/// What this costs is the weak bursts. The parity streams do not fit the LTE
-/// turbo encoder as this reads them: with the systematic bits known good from
-/// their CRC, a decode over the parity disagrees with them in about 180 bits
-/// of 1408, so something about how DJI fills the other two streams is still
-/// wrong here. Until that is found there is no error correction, only
-/// detection.
+/// Turbo decoded with LTE's own code, which DJI kept along with its rate
+/// matcher's starting point, where the systematic bits alone fail their
+/// CRC-24.
 pub fn frame_bits(iq: &[C32], start: usize, rate: f64) -> Option<Vec<u8>> {
     let d = demodulate(iq, start, rate)?;
     let e: Vec<f32> = d.bits.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
     let streams = crate::lte_turbo::dematch_at(&e, BLOCK_LEN + 4, RATE_MATCH_START);
-    Some(
-        streams[0][..BLOCK_LEN]
-            .chunks(8)
-            .map(|c| {
-                c.iter().enumerate().fold(0u8, |a, (i, &v)| a | (u8::from(v < 0.0) << (7 - i)))
-            })
-            .collect(),
-    )
+    let bytes = |bits: &[u8]| -> Vec<u8> {
+        bits.chunks(8).map(|c| c.iter().fold(0u8, |a, &b| a << 1 | b)).collect()
+    };
+    let systematic: Vec<u8> = streams[0][..BLOCK_LEN].iter().map(|&v| u8::from(v < 0.0)).collect();
+    if crate::lte_turbo::crc24a(&bytes(&systematic)) == 0 {
+        return Some(bytes(&systematic));
+    }
+    Some(bytes(&crate::lte_turbo::decode(&streams, BLOCK_LEN, TURBO_ITERATIONS)?))
 }
+
+const TURBO_ITERATIONS: usize = 8;
 
 /// The code block, in bits: 176 bytes under a CRC-24.
 pub const BLOCK_LEN: usize = 1408;
@@ -758,26 +751,6 @@ pub const BLOCK_LEN: usize = 1408;
 /// two rows of the sub-block interleaver, and 45 rows of 32 columns hold the
 /// 1412 coded bits.
 pub const RATE_MATCH_START: usize = 90;
-
-/// The LTE pseudo-random sequence (36.211 section 7.2), which DroneID uses
-/// unchanged as its scrambler.
-///
-/// `x2_init` is the second register's 31 bit state; the first is fixed.
-pub fn gold_sequence(len: usize, x2_init: u32) -> Vec<u8> {
-    const NC: usize = 1600;
-    let n = NC + len + 31;
-    let mut x1 = vec![0u8; n];
-    let mut x2 = vec![0u8; n];
-    x1[0] = 1;
-    for (i, v) in x2.iter_mut().enumerate().take(31) {
-        *v = (x2_init >> i & 1) as u8;
-    }
-    for i in 0..n - 31 {
-        x1[i + 31] = x1[i + 3] ^ x1[i];
-        x2[i + 31] = x2[i + 3] ^ x2[i + 2] ^ x2[i + 1] ^ x2[i];
-    }
-    (0..len).map(|i| x1[i + NC] ^ x2[i + NC]).collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -855,19 +828,5 @@ mod tests {
         assert_eq!(found.len(), 1, "one burst, not {}", found.len());
         assert_eq!(found[0].zc4_at, at - short_cp);
         assert!(found[0].score > 0.8, "score {}", found[0].score);
-    }
-
-    /// The scrambler is LTE's, so the first bits of the sequence with the
-    /// standard's own initial state are a fixed, checkable thing.
-    #[test]
-    fn the_gold_sequence_matches_the_standard() {
-        // 36.211 7.2 with x2 initialised to 1: the first output bits are a
-        // published value, and getting Nc = 1600 wrong changes all of them.
-        let c = gold_sequence(16, 1);
-        assert_eq!(c.len(), 16);
-        assert!(c.iter().all(|&b| b <= 1));
-        // The sequence is not degenerate: a broken register gives all zeros
-        // or a short period, both of which this catches.
-        assert!(c.contains(&1) && c.contains(&0));
     }
 }

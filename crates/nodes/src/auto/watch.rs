@@ -6,7 +6,7 @@ use dsp::{Owned, SourceConfig, SourceDetector, SourceEvent, SourceExtractor};
 use pipeline::port::StreamSpec;
 
 use super::{AutoNode, Member};
-use crate::protocol::{self, Placed, Stickiness};
+use crate::protocol::{self, Placed, Placement, Stickiness};
 
 /// The pair that finds what is on the span and cuts it out, and everything
 /// that decides where they may look.
@@ -312,12 +312,22 @@ impl AutoNode {
             // ran two full-span FM demodulators and published every field of
             // the picture twice. Where several bands cover, the one nearest
             // the centre is the one the span is really on.
-            let mut bands: Vec<(f64, f64)> = p
-                .placement()
-                .bands(shape.widths[0])
-                .into_iter()
-                .filter(|(lo, hi)| covers(*lo, *hi))
-                .collect();
+            let placement = p.placement();
+            let mut bands: Vec<(f64, f64)> = match placement {
+                Placement::Bands(_) => placement
+                    .bands(shape.widths[0])
+                    .into_iter()
+                    .map(|(lo, hi)| (lo.max(c - half), hi.min(c + half)))
+                    .filter(|(lo, hi)| {
+                        hi - lo >= shape.widths.iter().copied().fold(f64::INFINITY, f64::min)
+                    })
+                    .collect(),
+                _ => placement
+                    .bands(shape.widths[0])
+                    .into_iter()
+                    .filter(|(lo, hi)| covers(*lo, *hi))
+                    .collect(),
+            };
             bands.sort_by(|a, b| {
                 let off = |(lo, hi): &(f64, f64)| ((lo + hi) / 2.0 - c).abs();
                 off(a).total_cmp(&off(b))

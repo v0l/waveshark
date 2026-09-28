@@ -94,7 +94,8 @@ impl Reception {
     /// What this row says, in words: the statements its decoders made, or
     /// what the burst was measured to be where nothing read it.
     pub fn detail(&self) -> String {
-        let said: Vec<String> = self.packet.facts().map(|(_, f)| f.says()).collect();
+        let said: Vec<String> =
+            self.packet.facts().map(|(_, f)| f.says()).filter(|s| !s.is_empty()).collect();
         if !said.is_empty() {
             return said.join(", ");
         }

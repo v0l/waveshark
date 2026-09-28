@@ -1119,6 +1119,7 @@ pub fn read(bytes: &[u8]) -> Option<Proto> {
                     cell: Some(u64::from(nb.cell_id)),
                     site_code: None,
                     carrier_hz: hz.map(|h| h as u64),
+                    ..Cell::default()
                 }));
             }
             p

@@ -38,6 +38,7 @@ pub mod iridium;
 pub mod lms6;
 pub mod lora;
 pub mod lrpt;
+pub mod lte;
 pub mod m10;
 pub mod m17;
 pub mod mdc;
@@ -226,6 +227,7 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &nxdn::Nxdn,
         &tetra::Tetra,
         &gsm::Gsm,
+        &lte::Lte,
         &lora::Lora,
         &elrs::Elrs,
         &wmbus::Wmbus,

@@ -243,6 +243,8 @@ pub struct Cell {
     /// The carrier it transmits on, where the network broadcasts one: a cell
     /// announcing its neighbours says where to go and look for them
     pub carrier_hz: Option<u64>,
+    pub bandwidth_hz: Option<u32>,
+    pub band: Option<u16>,
 }
 
 /// Something a person has to be told about
@@ -364,6 +366,18 @@ impl Fact {
                 }
                 if let Some(id) = c.cell {
                     parts.push(format!("cell {id}"));
+                }
+                if let Some(code) = c.site_code {
+                    parts.push(format!("site code {code}"));
+                }
+                if let Some(b) = c.band {
+                    parts.push(format!("band {b}"));
+                }
+                if let Some(hz) = c.carrier_hz {
+                    parts.push(format!("on {:.3} MHz", hz as f64 / 1e6));
+                }
+                if let Some(hz) = c.bandwidth_hz {
+                    parts.push(format!("{} MHz wide", hz as f64 / 1e6));
                 }
                 parts.join(" ")
             }
@@ -610,6 +624,31 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cell_says_every_part_of_itself_it_was_given() {
+        let says = |c: Cell| Fact::Infrastructure(c).says();
+        assert_eq!(
+            says(Cell {
+                mcc: Some(272),
+                mnc: Some(5),
+                area: Some(40801),
+                cell: Some(1_144_144),
+                site_code: Some(473),
+                band: Some(20),
+                ..Cell::default()
+            }),
+            "272-5 area 40801 cell 1144144 site code 473 band 20"
+        );
+        assert_eq!(
+            says(Cell { carrier_hz: Some(796_000_000), ..Cell::default() }),
+            "on 796.000 MHz"
+        );
+        assert_eq!(
+            says(Cell { site_code: Some(473), bandwidth_hz: Some(1_400_000), ..Cell::default() }),
+            "site code 473 1.4 MHz wide"
+        );
+    }
 
     #[test]
     fn a_set_of_kinds_is_a_bitset() {

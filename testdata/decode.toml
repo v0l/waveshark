@@ -290,14 +290,15 @@ the correct behaviour and is asserted: an aircraft with no fix sends
 zeros and a decoder that turns those into a position off Africa has invented
 evidence.
 
-Thirteen bursts correlate in the recording and seven decode to this packet
-type. The rest are the other packet type DJI sends interleaved with it, whose
-layout differs and which is not read yet.
+Thirteen bursts correlate in the recording, eleven turbo decode behind their
+CRC-24 and nine of those are this packet type. The rest are the other packet
+type DJI sends interleaved with it, whose layout differs and which is not read
+yet.
 """
 
 [[capture.read]]
 protocol = "droneid"
-rows = 7
+rows = 9
 checked = true
 subjects = ["F8PJC254J001JR4R"]
 hz = 2_444_500_000

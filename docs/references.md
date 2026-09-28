@@ -79,6 +79,7 @@ knowing which number to look up is most of the work.
 | ACARS | ARINC 618 for the air side, ARINC 620 for the ground side |
 | VDL Mode 2 | ICAO Annex 10 Vol III for the link, ARINC 631 for what rides on it |
 | DVB-T | ETSI EN 300 744, with ISO/IEC 13818-1 for the transport stream above it |
+| LTE | 3GPP TS 36.211, 36.212 and 36.213 for the downlink physical layer, TS 36.331 for the system information, TS 36.321 for its redundancy versions |
 | SSTV | no standard: the mode timings as their authors published them, collected in JL Barber N7CXI's *Proposal for SSTV Mode Specifications* |
 | Vaisala RS41 | not published; the frame layout is reverse engineered (see below) |
 | LoRaWAN | LoRa Alliance LoRaWAN 1.0.x specification; the PHY itself is not published and is reverse engineered (see below) |
@@ -125,6 +126,14 @@ which is a different and stronger claim than "it runs".
   meaning of every field are from there, and it is the decoder
   radiosonde_auto_rx runs. No off-air recording of either has been read here
   yet, so the tests are against frames built by the same description.
+- **Daniel Estévez's LTE notebooks** (`daniestevez/jupyter_notebooks`, `LTE/`)
+  for the LTE system information: his decode of his own band 20 recording,
+  `lte-downlink.pcap`, and the SIB1, SIB2, SIB5 and SIB6 read here off the
+  same cell match it byte for byte. **srsRAN 4G** 25.10.0 read the band 28
+  capture's SIB1s, and its eNodeB encoders made the synthetic cells that
+  carry DCI 1C, distributed blocks, the extended PHICH and four ports. It
+  disagrees with TS 36.211 6.2.3.2 on the second gap of distributed blocks,
+  where the spec is followed.
 - The transmitters themselves, where an independent decoder does not exist:
   a LoRa frame carrying its own CRC, an M17 transmission carrying a callsign,
   and a Holybro RemoteID module shipped with a known serial are each evidence
@@ -288,6 +297,7 @@ somewhere else.
 | `dvbt_hd_429M_9142857.cs8` | Ron Economos, w6rz.net | no terms stated, cut here and re-hosted |
 | `rs41_herstmonceux_405.80024M_31.25k.cs16` | SDRangel | no terms stated, cut here and re-hosted |
 | `dab_melbourne_9a_202.928M_2500k.cs16` | Signal Identification Wiki | no terms stated, cut here and re-hosted |
+| `lte_b20_madrid_806M_30720k.cs8` | Daniel Estévez | CC BY 4.0, requantised here and re-hosted |
 | `nxdn48_453M_48k.cs16` | Signal Identification Wiki | no terms stated, converted here and re-hosted |
 | `nxdn96_453M_48k.cs16` | Signal Identification Wiki | no terms stated, converted here and re-hosted |
 | `eas_tor_kilx_22050.wav` | Signal Identification Wiki | no terms stated, converted here and re-hosted |

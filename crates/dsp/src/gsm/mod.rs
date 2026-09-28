@@ -1168,6 +1168,16 @@ pub fn hz_of_arfcn(arfcn: u16, near_hz: f64) -> Option<f64> {
 }
 
 /// The downlink bands, for telling which plan a frequency belongs to.
+pub fn downlink_hz(arfcn: u16, pcs1900: bool) -> Option<f64> {
+    let near = match arfcn {
+        128..=251 => 880e6,
+        512..=885 if pcs1900 => 1960e6,
+        512..=885 => 1840e6,
+        _ => 940e6,
+    };
+    hz_of_arfcn(arfcn, near)
+}
+
 const BANDS: [(f64, f64); 4] =
     [(869.2e6, 894.2e6), (925.2e6, 960.0e6), (1805.2e6, 1880.0e6), (1930.2e6, 1990.0e6)];
 

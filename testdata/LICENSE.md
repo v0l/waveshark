@@ -30,7 +30,7 @@ is a permission from the people or the transmitters heard.
 
 ## Recordings that came from somewhere else
 
-Thirteen of the fixtures are not ours. Each carries its own `license` and a
+Fourteen of the fixtures are not ours. Each carries its own `license` and a
 `license_source` naming where it came from, and the terms are the publisher's,
 not this project's:
 
@@ -49,9 +49,10 @@ not this project's:
 | `stdc_egc_1541.45M_48k.cs16` | Signal Identification Wiki, `Inmarsat-C_TDM_EGC_IQ.zip` by Cartoonman, converted here | no terms stated by the publisher |
 | `drm_b_3.965M_48k.cs16` | Signal Identification Wiki, `DRM_B.zip` by Voxo, converted and tuned here | no terms stated by the publisher |
 | `aero_oqpsk_1546M_48k.cs16` | Signal Identification Wiki, `Inmarst_Aero_10500_Bd_OQPSK_IQ.zip` by Cartoonman, converted here | no terms stated by the publisher |
+| `lte_b20_madrid_806M_30720k.cs8` | Daniel Estévez, `nas.destevez.net/~daniel/LTE/`, requantised here | CC BY 4.0, credit Daniel Estévez |
 
 The first three are fetched from their own repositories at a pinned commit and
-are never re-hosted. The last ten are on nostr.download, converted or cut,
+are never re-hosted. The last eleven are on nostr.download, converted or cut,
 because the originals are lossy, a gigabyte, or a WAV that needs converting
 first. Ask the publisher rather than this project if you need terms for the
 nine `unstated` files.

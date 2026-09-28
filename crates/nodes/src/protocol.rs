@@ -325,6 +325,13 @@ pub trait Protocol: Send + Sync {
         Stickiness::SESSION
     }
 
+    /// Whether a span-wide decoder's `Request::Claim` is the exact band it
+    /// holds, one of several, rather than a part of the band it was placed
+    /// on to be widened to all of it.
+    fn claims_exactly(&self) -> bool {
+        false
+    }
+
     /// Whether the receiver should cut the span down to `feed_rate_hz`
     /// before this decoder sees it.
     ///
@@ -572,6 +579,7 @@ fn compiled() -> &'static [&'static dyn Protocol] {
         &crate::nxdn_nodes::Nxdn,
         &crate::tetra_nodes::Tetra,
         &crate::gsm_nodes::Gsm,
+        &crate::lte_nodes::Lte,
         &crate::lora_nodes::Lora,
         &crate::elrs_nodes::Elrs,
         &crate::wmbus_nodes::Wmbus,

@@ -144,6 +144,7 @@ pub(super) struct Member {
     /// otherwise claim half of its own carrier's span and leave the skirts
     /// to be opened as sources.
     pub(super) placed_band: Option<(f64, f64)>,
+    pub(super) claims: Vec<(f64, f64)>,
     /// The burst front end inside, when this is it: its packets are read
     /// from what it measured rather than from its port, so every burst
     /// leaves with its measurement, and a burst no front end reads leaves
@@ -309,6 +310,7 @@ impl Member {
             video,
             band: None,
             placed_band: None,
+            claims: Vec::new(),
             router,
             source_snr_db: f32::NAN,
             peak_pow: 0.0,
@@ -384,7 +386,7 @@ impl Member {
             None => true,
         };
         let detected = settling || detected.iter().copied().any(overlaps);
-        if detected || self.band.is_some() {
+        if detected || self.band.is_some() || !self.claims.is_empty() {
             self.since_detected_s = 0.0;
             return true;
         }

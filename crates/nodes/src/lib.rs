@@ -50,6 +50,7 @@ pub mod kiss_nodes;
 pub mod lms6_nodes;
 pub mod lora_nodes;
 pub mod lrpt_nodes;
+pub mod lte_nodes;
 pub mod m10_nodes;
 pub mod m17_nodes;
 pub mod mdc_nodes;
@@ -255,6 +256,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (ais_nodes::DESC, ais_nodes::build),
     (uat_nodes::DESC, uat_nodes::build),
     (gsm_nodes::DESC, gsm_nodes::build),
+    (lte_nodes::DESC, lte_nodes::build),
     (mic_in::DESC, mic_in::build),
     (sstv_nodes::DESC, sstv_nodes::build),
     (sstv_nodes::SSTV_TX, sstv_nodes::build_tx),

@@ -9,6 +9,7 @@ mod captures;
 mod eas;
 mod front_end;
 mod gsm;
+mod lte;
 mod m17;
 mod pmr446;
 mod sideband;

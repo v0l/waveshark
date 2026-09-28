@@ -46,12 +46,12 @@ fn frames() -> Option<Vec<common::packet::Packet>> {
     Some(out)
 }
 
-/// The count is the point. `>= 1` would pass with six of the seven bursts
+/// The count is the point. `>= 1` would pass with eight of the nine bursts
 /// thrown away, which is the failure that matters.
 #[test]
-fn the_capture_decodes_seven_frames_from_one_airframe() {
+fn the_capture_decodes_nine_frames_from_one_airframe() {
     let Some(frames) = frames() else { return };
-    assert_eq!(frames.len(), 7, "frames decoded");
+    assert_eq!(frames.len(), 9, "frames decoded");
 
     let parsed: Vec<decode::droneid::Frame> = frames
         .iter()
@@ -65,7 +65,7 @@ fn the_capture_decodes_seven_frames_from_one_airframe() {
     // The sequence number counts bursts, so it says which of the aircraft's
     // transmissions were read rather than merely how many.
     let seq: Vec<u16> = parsed.iter().map(|f| f.sequence).collect();
-    assert_eq!(seq, vec![437, 439, 440, 440, 441, 442, 444]);
+    assert_eq!(seq, vec![437, 438, 439, 440, 440, 441, 442, 444, 444]);
 }
 
 /// An aircraft indoors has no fix and sends zeros in every position field.

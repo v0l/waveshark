@@ -112,6 +112,12 @@ impl AutoNode {
                 match at {
                     AskAt::Span => {
                         for m in self.wide.iter_mut().filter(|m| m.name == front) {
+                            if m.protocol.is_some_and(|p| p.claims_exactly()) {
+                                if !m.claims.contains(&(lo_hz, hi_hz)) {
+                                    m.claims.push((lo_hz, hi_hz));
+                                }
+                                continue;
+                            }
                             let (mut lo, mut hi) = (lo_hz, hi_hz);
                             if let Some((a, b)) = m.placed_band {
                                 lo = lo.min(a);
@@ -200,6 +206,7 @@ impl AutoNode {
                         // again.
                         for m in self.wide.iter_mut().filter(|m| m.name == front) {
                             m.band = None;
+                            m.claims.clear();
                         }
                         self.apply_locked();
                     }

@@ -335,7 +335,7 @@ impl Span {
 /// block up. Without it the file is written once, on the first run, and a
 /// front end added later never runs for anybody who already had one: BLE
 /// shipped, and every existing installation quietly had no Bluetooth.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// The scanners, in the order they are consulted.
 #[derive(Clone, PartialEq, Debug)]
@@ -989,6 +989,66 @@ span   = 1 MHz
 front  = auto
 region = americas
 
+# The LTE downlinks the GSM blocks above do not already cover. `auto` finds
+# every carrier's synchronisation signals across the span, whatever its width,
+# and reads each cell's MIB and SIB1: its network, tracking area, cell
+# identity and neighbours. A span over one of the GSM blocks above reads the
+# LTE carriers sharing that allocation as well.
+
+[LTE 600]
+range  = 617 - 652 MHz
+span   = 2 MHz
+front  = auto
+region = americas
+
+[LTE 700]
+range  = 758 - 788 MHz
+span   = 2 MHz
+front  = auto
+region = europe
+
+[LTE 700 APT]
+range  = 758 - 803 MHz
+span   = 2 MHz
+front  = auto
+region = asia-pacific
+
+[LTE 700 Americas]
+range  = 729 - 768 MHz
+span   = 2 MHz
+front  = auto
+region = americas
+
+[LTE 800]
+range  = 791 - 821 MHz
+span   = 2 MHz
+front  = auto
+region = europe
+
+[LTE 1500]
+range  = 1452 - 1496 MHz
+span   = 2 MHz
+front  = auto
+region = europe
+
+[LTE 2100]
+range  = 2110 - 2170 MHz
+span   = 2 MHz
+front  = auto
+region = europe, asia-pacific
+
+[AWS]
+range  = 2110 - 2200 MHz
+span   = 2 MHz
+front  = auto
+region = americas
+
+[LTE 2600]
+range  = 2620 - 2690 MHz
+span   = 2 MHz
+front  = auto
+region = europe, asia-pacific
+
 [TETRA]
 # Base station downlinks, which is the half of a TETRA network a listener
 # hears: 390 to 400 MHz across Europe for the emergency services, with the
@@ -1301,6 +1361,15 @@ mod tests {
                 "GSM 900",
                 "DCS 1800",
                 "PCS 1900",
+                "LTE 600",
+                "LTE 700",
+                "LTE 700 APT",
+                "LTE 700 Americas",
+                "LTE 800",
+                "LTE 1500",
+                "LTE 2100",
+                "AWS",
+                "LTE 2600",
                 "TETRA",
                 "Radiosonde",
                 "ISM 27",
@@ -1415,6 +1484,31 @@ mod tests {
         assert_eq!(at(Plan::Europe, 1_750_000_000.0), [], "DCS 1800 uplink");
         // And a span too narrow for the carrier's own rate does not match.
         assert!(s.fronts_in(Plan::Europe, Span::new(947_400_000.0, 500_000.0)).is_empty());
+    }
+
+    #[test]
+    fn every_lte_downlink_has_a_block_under_the_regulator_that_granted_it() {
+        use crate::bands::Plan;
+        let s = Scanners::default();
+        let at = |plan: Plan, hz: f64| kinds(&s.fronts_in(plan, Span::new(hz, 20_000_000.0)));
+        for (plan, hz) in [
+            (Plan::Europe, 763_000_000.0),
+            (Plan::Europe, 806_000_000.0),
+            (Plan::Europe, 947_400_000.0),
+            (Plan::Europe, 1_474_000_000.0),
+            (Plan::Europe, 1_842_000_000.0),
+            (Plan::Europe, 2_140_000_000.0),
+            (Plan::Europe, 2_655_000_000.0),
+            (Plan::AsiaPacific, 795_000_000.0),
+            (Plan::Americas, 634_000_000.0),
+            (Plan::Americas, 739_000_000.0),
+            (Plan::Americas, 2_155_000_000.0),
+        ] {
+            assert!(at(plan, hz).contains(&Front::Auto), "no block at {hz} in {plan:?}");
+        }
+        let europe = |hz| at(Plan::Europe, hz).contains(&Front::Auto);
+        assert!(!europe(634_000_000.0), "the 600 MHz band is television here");
+        assert!(!europe(739_000_000.0), "and so is 700 below the LTE band");
     }
 
     /// The behaviour the old hand-written gates had, now as table lookups.

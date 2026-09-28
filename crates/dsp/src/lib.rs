@@ -49,6 +49,7 @@ pub mod iq_balance;
 pub mod level;
 pub mod lms;
 pub mod lora;
+pub mod lte;
 pub mod lte_turbo;
 pub mod m17;
 pub mod mfsk;

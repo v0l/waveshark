@@ -524,3 +524,122 @@ fn an_aero_10500_channel_reads_as_jaero_read_it() {
     assert_eq!(got.center_hz, 1_546_000_000.0);
     assert_eq!(got.identities, ["a6b593", "N531QS", "a86e6c", "N642UA", "a95a41", "N701WH"]);
 }
+
+#[test]
+fn a_band_28_recording_is_named_lte_with_both_cells_and_the_carriers_their_sib5_and_sib7_name() {
+    let Some(buf) = fixture("offair/ofdm_lte_762M_12000k.cs16") else { return };
+    let got = identify::identify(&buf.samples, buf.rate.as_f64(), buf.center.as_f64())
+        .expect("an LTE carrier is in this recording");
+    assert_eq!(got.protocol, "lte");
+    assert_eq!(got.center_hz, 763_000_000.0);
+    assert_eq!(got.identities, ["272-03-40111-11350600", "272-03-40111-11350601"]);
+    let kinds: Vec<&str> = got.rows.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            "mib",
+            "mib",
+            "system_information",
+            "system_information",
+            "system_information",
+            "network",
+            "network",
+            "network",
+            "network"
+        ]
+    );
+    let carriers = |r: &common::packet::Proto| -> Vec<u64> {
+        r.facts
+            .iter()
+            .filter_map(|f| match f {
+                common::packet::Fact::Infrastructure(c) => c.carrier_hz,
+                _ => None,
+            })
+            .collect()
+    };
+    let lte = [2_160_000_000, 1_872_500_000, 796_000_000];
+    assert_eq!((carriers(&got.rows[5]), carriers(&got.rows[6])), (lte.to_vec(), lte.to_vec()));
+    let gsm: Vec<usize> = got.rows[7..].iter().map(|r| carriers(r).len()).collect();
+    assert_eq!(
+        gsm,
+        [23, 21],
+        "the E-GSM 900 carriers each sector's SIB7 names, as asn1tools reads it"
+    );
+    assert!(
+        got.rows[7..].iter().flat_map(carriers).all(|hz| (925_000_000..=935_000_000).contains(&hz))
+    );
+}
+
+fn lte_cell(buf: &common::IqBuf, channel_hz: f64) -> Vec<dsp::lte::Heard> {
+    let mut rx = dsp::lte::Receiver::new(buf.rate.as_f64(), buf.center.as_f64(), channel_hz)
+        .expect("an LTE rate");
+    let mut heard = Vec::new();
+    for b in buf.samples.chunks(131_072) {
+        let from = heard.len();
+        rx.push(b, &mut heard);
+        for h in &heard[from..] {
+            identify::lte::follow(&mut rx, h);
+        }
+    }
+    heard
+}
+
+fn system_information(heard: &[dsp::lte::Heard]) -> Vec<String> {
+    heard
+        .iter()
+        .filter_map(|h| match h {
+            dsp::lte::Heard::SystemInformation { bytes, .. } => {
+                Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+const ESTEVEZ_PCI_380: [&str; 4] = [
+    "4848500301164607407819311081044c23cb52000000",
+    "00830ac3230dfc545826e0f2dc5a0000c0361dc62d540880c029b9858389180078006002a106ff31628df2780000000000",
+    "000d2402ee8c8a5ac8080d0480cb219211590101a090032232295aa0203412006a86462a34040682407460c8e6468080d0000000000000000000000000",
+    "0011052fd8a022ca334ec940459466",
+];
+
+#[test]
+fn the_vodafone_cell_in_estevezs_b20_recording_gives_the_system_information_his_decoder_read() {
+    let Some(buf) = fixture("lte_b20_madrid_806M_30720k.cs8") else { return };
+    let heard = lte_cell(&buf, 806e6);
+    let pci: Vec<u16> = heard
+        .iter()
+        .filter_map(|h| match h {
+            dsp::lte::Heard::Mib { pci, .. } => Some(*pci),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pci, [380]);
+    assert_eq!(
+        system_information(&heard),
+        ESTEVEZ_PCI_380,
+        "SIB1, SIB2, SIB5 and SIB6 as lte-downlink.pcap in daniestevez/jupyter_notebooks has them"
+    );
+}
+
+#[test]
+fn the_three_b20_operators_in_estevezs_recording_each_name_their_cell_and_neighbours() {
+    let Some(buf) = fixture("lte_b20_madrid_806M_30720k.cs8") else { return };
+    let mut named = Vec::new();
+    for hz in [796e6, 806e6, 816e6] {
+        let rows: Vec<common::packet::Proto> =
+            lte_cell(&buf, hz).iter().flat_map(identify::lte::rows).collect();
+        let cell =
+            rows.iter().find_map(|r| r.subject.as_ref().map(|e| e.id.to_string())).expect("a SIB1");
+        let network: usize = rows.iter().filter(|r| r.kind == "network").count();
+        named.push((hz as u64, cell, network));
+    }
+    assert_eq!(
+        named,
+        [
+            (796_000_000, "214-03-1371-73430136".to_string(), 2),
+            (806_000_000, "214-01-278-73430023".to_string(), 2),
+            (816_000_000, "214-07-28673-73816853".to_string(), 3),
+        ]
+    );
+}

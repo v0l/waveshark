@@ -72,6 +72,8 @@ pub const TETRA_1_3: Code = Code { constraint: 5, polys: &[0b1_1111, 0b1_1011, 0
 pub const DRM_1_6: Code =
     Code { constraint: 7, polys: &[0o133, 0o171, 0o145, 0o133, 0o171, 0o145] };
 
+pub const LTE_1_3: Code = Code { constraint: 7, polys: &[0o133, 0o171, 0o165] };
+
 /// No puncturing: every mother bit is sent.
 pub const P_1_2: &[u8] = &[1, 1];
 
@@ -150,6 +152,7 @@ pub enum Ends {
     /// In state zero, because the transmitter flushed the register with
     /// zeros and nothing followed them.
     Zero,
+    TailBiting,
 }
 
 fn parity(v: usize) -> u8 {
@@ -865,8 +868,8 @@ impl Viterbi {
         };
         let mut state = match ends {
             Ends::Zero => 0,
-            Ends::Anywhere if self.narrow => best(&self.cost16),
-            Ends::Anywhere => self
+            Ends::Anywhere | Ends::TailBiting if self.narrow => best(&self.cost16),
+            Ends::Anywhere | Ends::TailBiting => self
                 .cost
                 .iter()
                 .enumerate()
@@ -900,6 +903,11 @@ impl Viterbi {
         count: usize,
         ends: Ends,
     ) -> Vec<u8> {
+        if ends == Ends::TailBiting {
+            let wrapped: Vec<f32> = soft.iter().chain(soft).chain(soft).copied().collect();
+            let all = Self::decode_block(code, &wrapped, mask, 3 * count, Ends::Anywhere);
+            return all[count..2 * count].to_vec();
+        }
         let mut v = Viterbi::new(code).ending(ends);
         // Nothing is released until the end, so the window is the block.
         v.block = usize::MAX;
@@ -1114,6 +1122,18 @@ mod tests {
         want.extend([0, 0, 0, 0, 0, 0]);
         let soft = encode(K7_X_FIRST, &want);
         let got = Viterbi::decode_block(K7_X_FIRST, &soft, P_1_2, want.len(), Ends::Zero);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_tail_biting_block_decodes_through_eight_flipped_bits_in_120() {
+        let want = bits(40, 11);
+        let primed: Vec<u8> = want[34..].iter().chain(&want).copied().collect();
+        let mut soft = encode(LTE_1_3, &primed)[18..].to_vec();
+        for i in [3, 17, 30, 52, 71, 88, 101, 119] {
+            soft[i] = -soft[i];
+        }
+        let got = Viterbi::decode_block(LTE_1_3, &soft, &[1, 1, 1], want.len(), Ends::TailBiting);
         assert_eq!(got, want);
     }
 }

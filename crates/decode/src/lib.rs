@@ -65,6 +65,7 @@ pub mod lora;
 pub mod lora_li;
 pub mod lorawan;
 pub mod lrpt;
+pub mod lte;
 pub mod m10;
 pub mod m17;
 pub mod mdc1200;

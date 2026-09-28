@@ -32,6 +32,11 @@ the code is in the commit log.
 - Auto notch on AM, USB and LSB channels, a strip switch that removes heterodynes and steady carriers.
 - ADALM-PLUTO receive and full duplex transmit, on USB or over the network, up to 4 MS/s.
 - SigMF recordings replayed and trimmed, with a `.sigmf-meta` written beside raw span captures and transmit files.
+- LTE cells, found on every carrier of a span over an LTE downlink or read on a decode channel: PCI, network, tracking area, band, bandwidth, RSRP, RSRQ and neighbouring carriers.
+- KiwiSDR directory from kiwisdr.com's public list, checked and opened with TUNE.
+- TUNERS map layer of public IQStream servers, SpyServers and KiwiSDRs, each opened with CONNECT.
+- Mouse wheel on faders and squelch thresholds.
+- Cell tower map marking the cells this receiver decoded in cyan.
 
 ### Changed
 
@@ -53,6 +58,12 @@ the code is in the commit log.
 - Survey tab holding devices, trilateration, data links, channels, control links and keys.
 - Transcript as a tab of Calls.
 - Survey sightings written only from places not yet heard from, none while parked.
+- DJI DroneID bursts too weak to read clean now error corrected rather than dropped.
+- SpyServer directory frequency filter keeping a server without control only where its span reaches.
+- Centre spur removal only on radios that make one, never on a KiwiSDR or an Airspy.
+- Cell tower map layer drawing only cells placed by 20 or more reports within 1 km.
+- beaconDB estimates on the cell map for decoded LTE cells as well as GSM.
+- TETRA neighbour cells listed with their carrier frequencies.
 
 ### Fixed
 

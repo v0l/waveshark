@@ -1090,6 +1090,119 @@ and more of them add little; six is what this length gives, and at half a
 second it falls to three, which is too few to mean much.
 
 Recorded on a LimeSDR-USB, RX2/LNAL.
+
+The carrier is EARFCN 9260, 763 MHz, 10 MHz wide, with two cells on it from
+one site at the same timing: PCI 473 and PCI 481, both two antenna ports. Each
+MIB passes its CRC-16 under the two-port mask, and each SIB1 is found by a
+DCI whose CRC-16 is masked with the SI-RNTI and read from a transport block
+whose CRC-24 checks, none of which this project computed. The SIB1s name
+PLMN 272-03, tracking area 40111, band 28, and cells 72 and 73 of eNodeB
+44338; 272-03 is Eir, to which ComReg's licence register assigns 758 to
+768 MHz.
+
+srsRAN 4G 25.10.0 (bef8680) read the same two SIB1s, byte for byte, off the
+capture mixed down 1 MHz and resampled to 15.36 MS/s cf32:
+
+    pdsch_ue -i lte_763M_15360k.cf32 -O 133450 -n 600 -p 50 -P 2 -Q \
+        -r 0xffff -u <udp port> -c 473
+    pdsch_ue ... -c 481 -R average
+
+It decodes 30 of 30 SI-RNTI blocks of PCI 473, and 11 of 29 of PCI 481 with
+its averaging channel estimator and none with its default one: the two cells
+overlap at nearly the same strength.
+"""
+
+[[capture]]
+name = "lte_srsran_1c_phich_ext_806M_15360k.cs8"
+sha256 = "25df971bfc85cc6ff3eb67a91848a405db8b969250b999f05e17050c2603c819"
+url = "https://nostr.download/25df971bfc85cc6ff3eb67a91848a405db8b969250b999f05e17050c2603c819.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+PCI 101, 10 MHz, two antenna ports, extended PHICH duration with three control
+symbols, SIB1 granted by DCI format 1C on 8 distributed blocks with the first
+gap; 1234 Hz off and 3.7 ms into a frame.
+
+Eleven frames made by srsRAN 4G 25.10.0 (bef8680): its own PSS, SSS, reference signals,
+PBCH, PCFICH, PDCCH and PDSCH encoders, driven by si_enodeb.c
+(https://nostr.download/33fd2390c4ae8de360c288900080542c0bfeb0394fa16fb6dd29aac222aca314.c),
+which sends the SIB1 of PCI 473 in offair/ofdm_lte_762M_12000k.cs16 on the
+SI-RNTI in subframe 5 of every even frame, redundancy versions 0, 2, 3, 1,
+through a fixed gain per antenna port, AWGN at 15 dB and a frequency offset,
+and starts part way into a frame. Synthetic, but from somebody else's
+transmitter: evidence that this receiver reads the forms of the grant that
+off-air capture does not use. Quantised to 8 bits with the largest sample at
+127. The centre is arbitrary.
+"""
+
+[[capture]]
+name = "lte_srsran_distributed_4port_806M_7680k.cs8"
+sha256 = "00344ebdb8a340cc11c7f4530605697511fa81375f8209d70e6f0a6d74b38a25"
+url = "https://nostr.download/00344ebdb8a340cc11c7f4530605697511fa81375f8209d70e6f0a6d74b38a25.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+PCI 302, 5 MHz, four antenna ports, a sixth of a PHICH group per eight blocks,
+SIB1 granted by DCI format 1A on 6 distributed blocks; -800 Hz off and 2.7 ms
+into a frame.
+
+Eleven frames made by srsRAN 4G 25.10.0 (bef8680): its own PSS, SSS, reference signals,
+PBCH, PCFICH, PDCCH and PDSCH encoders, driven by si_enodeb.c
+(https://nostr.download/33fd2390c4ae8de360c288900080542c0bfeb0394fa16fb6dd29aac222aca314.c),
+which sends the SIB1 of PCI 473 in offair/ofdm_lte_762M_12000k.cs16 on the
+SI-RNTI in subframe 5 of every even frame, redundancy versions 0, 2, 3, 1,
+through a fixed gain per antenna port, AWGN at 15 dB and a frequency offset,
+and starts part way into a frame. Synthetic, but from somebody else's
+transmitter: evidence that this receiver reads the forms of the grant that
+off-air capture does not use. Quantised to 8 bits with the largest sample at
+127. The centre is arbitrary.
+"""
+
+[[capture]]
+name = "lte_srsran_1m4_1port_806M_1920k.cs8"
+sha256 = "9d133e628980217ac7a0cfdd3c2811b02c66ae66681933dfce4e6a74244e059a"
+url = "https://nostr.download/9d133e628980217ac7a0cfdd3c2811b02c66ae66681933dfce4e6a74244e059a.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+description = """
+PCI 17, 1.4 MHz, one antenna port, three control symbols as a carrier of six
+blocks has, SIB1 granted by DCI format 1A on 3 localized blocks; 400 Hz off
+and 2.6 ms into a frame. An idle cell with one port is what the first cell
+search could not find.
+
+Eleven frames made by srsRAN 4G 25.10.0 (bef8680): its own PSS, SSS, reference signals,
+PBCH, PCFICH, PDCCH and PDSCH encoders, driven by si_enodeb.c
+(https://nostr.download/33fd2390c4ae8de360c288900080542c0bfeb0394fa16fb6dd29aac222aca314.c),
+which sends the SIB1 of PCI 473 in offair/ofdm_lte_762M_12000k.cs16 on the
+SI-RNTI in subframe 5 of every even frame, redundancy versions 0, 2, 3, 1,
+through a fixed gain per antenna port, AWGN at 15 dB and a frequency offset,
+and starts part way into a frame. Synthetic, but from somebody else's
+transmitter: evidence that this receiver reads the forms of the grant that
+off-air capture does not use. Quantised to 8 bits with the largest sample at
+127. The centre is arbitrary.
+"""
+
+[[capture]]
+name = "lte_b20_madrid_806M_30720k.cs8"
+sha256 = "e2f7e2c4816da0acca5a7c8fac7ff5f64a2f5c6d67518d99467bcff79c397634"
+url = "https://nostr.download/e2f7e2c4816da0acca5a7c8fac7ff5f64a2f5c6d67518d99467bcff79c397634.xz"
+compression = "xz"
+license = "CC-BY-4.0"
+license_source = "Daniel Estevez, nas.destevez.net/~daniel/LTE/LTE_downlink_806MHz_2022-04-09_30720ksps.sigmf-data, requantised here and re-hosted"
+description = """
+One second of the LTE band 20 downlink in Madrid on 2022-04-09, recorded by
+Daniel Estevez on a USRP B205mini at 30.72 MS/s centred on 806 MHz. It holds
+three 10 MHz carriers: Orange 214-03 PCI 144 at 796 MHz, Vodafone 214-01
+PCI 380 at 806 MHz and Movistar 214-07 PCI 324 at 816 MHz. Requantised from
+the published 16-bit samples, whose SHA-512 matched the SigMF metadata, to 8
+bits with full scale at 127.
+
+Evidence of reading somebody else's cells with somebody else's decoder beside
+it: lte-downlink.pcap in daniestevez/jupyter_notebooks (LTE/) is his own
+decode of this cell, and the SIB1, SIB2, SIB5 and SIB6 of PCI 380 read here
+are byte for byte the ones in it. The other two cells are read by this
+receiver alone, behind their CRCs. Every system information grant in it is
+DCI 1A on contiguous blocks.
 """
 
 [[capture]]

@@ -383,12 +383,12 @@ pub fn match_plain(d: &[Vec<u8>; 3], e_len: usize) -> Vec<u8> {
 /// The constituent encoder's state transition: given the state and an input
 /// bit, the new state and the parity bit.
 ///
-/// g0 = 1 + D + D^3 is the feedback and g1 = 1 + D^2 + D^3 the parity, as
+/// g0 = 1 + D^2 + D^3 is the feedback and g1 = 1 + D + D^3 the parity, as
 /// TS 36.212 5.1.3.2 defines them.
 fn step(state: usize, u: u8) -> (usize, u8) {
     let (s1, s2, s3) = (state & 1, (state >> 1) & 1, (state >> 2) & 1);
-    let v = (u as usize) ^ s1 ^ s3;
-    let z = v ^ s2 ^ s3;
+    let v = (u as usize) ^ s2 ^ s3;
+    let z = v ^ s1 ^ s3;
     ((v) | (s1 << 1) | (s2 << 2), z as u8)
 }
 
@@ -396,7 +396,7 @@ fn step(state: usize, u: u8) -> (usize, u8) {
 /// termination means for a recursive encoder: the input is whatever the
 /// feedback is, so the new bit is zero.
 fn tail_input(state: usize) -> u8 {
-    ((state & 1) ^ ((state >> 2) & 1)) as u8
+    (((state >> 1) & 1) ^ ((state >> 2) & 1)) as u8
 }
 
 /// Encode `bits` into the three streams the rate matcher takes, each
@@ -721,6 +721,14 @@ mod tests {
         let back = rate_dematch(&e, 1412);
         let out = decode(&back, 1408, 4).expect("a decode");
         assert_eq!(out, bits);
+    }
+
+    #[test]
+    fn a_lone_one_rings_out_as_the_standards_feedback_and_parity_divide() {
+        let mut bits = vec![0u8; 40];
+        bits[0] = 1;
+        let d = encode(&bits).expect("an LTE block size");
+        assert_eq!(d[1][..8], [1, 1, 1, 1, 0, 0, 1, 0], "(1 + D + D^3) / (1 + D^2 + D^3)");
     }
 
     /// The CRC is the one LTE puts on a transport block, and a block with

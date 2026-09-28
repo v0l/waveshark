@@ -804,6 +804,7 @@ pub fn block_read(bytes: &[u8], center: common::Hz) -> Vec<Proto> {
             cell: msg.cell_id.map(u64::from),
             site_code: None,
             carrier_hz: None,
+            ..Cell::default()
         }));
     }
     let cell = Party::infrastructure(
