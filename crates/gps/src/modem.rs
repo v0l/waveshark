@@ -411,6 +411,9 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    static FORKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
     fn pty() -> (std::fs::File, String) {
         use std::os::unix::io::FromRawFd;
         unsafe {
@@ -474,6 +477,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_port_held_by_a_reader_is_not_taken_twice() {
+        let _alone = FORKS.lock().unwrap_or_else(|e| e.into_inner());
         let (_master, slave) = pty();
         let held = crate::source::open_port(&slave, BAUD, Duration::from_millis(200))
             .expect("the first open");
@@ -490,6 +494,7 @@ mod tests {
     #[test]
     fn a_port_another_process_has_open_is_not_probed() {
         use std::os::unix::fs::OpenOptionsExt;
+        let _alone = FORKS.lock().unwrap_or_else(|e| e.into_inner());
         let (_master, slave) = pty();
         set_ospeed(&slave, libc::B4800);
         let stdin = std::fs::OpenOptions::new()
