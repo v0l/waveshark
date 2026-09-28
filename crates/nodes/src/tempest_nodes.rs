@@ -180,6 +180,7 @@ impl TempestNode {
             update: Update::Whole,
             cadence: Cadence::Live,
             sent_at_us: None,
+            decoder: None,
         });
     }
 }

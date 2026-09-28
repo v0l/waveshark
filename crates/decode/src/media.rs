@@ -72,6 +72,7 @@ pub struct Picture {
     pub height: usize,
     pub samples: Vec<u8>,
     pub yuv: Yuv,
+    pub decoder: common::Decoder,
     /// When it is shown, in seconds on the stream's own clock, where the
     /// stream said.
     pub at_s: Option<f64>,
@@ -86,24 +87,16 @@ pub enum Decoding {
     Software,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Engine {
-    Hardware(&'static str),
-    Software,
-}
-
-impl Engine {
-    fn of(frame: &ffmpeg_rs_raw::AvFrameRef) -> Self {
-        if frame.hw_frames_ctx.is_null() {
-            return Self::Software;
-        }
-        let name = unsafe {
-            let frames = (*frame.hw_frames_ctx).data as *const AVHWFramesContext;
-            let device = (*(*frames).device_ctx).type_;
-            std::ffi::CStr::from_ptr(av_hwdevice_get_type_name(device)).to_str().unwrap_or("")
-        };
-        Self::Hardware(name)
+fn decoder_of(frame: &ffmpeg_rs_raw::AvFrameRef) -> common::Decoder {
+    if frame.hw_frames_ctx.is_null() {
+        return common::Decoder::Software;
     }
+    let name = unsafe {
+        let frames = (*frame.hw_frames_ctx).data as *const AVHWFramesContext;
+        let device = (*(*frames).device_ctx).type_;
+        std::ffi::CStr::from_ptr(av_hwdevice_get_type_name(device)).to_str().unwrap_or("")
+    };
+    common::Decoder::of_device(name)
 }
 
 /// What a caller asks the decoding thread for.
@@ -123,7 +116,7 @@ pub struct Media {
     /// What the thread last said it could not do, so a caller can show it
     /// rather than watching an empty pane.
     fault: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
-    engine: std::sync::Arc<parking_lot::Mutex<Option<Engine>>>,
+    engine: std::sync::Arc<parking_lot::Mutex<Option<common::Decoder>>>,
 }
 
 impl Media {
@@ -209,7 +202,7 @@ impl Media {
         }
     }
 
-    pub fn engine(&self) -> Option<Engine> {
+    pub fn decoder(&self) -> Option<common::Decoder> {
         *self.engine.lock()
     }
 
@@ -270,7 +263,7 @@ fn run(
     out: SyncSender<Out>,
     heard: &std::sync::atomic::AtomicU64,
     decoding: Decoding,
-    engine: &parking_lot::Mutex<Option<Engine>>,
+    engine: &parking_lot::Mutex<Option<common::Decoder>>,
 ) -> anyhow::Result<()> {
     // A broadcast off the air is damaged by definition: a cut recording
     // starts mid-picture and a fade loses packets, and ffmpeg says so on
@@ -336,7 +329,7 @@ fn run(
             fields.drain(&mut last);
             held.extend(last.into_iter().map(|(f, clock)| (stamp(&f, clock), f)));
             for (at_s, frame) in held.drain(..) {
-                if !send_picture(&mut scaler, &frame, service, at_s, &out) {
+                if !send_picture(&mut scaler, &frame, service, at_s, engine, &out) {
                     break;
                 }
             }
@@ -356,7 +349,7 @@ fn run(
         let now = (!now.is_nan()).then_some(now);
         while held.front().is_some_and(|(at_s, _)| due(*at_s, now)) {
             let Some((at_s, frame)) = held.pop_front() else { break };
-            if !send_picture(&mut scaler, &frame, service, at_s, &out) {
+            if !send_picture(&mut scaler, &frame, service, at_s, engine, &out) {
                 return Ok(());
             }
         }
@@ -370,7 +363,7 @@ struct Sorting<'a> {
     service: Option<u16>,
     demux: &'a Demuxer,
     resample: &'a mut Resample,
-    engine: &'a parking_lot::Mutex<Option<Engine>>,
+    engine: &'a parking_lot::Mutex<Option<common::Decoder>>,
 }
 
 impl Sorting<'_> {
@@ -386,7 +379,7 @@ impl Sorting<'_> {
         for (frame, index) in frames {
             let clock = clock(self.demux, index);
             if Some(index) != self.sound {
-                *self.engine.lock() = Some(Engine::of(&frame));
+                *self.engine.lock() = Some(decoder_of(&frame));
                 let Ok(frame) = ffmpeg_rs_raw::get_frame_from_hw(frame) else { continue };
                 fields.push(frame, clock, &mut pictures);
             } else if !send_sound(self.resample, &frame, self.service, stamp(&frame, clock), out) {
@@ -586,8 +579,10 @@ fn send_picture(
     frame: &ffmpeg_rs_raw::AvFrameRef,
     service: Option<u16>,
     at_s: Option<f64>,
+    engine: &parking_lot::Mutex<Option<common::Decoder>>,
     out: &SyncSender<Out>,
 ) -> bool {
+    let decoder = engine.lock().unwrap_or(common::Decoder::Software);
     let (w, h) = (frame.width as usize, frame.height as usize);
     if w == 0 || h == 0 {
         return true;
@@ -605,14 +600,14 @@ fn send_picture(
             };
             let yuv =
                 Yuv { chroma: Chroma::Planar, matrix: matrix(frame, h), range: Range::Limited };
-            return send_planes(&planar, yuv, service, at_s, out);
+            return send_planes(&planar, yuv, decoder, service, at_s, out);
         }
     };
     let range = range.unwrap_or(match frame.color_range {
         AVColorRange::JPEG => Range::Full,
         _ => Range::Limited,
     });
-    send_planes(frame, Yuv { chroma, matrix: matrix(frame, h), range }, service, at_s, out)
+    send_planes(frame, Yuv { chroma, matrix: matrix(frame, h), range }, decoder, service, at_s, out)
 }
 
 fn matrix(frame: &ffmpeg_rs_raw::AvFrameRef, height: usize) -> Matrix {
@@ -628,6 +623,7 @@ fn matrix(frame: &ffmpeg_rs_raw::AvFrameRef, height: usize) -> Matrix {
 fn send_planes(
     frame: &ffmpeg_rs_raw::AvFrameRef,
     yuv: Yuv,
+    decoder: common::Decoder,
     service: Option<u16>,
     at_s: Option<f64>,
     out: &SyncSender<Out>,
@@ -649,7 +645,8 @@ fn send_planes(
             samples.extend_from_slice(line);
         }
     }
-    out.send(Out::Picture(Picture { width: w, height: h, samples, yuv, at_s, service })).is_ok()
+    out.send(Out::Picture(Picture { width: w, height: h, samples, yuv, decoder, at_s, service }))
+        .is_ok()
 }
 
 /// One decoded audio frame as samples the bus can mix.

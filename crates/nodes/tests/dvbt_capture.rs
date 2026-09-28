@@ -304,6 +304,7 @@ fn the_stage_puts_a_picture_on_the_video_port() {
         );
         assert_eq!(f.samples.len(), 1920 * 1080 * 3 / 2);
         assert_eq!(f.lines_seen, f.height, "a picture is whole or it is not read");
+        assert!(f.decoder.is_some(), "a decoded picture says what decoded it");
         assert_eq!(f.channel_hz, 429_000_000.0);
         assert_eq!(f.system, nodes::dvbt_nodes::DVB);
         // This stream carries no service description table, so the service

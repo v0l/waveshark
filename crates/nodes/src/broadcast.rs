@@ -551,6 +551,7 @@ impl Broadcast {
             // last.
             cadence: common::Cadence::Live,
             sent_at_us: None,
+            decoder: Some(p.decoder),
         }
     }
 }
@@ -619,6 +620,7 @@ mod tests {
                 matrix: common::Matrix::Bt709,
                 range: common::Range::Limited,
             },
+            decoder: common::Decoder::Software,
             at_s: Some(30.0),
             service: None,
         };

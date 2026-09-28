@@ -338,6 +338,13 @@ impl Osd {
             if let Some(fps) = st.rate.fps {
                 facts.push((format!("{fps:.0} fps"), theme::TRACE));
             }
+            match f.decoder {
+                Some(common::Decoder::Software) => {
+                    facts.push(("software decode".to_string(), theme::LEGEND));
+                }
+                Some(d) => facts.push((d.label().to_string(), theme::VALUE)),
+                None => {}
+            }
             if f.lines_seen < f.height {
                 let tint = if f.completeness() > 0.9 { theme::TRACE } else { theme::FAULT };
                 facts.push((format!("{} of {} lines", f.lines_seen, f.height), tint));
@@ -810,6 +817,7 @@ mod tests {
             update: common::Update::Whole,
             cadence: common::Cadence::Still,
             sent_at_us: None,
+            decoder: None,
         }
     }
 
@@ -886,6 +894,7 @@ mod tests {
         let mut shown = frame(1, 1080);
         (shown.system, shown.channel_hz, shown.width, shown.height) =
             ("DVB-S2", 1_097e6, 1920, 1080);
+        shown.decoder = Some(common::Decoder::Nvdec);
         let mut st = VideoState { shown: Some(shown.clone()), ..Default::default() };
         st.rate.fps = Some(25.02);
         let on = playing(&Pick::First, Some(&shown), &muxes);
@@ -893,7 +902,10 @@ mod tests {
         assert_eq!((osd.title.as_str(), osd.number), ("BBC Two HD", Some(6940)));
         assert_eq!((osd.provider.as_deref(), osd.scrambled), (Some("BSkyB"), Some(false)));
         let facts: Vec<&str> = osd.facts.iter().map(|(v, _)| v.as_str()).collect();
-        assert_eq!(facts, ["DVB-S2", "1097.000 MHz", "H.264 / MPEG-2", "1920x1080", "25 fps"]);
+        assert_eq!(
+            facts,
+            ["DVB-S2", "1097.000 MHz", "H.264 / MPEG-2", "1920x1080", "25 fps", "NVDEC"]
+        );
         let guide: Vec<(&str, &str, &str)> =
             osd.guide.iter().map(|s| (s.legend, s.title.as_str(), s.when.as_str())).collect();
         assert_eq!(
@@ -908,7 +920,7 @@ mod tests {
         let facts: Vec<&str> = osd.facts.iter().map(|(v, _)| v.as_str()).collect();
         assert_eq!(
             facts,
-            ["DVB-S2", "1097.000 MHz", "1920x1080", "700 of 1080 lines"],
+            ["DVB-S2", "1097.000 MHz", "1920x1080", "NVDEC", "700 of 1080 lines"],
             "only a picture short of lines says how many"
         );
 

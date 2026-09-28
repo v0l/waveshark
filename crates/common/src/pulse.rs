@@ -739,6 +739,39 @@ pub enum Pixels {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decoder {
+    Software,
+    Nvdec,
+    Vaapi,
+    VideoToolbox,
+    D3d11va,
+    Hardware(&'static str),
+}
+
+impl Decoder {
+    pub fn of_device(name: &'static str) -> Self {
+        match name {
+            "cuda" => Self::Nvdec,
+            "vaapi" => Self::Vaapi,
+            "videotoolbox" => Self::VideoToolbox,
+            "d3d11va" => Self::D3d11va,
+            other => Self::Hardware(other),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Software => "software",
+            Self::Nvdec => "NVDEC",
+            Self::Vaapi => "VA-API",
+            Self::VideoToolbox => "VideoToolbox",
+            Self::D3d11va => "D3D11VA",
+            Self::Hardware(name) => name,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Yuv {
     pub chroma: Chroma,
     pub matrix: Matrix,
@@ -993,6 +1026,7 @@ pub struct VideoFrame {
     /// quarter of an hour apart and only this one matches a set of orbital
     /// elements.
     pub sent_at_us: Option<u64>,
+    pub decoder: Option<Decoder>,
 }
 
 impl VideoFrame {
@@ -1260,6 +1294,7 @@ mod yuv_tests {
             update: Update::Whole,
             cadence: Cadence::Live,
             sent_at_us: None,
+            decoder: None,
         };
         let planar = frame(Pixels::Yuv420(HD), vec![16, 235, 63, 173, 102, 240]);
         let nv12 = Yuv { chroma: Chroma::Interleaved, ..HD };
@@ -1268,5 +1303,20 @@ mod yuv_tests {
         assert_eq!(planar.rgb(), interleaved.rgb());
         assert_eq!(planar.rgb().len(), 12);
         assert_eq!(planar.rgb()[..3], HD.rgb(16, 102, 240));
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+
+    #[test]
+    fn ffmpeg_device_names_become_the_names_their_makers_use() {
+        let named: Vec<&str> = ["cuda", "vaapi", "videotoolbox", "d3d11va", "vulkan"]
+            .into_iter()
+            .map(|n| Decoder::of_device(n).label())
+            .collect();
+        assert_eq!(named, ["NVDEC", "VA-API", "VideoToolbox", "D3D11VA", "vulkan"]);
+        assert_eq!(Decoder::Software.label(), "software");
     }
 }

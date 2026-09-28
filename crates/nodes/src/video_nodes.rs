@@ -352,6 +352,7 @@ impl pipeline::node::Node for VideoNode {
                 update: common::Update::Whole,
                 cadence: common::Cadence::Live,
                 sent_at_us: None,
+                decoder: None,
             });
         }
         Ok(())

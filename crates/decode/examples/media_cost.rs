@@ -47,7 +47,7 @@ fn main() {
     println!(
         "{path}: {:?} on {:?}, {pictures} pictures, {:.2} cores while playing, fault {:?}",
         decoding,
-        media.engine(),
+        media.decoder(),
         used / seconds,
         media.fault()
     );

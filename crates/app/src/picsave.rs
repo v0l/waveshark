@@ -240,6 +240,7 @@ mod tests {
             update: Update::Whole,
             cadence: Cadence::Still,
             sent_at_us: None,
+            decoder: None,
         }
     }
 

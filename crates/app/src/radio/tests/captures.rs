@@ -144,6 +144,7 @@ fn a_picture_filling_in_is_published_each_time() {
         update: common::Update::Whole,
         cadence: common::Cadence::Still,
         sent_at_us: None,
+        decoder: None,
     };
     status.set_video(Some(frame(1)));
     assert_eq!(status.video().map(|f| f.lines_seen), Some(1));

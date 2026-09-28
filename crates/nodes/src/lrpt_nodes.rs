@@ -205,6 +205,7 @@ impl LrptNode {
             update: Update::Rows { first },
             cadence: Cadence::Still,
             sent_at_us,
+            decoder: None,
         });
     }
 

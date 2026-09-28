@@ -117,6 +117,7 @@ impl SstvNode {
             update: Update::Rows { first: lines.first },
             cadence: Cadence::Still,
             sent_at_us: None,
+            decoder: None,
         });
     }
 }
