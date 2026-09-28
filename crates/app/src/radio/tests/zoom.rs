@@ -103,6 +103,8 @@ fn what_survives_the_narrowing_is_what_was_inside_it() {
         squelch_db: Some(-200.0),
         agc: false,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         voice: false,
         reads: None,
         tx: None,

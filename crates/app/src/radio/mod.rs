@@ -219,6 +219,8 @@ impl Audio {
             reads: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             tx: None,
             tone: None,
         }
@@ -339,6 +341,8 @@ fn pull_levels(rx: &crate::chain::Receiver, plan: &mut Plan, status: &Status) {
             have.squelch_db = c.squelch_db;
             have.agc = c.agc;
             have.blanker = c.blanker;
+            have.denoise = c.denoise;
+            have.denoise_db = c.denoise_db;
         }
     }
     if audio != was.audio || chans != was.channels {

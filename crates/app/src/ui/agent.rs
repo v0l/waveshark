@@ -805,6 +805,13 @@ impl App {
             }
             (None, None) => {}
         }
+        if let Some(n) = a.denoise {
+            c.denoise = n;
+        }
+        if let Some(db) = a.denoise_db {
+            let (lo, hi) = dsp::denoise::DEPTH_RANGE_DB.into_inner();
+            c.denoise_db = db.clamp(lo as f32, hi as f32);
+        }
         if let Some(v) = a.voice {
             c.voice = v;
         }
@@ -1197,6 +1204,8 @@ impl App {
                     "volume": c.volume,
                     "muted": c.muted,
                     "agc": c.agc,
+                    "denoise": c.denoise,
+                    "denoise_db": c.denoise_db,
                     "voice": c.voice,
                     "doppler": c.doppler,
                     "squelch_db": c.squelch_db.or_else(|| c.mode.demod().and_then(|d| d.default_squelch_db())),
@@ -2040,6 +2049,8 @@ mod tests {
                 agc: None,
                 noise_blanker: None,
                 noise_blanker_db: None,
+                denoise: None,
+                denoise_db: None,
                 voice: None,
             }),
         )
@@ -2067,6 +2078,8 @@ mod tests {
                     agc: None,
                     noise_blanker: None,
                     noise_blanker_db: None,
+                    denoise: None,
+                    denoise_db: None,
                     voice: None,
                 })
             )

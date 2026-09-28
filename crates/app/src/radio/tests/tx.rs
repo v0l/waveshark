@@ -20,6 +20,8 @@ fn the_transmit_chain_follows_the_channel_going_on_air() {
         reads: None,
         agc: true,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         tx: Some(TxSpec { source, ..Default::default() }),
         tone: None,
     };

@@ -359,6 +359,8 @@ pub mod args {
         /// How far over the average level a click has to stand to be cut,
         /// 10 to 30 dB. Setting it turns the blanker on.
         pub noise_blanker_db: Option<f32>,
+        pub denoise: Option<bool>,
+        pub denoise_db: Option<f32>,
         /// Treat what is heard here as speech: a row in the call list, and a
         /// transcript where a model is installed.
         pub voice: Option<bool>,

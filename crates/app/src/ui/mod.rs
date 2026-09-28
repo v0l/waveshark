@@ -1351,6 +1351,8 @@ impl App {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: speaks(&ChanMode::Audio(demod)),
             reads: None,
             tx: None,
@@ -1622,6 +1624,8 @@ impl App {
                         c.squelch_db = spec.squelch_db;
                         c.agc = spec.agc;
                         c.blanker = spec.blanker;
+                        c.denoise = spec.denoise;
+                        c.denoise_db = spec.denoise_db;
                         if !spec.label.is_empty() {
                             c.label = spec.label;
                         }
@@ -3014,6 +3018,8 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
         squelch_db: None,
         agc: true,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         tx: None,
         tone: None,
         doppler: false,
@@ -3056,6 +3062,8 @@ fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
             squelch_db: c.squelch_db,
             agc: c.agc,
             blanker: c.blanker,
+            denoise: c.denoise,
+            denoise_db: c.denoise_db,
             voice: c.voice,
             reads: c.reads.clone(),
             // Only what an operator changed about transmitting. Whether the
@@ -4241,6 +4249,8 @@ mod tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: None,
@@ -4432,6 +4442,8 @@ mod tests {
                 squelch_db: None,
                 agc: true,
                 blanker: None,
+                denoise: false,
+                denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
                 voice: false,
                 reads: None,
                 tx: None,

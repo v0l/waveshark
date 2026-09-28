@@ -146,6 +146,7 @@ pub struct Chan {
     tail: Out,
     agc: Option<NodeId>,
     blanker: Option<NodeId>,
+    denoise: Option<NodeId>,
     squelch: Option<NodeId>,
     wfm: Option<NodeId>,
     pub audio_rate: f64,
@@ -630,6 +631,8 @@ pub struct ChannelLevels {
     pub squelch_db: Option<f32>,
     pub agc: bool,
     pub blanker: Option<f32>,
+    pub denoise: bool,
+    pub denoise_db: f32,
 }
 
 /// One fader, as the strip draws it.
@@ -1487,6 +1490,7 @@ impl Receiver {
                 },
                 agc: of("chan_agc"),
                 blanker: of("chan_blank"),
+                denoise: of("chan_denoise"),
                 squelch: of("chan_squelch"),
                 wfm: stereo.then(|| of("chan_demod")).flatten(),
                 audio_rate: AUDIO_HZ,
@@ -2343,6 +2347,8 @@ impl Receiver {
                     squelch_db: c.spec.squelch_db,
                     agc: c.spec.agc,
                     blanker: c.spec.blanker,
+                    denoise: c.spec.denoise,
+                    denoise_db: c.spec.denoise_db,
                 };
                 if let Some(f) = self.fader(c.spec.id) {
                     own.volume = f.volume();
@@ -2362,6 +2368,12 @@ impl Receiver {
                     c.blanker.and_then(|id| downcast::<NoiseBlankerNode>(&self.graph, id))
                 {
                     own.blanker = b.is_enabled().then(|| b.threshold_db());
+                }
+                if let Some(d) =
+                    c.denoise.and_then(|id| downcast::<nodes::DenoiseNode>(&self.graph, id))
+                {
+                    own.denoise = d.is_enabled();
+                    own.denoise_db = d.depth_db();
                 }
                 own
             })
@@ -3991,7 +4003,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     // noise that sounds like a dead station rather than silence.
     let mut want: Vec<u64> = Vec::new();
     // Each channel's fader, and whether what passes it is speech.
-    let mut faders: Vec<(u64, bool)> = Vec::new();
+    let mut faders: Vec<(u64, bool, Source)> = Vec::new();
     let mut fronts: Vec<u64> = Vec::new();
     for spec in &plan.channels {
         if !spec.fits_rate(rate) {
@@ -4038,7 +4050,21 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             p.add_derived(id, mix::fader::KIND, s);
             p.connect(from, (id, 0));
             want.push(id);
-            faders.push((id, voice));
+            let mut mixed = Source::Stage(id, 0);
+            if let ChanMode::Audio(demod) = spec.mode
+                && demod != Demod::Wfm
+            {
+                let nr = chan_stage_id("chan_denoise", spec, rate);
+                let mut s = pipeline::registry::Settings::new();
+                s.insert("channel".into(), V::Int(spec.id as i64));
+                s.insert("enabled".into(), V::Bool(spec.denoise));
+                s.insert("depth_db".into(), V::Float(spec.denoise_db as f64));
+                p.add_derived(nr, "denoise", s);
+                p.connect(mixed, (nr, 0));
+                want.push(nr);
+                mixed = Source::Stage(nr, 0);
+            }
+            faders.push((id, voice, mixed));
         }
         // Only if what it ends in is something the packet bus reads. A
         // DVB-T channel ends in a transport stream, which is bytes for a
@@ -4113,7 +4139,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
             let behind_fader = p
                 .links()
                 .iter()
-                .any(|l| l.from == from && faders.iter().any(|(f, _)| *f == l.to.0));
+                .any(|l| l.from == from && faders.iter().any(|(f, _, _)| *f == l.to.0));
             if !behind_fader {
                 loose.push(from);
             }
@@ -4159,12 +4185,12 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
 
     // The calls: every voice fader and every loose voice port.
     let mut to_calls: Vec<Source> =
-        faders.iter().filter(|(_, v)| *v).map(|(f, _)| Source::Stage(*f, 0)).collect();
+        faders.iter().filter(|(_, v, _)| *v).map(|(_, _, m)| *m).collect();
     to_calls.push(network);
     gather(p, derived::CALLS, mix::calls::KIND, "Calls", &to_calls);
 
     // The tap: every fader before its level, and every loose voice port.
-    let mut to_heard: Vec<Source> = faders.iter().map(|(f, _)| Source::Stage(*f, 1)).collect();
+    let mut to_heard: Vec<Source> = faders.iter().map(|(f, _, _)| Source::Stage(*f, 1)).collect();
     to_heard.push(network);
     gather(p, derived::HEARD, mix::heard::KIND, "Heard", &to_heard);
 
@@ -4190,7 +4216,7 @@ fn sync_audio(p: &mut crate::patch::Patch, plan: &Plan) {
     // The bus: every audio fader, the calls and the replay. Whatever the
     // operator wired into the spare stays.
     let mut to_bus: Vec<Source> =
-        faders.iter().filter(|(_, v)| !*v).map(|(f, _)| Source::Stage(*f, 0)).collect();
+        faders.iter().filter(|(_, v, _)| !*v).map(|(_, _, m)| *m).collect();
     to_bus.push(Source::Stage(derived::CALLS, 0));
     to_bus.push(Source::Stage(derived::REPLAY_FADER, 0));
     gather(p, derived::AUDIO, mix::bus::KIND, "Audio", &to_bus);
@@ -6187,6 +6213,8 @@ pub(crate) mod tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: None,
@@ -7269,8 +7297,8 @@ pub(crate) mod tests {
         let chan_stages =
             rx.patch().stages().iter().filter(|s| s.settings.contains_key("channel")).count();
         assert_eq!(
-            chan_stages, 11,
-            "an NFM chain is ten stages and a fader, and no more were kept"
+            chan_stages, 12,
+            "an NFM chain is ten stages, a fader and its noise reduction, and no more were kept"
         );
         // A fader drag in manual mode is a number on a stage, not a rebuild
         // that would drop every source the auto node had open.
@@ -7435,6 +7463,100 @@ pub(crate) mod tests {
         open.channels = vec![chan(1, 200_000.0, Demod::Nfm)];
         rx.apply_params(&open);
         assert_eq!(code(&rx), "");
+    }
+
+    #[test]
+    fn noise_reduction_takes_the_hiss_down_by_its_depth_without_a_rebuild() {
+        let mut p = plan(240_000.0, Hz::mhz(14));
+        p.fronts.clear();
+        let mut spec = chan(1, 20_000.0, Demod::Usb);
+        spec.agc = false;
+        p.channels = vec![spec.clone()];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert!(!rx.levels().1[0].denoise);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut hiss = |n: usize| -> Vec<C32> {
+            let mut u = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) as f32 * 0.02
+            };
+            (0..n).map(|_| C32::new(u(), u())).collect()
+        };
+        let mut listen = |rx: &mut Receiver, seconds: usize| -> f64 {
+            let mut last = Vec::new();
+            for s in 0..seconds {
+                for _ in 0..10 {
+                    rx.process(&hiss(24_000)).unwrap();
+                    if s + 1 == seconds {
+                        last.extend_from_slice(rx.audio_out().0);
+                    }
+                }
+            }
+            last.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / last.len() as f64
+        };
+        let off = listen(&mut rx, 3);
+
+        let mut on = plan(240_000.0, Hz::mhz(14));
+        on.fronts.clear();
+        spec.denoise = true;
+        spec.denoise_db = 20.0;
+        on.channels = vec![spec];
+        assert!(rx.params_only(&on), "switching noise reduction on rebuilt the chain");
+        rx.apply_params(&on);
+        let levels = &rx.levels().1[0];
+        assert_eq!((levels.denoise, levels.denoise_db), (true, 20.0));
+        let reduced = listen(&mut rx, 3);
+        let drop_db = 10.0 * (reduced / off).log10();
+        assert!(
+            (-21.0..=-18.0).contains(&drop_db),
+            "hiss moved {drop_db:.2} dB with a 20 dB depth, -19.60 when measured; floor -21, ceiling -18"
+        );
+    }
+
+    #[test]
+    fn noise_reduction_reaches_the_speaker_and_not_the_transcriber_tap() {
+        let heard = |denoise: bool| -> (Vec<f32>, f64) {
+            let mut p = plan(240_000.0, Hz::mhz(14));
+            p.fronts.clear();
+            let mut spec = chan(1, 20_000.0, Demod::Usb);
+            spec.agc = false;
+            spec.voice = true;
+            spec.denoise = denoise;
+            p.channels = vec![spec];
+            let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+            let tap = rx.node_of_stage(fader_id(1)).unwrap().out(1);
+            let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+            let (mut pcm, mut speaker) = (Vec::new(), 0.0f64);
+            for _ in 0..20 {
+                let block: Vec<C32> = (0..24_000)
+                    .map(|_| {
+                        let mut u = || {
+                            seed ^= seed << 13;
+                            seed ^= seed >> 7;
+                            seed ^= seed << 17;
+                            ((seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5) as f32 * 0.02
+                        };
+                        C32::new(u(), u())
+                    })
+                    .collect();
+                rx.process(&block).unwrap();
+                let voices = rx.graph.buf(tap).and_then(|b| b.as_voice()).unwrap_or_default();
+                pcm.extend(voices.iter().flat_map(|v| v.pcm.iter().copied()));
+                speaker += rx.audio_out().0.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+            }
+            (pcm, speaker)
+        };
+        let (plain, loud) = heard(false);
+        let (reduced, quiet) = heard(true);
+        assert_eq!(plain.len(), 96_000, "two seconds of 48 kHz audio on the tap");
+        assert_eq!(plain, reduced, "the transcriber heard the noise reduction");
+        let drop_db = 10.0 * (quiet / loud).log10();
+        assert!(
+            (-13.0..=-9.0).contains(&drop_db),
+            "speaker moved {drop_db:.2} dB over two seconds, -10.96 when measured; floor -13, ceiling -9"
+        );
     }
 
     #[test]
@@ -8754,6 +8876,8 @@ mod refusal_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: None,
@@ -8814,6 +8938,8 @@ mod refusal_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: None,
@@ -8858,6 +8984,8 @@ mod refusal_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: None,
@@ -8899,6 +9027,8 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec { source, ..Default::default() }),
@@ -8977,6 +9107,8 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec { source: TxSource::Tone, ..Default::default() }),
@@ -9312,6 +9444,8 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9381,6 +9515,8 @@ mod tx_in_graph_tests {
                 squelch_db: None,
                 agc: true,
                 blanker: None,
+                denoise: false,
+                denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),
@@ -9420,6 +9556,8 @@ mod tx_in_graph_tests {
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9504,6 +9642,8 @@ vectors:
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9603,6 +9743,8 @@ vectors:
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9707,6 +9849,8 @@ vectors:
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),
@@ -9824,6 +9968,8 @@ vectors:
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: None,
@@ -10334,6 +10480,8 @@ vectors:
             squelch_db: None,
             agc: true,
             blanker: None,
+            denoise: false,
+            denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
             voice: false,
             reads: None,
             tx: Some(TxSpec::default()),

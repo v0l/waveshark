@@ -25,6 +25,7 @@ the code is in the commit log.
 - Trilateration list and map LOCATED layer of surveyed transmitters placed within a chosen accuracy.
 - Walksnail Avatar 20 MHz video links: channel, frame rate, frame counter, modulation, MER, antenna balance and the goggles' bursts.
 - Noise blanker on AM, SSB, CW and NFM channels, with its threshold and share cut on the strip.
+- Noise reduction on AM, SSB, CW and NFM channels, switched and set in depth on the strip.
 
 ### Changed
 

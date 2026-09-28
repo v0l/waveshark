@@ -8,6 +8,7 @@
 use common::{C32, Result};
 use dsp::agc::Agc;
 use dsp::blanker::Blanker;
+use dsp::denoise::Denoiser;
 use dsp::squelch::{NoiseMeter, Squelch};
 use dsp::ssb::{Sideband, SsbDemod};
 use dsp::{Deemphasis, FirDecim, FmDemod, HighBlend, Mixer};
@@ -35,6 +36,7 @@ const RELEASE_MS: &str = "release_ms";
 const HANG_MS: &str = "hang_ms";
 const MAX_GAIN_DB: &str = "max_gain_db";
 const ENABLED: &str = "enabled";
+const DEPTH_DB: &str = "depth_db";
 const KIND: &str = "kind";
 const THRESHOLD_DB: &str = "threshold_db";
 const HYSTERESIS_DB: &str = "hysteresis_db";
@@ -924,6 +926,109 @@ impl Simple for NoiseBlankerNode {
 
 const BLANKED_OVER_S: f64 = 0.5;
 
+pub struct DenoiseNode {
+    enabled: bool,
+    depth_db: f32,
+    denoiser: Denoiser,
+}
+
+impl DenoiseNode {
+    pub fn new() -> Self {
+        let depth_db = dsp::denoise::DEFAULT_DEPTH_DB;
+        Self { enabled: false, depth_db, denoiser: Denoiser::new(48_000.0, depth_db) }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn depth_db(&self) -> f32 {
+        self.depth_db
+    }
+
+    pub fn set_enabled(&mut self, on: bool) {
+        if on && !self.enabled {
+            self.denoiser.reset();
+        }
+        self.enabled = on;
+    }
+}
+
+impl Default for DenoiseNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Simple for DenoiseNode {
+    fn name(&self) -> &str {
+        "denoise"
+    }
+
+    fn negotiate(&mut self, i: &PortSpec) -> Result<StreamSpec> {
+        match i.spec.kind {
+            PortKind::Real => self.denoiser = Denoiser::new(i.spec.frame_rate(), self.depth_db),
+            PortKind::Voice => {}
+            other => {
+                return Err(common::Error::other(format!(
+                    "denoise takes audio or speech, not {other:?}"
+                )));
+            }
+        }
+        Ok(i.spec)
+    }
+
+    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+        match i {
+            Payload::Voice(voices) => {
+                for v in voices {
+                    let mut v = v.clone();
+                    if self.enabled && v.channels <= 1 {
+                        if self.denoiser.rate() != v.rate {
+                            self.denoiser = Denoiser::new(v.rate, self.depth_db);
+                        }
+                        self.denoiser.process(&mut v.pcm);
+                    }
+                    o.voice_mut().push(v);
+                }
+            }
+            _ => {
+                let out = o.real_mut();
+                out.extend_from_slice(i.as_real().unwrap_or_default());
+                if self.enabled {
+                    self.denoiser.process(out);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.denoiser.reset();
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::bool(ENABLED, self.enabled).label("Enabled"),
+            Param::float(DEPTH_DB, self.depth_db as f64, dsp::denoise::DEPTH_RANGE_DB)
+                .unit("dB")
+                .label("Depth"),
+        ]
+    }
+
+    fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
+        match name {
+            ENABLED => self.set_enabled(v.as_bool().unwrap_or(false)),
+            DEPTH_DB => {
+                self.depth_db = v.as_f64().unwrap_or(dsp::denoise::DEFAULT_DEPTH_DB as f64) as f32;
+                self.denoiser.set_depth_db(self.depth_db);
+            }
+            _ => return Err(common::Error::other(format!("denoise: unknown parameter {name:?}"))),
+        }
+        Ok(())
+    }
+}
+
 /// How a squelch decides whether a channel is busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SquelchKind {
@@ -1375,6 +1480,17 @@ pub fn build_noise_blanker(s: &Settings) -> Result<Box<dyn Node>> {
         s.bool_or(ENABLED, false),
         s.f64_or(THRESHOLD_DB, dsp::blanker::DEFAULT_THRESHOLD_DB as f64) as f32,
     )))
+}
+
+pub const DENOISE: StageDesc = StageDesc {
+    name: "denoise",
+    summary: "Take the steady hiss out of what the speaker plays, leaving speech and tones",
+    category: Category::Audio,
+    feeds_bus: false,
+};
+
+pub fn build_denoise(_s: &Settings) -> Result<Box<dyn Node>> {
+    Ok(Box::new(DenoiseNode::new()))
 }
 
 pub const SQUELCH: StageDesc = StageDesc {

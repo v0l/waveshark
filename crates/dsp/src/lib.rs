@@ -27,6 +27,7 @@ pub mod dab;
 pub mod dc;
 pub mod dcs;
 pub mod demod;
+pub mod denoise;
 pub mod detect;
 pub mod dqpsk;
 pub mod drift;

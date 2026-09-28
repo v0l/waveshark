@@ -171,6 +171,7 @@ impl Strip<'_> {
                     }
                 });
             });
+            changed |= Self::channel_denoise(ui, ch);
         }
         if demod != Demod::Wfm {
             changed |= Self::channel_blanker(ui, ch, st.blanked);
@@ -227,6 +228,34 @@ impl Strip<'_> {
         if demod == Demod::Nfm {
             changed |= Self::channel_tone(ui, ch, st.code);
         }
+        changed
+    }
+
+    fn channel_denoise(ui: &mut egui::Ui, ch: &mut Channel) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            Line::new().legend("nr").show(ui);
+            if ui
+                .selectable_label(ch.denoise, if ch.denoise { "ON" } else { "OFF" })
+                .on_hover_text("Take the steady hiss out of the audio")
+                .clicked()
+            {
+                ch.denoise = !ch.denoise;
+                changed = true;
+            }
+            if ch.denoise {
+                let (lo, hi) = dsp::denoise::DEPTH_RANGE_DB.into_inner();
+                let mut db = ch.denoise_db;
+                if ui
+                    .add(egui::DragValue::new(&mut db).speed(0.5).range(lo..=hi).suffix(" dB"))
+                    .on_hover_text("How far the hiss is taken down")
+                    .changed()
+                {
+                    ch.denoise_db = db;
+                    changed = true;
+                }
+            }
+        });
         changed
     }
 
@@ -1961,6 +1990,8 @@ mod tests {
                 squelch_db: None,
                 agc: true,
                 blanker: None,
+                denoise: false,
+                denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
                 voice: false,
                 reads: None,
                 tx: Some(TxSpec::default()),

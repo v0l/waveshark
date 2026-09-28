@@ -35,6 +35,8 @@ fn a_decode_channel_reads_its_frequency_with_the_scanner_switched_off() {
         reads: None,
         agc: true,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         tx: None,
         tone: None,
     }];
@@ -96,6 +98,8 @@ fn an_auto_channel_finds_and_reads_what_is_in_its_own_bandwidth() {
         reads: None,
         agc: true,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         tx: None,
         tone: None,
     }];

@@ -44,6 +44,8 @@ pub struct Channel {
     pub(super) squelch_db: Option<f32>,
     pub(super) agc: bool,
     pub(super) blanker: Option<f32>,
+    pub(super) denoise: bool,
+    pub(super) denoise_db: f32,
     /// Treat what is heard here as speech: calls on the bus, a row in the
     /// call list, and a transcript where a model is installed.
     pub(super) voice: bool,

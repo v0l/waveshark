@@ -24,10 +24,30 @@ fn a_handheld_on_pmr446_arrives_as_words() {
         eprintln!("skipping: no whisper model in {}", dir.display());
         return;
     }
+    pmr446_reads_as_words(&buf, false);
+}
+
+#[cfg(feature = "stt")]
+#[test]
+fn a_handheld_on_pmr446_arrives_as_the_same_words_through_noise_reduction() {
+    let Some(buf) = pmr446_fixture() else {
+        eprintln!("skipping: pmr446_test_446.0M_512k.cs8 absent, run testdata/fetch.sh");
+        return;
+    };
+    let dir = crate::chain::default_model_dir();
+    if !dir.join("config.json").exists() {
+        eprintln!("skipping: no whisper model in {}", dir.display());
+        return;
+    }
+    pmr446_reads_as_words(&buf, true);
+}
+
+#[cfg(feature = "stt")]
+fn pmr446_reads_as_words(buf: &common::IqBuf, denoise: bool) {
     // PMR446 channel 1. The capture is tuned 49.1 kHz below it, which is
     // what the dial was set to rather than anything about the signal.
     const CHANNEL_HZ: f64 = 446_049_100.0;
-    let mut plan = replay_plan(&buf, false);
+    let mut plan = replay_plan(buf, false);
     plan.fronts.clear();
     plan.channels = vec![ChannelSpec {
         id: 1,
@@ -41,6 +61,8 @@ fn a_handheld_on_pmr446_arrives_as_words() {
         squelch_db: Some(-200.0),
         agc: true,
         blanker: None,
+        denoise,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         voice: true,
         reads: None,
         tx: None,
@@ -57,7 +79,7 @@ fn a_handheld_on_pmr446_arrives_as_words() {
     // The receiver's own transcript, so what this test reads is what
     // this receiver heard.
     let log = rx.transcript().clone();
-    let _ = replay_blocks(&mut rx, &buf);
+    let _ = replay_blocks(&mut rx, buf);
     // The model runs on its own thread, so the answer arrives after the
     // samples have run out, the way it does in the receiver.
     let silence = vec![C32::default(); 16_384];
@@ -113,6 +135,8 @@ fn pmr446_strip(
         squelch_db: None,
         agc: true,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         voice,
         reads: None,
         tx: None,
@@ -235,6 +259,8 @@ fn a_handheld_on_pmr446_is_recorded_and_reads_back() {
         squelch_db: Some(-200.0),
         agc: true,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         voice: true,
         reads: None,
         tx: None,

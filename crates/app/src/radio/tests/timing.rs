@@ -16,6 +16,8 @@ fn widest_chain() -> crate::chain::Receiver {
         squelch_db: Some(-200.0),
         agc: false,
         blanker: None,
+        denoise: false,
+        denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
         voice: false,
         reads: None,
         tx: None,
