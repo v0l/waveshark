@@ -166,6 +166,18 @@ pub fn kiwisdrs() -> Option<Arc<Vec<sdr_directory::Listing>>> {
     on_demand(Which::KiwiSdrs, &KIWISDRS)
 }
 
+static REPAINT: OnceLock<egui::Context> = OnceLock::new();
+
+pub fn set_repaint(ctx: egui::Context) {
+    let _ = REPAINT.set(ctx);
+}
+
+pub fn repaint() {
+    if let Some(ctx) = REPAINT.get() {
+        ctx.request_repaint();
+    }
+}
+
 pub fn check(which: Which) {
     load(which, When::IfDue);
 }
@@ -227,10 +239,14 @@ pub struct Credit {
 /// has been given and the export downloaded.
 #[allow(dead_code)]
 pub fn cell_towers() -> Option<Arc<Cells>> {
-    if cell_mcc().is_none() || opencellid_token().is_empty() {
+    if !towers_wanted() {
         return None;
     }
     on_demand(Which::CellTowers, &CELLS)
+}
+
+fn towers_wanted() -> bool {
+    Which::CellTowers.blocked().is_none()
 }
 
 /// The OpenCelliD download token, which is the operator's own: the export
@@ -896,6 +912,7 @@ fn load(which: Which, when: When) {
             let w = work_slot(which);
             *w.error.write() = outcome.err();
             w.busy.store(false, Ordering::Release);
+            repaint();
         })
         .is_ok();
     if !started {
@@ -1238,6 +1255,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_dataset_landing_asks_the_window_for_a_frame() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        set_repaint(ctx.clone());
+        let ctx = REPAINT.get().expect("a window to wake").clone();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        assert!(!ctx.has_requested_repaint(), "an idle window asks for nothing");
+        repaint();
+        assert!(ctx.has_requested_repaint());
+    }
+
+    #[test]
     fn sizes_round_to_something_readable() {
         assert_eq!(fmt_bytes(0), "—");
         assert_eq!(fmt_bytes(930_667), "908 kB");
@@ -1351,6 +1380,10 @@ mod tests {
         // fetch downloads that table itself.
         set_country("gb");
         assert_eq!(Which::CellTowers.blocked(), None);
+        assert!(
+            OPERATORS.read().is_some() || towers_wanted(),
+            "the map asks for the export before the operator table has loaded"
+        );
         set_opencellid_token("");
         set_country("");
     }

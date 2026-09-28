@@ -692,10 +692,12 @@ pub(super) struct CellLayer<'a> {
     shown: Vec<(Pos2, datasets::cells::Cell)>,
     /// Cells the export does not have, placed where beaconDB says a receiver
     /// hearing them is, with the metres that is good to.
-    guessed: Vec<(Pos2, survey::beacondb::Cell, f64)>,
+    guessed: Vec<(Pos2, survey::beacondb::Radio, survey::beacondb::Cell, f64)>,
     /// Why nothing was drawn, for the status line. A layer switched on and
     /// silent is indistinguishable from a country with no masts in it.
     quiet: Option<&'static str>,
+    rough: usize,
+    heard_here: usize,
 }
 
 /// Below this the export is a wall of dots over a whole city. Higher than
@@ -721,18 +723,20 @@ impl<'a> CellLayer<'a> {
         if !crate::beacondb::lookup_on() {
             return;
         }
-        for d in self.heard.iter().filter(|d| d.protocol == "gsm") {
+        for d in self.heard.iter() {
+            let Some(radio) = survey::beacondb::Radio::of(&d.protocol) else { continue };
             let Some(cell) = survey::beacondb::cell(&d.ident) else {
                 continue;
             };
-            let known = export.is_some_and(|e| {
-                e.get(cell.mcc, &cell.mnc.to_string(), cell.lac, cell.cid).is_some()
+            let placed = export.is_some_and(|e| {
+                e.get(cell.mcc, &cell.mnc.to_string(), cell.lac, cell.cid)
+                    .is_some_and(|c| c.placed())
             });
-            if known {
+            if placed {
                 continue;
             }
             let Some(crate::beacondb::Answer::At { lat, lon, accuracy_m }) =
-                crate::beacondb::position(cell)
+                crate::beacondb::position(radio, cell)
             else {
                 continue;
             };
@@ -742,21 +746,12 @@ impl<'a> CellLayer<'a> {
             }
             let r = (accuracy_m / 1852.0 * c.nm_px_at(lat)) as f32;
             if r > 3.0 {
-                c.p.circle_stroke(at, r, Stroke::new(1.0, theme::TRACE.gamma_multiply(0.18)));
+                c.p.circle_stroke(at, r, Stroke::new(1.0, theme::TRACE.gamma_multiply(0.35)));
             }
             // A cross, not a dot: this is somebody's estimate of a place, and
             // it must not read as a mast the export has a position for.
-            let arm = 3.5;
-            let dim = theme::TRACE.gamma_multiply(0.7);
-            c.p.line_segment(
-                [Pos2::new(at.x - arm, at.y), Pos2::new(at.x + arm, at.y)],
-                Stroke::new(1.0, dim),
-            );
-            c.p.line_segment(
-                [Pos2::new(at.x, at.y - arm), Pos2::new(at.x, at.y + arm)],
-                Stroke::new(1.0, dim),
-            );
-            self.guessed.push((at, cell, accuracy_m));
+            cell_mark(&c.p, at, theme::TRACE);
+            self.guessed.push((at, radio, cell, accuracy_m));
         }
     }
 }
@@ -773,6 +768,8 @@ impl Layer for CellLayer<'_> {
     fn draw(&mut self, c: &Canvas) {
         self.shown.clear();
         self.guessed.clear();
+        self.rough = 0;
+        self.heard_here = 0;
         self.quiet = None;
         if c.zoom() < CELL_ZOOM {
             self.quiet = Some("zoom in");
@@ -788,18 +785,27 @@ impl Layer for CellLayer<'_> {
             // identity rather than by position, and at this zoom the window
             // is a few streets, so anything spatial would be an index built
             // for a filter that already costs less than the draw.
+            let heard = heard_cells(self.heard);
+            let mut ours = Vec::new();
             for cell in cells.iter() {
                 let at = c.at(cell.lat, cell.lon);
                 if !near.contains(at) {
                     continue;
                 }
-                let r = (f64::from(cell.range_m) / 1852.0 * c.nm_px_at(cell.lat)) as f32;
-                if r > 3.0 {
-                    c.p.circle_stroke(at, r, Stroke::new(1.0, theme::OK.gamma_multiply(0.22)));
+                if !cell.placed() {
+                    self.rough += 1;
+                    continue;
                 }
-                c.p.circle_filled(at, 2.5, theme::OK.gamma_multiply(0.75));
+                match heard.contains(&export_key(cell)) {
+                    true => ours.push(at),
+                    false => cell_mark(&c.p, at, theme::OK),
+                }
                 self.shown.push((at, cell.clone()));
             }
+            for at in &ours {
+                cell_mark(&c.p, *at, theme::TRACE);
+            }
+            self.heard_here = ours.len();
         }
         self.draw_heard(c, near, cells.as_deref());
         if cells.is_none() && self.guessed.is_empty() {
@@ -809,11 +815,18 @@ impl Layer for CellLayer<'_> {
 
     fn over(&mut self, c: &Canvas) {
         let Some(pos) = c.hover() else { return };
-        if let Some((at, cell, accuracy_m)) = nearest_guess(&self.guessed, pos) {
+        if let Some((at, radio, cell, accuracy_m)) = nearest_guess(&self.guessed, pos) {
             let who = network_name(cell.mcc, &cell.mnc.to_string());
             let line = format!(
-                "{}-{} LAC {} CI {} {} beaconDB estimate ±{:.0} m",
-                cell.mcc, cell.mnc, cell.lac, cell.cid, who, accuracy_m
+                "{} {}-{} ({who}) {} {} {} {} beaconDB estimate ±{:.0} m",
+                radio.as_str().to_uppercase(),
+                cell.mcc,
+                cell.mnc,
+                radio.area(),
+                cell.lac,
+                radio.cell(),
+                cell.cid,
+                accuracy_m
             );
             c.label(Pos2::new(at.x + 8.0, at.y - 6.0), &line, theme::TRACE, 1.0);
             return;
@@ -821,13 +834,34 @@ impl Layer for CellLayer<'_> {
         let Some((at, cell)) = nearest_cell(&self.shown, pos) else {
             return;
         };
+        let r = (f64::from(cell.range_m) / 1852.0 * c.nm_px_at(cell.lat)) as f32;
+        let ours = heard_cells(self.heard).contains(&export_key(cell));
+        let ink = if ours { theme::TRACE } else { theme::OK };
+        if r > 6.0 {
+            c.p.circle_filled(at, r, ink.gamma_multiply(0.03));
+            c.p.circle_stroke(at, r, Stroke::new(1.0, ink.gamma_multiply(0.35)));
+            cell_mark(&c.p, at, ink);
+        }
         // The network's name where the operator table has landed, and the
         // codes either way: a beacon gives numbers, and a card that shows
         // only a brand cannot be matched against what was decoded.
         let who = network_name(cell.mcc, &cell.mnc);
+        let radio = match cell.radio.as_str() {
+            "LTE" => survey::beacondb::Radio::Lte,
+            _ => survey::beacondb::Radio::Gsm,
+        };
         let line = format!(
-            "{} {}-{} LAC {} CI {} {} ±{} m, {} reports",
-            cell.radio, cell.mcc, cell.mnc, cell.area, cell.cell, who, cell.range_m, cell.samples
+            "{} {}-{} ({who}) {} {} {} {} ±{} m, {} reports{}",
+            cell.radio,
+            cell.mcc,
+            cell.mnc,
+            radio.area(),
+            cell.area,
+            radio.cell(),
+            cell.cell,
+            cell.range_m,
+            cell.samples,
+            if ours { ", heard here" } else { "" }
         );
         c.label(Pos2::new(at.x + 8.0, at.y - 6.0), &line, theme::VALUE, 1.0);
     }
@@ -836,12 +870,20 @@ impl Layer for CellLayer<'_> {
         if let Some(why) = self.quiet {
             return Some(format!("cells: {why}"));
         }
-        match (self.shown.len(), self.guessed.len()) {
-            (0, 0) => None,
-            (n, 0) => Some(format!("{n} cells")),
-            (0, g) => Some(format!("{g} cells from beaconDB")),
-            (n, g) => Some(format!("{n} cells, {g} from beaconDB")),
+        let mut said = match (self.shown.len(), self.guessed.len()) {
+            (0, 0) => "no placed cells".to_string(),
+            (n, 0) => format!("{n} placed cells"),
+            (0, 1) => "1 cell from beaconDB".to_string(),
+            (0, g) => format!("{g} cells from beaconDB"),
+            (n, g) => format!("{n} placed cells, {g} from beaconDB"),
+        };
+        if self.heard_here > 0 {
+            said.push_str(&format!(", {} heard here", self.heard_here));
         }
+        if self.rough > 0 {
+            said.push_str(&format!(", {} too rough to draw", self.rough));
+        }
+        (self.rough > 0 || self.shown.len() + self.guessed.len() > 0).then_some(said)
     }
 
     /// Asked for in writing by OpenCelliD: a visible credit and a link, for
@@ -872,16 +914,41 @@ fn network_name(mcc: u16, mnc: &str) -> String {
 /// The beaconDB estimate under the pointer, within a marker's grabbing
 /// distance.
 fn nearest_guess(
-    shown: &[(Pos2, survey::beacondb::Cell, f64)],
+    shown: &[(Pos2, survey::beacondb::Radio, survey::beacondb::Cell, f64)],
     pos: Pos2,
-) -> Option<(Pos2, survey::beacondb::Cell, f64)> {
+) -> Option<(Pos2, survey::beacondb::Radio, survey::beacondb::Cell, f64)> {
     const PX: f32 = 10.0;
     shown
         .iter()
-        .map(|(at, cell, acc)| (at.distance(pos), at, cell, acc))
+        .map(|(at, radio, cell, acc)| (at.distance(pos), at, radio, cell, acc))
         .filter(|(d, ..)| *d <= PX)
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, at, cell, acc)| (*at, *cell, *acc))
+        .map(|(_, at, radio, cell, acc)| (*at, *radio, *cell, *acc))
+}
+
+type CellKey = (u16, u16, u32, u64);
+
+fn heard_cells(heard: &[survey::Device]) -> std::collections::HashSet<CellKey> {
+    heard
+        .iter()
+        .filter(|d| survey::beacondb::Radio::of(&d.protocol).is_some())
+        .filter_map(|d| survey::beacondb::cell(&d.ident))
+        .map(|c| (c.mcc, c.mnc, c.lac, c.cid))
+        .collect()
+}
+
+fn export_key(c: &datasets::cells::Cell) -> CellKey {
+    (c.mcc, c.mnc.parse().unwrap_or(u16::MAX), c.area, c.cell)
+}
+
+fn cell_mark(p: &egui::Painter, at: Pos2, ink: Color32) {
+    let corners: Vec<Pos2> = (0..6)
+        .map(|k| {
+            let a = std::f32::consts::FRAC_PI_3 * k as f32 + std::f32::consts::FRAC_PI_6;
+            Pos2::new(at.x + 5.0 * a.cos(), at.y + 5.0 * a.sin())
+        })
+        .collect();
+    p.add(egui::Shape::convex_polygon(corners, ink, Stroke::new(1.0, theme::CHASSIS)));
 }
 
 /// The cell under the pointer, within a marker's grabbing distance.
@@ -1651,6 +1718,50 @@ mod tests {
         assert_eq!(pick(Some(kiwi.clone()), Some(kiwi.clone())), None, "clicked again");
         assert_eq!(pick(Some(kiwi.clone()), Some(spy.clone())), Some(spy), "same host, other kind");
         assert_eq!(pick(Some(kiwi), None), None, "clicked the map");
+    }
+
+    #[test]
+    fn a_decoded_cell_is_found_in_the_export_whatever_digits_its_network_code_was_written_with() {
+        let device = |protocol: &str, ident: &str| survey::Device {
+            id: 0,
+            protocol: protocol.into(),
+            ident: ident.into(),
+            first_us: 0,
+            last_us: 0,
+            packets: 1,
+            name: None,
+            vendor: None,
+            best_rssi_dbfs: None,
+            best_lat: None,
+            best_lon: None,
+            center_hz: 0,
+        };
+        let heard = heard_cells(&[
+            device("gsm", "272-01-100-4660"),
+            device("lte", "272-05-40801-1144144"),
+            device("gsm", "272-02-52538"),
+            device("ble", "E8:31:CD:0A:F5:3A"),
+        ]);
+        assert_eq!(
+            heard.len(),
+            2,
+            "the three part GSM name and the Bluetooth device are not cells"
+        );
+        let row = |mnc: &str, area, cell| datasets::cells::Cell {
+            radio: "LTE".into(),
+            mcc: 272,
+            mnc: mnc.into(),
+            area,
+            cell,
+            lat: 53.6,
+            lon: -6.6,
+            range_m: 900,
+            samples: 40,
+            updated: 0,
+        };
+        assert!(heard.contains(&export_key(&row("5", 40801, 1_144_144))));
+        assert!(heard.contains(&export_key(&row("01", 100, 4660))));
+        assert!(!heard.contains(&export_key(&row("5", 40801, 1_144_145))));
     }
 
     #[test]

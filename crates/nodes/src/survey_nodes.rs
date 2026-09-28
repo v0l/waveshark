@@ -380,7 +380,12 @@ mod tests {
         let rows = db.devices(survey::Query::default()).unwrap();
         assert_eq!(rows.len(), 1, "expected one cell, got {rows:?}");
         assert_eq!(rows[0].protocol, "gsm");
-        assert_eq!(rows[0].ident, "001-01-1");
+        assert_eq!(rows[0].ident, "001-01-1-1");
+        assert_eq!(
+            survey::beacondb::cell(&rows[0].ident).map(|c| (c.lac, c.cid)),
+            Some((1, 1)),
+            "the name carries the area, which beaconDB and WiGLE both need"
+        );
     }
 
     /// Indoors, or before the first lock, there is no position. What was

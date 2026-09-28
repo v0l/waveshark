@@ -793,7 +793,7 @@ pub fn block_read(bytes: &[u8], center: common::Hz) -> Vec<Proto> {
             // A cell is a transmitter that names itself, so it says so here
             // rather than leaving a device list to know that GSM keeps its
             // identity in a field called `cell`.
-            let cell = format!("{lai}-{id}");
+            let cell = format!("{lai}-{}-{id}", lai.lac);
             named = Some(cell.clone());
             p = p.by(Entity::new("gsm", Id::Text(cell)).made_by(lai.to_string()));
         }

@@ -64,6 +64,7 @@ the code is in the commit log.
 - Cell tower map layer drawing only cells placed by 20 or more reports within 1 km.
 - beaconDB estimates on the cell map for decoded LTE cells as well as GSM.
 - TETRA neighbour cells listed with their carrier frequencies.
+- LTE cells sent to beaconDB and WiGLE alongside GSM cells and Bluetooth devices.
 
 ### Fixed
 
@@ -100,6 +101,10 @@ the code is in the commit log.
 - sub-ghz-modem DETECT hanging, and taking over or reconfiguring serial ports other programs had open.
 - Display leakage locking on 2.4 GHz traffic and painting it as a screen.
 - Display leakage stalling the receiver with a mode named, and each second while searching.
+- Cell towers never drawn on the map after a restart, and too faint to find when they were.
+- GSM cells never looked up on or sent to beaconDB and WiGLE, their names missing the location area.
+- beaconDB cell estimates on the map too faint to find.
+- Map layers left blank until the pointer moved, after their data had loaded.
 
 ## [0.4.0] - 2026-09-24
 

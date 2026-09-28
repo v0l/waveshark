@@ -84,6 +84,8 @@ pub fn refresh() {
             Err(e) => f.error = Some(e),
         }
         f.busy = false;
+        drop(f);
+        crate::data::repaint();
     });
     if started.is_err() {
         finder().lock().busy = false;

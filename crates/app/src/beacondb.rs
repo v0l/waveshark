@@ -17,7 +17,7 @@
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use survey::beacondb::Cell;
+use survey::beacondb::{Cell, Radio};
 
 /// What is known about one cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,10 +33,10 @@ pub enum Answer {
 }
 
 /// Cells nobody wants to ask about twice.
-static ANSWERS: RwLock<Option<HashMap<Cell, Answer>>> = RwLock::new(None);
+static ANSWERS: RwLock<Option<HashMap<(Radio, Cell), Answer>>> = RwLock::new(None);
 
 /// What has been asked for and not yet answered.
-static QUEUE: Mutex<VecDeque<Cell>> = Mutex::new(VecDeque::new());
+static QUEUE: Mutex<VecDeque<(Radio, Cell)>> = Mutex::new(VecDeque::new());
 static WAKE: Condvar = Condvar::new();
 
 /// Whether lookups happen at all.
@@ -73,10 +73,11 @@ pub const CREDIT: crate::data::Credit = crate::data::Credit {
 ///
 /// Never blocks: the answer to a cell nobody has asked about is `Asking`,
 /// and the map draws nothing for it until the thread comes back.
-pub fn position(c: Cell) -> Option<Answer> {
+pub fn position(radio: Radio, cell: Cell) -> Option<Answer> {
     if !lookup_on() {
         return None;
     }
+    let c = (radio, cell);
     if let Some(a) = ANSWERS.read().as_ref().and_then(|m| m.get(&c).copied()) {
         return Some(a);
     }
@@ -114,7 +115,7 @@ fn run() {
                 WAKE.wait(&mut q);
             }
         };
-        let answer = match survey::beacondb::locate_cell(next, "gsm") {
+        let answer = match survey::beacondb::locate_cell(next.1, next.0) {
             Ok(Some((lat, lon, accuracy_m))) => Answer::At { lat, lon, accuracy_m },
             Ok(None) => Answer::Unknown,
             Err(e) => {
@@ -132,6 +133,7 @@ fn run() {
         if let Some(m) = ANSWERS.write().as_mut() {
             m.insert(next, answer);
         }
+        crate::data::repaint();
         std::thread::sleep(GAP);
     }
 }
@@ -144,21 +146,29 @@ mod tests {
         Cell { mcc: 272, mnc: 1, lac: 1, cid }
     }
 
+    #[test]
+    fn a_gsm_and_an_lte_cell_with_the_same_numbers_are_asked_about_separately() {
+        let (gsm, lte) = ((Radio::Gsm, cell(9)), (Radio::Lte, cell(9)));
+        ANSWERS.write().get_or_insert_with(HashMap::new).insert(gsm, Answer::Unknown);
+        let held = ANSWERS.read().as_ref().map(|m| (m.get(&gsm).copied(), m.get(&lte).copied()));
+        assert_eq!(held, Some((Some(Answer::Unknown), None)));
+    }
+
     /// One test rather than two, because the switch and the queue are
     /// process-wide: two tests of them run at once and take each other's
     /// state away.
     #[test]
     fn nothing_is_asked_while_it_is_off_and_nothing_is_asked_twice() {
         set_lookup(false);
-        assert_eq!(position(cell(1)), None);
+        assert_eq!(position(Radio::Gsm, cell(1)), None);
         assert!(QUEUE.lock().is_empty());
 
         set_lookup(true);
         QUEUE.lock().clear();
         // The first ask queues the cell; the second finds it already asked.
-        assert_eq!(position(cell(2)), Some(Answer::Asking));
-        assert_eq!(position(cell(2)), Some(Answer::Asking));
-        assert_eq!(QUEUE.lock().iter().filter(|c| **c == cell(2)).count(), 1);
+        assert_eq!(position(Radio::Gsm, cell(2)), Some(Answer::Asking));
+        assert_eq!(position(Radio::Gsm, cell(2)), Some(Answer::Asking));
+        assert_eq!(QUEUE.lock().iter().filter(|c| **c == (Radio::Gsm, cell(2))).count(), 1);
         set_lookup(false);
     }
 }

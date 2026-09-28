@@ -47,7 +47,7 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// answer for everything that is not a cell or a Bluetooth device.
 pub fn kind(protocol: &str) -> Option<&'static str> {
     match protocol {
-        "gsm" => Some("cellTowers"),
+        "gsm" | "lte" => Some("cellTowers"),
         "ble" | "bt" => Some("bluetoothBeacons"),
         _ => None,
     }
@@ -73,6 +73,43 @@ pub fn cell(ident: &str) -> Option<Cell> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Radio {
+    Gsm,
+    Lte,
+}
+
+impl Radio {
+    pub fn of(protocol: &str) -> Option<Radio> {
+        match protocol {
+            "gsm" => Some(Radio::Gsm),
+            "lte" => Some(Radio::Lte),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Radio::Gsm => "gsm",
+            Radio::Lte => "lte",
+        }
+    }
+
+    pub fn area(self) -> &'static str {
+        match self {
+            Radio::Gsm => "LAC",
+            Radio::Lte => "TAC",
+        }
+    }
+
+    pub fn cell(self) -> &'static str {
+        match self {
+            Radio::Gsm => "CI",
+            Radio::Lte => "ECI",
+        }
+    }
+}
+
 /// One cell, in the numbers the API asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Cell {
@@ -83,9 +120,9 @@ pub struct Cell {
 }
 
 impl Cell {
-    fn json(&self, radio: &str) -> serde_json::Value {
+    fn json(&self, radio: Radio) -> serde_json::Value {
         serde_json::json!({
-            "radioType": radio,
+            "radioType": radio.as_str(),
             "mobileCountryCode": self.mcc,
             "mobileNetworkCode": self.mnc,
             "locationAreaCode": self.lac,
@@ -103,7 +140,7 @@ pub fn item(protocol: &str, ident: &str, s: &Sighting) -> Option<serde_json::Val
     let (lat, lon) = (s.lat?, s.lon?);
     let field = kind(protocol)?;
     let beacon = match field {
-        "cellTowers" => cell(ident)?.json("gsm"),
+        "cellTowers" => cell(ident)?.json(Radio::of(protocol)?),
         _ => serde_json::json!({ "macAddress": ident.to_ascii_lowercase() }),
     };
     let mut position = serde_json::json!({
@@ -168,7 +205,7 @@ pub fn submit(body: &[u8]) -> Result<(), String> {
 /// worth no more precision than the accuracy it comes with. `Ok(None)` is a
 /// cell the database has never heard of, which is the ordinary answer and not
 /// a failure.
-pub fn locate_cell(c: Cell, radio: &str) -> Result<Option<(f64, f64, f64)>, String> {
+pub fn locate_cell(c: Cell, radio: Radio) -> Result<Option<(f64, f64, f64)>, String> {
     let body = serde_json::json!({
         "considerIp": false,
         "cellTowers": [c.json(radio)],
@@ -234,6 +271,17 @@ mod tests {
     }
 
     #[test]
+    fn an_lte_cell_the_decoder_named_is_asked_about_as_lte() {
+        let c = cell("272-03-40111-11350089").expect("PLMN, TAC and ECI");
+        assert_eq!(c, Cell { mcc: 272, mnc: 3, lac: 40111, cid: 11_350_089 });
+        let radio = Radio::of("lte").expect("lte is a cell");
+        assert_eq!(c.json(radio)["radioType"], "lte");
+        assert_eq!((radio.area(), radio.cell()), ("TAC", "ECI"));
+        assert_eq!(Radio::of("gsm").map(Radio::as_str), Some("gsm"));
+        assert_eq!(Radio::of("ble"), None);
+    }
+
+    #[test]
     fn an_observation_carries_the_place_it_was_heard_from() {
         let v = item("gsm", "272-1-1234-56789", &sighting()).expect("an item");
         assert_eq!(v["position"]["latitude"], 53.5137);
@@ -243,6 +291,18 @@ mod tests {
         assert_eq!(v["cellTowers"][0]["cellId"], 56789);
         // dBFS is not dBm, so the level is left out rather than sent as one.
         assert!(v["cellTowers"][0].get("signalStrength").is_none());
+    }
+
+    #[test]
+    fn an_lte_cell_is_submitted_as_lte() {
+        let v = item("lte", "272-05-40801-1144144", &sighting()).expect("an item");
+        let cell = &v["cellTowers"][0];
+        assert_eq!(cell["radioType"], "lte");
+        assert_eq!(
+            (cell["locationAreaCode"].clone(), cell["cellId"].clone()),
+            (40801.into(), 1_144_144.into())
+        );
+        assert_eq!(cell["mobileNetworkCode"], 5);
     }
 
     #[test]

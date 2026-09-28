@@ -58,7 +58,7 @@ fn a_gsm_beacon_is_read_through_the_receiver() {
     let si = read_as(&out, "gsm", "system_information");
     assert_eq!(si.len(), 1, "expected one system information block, got {out:?}");
     // The cell as it names itself: the network, then the cell inside it.
-    assert_eq!(who(si[0]).as_deref(), Some("262-01-4660"), "{}", si[0].detail());
+    assert_eq!(who(si[0]).as_deref(), Some("262-01-100-4660"), "{}", si[0].detail());
     assert!(si[0].detail().contains("area 100"), "{}", si[0].detail());
     every_row_carries_its_measurements(&si);
 }

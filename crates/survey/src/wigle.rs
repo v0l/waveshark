@@ -50,6 +50,7 @@ pub fn kind(protocol: &str) -> Option<&'static str> {
         "ble" => Some("BLE"),
         "bt" => Some("BT"),
         "gsm" => Some("GSM"),
+        "lte" => Some("LTE"),
         _ => None,
     }
 }
@@ -130,6 +131,15 @@ pub fn row(
             let arfcn =
                 dsp::gsm::arfcn(s.center_hz as f64).map(|n| n.to_string()).unwrap_or_default();
             (key, name.unwrap_or("").to_string(), format!("GSM;{operator}"), String::new(), arfcn)
+        }
+        "LTE" => {
+            let (key, operator) = cell_key(ident)?;
+            let hz = s.center_hz as f64;
+            let earfcn = dsp::lte::bands::containing(hz)
+                .and_then(|b| b.earfcn(hz))
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            (key, name.unwrap_or("").to_string(), format!("LTE;{operator}"), String::new(), earfcn)
         }
         _ => (
             ident.to_string(),
@@ -261,6 +271,30 @@ mod tests {
         assert!(row.ends_with(",GSM"), "{row}");
         // ARFCN 62 is 947.4 MHz downlink, and the channel column stays empty.
         assert!(row.contains(",,62,"), "{row}");
+    }
+
+    #[test]
+    fn an_lte_cell_is_keyed_by_operator_tracking_area_and_cell_with_its_earfcn() {
+        let mut db = Db::in_memory().unwrap();
+        db.record(&Report {
+            protocol: "lte".into(),
+            ident: "272-05-40801-1144144".into(),
+            name: None,
+            vendor: Some("272-05".into()),
+            sighting: Sighting {
+                at_us: 1_788_774_170_000_000,
+                lat: Some(53.6),
+                lon: Some(-6.6),
+                rssi_dbfs: Some(-29.0),
+                center_hz: 773_000_000,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let row = export(&db).lines().nth(2).unwrap().to_string();
+        assert!(row.starts_with("27205_40801_1144144,,LTE;27205,"), "{row}");
+        assert!(row.ends_with(",LTE"), "{row}");
+        assert!(row.contains(",,9360,"), "773 MHz is EARFCN 9360 in band 28: {row}");
     }
 
     /// A row in the wrong bucket is wrong in somebody else's database

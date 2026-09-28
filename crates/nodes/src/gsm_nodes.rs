@@ -529,7 +529,10 @@ mod tests {
         assert_eq!((c.mcc, c.mnc), (Some(262), Some(1)));
         assert_eq!((c.area, c.cell), (Some(11_051), Some(0x1234)));
         // A cell names itself, which is what a device list rows on.
-        assert_eq!(d.subject.as_ref().map(|e| e.id.to_string()).as_deref(), Some("262-01-4660"));
+        assert_eq!(
+            d.subject.as_ref().map(|e| e.id.to_string()).as_deref(),
+            Some("262-01-11051-4660")
+        );
     }
 
     /// A block off a channel the cell assigned becomes its own kind of row:

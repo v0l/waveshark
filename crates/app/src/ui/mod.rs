@@ -850,6 +850,7 @@ impl App {
                 .unwrap_or_default(),
             false => s.log_dir.clone(),
         };
+        crate::data::set_repaint(cc.egui_ctx.clone());
         crate::beacondb::start();
         app.radio_dirty = true;
         // Everything the record reaches outside the radio thread: the GPS

@@ -175,7 +175,9 @@ impl Directory {
         let started = std::thread::Builder::new().name(name).spawn(move || {
             let home = crate::stations::home(&listings, own.as_ref());
             let asked = probe::sweep(&swept.probes, &listings, now, probe::WORKERS, |l| {
-                self.ask(l, own.as_ref(), home.as_deref())
+                let heard = self.ask(l, own.as_ref(), home.as_deref());
+                crate::data::repaint();
+                heard
             });
             let t = self.probes().tally(&listings);
             tracing::info!(asked, answering = t.answering, "{} directory probed", self.key());
@@ -185,6 +187,7 @@ impl Directory {
                 tracing::warn!("{} probes not saved: {e}", self.key());
             }
             swept.sweeping.store(false, Ordering::Release);
+            crate::data::repaint();
         });
         if started.is_err() {
             swept.sweeping.store(false, Ordering::Release);

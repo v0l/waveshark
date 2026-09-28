@@ -203,6 +203,16 @@ pub struct Cell {
     pub updated: u64,
 }
 
+pub const PLACED_REPORTS: u32 = 20;
+
+pub const PLACED_WITHIN_M: u32 = 1000;
+
+impl Cell {
+    pub fn placed(&self) -> bool {
+        self.samples >= PLACED_REPORTS && self.range_m < PLACED_WITHIN_M
+    }
+}
+
 /// Every cell in the export, sorted by identity.
 #[derive(Clone, Debug, Default)]
 pub struct Cells(Vec<Cell>);
@@ -385,5 +395,25 @@ mod tests {
         // networks in a country can use the same area and cell number.
         assert_eq!(cells.get(234, "30", 1234, 5678), None);
         assert_eq!(cells.in_network(234, "030").count(), 1);
+    }
+
+    #[test]
+    fn a_cell_is_placed_only_by_twenty_reports_spread_under_the_kilometre_floor() {
+        let cell = |samples, range_m| Cell {
+            radio: "LTE".into(),
+            mcc: 272,
+            mnc: "1".into(),
+            area: 1,
+            cell: 1,
+            lat: 53.3,
+            lon: -6.3,
+            range_m,
+            samples,
+            updated: 0,
+        };
+        assert!(cell(20, 999).placed());
+        assert!(!cell(19, 999).placed(), "too few reports");
+        assert!(!cell(200, 1000).placed(), "1000 m is the export's floor, not a measurement");
+        assert!(!cell(1, 1000).placed(), "one phone going past");
     }
 }
