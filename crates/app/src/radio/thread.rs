@@ -260,6 +260,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 last_keyed: None,
                 vox_keyed: None,
                 ending: None,
+                back_to_receive: false,
                 last_on_air: None,
             },
             voice: None,
@@ -319,6 +320,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             self.meter_mic();
             self.vox();
             self.finish_over();
+            self.back_to_receive();
+            self.status.talk_ready.store(self.rx.tx_talk_ready(), Ordering::Relaxed);
             // Whether the monitor stage draws what is going out on the span.
             // Only while the radio is deaf: a full duplex one hears its own
             // transmission for real, and mirroring on top of that would draw

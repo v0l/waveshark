@@ -835,6 +835,14 @@ impl Receiver {
         self.tx.sending_roger()
     }
 
+    pub fn tx_draining(&self) -> bool {
+        self.tx.draining()
+    }
+
+    pub fn tx_talk_ready(&self) -> bool {
+        self.tx.talk_ready()
+    }
+
     pub fn keyed(&self) -> bool {
         self.tx.keyed()
     }
@@ -10135,9 +10143,14 @@ vectors:
         n: std::sync::Arc<std::sync::atomic::AtomicU64>,
         /// What reached the antenna, for a test that has to read it back.
         air: std::sync::Arc<parking_lot::Mutex<Vec<C32>>>,
+        paced_at: Option<f64>,
     }
 
     impl Counted {
+        fn paced(rate: f64) -> Self {
+            Self { paced_at: Some(rate), ..Self::default() }
+        }
+
         fn samples(&self) -> u64 {
             self.n.load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -10149,6 +10162,11 @@ vectors:
 
     impl common::TxStream for Counted {
         fn write(&mut self, buf: &common::IqBuf) -> Result<()> {
+            if let Some(rate) = self.paced_at {
+                std::thread::sleep(std::time::Duration::from_secs_f64(
+                    buf.samples.len() as f64 / rate,
+                ));
+            }
             self.n.fetch_add(buf.samples.len() as u64, std::sync::atomic::Ordering::Relaxed);
             self.air.lock().extend_from_slice(&buf.samples);
             Ok(())
@@ -10338,6 +10356,59 @@ vectors:
 
     #[test]
     fn a_quindar_over_opens_and_closes_with_its_tones() {
+        quindar_over(Counted::default());
+    }
+
+    #[test]
+    fn a_quindar_tail_reaches_a_radio_that_takes_its_samples_in_real_time() {
+        quindar_over(Counted::paced(plan_with_tx(TxSource::Tone).rate));
+    }
+
+    #[test]
+    fn a_chain_rebuilt_during_the_lead_still_sends_the_opening_tone() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let spec = TxSpec {
+            source: TxSource::Tone,
+            tone_hz: 700.0,
+            roger_style: nodes::RogerStyle::Quindar,
+            ..Default::default()
+        };
+        plan.channels[0].tx = Some(spec);
+        plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+
+        let radio = Counted::paced(plan.rate);
+        assert!(rx.key(Box::new(radio.clone())));
+        until("the lead to start", || radio.samples() > 100_000);
+        assert!(!rx.tx_talk_ready(), "ready to talk during the lead");
+        let moved = TxSpec { tone_hz: 800.0, ..spec };
+        plan.channels[0].tx = Some(moved);
+        plan.tx = Some(TxPlan { spec: moved, ..plan.tx.unwrap() });
+        rx.rebuild(&plan).unwrap();
+        until("the opening tone to be out", || rx.tx_talk_ready());
+        until("some of the over", || radio.samples() > 2_400_000);
+        assert!(rx.end_over());
+        until("the key-up tone to go out", || !rx.sending_roger());
+        rx.unkey();
+
+        let air = radio.transmitted();
+        let mut demod = dsp::FmDemod::new(plan.rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&air, &mut audio);
+        let window = (plan.rate * 0.01) as usize;
+        let pitches: Vec<f64> = audio
+            .chunks_exact(window)
+            .map(|w| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f64 / 0.01)
+            .collect();
+        let voice = |hz: &f64| (hz - 700.0).abs() < 120.0 || (hz - 800.0).abs() < 120.0;
+        let first_voice = pitches.iter().position(voice).expect("the over itself");
+        let opening =
+            pitches[..first_voice].iter().filter(|h| (*h - 2_500.0).abs() < 120.0).count();
+        assert_eq!(opening, 25, "250 ms of opening tone across the rebuild: {pitches:?}");
+    }
+
+    fn quindar_over(radio: Counted) {
         let mut plan = plan_with_tx(TxSource::Tone);
         let spec = TxSpec {
             source: TxSource::Tone,
@@ -10351,7 +10422,6 @@ vectors:
         let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
         assert!(rx.tx_settled());
 
-        let radio = Counted::default();
         assert!(rx.key(Box::new(radio.clone())));
         until("an over on the air", || radio.samples() > 1_200_000);
         assert!(rx.end_over(), "Quindar was not sent with the single tone at zero");

@@ -431,3 +431,114 @@ fn a_frequency_is_not_part_of_the_transmit_chain() {
         TxPlan { spec: TxSpec { tone: Some(dsp::squelch::Coded::Tone(8)), ..here.spec }, ..here };
     assert!(!here.same_chain(&toned), "a tone is a stage of its own");
 }
+
+#[test]
+fn letting_go_of_the_key_on_a_quindar_channel_sends_the_whole_tail() {
+    let center = Hz(446_000_000);
+    let rate = Sps(2_400_000);
+    let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+    let watch = dev.watcher();
+    let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+    until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+    until("the radio to say it transmits", || radio.status.can_transmit.load(Ordering::Relaxed));
+
+    let mut ch = strip_channel(1, 50_000.0);
+    ch.tx = Some(crate::radio::TxSpec {
+        source: crate::radio::TxSource::Tone,
+        tone_hz: 700.0,
+        roger_style: nodes::RogerStyle::Quindar,
+        ..Default::default()
+    });
+    radio.send(Cmd::Channels(vec![ch]));
+    radio.send(Cmd::Key(Some(1)));
+    until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+    until("a second on the antenna", || watch.transmitted_len() > 2_400_000);
+    let at_release = watch.transmitted_len();
+    radio.send(Cmd::Key(None));
+    until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+    let tail_s = (watch.transmitted_len() - at_release) as f64 / rate.as_f64();
+    assert!(
+        (0.25..0.3).contains(&tail_s),
+        "{tail_s:.3} s went out after the key was let go, 0.260 measured: the 250 ms closing tone \
+         and the block it ends in, with no speech held back; floor 0.25, ceiling 0.3"
+    );
+}
+
+#[test]
+fn letting_go_of_the_key_on_a_quindar_microphone_channel_sends_the_whole_tail() {
+    let center = Hz(446_000_000);
+    let rate = Sps(2_400_000);
+    let dev = sources::FileRadio::silent(center, rate).as_fast_as_it_can();
+    let watch = dev.watcher();
+    let radio = Radio::on_device_hearing(
+        Box::new(dev),
+        center,
+        rate,
+        1024,
+        Some(speech_then_quiet(480_000, 480_000)),
+    );
+    until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+    until("the radio to say it transmits", || radio.status.can_transmit.load(Ordering::Relaxed));
+
+    let mut ch = strip_channel(1, 50_000.0);
+    ch.tx = Some(crate::radio::TxSpec {
+        source: crate::radio::TxSource::Mic,
+        roger_style: nodes::RogerStyle::Quindar,
+        ..Default::default()
+    });
+    radio.send(Cmd::Channels(vec![ch]));
+    radio.send(Cmd::Key(Some(1)));
+    until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+    until("a second on the antenna", || watch.transmitted_len() > 2_400_000);
+    let at_release = watch.transmitted_len();
+    radio.send(Cmd::Key(None));
+    until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+    let tail_s = (watch.transmitted_len() - at_release) as f64 / rate.as_f64();
+    assert!(
+        (0.25..0.3).contains(&tail_s),
+        "{tail_s:.3} s went out after the key was let go, 0.260 measured: the 250 ms closing tone \
+         and the block it ends in, with no speech held back; floor 0.25, ceiling 0.3"
+    );
+}
+
+#[test]
+fn a_half_duplex_radio_is_not_retuned_until_the_last_of_the_over_has_gone_out() {
+    let center = Hz(446_000_000);
+    let rate = Sps(2_048_000);
+    let dev = sources::FileRadio::silent(center, rate)
+        .half_duplex(true)
+        .holding_in_flight(std::time::Duration::from_millis(256))
+        .as_fast_as_it_can();
+    let watch = dev.watcher();
+    let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
+    until("the radio to start", || radio.status.running.load(Ordering::Relaxed));
+    until("the radio to say it transmits", || radio.status.can_transmit.load(Ordering::Relaxed));
+
+    let mut ch = strip_channel(1, 50_000.0);
+    ch.tx = Some(crate::radio::TxSpec {
+        source: crate::radio::TxSource::Tone,
+        roger_style: nodes::RogerStyle::Quindar,
+        ..Default::default()
+    });
+    radio.send(Cmd::Channels(vec![ch]));
+    radio.send(Cmd::Key(Some(1)));
+    until("the key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
+    until("a second on the antenna", || watch.transmitted_len() > 2_048_000);
+    let at_release = watch.transmitted_len();
+    radio.send(Cmd::Key(None));
+    until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
+    until("the radio to be given back", || !watch.keyed());
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let tail_s = (watch.transmitted_len() - at_release) as f64 / rate.as_f64();
+    assert!(
+        (0.5..0.56).contains(&tail_s),
+        "{tail_s:.3} s went out after the key was let go, 0.516 measured: the closing tone and \
+         256 ms still in flight; floor 0.5, ceiling 0.56"
+    );
+    assert_eq!(
+        watch.aired_on(),
+        vec![Hz(446_050_000)],
+        "part of the over went out somewhere other than the channel"
+    );
+}

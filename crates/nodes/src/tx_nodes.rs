@@ -535,6 +535,7 @@ pub struct TxMonitorNode {
     /// than wired, because the transmitter runs on a thread of its own and a
     /// wire cannot cross one.
     sent: Sent,
+    finishing: bool,
 }
 
 /// How much of the transmission may wait to be drawn. The transmitter holds
@@ -556,6 +557,7 @@ impl Default for TxMonitorNode {
             scratch: Vec::new(),
             taken: Vec::new(),
             sent: Sent::default(),
+            finishing: false,
         }
     }
 }
@@ -565,6 +567,7 @@ impl TxMonitorNode {
     /// Set from the radio thread, which is the only thing that knows whether
     /// the receive stream has gone deaf for the over.
     pub fn set_enabled(&mut self, on: bool) {
+        self.finishing = (self.enabled || self.finishing) && !on;
         self.enabled = on;
     }
 
@@ -614,7 +617,11 @@ impl Node for TxMonitorNode {
         out.extend_from_slice(span);
         self.taken.clear();
         if let Ok(mut sent) = self.sent.lock() {
-            if !self.enabled {
+            if self.finishing {
+                let n = sent.len().min(span.len());
+                self.taken.extend(sent.drain(..n));
+                self.finishing = !sent.is_empty();
+            } else if !self.enabled {
                 // Nothing is going out, so nothing is waiting to be drawn.
                 sent.clear();
             } else {
@@ -635,7 +642,7 @@ impl Node for TxMonitorNode {
                 }
             }
         }
-        if !self.enabled || self.taken.is_empty() {
+        if self.taken.is_empty() {
             return Ok(());
         }
         self.scratch.clear();
@@ -666,7 +673,7 @@ impl Node for TxMonitorNode {
                 self.shift_hz = value.as_f64().unwrap_or(0.0);
                 self.mixer.set_shift(self.shift_hz, self.rate.max(1.0));
             }
-            ENABLED => self.enabled = value.as_bool().unwrap_or(false),
+            ENABLED => self.set_enabled(value.as_bool().unwrap_or(false)),
             _ => {
                 return Err(common::Error::other(format!(
                     "tx_monitor: unknown parameter {name:?}"
@@ -704,6 +711,7 @@ pub struct MicNode {
     level: f32,
     /// Peak of the last block, before the gain, for a meter beside the key.
     peak: f32,
+    held: bool,
     /// The last block arrived already flat-topped: runs of samples sitting
     /// on one value at the block's own peak, which is a converter or a
     /// capture chain clipping before anything here ran. Nothing downstream
@@ -755,6 +763,10 @@ impl MicNode {
     /// modulator is as wide as the deviation plus the highest note it was
     /// given, so the audio limit is what keeps a transmission inside its
     /// channel.
+    pub fn hold(&mut self, on: bool) {
+        self.held = on;
+    }
+
     pub fn with_band(
         src: std::sync::Arc<dyn audio::AudioSource>,
         level: f32,
@@ -776,6 +788,7 @@ impl MicNode {
             src,
             level: level.clamp(0.0, MIC_GAIN_MAX),
             peak: 0.0,
+            held: false,
             clipped: false,
             // Communications speech: from 400 Hz, which is where a handheld's
             // own microphone chain starts and lower sounds muddy beside it,
@@ -996,6 +1009,16 @@ impl Simple for MicNode {
         let step = self.src.rate() / self.rate;
         // What this block needs, plus the interpolator's own lookahead.
         let want = (n as f64 * step).ceil() as usize + 4;
+        if self.held {
+            if self.src.live() {
+                let mut dropped = Vec::with_capacity(want);
+                self.src.take(&mut dropped, want);
+                self.peak = dropped.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                self.pending.clear();
+            }
+            output.real_mut().extend_from_slice(audio);
+            return Ok(());
+        }
         self.pending.reserve(want);
         let mut got = Vec::with_capacity(want);
         self.src.take(&mut got, want.saturating_sub(self.pending.len()));
@@ -1122,6 +1145,29 @@ mod mic_tests {
             Payload::Real(v) => v,
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn a_held_microphone_is_thrown_away_and_a_held_agent_waits_its_turn() {
+        let rate = 48_000.0;
+        let voice: Vec<f32> = (0..9_600).map(|i| 0.5 * ((i % 48) as f32 / 48.0 - 0.5)).collect();
+
+        let room = Arc::new(audio::Canned::new(voice.clone(), rate, false));
+        let mut mic = MicNode::new(room.clone(), 1.0);
+        mic.hold(true);
+        let held = run(&mut mic, rate, 4_800);
+        assert!(held.iter().all(|v| *v == 0.0), "the room went out while the tone was on");
+        let mut after = Vec::new();
+        audio::AudioSource::take(room.as_ref(), &mut after, 9_600);
+        assert_eq!(after.len(), 9_600 - 4_804, "a live microphone is read and dropped, not kept");
+
+        let agent = Arc::new(audio::Speaker::new(rate));
+        agent.say(&voice);
+        let mut reply = MicNode::new(agent.clone(), 1.0);
+        reply.hold(true);
+        let held = run(&mut reply, rate, 4_800);
+        assert!(held.iter().all(|v| *v == 0.0));
+        assert_eq!(agent.waiting(), 9_600, "the agent's first words were used up while it waited");
     }
 
     #[test]
@@ -1752,8 +1798,6 @@ pub struct RogerNode {
     lead: usize,
     intro: Burst,
     outro: Burst,
-    held: std::collections::VecDeque<f32>,
-    pushed_back: bool,
     ended: bool,
 }
 
@@ -1792,7 +1836,7 @@ pub const QUINDAR_KEY_UP_HZ: f64 = 2_475.0;
 pub const QUINDAR_LEAD_MS: f64 = 300.0;
 pub const QUINDAR_LEAD_MAX_MS: f64 = 2_000.0;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Burst {
     hz: f64,
     len: usize,
@@ -1829,8 +1873,6 @@ impl Default for RogerNode {
             lead: 0,
             intro: Burst::default(),
             outro: Burst::default(),
-            held: std::collections::VecDeque::new(),
-            pushed_back: false,
             ended: false,
         }
     }
@@ -1861,7 +1903,26 @@ impl RogerNode {
     }
 
     pub fn sending(&self) -> bool {
-        self.ended && self.lead + self.intro.left() + self.held.len() + self.outro.left() > 0
+        self.ended && self.outro.left() > 0
+    }
+
+    pub fn talk_ready(&self) -> bool {
+        self.lead == 0 && self.intro.left() == 0
+    }
+
+    pub fn carry_on(&mut self, was: &RogerNode) {
+        if was.style != self.style || was.rate != self.rate {
+            Simple::over_began(self);
+            return;
+        }
+        self.lead = was.lead;
+        self.intro = was.intro.clone();
+        self.outro = was.outro.clone();
+        self.ended = was.ended;
+    }
+
+    pub fn finished(&self) -> bool {
+        self.ended && !self.sending()
     }
 
     pub fn ms(&self) -> f64 {
@@ -1877,9 +1938,6 @@ impl RogerNode {
     }
 
     fn next(&mut self, s: f32) -> f32 {
-        if self.pushed_back && !self.ended {
-            self.held.push_back(s);
-        }
         if self.lead > 0 {
             self.lead -= 1;
             return 0.0;
@@ -1887,10 +1945,11 @@ impl RogerNode {
         if let Some(v) = self.intro.next(self.rate) {
             return v;
         }
-        if let Some(v) = self.held.pop_front() {
-            return v;
+        match self.outro.next(self.rate) {
+            Some(v) => v,
+            None if self.ended && self.outro.len > 0 => 0.0,
+            None => s,
         }
-        self.outro.next(self.rate).unwrap_or(s)
     }
 }
 
@@ -1951,8 +2010,6 @@ impl Simple for RogerNode {
         self.lead = 0;
         self.intro = Burst::default();
         self.outro = Burst::default();
-        self.held.clear();
-        self.pushed_back = false;
         self.ended = false;
     }
 
@@ -1961,7 +2018,6 @@ impl Simple for RogerNode {
         if self.style == RogerStyle::Quindar {
             self.lead = self.samples(self.lead_ms);
             self.intro = Burst::new(QUINDAR_KEY_DOWN_HZ, self.samples(QUINDAR_MS));
-            self.pushed_back = true;
         }
     }
 
@@ -2054,6 +2110,31 @@ mod roger_tests {
         assert!(!node.sending(), "the key stayed down after the tone");
     }
 
+    #[test]
+    fn a_quindar_over_is_finished_when_its_closing_tone_is_out_and_talk_waits_for_the_opening() {
+        let mut node = RogerNode::quindar();
+        Simple::negotiate(&mut node, &spec()).unwrap();
+        Simple::over_began(&mut node);
+        let mut waiting = 0;
+        while !node.talk_ready() {
+            block(&mut node, 0.5);
+            waiting += 1;
+        }
+        assert_eq!(waiting, 28, "300 ms of lead and 250 ms of opening tone before speech");
+        for _ in 0..50 {
+            block(&mut node, 0.5);
+        }
+        assert!(!node.finished(), "finished before anybody said the over had ended");
+        assert!(node.end_over());
+        let mut blocks = 0;
+        while !node.finished() {
+            block(&mut node, 0.0);
+            blocks += 1;
+            assert!(blocks < 100, "the over never finished");
+        }
+        assert_eq!(blocks, 13, "250 ms of closing tone and nothing held back");
+    }
+
     /// And with no tone asked for, the key comes up at once.
     #[test]
     fn no_tone_asked_for_holds_nothing() {
@@ -2122,7 +2203,7 @@ mod roger_tests {
         let peak = intro.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - 0.5).abs() < 0.01, "the key-down tone went out at {peak}");
         assert!(intro[1].abs() > 0.1, "the key-down tone was ramped in: {}", intro[1]);
-        assert_eq!(&over[quarter..], &speech[..speech.len() - quarter], "speech not 250 ms behind");
+        assert_eq!(&over[quarter..], &speech[quarter..], "speech is live once the tone is out");
 
         assert!(node.end_over(), "Quindar had nothing to send at the end of the over");
         let mut after = Vec::new();
@@ -2133,17 +2214,16 @@ mod roger_tests {
                 held += 1;
             }
         }
-        assert_eq!(held, 24, "250 ms of speech and 250 ms of tone, in blocks of 20 ms");
-        assert_eq!(
-            &after[..quarter],
-            &speech[speech.len() - quarter..],
-            "the last 250 ms of speech"
-        );
-        let outro = &after[quarter..2 * quarter];
+        assert_eq!(held, 12, "250 ms of tone, in blocks of 20 ms");
+        let outro = &after[..quarter];
         assert_eq!(rising(outro), 619, "250 ms of 2475 Hz");
         let peak = outro.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!((peak - 0.5).abs() < 0.01, "the key-up tone went out at {peak}");
-        assert_eq!(after[2 * quarter..].iter().filter(|&&s| s != 0.9).count(), 0);
+        assert_eq!(
+            after[quarter..].iter().filter(|&&s| s != 0.0).count(),
+            0,
+            "the source went back on air after the key-up tone"
+        );
     }
 
     #[test]
@@ -2167,8 +2247,8 @@ mod roger_tests {
         assert_eq!(rising(&over[lead..lead + quarter]), 632, "then 250 ms of 2525 Hz");
         assert_eq!(
             &over[lead + quarter..],
-            &speech[..speech.len() - lead - quarter],
-            "speech 550 ms behind"
+            &speech[lead + quarter..],
+            "speech live after the tone"
         );
         assert!(node.end_over());
         let mut held = 0;
@@ -2178,7 +2258,7 @@ mod roger_tests {
                 held += 1;
             }
         }
-        assert_eq!(held, 39, "550 ms of held speech and 250 ms of tone, in blocks of 20 ms");
+        assert_eq!(held, 12, "250 ms of tone, in blocks of 20 ms");
 
         let mut none = RogerNode::quindar();
         Simple::set_param(&mut none, ROGER_LEAD_MS, ParamValue::Float(0.0)).unwrap();
@@ -2572,6 +2652,35 @@ mod monitor_tests {
         for (i, v) in read.iter().enumerate() {
             assert_eq!(*v, i as u32, "a hole in the loopback at sample {i}");
         }
+    }
+
+    #[test]
+    fn the_end_of_an_over_is_drawn_after_the_key_comes_up() {
+        const BLOCK: usize = 4096;
+        let mut node = TxMonitorNode::default();
+        let spec = StreamSpec { kind: PortKind::Iq, rate: 2_048_000.0, ..Default::default() };
+        Node::negotiate(&mut node, &[PortSpec { spec, latency: 0 }]).unwrap();
+        node.set_enabled(true);
+        let sent = node.sent();
+        let over = 10 * BLOCK + BLOCK / 2;
+        sent.lock().unwrap().extend((1..=over).map(|i| C32::new(i as f32, 0.0)));
+        let mut drawn: Vec<u32> = Vec::new();
+        for block in 0..16 {
+            if block == 2 {
+                node.set_enabled(false);
+            }
+            let input = Payload::Iq(vec![C32::new(0.0, 0.0); BLOCK]);
+            let mut out = Payload::Iq(Vec::new());
+            let (mut ev, mut tg) = (Vec::new(), Vec::new());
+            let ins = [PortSpec { spec, latency: 0 }];
+            let mut ctx = NodeCtx::new(0, &ins, &[], &mut ev, &mut tg);
+            Node::process(&mut node, &[&input], std::slice::from_mut(&mut out), &mut ctx).unwrap();
+            let Payload::Iq(v) = out else { unreachable!() };
+            drawn.extend(v.iter().map(|s| s.re.round() as u32).filter(|&v| v > 0));
+        }
+        assert_eq!(drawn.len(), over, "the last {} samples were never drawn", over - drawn.len());
+        assert!(drawn.iter().enumerate().all(|(i, &v)| v == i as u32 + 1), "drawn out of order");
+        assert!(!node.finishing && sent.lock().unwrap().is_empty());
     }
 
     /// With the key up there is nothing going out, and what was queued

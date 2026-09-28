@@ -63,6 +63,8 @@ pub struct Readings {
     /// the key is held down until it has. Set by whoever let the key up,
     /// cleared by the thread when the stage has sent it.
     pub roger: AtomicBool,
+    pub draining: AtomicBool,
+    pub talk_ready: AtomicBool,
     /// Blocks the radio refused, which is how a device unplugged in the
     /// middle of an over shows up: the stream reports every write failing
     /// and there is nothing else to notice it by.
@@ -240,6 +242,14 @@ impl Transmitter {
         self.to.send(Job::EndOver).is_ok()
     }
 
+    pub fn talk_ready(&self) -> bool {
+        self.readings.talk_ready.load(Ordering::Relaxed)
+    }
+
+    pub fn draining(&self) -> bool {
+        self.readings.draining.load(Ordering::Relaxed)
+    }
+
     /// Whether the courtesy tone is still going out.
     pub fn sending_roger(&self) -> bool {
         self.readings.roger.load(Ordering::Relaxed)
@@ -255,7 +265,10 @@ impl Transmitter {
         // to stop, and an answer that lags the key by a block reads as a key
         // that did not take.
         self.readings.keyed.store(false, Ordering::Relaxed);
-        let _ = self.to.send(Job::Unkey);
+        self.readings.draining.store(true, Ordering::Relaxed);
+        if self.to.send(Job::Unkey).is_err() {
+            self.readings.draining.store(false, Ordering::Relaxed);
+        }
         // The thread takes the stream down; what it read off it last is what
         // the over cost.
         self.readings.underruns.load(Ordering::Relaxed)
@@ -322,6 +335,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                     over_began(&mut g);
                 }
                 arm(&mut g, &mut waiting);
+                gate(&mut g, &readings);
                 *readings.topo.lock() = Some(g.topology());
                 graph = Some(g);
                 idle = runs_idle;
@@ -329,6 +343,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
             }
             Some(Job::Key(stream)) => {
                 readings.keyed.store(true, Ordering::Relaxed);
+                readings.roger.store(false, Ordering::Relaxed);
                 readings.lost.store(false, Ordering::Relaxed);
                 readings.written.store(0, Ordering::Relaxed);
                 clock = Clock::default();
@@ -336,6 +351,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                 if let Some(g) = graph.as_mut() {
                     over_began(g);
                     arm(g, &mut waiting);
+                    gate(g, &readings);
                 }
             }
             Some(Job::EndOver) => {
@@ -353,6 +369,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                     sink.finish(Duration::from_secs(1));
                 }
                 readings.keyed.store(false, Ordering::Relaxed);
+                readings.draining.store(false, Ordering::Relaxed);
             }
             Some(Job::Drop) => {
                 waiting = None;
@@ -364,6 +381,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
                     sink.finish(Duration::from_secs(1));
                 }
                 readings.keyed.store(false, Ordering::Relaxed);
+                readings.draining.store(false, Ordering::Relaxed);
                 *readings.topo.lock() = None;
                 *readings.scopes.lock() = Vec::new();
             }
@@ -406,6 +424,7 @@ fn run(work: crossbeam_channel::Receiver<Job>, readings: Arc<Readings>) {
             continue;
         }
         clock.ran(BLOCK_S);
+        gate(g, &readings);
         if read_off(g, &readings) {
             // The radio went away mid-over. Ending it here is what tells the
             // interface: a key that stays lit over a transmitter that is not
@@ -442,13 +461,8 @@ fn read_off(g: &mut Graph, readings: &Readings) -> bool {
         readings.mic_peak.store(peak.to_bits(), Ordering::Relaxed);
         readings.mic_clipped.store(clipped, Ordering::Relaxed);
     }
-    if let Some(r) = roger_of(g) {
-        let sending = r.sending();
-        // Only ever cleared here: the key went down again while the tone was
-        // going out, and the stage was reset with the rest of the chain.
-        if !sending {
-            readings.roger.store(false, Ordering::Relaxed);
-        }
+    if roger_of(g).is_some_and(|r| r.finished()) {
+        readings.roger.store(false, Ordering::Relaxed);
     }
     let vox = g
         .by_tag(crate::chain::derived::VOX)
@@ -545,7 +559,25 @@ fn hand_back(mut old: Graph, new: &mut Graph) {
         && let Some(sink) = sink_of(new)
     {
         sink.attach(stream);
+        match (roger_of(&mut old), roger_of(new)) {
+            (Some(was), Some(now)) => now.carry_on(was),
+            (None, Some(now)) => pipeline::node::Simple::over_began(now),
+            _ => {}
+        }
     }
+}
+
+/// Hold the source while the over is not ready for speech, and say so.
+fn gate(g: &mut Graph, readings: &Readings) {
+    let ready = roger_of(g).is_none_or(|r| r.talk_ready());
+    if let Some(mic) = g
+        .by_tag(crate::chain::derived::TX_SOURCE)
+        .and_then(|id| g.node_mut(id))
+        .and_then(|n| n.as_any_mut().downcast_mut::<nodes::MicNode>())
+    {
+        mic.hold(!ready);
+    }
+    readings.talk_ready.store(ready, Ordering::Relaxed);
 }
 
 fn sink_of(g: &mut Graph) -> Option<&mut nodes::TxSinkNode> {

@@ -41,6 +41,10 @@ pub trait AudioSource: Send + Sync {
     fn overruns(&self) -> u64 {
         0
     }
+
+    fn live(&self) -> bool {
+        true
+    }
 }
 
 /// The samples the microphone has produced lately, and where they sit in the
@@ -335,6 +339,10 @@ impl Speaker {
 impl AudioSource for Speaker {
     fn rate(&self) -> f64 {
         self.rate
+    }
+
+    fn live(&self) -> bool {
+        false
     }
 
     /// What is queued, and no silence: a short read is the chain's cue that

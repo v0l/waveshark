@@ -367,6 +367,7 @@ pub struct AsyncWriteHandle {
     idle: Arc<AtomicU64>,
     /// Chunks accepted but not yet handed to the USB queue.
     queued: Arc<AtomicU64>,
+    airborne: Arc<AtomicU64>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -429,13 +430,13 @@ impl AsyncWriteHandle {
     /// Wait until every queued chunk has been handed to the device, or until
     /// `timeout` expires. Returns whether the queue emptied.
     ///
-    /// The queue emptying means the last chunk was submitted, not that it has
-    /// left the antenna: the device buffers a few transfers of its own, so a
-    /// caller that stops immediately afterwards truncates the tail.
+    /// Waits for the transfers carrying those chunks to complete as well.
     pub fn drain(&self, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
-            if self.queued.load(Ordering::Relaxed) == 0 {
+            if self.queued.load(Ordering::Relaxed) == 0
+                && self.airborne.load(Ordering::Relaxed) == 0
+            {
                 return true;
             }
             if self.stop.load(Ordering::Relaxed) {
@@ -961,11 +962,13 @@ impl HackRf {
         let stop = Arc::new(AtomicBool::new(false));
         let idle = Arc::new(AtomicU64::new(0));
         let queued = Arc::new(AtomicU64::new(0));
+        let airborne = Arc::new(AtomicU64::new(0));
 
         let iface = self.iface.clone();
         let stop_thread = Arc::clone(&stop);
         let idle_thread = Arc::clone(&idle);
         let queued_thread = Arc::clone(&queued);
+        let airborne_thread = Arc::clone(&airborne);
 
         let thread = thread::Builder::new()
             .name("hackrf-tx".into())
@@ -977,6 +980,7 @@ impl HackRf {
                     stop_thread,
                     idle_thread,
                     queued_thread,
+                    airborne_thread,
                     ctrl_rx,
                     transfer_size,
                     num_transfers,
@@ -984,7 +988,7 @@ impl HackRf {
             })
             .map_err(|e| Error::StreamingError(format!("failed to spawn transmit thread: {e}")))?;
 
-        Ok(AsyncWriteHandle { tx, ctrl_tx, stop, idle, queued, thread: Some(thread) })
+        Ok(AsyncWriteHandle { tx, ctrl_tx, stop, idle, queued, airborne, thread: Some(thread) })
     }
 
     /// Read a chunk of RX data synchronously.
@@ -1299,6 +1303,35 @@ struct TxFiller {
     pend: Vec<u8>,
 }
 
+struct Flights {
+    real: std::collections::VecDeque<bool>,
+    airborne: Arc<AtomicU64>,
+}
+
+impl Flights {
+    fn new(airborne: Arc<AtomicU64>) -> Self {
+        Self { real: std::collections::VecDeque::new(), airborne }
+    }
+
+    fn submitted(&mut self, real: bool) {
+        self.real.push_back(real);
+        if real {
+            self.airborne.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn completed(&mut self) {
+        if self.real.pop_front() == Some(true) {
+            self.airborne.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn abandoned(&mut self) {
+        self.real.clear();
+        self.airborne.store(0, Ordering::Relaxed);
+    }
+}
+
 impl TxFiller {
     fn next(
         &mut self,
@@ -1306,7 +1339,7 @@ impl TxFiller {
         queued: &AtomicU64,
         idle: &AtomicU64,
         size: usize,
-    ) -> Vec<u8> {
+    ) -> (Vec<u8>, bool) {
         let deadline = std::time::Instant::now() + TX_FILL_WAIT;
         while self.pend.len() < size {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1323,15 +1356,16 @@ impl TxFiller {
         }
 
         if self.pend.len() >= size {
-            return self.pend.drain(..size).collect();
+            return (self.pend.drain(..size).collect(), true);
         }
 
         // Nothing to send, or not enough. Zero is no carrier rather than a
         // held sample, so a gap is silence and not a tone at the last value.
         idle.fetch_add(1, Ordering::Relaxed);
         let mut out = std::mem::take(&mut self.pend);
+        let real = !out.is_empty();
         out.resize(size, 0);
-        out
+        (out, real)
     }
 }
 
@@ -1349,6 +1383,7 @@ fn transmitting_thread(
     stop: Arc<AtomicBool>,
     idle: Arc<AtomicU64>,
     queued: Arc<AtomicU64>,
+    airborne: Arc<AtomicU64>,
     ctrl_rx: mpsc::Receiver<StreamControl>,
     transfer_size: usize,
     num_transfers: usize,
@@ -1359,9 +1394,11 @@ fn transmitting_thread(
     };
 
     let mut filler = TxFiller { pend: Vec::new() };
+    let mut flights = Flights::new(airborne);
 
     for _ in 0..num_transfers {
-        let chunk = filler.next(&rx, &queued, &idle, transfer_size);
+        let (chunk, real) = filler.next(&rx, &queued, &idle, transfer_size);
+        flights.submitted(real);
         ep_out.submit(Buffer::from(chunk));
     }
 
@@ -1435,10 +1472,13 @@ fn transmitting_thread(
         } else {
             consecutive_errors = 0;
         }
+        flights.completed();
 
-        let chunk = filler.next(&rx, &queued, &idle, transfer_size);
+        let (chunk, real) = filler.next(&rx, &queued, &idle, transfer_size);
+        flights.submitted(real);
         ep_out.submit(Buffer::from(chunk));
     }
+    flights.abandoned();
 
     // Off before the transfers are cancelled: cancelling first leaves the
     // device transmitting whatever the FIFO still holds.
@@ -1457,6 +1497,37 @@ fn transmitting_thread(
 #[cfg(test)]
 mod tests {
     use super::compute_baseband_filter_bw;
+    use super::{Flights, TRANSFER_BUFFER_SIZE, TRANSFER_COUNT, TxFiller};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn the_last_quarter_second_of_an_over_is_waited_for_until_its_transfers_complete() {
+        let airborne = Arc::new(AtomicU64::new(0));
+        let mut flights = Flights::new(airborne.clone());
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let (queued, idle) = (AtomicU64::new(0), AtomicU64::new(0));
+        let mut filler = TxFiller { pend: Vec::new() };
+        for _ in 0..TRANSFER_COUNT {
+            queued.fetch_add(1, Ordering::Relaxed);
+            tx.send(vec![1u8; TRANSFER_BUFFER_SIZE]).unwrap();
+            let (chunk, real) = filler.next(&rx, &queued, &idle, TRANSFER_BUFFER_SIZE);
+            assert_eq!((chunk.len(), real), (TRANSFER_BUFFER_SIZE, true));
+            flights.submitted(real);
+        }
+        assert_eq!(queued.load(Ordering::Relaxed), 0, "every chunk is in a transfer");
+        let seconds = (TRANSFER_COUNT * TRANSFER_BUFFER_SIZE / 2) as f64 / 2_048_000.0;
+        assert!((seconds - 0.256).abs() < 0.001, "{seconds} s still to go out at 2.048 MS/s");
+        assert_eq!(airborne.load(Ordering::Relaxed), 4, "and all four still to reach the radio");
+
+        let (_, real) = filler.next(&rx, &queued, &idle, TRANSFER_BUFFER_SIZE);
+        assert!(!real, "a transfer of padding is not part of the over");
+        flights.submitted(real);
+        for left in [3, 2, 1, 0, 0] {
+            flights.completed();
+            assert_eq!(airborne.load(Ordering::Relaxed), left);
+        }
+    }
 
     #[test]
     fn baseband_filter_bandwidth_matches_libhackrf_round_down() {
@@ -1503,7 +1574,7 @@ mod tx_tests {
         }
         let mut out = Vec::new();
         for _ in 0..5 {
-            out.extend(f.next(&rx, &queued, &idle, 4));
+            out.extend(f.next(&rx, &queued, &idle, 4).0);
         }
         assert_eq!(&out[..18], &[0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25]);
         // The fourth transfer runs past the data, so it is padded and counted.
@@ -1516,7 +1587,8 @@ mod tx_tests {
     fn a_starved_transfer_is_zeros_rather_than_the_last_sample() {
         let (mut f, queued, idle) = filler();
         let (_tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
-        let chunk = f.next(&rx, &queued, &idle, 512);
+        let (chunk, real) = f.next(&rx, &queued, &idle, 512);
+        assert!(!real, "a transfer of nothing but padding carries none of the over");
         assert_eq!(chunk.len(), 512);
         assert!(chunk.iter().all(|&b| b == 0), "a gap must be no carrier");
         assert_eq!(idle.load(Ordering::Relaxed), 1);

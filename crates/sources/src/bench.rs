@@ -33,6 +33,20 @@ struct Air {
     /// Blocks refused, which is how a radio unplugged mid-over is played.
     gone: AtomicBool,
     dropped: AtomicU64,
+    tx_hz: AtomicU64,
+    in_flight: parking_lot::Mutex<(Duration, Vec<C32>)>,
+    aired_on: parking_lot::Mutex<Vec<Hz>>,
+}
+
+impl Air {
+    fn air(&self, samples: &[C32]) {
+        let hz = Hz(self.tx_hz.load(Ordering::Relaxed));
+        let mut aired_on = self.aired_on.lock();
+        if aired_on.last() != Some(&hz) {
+            aired_on.push(hz);
+        }
+        self.sent.lock().extend_from_slice(samples);
+    }
 }
 
 /// A radio on the bench: it hears a capture and keeps what it transmits.
@@ -85,6 +99,11 @@ impl FileRadio {
     /// should not wait out the capture.
     pub fn as_fast_as_it_can(mut self) -> Self {
         self.realtime = false;
+        self
+    }
+
+    pub fn holding_in_flight(self, tail: Duration) -> Self {
+        self.air.in_flight.lock().0 = tail;
         self
     }
 
@@ -202,6 +221,10 @@ impl Watcher {
     pub fn unplug(&self) {
         self.air.gone.store(true, Ordering::Relaxed);
     }
+
+    pub fn aired_on(&self) -> Vec<Hz> {
+        self.air.aired_on.lock().clone()
+    }
 }
 
 impl Device for FileRadio {
@@ -219,6 +242,7 @@ impl Device for FileRadio {
 
     fn set_center(&mut self, f: Hz) -> Result<()> {
         self.center = f;
+        self.air.tx_hz.store(self.tx_center().0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -228,6 +252,7 @@ impl Device for FileRadio {
 
     fn set_tx_center(&mut self, f: Hz) -> Result<()> {
         self.tx_center = f;
+        self.air.tx_hz.store(self.tx_center().0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -278,7 +303,8 @@ impl Device for FileRadio {
 
     fn start_tx(&mut self) -> Result<Box<dyn TxStream>> {
         self.air.keyed.store(true, Ordering::Relaxed);
-        Ok(Box::new(BenchTx { air: self.air.clone(), underruns: 0 }))
+        self.air.tx_hz.store(self.tx_center().0, Ordering::Relaxed);
+        Ok(Box::new(BenchTx { air: self.air.clone(), underruns: 0, rate: self.rate }))
     }
 }
 
@@ -345,6 +371,7 @@ impl RxStream for BenchRx {
 struct BenchTx {
     air: Arc<Air>,
     underruns: u64,
+    rate: Sps,
 }
 
 impl TxStream for BenchTx {
@@ -352,7 +379,13 @@ impl TxStream for BenchTx {
         if self.air.gone.load(Ordering::Relaxed) {
             return Err(Error::Disconnected);
         }
-        self.air.sent.lock().extend_from_slice(&buf.samples);
+        let mut flight = self.air.in_flight.lock();
+        let hold = (flight.0.as_secs_f64() * self.rate.as_f64()) as usize;
+        flight.1.extend_from_slice(&buf.samples);
+        let out = flight.1.len().saturating_sub(hold);
+        let gone: Vec<C32> = flight.1.drain(..out).collect();
+        drop(flight);
+        self.air.air(&gone);
         Ok(())
     }
 
@@ -361,6 +394,18 @@ impl TxStream for BenchTx {
     }
 
     fn drain(&mut self, _timeout: Duration) -> bool {
+        let (tail, left) = {
+            let mut flight = self.air.in_flight.lock();
+            (flight.0, std::mem::take(&mut flight.1))
+        };
+        let step = (self.rate.as_f64() * 0.01).max(1.0) as usize;
+        let per = Duration::from_secs_f64(step as f64 / self.rate.as_f64());
+        for chunk in left.chunks(step) {
+            if !tail.is_zero() {
+                std::thread::sleep(per);
+            }
+            self.air.air(chunk);
+        }
         true
     }
 

@@ -475,6 +475,7 @@ pub(super) struct Tx {
     /// going out. The radio goes back when the tone has, so a half duplex
     /// radio is not retuned out from under it.
     pub(super) ending: Option<std::time::Instant>,
+    pub(super) back_to_receive: bool,
 }
 
 /// How long past the key coming up the transcriber stays deaf.
@@ -588,6 +589,15 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // the receiver its radio back.
         self.status.tx_underruns.store(self.rx.unkey(), Ordering::Relaxed);
         self.status.keyed.store(0, Ordering::Relaxed);
+        self.tx.back_to_receive = true;
+        self.back_to_receive();
+    }
+
+    pub(super) fn back_to_receive(&mut self) {
+        if !self.tx.back_to_receive || self.rx.tx_draining() {
+            return;
+        }
+        self.tx.back_to_receive = false;
         // Back where the receiver was. A half duplex radio has one
         // synthesiser, so keying moved it to the transmit frequency; leaving
         // it there means the waterfall comes back tuned to wherever the
@@ -611,6 +621,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // Keyed again while the last over's tone was going out: it is one
         // over now, and nothing is waiting to be given back.
         self.tx.ending = None;
+        self.tx.back_to_receive = false;
         let Some(ch) = self.plan.channels.iter().find(|c| c.id == id).cloned() else {
             *self.status.error.lock() = Some("there is no such channel to key".into());
             return;

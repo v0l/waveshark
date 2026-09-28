@@ -200,6 +200,7 @@ pub struct Status {
     /// there is one of these and not one per channel: the radio cannot key
     /// two channels at once and the interface should not be able to say so.
     pub keyed: AtomicU64,
+    pub talk_ready: AtomicBool,
     /// Transfers the radio sent as silence during the last transmission.
     pub tx_underruns: AtomicU64,
     /// What the microphone is hearing, as f32 bits.
@@ -478,6 +479,7 @@ impl Default for Status {
             manual: AtomicBool::new(false),
             can_transmit: AtomicBool::new(false),
             keyed: AtomicU64::new(0),
+            talk_ready: AtomicBool::new(true),
             tx_underruns: AtomicU64::new(0),
             mic_level: AtomicU32::new(0),
             mic_clipped: AtomicBool::new(false),

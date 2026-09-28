@@ -881,7 +881,7 @@ impl Strip<'_> {
     fn channel_tx(
         ui: &mut egui::Ui,
         ch: &mut Channel,
-        keyed: Option<u64>,
+        keyed: Option<(u64, bool)>,
         mic: f32,
         mic_clipped: bool,
         vox: (f32, bool),
@@ -1213,7 +1213,8 @@ impl Strip<'_> {
             Line::new().note(why).size(11.0).wrapped(ui);
             return changed;
         }
-        let keyed_here = keyed == Some(ch.id);
+        let keyed_here = keyed.is_some_and(|(k, _)| k == ch.id);
+        let ready = keyed.is_none_or(|(_, ready)| ready);
         // The key: the whole width of the strip, the transmit mark and the
         // word together in the middle, lit amber while on air. Sensed as a
         // drag, not a click: a button that only senses clicks reports the
@@ -1223,7 +1224,9 @@ impl Strip<'_> {
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click_and_drag());
         if ui.is_rect_visible(rect) {
             let p = ui.painter();
-            let (fill, ink) = if keyed_here {
+            let (fill, ink) = if keyed_here && !ready {
+                (theme::FAULT, theme::PANEL)
+            } else if keyed_here {
                 (theme::READOUT, theme::PANEL)
             } else if key.hovered() {
                 (theme::ETCH, theme::VALUE)
@@ -1232,7 +1235,11 @@ impl Strip<'_> {
             };
             p.rect_filled(rect, 3.0, fill);
             p.rect_stroke(rect, 3.0, Stroke::new(1.0, theme::ETCH), egui::StrokeKind::Inside);
-            let label = if keyed_here { "ON AIR" } else { "TRANSMIT" };
+            let label = match (keyed_here, ready) {
+                (true, false) => "WAIT",
+                (true, true) => "ON AIR",
+                (false, _) => "TRANSMIT",
+            };
             let font = theme::legend_font(13.0);
             let galley = p.layout_no_wrap(label.to_string(), font, ink);
             let icon = 22.0;
@@ -1414,8 +1421,11 @@ impl Strip<'_> {
                     .unwrap_or(0.0);
                 let keyed = self
                     .radio
-                    .map(|r| r.status.keyed.load(std::sync::atomic::Ordering::Relaxed))
-                    .filter(|id| *id != 0);
+                    .map(|r| {
+                        let o = std::sync::atomic::Ordering::Relaxed;
+                        (r.status.keyed.load(o), r.status.talk_ready.load(o))
+                    })
+                    .filter(|(id, _)| *id != 0);
                 let mic_clipped = self
                     .radio
                     .is_some_and(|r| r.status.mic_clipped.load(std::sync::atomic::Ordering::Relaxed));
