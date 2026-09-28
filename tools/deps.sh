@@ -7,7 +7,7 @@ ceilings=tools/deps.ceiling
 
 count() {
     local target=$1 features=$2
-    cargo tree --locked -q -p app -p wave1090 --target "$target" \
+    cargo tree --locked -q --color never -p app -p wave1090 --target "$target" \
         --no-default-features --features "$features" \
         -e normal,build --prefix none --format '{p}' |
         sed 's/ (\*)$//' | grep -v ' (/' | sort -u | wc -l

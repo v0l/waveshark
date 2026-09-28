@@ -1536,6 +1536,7 @@ dependencies = [
  "dsp",
  "ffmpeg-rs-raw",
  "hmac",
+ "libc",
  "md-5",
  "parking_lot",
  "poll-promise",

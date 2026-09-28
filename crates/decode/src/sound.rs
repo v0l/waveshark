@@ -9,6 +9,32 @@ use ffmpeg_rs_raw::ffmpeg_sys_the_third::{
 use ffmpeg_rs_raw::{AvFrameRef, Resample};
 use std::ffi::c_int;
 
+trait CodecArg {
+    fn of(codec: AVCodecID) -> Self;
+}
+
+impl CodecArg for c_int {
+    fn of(codec: AVCodecID) -> Self {
+        codec.0 as c_int
+    }
+}
+
+impl CodecArg for AVCodecID {
+    fn of(codec: AVCodecID) -> Self {
+        codec
+    }
+}
+
+unsafe fn parser_for(codec: AVCodecID) -> *mut AVCodecParserContext {
+    unsafe fn call<T: CodecArg>(
+        init: unsafe extern "C" fn(T) -> *mut AVCodecParserContext,
+        codec: AVCodecID,
+    ) -> *mut AVCodecParserContext {
+        unsafe { init(T::of(codec)) }
+    }
+    unsafe { call(av_parser_init, codec) }
+}
+
 pub struct Sound {
     ctx: *mut AVCodecContext,
     parser: *mut AVCodecParserContext,
@@ -52,8 +78,7 @@ impl Sound {
                 avcodec_free_context(&mut ctx);
                 anyhow::bail!("ffmpeg would not open {codec:?} with that configuration");
             }
-            let parser =
-                if parsed { av_parser_init(codec.0 as c_int) } else { std::ptr::null_mut() };
+            let parser = if parsed { parser_for(codec) } else { std::ptr::null_mut() };
             Ok(Self {
                 ctx,
                 parser,

@@ -37,3 +37,6 @@ ffmpeg = ["dep:ffmpeg-rs-raw", "dep:anyhow", "dep:parking_lot"]
 
 [dev-dependencies]
 sources.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"

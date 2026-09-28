@@ -635,6 +635,19 @@ mod tests {
     /// without a screen in the span. Measured on a 20 MS/s span: 5.4 times
     /// real time while locked to a 1280x1024 screen, 9.2 times on an empty
     /// band, where a failed look costs one correlation rather than two.
+    #[cfg(target_os = "linux")]
+    fn thread_seconds() -> f64 {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn thread_seconds() -> f64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    }
+
     #[test]
     fn a_span_is_read_faster_than_it_arrives() {
         if cfg!(debug_assertions) {
@@ -645,13 +658,16 @@ mod tests {
         let mode = display::by_label("1280x1024 60 Hz").expect("the mode");
         let screen = leak(mode, rate, seconds, 0.5);
         let mut reader = Reader::new(rate);
-        let t = std::time::Instant::now();
+        let t = thread_seconds();
         for b in screen.chunks(131_072) {
             reader.push(b);
         }
-        let locked = seconds / t.elapsed().as_secs_f64();
+        let locked = seconds / (thread_seconds() - t);
         assert!(reader.locked().is_some(), "the benchmark never locked");
-        assert!(locked > 2.0, "a locked screen reads at {locked:.2} times real time");
+        assert!(
+            locked > 2.0,
+            "a locked screen reads at {locked:.2} times real time on its thread's clock"
+        );
 
         let mut state = 0xABCD_1234_5678_9876u64;
         let mut rand = move || {
@@ -662,13 +678,16 @@ mod tests {
         };
         let mut block = vec![C32::new(0.0, 0.0); 131_072];
         let mut empty = Reader::new(rate);
-        let t = std::time::Instant::now();
+        let t = thread_seconds();
         for _ in 0..((seconds * rate / block.len() as f64) as usize) {
             block.iter_mut().for_each(|s| *s = C32::new(rand(), rand()));
             empty.push(&block);
         }
-        let idle = seconds / t.elapsed().as_secs_f64();
-        assert!(idle > 3.0, "an empty band reads at {idle:.2} times real time");
+        let idle = seconds / (thread_seconds() - t);
+        assert!(
+            idle > 3.0,
+            "an empty band reads at {idle:.2} times real time on its thread's clock"
+        );
     }
 
     #[test]
