@@ -458,7 +458,7 @@ fn pump(
 fn pick(radio: &str) -> Option<crate::devices::Entry> {
     let attached: Vec<crate::devices::Entry> = crate::devices::list()
         .into_iter()
-        .filter(|e| matches!(e.kind, DriverKind::RtlSdr | DriverKind::HackRf | DriverKind::LimeSdr))
+        .filter(|e| e.kind.is_radio() && e.kind != DriverKind::Combined)
         .collect();
     let wanted = radio.trim();
     if let Ok(i) = wanted.parse::<usize>() {

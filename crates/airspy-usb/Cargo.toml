@@ -1,0 +1,11 @@
+[package]
+name = "airspy-usb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Airspy R2 and Mini over USB, with no system library"
+
+[dependencies]
+nusb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

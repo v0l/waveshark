@@ -13,6 +13,8 @@ pub enum DriverKind {
     RtlSdr,
     HackRf,
     LimeSdr,
+    Airspy,
+    AirspyHf,
     /// A tuner on another machine, reached over the network.
     Network,
     File,
@@ -27,6 +29,8 @@ impl DriverKind {
             Self::RtlSdr => "rtlsdr",
             Self::HackRf => "hackrf",
             Self::LimeSdr => "limesdr",
+            Self::Airspy => "airspy",
+            Self::AirspyHf => "airspyhf",
             Self::Network => "network",
             Self::File => "file",
             Self::Synthetic => "synthetic",
@@ -36,7 +40,12 @@ impl DriverKind {
 
     pub fn is_radio(self) -> bool {
         match self {
-            Self::RtlSdr | Self::HackRf | Self::LimeSdr | Self::Combined => true,
+            Self::RtlSdr
+            | Self::HackRf
+            | Self::LimeSdr
+            | Self::Airspy
+            | Self::AirspyHf
+            | Self::Combined => true,
             Self::Network | Self::File | Self::Synthetic => false,
         }
     }

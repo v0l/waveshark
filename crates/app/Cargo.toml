@@ -33,6 +33,7 @@ dsp.workspace = true
 audio.workspace = true
 rtlsdr.workspace = true
 hackrf.workspace = true
+airspy.workspace = true
 limesdr = { workspace = true, optional = true }
 remote.workspace = true
 sources.workspace = true

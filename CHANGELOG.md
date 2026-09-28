@@ -13,6 +13,7 @@ the code is in the commit log.
 
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
 - LimeSDR on Windows, with LimeSuite installed.
+- Airspy R2, Mini, HF+ and HF+ Discovery as local radios, with no libairspy needed.
 - IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
 - DVB-S2 off a satellite LNB: QPSK to 32APSK, symbol rate measured, pictures and sound.
 - Chain view switch turning off one stage, or all of receive with transmit left on.

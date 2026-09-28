@@ -63,7 +63,7 @@ impl Entry {
 /// wants the span they paid for.
 fn combinations(hw: &[Entry]) -> Vec<Entry> {
     let mut out = Vec::new();
-    for kind in [DriverKind::RtlSdr, DriverKind::HackRf, DriverKind::LimeSdr] {
+    for kind in [DriverKind::RtlSdr, DriverKind::HackRf, DriverKind::Airspy, DriverKind::LimeSdr] {
         let parts: Vec<Entry> = hw.iter().filter(|e| e.kind == kind).cloned().collect();
         let n = parts.len();
         if n < 2 || parts.iter().any(|e| e.rates != parts[0].rates) {
@@ -109,6 +109,12 @@ pub fn list() -> Vec<Entry> {
             HACKRF_RATES,
         ));
     }
+    for a in airspy::enumerate() {
+        v.push(airspy_entry(&a));
+    }
+    for a in airspy::hf::enumerate() {
+        v.push(airspy_hf_entry(&a));
+    }
     #[cfg(feature = "limesdr")]
     for e in limesdr::enumerate() {
         v.push(Entry::local(
@@ -131,6 +137,21 @@ pub fn list() -> Vec<Entry> {
         v.push(c.entry(i));
     }
     v
+}
+
+fn airspy_entry(a: &airspy::Found) -> Entry {
+    let mut e = Entry::local(DriverKind::Airspy, a.index, a.label(), airspy::rate_range(&a.rates));
+    e.steps = a.rates.iter().map(|r| Sps(*r as u64)).collect();
+    e.steps.sort();
+    e
+}
+
+fn airspy_hf_entry(a: &airspy::hf::Found) -> Entry {
+    let mut e =
+        Entry::local(DriverKind::AirspyHf, a.index, a.label(), airspy::hf::rate_range(&a.rates));
+    e.steps = a.rates.iter().map(|r| Sps(*r as u64)).collect();
+    e.steps.sort();
+    e
 }
 
 /// A capture on disk, offered as a receiver that plays it back.
@@ -414,6 +435,8 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
     match e.kind {
         DriverKind::RtlSdr => Ok(Box::new(rtlsdr::RtlSdr::open(e.index as u32)?)),
         DriverKind::HackRf => Ok(Box::new(hackrf::HackRfDevice::open(e.index)?)),
+        DriverKind::Airspy => Ok(Box::new(airspy::Airspy::open(e.index)?)),
+        DriverKind::AirspyHf => Ok(Box::new(airspy::hf::AirspyHf::open(e.index)?)),
         #[cfg(feature = "limesdr")]
         DriverKind::LimeSdr => Ok(Box::new(limesdr::LimeSdr::open(e.index)?)),
         DriverKind::Network => {
@@ -497,6 +520,10 @@ pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
         let rate = range.end().as_f64();
         out.push(Span { label: span_label(rate), rate, zoom: 1 });
     }
+    zoomed(out)
+}
+
+fn zoomed(mut out: Vec<Span>) -> Vec<Span> {
     let Some(base) = out.first().map(|s| s.rate) else {
         return out;
     };
@@ -509,15 +536,16 @@ pub fn spans_with_zoom(range: &std::ops::RangeInclusive<Sps>) -> Vec<Span> {
 }
 
 pub fn spans_of(e: &Entry) -> Vec<Span> {
-    let listed: Vec<Span> = e
+    let mut listed: Vec<Span> = e
         .steps
         .iter()
         .map(|r| r.as_f64())
         .filter(|r| *r >= 48_000.0)
         .map(|rate| Span { label: span_label(rate), rate, zoom: 1 })
         .collect();
+    listed.sort_by(|a, b| a.rate.total_cmp(&b.rate));
     match (listed.is_empty(), e.steps.last()) {
-        (false, _) => listed,
+        (false, _) => zoomed(listed),
         (true, Some(fastest)) => {
             let rate = fastest.as_f64();
             vec![Span { label: span_label(rate), rate, zoom: 1 }]
@@ -579,6 +607,65 @@ mod tests {
         assert!(hrf.iter().all(|(_, r)| *r >= 2_000_000.0));
         assert!(hrf.iter().any(|(_, r)| (*r - 20_000_000.0).abs() < 1.0));
         assert!(!hrf.iter().any(|(_, r)| (*r - 250_000.0).abs() < 1.0));
+    }
+
+    #[test]
+    fn an_airspy_offers_its_firmware_rates_and_the_slowest_narrowed_to_78_khz() {
+        let spans = |rates: Vec<u32>, model| {
+            let found = airspy::Found { index: 0, serial: "A74068C82F531693".into(), model, rates };
+            let e = airspy_entry(&found);
+            assert_eq!(e.kind, DriverKind::Airspy);
+            spans_of(&e).iter().map(|s| (s.label.clone(), s.rate, s.zoom)).collect::<Vec<_>>()
+        };
+        let r2 = spans(vec![10_000_000, 2_500_000], airspy::Model::R2);
+        let want = |base: f64, top: f64, top_label: &str, base_label: &str, zooms: &[&str]| {
+            let mut v: Vec<(String, f64, usize)> = zooms
+                .iter()
+                .rev()
+                .enumerate()
+                .map(|(i, l)| (l.to_string(), base, 1 << (zooms.len() - i)))
+                .collect();
+            v.push((base_label.into(), base, 1));
+            v.push((top_label.into(), top, 1));
+            v
+        };
+        assert_eq!(
+            r2,
+            want(2.5e6, 10e6, "10M", "2.500M", &["1.250M", "625k", "312k", "156k", "78k"])
+        );
+        let mini = spans(vec![6_000_000, 3_000_000], airspy::Model::Mini);
+        assert_eq!(mini, want(3e6, 6e6, "6M", "3M", &["1.500M", "750k", "375k", "188k", "94k"]));
+    }
+
+    #[test]
+    fn an_airspy_hf_offers_every_firmware_rate_and_narrows_the_slowest_to_48_khz() {
+        let found = airspy::hf::Found {
+            index: 0,
+            serial: "3952C3DA2A3C0B35".into(),
+            product: "AIRSPY HF+ Discovery".into(),
+            rates: vec![912_000, 768_000, 456_000, 384_000, 256_000, 192_000],
+        };
+        let e = airspy_hf_entry(&found);
+        assert_eq!(
+            (e.kind, e.label.as_str()),
+            (DriverKind::AirspyHf, "Airspy HF+ Discovery 2A3C0B35")
+        );
+        let spans: Vec<(String, usize)> =
+            spans_of(&e).iter().map(|s| (s.label.clone(), s.zoom)).collect();
+        let want: Vec<(String, usize)> = [
+            ("48k", 4),
+            ("96k", 2),
+            ("192k", 1),
+            ("256k", 1),
+            ("384k", 1),
+            ("456k", 1),
+            ("768k", 1),
+            ("912k", 1),
+        ]
+        .iter()
+        .map(|(l, z)| (l.to_string(), *z))
+        .collect();
+        assert_eq!(spans, want);
     }
 
     #[test]

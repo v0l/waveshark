@@ -41,9 +41,9 @@ speech model transcribes what is said.
 
 ## Hardware
 
-Any RTL2832U dongle, a HackRF One, or a LimeSDR USB or Mini, and a tuner on
-another machine over IQStream, rtl_tcp, SpyServer or KiwiSDR with `--stream
-rtl_tcp://<host>`. Public IQStream and SpyServer tuners are listed in the add
+Any RTL2832U dongle, a HackRF One, an Airspy R2, Mini, HF+ or HF+ Discovery,
+or a LimeSDR USB or Mini, and a tuner on another machine over IQStream,
+rtl_tcp, SpyServer or KiwiSDR with `--stream rtl_tcp://<host>`. Public IQStream and SpyServer tuners are listed in the add
 dialog's FIND. A €30 RTL-SDR does all of
 the receiving above; a HackRF buys you wider spans and a transmitter, and a
 LimeSDR both of those plus full duplex.
@@ -66,11 +66,12 @@ because the CUDA libraries are loaded when they are first wanted rather than
 named in the binary. macOS uses Metal. The TETRA key search runs on any GPU
 through wgpu, AMD and Intel included.
 
-The RTL-SDR is driven by the receiver's own USB driver, so no librtlsdr is
-installed or loaded. The dongle still needs the udev rules to be openable
-without root: install `rtl-sdr` or `librtlsdr0` yourself to get them, or
-write the rule by hand. On Windows bind WinUSB to the RTL2832U with
-[Zadig](https://zadig.akeo.ie/) first or nothing can open the device.
+The RTL-SDR and the Airspy are driven by the receiver's own USB driver, so no
+librtlsdr, libairspy or libairspyhf is installed or loaded. They still need
+the udev rules to be openable without root: install `rtl-sdr`, `airspy` or
+`airspyhf` yourself to get them, or write the rule by hand. On Windows
+bind WinUSB to the RTL2832U with [Zadig](https://zadig.akeo.ie/) first or
+nothing can open the device.
 LimeSuite is opened when a LimeSDR is looked for rather than linked, so the
 binary starts without it and reads a LimeSDR once `liblimesuite` or
 `LimeSuite` is installed, whatever version the distribution carries. On

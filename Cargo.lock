@@ -172,6 +172,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "airspy"
+version = "0.4.0"
+dependencies = [
+ "airspy-usb",
+ "common",
+ "crossbeam-channel",
+ "dsp",
+ "tracing",
+]
+
+[[package]]
+name = "airspy-usb"
+version = "0.4.0"
+dependencies = [
+ "nusb",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -249,6 +269,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.4.0"
 dependencies = [
+ "airspy",
  "anyhow",
  "audio",
  "axum",

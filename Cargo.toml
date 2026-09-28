@@ -9,6 +9,8 @@ members = [
     "crates/pipeline",
     "crates/hackrf",
     "crates/hackrf-usb",
+    "crates/airspy",
+    "crates/airspy-usb",
     "crates/rtlsdr-usb",
     "crates/rtlsdr",
     "crates/limesdr-sys",
@@ -47,6 +49,8 @@ default-members = [
     "crates/pipeline",
     "crates/hackrf",
     "crates/hackrf-usb",
+    "crates/airspy",
+    "crates/airspy-usb",
     "crates/rtlsdr-usb",
     "crates/rtlsdr",
     "crates/limesdr-sys",
@@ -93,6 +97,8 @@ pipeline = { path = "crates/pipeline" }
 nodes = { path = "crates/nodes" }
 audio = { path = "crates/audio" }
 hackrf = { path = "crates/hackrf" }
+airspy = { path = "crates/airspy" }
+airspy-usb = { path = "crates/airspy-usb" }
 hackrf-usb = { path = "crates/hackrf-usb" }
 rtlsdr = { path = "crates/rtlsdr" }
 rtlsdr-usb = { path = "crates/rtlsdr-usb" }

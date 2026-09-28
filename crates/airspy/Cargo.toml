@@ -1,0 +1,15 @@
+[package]
+name = "airspy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The linearity and sensitivity gain tables are libairspy's, BSD-3-Clause,
+# Copyright (c) 2014 Youssef Touil and Benjamin Vernoux.
+
+[dependencies]
+airspy-usb.workspace = true
+common.workspace = true
+dsp.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
