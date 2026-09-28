@@ -11,10 +11,13 @@
 //! That also keeps a 1080i picture off the thread the radio runs on, which
 //! has a sample buffer to empty on time.
 
+use common::{Chroma, Matrix, Range, Yuv};
 use ffmpeg_rs_raw::ffmpeg_sys_the_third::AVSampleFormat;
 use ffmpeg_rs_raw::ffmpeg_sys_the_third::{
-    AV_DISPOSITION_VISUAL_IMPAIRED, AV_LOG_FATAL, AVCodecID, AVMediaType, AVPixelFormat,
-    AVRational as Rational, AVStream, av_dict_get, av_log_set_level,
+    AV_DISPOSITION_VISUAL_IMPAIRED, AV_LOG_FATAL, AVBufferRef, AVCodecID, AVColorRange,
+    AVColorSpace, AVHWDeviceType, AVHWFramesContext, AVMediaType, AVPixelFormat,
+    AVRational as Rational, AVStream, av_buffer_ref, av_dict_get, av_hwdevice_ctx_create,
+    av_hwdevice_get_type_name, av_log_set_level, avcodec_parameters_to_context,
 };
 use ffmpeg_rs_raw::{Decoder, Demuxer, Resample, Scaler};
 use std::io::Read;
@@ -67,16 +70,40 @@ pub struct Sound {
 pub struct Picture {
     pub width: usize,
     pub height: usize,
-    /// Four bytes a pixel, red, green, blue and an opaque alpha: what a
-    /// texture takes, so nothing between here and the screen has to walk
-    /// over two million pixels to widen them.
-    pub rgb: Vec<u8>,
+    pub samples: Vec<u8>,
+    pub yuv: Yuv,
     /// When it is shown, in seconds on the stream's own clock, where the
     /// stream said.
     pub at_s: Option<f64>,
     /// The programme it came from, which for a DVB multiplex is the service
     /// identifier the tables use.
     pub service: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decoding {
+    Hardware,
+    Software,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    Hardware(&'static str),
+    Software,
+}
+
+impl Engine {
+    fn of(frame: &ffmpeg_rs_raw::AvFrameRef) -> Self {
+        if frame.hw_frames_ctx.is_null() {
+            return Self::Software;
+        }
+        let name = unsafe {
+            let frames = (*frame.hw_frames_ctx).data as *const AVHWFramesContext;
+            let device = (*(*frames).device_ctx).type_;
+            std::ffi::CStr::from_ptr(av_hwdevice_get_type_name(device)).to_str().unwrap_or("")
+        };
+        Self::Hardware(name)
+    }
 }
 
 /// What a caller asks the decoding thread for.
@@ -96,10 +123,15 @@ pub struct Media {
     /// What the thread last said it could not do, so a caller can show it
     /// rather than watching an empty pane.
     fault: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    engine: std::sync::Arc<parking_lot::Mutex<Option<Engine>>>,
 }
 
 impl Media {
     pub fn new() -> Self {
+        Self::decoding(Decoding::Hardware)
+    }
+
+    pub fn decoding(decoding: Decoding) -> Self {
         let (feed, blocks) = sync_channel::<Vec<u8>>(FEED_DEPTH);
         let (ask, asked) = sync_channel::<Ask>(8);
         let (send, out) = sync_channel::<Out>(PICTURE_DEPTH);
@@ -107,15 +139,17 @@ impl Media {
         let mine = fault.clone();
         let heard = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(f64::NAN.to_bits()));
         let clock = heard.clone();
+        let engine = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let said = engine.clone();
         let thread = std::thread::Builder::new()
             .name("mpegts decode".into())
             .spawn(move || {
-                if let Err(e) = run(blocks, asked, send, &clock) {
+                if let Err(e) = run(blocks, asked, send, &clock, decoding, &said) {
                     *mine.lock() = Some(e.to_string());
                 }
             })
             .ok();
-        Self { feed: Some(feed), ask, watching: None, out, heard, thread, fault }
+        Self { feed: Some(feed), ask, watching: None, out, heard, thread, fault, engine }
     }
 
     pub fn hear(&self, at_s: Option<f64>) {
@@ -175,6 +209,10 @@ impl Media {
         }
     }
 
+    pub fn engine(&self) -> Option<Engine> {
+        *self.engine.lock()
+    }
+
     /// What went wrong, if the decoder stopped.
     pub fn fault(&self) -> Option<String> {
         self.fault.lock().clone()
@@ -231,6 +269,8 @@ fn run(
     asked: Receiver<Ask>,
     out: SyncSender<Out>,
     heard: &std::sync::atomic::AtomicU64,
+    decoding: Decoding,
+    engine: &parking_lot::Mutex<Option<Engine>>,
 ) -> anyhow::Result<()> {
     // A broadcast off the air is damaged by definition: a cut recording
     // starts mid-picture and a fade loses packets, and ffmpeg says so on
@@ -241,6 +281,10 @@ fn run(
     let reader = Blocks { rx: blocks, held: Vec::new(), at: 0 };
     // Told what it is reading, because a stream with no beginning and no
     // file name is one ffmpeg would otherwise have to guess at.
+    let device = match decoding {
+        Decoding::Hardware => hardware(),
+        Decoding::Software => None,
+    };
     let mut demux = Demuxer::new_custom_io(reader, None)?.with_format("mpegts");
     unsafe { demux.probe_input()? };
 
@@ -271,8 +315,8 @@ fn run(
             if let Some(p) = &mut on {
                 decoder = Decoder::new();
                 resample = Resample::new(AVSampleFormat::FLT, SOUND_HZ, 1);
-                p.video = p.video.filter(|&i| open(&mut decoder, &demux, i));
-                p.sound = p.sound.filter(|&i| open(&mut decoder, &demux, i));
+                p.video = p.video.filter(|&i| open(&mut decoder, &demux, i, device));
+                p.sound = p.sound.filter(|&i| open(&mut decoder, &demux, i, None));
             }
         }
 
@@ -283,7 +327,8 @@ fn run(
             let service = on.as_ref().and_then(|p| p.service);
             let sound = on.as_ref().and_then(|p| p.sound);
             let frames = decoder.decode_pkt(None).unwrap_or_default();
-            let mut sorting = Sorting { sound, service, demux: &demux, resample: &mut resample };
+            let mut sorting =
+                Sorting { sound, service, demux: &demux, resample: &mut resample, engine };
             if !sorting.sort(frames, &mut fields, &mut held, &out) {
                 return Ok(());
             }
@@ -301,7 +346,8 @@ fn run(
         let (service, sound) = (p.service, p.sound);
         if Some(pkt.stream_index) == p.video || Some(pkt.stream_index) == sound {
             let frames = decoder.decode_pkt(Some(&pkt)).unwrap_or_default();
-            let mut sorting = Sorting { sound, service, demux: &demux, resample: &mut resample };
+            let mut sorting =
+                Sorting { sound, service, demux: &demux, resample: &mut resample, engine };
             if !sorting.sort(frames, &mut fields, &mut held, &out) {
                 return Ok(());
             }
@@ -324,6 +370,7 @@ struct Sorting<'a> {
     service: Option<u16>,
     demux: &'a Demuxer,
     resample: &'a mut Resample,
+    engine: &'a parking_lot::Mutex<Option<Engine>>,
 }
 
 impl Sorting<'_> {
@@ -339,6 +386,8 @@ impl Sorting<'_> {
         for (frame, index) in frames {
             let clock = clock(self.demux, index);
             if Some(index) != self.sound {
+                *self.engine.lock() = Some(Engine::of(&frame));
+                let Ok(frame) = ffmpeg_rs_raw::get_frame_from_hw(frame) else { continue };
                 fields.push(frame, clock, &mut pictures);
             } else if !send_sound(self.resample, &frame, self.service, stamp(&frame, clock), out) {
                 return false;
@@ -356,10 +405,51 @@ fn due(at_s: Option<f64>, heard_s: Option<f64>) -> bool {
     }
 }
 
-fn open(decoder: &mut Decoder, demux: &Demuxer, index: i32) -> bool {
+struct Device(*mut AVBufferRef);
+
+unsafe impl Send for Device {}
+unsafe impl Sync for Device {}
+
+fn hardware() -> Option<*mut AVBufferRef> {
+    static DEVICE: std::sync::OnceLock<Option<Device>> = std::sync::OnceLock::new();
+    let made = DEVICE.get_or_init(|| {
+        [
+            AVHWDeviceType::CUDA,
+            AVHWDeviceType::VAAPI,
+            AVHWDeviceType::VIDEOTOOLBOX,
+            AVHWDeviceType::D3D11VA,
+        ]
+        .into_iter()
+        .find_map(|kind| unsafe {
+            let mut device = std::ptr::null_mut();
+            let made = av_hwdevice_ctx_create(
+                &mut device,
+                kind,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            );
+            (made >= 0).then_some(Device(device))
+        })
+    });
+    made.as_ref().map(|d| d.0)
+}
+
+fn open(
+    decoder: &mut Decoder,
+    demux: &Demuxer,
+    index: i32,
+    device: Option<*mut AVBufferRef>,
+) -> bool {
     unsafe {
         let Ok(stream) = demux.get_stream(index as usize) else { return false };
-        decoder.setup_decoder_for_stream(stream, Some(threads())).is_ok()
+        let par = (*stream).codecpar;
+        let Ok(ctx) = decoder.add_decoder((*par).codec_id, index) else { return false };
+        if let Some(device) = device {
+            (*ctx.context).hw_device_ctx = av_buffer_ref(device);
+        }
+        avcodec_parameters_to_context(ctx.context, par) >= 0
+            && decoder.open_decoder_codec_by_index(index, Some(threads())).is_ok()
     }
 }
 
@@ -498,39 +588,68 @@ fn send_picture(
     at_s: Option<f64>,
     out: &SyncSender<Out>,
 ) -> bool {
-    let (w, h) = (frame.width as u16, frame.height as u16);
+    let (w, h) = (frame.width as usize, frame.height as usize);
     if w == 0 || h == 0 {
         return true;
     }
-    let Ok(rgb) = scaler.process_frame(frame, w, h, AVPixelFormat::RGBA) else {
-        return true;
+    let format = AVPixelFormat(frame.format as _);
+    let (chroma, range) = match format {
+        AVPixelFormat::YUV420P => (Chroma::Planar, None),
+        AVPixelFormat::YUVJ420P => (Chroma::Planar, Some(Range::Full)),
+        AVPixelFormat::NV12 => (Chroma::Interleaved, None),
+        _ => {
+            let Ok(planar) =
+                scaler.process_frame(frame, w as u16, h as u16, AVPixelFormat::YUV420P)
+            else {
+                return true;
+            };
+            let yuv =
+                Yuv { chroma: Chroma::Planar, matrix: matrix(frame, h), range: Range::Limited };
+            return send_planes(&planar, yuv, service, at_s, out);
+        }
     };
-    // A scaled frame is one plane with a stride that may be wider than the
-    // picture, so the rows are copied rather than the buffer.
-    let stride = rgb.linesize[0] as usize;
-    let row = w as usize * 4;
-    let mut pixels = vec![0u8; row * h as usize];
-    unsafe {
-        let src = rgb.data[0];
-        if src.is_null() {
+    let range = range.unwrap_or(match frame.color_range {
+        AVColorRange::JPEG => Range::Full,
+        _ => Range::Limited,
+    });
+    send_planes(frame, Yuv { chroma, matrix: matrix(frame, h), range }, service, at_s, out)
+}
+
+fn matrix(frame: &ffmpeg_rs_raw::AvFrameRef, height: usize) -> Matrix {
+    match frame.colorspace {
+        AVColorSpace::BT709 => Matrix::Bt709,
+        AVColorSpace::BT470BG | AVColorSpace::SMPTE170M => Matrix::Bt601,
+        _ if height > 576 => Matrix::Bt709,
+        _ => Matrix::Bt601,
+    }
+}
+
+#[must_use]
+fn send_planes(
+    frame: &ffmpeg_rs_raw::AvFrameRef,
+    yuv: Yuv,
+    service: Option<u16>,
+    at_s: Option<f64>,
+    out: &SyncSender<Out>,
+) -> bool {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let (cw, ch) = Yuv::chroma_size(w, h);
+    let planes: &[(usize, usize, usize)] = match yuv.chroma {
+        Chroma::Planar => &[(0, w, h), (1, cw, ch), (2, cw, ch)],
+        Chroma::Interleaved => &[(0, w, h), (1, 2 * cw, ch)],
+    };
+    let mut samples = Vec::with_capacity(Yuv::len(w, h));
+    for &(plane, row, rows) in planes {
+        let (src, stride) = (frame.data[plane], frame.linesize[plane]);
+        if src.is_null() || stride < row as i32 {
             return true;
         }
-        for y in 0..h as usize {
-            let from = src.add(y * stride);
-            std::ptr::copy_nonoverlapping(from, pixels.as_mut_ptr().add(y * row), row);
+        for y in 0..rows {
+            let line = unsafe { std::slice::from_raw_parts(src.add(y * stride as usize), row) };
+            samples.extend_from_slice(line);
         }
     }
-    // Blocking, so the thread is held by whoever is taking pictures rather
-    // than dropping one it has already paid for. A receiver that has gone
-    // ends the thread.
-    out.send(Out::Picture(Picture {
-        width: w as usize,
-        height: h as usize,
-        rgb: pixels,
-        at_s,
-        service,
-    }))
-    .is_ok()
+    out.send(Out::Picture(Picture { width: w, height: h, samples, yuv, at_s, service })).is_ok()
 }
 
 /// One decoded audio frame as samples the bus can mix.
@@ -671,9 +790,9 @@ mod tests {
     }
 
     #[test]
-    fn pictures_follow_the_service_after_it_is_changed() {
+    fn pictures_follow_the_service_after_it_is_changed_in_software_decoding() {
         let ts = two_services_sharing_one_picture(8_000);
-        let mut media = Media::new();
+        let mut media = Media::decoding(Decoding::Software);
         media.watch(Some(1));
         let mut out = Vec::new();
         let mut blocks = ts.chunks(PACKET * 64);

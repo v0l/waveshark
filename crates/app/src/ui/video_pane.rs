@@ -50,6 +50,8 @@ pub(super) struct VideoState {
     /// The texture the last field was uploaded into, kept so a redraw that
     /// gets no new field is free.
     texture: Option<egui::TextureHandle>,
+    converter: Option<super::yuv_texture::Converter>,
+    drawn: Option<egui::load::SizedTexture>,
     /// The field that texture holds, for the caption.
     shown: Option<VideoFrame>,
     last: Option<std::time::Instant>,
@@ -130,6 +132,7 @@ pub(super) struct VideoPane<'a> {
     pub muxes: Vec<crate::videobus::Offered>,
     /// Where the pane puts what it wants the receiver to do.
     pub cmds: &'a mut Vec<Cmd>,
+    pub gpu: Option<&'a eframe::egui_wgpu::RenderState>,
 }
 
 impl VideoPane<'_> {
@@ -145,7 +148,7 @@ impl VideoPane<'_> {
             && is_new(st.shown.as_ref(), &f)
         {
             let now = std::time::Instant::now();
-            st.texture = Some(upload(ui.ctx(), &f, st.texture.take()));
+            st.drawn = Some(upload(ui.ctx(), &f, st, self.gpu));
             st.rate.saw(&f, now);
             st.last = Some(now);
             st.shown = Some(f);
@@ -157,6 +160,7 @@ impl VideoPane<'_> {
             .unwrap_or(HOLD);
         if st.last.is_some_and(|t| t.elapsed() > hold) {
             st.texture = None;
+            st.drawn = None;
             st.shown = None;
             st.last = None;
             st.rate = FrameRate::default();
@@ -210,7 +214,7 @@ impl VideoPane<'_> {
 
 fn picture(ui: &mut egui::Ui, st: &mut VideoState, osd: &Osd) {
     let area = ui.available_rect_before_wrap();
-    let shown = match (st.texture.as_ref(), st.shown.as_ref()) {
+    let shown = match (st.drawn, st.shown.as_ref()) {
         (Some(tex), Some(f)) => {
             let aspect = if f.aspect > 0.0 { f.aspect } else { 4.0 / 3.0 };
             let size = if area.width() / area.height() > aspect {
@@ -687,26 +691,38 @@ fn is_new(shown: Option<&VideoFrame>, f: &VideoFrame) -> bool {
 fn upload(
     ctx: &egui::Context,
     f: &VideoFrame,
-    old: Option<egui::TextureHandle>,
-) -> egui::TextureHandle {
+    st: &mut VideoState,
+    gpu: Option<&eframe::egui_wgpu::RenderState>,
+) -> egui::load::SizedTexture {
+    let size = egui::vec2(f.width as f32, f.height as f32);
+    if let (Pixels::Yuv420(yuv), Some(gpu)) = (f.pixels, gpu) {
+        st.texture = None;
+        let converter = st.converter.get_or_insert_with(|| super::yuv_texture::Converter::new(gpu));
+        return egui::load::SizedTexture::new(
+            converter.show(f.width, f.height, yuv, &f.samples),
+            size,
+        );
+    }
     let image = match f.pixels {
         // Already the shape a texture is, so this is a copy rather than a
         // pass over every pixel. A 1080 line picture is two million of them,
         // fifty times a second, on the thread that draws everything else.
         Pixels::Rgba8 => egui::ColorImage::from_rgba_unmultiplied([f.width, f.height], &f.samples),
         Pixels::Rgb8 => egui::ColorImage::from_rgb([f.width, f.height], &f.samples),
-        Pixels::Luma8 => {
-            let rgb: Vec<u8> = f.samples.iter().flat_map(|&v| [v, v, v]).collect();
-            egui::ColorImage::from_rgb([f.width, f.height], &rgb)
+        Pixels::Luma8 | Pixels::Yuv420(_) => {
+            egui::ColorImage::from_rgb([f.width, f.height], &f.rgb())
         }
     };
-    match old {
+    let handle = match st.texture.take() {
         Some(mut t) if t.size() == [f.width, f.height] => {
             t.set(image, egui::TextureOptions::LINEAR);
             t
         }
         _ => ctx.load_texture("video", image, egui::TextureOptions::LINEAR),
-    }
+    };
+    let sized = egui::load::SizedTexture::from_handle(&handle);
+    st.texture = Some(handle);
+    sized
 }
 
 #[derive(Clone, Debug, PartialEq)]

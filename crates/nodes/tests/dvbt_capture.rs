@@ -211,15 +211,27 @@ fn the_pictures_come_out_of_the_multiplex() {
     assert_eq!(frames.len(), 2, "fields of the one picture in the window");
     for f in &frames {
         assert_eq!((f.width, f.height), (1920, 1080));
-        assert_eq!(f.pixels, common::Pixels::Rgba8);
-        assert_eq!(f.samples.len(), 1920 * 1080 * 4);
+        assert!(
+            matches!(
+                f.pixels,
+                common::Pixels::Yuv420(common::Yuv {
+                    matrix: common::Matrix::Bt709,
+                    range: common::Range::Limited,
+                    ..
+                })
+            ),
+            "{:?}",
+            f.pixels
+        );
+        assert_eq!(f.samples.len(), 1920 * 1080 * 3 / 2);
     }
     // Not a flat or a black picture: a decoder that lost its coefficients
     // still produces one, and it is one colour.
     let f = &frames[0];
-    let mean = f.samples.iter().map(|&v| v as u64).sum::<u64>() / f.samples.len() as u64;
+    let rgb = f.rgb();
+    let mean = rgb.iter().map(|&v| v as u64).sum::<u64>() / rgb.len() as u64;
     assert!((40..200).contains(&mean), "mean brightness {mean}");
-    assert!(f.samples.iter().any(|&v| v < 40) && f.samples.iter().any(|&v| v > 215));
+    assert!(rgb.iter().any(|&v| v < 40) && rgb.iter().any(|&v| v > 215));
 
     // And the sound that goes with it: AC-3 on this multiplex, resampled to
     // the rate the audio bus mixes at. Not silence, and not a full second,
@@ -278,8 +290,19 @@ fn the_stage_puts_a_picture_on_the_video_port() {
         assert_eq!(frames.len(), 2, "fields of the one picture on the video port");
         let f = &frames[0];
         assert_eq!((f.width, f.height), (1920, 1080));
-        assert_eq!(f.pixels, common::Pixels::Rgba8);
-        assert_eq!(f.samples.len(), 1920 * 1080 * 4);
+        assert!(
+            matches!(
+                f.pixels,
+                common::Pixels::Yuv420(common::Yuv {
+                    matrix: common::Matrix::Bt709,
+                    range: common::Range::Limited,
+                    ..
+                })
+            ),
+            "{:?}",
+            f.pixels
+        );
+        assert_eq!(f.samples.len(), 1920 * 1080 * 3 / 2);
         assert_eq!(f.lines_seen, f.height, "a picture is whole or it is not read");
         assert_eq!(f.channel_hz, 429_000_000.0);
         assert_eq!(f.system, nodes::dvbt_nodes::DVB);

@@ -55,6 +55,7 @@ mod transcript_pane;
 mod trilateration_pane;
 mod video_pane;
 pub(crate) mod widgets;
+mod yuv_texture;
 
 use crate::bands;
 use crate::dial::Dial;
@@ -168,6 +169,7 @@ pub struct App {
     pub shot: Option<String>,
     /// Seconds of running before the screenshot is taken.
     pub shot_after: f32,
+    gpu: Option<eframe::egui_wgpu::RenderState>,
     /// Where bursts are being written and how much may be written, when
     /// recording.
     record_dir: Option<(std::path::PathBuf, Option<u64>)>,
@@ -760,6 +762,7 @@ impl Default for App {
             soak: None,
             shot: None,
             shot_after: 6.0,
+            gpu: None,
             shot_at: None,
             shot_sent: false,
             autostart: false,
@@ -878,6 +881,7 @@ impl App {
         if let Some(e) = device {
             app.adopt_device(e);
         }
+        app.gpu = cc.wgpu_render_state.clone();
         app.connect(&cc.egui_ctx);
         app
     }
@@ -2055,6 +2059,7 @@ impl App {
             saved,
             muxes,
             cmds: &mut self.cmds,
+            gpu: self.gpu.as_ref(),
         }
         .show(ui);
     }

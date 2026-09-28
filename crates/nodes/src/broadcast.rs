@@ -542,8 +542,8 @@ impl Broadcast {
             // Broadcast pictures are 16:9 and their samples are square at
             // this size, so the grid is the shape.
             aspect: p.width as f32 / p.height as f32,
-            pixels: common::Pixels::Rgba8,
-            samples: std::sync::Arc::new(p.rgb),
+            pixels: common::Pixels::Yuv420(p.yuv),
+            samples: std::sync::Arc::new(p.samples),
             lines_seen: p.height,
             sequence: self.sequence,
             update: common::Update::Whole,
@@ -613,7 +613,12 @@ mod tests {
         let picture = decode::media::Picture {
             width: 2,
             height: 2,
-            rgb: vec![0; 16],
+            samples: vec![0; 6],
+            yuv: common::Yuv {
+                chroma: common::Chroma::Planar,
+                matrix: common::Matrix::Bt709,
+                range: common::Range::Limited,
+            },
             at_s: Some(30.0),
             service: None,
         };

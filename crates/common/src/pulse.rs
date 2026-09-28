@@ -735,12 +735,107 @@ pub enum Pixels {
     /// on the thread that paints. A decoder that can put out four for the
     /// same work should.
     Rgba8,
+    Yuv420(Yuv),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Yuv {
+    pub chroma: Chroma,
+    pub matrix: Matrix,
+    pub range: Range,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chroma {
+    Planar,
+    Interleaved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matrix {
+    Bt601,
+    Bt709,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Range {
+    Limited,
+    Full,
+}
+
+impl Matrix {
+    pub fn red_v(self) -> f32 {
+        match self {
+            Self::Bt601 => 1.402,
+            Self::Bt709 => 1.5748,
+        }
+    }
+
+    pub fn green_u(self) -> f32 {
+        match self {
+            Self::Bt601 => 0.344_136,
+            Self::Bt709 => 0.187_324,
+        }
+    }
+
+    pub fn green_v(self) -> f32 {
+        match self {
+            Self::Bt601 => 0.714_136,
+            Self::Bt709 => 0.468_124,
+        }
+    }
+
+    pub fn blue_u(self) -> f32 {
+        match self {
+            Self::Bt601 => 1.772,
+            Self::Bt709 => 1.8556,
+        }
+    }
+}
+
+impl Range {
+    pub fn luma(self) -> (f32, f32) {
+        match self {
+            Self::Limited => (16.0, 255.0 / 219.0),
+            Self::Full => (0.0, 1.0),
+        }
+    }
+
+    pub fn chroma_scale(self) -> f32 {
+        match self {
+            Self::Limited => 255.0 / 224.0,
+            Self::Full => 1.0,
+        }
+    }
+}
+
+impl Yuv {
+    pub fn chroma_size(width: usize, height: usize) -> (usize, usize) {
+        (width.div_ceil(2), height.div_ceil(2))
+    }
+
+    pub fn len(width: usize, height: usize) -> usize {
+        let (cw, ch) = Self::chroma_size(width, height);
+        width * height + 2 * cw * ch
+    }
+
+    pub fn rgb(self, y: u8, u: u8, v: u8) -> [u8; 3] {
+        let (black, gain) = self.range.luma();
+        let y = (f32::from(y) - black) * gain;
+        let c = self.range.chroma_scale();
+        let (u, v) = ((f32::from(u) - 128.0) * c, (f32::from(v) - 128.0) * c);
+        let m = self.matrix;
+        let r = y + m.red_v() * v;
+        let g = y - m.green_u() * u - m.green_v() * v;
+        let b = y + m.blue_u() * u;
+        [r, g, b].map(|x| x.round().clamp(0.0, 255.0) as u8)
+    }
 }
 
 impl Pixels {
     pub fn bytes(self) -> usize {
         match self {
-            Self::Luma8 => 1,
+            Self::Luma8 | Self::Yuv420(_) => 1,
             Self::Rgb8 => 3,
             Self::Rgba8 => 4,
         }
@@ -917,10 +1012,44 @@ impl VideoFrame {
     /// How many rows the samples hold, which for [`Update::Rows`] is the
     /// batch rather than the picture.
     pub fn rows(&self) -> usize {
-        match self.stride() {
-            0 => 0,
-            s => self.samples.len() / s,
+        match (self.pixels, self.stride()) {
+            (_, 0) => 0,
+            (Pixels::Yuv420(_), _) => self.height,
+            (_, s) => self.samples.len() / s,
         }
+    }
+
+    pub fn rgb(&self) -> std::borrow::Cow<'_, [u8]> {
+        use std::borrow::Cow;
+        match self.pixels {
+            Pixels::Rgb8 => Cow::Borrowed(&self.samples),
+            Pixels::Rgba8 => {
+                Cow::Owned(self.samples.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
+            }
+            Pixels::Luma8 => Cow::Owned(self.samples.iter().flat_map(|&v| [v, v, v]).collect()),
+            Pixels::Yuv420(yuv) => Cow::Owned(self.yuv_to_rgb(yuv)),
+        }
+    }
+
+    fn yuv_to_rgb(&self, yuv: Yuv) -> Vec<u8> {
+        let (w, h) = (self.width, self.height);
+        if self.samples.len() < Yuv::len(w, h) {
+            return vec![0; w * h * 3];
+        }
+        let (cw, ch) = Yuv::chroma_size(w, h);
+        let (luma, chroma) = self.samples.split_at(w * h);
+        let mut out = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                let c = (y / 2) * cw + x / 2;
+                let (u, v) = match yuv.chroma {
+                    Chroma::Planar => (chroma[c], chroma[cw * ch + c]),
+                    Chroma::Interleaved => (chroma[2 * c], chroma[2 * c + 1]),
+                };
+                out.extend_from_slice(&yuv.rgb(luma[y * w + x], u, v));
+            }
+        }
+        out
     }
 }
 
@@ -1095,5 +1224,49 @@ mod dropout_tests {
         let before = p.pulses.clone();
         p.merge_dropouts();
         assert_eq!(p.pulses, before);
+    }
+}
+
+#[cfg(test)]
+mod yuv_tests {
+    use super::*;
+
+    const HD: Yuv = Yuv { chroma: Chroma::Planar, matrix: Matrix::Bt709, range: Range::Limited };
+    const SD: Yuv = Yuv { chroma: Chroma::Planar, matrix: Matrix::Bt601, range: Range::Limited };
+
+    #[test]
+    fn itu_colour_bars_come_back_as_the_primaries_they_were_made_from() {
+        assert_eq!(HD.rgb(16, 128, 128), [0, 0, 0]);
+        assert_eq!(HD.rgb(235, 128, 128), [255, 255, 255]);
+        assert_eq!(HD.rgb(63, 102, 240), [255, 1, 0], "BT.709 red");
+        assert_eq!(HD.rgb(173, 42, 26), [0, 255, 1], "BT.709 green");
+        assert_eq!(HD.rgb(32, 240, 118), [1, 0, 255], "BT.709 blue");
+        assert_eq!(SD.rgb(81, 90, 240), [254, 0, 0], "BT.601 red");
+    }
+
+    #[test]
+    fn a_two_by_two_picture_reads_the_same_whichever_way_its_chroma_is_laid() {
+        let frame = |pixels, samples: Vec<u8>| VideoFrame {
+            system: "test",
+            channel_hz: 0.0,
+            label: None,
+            width: 2,
+            height: 2,
+            aspect: 1.0,
+            pixels,
+            samples: std::sync::Arc::new(samples),
+            lines_seen: 2,
+            sequence: 0,
+            update: Update::Whole,
+            cadence: Cadence::Live,
+            sent_at_us: None,
+        };
+        let planar = frame(Pixels::Yuv420(HD), vec![16, 235, 63, 173, 102, 240]);
+        let nv12 = Yuv { chroma: Chroma::Interleaved, ..HD };
+        let interleaved = frame(Pixels::Yuv420(nv12), vec![16, 235, 63, 173, 102, 240]);
+        assert_eq!(planar.rows(), 2);
+        assert_eq!(planar.rgb(), interleaved.rgb());
+        assert_eq!(planar.rgb().len(), 12);
+        assert_eq!(planar.rgb()[..3], HD.rgb(16, 102, 240));
     }
 }

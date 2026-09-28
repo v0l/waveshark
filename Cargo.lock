@@ -302,6 +302,7 @@ dependencies = [
  "parking_lot",
  "pipeline",
  "poll-promise",
+ "pollster",
  "rayon",
  "remote",
  "reqwest",

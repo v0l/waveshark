@@ -32,6 +32,7 @@ the code is in the commit log.
 
 ### Changed
 
+- DVB-T and DVB-S2 pictures decoded on the graphics card where FFmpeg can, and colour converted there.
 - Video pane programme table across every multiplex, with scrambling, codecs and now and next, only the watched one decoded.
 - Video pane overlay with the service, now and next, and frame rate, shown on hover, tap or a change of channel.
 - Scanner front ends and channels run out to the span edge, with no rolloff held back.

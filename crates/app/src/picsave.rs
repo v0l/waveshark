@@ -14,7 +14,7 @@
 //! arrived on it for [`ABANDON_S`]: half a picture off a fading signal is
 //! still the only copy of what was received.
 
-use common::{Cadence, Pixels, Result, VideoFrame};
+use common::{Cadence, Result, VideoFrame};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -196,15 +196,7 @@ fn save_png(f: &VideoFrame, path: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let rgb: std::borrow::Cow<'_, [u8]> = match f.pixels {
-        Pixels::Rgb8 => std::borrow::Cow::Borrowed(&f.samples),
-        Pixels::Rgba8 => std::borrow::Cow::Owned(
-            f.samples.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect(),
-        ),
-        Pixels::Luma8 => {
-            std::borrow::Cow::Owned(f.samples.iter().flat_map(|&v| [v, v, v]).collect())
-        }
-    };
+    let rgb = f.rgb();
     let buf = image::RgbImage::from_raw(f.width as u32, f.height as u32, rgb.into_owned())
         .ok_or_else(|| std::io::Error::other("the picture's samples do not fit its size"))?;
     buf.save_with_format(path, image::ImageFormat::Png)
@@ -241,7 +233,7 @@ mod tests {
             width: 2,
             height,
             aspect: 4.0 / 3.0,
-            pixels: Pixels::Rgb8,
+            pixels: common::Pixels::Rgb8,
             samples: std::sync::Arc::new(vec![9u8; 2 * height * 3]),
             lines_seen: lines,
             sequence: 1,
