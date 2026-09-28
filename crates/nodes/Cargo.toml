@@ -41,6 +41,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 rumqttc = { version = "0.25", default-features = false }
 serde_json.workspace = true
 iqstream.workspace = true
+remote.workspace = true
 
 [features]
 # Nothing by default: the app names what it wants, and a default here was on

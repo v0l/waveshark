@@ -296,9 +296,10 @@ fn run<D: SdrDirectory>(
                     now
                 }
             };
-            let mut next = match listed {
-                Some(_) => Duration::from_secs(ANNOUNCE_EVERY_SECS),
-                None => RETRY,
+            let mut next = match (&listed, &dir) {
+                (Some(_), Some((_, d))) => d.every(),
+                (Some(_), None) => Duration::from_secs(ANNOUNCE_EVERY_SECS),
+                (None, _) => RETRY,
             };
             if let Some(renew) = map.as_ref().and_then(PortMap::renew_in) {
                 next = next.min(renew);
@@ -492,7 +493,7 @@ mod tests {
     fn a_retune_is_listed_once_it_settles_and_no_sooner_than_the_pace_allows() {
         let server = iqstream::Server::start(
             "127.0.0.1:0".parse().unwrap(),
-            iqstream::ServerConfig { name: "test".into(), streams: Vec::new() },
+            iqstream::ServerConfig { name: "test".into(), streams: Vec::new(), door: None },
         )
         .unwrap();
         let stream = server.stream_named(iqstream::StreamConfig {
@@ -581,7 +582,7 @@ mod tests {
     fn a_lease_is_renewed_before_it_lapses_a_moved_port_relisted_and_a_refusal_withdrawn() {
         let server = iqstream::Server::start(
             "127.0.0.1:0".parse().unwrap(),
-            iqstream::ServerConfig { name: "test".into(), streams: Vec::new() },
+            iqstream::ServerConfig { name: "test".into(), streams: Vec::new(), door: None },
         )
         .unwrap();
         server.stream_named(iqstream::StreamConfig {

@@ -31,14 +31,14 @@ use crate::proto::{
     VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_probe, encode_preamble, encode_punch,
     msg, now_ns, read_streams, tag, unpack,
 };
+use crate::ws;
 use common::{Error, Result};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpStream, ToSocketAddrs, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 fn other(e: impl std::fmt::Display) -> Error {
@@ -177,7 +177,7 @@ pub struct IqStream {
     /// and what stops it.
     heard: bool,
     punching: tokio::time::Interval,
-    control: OwnedWriteHalf,
+    control: ws::Write,
     frames: mpsc::Receiver<Frame>,
     /// Blocks carried on the control connection, for a subscription that gave
     /// up on datagrams.
@@ -200,13 +200,14 @@ pub struct IqStream {
 
 /// What a server said when it was greeted, before anything subscribed.
 struct Greeting {
-    read_half: OwnedReadHalf,
-    write_half: OwnedWriteHalf,
+    read_half: ws::Read,
+    write_half: ws::Write,
     welcome: Frame,
     streams: Vec<StreamDesc>,
     /// Where to punch, and the sign that this server knows how to be: a
     /// server that named no data port is a 1.3 one, and is told a port.
     punch_to: Option<SocketAddr>,
+    over_ws: bool,
 }
 
 /// A token no other subscription on this server will be using.
@@ -229,11 +230,21 @@ fn token() -> u64 {
 /// A 1.1 server lists no tuners and describes its one stream in the flat
 /// tags, so one is made out of those: everything above here then reads a set
 /// of tuners whatever the far end's version.
-async fn greet<A: ToSocketAddrs + std::fmt::Debug>(server: A, name: &str) -> Result<Greeting> {
-    let control = TcpStream::connect(&server).await.map_err(other)?;
-    control.set_nodelay(true).map_err(other)?;
-    let peer = control.peer_addr().map_err(other)?;
-    let (mut read_half, mut write_half) = control.into_split();
+async fn greet(server: &str, name: &str) -> Result<Greeting> {
+    let over_ws = ws::is_url(server);
+    let (mut read_half, mut write_half, peer) = match over_ws {
+        true => {
+            let (r, w) = ws::connect(server).await?;
+            (r, w, None)
+        }
+        false => {
+            let control = TcpStream::connect(server).await.map_err(other)?;
+            control.set_nodelay(true).map_err(other)?;
+            let peer = control.peer_addr().map_err(other)?;
+            let (r, w) = control.into_split();
+            (Box::new(r) as ws::Read, Box::new(w) as ws::Write, Some(peer))
+        }
+    };
 
     write_half.write_all(&encode_preamble()).await.map_err(other)?;
     let mut preamble = [0u8; PREAMBLE_LEN];
@@ -268,13 +279,12 @@ async fn greet<A: ToSocketAddrs + std::fmt::Debug>(server: A, name: &str) -> Res
             settings: Vec::new(),
         });
     }
-    let punch_to = w.u16(tag::DATA_PORT).map(|port| {
-        let mut to = peer;
+    let punch_to = peer.zip(w.u16(tag::DATA_PORT)).map(|(mut to, port)| {
         to.set_port(port);
         to
     });
     drop(w);
-    Ok(Greeting { read_half, write_half, welcome, streams, punch_to })
+    Ok(Greeting { read_half, write_half, welcome, streams, punch_to, over_ws })
 }
 
 /// One subscribe, which says the same things whichever transport it asks for.
@@ -306,8 +316,8 @@ fn subscribe_frame(
 ///
 /// What builds a radio list: a server with three dongles on it is three
 /// entries, and each says where it is and how far its dial goes.
-pub async fn set<A: ToSocketAddrs + std::fmt::Debug>(
-    server: A,
+pub async fn set(
+    server: &str,
     name: &str,
     stream: u16,
     setting: &str,
@@ -325,19 +335,16 @@ pub async fn set<A: ToSocketAddrs + std::fmt::Debug>(
     Ok(())
 }
 
-pub async fn list<A: ToSocketAddrs + std::fmt::Debug>(
-    server: A,
-    name: &str,
-) -> Result<Vec<StreamDesc>> {
+pub async fn list(server: &str, name: &str) -> Result<Vec<StreamDesc>> {
     Ok(greet(server, name).await?.streams)
 }
 
 impl IqStream {
-    pub async fn connect<A: ToSocketAddrs + std::fmt::Debug>(
-        server: A,
-        config: ClientConfig,
-    ) -> Result<Self> {
+    pub async fn connect(server: &str, mut config: ClientConfig) -> Result<Self> {
         let bit_depth = BitDepth::new(config.bits)?;
+        if ws::is_url(server) {
+            config.transport = Prefer::Tcp;
+        }
 
         // A port that will not bind is a machine that is not going to carry
         // datagrams, so it is the same answer as a path that drops them: ask
@@ -347,7 +354,7 @@ impl IqStream {
             _ => UdpSocket::bind(("0.0.0.0", config.local_port)).await.ok(),
         };
 
-        let Greeting { mut read_half, mut write_half, welcome, streams, punch_to } =
+        let Greeting { mut read_half, mut write_half, welcome, streams, punch_to, over_ws } =
             greet(server, &config.name).await?;
         let w = welcome.tlvs()?;
         if let Some(depths) = w.get(tag::SUPPORTED_BIT_DEPTHS)
@@ -383,7 +390,7 @@ impl IqStream {
             (Some(udp), None) => Some(udp.local_addr().map_err(other)?.port()),
             _ => None,
         };
-        if transport == Transport::Tcp && punch_to.is_none() {
+        if transport == Transport::Tcp && punch_to.is_none() && !over_ws {
             return Err(Error::other("this server cannot carry samples on the control connection"));
         }
         let sub = subscribe_frame(&config, bit_depth, wanted.id, transport, token, local_port);
@@ -883,7 +890,7 @@ enum Inbound {
 
 /// One frame or one inline record, told apart by the first four bytes: a
 /// frame opens with a protocol version, which the magic cannot be.
-async fn read_inbound(sock: &mut OwnedReadHalf) -> Result<Option<Inbound>> {
+async fn read_inbound(sock: &mut ws::Read) -> Result<Option<Inbound>> {
     let mut head = [0u8; 4];
     match sock.read_exact(&mut head).await {
         Ok(_) => {}
@@ -910,7 +917,7 @@ async fn read_inbound(sock: &mut OwnedReadHalf) -> Result<Option<Inbound>> {
     Ok(Some(Inbound::Control(Frame { version: head[0], msg_type: head[1], payload })))
 }
 
-pub async fn read_frame(sock: &mut OwnedReadHalf) -> Result<Option<Frame>> {
+pub async fn read_frame(sock: &mut ws::Read) -> Result<Option<Frame>> {
     match read_inbound(sock).await? {
         Some(Inbound::Control(frame)) => Ok(Some(frame)),
         Some(Inbound::Data(_)) => Err(Error::other("samples before a subscription")),

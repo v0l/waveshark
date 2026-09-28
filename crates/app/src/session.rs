@@ -383,6 +383,8 @@ pub struct Session {
     pub iqstream_antenna: String,
     pub iqstream_public_host: String,
     pub iqstream_locate: Option<sdr_directory::Accuracy>,
+    pub airspy_listed: bool,
+    pub airspy_email: String,
     /// Whether the map may ask beaconDB where a decoded cell is. Apart from
     /// the feed: asking tells beaconDB which cells this receiver heard, and
     /// giving is not the same decision as asking.
@@ -539,6 +541,8 @@ impl Default for Session {
             iqstream_antenna: String::new(),
             iqstream_public_host: String::new(),
             iqstream_locate: None,
+            airspy_listed: false,
+            airspy_email: String::new(),
             beacondb_lookup: false,
             view: ViewPrefs::default(),
             feeds: Vec::new(),
@@ -718,14 +722,10 @@ impl Session {
             .flatten()
     }
 
-    pub fn iqstream_listing(&self) -> Option<crate::iqstream_listing::Listing> {
-        if !self.iqstream_listed {
-            return None;
-        }
-        nostr_directory::identity(&self.iqstream_nsec)?;
+    fn station_offer<C>(&self, directory: C) -> sdr_directory::lister::Offer<C> {
         let name = self.iqstream_name.trim();
         let host = self.iqstream_public_host.trim();
-        Some(crate::iqstream_listing::Listing {
+        sdr_directory::lister::Offer {
             name: if name.is_empty() { "waveshark" } else { name }.to_string(),
             description: self.iqstream_description.trim().to_string(),
             antenna: self.iqstream_antenna.trim().to_string(),
@@ -734,11 +734,32 @@ impl Session {
                 .zip(self.iqstream_locate)
                 .map(|((lat, lon), within)| sdr_directory::Location::within(lat, lon, within)),
             public_host: (!host.is_empty()).then(|| host.to_string()),
-            directory: nostr_directory::Config::publisher(
-                &self.iqstream_nsec,
-                &nostr_directory::RELAYS,
-            ),
-        })
+            directory,
+        }
+    }
+
+    pub fn iqstream_listing(&self) -> Option<crate::iqstream_listing::Listing> {
+        if !self.iqstream_listed {
+            return None;
+        }
+        nostr_directory::identity(&self.iqstream_nsec)?;
+        Some(self.station_offer(nostr_directory::Config::publisher(
+            &self.iqstream_nsec,
+            &nostr_directory::RELAYS,
+        )))
+    }
+
+    pub fn airspy_offer(
+        &self,
+    ) -> Option<(std::net::SocketAddr, crate::iqstream_listing::AirspyListing)> {
+        if !self.airspy_listed {
+            return None;
+        }
+        let directory = sdr_directory::airspy::Config {
+            owner_email: self.airspy_email.trim().to_string(),
+            ..Default::default()
+        };
+        Some((self.iqstream()?.0, self.station_offer(directory)))
     }
 
     pub fn iqstream_offer(
@@ -1009,6 +1030,8 @@ impl Session {
                 "true" => Some(sdr_directory::Accuracy::Town),
                 v => v.parse().ok(),
             }),
+            airspy_listed: kv.get("airspy_listed").map(|v| *v == "true").unwrap_or(false),
+            airspy_email: kv.get("airspy_email").map(|v| v.to_string()).unwrap_or_default(),
             beacondb_lookup: kv.get("beacondb_lookup").map(|v| *v == "true").unwrap_or(false),
             view: ViewPrefs {
                 rows_per_sec: f("rows_per_sec", d.view.rows_per_sec as f64).clamp(1.0, 200.0)
@@ -1092,6 +1115,7 @@ impl Session {
             ("iqstream_description", &self.iqstream_description),
             ("iqstream_antenna", &self.iqstream_antenna),
             ("iqstream_public_host", &self.iqstream_public_host),
+            ("airspy_email", &self.airspy_email),
         ] {
             if !v.is_empty() {
                 s.push_str(&format!("{k} = {v}\n"));
@@ -1171,6 +1195,9 @@ impl Session {
         }
         if self.iqstream_tunable {
             s.push_str("iqstream_tunable = true\n");
+        }
+        if self.airspy_listed {
+            s.push_str("airspy_listed = true\n");
         }
         if self.iqstream_listed {
             s.push_str("iqstream_listed = true\n");
@@ -1381,6 +1408,8 @@ mod tests {
             iqstream_antenna: "Discone".into(),
             iqstream_public_host: "sdr.example.net".into(),
             iqstream_locate: Some(sdr_directory::Accuracy::District),
+            airspy_listed: true,
+            airspy_email: "g0abc@example.org".into(),
             log_cap_mb: None,
             capture_cap_mb: Some(16_384),
             heat_on: false,
@@ -1441,7 +1470,7 @@ mod tests {
         );
         assert_eq!(
             Session::parse("iqstream_on = true\niqstream_tunable = true").iqstream(),
-            Some(("0.0.0.0:1234".parse().unwrap(), true))
+            Some(("0.0.0.0:5555".parse().unwrap(), true))
         );
     }
 

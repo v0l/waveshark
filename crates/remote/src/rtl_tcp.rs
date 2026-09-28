@@ -10,6 +10,8 @@
 //! settings rather than readings, and the server turns away a second client
 //! for as long as this one holds the socket.
 
+pub mod serve;
+
 use crate::gaps::Gaps;
 use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};
 use common::device::{

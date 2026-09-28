@@ -1523,11 +1523,13 @@ impl App {
     fn iqstream_section(&mut self, ui: &mut egui::Ui) {
         let addr = self.setting(|s| s.iqstream_address());
         let server = addr.clone().ok().and_then(nodes::iqstream_nodes::running);
-        section(ui, "iq server", "the span to another receiver, over IQStream", |ui| {
+        section(ui, "iq server", "the span over IQStream, SpyServer and rtl_tcp", |ui| {
             let mut on = self.setting(|s| s.iqstream_on);
-            let help = "Serves the samples this receiver is reading to anything speaking \
-                        IQStream, which is how another WaveShark adds this radio as a \
-                        remote tuner. The whole span goes out, so it costs bandwidth.";
+            let help = "Serves the samples this receiver is reading on one port, in \
+                        whichever protocol the client speaks: IQStream for another \
+                        WaveShark, SpyServer for SDR# and SDR++, rtl_tcp for anything \
+                        that reads a dongle over the network. SpyServer and rtl_tcp \
+                        clients may tune anywhere inside the span.";
             if switch(ui, "serve", &mut on, "the span from this machine", help) {
                 self.settings.edit(|s| s.iqstream_on = on);
             }
@@ -1537,7 +1539,7 @@ impl App {
                 "A port, or host:port. A port alone is every interface.",
                 |ui| {
                     let mut text = self.setting(|s| s.iqstream_addr.clone());
-                    if field(ui, &mut text, "1234, or 0.0.0.0:1234").changed() {
+                    if field(ui, &mut text, "5555, or 0.0.0.0:5555").changed() {
                         self.settings.edit(|s| s.iqstream_addr = text.clone());
                     }
                 },
@@ -1571,6 +1573,45 @@ impl App {
         });
         ui.add_space(8.0);
         self.directory_section(ui);
+        ui.add_space(8.0);
+        self.airspy_section(ui);
+    }
+
+    fn airspy_section(&mut self, ui: &mut egui::Ui) {
+        let serving = self.setting(|s| s.iqstream());
+        let listed = serving.and_then(|(addr, _)| crate::iqstream_listing::airspy_state(addr));
+        section(ui, "airspy", "this server in the SpyServer directory", |ui| {
+            let mut on = self.setting(|s| s.airspy_listed);
+            let help = "Lists this server on airspy.com/directory, where SDR# and SDR++ \
+                        users find SpyServers, with the name, description, antenna and \
+                        location from the directory card. Refreshed every 15 seconds.";
+            if switch(ui, "list", &mut on, "this server in the Airspy directory", help) {
+                self.settings.edit(|s| s.airspy_listed = on);
+            }
+            self.text_setting(
+                ui,
+                "email",
+                "Shown against the station in the directory. Blank lists none.",
+                "blank for none",
+                |s| &s.airspy_email,
+                |s| &mut s.airspy_email,
+            );
+            match (on, serving, listed) {
+                (false, ..) => panel::status(ui, false, "off: not in the Airspy directory"),
+                (true, None, _) => {
+                    panel::status(ui, false, "the server is off, so there is nothing to list")
+                }
+                (true, Some(_), None) => panel::status(ui, true, "starting"),
+                (true, Some(_), Some(state)) => {
+                    let fine = !matches!(
+                        state,
+                        crate::iqstream_listing::ListingState::Unreachable(_)
+                            | crate::iqstream_listing::ListingState::Refused(_)
+                    );
+                    panel::status(ui, fine, &state.describe())
+                }
+            }
+        });
     }
 
     fn text_setting(

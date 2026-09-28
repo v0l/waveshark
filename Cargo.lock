@@ -2866,7 +2866,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3094,8 +3094,13 @@ name = "iqstream"
 version = "0.4.0"
 dependencies = [
  "common",
+ "futures-util",
+ "rustls",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
+ "tungstenite",
+ "webpki-roots 1.0.9",
  "zstd",
 ]
 
@@ -3609,6 +3614,7 @@ dependencies = [
  "pipeline",
  "poll-promise",
  "rayon",
+ "remote",
  "rumqttc",
  "rustfft",
  "serde_json",
@@ -3651,7 +3657,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "tungstenite",
- "webpki-roots",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -4816,10 +4822,12 @@ version = "0.4.0"
 dependencies = [
  "common",
  "crossbeam-channel",
+ "dsp",
  "httpc",
  "iqstream",
  "nusb",
  "quick-xml",
+ "sdr-directory",
  "tokio",
  "tracing",
  "tungstenite",
@@ -4869,7 +4877,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -5199,9 +5207,11 @@ dependencies = [
 name = "sdr-directory"
 version = "0.4.0"
 dependencies = [
+ "common",
  "getrandom 0.4.3",
  "httpc",
  "iqstream",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -5990,6 +6000,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6212,6 +6238,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.10.2",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.20",
 ]
@@ -6668,6 +6696,15 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "url",
  "web-sys",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

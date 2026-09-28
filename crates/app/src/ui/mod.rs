@@ -961,6 +961,9 @@ impl App {
         if all || offered(&now) != offered(before) {
             crate::iqstream_listing::follow(offered(before), offered(&now));
         }
+        if all || now.airspy_offer() != before.airspy_offer() {
+            crate::iqstream_listing::follow_airspy(before.airspy_offer(), now.airspy_offer());
+        }
         if all || (now.survey_on, &now.survey_path) != (before.survey_on, &before.survey_path) {
             // The pane reads the survey through a connection of its own,
             // which does not exist until the radio thread has made the file.
@@ -4024,7 +4027,7 @@ mod tests {
         assert_eq!(
             served(settings_cmds(&now, Some(&was))),
             [Some(crate::chain::IqStreamPlan {
-                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
+                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 5555)),
                 tunable: false,
             })],
             "a port with no host is every interface, and nobody may retune it"
@@ -4035,7 +4038,7 @@ mod tests {
         assert_eq!(
             served(settings_cmds(&tunable, Some(&now))),
             [Some(crate::chain::IqStreamPlan {
-                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 1234)),
+                addr: std::net::SocketAddr::from(([0, 0, 0, 0], 5555)),
                 tunable: true,
             })]
         );

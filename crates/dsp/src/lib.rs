@@ -26,6 +26,7 @@ pub mod d8psk;
 pub mod dab;
 pub mod dc;
 pub mod dcs;
+pub mod ddc;
 pub mod demod;
 pub mod denoise;
 pub mod detect;

@@ -9,6 +9,11 @@ common.workspace = true
 tracing.workspace = true
 zstd = "0.13"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

@@ -10,6 +10,8 @@
 //! accepts a retune, and the name of the program that serves it, which is
 //! what an operator has to install at the far end.
 
+mod cut;
+pub mod door;
 pub mod gaps;
 pub mod iiod;
 pub mod iqstream;
@@ -146,7 +148,7 @@ impl Proto {
 
     pub fn placeholder(self) -> &'static str {
         match self {
-            Self::IqStream => "host, or host:port (1234)",
+            Self::IqStream => "host, host:port (1234), or a ws:// or wss:// address",
             Self::RtlTcp => "host, or host:port (1234)",
             Self::SpyServer => "host, or host:port (5555)",
             Self::KiwiSdr => "host, host:port (8073), or its http:// address",
@@ -232,6 +234,15 @@ pub fn parse_addr(s: &str, port: u16) -> std::result::Result<String, AddrError> 
     if let (head, Some(id)) = split_stream(s) {
         return parse_addr(head, port).map(|a| format!("{a}#{id}"));
     }
+    if ::iqstream::ws::is_url(s) {
+        let (_, rest) = s.split_once("://").unwrap_or_default();
+        let host = rest.split(['/', '?']).next().unwrap_or_default();
+        return match host.is_empty() {
+            true => Err(AddrError::NoHost),
+            false if s.contains(char::is_whitespace) => Err(AddrError::Space),
+            false => Ok(s.to_string()),
+        };
+    }
     HostPort::parse(s, port).map(|h| h.to_string())
 }
 
@@ -240,6 +251,9 @@ pub fn parse_addr(s: &str, port: u16) -> std::result::Result<String, AddrError> 
 /// The scheme is how one string off the command line or out of a paste says
 /// which server is listening, since the port cannot.
 pub fn parse_spec(s: &str) -> Option<(Proto, String)> {
+    if ::iqstream::ws::is_url(s) {
+        return Some((Proto::IqStream, Proto::IqStream.parse_addr(s).ok()?));
+    }
     let (proto, rest) = match s.split_once("://") {
         Some((scheme, rest)) => (Proto::parse(scheme)?, rest),
         None => (Proto::IqStream, s),
@@ -279,14 +293,13 @@ pub struct Probe {
 
 /// Ask every protocol in turn which one is listening.
 ///
-/// rtl_tcp goes first because it greets an unopened connection with four
-/// magic bytes, so recognising it costs one read and mistaking anything else
-/// for it is not possible. iqstream and spyserver are asked after it and only
-/// then, because each has a handshake that has to be spoken before the server
-/// says anything at all.
+/// iqstream goes first because a WaveShark answers every protocol on one
+/// port, and one that waited for silence would be taken for rtl_tcp. An
+/// rtl_tcp server answers the iqstream preamble with its own four magic
+/// bytes, so asking it first costs one read.
 pub fn identify(addr: &str) -> Result<Probe> {
     let mut last = None;
-    for p in [Proto::RtlTcp, Proto::IqStream, Proto::SpyServer, Proto::KiwiSdr, Proto::Pluto] {
+    for p in [Proto::IqStream, Proto::RtlTcp, Proto::SpyServer, Proto::KiwiSdr, Proto::Pluto] {
         match p.probe(addr) {
             Ok(found) => return Ok(found),
             Err(e) => last = Some(e),
@@ -341,6 +354,12 @@ mod tests {
         );
         assert_eq!(parse_spec("sdruno://radarpi"), None);
         assert_eq!(
+            parse_spec("wss://sdr.example.org/iq#1"),
+            Some((Proto::IqStream, "wss://sdr.example.org/iq#1".to_string())),
+            "a websocket is iqstream, and keeps its path"
+        );
+        assert_eq!(parse_spec("ws://"), None);
+        assert_eq!(
             parse_spec("pluto://192.168.2.1"),
             Some((Proto::Pluto, "192.168.2.1:30431".to_string()))
         );
@@ -371,13 +390,14 @@ mod tests {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
         std::thread::spawn(move || {
-            let (mut sock, _) = l.accept().unwrap();
-            let mut hello = [0u8; 12];
-            hello[..4].copy_from_slice(b"RTL0");
-            hello[7] = 5;
-            hello[11] = 29;
-            let _ = sock.write_all(&hello);
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            for mut sock in l.incoming().take(2).flatten() {
+                let mut hello = [0u8; 12];
+                hello[..4].copy_from_slice(b"RTL0");
+                hello[7] = 5;
+                hello[11] = 29;
+                let _ = sock.write_all(&hello);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         });
         let p = identify(&addr).unwrap();
         assert_eq!(p.proto, Proto::RtlTcp);

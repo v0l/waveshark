@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 common.workspace = true
+dsp.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
 nusb.workspace = true
@@ -14,3 +15,7 @@ iqstream.workspace = true
 tokio = { version = "1", features = ["rt", "net", "time"] }
 httpc.workspace = true
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+[dev-dependencies]
+dsp.workspace = true
+sdr-directory.workspace = true

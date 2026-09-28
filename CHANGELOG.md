@@ -37,6 +37,9 @@ the code is in the commit log.
 - TUNERS map layer of public IQStream servers, SpyServers and KiwiSDRs, each opened with CONNECT.
 - Mouse wheel on faders and squelch thresholds.
 - Cell tower map marking the cells this receiver decoded in cyan.
+- SpyServer and rtl_tcp clients on the IQ server's port, each tuning anywhere inside the span.
+- Airspy SpyServer directory listing of the IQ server, with its owner email.
+- IQStream over WebSocket: `ws://` and `wss://` remote tuners, and served on the IQ server's port.
 
 ### Changed
 
@@ -65,6 +68,7 @@ the code is in the commit log.
 - beaconDB estimates on the cell map for decoded LTE cells as well as GSM.
 - TETRA neighbour cells listed with their carrier frequencies.
 - LTE cells sent to beaconDB and WiGLE alongside GSM cells and Bluetooth devices.
+- IQ server default port 5555, SpyServer's, in place of 1234.
 
 ### Fixed
 

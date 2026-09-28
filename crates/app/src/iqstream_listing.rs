@@ -1,4 +1,6 @@
 use nostr_directory::{Config, NostrDirectory};
+use sdr_directory::SdrDirectory;
+use sdr_directory::airspy::{self, AirspyDirectory};
 pub use sdr_directory::lister::ListingState;
 use sdr_directory::lister::{Lister, Offer};
 use std::collections::HashMap;
@@ -7,62 +9,107 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 pub type Listing = Offer<Config>;
+pub type AirspyListing = Offer<airspy::Config>;
 
-type Listers = HashMap<SocketAddr, Lister<NostrDirectory>>;
+struct Table<D: SdrDirectory>(Mutex<HashMap<SocketAddr, Lister<D>>>);
 
-fn listers() -> &'static Mutex<Listers> {
-    static LISTERS: OnceLock<Mutex<Listers>> = OnceLock::new();
-    LISTERS.get_or_init(Default::default)
+impl<D: SdrDirectory + 'static> Table<D> {
+    fn new() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
+
+    fn list(&self, addr: SocketAddr, listing: Option<Offer<D::Config>>) {
+        let Ok(mut table) = self.0.lock() else { return };
+        match (table.get(&addr), listing) {
+            (Some(l), Some(listing)) => l.update(listing),
+            (Some(_), None) => {
+                if let Some(l) = table.remove(&addr) {
+                    l.stop();
+                }
+            }
+            (None, Some(listing)) => {
+                match Lister::start(move || nodes::iqstream_nodes::running(addr), listing) {
+                    Ok(l) => {
+                        table.insert(addr, l);
+                    }
+                    Err(e) => tracing::warn!("listing: {e}"),
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    fn follow(
+        &self,
+        was: Option<(SocketAddr, Offer<D::Config>)>,
+        now: Option<(SocketAddr, Offer<D::Config>)>,
+    ) {
+        if let Some((at, _)) = &was
+            && now.as_ref().is_none_or(|(addr, _)| addr != at)
+        {
+            self.list(*at, None);
+        }
+        if let Some((addr, listing)) = now {
+            self.list(addr, Some(listing));
+        }
+    }
+
+    fn drain(&self) -> Vec<Lister<D>> {
+        match self.0.lock() {
+            Ok(mut table) => table.drain().map(|(_, l)| l).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn state(&self, addr: SocketAddr) -> Option<ListingState> {
+        self.0.lock().ok()?.get(&addr).map(Lister::state)
+    }
 }
 
+fn nostr() -> &'static Table<NostrDirectory> {
+    static TABLE: OnceLock<Table<NostrDirectory>> = OnceLock::new();
+    TABLE.get_or_init(Table::new)
+}
+
+fn airspy() -> &'static Table<AirspyDirectory> {
+    static TABLE: OnceLock<Table<AirspyDirectory>> = OnceLock::new();
+    TABLE.get_or_init(Table::new)
+}
+
+#[cfg(test)]
 pub fn list(addr: SocketAddr, listing: Option<Listing>) {
     nodes::iqstream_nodes::describe_listing_with(|addr| state(addr).map(|s| s.describe()));
-    let Ok(mut table) = listers().lock() else { return };
-    match (table.get(&addr), listing) {
-        (Some(l), Some(listing)) => l.update(listing),
-        (Some(_), None) => {
-            if let Some(l) = table.remove(&addr) {
-                l.stop();
-            }
-        }
-        (None, Some(listing)) => {
-            match Lister::start(move || nodes::iqstream_nodes::running(addr), listing) {
-                Ok(l) => {
-                    table.insert(addr, l);
-                }
-                Err(e) => tracing::warn!("iqstream listing: {e}"),
-            }
-        }
-        (None, None) => {}
-    }
+    nostr().list(addr, listing);
 }
 
 pub fn follow(was: Option<(SocketAddr, Listing)>, now: Option<(SocketAddr, Listing)>) {
-    if let Some((at, _)) = &was
-        && now.as_ref().is_none_or(|(addr, _)| addr != at)
-    {
-        list(*at, None);
-    }
-    if let Some((addr, listing)) = now {
-        list(addr, Some(listing));
-    }
+    nodes::iqstream_nodes::describe_listing_with(|addr| state(addr).map(|s| s.describe()));
+    nostr().follow(was, now);
+}
+
+pub fn follow_airspy(
+    was: Option<(SocketAddr, AirspyListing)>,
+    now: Option<(SocketAddr, AirspyListing)>,
+) {
+    airspy().follow(was, now);
 }
 
 pub fn withdraw_all(within: Duration) {
-    let all: Vec<Lister<NostrDirectory>> = match listers().lock() {
-        Ok(mut table) => table.drain().map(|(_, l)| l).collect(),
-        Err(_) => return,
-    };
-    sdr_directory::lister::withdraw_all(all, within);
+    sdr_directory::lister::withdraw_all(airspy().drain(), Duration::ZERO);
+    sdr_directory::lister::withdraw_all(nostr().drain(), within);
 }
 
 pub fn state(addr: SocketAddr) -> Option<ListingState> {
-    listers().lock().ok()?.get(&addr).map(Lister::state)
+    nostr().state(addr)
+}
+
+pub fn airspy_state(addr: SocketAddr) -> Option<ListingState> {
+    airspy().state(addr)
 }
 
 #[cfg(test)]
 pub fn offered(addr: SocketAddr) -> Option<Listing> {
-    listers().lock().ok()?.get(&addr)?.offer()
+    nostr().0.lock().ok()?.get(&addr)?.offer()
 }
 
 #[cfg(test)]

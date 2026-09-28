@@ -1208,8 +1208,9 @@ struct Args {
     #[arg(long, value_name = "ADDR", default_value = "8931")]
     mcp_listen: Listen,
 
-    /// Serve the span over iqstream, so another machine can read the same
-    /// samples: a port, or host:port. Every interface unless a host is given.
+    /// Serve the span over IQStream, SpyServer and rtl_tcp on one port, so
+    /// another machine can read the same samples: a port, or host:port.
+    /// Every interface unless a host is given.
     /// Add `,tune` to let a subscriber move this receiver's dial, which moves
     /// it on this screen too
     #[arg(long, value_name = "ADDR", default_value = "off")]

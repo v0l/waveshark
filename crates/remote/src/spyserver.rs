@@ -1,3 +1,5 @@
+pub mod serve;
+
 use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};
 use common::device::{
     Device as DeviceTrait, DeviceInfo, DriverKind, GainMode, Number, RxStream, TunerRange,
@@ -32,6 +34,7 @@ const GAIN: &str = "gain";
 enum Cmd {
     Hello = 0,
     SetSetting = 2,
+    Ping = 3,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +47,34 @@ enum Set {
     IqFrequency = 101,
     IqDecimation = 102,
     IqDigitalGain = 103,
+    FftFormat = 200,
+    FftFrequency = 201,
+    FftDecimation = 202,
+    FftDbOffset = 203,
+    FftDbRange = 204,
+    FftDisplayPixels = 205,
+}
+
+impl Set {
+    fn from_code(code: u32) -> Option<Self> {
+        [
+            Self::StreamingMode,
+            Self::StreamingEnabled,
+            Self::Gain,
+            Self::IqFormat,
+            Self::IqFrequency,
+            Self::IqDecimation,
+            Self::IqDigitalGain,
+            Self::FftFormat,
+            Self::FftFrequency,
+            Self::FftDecimation,
+            Self::FftDbOffset,
+            Self::FftDbRange,
+            Self::FftDisplayPixels,
+        ]
+        .into_iter()
+        .find(|s| *s as u32 == code)
+    }
 }
 
 const STREAM_MODE_IQ: u32 = 1;
@@ -64,6 +95,16 @@ impl DeviceType {
         match self {
             Self::AirspyOne | Self::AirspyHf => false,
             Self::RtlSdr | Self::Invalid | Self::Other(_) => true,
+        }
+    }
+
+    fn code(self) -> u32 {
+        match self {
+            Self::Invalid => 0,
+            Self::AirspyOne => 1,
+            Self::AirspyHf => 2,
+            Self::RtlSdr => 3,
+            Self::Other(c) => c,
         }
     }
 
@@ -143,11 +184,13 @@ pub struct Info {
     pub max_rate: u32,
     pub max_bandwidth: u32,
     pub decimation_stages: u32,
+    pub gain_stages: u32,
     pub max_gain_index: u32,
     pub min_hz: u32,
     pub max_hz: u32,
     pub resolution: u32,
     pub min_decimation: u32,
+    pub forced_format: u32,
 }
 
 impl Info {
@@ -162,12 +205,34 @@ impl Info {
             max_rate: word(2),
             max_bandwidth: word(3),
             decimation_stages: word(4),
+            gain_stages: word(5),
             max_gain_index: word(6),
             min_hz: word(7),
             max_hz: word(8),
             resolution: word(9),
             min_decimation: word(10),
+            forced_format: word(11),
         })
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        [
+            self.device.code(),
+            self.serial,
+            self.max_rate,
+            self.max_bandwidth,
+            self.decimation_stages,
+            self.gain_stages,
+            self.max_gain_index,
+            self.min_hz,
+            self.max_hz,
+            self.resolution,
+            self.min_decimation,
+            self.forced_format,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect()
     }
 
     pub fn rates(&self) -> Vec<Sps> {
@@ -204,8 +269,11 @@ pub struct Sync {
     pub gain: u32,
     pub device_center: u32,
     pub iq_center: u32,
+    pub fft_center: u32,
     pub min_iq_center: u32,
     pub max_iq_center: u32,
+    pub min_fft_center: u32,
+    pub max_fft_center: u32,
 }
 
 impl Sync {
@@ -219,9 +287,29 @@ impl Sync {
             gain: word(1),
             device_center: word(2),
             iq_center: word(3),
+            fft_center: word(4),
             min_iq_center: word(5),
             max_iq_center: word(6),
+            min_fft_center: word(7),
+            max_fft_center: word(8),
         })
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        [
+            self.can_control as u32,
+            self.gain,
+            self.device_center,
+            self.iq_center,
+            self.fft_center,
+            self.min_iq_center,
+            self.max_iq_center,
+            self.min_fft_center,
+            self.max_fft_center,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect()
     }
 }
 

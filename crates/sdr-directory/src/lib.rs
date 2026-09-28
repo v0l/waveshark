@@ -1,3 +1,4 @@
+pub mod airspy;
 pub mod lister;
 pub mod model;
 pub mod portmap;
@@ -18,6 +19,9 @@ pub trait SdrDirectory: Sized + Send {
     fn open(config: &Self::Config, wait: Duration) -> Result<Self, Error>;
     fn author(&self) -> Option<Author>;
     fn announce(&self, entry: &Entry) -> Result<Published, Error>;
+    fn every(&self) -> Duration {
+        Duration::from_secs(ANNOUNCE_EVERY_SECS)
+    }
     fn withdraw(&self) -> Result<Published, Error>;
     fn list(&self, wait: Duration) -> Result<Vec<Listing>, Error>;
     fn list_near(&self, geohash: &str, wait: Duration) -> Result<Vec<Listing>, Error>;

@@ -96,6 +96,49 @@ async fn eight_bit_samples_arrive_byte_for_byte() {
     assert_eq!(only(&srv).subscribers(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_websocket_carries_the_samples_on_the_control_connection_byte_for_byte() {
+    let srv = server(false);
+    let url = format!("ws://{}/iq", srv.addr());
+    let mut stream = IqStream::connect(
+        url.as_str(),
+        ClientConfig { name: "test".into(), bits: 8, codec: Codec::Zstd, ..Default::default() },
+    )
+    .await
+    .unwrap();
+    assert_eq!(stream.transport(), iqstream::Transport::Tcp);
+    assert_eq!(stream.info().center_hz, 1_090_000_000);
+    let block = ramp(4096);
+    let got = collect(&mut stream, &only(&srv), &block, 3).await;
+    assert_eq!(got.len(), 3);
+    for b in &got {
+        assert_eq!(b.samples, block, "a byte changed in flight");
+        assert_eq!(b.padded_before, 0);
+    }
+    assert_eq!(got[2].sample_index, 8192);
+    assert_eq!(iqstream::list(url.as_str(), "test").await.unwrap().len(), 1);
+}
+
+#[test]
+fn a_browser_gets_its_subprotocol_back_and_one_frame_per_message() {
+    use tungstenite::client::IntoClientRequest;
+    let srv = server(false);
+    let mut req = format!("ws://{}/", srv.addr()).into_client_request().unwrap();
+    req.headers_mut().insert("sec-websocket-protocol", "iqstream".parse().unwrap());
+    let (mut ws, resp) = tungstenite::connect(req).unwrap();
+    assert_eq!(resp.headers()["sec-websocket-protocol"], "iqstream");
+    ws.send(tungstenite::Message::binary(iqstream::proto::encode_preamble().to_vec())).unwrap();
+    let mut hello = iqstream::proto::Tlvs::new();
+    hello.str(iqstream::proto::tag::CLIENT_NAME, "browser");
+    let frame = iqstream::proto::Frame::new(iqstream::proto::msg::HELLO, &hello).encode();
+    ws.send(tungstenite::Message::binary(frame)).unwrap();
+    let preamble = ws.read().unwrap().into_data();
+    assert_eq!(preamble.len(), iqstream::proto::PREAMBLE_LEN);
+    let welcome = ws.read().unwrap().into_data();
+    assert_eq!(welcome[1], iqstream::proto::msg::WELCOME);
+    assert_eq!(welcome.len(), 4 + u16::from_le_bytes([welcome[2], welcome[3]]) as usize);
+}
+
 /// Six bits is lossy by two, and the reconstruction sits at the middle of each
 /// step rather than its floor, so every value is within two of what went in
 /// and the top six bits are exact.
@@ -252,6 +295,7 @@ async fn two_tuners_on_one_port_are_read_apart() {
         ServerConfig {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, false), tuner("loft", 433_920_000, true)],
+            door: None,
         },
     )
     .expect("a free port");
@@ -334,6 +378,7 @@ async fn a_tune_moves_the_dial_it_named_and_no_other() {
         ServerConfig {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, true), tuner("loft", 433_920_000, true)],
+            door: None,
         },
     )
     .expect("a free port");
@@ -486,6 +531,7 @@ async fn a_setting_on_another_tuner_reaches_a_reader_of_the_first() {
         ServerConfig {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, false), tuner("loft", 433_920_000, true)],
+            door: None,
         },
     )
     .expect("a free port");
@@ -676,6 +722,7 @@ async fn a_reader_of_a_tuner_that_is_taken_away_is_ended() {
         ServerConfig {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, false), tuner("loft", 433_920_000, false)],
+            door: None,
         },
     )
     .expect("a free port");

@@ -33,10 +33,11 @@
 //! and only the owner knows that.
 
 use crate::proto::{
-    BitDepth, Codec, DATA_HEADER_LEN, DATAGRAM_OVERHEAD, DataHeader, Frame, MAX_DATAGRAM_PAYLOAD,
-    MAX_FRAME_PAYLOAD, PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD, Setting, SettingValue,
-    StreamDesc, Tlvs, Transport, VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_punch,
-    encode_inline, encode_preamble, encode_probe, error_code, msg, now_ns, pack, put_streams, tag,
+    BitDepth, CONTROL_MAGIC, Codec, DATA_HEADER_LEN, DATAGRAM_OVERHEAD, DataHeader, Frame,
+    MAX_DATAGRAM_PAYLOAD, MAX_FRAME_PAYLOAD, PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD,
+    Setting, SettingValue, StreamDesc, Tlvs, Transport, VERSION_MAJOR, VERSION_MINOR,
+    decode_preamble, decode_punch, encode_inline, encode_preamble, encode_probe, error_code, msg,
+    now_ns, pack, put_streams, tag,
 };
 use common::{Error, Result};
 use std::collections::HashMap;
@@ -95,25 +96,100 @@ pub struct StreamConfig {
 }
 
 /// What the server is, and the tuners it starts with.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Reported to subscribers for logging.
     pub name: String,
     /// Tuners offered from the moment the port opens. More may be added with
     /// [`Server::add_stream`] while it runs.
     pub streams: Vec<StreamConfig>,
+    pub door: Option<Arc<dyn Door>>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("name", &self.name)
+            .field("streams", &self.streams)
+            .field("door", &self.door.is_some())
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        ServerConfig { name: "waveshark".into(), streams: Vec::new() }
+        ServerConfig { name: "waveshark".into(), streams: Vec::new(), door: None }
     }
 }
 
 impl ServerConfig {
     /// One tuner and nothing else, which is what a 1.1 server was.
     pub fn single(name: &str, stream: StreamConfig) -> Self {
-        ServerConfig { name: name.into(), streams: vec![stream] }
+        ServerConfig { name: name.into(), streams: vec![stream], door: None }
+    }
+}
+
+pub const SNIFF_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
+
+pub trait Door: Send + Sync + 'static {
+    fn open(
+        &self,
+        sock: std::net::TcpStream,
+        peer: SocketAddr,
+        first: &[u8],
+        streams: Vec<Arc<Stream>>,
+    );
+}
+
+pub struct Tap {
+    stream: Arc<Stream>,
+    blocks: broadcast::Receiver<Arc<Vec<u8>>>,
+    retunes: broadcast::Receiver<u64>,
+}
+
+pub enum Tapped {
+    Block(Arc<Vec<u8>>),
+    Retuned(u64),
+    Idle,
+    Closed,
+}
+
+impl Tap {
+    pub fn stream(&self) -> &Arc<Stream> {
+        &self.stream
+    }
+
+    pub fn next(&mut self, within: std::time::Duration) -> Tapped {
+        let until = std::time::Instant::now() + within;
+        loop {
+            match self.retunes.try_recv() {
+                Ok(hz) => return Tapped::Retuned(hz),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => {}
+            }
+            match self.blocks.try_recv() {
+                Ok(b) => {
+                    self.stream.blocks_sent.fetch_add(1, Ordering::Relaxed);
+                    return Tapped::Block(b);
+                }
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    self.stream.blocks_dropped.fetch_add(n, Ordering::Relaxed);
+                    continue;
+                }
+                Err(broadcast::error::TryRecvError::Closed) => return Tapped::Closed,
+                Err(broadcast::error::TryRecvError::Empty) => {}
+            }
+            if std::time::Instant::now() >= until {
+                return Tapped::Idle;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        self.stream.subscribers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -336,6 +412,16 @@ impl Stream {
             tune_range_hz: self.tune_range_hz().filter(|_| self.tunable),
             settings,
         }
+    }
+
+    pub fn tap(self: &Arc<Self>) -> Tap {
+        let tap = Tap {
+            stream: self.clone(),
+            blocks: self.blocks.subscribe(),
+            retunes: self.retunes.subscribe(),
+        };
+        self.subscribers.fetch_add(1, Ordering::Relaxed);
+        tap
     }
 
     /// Hand one block of interleaved UC8 to every subscriber of this tuner.
@@ -568,7 +654,7 @@ impl Server {
             punches: Mutex::new(HashMap::new()),
             early: Mutex::new(HashMap::new()),
         });
-        for s in cfg.streams {
+        for s in cfg.streams.clone() {
             add(&inner, s);
         }
 
@@ -580,6 +666,7 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let shared = inner.clone();
+        let door = cfg.door;
         let join = std::thread::Builder::new()
             .name("iqstream-srv".into())
             .spawn(move || {
@@ -591,7 +678,7 @@ impl Server {
                         tokio::spawn(punch_loop(d, shared.clone()));
                     }
                     match TcpListener::from_std(listener) {
-                        Ok(l) => accept_loop(l, shared, data, stopping).await,
+                        Ok(l) => accept_loop(l, shared, data, stopping, door).await,
                         Err(e) => tracing::error!("iqstream: {e}"),
                     }
                 });
@@ -689,6 +776,7 @@ async fn accept_loop(
     shared: Arc<Streams>,
     data: Option<Arc<UdpSocket>>,
     stop: Arc<AtomicBool>,
+    door: Option<Arc<dyn Door>>,
 ) {
     loop {
         let Ok((sock, peer)) = listener.accept().await else {
@@ -699,12 +787,48 @@ async fn accept_loop(
         }
         let shared = shared.clone();
         let data = data.clone();
+        let door = door.clone();
         tokio::spawn(async move {
+            let first = sniff(&sock).await;
+            if first.starts_with(b"GET ") {
+                if let Err(e) = serve_ws(sock, peer, shared).await {
+                    tracing::debug!("iqstream: {peer}: {e}");
+                }
+                return;
+            }
+            if let Some(door) = door
+                && first[..] != CONTROL_MAGIC[..]
+            {
+                match sock.into_std().and_then(|s| s.set_nonblocking(false).map(|_| s)) {
+                    Ok(s) => door.open(s, peer, &first, shared.all()),
+                    Err(e) => tracing::debug!("iqstream: {peer}: {e}"),
+                }
+                return;
+            }
             if let Err(e) = serve(sock, peer, shared, data).await {
                 tracing::debug!("iqstream: {peer}: {e}");
             }
         });
     }
+}
+
+async fn sniff(sock: &TcpStream) -> Vec<u8> {
+    let mut buf = [0u8; CONTROL_MAGIC.len()];
+    let until = tokio::time::Instant::now() + SNIFF_WAIT;
+    let mut seen = 0;
+    loop {
+        match tokio::time::timeout_at(until, sock.peek(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => {
+                seen = n;
+                if n >= buf.len() || tokio::time::Instant::now() >= until {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
+    buf[..seen].to_vec()
 }
 
 /// One subscription on one connection: the task pumping it, the sizes the
@@ -739,8 +863,24 @@ async fn serve(
     data: Option<Arc<UdpSocket>>,
 ) -> Result<()> {
     sock.set_nodelay(true).map_err(other)?;
-    let (mut rd, mut wr) = sock.into_split();
+    let (rd, wr) = sock.into_split();
+    serve_on(Box::new(rd), Box::new(wr), peer, shared, data).await
+}
 
+async fn serve_ws(sock: TcpStream, peer: SocketAddr, shared: Arc<Streams>) -> Result<()> {
+    sock.set_nodelay(true).map_err(other)?;
+    let (rd, wr) = crate::ws::accept(sock).await?;
+    tracing::info!("iqstream: {peer} over a websocket");
+    serve_on(rd, wr, peer, shared, None).await
+}
+
+async fn serve_on(
+    mut rd: crate::ws::Read,
+    mut wr: crate::ws::Write,
+    peer: SocketAddr,
+    shared: Arc<Streams>,
+    data: Option<Arc<UdpSocket>>,
+) -> Result<()> {
     let mut preamble = [0u8; PREAMBLE_LEN];
     rd.read_exact(&mut preamble).await.map_err(other)?;
     let (major, minor) = decode_preamble(&preamble)?;
@@ -809,7 +949,7 @@ async fn serve(
 
 #[allow(clippy::too_many_arguments)]
 async fn converse(
-    rd: &mut tokio::net::tcp::OwnedReadHalf,
+    rd: &mut crate::ws::Read,
     out: &mpsc::Sender<Vec<u8>>,
     inline: &mpsc::Sender<Vec<u8>>,
     shared: &Arc<Streams>,
@@ -1376,7 +1516,7 @@ async fn send_block(
     }
 }
 
-async fn read_frame(sock: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Option<Frame>> {
+async fn read_frame(sock: &mut crate::ws::Read) -> Result<Option<Frame>> {
     let mut head = [0u8; 4];
     match sock.read_exact(&mut head).await {
         Ok(_) => {}

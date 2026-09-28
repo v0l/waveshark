@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 ///
 /// 1234 is what `iqstreamd` and `rtl_tcp` both serve on, so a client pointed
 /// at a bare host finds this without being told a port.
-pub const DEFAULT_PORT: u16 = 1234;
+pub const DEFAULT_PORT: u16 = 5555;
 
 /// Every server started in this process, by the address it was asked for.
 ///
@@ -83,7 +83,11 @@ pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
     {
         return Ok(s.clone());
     }
-    let cfg = iqstream::ServerConfig { name: "waveshark".into(), streams: Vec::new() };
+    let cfg = iqstream::ServerConfig {
+        name: "waveshark".into(),
+        streams: Vec::new(),
+        door: Some(remote::door::Doors::shared()),
+    };
     let s = iqstream::Server::start(addr, cfg)?;
     if addr.port() != 0
         && let Ok(mut map) = servers().lock()
