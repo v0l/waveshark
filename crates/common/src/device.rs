@@ -15,6 +15,7 @@ pub enum DriverKind {
     LimeSdr,
     Airspy,
     AirspyHf,
+    Pluto,
     /// A tuner on another machine, reached over the network.
     Network,
     File,
@@ -31,6 +32,7 @@ impl DriverKind {
             Self::LimeSdr => "limesdr",
             Self::Airspy => "airspy",
             Self::AirspyHf => "airspyhf",
+            Self::Pluto => "pluto",
             Self::Network => "network",
             Self::File => "file",
             Self::Synthetic => "synthetic",
@@ -45,6 +47,7 @@ impl DriverKind {
             | Self::LimeSdr
             | Self::Airspy
             | Self::AirspyHf
+            | Self::Pluto
             | Self::Combined => true,
             Self::Network | Self::File | Self::Synthetic => false,
         }

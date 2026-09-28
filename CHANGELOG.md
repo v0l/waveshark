@@ -28,6 +28,7 @@ the code is in the commit log.
 - Noise blanker on AM, SSB, CW and NFM channels, with its threshold and share cut on the strip.
 - Noise reduction on AM, SSB, CW and NFM channels, switched and set in depth on the strip.
 - Auto notch on AM, USB and LSB channels, a strip switch that removes heterodynes and steady carriers.
+- ADALM-PLUTO receive and full duplex transmit, on USB or over the network, up to 4 MS/s.
 
 ### Changed
 

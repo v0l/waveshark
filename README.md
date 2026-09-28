@@ -42,8 +42,8 @@ speech model transcribes what is said.
 ## Hardware
 
 Any RTL2832U dongle, a HackRF One, an Airspy R2, Mini, HF+ or HF+ Discovery,
-or a LimeSDR USB or Mini, and a tuner on another machine over IQStream,
-rtl_tcp, SpyServer or KiwiSDR with `--stream rtl_tcp://<host>`. Public IQStream and SpyServer tuners are listed in the add
+a LimeSDR USB or Mini, or an ADALM-PLUTO on USB or the network, and a tuner on
+another machine over IQStream, rtl_tcp, SpyServer or KiwiSDR with `--stream rtl_tcp://<host>`. Public IQStream and SpyServer tuners are listed in the add
 dialog's FIND. A €30 RTL-SDR does all of
 the receiving above; a HackRF buys you wider spans and a transmitter, and a
 LimeSDR both of those plus full duplex.

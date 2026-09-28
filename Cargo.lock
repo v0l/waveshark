@@ -4815,6 +4815,8 @@ dependencies = [
  "crossbeam-channel",
  "httpc",
  "iqstream",
+ "nusb",
+ "quick-xml",
  "tokio",
  "tracing",
  "tungstenite",

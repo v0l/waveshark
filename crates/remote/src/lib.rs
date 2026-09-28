@@ -11,8 +11,10 @@
 //! what an operator has to install at the far end.
 
 pub mod gaps;
+pub mod iiod;
 pub mod iqstream;
 pub mod kiwisdr;
+pub mod pluto;
 pub mod rtl_tcp;
 pub mod spyserver;
 
@@ -34,11 +36,12 @@ pub enum Proto {
     RtlTcp,
     SpyServer,
     KiwiSdr,
+    Pluto,
 }
 
 impl Proto {
     pub const ALL: &'static [Proto] =
-        &[Proto::IqStream, Proto::RtlTcp, Proto::SpyServer, Proto::KiwiSdr];
+        &[Proto::IqStream, Proto::RtlTcp, Proto::SpyServer, Proto::KiwiSdr, Proto::Pluto];
 
     /// The name used on the wire-facing side of the receiver: the session
     /// file, the command line and the device id.
@@ -48,6 +51,7 @@ impl Proto {
             Self::RtlTcp => "rtl_tcp",
             Self::SpyServer => "spyserver",
             Self::KiwiSdr => "kiwisdr",
+            Self::Pluto => "pluto",
         }
     }
 
@@ -67,6 +71,7 @@ impl Proto {
             Self::IqStream | Self::RtlTcp => 1234,
             Self::SpyServer => spyserver::DEFAULT_PORT,
             Self::KiwiSdr => kiwisdr::DEFAULT_PORT,
+            Self::Pluto => iiod::DEFAULT_PORT,
         }
     }
 
@@ -79,6 +84,7 @@ impl Proto {
             Self::RtlTcp => true,
             Self::SpyServer => true,
             Self::KiwiSdr => true,
+            Self::Pluto => true,
         }
     }
 
@@ -90,6 +96,7 @@ impl Proto {
             Self::RtlTcp => "rtl_tcp, shipped with librtlsdr",
             Self::SpyServer => "spyserver, from the Airspy people",
             Self::KiwiSdr => "a KiwiSDR, which serves itself",
+            Self::Pluto => "iiod, which every ADALM-PLUTO runs",
         }
     }
 
@@ -99,6 +106,7 @@ impl Proto {
             Self::RtlTcp => "https://github.com/osmocom/rtl-sdr",
             Self::SpyServer => "https://airspy.com/directory/",
             Self::KiwiSdr => "http://rx.linkfanel.net/",
+            Self::Pluto => "https://wiki.analog.com/university/tools/pluto",
         }
     }
 
@@ -126,6 +134,13 @@ impl Proto {
                  one voice channel or a few narrow data signals; the dial moves it anywhere \
                  in the band. Receivers that want a password cannot be opened from here."
             }
+            Self::Pluto => {
+                "An ADALM-PLUTO, or another AD936x board running iiod, driven whole from \
+                 here: frequency, rate, gain and the transmitter. One on USB answers at \
+                 192.168.2.1 and is listed without being added; add one that is on the \
+                 network or has been given another address. The link carries about \
+                 4 MS/s, so that is the widest span offered."
+            }
         }
     }
 
@@ -135,6 +150,7 @@ impl Proto {
             Self::RtlTcp => "host, or host:port (1234)",
             Self::SpyServer => "host, or host:port (5555)",
             Self::KiwiSdr => "host, host:port (8073), or its http:// address",
+            Self::Pluto => "host, or host:port (30431)",
         }
     }
 
@@ -155,6 +171,7 @@ impl Proto {
             Self::RtlTcp => rtl_tcp::probe(addr),
             Self::SpyServer => spyserver::probe(addr),
             Self::KiwiSdr => kiwisdr::probe(addr),
+            Self::Pluto => pluto::probe(addr),
         }
     }
 
@@ -169,6 +186,7 @@ impl Proto {
             Self::RtlTcp => rtl_tcp::probe(addr).map(|p| vec![p]),
             Self::SpyServer => spyserver::probe(addr).map(|p| vec![p]),
             Self::KiwiSdr => kiwisdr::probe(addr).map(|p| vec![p]),
+            Self::Pluto => pluto::probe(addr).map(|p| vec![p]),
         }
     }
 
@@ -178,6 +196,9 @@ impl Proto {
             Self::RtlTcp => Ok(Box::new(rtl_tcp::Device::open(addr)?)),
             Self::SpyServer => Ok(Box::new(spyserver::Device::open(addr)?)),
             Self::KiwiSdr => Ok(Box::new(kiwisdr::Device::open(addr)?)),
+            Self::Pluto => {
+                Ok(Box::new(pluto::Pluto::open(addr, common::device::DriverKind::Network)?))
+            }
         }
     }
 }
@@ -236,6 +257,7 @@ pub struct Probe {
     pub center: Option<Hz>,
     pub rate: Option<Sps>,
     pub rates: Vec<Sps>,
+    pub rate_range: Option<std::ops::RangeInclusive<Sps>>,
     /// Gain the source was started with, when it was told.
     pub gain_db: Option<f32>,
     /// What the far end calls this tuner, where it has a name: a server with
@@ -264,7 +286,7 @@ pub struct Probe {
 /// says anything at all.
 pub fn identify(addr: &str) -> Result<Probe> {
     let mut last = None;
-    for p in [Proto::RtlTcp, Proto::IqStream, Proto::SpyServer, Proto::KiwiSdr] {
+    for p in [Proto::RtlTcp, Proto::IqStream, Proto::SpyServer, Proto::KiwiSdr, Proto::Pluto] {
         match p.probe(addr) {
             Ok(found) => return Ok(found),
             Err(e) => last = Some(e),
@@ -319,6 +341,10 @@ mod tests {
         );
         assert_eq!(parse_spec("sdruno://radarpi"), None);
         assert_eq!(
+            parse_spec("pluto://192.168.2.1"),
+            Some((Proto::Pluto, "192.168.2.1:30431".to_string()))
+        );
+        assert_eq!(
             parse_spec("kiwisdr://kiwisdr.areg.org.au"),
             Some((Proto::KiwiSdr, "kiwisdr.areg.org.au:8073".to_string()))
         );
@@ -364,8 +390,10 @@ mod tests {
         assert!(Proto::RtlTcp.tunable());
         assert!(Proto::SpyServer.tunable());
         assert!(Proto::KiwiSdr.tunable());
-        assert_eq!(Proto::ALL.len(), 4);
+        assert!(Proto::Pluto.tunable());
+        assert_eq!(Proto::ALL.len(), 5);
         assert_eq!(Proto::SpyServer.default_port(), 5555);
+        assert_eq!(Proto::Pluto.default_port(), 30431);
         assert_eq!(Proto::KiwiSdr.default_port(), 8073);
         for p in Proto::ALL {
             assert_eq!(Proto::parse(p.name()), Some(*p));

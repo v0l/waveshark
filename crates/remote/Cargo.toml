@@ -8,6 +8,8 @@ license.workspace = true
 common.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
+nusb.workspace = true
+quick-xml = "0.41"
 iqstream.workspace = true
 tokio = { version = "1", features = ["rt", "net", "time"] }
 httpc.workspace = true

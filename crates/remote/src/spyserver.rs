@@ -353,6 +353,7 @@ pub fn probe_within(addr: &str, within: Duration) -> Result<Probe> {
         center: Some(Hz(sync.iq_center as u64)),
         rate: None,
         rates: info.rates(),
+        rate_range: None,
         gain_db: None,
         name: match sync.can_control {
             true => info.device.name().to_string(),

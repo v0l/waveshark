@@ -124,6 +124,12 @@ pub fn list() -> Vec<Entry> {
             Sps(1_000_000)..=e.rate_max(),
         ));
     }
+    for (i, p) in remote::pluto::attached().into_iter().enumerate() {
+        v.push(Entry {
+            addr: Some(remote::pluto::USB_ADDR.to_string()),
+            ..Entry::local(DriverKind::Pluto, i, p.label(), remote::pluto::RATES)
+        });
+    }
     // After the radios themselves: a stitched receiver is a thing somebody
     // chooses, not what a fresh session should open on.
     v.extend(combinations(&v));
@@ -353,37 +359,7 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
         // A server that owns its own tuning says where it is and what rate it
         // is running; one this end tunes says neither, and the entry offers
         // the whole of what the tuner will do.
-        Ok(found) => found
-            .into_iter()
-            .map(|p| {
-                // The tuner's own name where it gave one, because a server
-                // with three dongles on it reads as three of the same line
-                // otherwise.
-                let called = match p.name.is_empty() {
-                    true => name.clone(),
-                    false => format!("{name} {}", p.name),
-                };
-                Entry {
-                    kind: DriverKind::Network,
-                    index,
-                    label: match p.center {
-                        Some(c) => format!("{called} {:.3} MHz", c.as_f64() / 1e6),
-                        None => format!("{called} ({})", p.tuner),
-                    },
-                    rates: match (p.rates.first(), p.rates.last(), p.rate) {
-                        (Some(lo), Some(hi), _) => *lo..=*hi,
-                        (_, _, Some(rate)) => rate..=rate,
-                        _ => RTL_RATES,
-                    },
-                    steps: p.rates,
-                    addr: Some(p.addr),
-                    proto: Some(r.proto),
-                    path: None,
-                    pinned: p.center.filter(|_| !p.tunable),
-                    parts: Vec::new(),
-                }
-            })
-            .collect(),
+        Ok(found) => found.into_iter().map(|p| answered(index, &name, r.proto, p)).collect(),
         Err(e) => {
             tracing::debug!("{} {}: {e}", r.proto, r.addr);
             vec![Entry {
@@ -399,6 +375,36 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
                 parts: Vec::new(),
             }]
         }
+    }
+}
+
+fn answered(index: usize, name: &str, proto: remote::Proto, p: remote::Probe) -> Entry {
+    // The tuner's own name where it gave one, because a server
+    // with three dongles on it reads as three of the same line
+    // otherwise.
+    let called = match p.name.is_empty() {
+        true => name.to_string(),
+        false => format!("{name} {}", p.name),
+    };
+    Entry {
+        kind: DriverKind::Network,
+        index,
+        label: match p.center {
+            Some(c) => format!("{called} {:.3} MHz", c.as_f64() / 1e6),
+            None => format!("{called} ({})", p.tuner),
+        },
+        rates: match (p.rates.first(), p.rates.last(), p.rate, &p.rate_range) {
+            (Some(lo), Some(hi), _, _) => *lo..=*hi,
+            (_, _, Some(rate), _) => rate..=rate,
+            (_, _, _, Some(range)) => range.clone(),
+            _ => RTL_RATES,
+        },
+        steps: p.rates,
+        addr: Some(p.addr),
+        proto: Some(proto),
+        path: None,
+        pinned: p.center.filter(|_| !p.tunable),
+        parts: Vec::new(),
     }
 }
 
@@ -439,6 +445,10 @@ pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
         DriverKind::AirspyHf => Ok(Box::new(airspy::hf::AirspyHf::open(e.index)?)),
         #[cfg(feature = "limesdr")]
         DriverKind::LimeSdr => Ok(Box::new(limesdr::LimeSdr::open(e.index)?)),
+        DriverKind::Pluto => {
+            let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
+            Ok(Box::new(remote::pluto::Pluto::open(addr, DriverKind::Pluto)?))
+        }
         DriverKind::Network => {
             let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
             e.proto.ok_or(Error::NoDevice)?.open(addr)
@@ -948,6 +958,33 @@ mod tests {
         assert!(same_server("radarpi2.test:1234#1", "radarpi2.test:1234#0"));
         remove_stream(iqs, "radarpi2.test:1234#0");
         assert_eq!(streams().iter().filter(|r| r.addr == "radarpi2.test:1234").count(), 0);
+    }
+
+    #[test]
+    fn a_pluto_on_the_network_offers_its_rate_range_rather_than_a_dongles() {
+        let p = remote::Probe {
+            proto: remote::Proto::Pluto,
+            addr: "pluto.test:30431".into(),
+            center: None,
+            rate: None,
+            rates: Vec::new(),
+            rate_range: Some(remote::pluto::RATES),
+            gain_db: None,
+            name: String::new(),
+            settings: Vec::new(),
+            tunable: true,
+            tune_range: Some(common::Hz(325_000_000)..=common::Hz(3_800_000_000)),
+            tuner: "AD9363A".into(),
+        };
+        let e = answered(0, "Loft", remote::Proto::Pluto, p);
+        assert_eq!(e.label, "Loft (AD9363A)");
+        assert_eq!(e.rates, Sps(260_417)..=Sps(4_000_000));
+        assert_eq!(e.pinned, None);
+        let spans: Vec<String> = spans_of(&e).into_iter().map(|s| s.label).collect();
+        assert_eq!(
+            spans,
+            ["64k", "128k", "256k", "512k", "1.024M", "2.048M", "2.304M", "2.400M", "4M"]
+        );
     }
 
     #[test]
