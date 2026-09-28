@@ -497,11 +497,8 @@ mod tests {
             .custom_flags(libc::O_NOCTTY)
             .open(&slave)
             .expect("the pty");
-        let mut other = std::process::Command::new("sleep")
-            .arg("10")
-            .stdin(stdin)
-            .spawn()
-            .expect("sleep");
+        let mut other =
+            std::process::Command::new("sleep").arg("10").stdin(stdin).spawn().expect("sleep");
         let started = Instant::now();
         let e = probe(&slave, BAUD, PROBE).expect_err("a held port");
         let _ = other.kill();

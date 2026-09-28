@@ -27,6 +27,8 @@ pub mod ccsds;
 pub mod channel_keys;
 pub(crate) mod crypto;
 pub mod dab;
+#[cfg(feature = "ffmpeg")]
+pub mod deinterlace;
 pub mod dfm;
 pub mod display;
 pub mod dmr;
@@ -66,8 +68,6 @@ pub mod lrpt;
 pub mod m10;
 pub mod m17;
 pub mod mdc1200;
-#[cfg(feature = "ffmpeg")]
-pub mod deinterlace;
 #[cfg(feature = "ffmpeg")]
 pub mod media;
 pub mod meisei;

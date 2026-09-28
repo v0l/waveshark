@@ -676,9 +676,9 @@ mod tests {
         let data: Vec<f32> =
             mask.squeeze(0).unwrap().squeeze(0).unwrap().flatten_all().unwrap().to_vec1().unwrap();
         // Token 0 (window 0) → token 103 (window 0): 0.0
-        assert_eq!(data[0 * 208 + 103], 0.0);
+        assert_eq!(data[103], 0.0);
         // Token 0 (window 0) → token 104 (window 1): -inf
-        assert_eq!(data[0 * 208 + 104], f32::NEG_INFINITY);
+        assert_eq!(data[104], f32::NEG_INFINITY);
         // Token 104 (window 1) → token 207 (window 1): 0.0
         assert_eq!(data[104 * 208 + 207], 0.0);
     }

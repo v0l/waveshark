@@ -81,7 +81,12 @@ fn both_antennas_open_is_139_frames_a_second_of_64_qam() {
     assert_eq!(iq.rate, dsp::artosyn::RATE);
     assert!(l.counter.is_some(), "the header's frame counter reads");
     let bursts = i32::from(l.uplinks) - i32::from(l.frames);
-    assert!((-2..=2).contains(&bursts), "{} goggles bursts against {} frames: one a frame", l.uplinks, l.frames);
+    assert!(
+        (-2..=2).contains(&bursts),
+        "{} goggles bursts against {} frames: one a frame",
+        l.uplinks,
+        l.frames
+    );
     let below = l.uplink_offset_hz.expect("the goggles' offset") - l.offset_hz;
     assert!(
         (-6_500..-3_000).contains(&below),

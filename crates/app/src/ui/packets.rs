@@ -298,8 +298,7 @@ impl Log<'_> {
             // What is actually running here, rather than a claim about
             // sweeping the span that has not been true since the front end
             // became a table lookup.
-            let running =
-                self.scanners.active(crate::scanners::Span::new(self.center, self.rate));
+            let running = self.scanners.active(crate::scanners::Span::new(self.center, self.rate));
             let waiting = match (self.decode_on, running.as_slice()) {
                 (false, _) => "decoding is off".to_string(),
                 (true, []) => "no scanner covers this span: press SCAN to add one".to_string(),
