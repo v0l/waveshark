@@ -470,6 +470,9 @@ impl IqCaptureNode {
             )));
         }
         let file = std::fs::File::create(&path)?;
+        sources::sigmf::Recording::new(self.format, self.rate, self.center.as_f64())
+            .at(at_us)
+            .write_beside(&path)?;
         self.last = 0;
         self.sink = Some(Sink {
             path,
@@ -908,6 +911,21 @@ mod tests {
         for (a, b) in buf.samples.iter().zip(&iq) {
             assert!((a - b).norm() < 0.02, "{a} against {b}");
         }
+
+        let meta = path.with_extension("sigmf-meta");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+        assert_eq!(v["global"]["core:datatype"], "cu8");
+        assert_eq!(v["global"]["core:sample_rate"], 250_000.0);
+        assert_eq!(v["captures"][0]["core:frequency"], 433_920_000.0);
+        assert_eq!(v["global"]["core:dataset"].as_str(), path.file_name().and_then(|n| n.to_str()));
+        let stamp = path.file_name().unwrap().to_str().unwrap().split('_').nth(1).unwrap();
+        let written = v["captures"][0]["core:datetime"].as_str().unwrap();
+        let (day, time) = (&stamp[..8], &stamp[9..15]);
+        assert_eq!(written[..10].replace('-', ""), day, "{written} against {stamp}");
+        assert_eq!(written[11..19].replace(':', ""), time, "{written} against {stamp}");
+        let replayed = sources::FileSource::open(&meta).unwrap().read_all().unwrap();
+        assert_eq!(replayed.samples.len(), iq.len());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -926,6 +944,7 @@ mod tests {
         let written: u64 = std::fs::read_dir(&d)
             .unwrap()
             .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "cu8"))
             .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
             .sum();
         assert_eq!(written, 4_000);
@@ -1020,6 +1039,7 @@ mod tests {
         let mut v: Vec<_> = std::fs::read_dir(d)
             .map(|r| r.flatten().map(|e| e.path()).collect())
             .unwrap_or_default();
+        v.retain(|p| p.extension().is_none_or(|x| x != "sigmf-meta"));
         v.sort();
         v
     }
@@ -1053,6 +1073,7 @@ mod tests {
         let files = files(&d);
         assert_eq!(files.len(), 2);
         for f in &files {
+            assert!(f.with_extension("sigmf-meta").is_file(), "{} has no SigMF", f.display());
             let buf = sources::FileSource::open(f).unwrap().read_all().unwrap();
             assert_eq!(buf.rate.0, rate as u64);
             // The burst, the 100 ms of pre-roll in front of it and the 40 ms

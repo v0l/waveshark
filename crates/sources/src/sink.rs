@@ -207,6 +207,9 @@ impl Device for FileSink {
     fn start_tx(&mut self) -> Result<Box<dyn TxStream>> {
         let out: Box<dyn Write + Send> = match &self.target {
             Target::Path(p) => {
+                crate::sigmf::Recording::new(self.format, self.rate.as_f64(), self.center.as_f64())
+                    .at(now_us())
+                    .write_beside(p)?;
                 Box::new(BufWriter::with_capacity(1 << 20, File::options().append(true).open(p)?))
             }
             Target::Memory(b) => Box::new(MemWriter(b.clone())),
@@ -220,6 +223,13 @@ impl Device for FileSink {
             stopped: false,
         }))
     }
+}
+
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 struct MemWriter(Arc<parking_lot::Mutex<Vec<u8>>>);
@@ -331,6 +341,22 @@ mod tests {
 
         let src = crate::file::FileSource::open(&path).unwrap();
         assert_eq!(src.read_all().unwrap().len(), 1000);
+
+        sink.set_center(Hz(434_500_000)).unwrap();
+        let mut tx = sink.start_tx().unwrap();
+        tx.write(&ramp(500, Sps(250_000))).unwrap();
+        drop(tx);
+        let meta = dir.join("tone_433.92M_250k.sigmf-meta");
+        for opened in [&path, &meta] {
+            let src = crate::file::FileSource::open(opened).unwrap();
+            assert_eq!(
+                src.center(),
+                Hz(434_500_000),
+                "the SigMF says where it was keyed, not the name"
+            );
+            assert_eq!(src.info().native_format, SampleFormat::Cs8);
+            assert_eq!(src.read_all().unwrap().len(), 1500);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -10,6 +10,7 @@ chrono.workspace = true
 tracing.workspace = true
 audio.workspace = true
 dsp.workspace = true
+sources.workspace = true
 identify.workspace = true
 rustfft.workspace = true
 pipeline.workspace = true
@@ -58,7 +59,6 @@ stt = ["dep:stt", "dep:candle-core"]
 ffmpeg = ["decode/ffmpeg"]
 
 [dev-dependencies]
-sources.workspace = true
 
 [[example]]
 name = "chain"

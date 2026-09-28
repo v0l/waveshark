@@ -56,13 +56,7 @@ pub fn parse_filename(path: &Path) -> FileMeta {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
-    let format = match ext.to_ascii_lowercase().as_str() {
-        "cu8" | "data" => Some(SampleFormat::Cu8),
-        "cs8" => Some(SampleFormat::Cs8),
-        "cs16" | "sigmf-data" => Some(SampleFormat::Cs16),
-        "cf32" | "complex16f" | "fc32" => Some(SampleFormat::Cf32),
-        _ => None,
-    };
+    let format = SampleFormat::from_extension(ext);
 
     let mut center = None;
     let mut rate = None;
@@ -143,6 +137,7 @@ pub fn parse_si(tok: &str) -> Option<f64> {
 #[derive(Debug)]
 pub struct FileSource {
     path: PathBuf,
+    bytes: std::ops::Range<u64>,
     info: DeviceInfo,
     /// The converter on the cable and the reference correction, which the
     /// `Device` trait does the arithmetic with.
@@ -201,7 +196,8 @@ impl FileSource {
                 format!("{}", path.display()),
             )));
         }
-        let named = parse_filename(&path);
+        let located = crate::sigmf::locate(&path)?;
+        let named = located.meta;
         let meta = match given_wins {
             true => named.under(given),
             false => given.under(named),
@@ -240,7 +236,8 @@ impl FileSource {
         };
 
         Ok(Self {
-            path,
+            path: located.data,
+            bytes: located.bytes,
             info,
             center,
             rate,
@@ -290,8 +287,7 @@ impl FileSource {
 
     /// Total complex samples in the file.
     pub fn sample_count(&self) -> Result<u64> {
-        let len = std::fs::metadata(&self.path)?.len();
-        Ok(len / self.format.bytes_per_sample() as u64)
+        Ok((self.bytes.end - self.bytes.start) / self.format.bytes_per_sample() as u64)
     }
 
     pub fn duration(&self) -> Result<std::time::Duration> {
@@ -302,8 +298,9 @@ impl FileSource {
     /// capture should be streamed instead.
     pub fn read_all(&self) -> Result<IqBuf> {
         let mut f = File::open(&self.path)?;
+        f.seek(SeekFrom::Start(self.bytes.start))?;
         let mut raw = Vec::new();
-        f.read_to_end(&mut raw)?;
+        f.take(self.bytes.end - self.bytes.start).read_to_end(&mut raw)?;
         let mut samples = Vec::with_capacity(raw.len() / self.format.bytes_per_sample());
         self.format.convert(&raw, &mut samples);
         Ok(IqBuf::new(samples, self.center, self.rate, 0))
@@ -340,9 +337,12 @@ impl Device for FileSource {
         Ok(())
     }
     fn start_rx(&mut self) -> Result<Box<dyn RxStream>> {
-        let f = File::open(&self.path)?;
+        let mut f = File::open(&self.path)?;
+        f.seek(SeekFrom::Start(self.bytes.start))?;
         Ok(Box::new(FileStream {
             reader: BufReader::with_capacity(1 << 20, f),
+            bytes: self.bytes.clone(),
+            at: self.bytes.start,
             format: self.format,
             center: self.center,
             rate: self.rate,
@@ -359,6 +359,8 @@ impl Device for FileSource {
 
 struct FileStream {
     reader: BufReader<File>,
+    bytes: std::ops::Range<u64>,
+    at: u64,
     format: SampleFormat,
     center: Hz,
     rate: Sps,
@@ -382,11 +384,15 @@ impl RxStream for FileStream {
         // Read a whole number of samples. A short read at EOF is normal; a
         // partial *sample* means the file is truncated, and silently dropping
         // the remainder would shift every subsequent sample.
+        let left = (self.bytes.end - self.at).min(self.raw.len() as u64) as usize;
         let mut filled = 0usize;
-        while filled < self.raw.len() {
-            match self.reader.read(&mut self.raw[filled..]) {
+        while filled < left {
+            match self.reader.read(&mut self.raw[filled..left]) {
                 Ok(0) => break,
-                Ok(n) => filled += n,
+                Ok(n) => {
+                    filled += n;
+                    self.at += n as u64;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(Error::Io(e)),
             }
@@ -394,7 +400,8 @@ impl RxStream for FileStream {
 
         if filled == 0 {
             if self.repeat {
-                self.reader.seek(SeekFrom::Start(0))?;
+                self.reader.seek(SeekFrom::Start(self.bytes.start))?;
+                self.at = self.bytes.start;
                 self.seq = 0;
                 self.start = std::time::Instant::now();
                 return self.read();

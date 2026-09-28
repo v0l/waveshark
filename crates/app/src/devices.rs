@@ -213,7 +213,7 @@ static CAPTURES: parking_lot::Mutex<Vec<Capture>> = parking_lot::Mutex::new(Vec:
 /// asks: the rtl_433 convention is the common case and typing what is
 /// already in the name is not.
 pub fn describe_capture(path: &std::path::Path) -> sources::FileMeta {
-    sources::parse_filename(path)
+    sources::sigmf::locate(path).map_or_else(|_| sources::parse_filename(path), |l| l.meta)
 }
 
 /// Offer this capture as a receiver, as the operator describes it.
@@ -228,7 +228,9 @@ pub fn add_capture(
     format: common::SampleFormat,
 ) -> Option<Capture> {
     let path = path.into();
-    let len = std::fs::metadata(&path).ok().filter(|m| m.is_file())?.len();
+    std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+    let bytes = sources::sigmf::locate(&path).ok()?.bytes;
+    let len = bytes.end - bytes.start;
     if rate.0 == 0 {
         return None;
     }
@@ -858,6 +860,35 @@ mod tests {
         drop(dev);
 
         remove_capture(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sigmf_recording_is_a_receiver_as_its_metadata_describes_it() {
+        let dir = std::env::temp_dir().join("sr_capture_sigmf");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("handheld.bin");
+        std::fs::write(&data, vec![0u8; 1_000_000]).unwrap();
+        let meta = sources::sigmf::Recording::new(common::SampleFormat::Cs8, 250e3, 433.92e6)
+            .write_beside(&data)
+            .unwrap();
+
+        let c = add_named_capture(meta.clone()).expect("the metadata says enough");
+        assert_eq!(c.rate, Sps(250_000));
+        assert_eq!(c.center, Some(common::Hz(433_920_000)));
+        assert_eq!(c.format, common::SampleFormat::Cs8);
+        assert!(
+            (c.seconds - 2.0).abs() < 1e-9,
+            "the samples' length, not the JSON's: {} s",
+            c.seconds
+        );
+        assert_eq!(describe_capture(&data), describe_capture(&meta), "the data names its metadata");
+
+        let dev = open(&c.entry(0)).expect("the SigMF recording opens");
+        assert_eq!(dev.info().native_format, common::SampleFormat::Cs8);
+        drop(dev);
+        remove_capture(&meta);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

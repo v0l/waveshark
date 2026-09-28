@@ -174,13 +174,20 @@ pub fn clip_file_as(
     cut: &Cut,
     given: crate::FileMeta,
 ) -> Result<Clipped> {
-    let meta = crate::parse_filename(input).under(given);
+    let located = crate::sigmf::locate(input)?;
+    let meta = located.meta.under(given);
     let format = meta
         .format
         .ok_or_else(|| Error::other(format!("no sample format in {}", input.display())))?;
     let rate =
         meta.rate.ok_or_else(|| Error::other(format!("no sample rate in {}", input.display())))?;
-    let bytes = std::fs::read(input)?;
+    let mut bytes = Vec::new();
+    let mut f = std::fs::File::open(&located.data)?;
+    std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(located.bytes.start))?;
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(f, located.bytes.end - located.bytes.start),
+        &mut bytes,
+    )?;
     let bps = format.bytes_per_sample();
     let spans = spans(&bytes, format, rate.as_f64(), cut);
     let kept: usize = spans.iter().map(|(a, b)| b - a).sum();

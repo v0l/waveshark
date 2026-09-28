@@ -5571,10 +5571,12 @@ dependencies = [
 name = "sources"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "common",
  "dsp",
  "num-complex",
  "parking_lot",
+ "serde_json",
 ]
 
 [[package]]

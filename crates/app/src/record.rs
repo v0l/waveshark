@@ -16,7 +16,7 @@ use crate::row::Reception;
 use common::{C32, Hz};
 use dsp::fir::FirDecim;
 use dsp::mixer::Mixer;
-use std::io::Write;
+use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
 /// Seconds of signal kept before the block that reported a decode.
@@ -223,7 +223,7 @@ impl Recorder {
         }
         self.written += bytes.len() as u64;
         self.full = self.written >= self.budget;
-        self.append_index(&name, r, out_rate, iq.len());
+        let _ = describe(r, out_rate, iq.len()).write_beside(&path);
         Some(path)
     }
 
@@ -235,47 +235,43 @@ impl Recorder {
     pub fn written(&self) -> u64 {
         self.written
     }
+}
 
-    /// One JSON object per capture, appended.
-    ///
-    /// Written by hand rather than through a serialiser because the shape is
-    /// flat and the file's whole purpose is to be read by something else,
-    /// `jq` or a script or a person, without this program being involved.
-    fn append_index(&self, name: &str, r: &Reception, rate: f64, samples: usize) {
-        let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.dir.join("index.jsonl"))
-        else {
-            return;
-        };
-        let hex: String = r.bytes().iter().map(|b| format!("{b:02x}")).collect();
-        let crc = match r.integrity() {
-            common::packet::Integrity::Passed => "\"ok\"",
-            common::packet::Integrity::Failed => "\"bad\"",
-            common::packet::Integrity::Corrected { .. } => "\"corrected\"",
-            common::packet::Integrity::Unchecked => "null",
-        };
-        let _ = writeln!(
-            f,
-            concat!(
-                r#"{{"file":"{}","freq_hz":{:.0},"rate_hz":{:.0},"samples":{},"#,
-                r#""protocol":"{}","modulation":"{}","rssi_dbfs":{:.1},"snr_db":{:.1},"#,
-                r#""crc":{},"bytes":"{}","detail":"{}"}}"#
-            ),
-            esc(name),
-            r.freq(),
-            rate,
-            samples,
-            esc(r.protocol()),
-            esc(r.modulation().label()),
-            r.rssi_dbfs(),
-            r.snr_db(),
-            crc,
-            hex,
-            esc(&r.detail()),
-        );
-    }
+fn describe(r: &Reception, rate: f64, samples: usize) -> sources::sigmf::Recording {
+    let crc = match r.integrity() {
+        common::packet::Integrity::Passed => json!("ok"),
+        common::packet::Integrity::Failed => json!("bad"),
+        common::packet::Integrity::Corrected { .. } => json!("corrected"),
+        common::packet::Integrity::Unchecked => Value::Null,
+    };
+    let hex: String = r.bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let fields: Map<String, Value> = [
+        ("modulation", json!(r.modulation().label())),
+        ("rssi_dbfs", json!(r.rssi_dbfs())),
+        ("snr_db", json!(r.snr_db())),
+        ("crc", crc),
+        ("bytes", json!(hex)),
+        ("detail", json!(r.detail())),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    sources::sigmf::Recording::new(common::SampleFormat::Cu8, rate, r.freq())
+        .at(now_us())
+        .annotated(sources::sigmf::Annotation {
+            start: 0,
+            count: samples as u64,
+            label: r.protocol().to_string(),
+            edges: None,
+            fields,
+        })
+}
+
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// Quantise to the eight bits the radios actually deliver.
@@ -298,17 +294,6 @@ fn sanitise(s: &str) -> String {
     let s: String =
         s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
     if s.is_empty() { "unknown".into() } else { s }
-}
-
-fn esc(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| match c {
-            '"' => vec!['\\', '"'],
-            '\\' => vec!['\\', '\\'],
-            c if (c as u32) < 0x20 => vec![' '],
-            c => vec![c],
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -472,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn the_index_names_every_capture_that_was_written() {
+    fn every_capture_carries_its_decode_as_a_sigmf_annotation() {
         let dir = std::env::temp_dir().join(format!("sr-index-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recorder::new(&dir, 250_000.0, Hz::mhz(434)).unwrap();
@@ -487,10 +472,22 @@ mod tests {
         let path = r.capture(&rec).expect("a burst still in the ring must be written");
         let name = path.file_name().unwrap().to_str().unwrap();
 
-        let index = std::fs::read_to_string(dir.join("index.jsonl")).unwrap();
-        assert!(index.contains(name), "the capture is not in the index");
-        assert!(index.contains("\"freq_hz\":433920000"), "{index}");
-        assert!(index.contains("temperature 16.2"), "{index}");
+        let text = std::fs::read_to_string(path.with_extension("sigmf-meta")).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["global"]["core:dataset"], json!(name));
+        assert_eq!(v["global"]["core:sample_rate"], json!(250_000.0));
+        assert_eq!(v["captures"][0]["core:frequency"], json!(433_920_000.0));
+        let notes = v["annotations"].as_array().unwrap();
+        assert_eq!(notes.len(), 1, "{text}");
+        assert_eq!(notes[0]["core:label"], json!("Fineoffset-WHx080"));
+        assert_eq!(notes[0]["core:sample_start"], json!(0));
+        assert_eq!(notes[0]["core:sample_count"], json!(4096), "the one block pushed");
+        assert!(
+            notes[0]["waveshark:detail"].as_str().unwrap().contains("temperature 16.2"),
+            "{text}"
+        );
+        let replayed = sources::FileSource::open(path.with_extension("sigmf-meta")).unwrap();
+        assert_eq!(replayed.sample_count().unwrap(), 4096);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

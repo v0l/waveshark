@@ -59,10 +59,23 @@ impl SampleFormat {
         match ext.to_ascii_lowercase().as_str() {
             "cu8" | "data" => Some(Self::Cu8),
             "cs8" => Some(Self::Cs8),
-            "cs16" | "sigmf-data" => Some(Self::Cs16),
+            "cs16" => Some(Self::Cs16),
             "cf32" | "complex16f" | "fc32" => Some(Self::Cf32),
             _ => None,
         }
+    }
+
+    pub const fn sigmf_datatype(self) -> &'static str {
+        match self {
+            Self::Cu8 => "cu8",
+            Self::Cs8 => "ci8",
+            Self::Cs16 => "ci16_le",
+            Self::Cf32 => "cf32_le",
+        }
+    }
+
+    pub fn from_sigmf_datatype(datatype: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.sigmf_datatype() == datatype)
     }
 
     /// The inverse of [`Self::convert`]: normalised samples back to the bytes

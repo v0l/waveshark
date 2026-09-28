@@ -31,6 +31,7 @@ the code is in the commit log.
 - Noise reduction on AM, SSB, CW and NFM channels, switched and set in depth on the strip.
 - Auto notch on AM, USB and LSB channels, a strip switch that removes heterodynes and steady carriers.
 - ADALM-PLUTO receive and full duplex transmit, on USB or over the network, up to 4 MS/s.
+- SigMF recordings replayed and trimmed, with a `.sigmf-meta` written beside raw span captures and transmit files.
 
 ### Changed
 
@@ -38,6 +39,7 @@ the code is in the commit log.
 - DVB-T and DVB-S2 pictures decoded on the graphics card where FFmpeg can, and colour converted there.
 - Video pane programme table across every multiplex, with scrambling, codecs and now and next, only the watched one decoded.
 - Video pane overlay with the service, now and next, frame rate and decoder, shown on hover, tap or a change of channel.
+- Burst recorder decodes as SigMF annotations beside each burst, in place of `index.jsonl`.
 - Scanner front ends and channels run out to the span edge, with no rolloff held back.
 - XN297 remotes read at a quarter of the processor time on a quiet band.
 - FT8 and FT4 read more stations on a crowded band.

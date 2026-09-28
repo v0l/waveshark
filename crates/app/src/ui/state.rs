@@ -1328,7 +1328,10 @@ impl CapturePick {
             let picked = rfd::FileDialog::new()
                 .set_title("Choose a capture to transmit")
                 .set_directory(&start)
-                .add_filter("IQ captures", &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-data"])
+                .add_filter(
+                    "IQ captures",
+                    &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-meta", "sigmf-data", "sigmf"],
+                )
                 .pick_file();
             ctx.request_repaint();
             picked

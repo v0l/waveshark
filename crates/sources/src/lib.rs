@@ -6,6 +6,7 @@ pub mod bench;
 pub mod clip;
 pub mod combine;
 pub mod file;
+pub mod sigmf;
 pub mod sink;
 
 pub use bench::FileRadio;

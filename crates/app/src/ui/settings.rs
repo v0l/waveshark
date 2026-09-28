@@ -3311,7 +3311,10 @@ impl App {
             let picked = rfd::FileDialog::new()
                 .set_title("Replay a capture")
                 .set_directory(&start)
-                .add_filter("IQ captures", &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-data"])
+                .add_filter(
+                    "IQ captures",
+                    &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-meta", "sigmf-data", "sigmf"],
+                )
                 .pick_file();
             // Nothing is drawing while the dialog is up, so the frame that
             // reads this has to be asked for.
