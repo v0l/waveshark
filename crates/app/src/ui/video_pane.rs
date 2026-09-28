@@ -261,10 +261,22 @@ fn picture(ui: &mut egui::Ui, st: &mut VideoState, osd: &Osd) {
 struct Osd {
     title: String,
     number: Option<u16>,
-    facts: Vec<(&'static str, String, Color32)>,
-    guide: Vec<(&'static str, String, String)>,
+    provider: Option<String>,
+    scrambled: Option<bool>,
+    guide: Vec<Slot>,
+    facts: Vec<(String, Color32)>,
     saved: Option<(String, String)>,
 }
+
+struct Slot {
+    legend: &'static str,
+    title: String,
+    when: String,
+    through: Option<f32>,
+}
+
+const OSD_GUTTER: f32 = 48.0;
+const OSD_SCRIM: f32 = 40.0;
 
 impl Osd {
     fn of(
@@ -299,14 +311,13 @@ impl Osd {
             .or_else(|| input.map(|i| i.label.clone()))
             .or_else(|| st.watching_label.clone())
             .unwrap_or_default();
+        let s = service.and_then(|p| p.service.as_ref());
         let mut facts = Vec::new();
-        if let Some(s) = service.and_then(|p| p.service.as_ref()) {
-            if let Some(p) = &s.provider {
-                facts.push(("provider", p.clone(), theme::VALUE));
-            }
-            if s.scrambled {
-                facts.push(("access", "scrambled".to_string(), theme::FAULT));
-            }
+        if let Some(f) = f {
+            facts.push((f.system.to_string(), theme::VALUE));
+            facts.push((format!("{:.3} MHz", f.channel_hz / 1e6), theme::READOUT));
+        }
+        if let Some(s) = s {
             let codecs: Vec<&str> = [
                 s.video.map(|v| v.trim_end_matches(" video")),
                 s.audio.map(|a| a.trim_end_matches(" audio")),
@@ -315,28 +326,35 @@ impl Osd {
             .flatten()
             .collect();
             if !codecs.is_empty() {
-                facts.push(("coding", codecs.join(" "), theme::VALUE));
+                facts.push((codecs.join(" / "), theme::VALUE));
             }
         }
         if let Some(f) = f {
-            facts.push(("tuned", format!("{:.3} MHz", f.channel_hz / 1e6), theme::READOUT));
-            facts.push(("system", f.system.to_string(), theme::VALUE));
-            facts.push(("picture", format!("{}x{}", f.width, f.height), theme::TRACE));
+            facts.push((format!("{}x{}", f.width, f.height), theme::TRACE));
             if let Some(fps) = st.rate.fps {
-                facts.push(("rate", format!("{fps:.0} fps"), theme::TRACE));
+                facts.push((format!("{fps:.0} fps"), theme::TRACE));
             }
             if f.lines_seen < f.height {
-                let lines = format!("{} of {}", f.lines_seen, f.height);
                 let tint = if f.completeness() > 0.9 { theme::TRACE } else { theme::FAULT };
-                facts.push(("lines", lines, tint));
+                facts.push((format!("{} of {} lines", f.lines_seen, f.height), tint));
             }
         }
-        let guide = service
-            .and_then(|p| p.service.as_ref())
+        let now_utc = chrono::Utc::now().timestamp();
+        let guide = s
             .map(|s| {
-                let now = s.now.as_ref().map(|n| ("now", n.title.clone(), on_air(n)));
-                let next = s.next.as_ref().map(|n| ("next", n.title.clone(), starts(n)));
-                now.into_iter().chain(next).filter(|(_, t, _)| !t.is_empty()).collect()
+                let now = s.now.as_ref().map(|n| Slot {
+                    legend: "now",
+                    title: n.title.clone(),
+                    when: on_air(n),
+                    through: through(n, now_utc),
+                });
+                let next = s.next.as_ref().map(|n| Slot {
+                    legend: "next",
+                    title: n.title.clone(),
+                    when: starts(n),
+                    through: None,
+                });
+                now.into_iter().chain(next).filter(|s| !s.title.is_empty()).collect()
             })
             .unwrap_or_default();
         let saved = saved.last().map(|last| {
@@ -346,46 +364,97 @@ impl Osd {
             };
             (what, last.parent().unwrap_or(last).display().to_string())
         });
-        let number = service.and_then(|p| p.service.as_ref()).map(|s| s.id);
-        Self { title, number, facts, guide, saved }
+        Self {
+            title,
+            number: s.map(|s| s.id),
+            provider: s.and_then(|s| s.provider.clone()),
+            scrambled: s.map(|s| s.scrambled),
+            guide,
+            facts,
+            saved,
+        }
     }
 
     fn show(&self, ui: &mut egui::Ui, over: Rect, alpha: f32) {
-        let inner = over.shrink2(Vec2::new(14.0, 9.0));
+        let inner = over.shrink2(Vec2::new(16.0, 12.0));
         let mut sizing =
             ui.new_child(egui::UiBuilder::new().max_rect(inner).sizing_pass().invisible());
         self.rows(&mut sizing);
         let h = sizing.min_rect().height();
         let at =
             Rect::from_min_max(Pos2::new(inner.left(), inner.bottom() - h), inner.right_bottom());
-        let band = Rect::from_min_max(Pos2::new(over.left(), at.top() - 9.0), over.right_bottom());
-        ui.painter().rect_filled(band, 0.0, theme::CHASSIS.gamma_multiply(0.85 * alpha));
+        let solid = at.top() - 12.0;
+        let top = (solid - OSD_SCRIM).max(over.top());
+        scrim(
+            ui.painter(),
+            Rect::from_min_max(Pos2::new(over.left(), top), over.max),
+            solid,
+            alpha,
+        );
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(at));
         ui.set_opacity(alpha);
         self.rows(&mut ui);
     }
 
     fn rows(&self, ui: &mut egui::Ui) {
-        if !self.title.is_empty() {
-            let mut title = Line::new().value(&self.title).size(20.0);
-            if let Some(n) = self.number {
-                title = title.gap(16.0).legend("service").value(n.to_string());
-            }
-            title.show(ui);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        if !self.title.is_empty() || self.number.is_some() {
+            ui.horizontal(|ui| {
+                if let Some(n) = self.number {
+                    service_readout(ui, n);
+                    ui.add_space(6.0);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(scrambled) = self.scrambled {
+                        let said = if scrambled { "scrambled" } else { "clear" };
+                        egui_bench::panel::lamp(ui, said, !scrambled, scrambled);
+                    }
+                    if let Some(p) = &self.provider {
+                        Line::new().legend(p).show(ui);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        Line::new().value(&self.title).size(20.0).elided(ui);
+                    });
+                });
+            });
         }
-        for (legend, title, when) in &self.guide {
-            let mut line = Line::new().legend(legend).value(title);
-            if !when.is_empty() {
-                line = line.gap(12.0).legend(when);
+        for slot in &self.guide {
+            ui.horizontal(|ui| {
+                let w = Line::new().legend(slot.legend).show(ui).rect.width();
+                ui.add_space((OSD_GUTTER - w - ui.spacing().item_spacing.x).max(0.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if !slot.when.is_empty() {
+                        Line::new().legend(&slot.when).show(ui);
+                        ui.add_space(8.0);
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                        let tint =
+                            if slot.through.is_some() { theme::VALUE } else { theme::LEGEND };
+                        Line::new().value(&slot.title).tint(tint).elided(ui);
+                    });
+                });
+            });
+            if let Some(t) = slot.through {
+                let (r, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+                let r = Rect::from_min_max(Pos2::new(r.left() + OSD_GUTTER, r.top()), r.max);
+                egui_bench::meter::bar(ui.painter(), r, t, theme::TRACE);
+                ui.add_space(2.0);
             }
-            line.elided(ui);
         }
-        ui.horizontal_wrapped(|ui| {
-            for (legend, value, tint) in &self.facts {
-                Line::new().legend(legend).value(value).tint(*tint).show(ui);
-                ui.add_space(10.0);
+        if !self.facts.is_empty() {
+            if !self.guide.is_empty() || !self.title.is_empty() {
+                let (r, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 5.0), Sense::hover());
+                ui.painter().hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, theme::ETCH));
             }
-        });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                for (value, tint) in &self.facts {
+                    Line::new().value(value).tint(*tint).show(ui);
+                }
+            });
+        }
         if let Some((what, dir)) = &self.saved {
             ui.horizontal(|ui| {
                 Line::new().legend(what).show(ui).on_hover_text(dir.clone());
@@ -395,6 +464,56 @@ impl Osd {
             });
         }
     }
+}
+
+fn scrim(p: &egui::Painter, r: Rect, solid_from: f32, alpha: f32) {
+    let dark = theme::CHASSIS.gamma_multiply(0.9 * alpha);
+    let clear = Color32::TRANSPARENT;
+    let mut mesh = egui::Mesh::default();
+    let ramp = [
+        (r.left_top(), clear),
+        (r.right_top(), clear),
+        (Pos2::new(r.right(), solid_from), dark),
+        (Pos2::new(r.left(), solid_from), dark),
+    ];
+    for (at, colour) in ramp {
+        mesh.colored_vertex(at, colour);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    p.add(egui::Shape::mesh(mesh));
+    p.rect_filled(Rect::from_min_max(Pos2::new(r.left(), solid_from), r.max), 0.0, dark);
+}
+
+fn service_readout(ui: &mut egui::Ui, n: u16) {
+    let digits = format!("{n:05}");
+    let lead = digits.len() - digits.trim_start_matches('0').len().max(1);
+    let job = Line::new()
+        .set(&digits[..lead])
+        .size(20.0)
+        .tint(theme::READOUT_DIM)
+        .gap(0.0)
+        .set(&digits[lead..])
+        .size(20.0)
+        .job();
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let (rect, _) = ui.allocate_exact_size(galley.size() + Vec2::new(14.0, 6.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, theme::RADIUS as f32, theme::WELL);
+    p.rect_stroke(
+        rect,
+        theme::RADIUS as f32,
+        egui::Stroke::new(1.0, theme::ETCH),
+        egui::StrokeKind::Inside,
+    );
+    p.galley(rect.center() - galley.size() / 2.0, galley, theme::READOUT);
+}
+
+fn through(s: &pipeline::Showing, now_utc: i64) -> Option<f32> {
+    let start = s.start_utc?;
+    let into = now_utc - start;
+    (s.duration_s > 0 && (0..i64::from(s.duration_s)).contains(&into))
+        .then(|| into as f32 / s.duration_s as f32)
 }
 
 struct Row {
@@ -756,20 +875,11 @@ mod tests {
         let on = playing(&Pick::First, Some(&shown), &muxes);
         let osd = Osd::of(&on, &st, &[], &muxes, &[]);
         assert_eq!((osd.title.as_str(), osd.number), ("BBC Two HD", Some(6940)));
-        let facts: Vec<(&str, &str)> = osd.facts.iter().map(|(l, v, _)| (*l, v.as_str())).collect();
-        assert_eq!(
-            facts,
-            [
-                ("provider", "BSkyB"),
-                ("coding", "H.264 MPEG-2"),
-                ("tuned", "1097.000 MHz"),
-                ("system", "DVB-S2"),
-                ("picture", "1920x1080"),
-                ("rate", "25 fps"),
-            ]
-        );
+        assert_eq!((osd.provider.as_deref(), osd.scrambled), (Some("BSkyB"), Some(false)));
+        let facts: Vec<&str> = osd.facts.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(facts, ["DVB-S2", "1097.000 MHz", "H.264 / MPEG-2", "1920x1080", "25 fps"]);
         let guide: Vec<(&str, &str, &str)> =
-            osd.guide.iter().map(|(l, t, w)| (*l, t.as_str(), w.as_str())).collect();
+            osd.guide.iter().map(|s| (s.legend, s.title.as_str(), s.when.as_str())).collect();
         assert_eq!(
             guide,
             [("now", "Newsnight", "22:00-22:45 UTC"), ("next", "The Weather", "22:45 UTC")]
@@ -779,11 +889,27 @@ mod tests {
         torn.lines_seen = 700;
         let st = VideoState { shown: Some(torn), ..Default::default() };
         let osd = Osd::of(&Pick::First, &st, &[], &[], &[]);
-        let lines = osd.facts.iter().find(|(l, _, _)| *l == "lines").map(|(_, v, _)| v.as_str());
-        assert_eq!(lines, Some("700 of 1080"), "only a picture short of lines says how many");
+        let facts: Vec<&str> = osd.facts.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(
+            facts,
+            ["DVB-S2", "1097.000 MHz", "1920x1080", "700 of 1080 lines"],
+            "only a picture short of lines says how many"
+        );
 
         let idle = Osd::of(&Pick::First, &VideoState::default(), &[], &[], &[]);
         assert_eq!((idle.title.as_str(), idle.facts.len()), ("", 0));
+    }
+
+    #[test]
+    fn the_progress_bar_runs_only_while_the_programme_is_on() {
+        let newsnight =
+            pipeline::Showing { start_utc: Some(1_000), duration_s: 2_000, ..Default::default() };
+        assert_eq!(through(&newsnight, 999), None, "not started");
+        assert_eq!(through(&newsnight, 1_000), Some(0.0));
+        assert_eq!(through(&newsnight, 1_500), Some(0.25));
+        assert_eq!(through(&newsnight, 3_000), None, "over, and the guide is stale");
+        let open = pipeline::Showing { start_utc: Some(1_000), ..Default::default() };
+        assert_eq!(through(&open, 1_500), None, "no length, no bar");
     }
 
     #[test]
