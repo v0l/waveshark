@@ -365,6 +365,207 @@ impl Layer for SondeLayer {
     }
 }
 
+pub(super) type TunerKey = (crate::directories::Directory, String);
+
+#[derive(Default)]
+pub(super) struct TunerLayer {
+    pub selected: Option<TunerKey>,
+    pub hit: Option<Option<TunerKey>>,
+    pub card: Option<(Pos2, crate::directories::Directory, sdr_directory::probe::Found)>,
+    held: Vec<(crate::directories::Directory, std::sync::Arc<Vec<sdr_directory::Listing>>)>,
+    shown: Vec<(Pos2, usize)>,
+    rows: Vec<(usize, usize, Option<sdr_directory::probe::Heard>)>,
+}
+
+const TUNER_ZOOM: f64 = 5.0;
+
+fn tower(p: &egui::Painter, foot: Pos2, ink: Color32) -> Pos2 {
+    let top = Pos2::new(foot.x, foot.y - 11.0);
+    let stroke = Stroke::new(1.3, ink);
+    p.line_segment([Pos2::new(foot.x - 4.0, foot.y), top], stroke);
+    p.line_segment([Pos2::new(foot.x + 4.0, foot.y), top], stroke);
+    p.line_segment(
+        [Pos2::new(foot.x - 2.5, foot.y - 4.0), Pos2::new(foot.x + 2.5, foot.y - 4.0)],
+        stroke,
+    );
+    p.circle_filled(top, 1.8, ink);
+    for (r, fade) in [(4.5, 1.0), (7.5, 0.6)] {
+        for side in [-1.0f32, 1.0] {
+            let arc: Vec<Pos2> = (-3..=3)
+                .map(|k| {
+                    let a = k as f32 * 0.22;
+                    Pos2::new(top.x + side * r * a.cos(), top.y + r * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, Stroke::new(1.2, ink.gamma_multiply(fade))));
+        }
+    }
+    top
+}
+
+pub(super) fn pick(held: Option<TunerKey>, clicked: Option<TunerKey>) -> Option<TunerKey> {
+    match clicked {
+        Some(k) if held.as_ref() == Some(&k) => None,
+        other => other,
+    }
+}
+
+const TUNER_HOVER_W: f32 = 320.0;
+
+impl TunerLayer {
+    pub fn new(selected: Option<TunerKey>) -> Self {
+        Self { selected, ..Default::default() }
+    }
+
+    fn listing(
+        &self,
+        row: usize,
+    ) -> Option<(
+        crate::directories::Directory,
+        &sdr_directory::Listing,
+        Option<sdr_directory::probe::Heard>,
+    )> {
+        let (dir, i, heard) = *self.rows.get(row)?;
+        let (d, held) = self.held.get(dir)?;
+        Some((*d, held.get(i)?, heard))
+    }
+
+    fn picked(&self, row: usize) -> Option<TunerKey> {
+        self.listing(row).map(|(d, l, _)| (d, l.entry.addr()))
+    }
+}
+
+impl Layer for TunerLayer {
+    fn key(&self) -> &'static str {
+        "tuners"
+    }
+
+    fn label(&self) -> &'static str {
+        "TUNERS"
+    }
+
+    fn draw(&mut self, c: &Canvas) {
+        use sdr_directory::probe::{Found, Heard};
+        self.held.clear();
+        self.shown.clear();
+        self.rows.clear();
+        self.hit = None;
+        self.card = None;
+        if c.zoom() < TUNER_ZOOM {
+            return;
+        }
+        let near = c.rect.expand(20.0);
+        for d in crate::directories::Directory::ALL {
+            let Some(listings) = d.listings() else { continue };
+            let probes = d.probes();
+            let dir = self.held.len();
+            for (i, l) in listings.iter().enumerate() {
+                let Some(place) = l.entry.station.location else { continue };
+                let heard = probes.heard(l);
+                if heard == Some(Heard::Silent) {
+                    continue;
+                }
+                let at = c.at(place.lat, place.lon);
+                if !near.contains(at) {
+                    continue;
+                }
+                let ink = match heard {
+                    Some(_) => theme::TRACE,
+                    None => theme::TRACE.gamma_multiply(0.55),
+                };
+                let head = tower(&c.p, at, ink);
+                let picked = self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(sd, addr)| *sd == d && *addr == l.entry.addr());
+                if picked {
+                    c.p.circle_stroke(head, 10.5, Stroke::new(1.5, theme::READOUT));
+                    let listing = match heard {
+                        Some(Heard::Answered(said)) => l.as_heard(&said),
+                        Some(Heard::Silent) | None => l.clone(),
+                    };
+                    self.card = Some((head, d, Found { listing, heard }));
+                }
+                self.shown.push((at, self.rows.len()));
+                self.rows.push((dir, i, heard));
+            }
+            drop(probes);
+            self.held.push((d, listings));
+        }
+        if let Some(click) = c.click() {
+            self.hit =
+                Some(nearest(&self.shown, click, 12.0).and_then(|(_, row)| self.picked(row)));
+        }
+    }
+
+    fn over(&mut self, c: &Canvas) {
+        let Some(pos) = c.hover() else { return };
+        let Some((at, row)) = nearest(&self.shown, pos, 10.0) else { return };
+        if self.picked(row).is_some() && self.picked(row) == self.selected {
+            return;
+        }
+        let Some((d, l, heard)) = self.listing(row) else { return };
+        c.note(
+            Pos2::new(at.x + 8.0, at.y - 6.0),
+            &tuner_line(d, l, heard.is_some()),
+            theme::VALUE,
+            TUNER_HOVER_W,
+        );
+    }
+
+    fn status(&self) -> Option<String> {
+        match self.shown.len() {
+            0 => None,
+            1 => Some("1 tuner, click one to connect".into()),
+            n => Some(format!("{n} tuners, click one to connect")),
+        }
+    }
+
+    fn credits(&self) -> Vec<crate::data::Credit> {
+        let mut out = Vec::new();
+        for (dir, (d, _)) in self.held.iter().enumerate() {
+            if self.rows.iter().any(|(r, _, _)| *r == dir)
+                && let Some(credit) = d.credit()
+            {
+                out.push(credit);
+            }
+        }
+        out
+    }
+}
+
+fn tuner_line(
+    d: crate::directories::Directory,
+    l: &sdr_directory::Listing,
+    answered: bool,
+) -> String {
+    let s = &l.entry.station;
+    let reach: Vec<String> = s
+        .tuners
+        .iter()
+        .map(|t| {
+            let (lo, hi) = match t.dial {
+                sdr_directory::Dial::Tunable { min_hz: Some(lo), max_hz: Some(hi) } => (lo, hi),
+                _ => t.span_hz(),
+            };
+            format!("{:.3}-{:.3} MHz", lo as f64 / 1e6, hi as f64 / 1e6)
+        })
+        .collect();
+    let users = match s.max_clients {
+        Some(max) => format!("{} of {max} listening", s.clients),
+        None => format!("{} listening", s.clients),
+    };
+    let checked = if answered { "" } else { ", not yet checked" };
+    format!(
+        "{} {} {}, {}, {}{checked}",
+        s.name,
+        d.proto().name(),
+        l.entry.addr(),
+        reach.join(", "),
+        users
+    )
+}
+
 /// Below this the sites are not drawn. Lower than the airports' threshold
 /// because there are 900 upper-air stations in the world against tens of
 /// thousands of airfields: at a country's width they are a scatter of marks
@@ -1439,5 +1640,56 @@ mod tests {
         // The rule sits between the head and the rows, not on top of either.
         assert!(l.rule_y > l.ys[head.len() - 1]);
         assert!(l.rule_y < l.ys[head.len()]);
+    }
+
+    #[test]
+    fn a_click_on_a_tuner_holds_its_card_and_a_second_click_or_the_map_lets_it_go() {
+        use crate::directories::Directory::{KiwiSdr, SpyServer};
+        let kiwi = (KiwiSdr, "g8ure.ddns.net:8075".to_string());
+        let spy = (SpyServer, "g8ure.ddns.net:8075".to_string());
+        assert_eq!(pick(None, Some(kiwi.clone())), Some(kiwi.clone()));
+        assert_eq!(pick(Some(kiwi.clone()), Some(kiwi.clone())), None, "clicked again");
+        assert_eq!(pick(Some(kiwi.clone()), Some(spy.clone())), Some(spy), "same host, other kind");
+        assert_eq!(pick(Some(kiwi), None), None, "clicked the map");
+    }
+
+    #[test]
+    fn a_hovered_tuner_says_what_it_is_where_to_reach_it_and_how_far_it_tunes() {
+        use sdr_directory::{Author, Dial, Entry, Hardware, Listing, Protocol, Station, Tuner};
+        let entry = Entry {
+            host: "g8ure.ddns.net".into(),
+            port: 8075,
+            data_port: None,
+            also: Vec::new(),
+            station: Station {
+                name: "80m Dipole".into(),
+                description: "Chichester UK".into(),
+                location: None,
+                protocol: Protocol::KiwiSdr,
+                clients: 5,
+                max_clients: Some(8),
+                session_limit_secs: None,
+                tuners: vec![Tuner {
+                    id: 0,
+                    name: String::new(),
+                    hardware: Hardware::KiwiSdr,
+                    antenna: String::new(),
+                    center_hz: 15_000_000,
+                    sample_rate: 12_000,
+                    dial: Dial::Tunable { min_hz: Some(0), max_hz: Some(30_000_000) },
+                }],
+            },
+        };
+        let l = Listing { author: Author(entry.addr()), seen: 0, entry };
+        let d = crate::directories::Directory::KiwiSdr;
+        assert_eq!(
+            tuner_line(d, &l, true),
+            "80m Dipole kiwisdr g8ure.ddns.net:8075, 0.000-30.000 MHz, 5 of 8 listening"
+        );
+        assert_eq!(
+            tuner_line(d, &l, false),
+            "80m Dipole kiwisdr g8ure.ddns.net:8075, 0.000-30.000 MHz, 5 of 8 listening, \
+             not yet checked"
+        );
     }
 }

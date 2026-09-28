@@ -33,6 +33,7 @@ holds the rows, the terms and the credit each is shown with.
 | Satellite transmitters | SatNOGS DB | CC BY-SA 4.0 | `db.satnogs.org/api/transmitters/?format=json` |
 | Radiosonde launch sites | SondeHub (Project Horus) | CC BY-SA 2.0, visible credit and link required | `api.v2.sondehub.org/sites` |
 | Public SpyServers | Airspy | no licence published; the owner's e-mail in each row is not read | `airspy.com/directory/status.json` |
+| Public KiwiSDRs | kiwisdr.com's public list, mirrored by Pierre Ynard (linkfanel) | no licence published; kiwisdr.com gates its own copy, so the mirror is read | `rx.linkfanel.net/kiwisdr_com.js` |
 | Satellites the TinyGS network tracks | TinyGS | open network, elements published for its own stations | `api.tinygs.com/v1/tinygs_supported.txt` |
 | Catalogue of objects in orbit | Space-Track (US Space Force) | their user agreement, an account of your own, no redistribution | `space-track.org/basicspacedata/query/class/gp/…`, logged in, fewer than 30 requests a minute |
 | Script repositories | the repository's own publisher, e.g. `bad-antics/nullsec-flipper-suite` | each repository's own licence; the repo's content, not waveshark's | the repository's branch tarball, e.g. `codeload.github.com/<owner>/<repo>/tar.gz/refs/heads/main`, validated by the branch HEAD commit id |

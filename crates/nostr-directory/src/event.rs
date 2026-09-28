@@ -136,8 +136,8 @@ pub fn read(event: &Event, now: u64) -> Result<Listing, Refused> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sdr_directory::Version;
     use sdr_directory::model::fixtures::{airband, entry, hf};
+    use sdr_directory::{Protocol, Version};
 
     const NOW: u64 = 1_750_000_000;
 
@@ -148,7 +148,7 @@ mod tests {
         let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000003")
             .unwrap();
         let mut e = entry("sdr.example.net", vec![airband()]);
-        e.station.version = Version { major: 1, minor: 5 };
+        e.station.protocol = Protocol::IqStream(Version { major: 1, minor: 5 });
         e.station.description = "Loft \"north\"\nReading, é ✓ \\ \t".into();
         let ours = announcement(&keys, &e, NOW);
         let theirs = Event::from_json(&serde_json::from_str(NOSTR_SDK_0_45).unwrap()).unwrap();

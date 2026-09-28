@@ -36,6 +36,7 @@ mod corpus;
 mod data;
 mod devices;
 mod dial;
+mod directories;
 mod gpu;
 mod heatmap;
 mod i18n;
@@ -1732,9 +1733,10 @@ fn main() -> eframe::Result<()> {
             if let Some(name) = &args.settings {
                 match (name.as_str(), ui::Settings::parse(name)) {
                     (_, Some(s)) => app.open_settings(s),
-                    ("spyservers", None) => app.find_spyservers(),
+                    ("spyservers", None) => app.find_in(directories::Directory::SpyServer),
                     ("network", None) => app.open_network_settings(),
-                    ("iqstreams", None) => app.find_iqstreams(),
+                    ("iqstreams", None) => app.find_in(directories::Directory::IqStream),
+                    ("kiwisdrs", None) => app.find_in(directories::Directory::KiwiSdr),
                     (n, None) if n.starts_with("pointing") => {
                         if !app.point_at(n.trim_start_matches("pointing").trim_start_matches(':')) {
                             eprintln!("--settings {name}: expected pointing:GROUP:NORAD");

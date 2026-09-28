@@ -4,7 +4,7 @@ use common::device::{
 };
 use common::{C32, Error, Hz, IqBuf, Result, SampleFormat, Sps};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded, unbounded};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -60,25 +60,28 @@ impl Status {
                 fields.insert(k.trim(), v.trim());
             }
         }
-        if !fields.contains_key("status") {
+        Self::of(|k| fields.get(k).copied())
+    }
+
+    pub fn of<'a>(field: impl Fn(&str) -> Option<&'a str>) -> Result<Self> {
+        if field("status").is_none() {
             return Err(Error::other("not a KiwiSDR status page"));
         }
-        let number = |k: &str| fields.get(k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-        let bands = fields
-            .get("bands")
+        let number = |k: &str| field(k).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+        let bands = field("bands")
             .and_then(|v| v.split_once('-'))
-            .and_then(|(lo, hi)| Some(Hz(lo.parse().ok()?)..=Hz(hi.parse().ok()?)))
+            .and_then(|(lo, hi)| Some(Hz(lo.trim().parse().ok()?)..=Hz(hi.trim().parse().ok()?)))
             .unwrap_or(Hz(0)..=Hz::mhz(30));
-        let rate = match fields.get("mode").is_some_and(|m| m.starts_with("rx3")) {
+        let rate = match field("mode").is_some_and(|m| m.starts_with("rx3")) {
             true => WIDE_RATE,
             false => NARROW_RATE,
         };
         Ok(Self {
-            name: fields.get("name").map(|s| s.to_string()).unwrap_or_default(),
+            name: field("name").map(|s| s.trim().to_string()).unwrap_or_default(),
             bands,
             users: number("users"),
             users_max: number("users_max"),
-            offline: fields.get("offline").is_some_and(|v| *v == "yes"),
+            offline: field("offline").is_some_and(|v| v.trim() == "yes"),
             rate,
         })
     }
@@ -101,25 +104,20 @@ fn dial(addr: &str) -> Result<(TcpStream, Duration)> {
 }
 
 pub fn fetch_status(addr: &str) -> Result<Status> {
-    let (mut sock, _) = dial(addr)?;
-    let request = format!(
-        "GET /status HTTP/1.0\r\nHost: {addr}\r\nUser-Agent: {}\r\nConnection: close\r\n\r\n",
-        httpc::USER_AGENT
-    );
-    sock.write_all(request.as_bytes()).map_err(|e| Error::other(format!("{addr}: {e}")))?;
-    let mut raw = Vec::new();
-    sock.take(MAX_STATUS as u64)
-        .read_to_end(&mut raw)
-        .map_err(|e| Error::other(format!("{addr} sent no status: {e}")))?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| Error::other(format!("{addr} is not a KiwiSDR")))?;
-    let answered = head.lines().next().and_then(|l| l.split_whitespace().nth(1));
-    if answered != Some("200") {
+    let client = httpc::blocking(CONNECT_TIMEOUT).map_err(|e| Error::other(e.to_string()))?;
+    let resp = client
+        .get(format!("http://{addr}/status"))
+        .send()
+        .map_err(|e| Error::other(format!("{addr}: {e}")))?;
+    if !resp.status().is_success() {
         return Err(Error::other(format!("{addr} is not a KiwiSDR")));
     }
-    Status::parse(body).map_err(|_| Error::other(format!("{addr} is not a KiwiSDR")))
+    let mut raw = Vec::new();
+    resp.take(MAX_STATUS as u64)
+        .read_to_end(&mut raw)
+        .map_err(|e| Error::other(format!("{addr} sent no status: {e}")))?;
+    Status::parse(&String::from_utf8_lossy(&raw))
+        .map_err(|_| Error::other(format!("{addr} is not a KiwiSDR")))
 }
 
 pub fn probe(addr: &str) -> Result<Probe> {
@@ -659,6 +657,7 @@ impl Drop for NetStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::net::TcpListener;
 
     const TARLEE: &str = "status=active\noffline=no\nname=2-30MHZ SDR #1, VK5ARG Remote Receiver Site | Near Tarlee, South Australia\nbands=1800000-30000000\nfreq_offset=0.000\nmode=rx8.wf3\nusers=6\nusers_max=8\nsw_version=KiwiSDR_v1.902\n";

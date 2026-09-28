@@ -11,6 +11,8 @@ fixtures = []
 getrandom = "0.4"
 httpc.workspace = true
 iqstream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

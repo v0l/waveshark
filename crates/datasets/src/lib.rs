@@ -16,6 +16,7 @@ pub mod cells;
 pub mod gateways;
 pub mod geocode;
 pub mod git;
+pub mod kiwisdr;
 pub mod m17;
 pub mod pistar;
 pub mod progress;

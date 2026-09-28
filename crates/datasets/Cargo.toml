@@ -15,6 +15,8 @@ thiserror.workspace = true
 tracing.workspace = true
 httpc.workspace = true
 common.workspace = true
+sdr-directory.workspace = true
+remote.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true

@@ -14,6 +14,22 @@ impl Version {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protocol {
+    IqStream(Version),
+    SpyServer,
+    KiwiSdr,
+}
+
+impl Protocol {
+    pub fn speaks_with(&self, ours: &Version) -> bool {
+        match self {
+            Protocol::IqStream(v) => ours.speaks_with(v),
+            Protocol::SpyServer | Protocol::KiwiSdr => true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Location {
     pub lat: f64,
@@ -96,6 +112,7 @@ pub enum Hardware {
     Airspy,
     AirspyHf,
     SdrPlay,
+    KiwiSdr,
     Other(String),
 }
 
@@ -108,6 +125,7 @@ impl Hardware {
             Hardware::Airspy => "airspy",
             Hardware::AirspyHf => "airspyhf",
             Hardware::SdrPlay => "sdrplay",
+            Hardware::KiwiSdr => "kiwisdr",
             Hardware::Other(name) => name,
         }
     }
@@ -122,12 +140,13 @@ impl From<&str> for Hardware {
             "airspy" => Hardware::Airspy,
             "airspyhf" => Hardware::AirspyHf,
             "sdrplay" => Hardware::SdrPlay,
+            "kiwisdr" => Hardware::KiwiSdr,
             _ => Hardware::Other(name.to_string()),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Dial {
     Fixed,
     Tunable { min_hz: Option<u64>, max_hz: Option<u64> },
@@ -193,7 +212,7 @@ pub struct Station {
     pub name: String,
     pub description: String,
     pub location: Option<Location>,
-    pub version: Version,
+    pub protocol: Protocol,
     pub clients: u32,
     pub max_clients: Option<u32>,
     pub session_limit_secs: Option<u32>,
@@ -264,7 +283,7 @@ pub mod fixtures {
             name: "G0ABC".into(),
             description: "Loft, Reading".into(),
             location: Some(Location::within(51.45, -0.97, Accuracy::Town)),
-            version: Version::OURS,
+            protocol: Protocol::IqStream(Version::OURS),
             clients: 1,
             max_clients: Some(4),
             session_limit_secs: None,
@@ -296,9 +315,10 @@ mod tests {
 
     #[test]
     fn hardware_nobody_listed_keeps_its_own_name() {
-        let names = ["rtlsdr", "hackrf", "limesdr", "airspy", "airspyhf", "sdrplay", "rx888"];
+        let names =
+            ["rtlsdr", "hackrf", "limesdr", "airspy", "airspyhf", "sdrplay", "kiwisdr", "rx888"];
         let back: Vec<Hardware> = names.iter().map(|n| Hardware::from(*n)).collect();
-        assert_eq!(back[6], Hardware::Other("rx888".into()));
+        assert_eq!(back[7], Hardware::Other("rx888".into()));
         assert_eq!(back.iter().filter(|h| matches!(h, Hardware::Other(_))).count(), 1);
         let again: Vec<&str> = back.iter().map(Hardware::as_str).collect();
         assert_eq!(again, names);

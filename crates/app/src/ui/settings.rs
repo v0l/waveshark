@@ -2748,7 +2748,8 @@ impl App {
         let Some(mut edit) = self.remote.take() else {
             return;
         };
-        let (mut close, mut add, mut find, mut iqfind) = (false, false, false, false);
+        let (mut close, mut add) = (false, false);
+        let mut find: Option<crate::directories::Directory> = None;
         let mut link = None;
         let connecting = self.joining.as_ref().map(|j| j.host.clone());
         let r = egui::containers::Modal::new(egui::Id::new("add-remote"))
@@ -2773,17 +2774,10 @@ impl App {
                                     link = Some(edit.proto.url().to_string());
                                 }
                             });
-                            if edit.proto == remote::Proto::SpyServer {
-                                row_help(ui, "public", FIND_HELP, |ui| {
-                                    if listed_row(ui) {
-                                        find = true;
-                                    }
-                                });
-                            }
-                            if edit.proto == remote::Proto::IqStream {
-                                row_help(ui, "public", IQFIND_HELP, |ui| {
-                                    if iqstream_listed_row(ui) {
-                                        iqfind = true;
+                            if let Some(d) = crate::directories::Directory::of(edit.proto) {
+                                row_help(ui, "public", &find_help(d), |ui| {
+                                    if listed_row(ui, d) {
+                                        find = Some(d);
                                     }
                                 });
                             }
@@ -2894,13 +2888,10 @@ impl App {
         if let Some(url) = link {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
-        if find {
-            self.find = Some(FindEdit::open());
+        if let Some(d) = find {
+            self.find = Some(FindEdit::open(d));
         }
-        if iqfind {
-            self.iqfind = Some(IqFindEdit::open(self.setting(crate::stations::Own::of)));
-        }
-        if r.should_close() && self.find.is_none() && self.iqfind.is_none() {
+        if r.should_close() && self.find.is_none() {
             close = true;
         }
         if add {
@@ -2927,26 +2918,19 @@ impl App {
         let Some(mut edit) = self.find.take() else {
             return;
         };
-        let which = crate::data::Which::SpyServers;
-        let servers = crate::data::spyservers();
+        let d = edit.dir;
         let (hz, bad_hz) = edit.hz();
-        let filter =
-            datasets::spyserver::Filter { hz, full_control: edit.full_control, free: edit.free };
-        crate::data::probe_spyservers();
-        let (kept, tally) = match &servers {
-            Some(v) => {
-                let probes = crate::data::spyserver_probes();
-                (filter.list(v, &probes), probes.tally(v))
-            }
-            None => Default::default(),
-        };
-        let (mut close, mut tune) = (false, None);
+        let query = sdr_directory::Query { hz, tunable: edit.tunable, free: edit.free };
+        d.sweep(self.setting(crate::stations::Own::of));
+        let kept = d.shown(&query);
+        let tally = d.tally();
+        let (mut close, mut tune): (bool, Option<(String, String)>) = (false, None);
         let connecting = self.joining.as_ref().map(|j| j.host.clone());
-        let r = egui::containers::Modal::new(egui::Id::new("find-spyserver"))
+        let r = egui::containers::Modal::new(egui::Id::new(("find-directory", d.title())))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(560.0);
-                modal_title(ui, "Public SpyServers");
+                modal_title(ui, d.title());
                 section(ui, "filter", "which of the listed servers to show", |ui| {
                     row_help(ui, "tunes", TUNES_HELP, |ui| {
                         field(ui, &mut edit.mhz, "any frequency, or MHz such as 145.8");
@@ -2954,9 +2938,9 @@ impl App {
                     switch(
                         ui,
                         "control",
-                        &mut edit.full_control,
+                        &mut edit.tunable,
                         "only servers whose dial may be moved",
-                        CONTROL_HELP,
+                        d.control_help(),
                     );
                     switch(
                         ui,
@@ -2965,24 +2949,24 @@ impl App {
                         "only servers with a listener slot free",
                         FREE_HELP,
                     );
-                    match (&connecting, &edit.err, &bad_hz, &servers) {
+                    match (&connecting, &edit.err, &bad_hz, tally) {
                         (Some(h), _, _, _) => {
                             panel::status(ui, false, &format!("connecting to {h}"))
                         }
                         (None, Some(e), _, _) => panel::status(ui, false, e),
                         (None, None, Some(e), _) => panel::status(ui, false, e),
-                        (None, None, None, Some(_)) => panel::status(
+                        (None, None, None, Some(t)) => panel::status(
                             ui,
                             true,
                             &format!(
                                 "{} of {} checked, {} answering, {} shown",
-                                tally.checked,
-                                tally.listed,
-                                tally.answering,
+                                t.checked,
+                                t.listed,
+                                t.answering,
                                 kept.len()
                             ),
                         ),
-                        (None, None, None, None) => match crate::data::failed(which) {
+                        (None, None, None, None) => match d.failed() {
                             Some(e) => panel::status(ui, false, &e),
                             None => panel::status(ui, false, "reading the directory"),
                         },
@@ -2994,105 +2978,9 @@ impl App {
                     .max_height(share_of_screen(ui, 0.55, 240.0, 520.0))
                     .show(ui, |ui| {
                         ui.set_max_width(w);
-                        for l in &kept {
-                            if server_card(ui, l, connecting.is_none()) {
-                                tune = Some(l.server.clone());
-                            }
-                            ui.add_space(6.0);
-                        }
-                    });
-                footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
-                        close = true;
-                    }
-                    let label = match crate::data::busy(which) {
-                        true => "CHECKING",
-                        false => crate::i18n::t("ui.refresh"),
-                    };
-                    if ui.add_enabled(!crate::data::busy(which), egui::Button::new(label)).clicked()
-                    {
-                        crate::data::refresh(which);
-                    }
-                });
-            });
-        if r.should_close() {
-            close = true;
-        }
-        if let Some(s) = tune {
-            let mut remote = RemoteEdit::spyserver();
-            remote.host = s.addr();
-            remote.label = s.description.clone();
-            edit.err = None;
-            self.add_remote(ctx, &remote);
-        }
-        if !close {
-            self.find = Some(edit);
-        }
-    }
-
-    pub(super) fn iqfind_modal(&mut self, ctx: &egui::Context) {
-        let Some(mut edit) = self.iqfind.take() else {
-            return;
-        };
-        let (hz, bad_hz) = edit.hz();
-        let query = sdr_directory::Query { hz, tunable: edit.tunable, free: false };
-        let found = crate::stations::found();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let kept =
-            found.as_deref().map(|f| crate::stations::shown(f, &query, now)).unwrap_or_default();
-        let (listed, checked, answering) =
-            found.as_deref().map(crate::stations::tally).unwrap_or_default();
-        let (mut close, mut tune): (bool, Option<(String, String)>) = (false, None);
-        let connecting = self.joining.as_ref().map(|j| j.host.clone());
-        let r = egui::containers::Modal::new(egui::Id::new("find-iqstream"))
-            .backdrop_color(Color32::from_black_alpha(150))
-            .show(ctx, |ui| {
-                ui.set_width(560.0);
-                modal_title(ui, "Public IQStream servers");
-                section(ui, "filter", "which of the listed servers to show", |ui| {
-                    row_help(ui, "tunes", TUNES_HELP, |ui| {
-                        field(ui, &mut edit.mhz, "any frequency, or MHz such as 145.8");
-                    });
-                    switch(
-                        ui,
-                        "control",
-                        &mut edit.tunable,
-                        "only servers whose dial may be moved",
-                        IQCONTROL_HELP,
-                    );
-                    match (&connecting, &bad_hz, &found) {
-                        (Some(h), _, _) => panel::status(ui, false, &format!("connecting to {h}")),
-                        (None, Some(e), _) => panel::status(ui, false, e),
-                        (None, None, Some(_)) => panel::status(
-                            ui,
-                            true,
-                            &format!(
-                                "{checked} of {listed} checked, {answering} answering, {} shown",
-                                kept.len()
-                            ),
-                        ),
-                        (None, None, None) => match crate::stations::failed() {
-                            Some(e) => panel::status(ui, false, &e),
-                            None => panel::status(ui, false, "reading the directory from nostr"),
-                        },
-                    }
-                });
-                ui.add_space(6.0);
-                let w = ui.available_width();
-                egui::ScrollArea::vertical()
-                    .max_height(share_of_screen(ui, 0.55, 240.0, 520.0))
-                    .show(ui, |ui| {
-                        ui.set_max_width(w);
                         for f in &kept {
-                            if station_card(ui, f, connecting.is_none()) {
-                                let at = match f.heard {
-                                    crate::stations::Heard::Ours(local)
-                                    | crate::stations::Heard::Near(local) => local.to_string(),
-                                    _ => f.listing.entry.addr(),
-                                };
-                                tune = Some((at, f.listing.entry.station.name.clone()));
+                            if widgets::station_card(ui, f, connecting.is_none()) {
+                                tune = Some((f.addr(), f.listing.entry.station.name.clone()));
                             }
                             ui.add_space(6.0);
                         }
@@ -3101,10 +2989,10 @@ impl App {
                     if ui.button(crate::i18n::t("ui.close")).clicked() {
                         close = true;
                     }
-                    let busy = crate::stations::busy();
+                    let busy = d.busy() || d.sweeping();
                     let label = if busy { "CHECKING" } else { crate::i18n::t("ui.refresh") };
                     if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                        crate::stations::refresh(self.setting(crate::stations::Own::of));
+                        d.refresh();
                     }
                 });
             });
@@ -3112,12 +3000,12 @@ impl App {
             close = true;
         }
         if let Some((host, label)) = tune {
-            let remote =
-                RemoteEdit { proto: remote::Proto::IqStream, host, label, ..RemoteEdit::default() };
+            let remote = RemoteEdit { proto: d.proto(), host, label, ..RemoteEdit::default() };
+            edit.err = None;
             self.add_remote(ctx, &remote);
         }
         if !close {
-            self.iqfind = Some(edit);
+            self.find = Some(edit);
         }
     }
 
@@ -3248,7 +3136,7 @@ impl App {
     /// What answered decides the protocol, whatever was picked: iqstreamd and
     /// rtl_tcp both listen on 1234, so an address alone cannot say which is
     /// there and the picker is a guess until something replies.
-    fn add_remote(&mut self, ctx: &egui::Context, edit: &RemoteEdit) {
+    pub(super) fn add_remote(&mut self, ctx: &egui::Context, edit: &RemoteEdit) {
         if self.joining.is_none() {
             self.joining = Some(Joining::start(ctx, edit.proto, &edit.host, &edit.label));
         }
@@ -4066,27 +3954,24 @@ fn server_row(ui: &mut egui::Ui, server: &str) -> bool {
     open
 }
 
-const FIND_HELP: &str = "Servers their owners have listed in the Airspy directory, open to \
-     anybody. TUNE on one adds it to the radio list like an address typed here.";
 const TUNES_HELP: &str = "Keep only servers whose radio reaches this frequency. Empty for all.";
-const CONTROL_HELP: &str = "A server granting control lets the dial go anywhere in its range. \
-     One that does not lets it move only inside the span it is already on.";
 const FREE_HELP: &str = "A server takes a fixed number of listeners and turns the next away.";
 
-const IQFIND_HELP: &str = "Servers their owners have listed on nostr, open to anybody. TUNE on \
-     one adds it to the radio list like an address typed here.";
-const IQCONTROL_HELP: &str = "A server offering its dial lets a subscriber retune it anywhere its \
-     tuner reaches. One that does not is fixed to the span it is serving.";
+fn find_help(d: crate::directories::Directory) -> String {
+    format!(
+        "Servers their owners have listed {}, open to anybody. CONNECT on one adds it to the radio \
+         list like an address typed here.",
+        d.place()
+    )
+}
 
-fn iqstream_listed_row(ui: &mut egui::Ui) -> bool {
+fn listed_row(ui: &mut egui::Ui, d: crate::directories::Directory) -> bool {
     let mut open = false;
     ui.horizontal(|ui| {
-        let said = match crate::stations::found() {
-            Some(f) => match crate::stations::tally(&f) {
-                (n, 0, _) => format!("{n} on nostr"),
-                (n, _, answering) => format!("{answering} answering of {n} on nostr"),
-            },
-            None => "the nostr directory".to_string(),
+        let said = match d.tally() {
+            Some(t) if t.checked == 0 => format!("{} {}", t.listed, d.place()),
+            Some(t) => format!("{} answering of {} {}", t.answering, t.listed, d.place()),
+            None => format!("the directory {}", d.place()),
         };
         Line::new().value(said).size(13.0).show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4094,157 +3979,6 @@ fn iqstream_listed_row(ui: &mut egui::Ui) -> bool {
         });
     });
     open
-}
-
-fn station_card(ui: &mut egui::Ui, f: &crate::stations::Found, idle: bool) -> bool {
-    let mut tune = false;
-    let e = &f.listing.entry;
-    let s = &e.station;
-    let answered = f.heard.answered();
-    let rail = answered.then_some(theme::TRACE);
-    let mut hardware: Vec<&str> = s.tuners.iter().map(|t| t.hardware.as_str()).collect();
-    hardware.dedup();
-    card(
-        ui,
-        rail,
-        |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                tune = ui.add_enabled(idle, egui::Button::new("TUNE")).clicked();
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    Line::new()
-                        .value(&s.name)
-                        .size(12.0)
-                        .gap(12.0)
-                        .note(hardware.join(", "))
-                        .size(10.5)
-                        .elided(ui);
-                });
-            });
-        },
-        |ui| {
-            for t in &s.tuners {
-                let (lo, hi) = t.span_hz();
-                let dial = match t.dial {
-                    sdr_directory::Dial::Fixed => "fixed".to_string(),
-                    sdr_directory::Dial::Tunable { min_hz: Some(lo), max_hz: Some(hi) } => {
-                        format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi))
-                    }
-                    sdr_directory::Dial::Tunable { .. } => "free".to_string(),
-                };
-                Line::new()
-                    .legend(if t.name.is_empty() { "tuner" } else { t.name.as_str() })
-                    .measured(format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi)))
-                    .size(12.0)
-                    .gap(18.0)
-                    .legend("dial")
-                    .value(dial)
-                    .size(12.0)
-                    .show(ui);
-            }
-            let mut said = vec![e.addr(), format!("{} reading", s.clients)];
-            if !s.description.is_empty() {
-                said.push(s.description.clone());
-            }
-            match f.heard {
-                crate::stations::Heard::Ours(local) => {
-                    said.push(format!("this receiver, reached here at {local}"))
-                }
-                crate::stations::Heard::Near(lan) => {
-                    said.push(format!("on this network, reached here at {lan}"))
-                }
-                crate::stations::Heard::Unchecked => said.push("not yet checked".into()),
-                crate::stations::Heard::Answered | crate::stations::Heard::Silent => {}
-            }
-            hint(ui, &said.join(", "));
-        },
-    );
-    tune
-}
-
-fn listed_row(ui: &mut egui::Ui) -> bool {
-    let mut open = false;
-    ui.horizontal(|ui| {
-        let said = match crate::data::spyservers() {
-            Some(v) => match crate::data::spyserver_probes().tally(&v) {
-                t if t.checked == 0 => format!("{} in the Airspy directory", v.len()),
-                t => format!("{} answering of {} in the Airspy directory", t.answering, v.len()),
-            },
-            None => "the Airspy directory".to_string(),
-        };
-        Line::new().value(said).size(13.0).show(ui);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            open = ui.small_button("FIND").clicked();
-        });
-    });
-    open
-}
-
-fn bare_mhz(hz: u64) -> String {
-    let s = format!("{:.3}", hz as f64 / 1e6);
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
-}
-
-fn server_card(ui: &mut egui::Ui, l: &datasets::spyserver::Listed, idle: bool) -> bool {
-    let mut tune = false;
-    let s = &l.server;
-    let answered = matches!(l.heard, Some(datasets::spyserver::Heard::Answered { .. }));
-    let rail = (answered && s.has_slot()).then_some(theme::TRACE);
-    let mhz = |hz: u64| format!("{:.3}", hz as f64 / 1e6);
-    card(
-        ui,
-        rail,
-        |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                tune = ui.add_enabled(idle, egui::Button::new("TUNE")).clicked();
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    Line::new()
-                        .value(&s.description)
-                        .size(12.0)
-                        .gap(12.0)
-                        .note(&s.device)
-                        .size(10.5)
-                        .elided(ui);
-                });
-            });
-        },
-        |ui| {
-            Line::new()
-                .legend("range")
-                .value(format!("{}-{} MHz", bare_mhz(s.min_hz), bare_mhz(s.max_hz)))
-                .size(12.0)
-                .gap(18.0)
-                .legend("on")
-                .measured(mhz(s.center_hz))
-                .size(12.0)
-                .gap(18.0)
-                .legend("span")
-                .value(format!("{} kHz", s.bandwidth_hz / 1000))
-                .size(12.0)
-                .gap(18.0)
-                .legend("users")
-                .value(format!("{} of {}", s.clients, s.max_clients))
-                .size(12.0)
-                .show(ui);
-            let dial = match s.full_control {
-                true => "dial free".to_string(),
-                false => "dial fixed to its span".to_string(),
-            };
-            let session = match s.session_limit {
-                Some(secs) => format!(", {} min a session", secs.div_ceil(60)),
-                None => String::new(),
-            };
-            let antenna = match s.antenna.is_empty() {
-                true => String::new(),
-                false => format!(", {}", s.antenna),
-            };
-            let checked = match answered {
-                true => "",
-                false => ", not yet checked",
-            };
-            hint(ui, &format!("{}, {dial}{session}{antenna}{checked}", s.addr()));
-        },
-    );
-    tune
 }
 
 /// A capture whose name does not say what it holds, while the card asking is
@@ -4363,46 +4097,32 @@ pub struct RemoteEdit {
 }
 
 impl RemoteEdit {
-    pub fn spyserver() -> Self {
-        Self { proto: remote::Proto::SpyServer, ..Self::default() }
+    pub fn of(proto: remote::Proto) -> Self {
+        Self { proto, ..Self::default() }
+    }
+
+    pub fn at(proto: remote::Proto, host: String, label: String) -> Self {
+        Self { proto, host, label, ..Self::default() }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FindEdit {
+    dir: crate::directories::Directory,
     mhz: String,
-    full_control: bool,
+    tunable: bool,
     free: bool,
     err: Option<String>,
 }
 
-#[derive(Clone, Default)]
-pub struct IqFindEdit {
-    mhz: String,
-    tunable: bool,
-}
-
-impl IqFindEdit {
-    pub fn open(own: Option<crate::stations::Own>) -> Self {
-        crate::stations::check(own);
-        Self::default()
-    }
-
-    fn hz(&self) -> (Option<u64>, Option<String>) {
-        match self.mhz.trim() {
-            "" => (None, None),
-            t => match common::Hz::parse_mhz(t) {
-                Ok(hz) => (Some(hz.0), None),
-                Err(e) => (None, Some(e)),
-            },
-        }
-    }
-}
-
 impl FindEdit {
-    pub fn open() -> Self {
-        crate::data::check(crate::data::Which::SpyServers);
-        Self { free: true, ..Self::default() }
+    pub fn open(dir: crate::directories::Directory) -> Self {
+        dir.open();
+        Self::new(dir)
+    }
+
+    fn new(dir: crate::directories::Directory) -> Self {
+        Self { dir, mhz: String::new(), tunable: false, free: true, err: None }
     }
 
     fn hz(&self) -> (Option<u64>, Option<String>) {
@@ -4631,10 +4351,10 @@ mod tests {
         let host = silent.local_addr().unwrap().to_string();
         let ctx = egui::Context::default();
         let mut a = App::default();
-        let mut edit = RemoteEdit::spyserver();
+        let mut edit = RemoteEdit::of(remote::Proto::SpyServer);
         edit.host = host.clone();
         a.remote = Some(edit.clone());
-        a.find = Some(FindEdit::default());
+        a.find = Some(FindEdit::new(crate::directories::Directory::SpyServer));
 
         let asked = Instant::now();
         a.add_remote(&ctx, &edit);

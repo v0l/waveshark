@@ -216,7 +216,6 @@ pub struct App {
     /// The remote radio being created, while that dialog is open.
     remote: Option<RemoteEdit>,
     find: Option<settings::FindEdit>,
-    iqfind: Option<settings::IqFindEdit>,
     joining: Option<settings::Joining>,
     /// The capture being described, while the card asking what is in it is
     /// open.
@@ -781,7 +780,6 @@ impl Default for App {
             feed_host: String::new(),
             remote: None,
             find: None,
-            iqfind: None,
             joining: None,
             capture_edit: None,
             feed_kind: nodes::FEED_KINDS[0],
@@ -1288,14 +1286,9 @@ impl App {
         true
     }
 
-    pub fn find_iqstreams(&mut self) {
-        self.remote = Some(RemoteEdit::default());
-        self.iqfind = Some(settings::IqFindEdit::open(self.setting(crate::stations::Own::of)));
-    }
-
-    pub fn find_spyservers(&mut self) {
-        self.remote = Some(RemoteEdit::spyserver());
-        self.find = Some(settings::FindEdit::open());
+    pub fn find_in(&mut self, d: crate::directories::Directory) {
+        self.remote = Some(RemoteEdit::of(d.proto()));
+        self.find = Some(settings::FindEdit::open(d));
     }
 
     pub fn start_on_open(&mut self) {
@@ -1994,6 +1987,11 @@ impl App {
         }
         if let Some((lat, lon)) = place {
             self.set_location(lat, lon);
+        }
+        if let Some((d, host, label)) = self.map.connect.take() {
+            let edit = RemoteEdit::at(d.proto(), host, label);
+            self.remote = Some(edit.clone());
+            self.add_remote(ui.ctx(), &edit);
         }
     }
 
@@ -3296,7 +3294,6 @@ impl eframe::App for App {
         self.settings_modal(ui.ctx());
         self.remote_modal(ui.ctx());
         self.find_modal(ui.ctx());
-        self.iqfind_modal(ui.ctx());
         self.pointing_modal(ui.ctx());
         self.capture_modal(ui.ctx());
         self.wigle_modal(ui.ctx());

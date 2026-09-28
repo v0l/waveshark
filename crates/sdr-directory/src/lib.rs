@@ -1,8 +1,9 @@
 pub mod lister;
 pub mod model;
 pub mod portmap;
+pub mod probe;
 
-pub use model::{Accuracy, Dial, Entry, Hardware, Location, Station, Tuner, Version};
+pub use model::{Accuracy, Dial, Entry, Hardware, Location, Protocol, Station, Tuner, Version};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -79,7 +80,7 @@ impl Query {
     pub fn keeps(&self, l: &Listing, now: u64) -> bool {
         let s = &l.entry.station;
         l.online(now)
-            && Version::OURS.speaks_with(&s.version)
+            && s.protocol.speaks_with(&Version::OURS)
             && (!self.free || s.has_slot())
             && s.tuners
                 .iter()
@@ -100,6 +101,11 @@ pub fn newest_per_author(listings: impl Iterator<Item = Listing>, now: u64) -> V
     let mut out: Vec<Listing> = by.into_values().collect();
     out.sort_by(|a, b| b.seen.cmp(&a.seen).then_with(|| a.entry.addr().cmp(&b.entry.addr())));
     out
+}
+
+pub fn distinct(listings: &mut Vec<Listing>) {
+    let mut held = std::collections::HashSet::new();
+    listings.retain(|l| held.insert(l.entry.addr()));
 }
 
 pub fn now() -> u64 {
@@ -135,7 +141,7 @@ mod tests {
                 2_000,
                 Entry {
                     station: Station {
-                        version: Version { major: 2, minor: 0 },
+                        protocol: Protocol::IqStream(Version { major: 2, minor: 0 }),
                         ..station(vec![hf()])
                     },
                     ..entry("f.example", vec![])
@@ -156,6 +162,18 @@ mod tests {
             Vec::<&str>::new(),
             "the tuner hearing 125 MHz is not the tunable one"
         );
+    }
+
+    #[test]
+    fn a_server_listed_twice_at_one_address_is_kept_once_where_it_first_appeared() {
+        let mut v = vec![
+            listed("a", 1, entry("x.example", vec![airband()])),
+            listed("b", 1, entry("y.example", vec![hf()])),
+            listed("c", 1, entry("x.example", vec![hf()])),
+        ];
+        distinct(&mut v);
+        let kept: Vec<&str> = v.iter().map(|l| l.author.0.as_str()).collect();
+        assert_eq!(kept, ["a", "b"]);
     }
 
     #[test]

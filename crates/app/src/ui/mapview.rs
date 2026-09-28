@@ -631,6 +631,20 @@ impl Canvas {
         r
     }
 
+    pub fn note(&self, at: Pos2, text: &str, col: Color32, width: f32) -> Rect {
+        let room = (self.rect.right() - 8.0 - at.x).max(width.min(self.rect.width() - 16.0));
+        let g = self.p.layout(text.to_string(), Self::font(), col, width.min(room));
+        let size = g.size() + Vec2::new(4.0, 0.0);
+        let x = at.x.min(self.rect.right() - 4.0 - size.x).max(self.rect.left() + 4.0);
+        let y = (at.y - g.size().y / 2.0)
+            .min(self.rect.bottom() - 4.0 - size.y)
+            .max(self.rect.top() + 4.0);
+        let r = Rect::from_min_size(Pos2::new(x - 2.0, y), size);
+        self.p.rect_filled(r, 2.0, Color32::from_black_alpha(190));
+        self.p.galley(Pos2::new(x, y), g, col);
+        r
+    }
+
     pub fn font() -> FontId {
         theme::figure(10.0)
     }

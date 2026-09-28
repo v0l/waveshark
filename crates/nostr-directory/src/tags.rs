@@ -1,5 +1,5 @@
 use common::geohash;
-use sdr_directory::{Dial, Entry, Hardware, Location, Station, Tuner, Version};
+use sdr_directory::{Dial, Entry, Hardware, Location, Protocol, Station, Tuner, Version};
 
 pub const SCHEME: &str = "iqstream://";
 pub const GEOHASH_LADDER: usize = 5;
@@ -30,7 +30,9 @@ pub fn encode(entry: &Entry) -> Vec<Tag> {
     if let Some(p) = entry.data_port {
         tags.push(tag("data_port", [p.to_string()]));
     }
-    tags.push(tag("version", [format!("{}.{}", s.version.major, s.version.minor)]));
+    if let Protocol::IqStream(v) = s.protocol {
+        tags.push(tag("version", [format!("{}.{}", v.major, v.minor)]));
+    }
     tags.push(tag("clients", [s.clients.to_string()]));
     if let Some(max) = s.max_clients {
         tags.push(tag("max_clients", [max.to_string()]));
@@ -115,7 +117,7 @@ pub fn decode<'a>(tags: impl Iterator<Item = &'a Tag> + Clone) -> Result<Entry, 
             name: first("name").unwrap_or_default().to_string(),
             description: first("description").unwrap_or_default().to_string(),
             location,
-            version,
+            protocol: Protocol::IqStream(version),
             clients: number("clients")?.unwrap_or(0) as u32,
             max_clients: number("max_clients")?.map(|m| m as u32),
             session_limit_secs: number("session_limit")?.map(|s| s as u32),

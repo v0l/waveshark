@@ -71,3 +71,84 @@ pub fn cog(p: &egui::Painter, r: &Rect, hot: bool) {
     let col = if hot { theme::READOUT } else { Color32::from_rgb(0x6A, 0x72, 0x7C) };
     crate::icons::Icon::Setup.paint(p, *r, col);
 }
+
+pub fn station_card(ui: &mut egui::Ui, f: &sdr_directory::probe::Found, idle: bool) -> bool {
+    use sdr_directory::probe::Reached;
+    let mut tune = false;
+    let e = &f.listing.entry;
+    let s = &e.station;
+    let rail = (f.answered() && s.has_slot()).then_some(theme::TRACE);
+    let mut hardware: Vec<&str> = s.tuners.iter().map(|t| t.hardware.as_str()).collect();
+    hardware.dedup();
+    egui_bench::panel::card(
+        ui,
+        rail,
+        |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                tune = ui.add_enabled(idle, egui::Button::new("CONNECT")).clicked();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    egui_bench::text::Line::new()
+                        .value(&s.name)
+                        .size(12.0)
+                        .gap(12.0)
+                        .note(hardware.join(", "))
+                        .size(10.5)
+                        .wrapped(ui);
+                });
+            });
+        },
+        |ui| {
+            for t in &s.tuners {
+                let (lo, hi) = t.span_hz();
+                let dial = match t.dial {
+                    sdr_directory::Dial::Fixed => "fixed".to_string(),
+                    sdr_directory::Dial::Tunable { min_hz: Some(lo), max_hz: Some(hi) } => {
+                        format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi))
+                    }
+                    sdr_directory::Dial::Tunable { .. } => "free".to_string(),
+                };
+                egui_bench::text::Line::new()
+                    .legend(if t.name.is_empty() { "tuner" } else { t.name.as_str() })
+                    .measured(format!("{}-{} MHz", bare_mhz(lo), bare_mhz(hi)))
+                    .size(12.0)
+                    .gap(18.0)
+                    .legend("dial")
+                    .value(dial)
+                    .size(12.0)
+                    .show(ui);
+            }
+            let mut said = vec![e.addr()];
+            said.push(match s.max_clients {
+                Some(max) => format!("{} of {max} listening", s.clients),
+                None => format!("{} listening", s.clients),
+            });
+            if let Some(secs) = s.session_limit_secs {
+                said.push(format!("{} min a session", secs.div_ceil(60)));
+            }
+            if !s.description.is_empty() {
+                said.push(s.description.clone());
+            }
+            let mut antennas: Vec<&str> =
+                s.tuners.iter().map(|t| t.antenna.as_str()).filter(|a| !a.is_empty()).collect();
+            antennas.dedup();
+            said.extend(antennas.into_iter().map(str::to_string));
+            match f.said().map(|s| s.reached) {
+                Some(Reached::Ours(local)) => {
+                    said.push(format!("this receiver, reached here at {local}"))
+                }
+                Some(Reached::Near(lan)) => {
+                    said.push(format!("on this network, reached here at {lan}"))
+                }
+                Some(Reached::Listed) => {}
+                None => said.push("not yet checked".into()),
+            }
+            egui_bench::text::hint(ui, &said.join(", "));
+        },
+    );
+    tune
+}
+
+fn bare_mhz(hz: u64) -> String {
+    let s = format!("{:.3}", hz as f64 / 1e6);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}

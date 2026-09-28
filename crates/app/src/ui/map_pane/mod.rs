@@ -12,7 +12,7 @@ use super::mapview::{Layer, MapView};
 use super::*;
 use layers::{
     AirportLayer, CellLayer, DispatchLayer, RingLayer, SatLayer, SightingLayer, SondeLayer,
-    StationLayer, TrackLayer,
+    StationLayer, TrackLayer, TunerLayer,
 };
 
 /// What the map pane remembers. Its own, and reachable from no other view:
@@ -33,6 +33,8 @@ pub(super) struct MapState {
     /// select. Held here rather than returned because the layer that names
     /// it lives inside the draw and the caller reads state, not layers.
     pub sat_hit: Option<u64>,
+    pub tuner: Option<layers::TunerKey>,
+    pub connect: Option<(crate::directories::Directory, String, String)>,
     /// Whether the divider is being dragged, so it stays lit and keeps the
     /// drag even when the pointer runs ahead of it.
     splitting: bool,
@@ -47,6 +49,8 @@ impl Default for MapState {
             map: MapView::default(),
             map_frac: DEFAULT_MAP_FRAC,
             sat_hit: None,
+            tuner: None,
+            connect: None,
             splitting: false,
             tracks: Vec::new(),
         }
@@ -104,6 +108,8 @@ impl Map<'_> {
         let mut place = None;
         let mut sat_hit = None;
         let mut split = self.st.map_frac;
+        let mut tuner = self.st.tuner.clone();
+        let mut connect = None;
         let splitting = &mut self.st.splitting;
         {
             let map = &mut self.st.map;
@@ -123,6 +129,7 @@ impl Map<'_> {
                 let mut airports = AirportLayer::default();
                 let mut cells = CellLayer::new(self.heard);
                 let mut sondes = SondeLayer::default();
+                let mut tuners = TunerLayer::new(tuner.clone());
                 let mut station = StationLayer { home, accuracy_m };
                 let mut tracks = TrackLayer { active: &active, now, named_airframes: false };
                 let mut sats = SatLayer::new(
@@ -140,11 +147,12 @@ impl Map<'_> {
                     within: self.trail.within,
                 };
                 let mut dispatch = DispatchLayer::new(self.messages.recent());
-                let mut layers: [&mut dyn Layer; 9] = [
+                let mut layers: [&mut dyn Layer; 10] = [
                     &mut rings,
                     &mut cells,
                     &mut airports,
                     &mut sondes,
+                    &mut tuners,
                     &mut station,
                     &mut sightings,
                     &mut dispatch,
@@ -173,6 +181,12 @@ impl Map<'_> {
                 // pass table makes, so picking one here shows its track and
                 // its footprint and highlights its card.
                 sat_hit = sats.hit;
+                if let Some(hit) = tuners.hit.take() {
+                    tuner = layers::pick(tuner.take(), hit);
+                }
+                if let Some((at, d, found)) = tuners.card.take().filter(|_| tuner.is_some()) {
+                    connect = Self::tuner_card(ui, at, d, &found);
+                }
                 if listing {
                     split = Self::divider(ui, top, usable, split, splitting);
                     ui.add_space(4.0);
@@ -183,7 +197,30 @@ impl Map<'_> {
         }
         self.st.map_frac = split;
         self.st.sat_hit = sat_hit;
+        self.st.tuner = tuner;
+        self.st.connect = connect;
         place
+    }
+
+    fn tuner_card(
+        ui: &egui::Ui,
+        head: Pos2,
+        d: crate::directories::Directory,
+        found: &sdr_directory::probe::Found,
+    ) -> Option<(crate::directories::Directory, String, String)> {
+        const W: f32 = 340.0;
+        let room = ui.clip_rect();
+        let x = (head.x + 12.0).min(room.right() - W - 8.0).max(room.left() + 4.0);
+        let y = (head.y - 12.0).max(room.top() + 4.0);
+        let mut connect = false;
+        egui::Area::new(egui::Id::new("tuner-card"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(Pos2::new(x, y))
+            .show(ui.ctx(), |ui| {
+                ui.set_width(W);
+                connect = super::widgets::station_card(ui, found, true);
+            });
+        connect.then(|| (d, found.addr(), found.listing.entry.station.name.clone()))
     }
 
     /// The handle between the map and the table, and the drag that moves it.

@@ -1,7 +1,7 @@
 use crate::model::private;
 use crate::portmap::PortMap;
 use crate::{
-    ANNOUNCE_EVERY_SECS, Entry, Hardware, Location, SdrDirectory, Station, Tuner, Version,
+    ANNOUNCE_EVERY_SECS, Entry, Hardware, Location, Protocol, SdrDirectory, Station, Tuner, Version,
 };
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
@@ -206,7 +206,7 @@ pub fn entry<C>(
             name: listing.name.clone(),
             description: listing.description.clone(),
             location: listing.location,
-            version: Version::OURS,
+            protocol: Protocol::IqStream(Version::OURS),
             clients: streams.iter().map(|s| s.subscribers() as u32).sum(),
             max_clients: None,
             session_limit_secs: None,
