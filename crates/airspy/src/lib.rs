@@ -178,6 +178,7 @@ impl Airspy {
             ],
             native_format: SampleFormat::Cs16,
             tunable: true,
+            centre_spur: false,
             tx: None,
         };
         let mut me = Self {

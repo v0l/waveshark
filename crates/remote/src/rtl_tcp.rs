@@ -167,6 +167,7 @@ impl Device {
             }],
             native_format: SampleFormat::Cu8,
             tunable: true,
+            centre_spur: true,
             tx: None,
         };
         tracing::debug!("rtl_tcp {addr}: {} with {steps} gain steps", tuner.name());

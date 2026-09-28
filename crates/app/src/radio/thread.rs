@@ -188,6 +188,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             rate: dev.rate().as_f64(),
             zoom: 1,
             dc_block: true,
+            centre_spur: dev.info().centre_spur,
             refresh_hz: 30.0,
             smoothing: crate::chain::DEFAULT_SMOOTHING,
             trace: dsp::spectrum::Detector::Average,

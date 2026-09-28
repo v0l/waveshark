@@ -176,6 +176,7 @@ impl HackRfDevice {
             ],
             native_format: SampleFormat::Cs8,
             tunable: true,
+            centre_spur: true,
             tx: Some(TxInfo {
                 ranges: vec![TunerRange {
                     range: Hz(FREQ_MIN)..=Hz(FREQ_MAX),

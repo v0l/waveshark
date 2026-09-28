@@ -31,6 +31,7 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
         zoom: 1,
         // A file has already been through whatever the receiver did to it.
         dc_block: false,
+        centre_spur: true,
         refresh_hz: 30.0,
         smoothing: crate::chain::DEFAULT_SMOOTHING,
         trace: dsp::spectrum::Detector::Average,

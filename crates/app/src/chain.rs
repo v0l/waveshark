@@ -315,6 +315,7 @@ pub struct Plan {
     /// downstream sees a decimated copy.
     pub zoom: usize,
     pub dc_block: bool,
+    pub centre_spur: bool,
     /// Frames a second the spectrum is worth producing.
     pub refresh_hz: f32,
     /// How much of the last spectrum frame the next one keeps.
@@ -3232,7 +3233,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         p.connect(Source::Span, (derived::TX_MONITOR, 0));
         head = Source::Stage(derived::TX_MONITOR, 0);
     }
-    if plan.dc_block {
+    if plan.dc_block && plan.centre_spur {
         p.add_derived(derived::DC, "dc_block", Settings::new());
         p.connect(head, (derived::DC, 0));
         head = Source::Stage(derived::DC, 0);
@@ -5539,6 +5540,7 @@ pub(crate) mod tests {
             tx_capture: None,
             rds: None,
             dc_block: true,
+            centre_spur: true,
             refresh_hz: 30.0,
             smoothing: DEFAULT_SMOOTHING,
             trace: dsp::spectrum::Detector::Average,
@@ -5567,6 +5569,17 @@ pub(crate) mod tests {
             scan: Default::default(),
             settings: Default::default(),
         }
+    }
+
+    #[test]
+    fn the_centre_spur_is_removed_only_on_a_radio_that_makes_one() {
+        let dc = |spur: bool, on: bool| {
+            let plan = Plan { centre_spur: spur, dc_block: on, ..plan(2.4e6, Hz::mhz(100)) };
+            derived_patch(&plan).stages().iter().filter(|s| s.kind == "dc_block").count()
+        };
+        assert_eq!(dc(true, true), 1, "an RTL-SDR or a HackRF");
+        assert_eq!(dc(false, true), 0, "a KiwiSDR or an Airspy samples the band directly");
+        assert_eq!(dc(true, false), 0, "switched off by the operator");
     }
 
     /// A plan with nothing on the span but what the operator drew: the

@@ -91,6 +91,7 @@ impl RtlSdr {
             }],
             native_format: SampleFormat::Cu8,
             tunable: true,
+            centre_spur: true,
             tx: None,
         };
 

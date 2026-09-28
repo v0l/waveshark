@@ -275,6 +275,7 @@ fn describe(children: &[Box<dyn Device>], child_rate: Sps) -> DeviceInfo {
         gain_stages: first.gain_stages.clone(),
         native_format: first.native_format,
         tunable: true,
+        centre_spur: false,
         // Transmitting out of a stitched receiver is a different radio's job.
         tx: None,
     }
@@ -1208,6 +1209,7 @@ mod tests {
             gain_stages: Vec::new(),
             native_format: common::SampleFormat::Cu8,
             tunable: true,
+            centre_spur: false,
             tx: None,
         };
         let a: Box<dyn Device> =

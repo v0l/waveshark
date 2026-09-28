@@ -60,6 +60,13 @@ pub enum DeviceType {
 }
 
 impl DeviceType {
+    pub fn centre_spur(&self) -> bool {
+        match self {
+            Self::AirspyOne | Self::AirspyHf => false,
+            Self::RtlSdr | Self::Invalid | Self::Other(_) => true,
+        }
+    }
+
     fn from_code(code: u32) -> Self {
         match code {
             0 => Self::Invalid,
@@ -398,6 +405,7 @@ impl Device {
             gain_stages: Vec::new(),
             native_format: SampleFormat::Cu8,
             tunable: sync.can_control,
+            centre_spur: server.device.centre_spur(),
             tx: None,
         };
         tracing::debug!(
@@ -879,6 +887,7 @@ mod tests {
         assert_eq!(version, (2 << 24) | 1700, "2.0.1700, what every client announces");
 
         assert_eq!(d.info().tuner, "Airspy");
+        assert!(!d.info().centre_spur, "an Airspy samples a real IF");
         assert_eq!(d.info().rates.len(), 11);
         assert_eq!(d.rate(), Sps(3_000_000), "the fastest stage until told otherwise");
 

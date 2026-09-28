@@ -516,6 +516,7 @@ impl Device {
             }],
             native_format: SampleFormat::Cs16,
             tunable: true,
+            centre_spur: false,
             tx: None,
         };
 
@@ -894,6 +895,7 @@ mod tests {
         let mut d = Device::open(&addr).unwrap();
         assert_eq!(d.rate(), Sps(11_999));
         assert_eq!(d.info().rate_range, Sps(11_999)..=Sps(11_999));
+        assert!(!d.info().centre_spur, "a KiwiSDR samples the band directly");
         assert!(d.set_rate(Sps(12_000)).is_ok(), "the probe's nominal rate is this one");
         assert!(d.set_rate(Sps(20_250)).is_err());
         let mut s = d.start_rx().unwrap();

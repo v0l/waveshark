@@ -299,6 +299,7 @@ pub struct DeviceInfo {
     /// process's tuner. A driver's property rather than a driver kind's,
     /// because rtl_tcp retunes and iqstream does not.
     pub tunable: bool,
+    pub centre_spur: bool,
     /// Present only on a radio that transmits.
     pub tx: Option<TxInfo>,
 }
@@ -658,6 +659,7 @@ mod tuning_tests {
                     gain_stages: Vec::new(),
                     native_format: crate::SampleFormat::Cs8,
                     tunable: true,
+                    centre_spur: true,
                     tx: None,
                 },
                 center: Hz(100_000_000),

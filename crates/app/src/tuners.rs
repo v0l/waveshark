@@ -721,6 +721,7 @@ mod tests {
                     ],
                     native_format: SampleFormat::Cu8,
                     tunable: true,
+                    centre_spur: true,
                     tx: None,
                 },
                 gains: vec![("lna".into(), GainMode::Manual(24.0)), ("vga".into(), GainMode::Auto)],

@@ -281,6 +281,7 @@ impl Device {
             // Unknown from here: the server does not say what is feeding it.
             // The usual answer is an RTL-SDR, so assume its filtering.
             tunable: movable.is_some(),
+            centre_spur: true,
             tx: None,
         };
         let dial = movable.map(|_| Dial {

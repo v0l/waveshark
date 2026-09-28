@@ -3403,7 +3403,8 @@ impl App {
             let dc_help = "A direct conversion receiver leaks its own local oscillator into \
                            the middle of the span, where it looks exactly like a carrier on \
                            the frequency you are tuned to. This measures the offset and \
-                           subtracts it.";
+                           subtracts it. A radio that samples the band directly, such as a \
+                           KiwiSDR or an Airspy, makes no spur and is left alone.";
             if switch(ui, "centre spur", &mut dc, "remove", dc_help) {
                 self.settings.edit(|s| s.dc_block = dc);
             }

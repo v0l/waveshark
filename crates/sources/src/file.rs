@@ -232,6 +232,7 @@ impl FileSource {
             // A recorded file is exactly what it says; nothing is rolled off
             // beyond whatever the original capture already lost.
             tunable: false,
+            centre_spur: true,
             tx: None,
         };
 

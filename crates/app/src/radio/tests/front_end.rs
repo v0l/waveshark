@@ -40,6 +40,7 @@ impl ThreeStages {
                 ],
                 native_format: common::SampleFormat::Cs8,
                 tunable: true,
+                centre_spur: true,
                 tx: None,
             },
             tuning: common::Tuning::default(),

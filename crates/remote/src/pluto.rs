@@ -270,6 +270,7 @@ impl Pluto {
             }],
             native_format: SampleFormat::Cs16,
             tunable: true,
+            centre_spur: true,
             tx: tx.as_ref().map(|_| TxInfo {
                 ranges: vec![TunerRange {
                     label: range_label(&found.tx_range),

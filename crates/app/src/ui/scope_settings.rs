@@ -105,7 +105,13 @@ impl ScopeSettings<'_> {
                 Line::new().set(text).size(11.0).show(ui);
             });
             let mut dc = self.settings.read(|s| s.dc_block);
-            if switch(ui, "centre spur", &mut dc, "remove", "LO leakage at the tuned frequency.") {
+            if switch(
+                ui,
+                "centre spur",
+                &mut dc,
+                "remove",
+                "LO leakage at the tuned frequency, on radios that make it.",
+            ) {
                 self.settings.edit(|s| s.dc_block = dc);
             }
         });

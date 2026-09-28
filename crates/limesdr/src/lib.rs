@@ -422,6 +422,7 @@ impl LimeSdr {
             }],
             native_format: SampleFormat::Cf32,
             tunable: true,
+            centre_spur: true,
             tx: Some(common::TxInfo {
                 ranges: vec![TunerRange {
                     range: Hz(FREQ_MIN)..=Hz(FREQ_MAX),
