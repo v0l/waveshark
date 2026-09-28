@@ -220,3 +220,4 @@ candle-core = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9be
 candle-kernels = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-nn = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-transformers = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
+egui_bench = { git = "https://github.com/v0l/egui_bench", rev = "67e10a1dda000b3b5d3ae6e399b719ade6d7e65a" }

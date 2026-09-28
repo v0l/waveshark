@@ -2049,6 +2049,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_wheel_over_a_fader_in_the_scrolling_strip_moves_the_fader_and_not_the_list() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 200.0));
+        let mut volume = 0.5f32;
+        let mut scrolled = 0.0f32;
+        for frame in 0..60 {
+            let mut events = vec![egui::Event::PointerMoved(egui::pos2(100.0, 12.0))];
+            if frame == 1 {
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, 1.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let _ = ctx.run_ui(input, |ui| {
+                let out = egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add(Fader::new(&mut volume, 0.0).width(200.0));
+                    ui.add_space(2000.0);
+                });
+                scrolled = out.state.offset.y;
+            });
+        }
+        assert!(volume > 0.5 && volume < 0.6, "one notch up moved the fader to {volume}");
+        assert_eq!(scrolled, 0.0, "the list scrolled under the fader");
+    }
+
+    #[test]
     fn a_channel_can_be_as_wide_as_the_widest_span_a_radio_delivers() {
         assert!(WIDEST_KHZ * 1e3 >= 61_440_000.0, "a LimeSDR at 61.44 MS/s");
         assert!(WIDEST_KHZ * 1e3 >= 30_000_000.0, "a 23 Msym/s DVB-S2 carrier at a 0.3 roll-off");
