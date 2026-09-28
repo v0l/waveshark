@@ -542,3 +542,20 @@ fn a_half_duplex_radio_is_not_retuned_until_the_last_of_the_over_has_gone_out() 
         "part of the over went out somewhere other than the channel"
     );
 }
+
+#[test]
+fn the_transcriber_stays_deaf_for_half_a_second_of_audio_after_hearing_itself() {
+    let mut deaf = crate::radio::tx::Deaf::default();
+    let heard: Vec<bool> = [
+        true, true, false, false, false, false, false, false, true, false, false, false, false,
+        false,
+    ]
+    .into_iter()
+    .map(|itself| deaf.block(itself, 0.125))
+    .collect();
+    assert_eq!(
+        heard,
+        [true, true, true, true, true, true, false, false, true, true, true, true, true, false],
+        "0.5 s is four blocks of 0.125 s after the last one carrying its own over"
+    );
+}

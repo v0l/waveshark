@@ -973,6 +973,10 @@ impl Receiver {
         }
     }
 
+    pub fn tx_monitor_finishing(&self) -> bool {
+        self.stage::<nodes::TxMonitorNode>(derived::TX_MONITOR).is_some_and(|m| m.finishing())
+    }
+
     pub fn set_tx_monitor(&mut self, on: bool) {
         if let Some(n) = self.stage_mut::<nodes::TxMonitorNode>(derived::TX_MONITOR) {
             n.set_enabled(on);
@@ -10835,6 +10839,31 @@ vectors:
         // it.
         let peak = span.iter().fold(0.0f32, |a, s| a.max(s.norm()));
         assert!((peak - 0.25).abs() < 0.01, "the transmission was drawn at {peak:.3}");
+    }
+
+    #[test]
+    fn the_monitor_says_it_is_still_drawing_an_over_after_the_key_comes_up() {
+        let plan = plan_with_tx(TxSource::Tone);
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        let (mut dev, captured) =
+            sources::FileSink::in_memory(Sps(2_000_000), common::SampleFormat::Cs8);
+        assert!(rx.key(dev.start_tx().unwrap()));
+        let quiet = vec![C32::new(0.0, 0.0); 4_000];
+        until("a transmission to draw", || captured.lock().len() >= 4 * 40_000 * 2);
+        rx.set_tx_monitor(true);
+        rx.process(&quiet).unwrap();
+        assert!(!rx.tx_monitor_finishing(), "finishing while the key is down");
+
+        rx.unkey();
+        rx.set_tx_monitor(false);
+        assert!(rx.tx_monitor_finishing(), "the queued end of the over was forgotten");
+        let mut blocks = 0;
+        while rx.tx_monitor_finishing() {
+            rx.process(&quiet).unwrap();
+            blocks += 1;
+            assert!(blocks < 1_000, "the monitor never finished drawing the over");
+        }
+        assert!(blocks > 1, "{blocks} block drew the end of the over, expected a backlog");
     }
 
     #[test]

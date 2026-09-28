@@ -464,10 +464,7 @@ pub(super) struct Tx {
     /// to whichever transmit channel comes first on the strip, so recalling
     /// a second from a bank and working it left the chain showing the other.
     pub(super) last_keyed: Option<u64>,
-    /// When the transmitter was last on air, so the transcriber stays deaf a
-    /// moment past the key coming up: the audio already in the demodulator
-    /// when the key lifted is still the receiver's own voice.
-    pub(super) last_on_air: Option<std::time::Instant>,
+    pub(super) deaf: Deaf,
     /// The channel a voice keyed, so the same voice stopping lets it up and
     /// a hand on the key is left alone.
     pub(super) vox_keyed: Option<u64>,
@@ -478,12 +475,24 @@ pub(super) struct Tx {
     pub(super) back_to_receive: bool,
 }
 
-/// How long past the key coming up the transcriber stays deaf.
-///
-/// One demodulator's worth of audio in flight, not a hang time: what the
-/// receiver said must not be written down, and what somebody says straight
-/// after must be.
-pub(super) const DEAF_TAIL: std::time::Duration = std::time::Duration::from_millis(500);
+pub(super) const DEAF_TAIL_S: f64 = 0.5;
+
+#[derive(Default)]
+pub(super) struct Deaf {
+    left_s: f64,
+}
+
+impl Deaf {
+    pub(super) fn block(&mut self, hearing_itself: bool, block_s: f64) -> bool {
+        if hearing_itself {
+            self.left_s = DEAF_TAIL_S;
+            return true;
+        }
+        let deaf = self.left_s > 0.0;
+        self.left_s = (self.left_s - block_s).max(0.0);
+        deaf
+    }
+}
 
 /// The longest an over is held open for its courtesy tone: the longest tone
 /// that can be set ([`nodes::ROGER_MAX_MS`]) and a block or two for the

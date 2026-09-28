@@ -575,6 +575,10 @@ impl TxMonitorNode {
         self.enabled
     }
 
+    pub fn finishing(&self) -> bool {
+        self.finishing
+    }
+
     /// Where the transmitter is against the receiver's centre.
     pub fn set_shift(&mut self, hz: f64) {
         self.shift_hz = hz;

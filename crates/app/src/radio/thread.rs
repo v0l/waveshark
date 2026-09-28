@@ -261,7 +261,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 vox_keyed: None,
                 ending: None,
                 back_to_receive: false,
-                last_on_air: None,
+                deaf: Default::default(),
             },
             voice: None,
             status,
@@ -331,12 +331,8 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             self.rx.set_tx_monitor(on_air && silent);
             // And nothing reads that loopback as speech: what the receiver
             // said is not what the receiver heard.
-            let now = std::time::Instant::now();
-            if on_air {
-                self.tx.last_on_air = Some(now);
-            }
-            let deaf =
-                on_air || self.tx.last_on_air.is_some_and(|t| now.duration_since(t) < DEAF_TAIL);
+            let hearing_itself = on_air || self.rx.tx_draining() || self.rx.tx_monitor_finishing();
+            let deaf = self.tx.deaf.block(hearing_itself, block_secs);
             self.rx.set_transcriber_deaf(deaf);
             // A radio unplugged mid-over ends the over itself, and the key
             // has to come up with it: a lit key over a transmitter that
