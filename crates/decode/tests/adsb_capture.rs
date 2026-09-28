@@ -188,10 +188,10 @@ fn framing_by_the_crc_reads_frames_the_preamble_search_never_sees() {
     // aircraft sat on is still readable. Both counts are of distinct frames
     // dump1090 also saw, over the same four seconds. They were 27 and 29
     // until all-call replies answering a ground station were read as well.
-    let theirs = reference();
     let with: HashSet<String> = skip_without_fixture!(FRAMES.as_ref()).iter().cloned().collect();
     let without: HashSet<String> =
         skip_without_fixture!(PREAMBLE_ONLY.as_ref()).iter().cloned().collect();
+    let theirs = reference();
     assert_eq!(without.intersection(&theirs).count(), 28, "preamble search alone");
     assert_eq!(with.intersection(&theirs).count(), 32, "with CRC framing");
     // Two all-call replies from 4B1880 answering different interrogators, its
