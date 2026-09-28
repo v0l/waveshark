@@ -3390,7 +3390,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
             // and the agent all transmit through. A recording and a `.sub`
             // took the branch above: what they send is somebody else's
             // transmission, and a tone on the end of it is not in it.
-            if tx.spec.roger_ms > 0.0 || tx.spec.roger_style == nodes::RogerStyle::Quindar {
+            if tx.spec.roger_style.sends(tx.spec.roger_ms) {
                 let mut s = Settings::new();
                 s.insert(
                     "roger_style".into(),
@@ -10362,6 +10362,46 @@ vectors:
     #[test]
     fn a_quindar_tail_reaches_a_radio_that_takes_its_samples_in_real_time() {
         quindar_over(Counted::paced(plan_with_tx(TxSource::Tone).rate));
+    }
+
+    #[test]
+    fn a_baofeng_roger_goes_out_as_the_uv_5r_sends_it() {
+        let mut plan = plan_with_tx(TxSource::Tone);
+        let spec = TxSpec {
+            source: TxSource::Tone,
+            tone_hz: 700.0,
+            roger_style: nodes::RogerStyle::Baofeng,
+            ..Default::default()
+        };
+        plan.channels[0].tx = Some(spec);
+        plan.tx = Some(TxPlan { spec, ..plan.tx.unwrap() });
+        let mut rx = Receiver::build(&plan, Sinks::default()).unwrap();
+        assert!(rx.tx_settled());
+        let radio = Counted::default();
+        assert!(rx.key(Box::new(radio.clone())));
+        until("an over on the air", || radio.samples() > 600_000);
+        assert!(rx.end_over(), "the Baofeng roger was not sent");
+        until("the roger to go out", || !rx.sending_roger());
+        rx.unkey();
+
+        let air = radio.transmitted();
+        let mut demod = dsp::FmDemod::new(plan.rate, nodes::NBFM_DEVIATION_HZ);
+        let mut audio = Vec::new();
+        demod.process(&air, &mut audio);
+        let window = (plan.rate * 0.01) as usize;
+        let pitches: Vec<f64> = audio
+            .chunks_exact(window)
+            .map(|w| w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f64 / 0.01)
+            .collect();
+        let first = pitches.iter().position(|h| (h - 1_123.0).abs() < 100.0).expect("the roger");
+        let tail = &pitches[first..];
+        let high = tail.iter().filter(|h| (*h - 1_123.0).abs() < 100.0).count();
+        let low = tail.iter().filter(|h| (*h - 865.0).abs() < 100.0).count();
+        assert!(
+            (13..=15).contains(&high),
+            "136 ms of 1123 Hz came out as {high} windows: {tail:?}"
+        );
+        assert!((19..=21).contains(&low), "202 ms of 865 Hz came out as {low} windows: {tail:?}");
     }
 
     #[test]

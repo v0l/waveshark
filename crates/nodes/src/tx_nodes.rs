@@ -1796,8 +1796,8 @@ pub struct RogerNode {
     rate: f64,
     lead_ms: f64,
     lead: usize,
-    intro: Burst,
-    outro: Burst,
+    intro: Melody,
+    outro: Melody,
     ended: bool,
 }
 
@@ -1806,22 +1806,87 @@ pub enum RogerStyle {
     #[default]
     Tone,
     Quindar,
+    Baofeng,
+    BaofengNew,
+    Cobra,
+    Motorola,
+    MorseK,
+    MorseR,
 }
 
+const DIT_MS: f64 = 60.0;
+const MORSE_HZ: f64 = 800.0;
+
 impl RogerStyle {
-    pub const ALL: [RogerStyle; 2] = [RogerStyle::Tone, RogerStyle::Quindar];
+    pub const ALL: [RogerStyle; 8] = [
+        RogerStyle::Tone,
+        RogerStyle::Quindar,
+        RogerStyle::Baofeng,
+        RogerStyle::BaofengNew,
+        RogerStyle::Cobra,
+        RogerStyle::Motorola,
+        RogerStyle::MorseK,
+        RogerStyle::MorseR,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             RogerStyle::Tone => "Tone",
             RogerStyle::Quindar => "Quindar",
+            RogerStyle::Baofeng => "Baofeng",
+            RogerStyle::BaofengNew => "Baofeng new",
+            RogerStyle::Cobra => "Cobra",
+            RogerStyle::Motorola => "Motorola",
+            RogerStyle::MorseK => "Morse K",
+            RogerStyle::MorseR => "Morse R",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            RogerStyle::Tone => "One tone as the key comes up",
+            RogerStyle::Quindar => {
+                "NASA's Quindar tones: 2525 Hz before the speech, 2475 Hz after it"
+            }
+            RogerStyle::Baofeng => "A Baofeng UV-5R on its older firmware: 1123 Hz then 865 Hz",
+            RogerStyle::BaofengNew => "A Baofeng UV-5R on its newer firmware: 1000 Hz then 800 Hz",
+            RogerStyle::Cobra => "A Cobra AM845 PMR446 handheld: three rising octaves",
+            RogerStyle::Motorola => "A Motorola TLKR T40: three quick rising notes",
+            RogerStyle::MorseK => "K in Morse at 20 words a minute, the amateur go-ahead",
+            RogerStyle::MorseR => "R in Morse at 20 words a minute, for roger",
         }
     }
 
     pub fn index(self) -> usize {
+        Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+
+    pub fn sends(self, tone_ms: f64) -> bool {
+        self != RogerStyle::Tone || tone_ms > 0.0
+    }
+
+    pub fn notes(self) -> &'static [(f64, f64)] {
+        const DAH: f64 = 3.0 * DIT_MS;
         match self {
-            RogerStyle::Tone => 0,
-            RogerStyle::Quindar => 1,
+            RogerStyle::Tone | RogerStyle::Quindar => &[],
+            RogerStyle::Baofeng => &[(1_123.0, 136.0), (865.0, 202.0)],
+            RogerStyle::BaofengNew => &[(1_000.0, 90.0), (800.0, 90.0)],
+            RogerStyle::Cobra => &[(435.0, 100.0), (872.0, 100.0), (1_742.0, 100.0)],
+            RogerStyle::Motorola => &[(656.0, 50.0), (812.0, 50.0), (1_000.0, 50.0)],
+            RogerStyle::MorseK => &[
+                (MORSE_HZ, DAH),
+                (0.0, DIT_MS),
+                (MORSE_HZ, DIT_MS),
+                (0.0, DIT_MS),
+                (MORSE_HZ, DAH),
+            ],
+            RogerStyle::MorseR => &[
+                (MORSE_HZ, DIT_MS),
+                (0.0, DIT_MS),
+                (MORSE_HZ, DAH),
+                (0.0, DIT_MS),
+                (MORSE_HZ, DIT_MS),
+            ],
         }
     }
 
@@ -1837,28 +1902,44 @@ pub const QUINDAR_LEAD_MS: f64 = 300.0;
 pub const QUINDAR_LEAD_MAX_MS: f64 = 2_000.0;
 
 #[derive(Clone, Default)]
-struct Burst {
-    hz: f64,
-    len: usize,
+struct Melody {
+    notes: Vec<(f64, usize)>,
+    at: usize,
     sent: usize,
+    phase: f64,
 }
 
-impl Burst {
-    fn new(hz: f64, len: usize) -> Self {
-        Self { hz, len, sent: 0 }
+impl Melody {
+    fn tone(hz: f64, len: usize) -> Self {
+        Self { notes: vec![(hz, len)], ..Self::default() }
+    }
+
+    fn of(notes: &[(f64, f64)], rate: f64) -> Self {
+        let notes = notes.iter().map(|&(hz, ms)| (hz, (rate * ms / 1_000.0) as usize)).collect();
+        Self { notes, ..Self::default() }
     }
 
     fn left(&self) -> usize {
-        self.len - self.sent
+        self.notes.iter().skip(self.at).map(|(_, n)| n).sum::<usize>() - self.sent
     }
 
     fn next(&mut self, rate: f64) -> Option<f32> {
-        if self.sent >= self.len {
-            return None;
+        while let Some(&(_, len)) = self.notes.get(self.at)
+            && self.sent >= len
+        {
+            self.at += 1;
+            self.sent = 0;
         }
-        let t = self.sent as f64 / rate.max(1.0);
+        let &(hz, _) = self.notes.get(self.at)?;
         self.sent += 1;
-        Some(0.5 * (std::f64::consts::TAU * self.hz * t).sin() as f32)
+        if hz <= 0.0 {
+            self.phase = 0.0;
+            return Some(0.0);
+        }
+        let v = 0.5 * self.phase.sin() as f32;
+        self.phase =
+            (self.phase + std::f64::consts::TAU * hz / rate.max(1.0)) % std::f64::consts::TAU;
+        Some(v)
     }
 }
 
@@ -1871,8 +1952,8 @@ impl Default for RogerNode {
             rate: 0.0,
             lead_ms: QUINDAR_LEAD_MS,
             lead: 0,
-            intro: Burst::default(),
-            outro: Burst::default(),
+            intro: Melody::default(),
+            outro: Melody::default(),
             ended: false,
         }
     }
@@ -1895,8 +1976,9 @@ impl RogerNode {
     /// answer to whether the key may come up yet.
     pub fn end_over(&mut self) -> bool {
         self.outro = match self.style {
-            RogerStyle::Tone => Burst::new(self.hz, self.samples(self.ms)),
-            RogerStyle::Quindar => Burst::new(QUINDAR_KEY_UP_HZ, self.samples(QUINDAR_MS)),
+            RogerStyle::Tone => Melody::tone(self.hz, self.samples(self.ms)),
+            RogerStyle::Quindar => Melody::tone(QUINDAR_KEY_UP_HZ, self.samples(QUINDAR_MS)),
+            preset => Melody::of(preset.notes(), self.rate),
         };
         self.ended = true;
         self.sending()
@@ -1947,15 +2029,14 @@ impl RogerNode {
         }
         match self.outro.next(self.rate) {
             Some(v) => v,
-            None if self.ended && self.outro.len > 0 => 0.0,
+            None if self.ended && self.outro.notes.iter().any(|(_, n)| *n > 0) => 0.0,
             None => s,
         }
     }
 }
 
 pub fn roger_sends(s: &Settings) -> bool {
-    RogerStyle::from_index(s.i64_or(ROGER_STYLE, 0)) == RogerStyle::Quindar
-        || s.f64_or(ROGER_MS, 0.0) > 0.0
+    RogerStyle::from_index(s.i64_or(ROGER_STYLE, 0)).sends(s.f64_or(ROGER_MS, 0.0))
 }
 
 impl Simple for RogerNode {
@@ -1975,6 +2056,15 @@ impl Simple for RogerNode {
                     format!("{:.0} ms at {:.0} Hz", self.ms, self.hz)
                 }
                 (false, RogerStyle::Tone) => "off".into(),
+                (
+                    false,
+                    style @ (RogerStyle::Baofeng
+                    | RogerStyle::BaofengNew
+                    | RogerStyle::Cobra
+                    | RogerStyle::Motorola
+                    | RogerStyle::MorseK
+                    | RogerStyle::MorseR),
+                ) => style.label().into(),
             },
         )]
     }
@@ -2008,8 +2098,8 @@ impl Simple for RogerNode {
 
     fn reset(&mut self) {
         self.lead = 0;
-        self.intro = Burst::default();
-        self.outro = Burst::default();
+        self.intro = Melody::default();
+        self.outro = Melody::default();
         self.ended = false;
     }
 
@@ -2017,7 +2107,7 @@ impl Simple for RogerNode {
         Simple::reset(self);
         if self.style == RogerStyle::Quindar {
             self.lead = self.samples(self.lead_ms);
-            self.intro = Burst::new(QUINDAR_KEY_DOWN_HZ, self.samples(QUINDAR_MS));
+            self.intro = Melody::tone(QUINDAR_KEY_DOWN_HZ, self.samples(QUINDAR_MS));
         }
     }
 
@@ -2133,6 +2223,46 @@ mod roger_tests {
             assert!(blocks < 100, "the over never finished");
         }
         assert_eq!(blocks, 13, "250 ms of closing tone and nothing held back");
+    }
+
+    #[test]
+    fn every_radio_roger_is_sent_note_for_note_at_its_pitch_and_length() {
+        let presets = [
+            RogerStyle::Baofeng,
+            RogerStyle::BaofengNew,
+            RogerStyle::Cobra,
+            RogerStyle::Motorola,
+            RogerStyle::MorseK,
+            RogerStyle::MorseR,
+        ];
+        for style in presets {
+            let mut node = RogerNode::default();
+            Simple::set_param(&mut node, ROGER_STYLE, ParamValue::Choice(style.index())).unwrap();
+            Simple::negotiate(&mut node, &spec()).unwrap();
+            assert!(node.end_over(), "{style:?} had nothing to send");
+            let mut sent = Vec::new();
+            while node.sending() {
+                sent.extend(block(&mut node, 0.7));
+            }
+            sent.extend(block(&mut node, 0.7));
+            let mut at = 0;
+            for &(hz, ms) in style.notes() {
+                let n = (RATE * ms / 1_000.0) as usize;
+                let note = &sent[at..at + n];
+                if hz == 0.0 {
+                    assert!(note.iter().all(|v| *v == 0.0), "{style:?}: a gap carried sound");
+                } else {
+                    let cycles = hz * ms / 1_000.0;
+                    let heard = rising(note) as f64;
+                    assert!(
+                        (heard - cycles).abs() <= 1.0,
+                        "{style:?}: {hz} Hz for {ms} ms is {cycles:.1} cycles, {heard} went out"
+                    );
+                }
+                at += n;
+            }
+            assert!(sent[at..].iter().all(|v| *v == 0.0), "{style:?}: sound after the last note");
+        }
     }
 
     /// And with no tone asked for, the key comes up at once.

@@ -796,47 +796,35 @@ impl Strip<'_> {
     /// audio rather than only on one with a vox: the key comes up by hand,
     /// by voice or by the agent, and all three end the same over.
     fn channel_roger(ui: &mut egui::Ui, id: u64, tx: &mut crate::radio::TxSpec) -> bool {
-        #[derive(Clone, Copy, PartialEq)]
-        enum Roger {
-            Off,
-            Beep,
-            Quindar,
-        }
+        use nodes::RogerStyle;
         let mut changed = false;
-        let was = match (tx.roger_style, tx.roger_ms > 0.0) {
-            (nodes::RogerStyle::Quindar, _) => Roger::Quindar,
-            (nodes::RogerStyle::Tone, true) => Roger::Beep,
-            (nodes::RogerStyle::Tone, false) => Roger::Off,
-        };
+        let was = tx.roger_style.sends(tx.roger_ms).then_some(tx.roger_style);
         let mut roger = was;
+        let named: Vec<(Option<RogerStyle>, String, &str)> =
+            std::iter::once((None, "OFF".to_string(), "Nothing at the end of an over"))
+                .chain(
+                    RogerStyle::ALL
+                        .iter()
+                        .map(|s| (Some(*s), s.label().to_uppercase(), s.describe())),
+                )
+                .collect();
+        let options: Vec<(Option<RogerStyle>, &str, &str)> =
+            named.iter().map(|(v, label, tip)| (*v, label.as_str(), *tip)).collect();
         ui.horizontal(|ui| {
             legend_col(ui, "roger");
-            pick(
-                ui,
-                ("roger", id),
-                &mut roger,
-                &[
-                    (Roger::Off, "OFF", "Nothing at the end of an over"),
-                    (Roger::Beep, "TONE", "One tone as the key comes up"),
-                    (
-                        Roger::Quindar,
-                        "QUINDAR",
-                        "NASA's Quindar tones: 2525 Hz before the speech, 2475 Hz after it",
-                    ),
-                ],
-            );
+            pick(ui, ("roger", id), &mut roger, &options);
         });
         if roger != was {
             (tx.roger_style, tx.roger_ms) = match roger {
-                Roger::Off => (nodes::RogerStyle::Tone, 0.0),
-                Roger::Beep => (nodes::RogerStyle::Tone, ROGER_BEEP_MS),
-                Roger::Quindar => (nodes::RogerStyle::Quindar, tx.roger_ms),
+                None => (RogerStyle::Tone, 0.0),
+                Some(RogerStyle::Tone) => (RogerStyle::Tone, ROGER_BEEP_MS),
+                Some(style) => (style, tx.roger_ms),
             };
             changed = true;
         }
         match roger {
-            Roger::Off => {}
-            Roger::Beep => {
+            None => {}
+            Some(RogerStyle::Tone) => {
                 changed |= number(
                     ui,
                     "beep",
@@ -856,7 +844,7 @@ impl Strip<'_> {
                     "What pitch the courtesy tone is sent at",
                 );
             }
-            Roger::Quindar => {
+            Some(RogerStyle::Quindar) => {
                 changed |= number(
                     ui,
                     "lead",
@@ -867,6 +855,7 @@ impl Strip<'_> {
                     "Carrier alone before the opening tone, so the far radio's squelch is open when it arrives",
                 );
             }
+            Some(_) => {}
         }
         changed
     }
