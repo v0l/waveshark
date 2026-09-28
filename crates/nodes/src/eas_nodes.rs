@@ -460,10 +460,7 @@ mod tests {
         let mut n = audio_node();
         let frames = run_audio(&mut n, &keyed_audio(TOR, 3));
         assert_eq!(frames.len(), 1, "{} alerts off the audio", frames.len());
-        assert_eq!(
-            eas::parse(&frames[0].bytes()),
-            eas::parse(TOR.trim_end_matches('-').as_bytes())
-        );
+        assert_eq!(eas::parse(frames[0].bytes()), eas::parse(TOR.trim_end_matches('-').as_bytes()));
     }
 
     /// Two copies and then silence still publish: an alert held back for a

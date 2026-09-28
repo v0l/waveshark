@@ -148,7 +148,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             for (k, v) in &said {
-                Line::new().legend(*k).value(v).size(11.0).show(ui);
+                Line::new().legend(k).value(v).size(11.0).show(ui);
             }
         });
         ui.add_space(4.0);
@@ -179,7 +179,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
         });
         ui.add_space(4.0);
     }
-    hex_dump(ui, &rec.bytes());
+    hex_dump(ui, rec.bytes());
     asked
 }
 

@@ -9,7 +9,7 @@ fn run(label: &str, iq: &[C32], rate: f64, center: f64, channel: f64) {
     let spec = StreamSpec::iq(rate, common::Hz(center as u64));
     let mut g =
         build_chain(spec, &[NodeSpec::new("dmr").f("channel_hz", channel)], &registry()).unwrap();
-    let (mut frames, mut voice) = (0usize, 0usize);
+    let (mut frames, voice) = (0usize, 0usize);
     let bs: usize = std::env::var("BLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(16_384);
     for b in iq.chunks(bs) {
         g.feed_iq(b).unwrap();

@@ -289,7 +289,7 @@ mod tests {
     use common::Hz;
     use decode::dab::ProgrammeType;
     use decode::drm::Language;
-    use decode::drm::{Fac, SdcMode};
+
     use dsp::drm::Occupancy;
 
     /// Four seconds of a synthesised multiplex, read the whole way through:

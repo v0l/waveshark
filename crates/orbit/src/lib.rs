@@ -382,12 +382,13 @@ impl Sat {
             let e = el(next);
             if prev <= 0.0 && e > 0.0 {
                 rise = Some(cross(&el, t, next, true));
-            } else if prev > 0.0 && e <= 0.0 {
-                if let Some(r) = rise.take() {
-                    let set = cross(&el, t, next, false);
-                    if let Some(p) = self.pass_between(from, r, set, min_el_deg) {
-                        out.push(p);
-                    }
+            } else if prev > 0.0
+                && e <= 0.0
+                && let Some(r) = rise.take()
+            {
+                let set = cross(&el, t, next, false);
+                if let Some(p) = self.pass_between(from, r, set, min_el_deg) {
+                    out.push(p);
                 }
             }
             prev = e;
@@ -395,10 +396,10 @@ impl Sat {
         }
         // A pass still running when the window closes is reported to where it
         // was looked at, rather than dropped for not having ended yet.
-        if let Some(r) = rise {
-            if let Some(p) = self.pass_between(from, r, end, min_el_deg) {
-                out.push(p);
-            }
+        if let Some(r) = rise
+            && let Some(p) = self.pass_between(from, r, end, min_el_deg)
+        {
+            out.push(p);
         }
         out
     }

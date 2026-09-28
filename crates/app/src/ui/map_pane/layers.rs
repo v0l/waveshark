@@ -237,10 +237,10 @@ impl Layer for AirportLayer {
         if c.zoom() < crate::data::SHOW_ZOOM {
             return;
         }
-        if let Some(pos) = c.hover() {
-            if let Some((at, a)) = hovered_airport(&self.shown, pos) {
-                airport_card(&c.p, c.rect, at, a);
-            }
+        if let Some(pos) = c.hover()
+            && let Some((at, a)) = hovered_airport(&self.shown, pos)
+        {
+            airport_card(&c.p, c.rect, at, a);
         }
     }
 
@@ -1104,44 +1104,6 @@ fn card_layout(head: &[Vec2], rows: &[Vec2], pad: f32, sep: f32, rule_gap: f32) 
     CardLayout { size: Vec2::new(text_w + pad * 2.0, y + pad), ys, rule_y, text_x: pad }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The airport card must be big enough for every line it draws.
-    ///
-    /// It twice was not: the width was the widest line with no room for the
-    /// margin the text is drawn at, so every row ran over the right edge, and
-    /// the "+N more" row was drawn below a card measured without it. Both are
-    /// a line outside the box, so that is what this checks.
-    #[test]
-    fn the_airport_card_holds_every_line_it_draws() {
-        let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
-        let head = [Vec2::new(180.0, 15.0), Vec2::new(90.0, 11.0), Vec2::new(40.0, 13.0)];
-        // Eleven rows: ten frequencies and the "+N more" that follows them.
-        let rows: Vec<Vec2> = (0..11).map(|_| Vec2::new(150.0, 13.0)).collect();
-        let l = card_layout(&head, &rows, pad, sep, rule_gap);
-
-        for (i, s) in head.iter().chain(rows.iter()).enumerate() {
-            let right = l.text_x + s.x;
-            assert!(
-                right <= l.size.x - pad + 1e-3,
-                "line {i} ends at {right}, past the {} the card is wide",
-                l.size.x
-            );
-            let bottom = l.ys[i] + s.y;
-            assert!(
-                bottom <= l.size.y - pad + 1e-3,
-                "line {i} ends at {bottom}, past the {} the card is tall",
-                l.size.y
-            );
-        }
-        // The rule sits between the head and the rows, not on top of either.
-        assert!(l.rule_y > l.ys[head.len() - 1]);
-        assert!(l.rule_y < l.ys[head.len()]);
-    }
-}
-
 /// Satellites: the path each one is on, and where it is now.
 ///
 /// Drawn from the elements rather than from anything heard, so unlike a
@@ -1439,5 +1401,43 @@ impl Layer for DispatchLayer<'_> {
         }
         let g = crate::places::geocoder();
         vec![crate::data::Credit { name: g.name(), licence: g.terms(), url: g.page() }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The airport card must be big enough for every line it draws.
+    ///
+    /// It twice was not: the width was the widest line with no room for the
+    /// margin the text is drawn at, so every row ran over the right edge, and
+    /// the "+N more" row was drawn below a card measured without it. Both are
+    /// a line outside the box, so that is what this checks.
+    #[test]
+    fn the_airport_card_holds_every_line_it_draws() {
+        let (pad, sep, rule_gap) = (8.0, 4.0, 6.0);
+        let head = [Vec2::new(180.0, 15.0), Vec2::new(90.0, 11.0), Vec2::new(40.0, 13.0)];
+        // Eleven rows: ten frequencies and the "+N more" that follows them.
+        let rows: Vec<Vec2> = (0..11).map(|_| Vec2::new(150.0, 13.0)).collect();
+        let l = card_layout(&head, &rows, pad, sep, rule_gap);
+
+        for (i, s) in head.iter().chain(rows.iter()).enumerate() {
+            let right = l.text_x + s.x;
+            assert!(
+                right <= l.size.x - pad + 1e-3,
+                "line {i} ends at {right}, past the {} the card is wide",
+                l.size.x
+            );
+            let bottom = l.ys[i] + s.y;
+            assert!(
+                bottom <= l.size.y - pad + 1e-3,
+                "line {i} ends at {bottom}, past the {} the card is tall",
+                l.size.y
+            );
+        }
+        // The rule sits between the head and the rows, not on top of either.
+        assert!(l.rule_y > l.ys[head.len() - 1]);
+        assert!(l.rule_y < l.ys[head.len()]);
     }
 }

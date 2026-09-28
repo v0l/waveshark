@@ -96,7 +96,7 @@ pub fn golay23_check_and_correct(frame: &mut BitFrame, start: usize) -> u32 {
 /// Golay(24,12) with overall parity, over the 24 bits starting at `start`.
 /// Returns the number of corrected bit errors, or 4 when correction failed.
 pub fn golay24_check_and_correct(frame: &mut BitFrame, start: usize) -> u32 {
-    let parity_error = frame.cardinality() % 2 != 0;
+    let parity_error = !frame.cardinality().is_multiple_of(2);
 
     let syndrome = golay_syndrome(frame, start);
 

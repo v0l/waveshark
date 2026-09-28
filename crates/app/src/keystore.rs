@@ -145,12 +145,11 @@ impl KeyStore {
     /// a recovered one; a manual entry replaces anything, and a recovered one
     /// only fills a gap or updates a prior recovery.
     pub fn insert(&mut self, cell: CellId, key: Key, origin: Origin) {
-        if origin == Origin::Recovered {
-            if let Some(e) = self.keys.get(&cell) {
-                if e.origin == Origin::Manual {
-                    return;
-                }
-            }
+        if origin == Origin::Recovered
+            && let Some(e) = self.keys.get(&cell)
+            && e.origin == Origin::Manual
+        {
+            return;
         }
         self.keys.insert(cell, Entry { key, origin });
     }

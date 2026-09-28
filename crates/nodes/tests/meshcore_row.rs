@@ -1,6 +1,5 @@
 //! MeshCore packets through the real row path, from LoRa envelope to fields.
 
-use common::Hz;
 use decode::lora::{Frame, Header};
 
 fn row(payload: Vec<u8>) -> common::packet::Proto {

@@ -35,19 +35,19 @@ fn main() {
         }
         for p in g.output().as_packets().unwrap_or(&[]) {
             packets += 1;
-            if std::env::var_os("MEASURE").is_some() {
-                if let Some(k) = &p.keying {
-                    eprintln!(
-                        "MEASURE at {:.2}s: {:.4} MHz {} {:?} {} us {:.0} Hz sweep {:.0} Hz/s",
-                        i as f64 * block as f64 / rate,
-                        p.carrier.center_hz as f64 / 1e6,
-                        k.modulation,
-                        k.how,
-                        p.carrier.duration_us,
-                        k.params.bandwidth_hz,
-                        k.params.sweep_hz_s
-                    );
-                }
+            if std::env::var_os("MEASURE").is_some()
+                && let Some(k) = &p.keying
+            {
+                eprintln!(
+                    "MEASURE at {:.2}s: {:.4} MHz {} {:?} {} us {:.0} Hz sweep {:.0} Hz/s",
+                    i as f64 * block as f64 / rate,
+                    p.carrier.center_hz as f64 / 1e6,
+                    k.modulation,
+                    k.how,
+                    p.carrier.duration_us,
+                    k.params.bandwidth_hz,
+                    k.params.sweep_hz_s
+                );
             }
             if !p.bytes().is_empty() {
                 let b = p.bytes();
@@ -76,50 +76,50 @@ fn main() {
                 }
             }
         }
-        if std::env::var_os("PHASES").is_some() && i % 500 == 499 {
-            if let Some(a) = g
+        if std::env::var_os("PHASES").is_some()
+            && i % 500 == 499
+            && let Some(a) = g
                 .order()
                 .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
                 .and_then(|(id, _)| g.node(id))
-            {
-                let mut ph: Vec<_> = a.phases();
-                ph.sort_by(|x, y| y.1.mean_us.total_cmp(&x.1.mean_us));
-                for (name, c) in ph.iter().take(12) {
-                    eprintln!(
-                        "phase {name:<22} mean {:8.0} us  p95 {:8} us  share {:5.1}%",
-                        c.mean_us,
-                        c.p95_us,
-                        100.0 * c.mean_us / (c.block_s * 1e6).max(1.0)
-                    );
-                }
-            }
-        }
-        if std::env::var_os("STICKY").is_some() && i % 2000 == 0 {
-            if let Some(a) = g
-                .order()
-                .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
-                .and_then(|(id, _)| g.node(id))
-                .map(|n| n.as_any())
-                .and_then(|x| x.downcast_ref::<nodes::AutoNode>())
-            {
+        {
+            let mut ph: Vec<_> = a.phases();
+            ph.sort_by(|x, y| y.1.mean_us.total_cmp(&x.1.mean_us));
+            for (name, c) in ph.iter().take(12) {
                 eprintln!(
-                    "t {:6.2}s sticky {:?} open {}",
-                    i as f64 * block as f64 / rate,
-                    a.remembered(),
-                    a.active()
+                    "phase {name:<22} mean {:8.0} us  p95 {:8} us  share {:5.1}%",
+                    c.mean_us,
+                    c.p95_us,
+                    100.0 * c.mean_us / (c.block_s * 1e6).max(1.0)
                 );
             }
         }
-        if std::env::var_os("SOURCES").is_some() && i % 200 == 0 {
-            if let Some(a) = g
+        if std::env::var_os("STICKY").is_some()
+            && i % 2000 == 0
+            && let Some(a) = g
                 .order()
                 .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
                 .and_then(|(id, _)| g.node(id))
                 .map(|n| n.as_any())
                 .and_then(|x| x.downcast_ref::<nodes::AutoNode>())
-            {
-                eprintln!("t {:6.2}s sources open {}", i as f64 * block as f64 / rate, a.active());
-            }
+        {
+            eprintln!(
+                "t {:6.2}s sticky {:?} open {}",
+                i as f64 * block as f64 / rate,
+                a.remembered(),
+                a.active()
+            );
+        }
+        if std::env::var_os("SOURCES").is_some()
+            && i % 200 == 0
+            && let Some(a) = g
+                .order()
+                .find(|(_, n)| n.eq_ignore_ascii_case("auto"))
+                .and_then(|(id, _)| g.node(id))
+                .map(|n| n.as_any())
+                .and_then(|x| x.downcast_ref::<nodes::AutoNode>())
+        {
+            eprintln!("t {:6.2}s sources open {}", i as f64 * block as f64 / rate, a.active());
         }
         let dt = t.elapsed().as_secs_f64();
         let real = block as f64 / rate;

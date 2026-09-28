@@ -159,29 +159,28 @@ impl Sats<'_> {
         // Elements go stale in days. Say how stale the worst of them is,
         // because a table drawn from a fortnight-old set is fiction and
         // nothing else on this screen would show it.
-        if let Some(s) = sky.as_ref() {
-            if let Some(oldest) = s
+        if let Some(s) = sky.as_ref()
+            && let Some(oldest) = s
                 .sats()
                 .iter()
                 .map(|x| x.age_days(now))
                 .fold(None, |m: Option<f64>, a| Some(m.map_or(a, |m| m.max(a))))
-            {
-                let stale = oldest > 7.0;
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    let mut line = Line::new()
-                        .legend("oldest elements")
-                        .value(format!("{oldest:.1} days past epoch"))
-                        .size(12.0);
-                    if stale {
-                        line = line
-                            .tint(theme::FAULT)
-                            .note("refresh them, a set this old is a guess")
-                            .tint(theme::FAULT);
-                    }
-                    line.show(ui);
-                });
-            }
+        {
+            let stale = oldest > 7.0;
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let mut line = Line::new()
+                    .legend("oldest elements")
+                    .value(format!("{oldest:.1} days past epoch"))
+                    .size(12.0);
+                if stale {
+                    line = line
+                        .tint(theme::FAULT)
+                        .note("refresh them, a set this old is a guess")
+                        .tint(theme::FAULT);
+                }
+                line.show(ui);
+            });
         }
         ui.add_space(4.0);
 

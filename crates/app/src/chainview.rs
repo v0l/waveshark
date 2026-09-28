@@ -783,34 +783,34 @@ pub fn draw(
     // are not all fed is left out of the built graph, so without these the
     // one thing you cannot do is wire up a stage you just added.
     let mut ghosts: Vec<Ghost> = Vec::new();
-    if edit.manual {
-        if let Some(patch) = patch {
-            // Not running here and not running in the other half either.
-            // The view draws one direction at a time, and a receive stage
-            // is not a stage waiting to be wired just because the transmit
-            // half is showing: every one of them appeared as a ghost under
-            // the source the moment manual mode was entered on that view.
-            for st in patch.stages().iter().filter(|s| {
-                !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id)
-            }) {
-                let at = match edit.pos.get(&st.id) {
-                    Some(at) => *at,
-                    None => {
-                        let placed: Vec<Rect> =
-                            rects.iter().copied().chain(ghosts.iter().map(|g| g.r)).collect();
-                        let seed = edit.free_spot_among(&placed);
-                        edit.pos.insert(st.id, seed);
-                        seed
-                    }
-                };
-                let desc = waiting.iter().find(|w| w.id == st.id);
-                ghosts.push(Ghost {
-                    id: st.id,
-                    r: Rect::from_center_size(rect.min + at.to_vec2(), Vec2::new(box_w, BOX_H)),
-                    ins: desc.map_or(1, |w| w.inputs),
-                    outs: desc.map_or(1, |w| w.outputs),
-                });
-            }
+    if edit.manual
+        && let Some(patch) = patch
+    {
+        // Not running here and not running in the other half either.
+        // The view draws one direction at a time, and a receive stage
+        // is not a stage waiting to be wired just because the transmit
+        // half is showing: every one of them appeared as a ghost under
+        // the source the moment manual mode was entered on that view.
+        for st in patch.stages().iter().filter(|s| {
+            !topo.nodes.iter().any(|t| t.tag == Some(s.id)) && !elsewhere.contains(&s.id)
+        }) {
+            let at = match edit.pos.get(&st.id) {
+                Some(at) => *at,
+                None => {
+                    let placed: Vec<Rect> =
+                        rects.iter().copied().chain(ghosts.iter().map(|g| g.r)).collect();
+                    let seed = edit.free_spot_among(&placed);
+                    edit.pos.insert(st.id, seed);
+                    seed
+                }
+            };
+            let desc = waiting.iter().find(|w| w.id == st.id);
+            ghosts.push(Ghost {
+                id: st.id,
+                r: Rect::from_center_size(rect.min + at.to_vec2(), Vec2::new(box_w, BOX_H)),
+                ins: desc.map_or(1, |w| w.inputs),
+                outs: desc.map_or(1, |w| w.outputs),
+            });
         }
     }
 
@@ -1089,16 +1089,17 @@ pub fn draw(
         let feeds_anything = topo.nodes.iter().any(|other| {
             other.inputs.iter().any(|(s, _)| node.outputs.iter().any(|(o, _)| o == s))
         });
-        if !feeds_anything && !node.sink {
-            if let Some((slot, spec)) = node.outputs.first() {
-                p.text(
-                    Pos2::new(r.right() + 8.0, r.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    format!("out  {}", wire_label(spec, topo.rate_of(*slot))),
-                    theme::figure(10.0),
-                    theme::TRACE,
-                );
-            }
+        if !feeds_anything
+            && !node.sink
+            && let Some((slot, spec)) = node.outputs.first()
+        {
+            p.text(
+                Pos2::new(r.right() + 8.0, r.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("out  {}", wire_label(spec, topo.rate_of(*slot))),
+                theme::figure(10.0),
+                theme::TRACE,
+            );
         }
     }
 
@@ -1239,13 +1240,13 @@ fn interact(
     // have, an output loses all of them. A stage with an input port hanging
     // is left out of the built graph rather than refused, so this is an edit
     // like any other rather than a way to break the receiver.
-    if resp.secondary_clicked() {
-        if let Some(q) = resp.interact_pointer_pos() {
-            if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
-                act.unlink = Some((tag, port));
-            } else if let Some(from) = output_at(topo, rects, ghosts, src, q) {
-                act.unlink_out = Some(from);
-            }
+    if resp.secondary_clicked()
+        && let Some(q) = resp.interact_pointer_pos()
+    {
+        if let Some((tag, port)) = input_at(topo, rects, ghosts, q) {
+            act.unlink = Some((tag, port));
+        } else if let Some(from) = output_at(topo, rects, ghosts, src, q) {
+            act.unlink_out = Some(from);
         }
     }
 
@@ -1288,10 +1289,9 @@ fn interact(
                 let c =
                     Rect::from_min_max(Pos2::new(r.right() - CORNER, r.bottom() - CORNER), r.max);
                 c.contains(q)
-            }) {
-                if resizable(&topo.nodes[i]) {
-                    return Drag::Resize(node_keys[i]);
-                }
+            }) && resizable(&topo.nodes[i])
+            {
+                return Drag::Resize(node_keys[i]);
             }
             match rects.iter().position(|r| r.contains(q)) {
                 Some(i) => Drag::Node(node_keys[i], rects[i].center() - q),
@@ -1326,29 +1326,27 @@ fn interact(
         // feeds whichever input the wire was pulled off. Anywhere else and
         // the wire is abandoned, because an edit that half happens is worse
         // than one that visibly did not.
-        if resp.drag_stopped() {
-            if let Drag::Wire { from, to, .. } = drag {
-                let on_in =
-                    input_at(topo, rects, ghosts, q).or_else(|| body_input(topo, rects, ghosts, q));
-                let on_out = output_at(topo, rects, ghosts, src, q)
-                    .or_else(|| body_output(topo, rects, ghosts, src, q));
-                match to {
-                    // Pulled off an input: whatever it is dropped on is what
-                    // that input reads now. Dropping it on another input
-                    // instead moves the wire across, which is what a wire
-                    // held by its end looks like it should do.
-                    Some(to) => match (on_out, from, on_in) {
-                        (Some(from), _, _) => act.link = Some((from, to.0, to.1)),
-                        (None, Some(from), Some(landed)) => {
-                            act.link = Some((from, landed.0, landed.1))
-                        }
-                        _ => {}
-                    },
-                    // Drawn out of an output: it has to land on an input.
-                    None => {
-                        if let (Some(from), Some(landed)) = (from, on_in) {
-                            act.link = Some((from, landed.0, landed.1));
-                        }
+        if resp.drag_stopped()
+            && let Drag::Wire { from, to, .. } = drag
+        {
+            let on_in =
+                input_at(topo, rects, ghosts, q).or_else(|| body_input(topo, rects, ghosts, q));
+            let on_out = output_at(topo, rects, ghosts, src, q)
+                .or_else(|| body_output(topo, rects, ghosts, src, q));
+            match to {
+                // Pulled off an input: whatever it is dropped on is what
+                // that input reads now. Dropping it on another input
+                // instead moves the wire across, which is what a wire
+                // held by its end looks like it should do.
+                Some(to) => match (on_out, from, on_in) {
+                    (Some(from), _, _) => act.link = Some((from, to.0, to.1)),
+                    (None, Some(from), Some(landed)) => act.link = Some((from, landed.0, landed.1)),
+                    _ => {}
+                },
+                // Drawn out of an output: it has to land on an input.
+                None => {
+                    if let (Some(from), Some(landed)) = (from, on_in) {
+                        act.link = Some((from, landed.0, landed.1));
                     }
                 }
             }

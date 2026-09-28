@@ -325,39 +325,6 @@ fn enumerate() -> Vec<DeviceEntry> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ids_are_unique_and_the_default_is_listed() {
-        for (i, a) in MODELS.iter().enumerate() {
-            for b in &MODELS[i + 1..] {
-                assert_ne!(a.id, b.id);
-                assert_ne!(a.repo, b.repo);
-            }
-        }
-        assert!(model(DEFAULT_MODEL).is_some());
-    }
-
-    #[test]
-    fn a_device_setting_round_trips() {
-        for c in [DeviceChoice::Auto, DeviceChoice::Cpu, DeviceChoice::Cuda(1), DeviceChoice::Metal]
-        {
-            assert_eq!(DeviceChoice::parse(&c.id()), c);
-        }
-        assert_eq!(DeviceChoice::parse("cuda"), DeviceChoice::Cuda(0));
-        assert_eq!(DeviceChoice::parse("nonsense"), DeviceChoice::Auto);
-    }
-
-    #[test]
-    fn auto_and_cpu_are_always_offered() {
-        let d = devices();
-        assert_eq!(d[0].choice, DeviceChoice::Auto);
-        assert_eq!(d[1].choice, DeviceChoice::Cpu);
-    }
-}
-
 /// Where a model's files live under the models directory.
 ///
 /// One directory per model, named by its id, so two can be kept and
@@ -408,4 +375,37 @@ pub fn installed(root: &std::path::Path) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_unique_and_the_default_is_listed() {
+        for (i, a) in MODELS.iter().enumerate() {
+            for b in &MODELS[i + 1..] {
+                assert_ne!(a.id, b.id);
+                assert_ne!(a.repo, b.repo);
+            }
+        }
+        assert!(model(DEFAULT_MODEL).is_some());
+    }
+
+    #[test]
+    fn a_device_setting_round_trips() {
+        for c in [DeviceChoice::Auto, DeviceChoice::Cpu, DeviceChoice::Cuda(1), DeviceChoice::Metal]
+        {
+            assert_eq!(DeviceChoice::parse(&c.id()), c);
+        }
+        assert_eq!(DeviceChoice::parse("cuda"), DeviceChoice::Cuda(0));
+        assert_eq!(DeviceChoice::parse("nonsense"), DeviceChoice::Auto);
+    }
+
+    #[test]
+    fn auto_and_cpu_are_always_offered() {
+        let d = devices();
+        assert_eq!(d[0].choice, DeviceChoice::Auto);
+        assert_eq!(d[1].choice, DeviceChoice::Cpu);
+    }
 }

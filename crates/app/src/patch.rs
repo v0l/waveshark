@@ -218,7 +218,7 @@ impl Patch {
                 // it: what the other half cannot give it is a wire from one
                 // of its own stages.
                 if !from_elsewhere {
-                    out.links.push(l.clone());
+                    out.links.push(*l);
                 }
                 return false;
             }
@@ -239,10 +239,10 @@ impl Patch {
         if !self.exists(to.0) {
             return;
         }
-        if let Source::Stage(f, _) = from {
-            if builtin::is(f) || !self.exists(f) {
-                return;
-            }
+        if let Source::Stage(f, _) = from
+            && (builtin::is(f) || !self.exists(f))
+        {
+            return;
         }
         self.links.retain(|l| l.to != to);
         self.links.push(Link { from, to });
@@ -514,10 +514,10 @@ impl Edits {
                 }
                 Some("at") => {
                     let vals: Vec<&str> = w.collect();
-                    if let [id, x, y] = vals[..] {
-                        if let (Ok(id), Ok(x), Ok(y)) = (id.parse(), x.parse(), y.parse()) {
-                            places.insert(id, (x, y));
-                        }
+                    if let [id, x, y] = vals[..]
+                        && let (Ok(id), Ok(x), Ok(y)) = (id.parse(), x.parse(), y.parse())
+                    {
+                        places.insert(id, (x, y));
                     }
                 }
                 _ => {}

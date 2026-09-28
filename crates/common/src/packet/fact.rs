@@ -7,9 +7,7 @@
 //! variant is earned when a second protocol needs the same statement and a
 //! view acts on it.
 
-use std::sync::Arc;
-
-use crate::{ChannelPlan, Cpr, Secrecy, Unit, VideoFrame};
+use crate::{ChannelPlan, Cpr, Secrecy, Unit};
 
 /// One statement a decoder made
 #[derive(Clone, Debug, PartialEq)]

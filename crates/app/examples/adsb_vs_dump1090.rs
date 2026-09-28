@@ -138,7 +138,8 @@ fn read_avr(addr: &str, stop: Arc<AtomicBool>, out: Arc<Mutex<Vec<Seen>>>) {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    (s.len() % 2 == 0)
+    s.len()
+        .is_multiple_of(2)
         .then(|| {
             (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()).collect()
         })

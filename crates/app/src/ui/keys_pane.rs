@@ -149,18 +149,18 @@ impl Keys<'_> {
                         _ => decode::channel_keys::parse_key(typed),
                     };
                     let ok = key.is_some() && !self.st.new_name.trim().is_empty();
-                    if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
-                        if let Some(key) = key {
-                            self.st.store.insert_channel(ChannelKey {
-                                system: self.st.new_system,
-                                name: self.st.new_name.trim().to_string(),
-                                key,
-                            });
-                            let _ = self.st.store.save();
-                            self.st.store.publish();
-                            self.st.new_name.clear();
-                            self.st.new_key.clear();
-                        }
+                    if ui.add_enabled(ok, egui::Button::new("Add")).clicked()
+                        && let Some(key) = key
+                    {
+                        self.st.store.insert_channel(ChannelKey {
+                            system: self.st.new_system,
+                            name: self.st.new_name.trim().to_string(),
+                            key,
+                        });
+                        let _ = self.st.store.save();
+                        self.st.store.publish();
+                        self.st.new_name.clear();
+                        self.st.new_key.clear();
                     }
                 });
                 // Or straight out of a node on the network, which is the
@@ -294,15 +294,10 @@ impl Keys<'_> {
                 // The key search, shown as it happens rather than only when
                 // it lands. Always drawn: without `tea` the phase is Idle, so
                 // nothing shows, which is correct.
-                if !s.has_key {
-                    if let Some((text, colour)) = recovery_label(s.recovery) {
-                        Line::new()
-                            .legend("search")
-                            .value(text)
-                            .tint(colour)
-                            .size(11.0)
-                            .wrapped(ui);
-                    }
+                if !s.has_key
+                    && let Some((text, colour)) = recovery_label(s.recovery)
+                {
+                    Line::new().legend("search").value(text).tint(colour).size(11.0).wrapped(ui);
                 }
 
                 // The key material: entry, provenance, persistence. Only with
@@ -336,13 +331,13 @@ impl Keys<'_> {
                     ),
                 );
                 let parsed = crate::keystore::parse_typed_key(buf);
-                if ui.add_enabled(parsed.is_some(), egui::Button::new("Set key")).clicked() {
-                    if let Some(key) = parsed {
-                        self.cmds.push(Cmd::TetraKey { colour: cell.colour, key });
-                        self.st.store.insert(cell, key, Origin::Manual);
-                        let _ = self.st.store.save();
-                        self.st.typing.remove(&cell.tag_key());
-                    }
+                if ui.add_enabled(parsed.is_some(), egui::Button::new("Set key")).clicked()
+                    && let Some(key) = parsed
+                {
+                    self.cmds.push(Cmd::TetraKey { colour: cell.colour, key });
+                    self.st.store.insert(cell, key, Origin::Manual);
+                    let _ = self.st.store.save();
+                    self.st.typing.remove(&cell.tag_key());
                 }
             });
         }
@@ -364,11 +359,11 @@ impl Keys<'_> {
                     ),
                 );
                 let secret = parse_id_secret(buf);
-                if ui.add_enabled(secret.is_some(), egui::Button::new("Set secret")).clicked() {
-                    if let Some(c) = secret {
-                        self.cmds.push(Cmd::TetraIdSecret { colour: cell.colour, c });
-                        self.st.typing.remove(&key);
-                    }
+                if ui.add_enabled(secret.is_some(), egui::Button::new("Set secret")).clicked()
+                    && let Some(c) = secret
+                {
+                    self.cmds.push(Cmd::TetraIdSecret { colour: cell.colour, c });
+                    self.st.typing.remove(&key);
                 }
             });
         }

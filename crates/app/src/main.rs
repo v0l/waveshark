@@ -544,7 +544,7 @@ fn bench_iq(spec: &str, block: usize) -> anyhow::Result<()> {
     }
 
     let name = |i: usize| labels.get(i).map(String::as_str).unwrap_or("?");
-    println!("\n{:>7} {:>9} {:>8}  {}", "block", "ms", "x real", "where the time went");
+    println!("\n{:>7} {:>9} {:>8}  where the time went", "block", "ms", "x real");
     let mut order: Vec<usize> = (0..timed.len()).collect();
     order.sort_by(|&a, &b| timed[b].us.partial_cmp(&timed[a].us).unwrap());
     for &i in order.iter().take(12) {
@@ -561,7 +561,7 @@ fn bench_iq(spec: &str, block: usize) -> anyhow::Result<()> {
 
     // Past a hundred per cent between them: independent nodes run beside
     // each other, so the shares are of one core's time and not of the wall.
-    println!("\n{:>12} {:>10} {:>9}  {}", "total ms", "% of wall", "us/block", "node");
+    println!("\n{:>12} {:>10} {:>9}  node", "total ms", "% of wall", "us/block");
     let mut totals: Vec<(String, u64)> = rx.node_costs();
     totals.sort_by(|a, b| b.1.cmp(&a.1));
     for (label, us) in totals.into_iter().take(15).filter(|(_, us)| *us > 0) {
@@ -1698,10 +1698,10 @@ fn main() -> eframe::Result<()> {
                 None => {}
             }
             #[cfg(feature = "mcp")]
-            if let Some(addr) = args.mcp_listen.0 {
-                if let Err(e) = app.serve_mcp(addr) {
-                    eprintln!("not serving MCP on {addr}: {e}");
-                }
+            if let Some(addr) = args.mcp_listen.0
+                && let Err(e) = app.serve_mcp(addr)
+            {
+                eprintln!("not serving MCP on {addr}: {e}");
             }
             app.shot = args.shot.clone();
             app.shot_after = args.shot_after;

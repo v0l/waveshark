@@ -159,15 +159,15 @@ pub fn refresh(
     when: When,
 ) -> Result<Option<Tree>, Error> {
     let meta = read_meta(repo, cache);
-    if let Some(m) = &meta {
-        if when == When::IfDue {
-            if let Some(why) = &m.refused {
-                return Err(Error::Fetch(repo.dir.into(), format!("halted: {why}")));
-            }
-            let due = now().saturating_sub(m.checked) >= repo.max_age.as_secs();
-            if !due && m.commit.is_some() {
-                return Ok(None);
-            }
+    if let Some(m) = &meta
+        && when == When::IfDue
+    {
+        if let Some(why) = &m.refused {
+            return Err(Error::Fetch(repo.dir.into(), format!("halted: {why}")));
+        }
+        let due = now().saturating_sub(m.checked) >= repo.max_age.as_secs();
+        if !due && m.commit.is_some() {
+            return Ok(None);
         }
     }
     let have = meta.and_then(|m| m.commit);
@@ -189,7 +189,7 @@ pub fn held(repo: &'static Repo, cache: &crate::cache::Cache) -> Option<Tree> {
     let m = read_meta(repo, cache)?;
     let dir = repo.cache_dir(cache);
     let commit = m.commit?;
-    (m.files > 0).then(|| Tree { dir, commit })
+    (m.files > 0).then_some(Tree { dir, commit })
 }
 
 /// What is held and when it was checked, for the row that reports it.
@@ -453,10 +453,11 @@ fn pax_path(payload: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(payload).ok()?;
     for line in text.split('\n') {
         let rest = line.trim_end_matches('\r');
-        if let Some((len, field)) = rest.split_once(' ') {
-            if len.parse::<usize>().is_ok() && field.starts_with("path=") {
-                return Some(field[5..].to_string());
-            }
+        if let Some((len, field)) = rest.split_once(' ')
+            && len.parse::<usize>().is_ok()
+            && field.starts_with("path=")
+        {
+            return Some(field[5..].to_string());
         }
     }
     None
@@ -715,7 +716,7 @@ mod tests {
     /// subdirectory, two files, a zero-record end.
     fn tarball(root: &str) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut entry = |name: &str, ty: u8, data: &[u8], out: &mut Vec<u8>| {
+        let entry = |name: &str, ty: u8, data: &[u8], out: &mut Vec<u8>| {
             let mut h = [0u8; 512];
             h[..name.len()].copy_from_slice(name.as_bytes());
             h[100] = b'0';

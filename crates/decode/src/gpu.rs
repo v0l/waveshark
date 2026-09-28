@@ -335,7 +335,7 @@ impl GpuSearch {
 
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bind"),
-                layout: &bgl,
+                layout: bgl,
                 entries: &[
                     bind(0, pbuf.as_entire_binding()),
                     bind(1, sbox.as_entire_binding()),
@@ -353,7 +353,7 @@ impl GpuSearch {
             let mut enc = device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&pipeline);
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &bind, &[]);
                 let mut done = 0u64;
                 while done < count as u64 {
@@ -366,7 +366,7 @@ impl GpuSearch {
             enc.copy_buffer_to_buffer(&reg_out, 0, &readback, 4, 4);
             queue.submit([enc.finish()]);
 
-            let out = read_two(&device, &readback);
+            let out = read_two(device, &readback);
             if out[0] != 0 {
                 return Some(out[1]);
             }
@@ -559,7 +559,7 @@ impl Ta61Gpu {
             queue.write_buffer(&found, 0, &0u32.to_le_bytes());
             let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ta61-bind"),
-                layout: &bgl,
+                layout: bgl,
                 entries: &[
                     bind(0, pbuf.as_entire_binding()),
                     bind(1, sbox.as_entire_binding()),
@@ -572,7 +572,7 @@ impl Ta61Gpu {
             let mut enc = device.create_command_encoder(&Default::default());
             {
                 let mut pass = enc.begin_compute_pass(&Default::default());
-                pass.set_pipeline(&pipeline);
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &binding, &[]);
                 let per_dispatch = (WORKGROUP * 65535) as u64;
                 let mut done = 0u64;
@@ -586,7 +586,7 @@ impl Ta61Gpu {
             enc.copy_buffer_to_buffer(&c_lo, 0, &readback, 4, 4);
             enc.copy_buffer_to_buffer(&c_hi, 0, &readback, 8, 4);
             queue.submit([enc.finish()]);
-            let out = read_n::<3>(&device, &readback);
+            let out = read_n::<3>(device, &readback);
             if out[0] != 0 {
                 let mut c = [0u8; 8];
                 c[..4].copy_from_slice(&out[1].to_le_bytes());

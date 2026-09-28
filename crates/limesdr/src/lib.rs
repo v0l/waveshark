@@ -480,12 +480,11 @@ impl LimeSdr {
     /// That is only right if the antenna is on the port the frequency picks,
     /// which is why the choice can be pinned instead.
     fn antenna_for(&self, f: Hz) -> Option<&Antenna> {
-        if self.antenna != AUTO_ANTENNA {
-            if let Some(a) =
+        if self.antenna != AUTO_ANTENNA
+            && let Some(a) =
                 self.antennas.iter().find(|a| a.name == self.antenna || a.label == self.antenna)
-            {
-                return Some(a);
-            }
+        {
+            return Some(a);
         }
         let want = if f.get() >= 1_500_000_000 { "LNAH" } else { "LNAL" };
         let on = |a: &&Antenna| a.chan == self.chan;
@@ -736,10 +735,10 @@ fn tx_ports_on(handle: &Handle, chan: usize, board: &str) -> Vec<TxPort> {
 /// `chan` is the transmitter in use, which is what `Auto` chooses within: a
 /// pinned port names its own channel and moving to it moves the chain.
 fn pick_tx_port<'a>(ports: &'a [TxPort], forced: &str, f: Hz, chan: usize) -> Option<&'a TxPort> {
-    if forced != AUTO_ANTENNA {
-        if let Some(p) = ports.iter().find(|p| p.name == forced || p.label == forced) {
-            return Some(p);
-        }
+    if forced != AUTO_ANTENNA
+        && let Some(p) = ports.iter().find(|p| p.name == forced || p.label == forced)
+    {
+        return Some(p);
     }
     let hz = f.0 as f64;
     let on = |p: &&TxPort| p.chan == chan;

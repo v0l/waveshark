@@ -212,7 +212,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::media;
+
     use common::{C32, Hz};
 
     /// Run a channel through the node and collect what reached the bus.

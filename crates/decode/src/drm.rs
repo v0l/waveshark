@@ -467,10 +467,10 @@ pub fn sdc_qam16(cells: &[C32], mode: Mode, occ: Occupancy) -> Option<Sdc> {
     let strong = usable / 3;
     let weak = 2 * (usable / 3);
     let tail = usable - 3 * (usable / 3);
-    let first = level(&qam16_soft(cells, None), QAM16_T0[0], &QAM16_PUNCTURE[0], tail, strong)?;
-    let sign = level_bits(&first, QAM16_T0[0], &QAM16_PUNCTURE[0], tail, 2 * cells.len());
+    let first = level(&qam16_soft(cells, None), QAM16_T0[0], QAM16_PUNCTURE[0], tail, strong)?;
+    let sign = level_bits(&first, QAM16_T0[0], QAM16_PUNCTURE[0], tail, 2 * cells.len());
     let second =
-        level(&qam16_soft(cells, Some(&sign)), QAM16_T0[1], &QAM16_PUNCTURE[1], tail, weak)?;
+        level(&qam16_soft(cells, Some(&sign)), QAM16_T0[1], QAM16_PUNCTURE[1], tail, weak)?;
     let mut bits = first;
     bits.extend(second);
     for (b, d) in bits.iter_mut().zip(dispersal(strong + weak)) {

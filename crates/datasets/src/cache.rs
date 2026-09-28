@@ -374,19 +374,19 @@ impl Cache {
     /// or the check was not due and `when` allowed skipping it.
     pub fn refresh(&self, src: &Source, when: When) -> Result<Option<PathBuf>, Error> {
         let meta = self.meta(src);
-        if let Some(m) = &meta {
-            if when == When::IfDue {
-                if let Some(why) = &m.refused {
-                    // Halted until somebody looks at it. Reported as an
-                    // error rather than as "nothing to do", or the pane
-                    // would show a dataset quietly frozen at whatever it
-                    // last held.
-                    return Err(Error::Fetch(src.name.into(), format!("halted: {why}")));
-                }
-                let due = now().saturating_sub(m.checked) >= src.max_age.as_secs();
-                if !due && !m.seen.is_empty() {
-                    return Ok(None);
-                }
+        if let Some(m) = &meta
+            && when == When::IfDue
+        {
+            if let Some(why) = &m.refused {
+                // Halted until somebody looks at it. Reported as an
+                // error rather than as "nothing to do", or the pane
+                // would show a dataset quietly frozen at whatever it
+                // last held.
+                return Err(Error::Fetch(src.name.into(), format!("halted: {why}")));
+            }
+            let due = now().saturating_sub(m.checked) >= src.max_age.as_secs();
+            if !due && !m.seen.is_empty() {
+                return Ok(None);
             }
         }
         let seen = meta.map(|m| m.seen).unwrap_or_default();

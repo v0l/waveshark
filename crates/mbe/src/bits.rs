@@ -156,7 +156,7 @@ impl BitFrame {
     /// The right-most `bit_count` bits plus one, matching
     /// `toReverseIntegerArray`'s sibling `right(int)` in jmbe.
     pub fn right(&self, bit_count: usize) -> Option<Vec<bool>> {
-        if bit_count + 1 <= self.size {
+        if bit_count < self.size {
             self.get_bits(self.size - bit_count - 1, self.size - 1)
         } else {
             None
@@ -201,7 +201,7 @@ impl BitFrame {
     pub fn load(&mut self, offset: usize, width: u32, value: u64) {
         for x in 0..width {
             let mask = 1u64 << (width - x - 1);
-            self.set_value(offset as usize + x as usize, (mask & value) == mask);
+            self.set_value(offset + x as usize, (mask & value) == mask);
         }
     }
 
@@ -248,7 +248,7 @@ impl BitFrame {
     pub fn xor(&mut self, offset: usize, width: u32, value: u32) {
         for x in 0..width {
             let bit = (value >> (width - x - 1)) & 1 == 1;
-            let index = offset as usize + x as usize;
+            let index = offset + x as usize;
             if index < self.bits.len() {
                 self.bits[index] ^= bit;
             }

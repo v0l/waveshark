@@ -113,12 +113,12 @@ impl VideoPane<'_> {
         }
         let before = pick_of(st.watching.as_deref(), &self.muxes);
         ui.add_space(4.0);
-        if let Some(f) = self.frame {
-            if is_new(st.shown.as_ref(), &f) {
-                st.texture = Some(upload(ui.ctx(), &f, st.texture.take()));
-                st.last = Some(std::time::Instant::now());
-                st.shown = Some(f);
-            }
+        if let Some(f) = self.frame
+            && is_new(st.shown.as_ref(), &f)
+        {
+            st.texture = Some(upload(ui.ctx(), &f, st.texture.take()));
+            st.last = Some(std::time::Instant::now());
+            st.shown = Some(f);
         }
         let hold = st
             .shown

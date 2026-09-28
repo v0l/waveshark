@@ -81,10 +81,10 @@ fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
         let p = e.path();
         if p.is_dir() {
             walk(root, &p, out);
-        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sub")) {
-            if let Ok(rel) = p.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sub"))
+            && let Ok(rel) = p.strip_prefix(root)
+        {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
 }
@@ -368,56 +368,6 @@ impl<'a> Scripts<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tmpdir(name: &str) -> std::path::PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("waveshark-scripts-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("garage")).unwrap();
-        d
-    }
-
-    #[test]
-    fn the_tree_lists_every_sub_under_a_root_and_nothing_else() {
-        let d = tmpdir("walk");
-        std::fs::write(d.join("gate.sub"), "x").unwrap();
-        std::fs::write(d.join("notes.txt"), "x").unwrap();
-        std::fs::write(d.join("garage/left.sub"), "x").unwrap();
-        std::fs::write(d.join("garage/right.SUB"), "x").unwrap();
-        let mut out = Vec::new();
-        walk(&d, &d, &mut out);
-        out.sort();
-        assert_eq!(out, vec!["garage/left.sub", "garage/right.SUB", "gate.sub"]);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// What the packet list writes is what this panel reads: the same file,
-    /// through the writer and back through the parser the transmitter uses.
-    #[test]
-    fn a_saved_burst_is_a_file_the_panel_can_load() {
-        let d = tmpdir("saved");
-        let save = decode::subghz::Save {
-            frequency: 433_920_000,
-            preset: decode::subghz::Preset::Ook,
-            body: decode::subghz::key_of_decode("Princeton", 0xa1_3f_08).unwrap(),
-        };
-        let path = d.join(format!("{}.sub", save.file_stem("Princeton", std::time::UNIX_EPOCH)));
-        std::fs::write(&path, save.text()).unwrap();
-        let mut out = Vec::new();
-        walk(&d, &d, &mut out);
-        assert_eq!(out, vec!["Princeton_433.92MHz_0.sub"]);
-        let f = SubFile::open(&path).expect("the panel parses what the packet list wrote");
-        assert_eq!(f.file.frequency, 433_920_000);
-        assert_eq!(f.label(), "Princeton");
-        // Ten repeats of a 24-bit frame, which is what the encoder keys.
-        assert_eq!(f.file.bursts[0].len(), 240);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-}
-
 /// One row of the tree: an indent, a name, and the whole width clickable.
 fn row(
     ui: &mut egui::Ui,
@@ -469,4 +419,54 @@ fn row_with(
         table::cell(&p, rect, rect.right() - right_w, right_w, right, theme::LEGEND);
     }
     resp.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("waveshark-scripts-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("garage")).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_tree_lists_every_sub_under_a_root_and_nothing_else() {
+        let d = tmpdir("walk");
+        std::fs::write(d.join("gate.sub"), "x").unwrap();
+        std::fs::write(d.join("notes.txt"), "x").unwrap();
+        std::fs::write(d.join("garage/left.sub"), "x").unwrap();
+        std::fs::write(d.join("garage/right.SUB"), "x").unwrap();
+        let mut out = Vec::new();
+        walk(&d, &d, &mut out);
+        out.sort();
+        assert_eq!(out, vec!["garage/left.sub", "garage/right.SUB", "gate.sub"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What the packet list writes is what this panel reads: the same file,
+    /// through the writer and back through the parser the transmitter uses.
+    #[test]
+    fn a_saved_burst_is_a_file_the_panel_can_load() {
+        let d = tmpdir("saved");
+        let save = decode::subghz::Save {
+            frequency: 433_920_000,
+            preset: decode::subghz::Preset::Ook,
+            body: decode::subghz::key_of_decode("Princeton", 0xa1_3f_08).unwrap(),
+        };
+        let path = d.join(format!("{}.sub", save.file_stem("Princeton", std::time::UNIX_EPOCH)));
+        std::fs::write(&path, save.text()).unwrap();
+        let mut out = Vec::new();
+        walk(&d, &d, &mut out);
+        assert_eq!(out, vec!["Princeton_433.92MHz_0.sub"]);
+        let f = SubFile::open(&path).expect("the panel parses what the packet list wrote");
+        assert_eq!(f.file.frequency, 433_920_000);
+        assert_eq!(f.label(), "Princeton");
+        // Ten repeats of a 24-bit frame, which is what the encoder keys.
+        assert_eq!(f.file.bursts[0].len(), 240);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

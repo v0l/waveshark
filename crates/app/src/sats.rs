@@ -75,10 +75,11 @@ impl Sky {
 pub fn sky(group: &'static Group) -> Option<Arc<Sky>> {
     let held = SKY.read().clone();
     let rows = crate::data::satellites(group);
-    if let (Some(s), Some(r)) = (&held, &rows) {
-        if s.group == Some(group) && s.from_rows == r.len() {
-            return held;
-        }
+    if let (Some(s), Some(r)) = (&held, &rows)
+        && s.group == Some(group)
+        && s.from_rows == r.len()
+    {
+        return held;
     }
     let rows = rows?;
     let mut sats = Vec::with_capacity(rows.len());

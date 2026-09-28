@@ -9,7 +9,7 @@
 //! the reference: manufacturer, meter number, version, type, and the bytes
 //! themselves.
 
-use common::{C32, Hz, PacketBody};
+use common::C32;
 use nodes::{NodeSpec, build_chain, registry};
 use pipeline::StreamSpec;
 use sources::FileSource;
@@ -129,7 +129,7 @@ fn a_meter_is_named_in_the_list() {
         return;
     }
     let got = frames(&p);
-    let (hz, f) = got.first().expect("a frame");
+    let (_hz, f) = got.first().expect("a frame");
     let d = decode::wmbus::read(f).expect("a decode");
     assert_eq!(d.id, "wmbus");
     // The meter names itself by its maker and the number on its face.

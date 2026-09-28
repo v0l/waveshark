@@ -191,7 +191,7 @@ impl ModelParameters {
         // Algorithm 110 - scale enhanced amplitudes to remove energy
         // differential.
         for l in 1..=band_count {
-            enhanced[l] *= y as f32;
+            enhanced[l] *= y;
         }
 
         // Algorithm 111 - calculate local energy.

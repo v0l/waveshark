@@ -311,14 +311,13 @@ fn score<'a>(s: &'a Signal, q: &Query) -> Option<Match<'a>> {
     }
 
     if let (Some(bw), Some(&wiki)) = (q.bandwidth_hz.filter(|b| *b > 0.0), s.bandwidths_hz.first())
+        && wiki > 0
     {
-        if wiki > 0 {
-            let r = (bw / wiki as f64).abs().log10().abs() as f32;
-            let w = 0.2 * (1.0 - r.min(1.0));
-            if w > 0.0 {
-                total += w;
-                why.push(format!("{} wide", fmt_hz(wiki as f64)));
-            }
+        let r = (bw / wiki as f64).abs().log10().abs() as f32;
+        let w = 0.2 * (1.0 - r.min(1.0));
+        if w > 0.0 {
+            total += w;
+            why.push(format!("{} wide", fmt_hz(wiki as f64)));
         }
     }
 

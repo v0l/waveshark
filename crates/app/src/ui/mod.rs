@@ -2981,12 +2981,12 @@ fn apply_locale(s: &mut crate::session::Session) {
     // A first run has nothing saved, and the environment already knows: a
     // locale of en_IE means the European plan, and guessing wrong puts an
     // American on a table where 915 MHz is a phone.
-    if s.country.is_empty() {
-        if let Some(c) = crate::locale::from_environment() {
-            s.country = c.code.to_string();
-            if s.band_plan.is_empty() {
-                s.band_plan = c.plan.id().to_string();
-            }
+    if s.country.is_empty()
+        && let Some(c) = crate::locale::from_environment()
+    {
+        s.country = c.code.to_string();
+        if s.band_plan.is_empty() {
+            s.band_plan = c.plan.id().to_string();
         }
     }
     if let Some(p) = crate::bands::Plan::from_id(&s.band_plan) {
@@ -3641,11 +3641,9 @@ fn split_divider(
         *splitting = true;
     }
     let mut frac = frac;
-    if *splitting {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            let f = (pos.y - top - SPLIT_GRIP_H / 2.0) / usable;
-            frac = f.clamp(*range.start(), *range.end());
-        }
+    if *splitting && let Some(pos) = resp.interact_pointer_pos() {
+        let f = (pos.y - top - SPLIT_GRIP_H / 2.0) / usable;
+        frac = f.clamp(*range.start(), *range.end());
     }
     if resp.drag_stopped() {
         *splitting = false;

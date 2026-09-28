@@ -641,11 +641,11 @@ impl Simple for IqCaptureNode {
         }
         // Opened on the first block rather than at negotiation, so a graph
         // that is built and thrown away leaves no empty file behind.
-        if self.sink.is_none() {
-            if let Err(e) = self.open(now_us()) {
-                self.fail(format!("cannot open a capture in {}: {e}", self.dir.display()), c);
-                return Ok(());
-            }
+        if self.sink.is_none()
+            && let Err(e) = self.open(now_us())
+        {
+            self.fail(format!("cannot open a capture in {}: {e}", self.dir.display()), c);
+            return Ok(());
         }
         self.write_or_fail(iq, c);
         Ok(())
@@ -806,6 +806,50 @@ fn now_us() -> u64 {
 fn sanitise(s: &str) -> String {
     let s: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
     if s.is_empty() { "capture".into() } else { s }
+}
+
+/// The setting names this stage reads.
+const DIR: &str = "dir";
+const NAME: &str = "name";
+const FORMAT: &str = "format";
+const BUDGET_MB: &str = "budget_mb";
+const ENABLED: &str = "enabled";
+const TRIGGER: &str = "trigger";
+const REFERENCE: &str = "reference";
+const THRESHOLD_DB: &str = "threshold_db";
+pub const BAND_HZ: &str = "band_hz";
+pub const BAND_OFFSET_HZ: &str = "band_offset_hz";
+const PRE_MS: &str = "pre_ms";
+const HANG_MS: &str = "hang_ms";
+
+pub const DESC: StageDesc = StageDesc {
+    name: "iq_capture",
+    summary: "Write the span to a file as it arrives, or a file per burst \
+              when armed on energy, so a signal nothing decodes can be \
+              worked on off the air",
+    category: Category::Sink,
+    feeds_bus: false,
+};
+
+pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    let default = SampleFormat::Cu8;
+    let format =
+        SampleFormat::from_extension(s.str_or(FORMAT, default.extension())).unwrap_or(default);
+    let mb = s.f64_or(BUDGET_MB, 0.0);
+    let budget = if mb > 0.0 { (mb * (1u64 << 20) as f64) as u64 } else { DEFAULT_BUDGET };
+    let trigger = Trigger::parse(s.str_or(TRIGGER, "switch")).unwrap_or_default();
+    let reference = Reference::parse(s.str_or(REFERENCE, "floor")).unwrap_or_default();
+    Ok(Box::new(
+        IqCaptureNode::new(s.str_or(DIR, "."))
+            .with_name(s.str_or(NAME, "capture"))
+            .with_format(format)
+            .with_budget(budget)
+            .with_enabled(s.bool_or(ENABLED, true))
+            .with_trigger(trigger)
+            .with_threshold(reference, s.f64_or(THRESHOLD_DB, 10.0) as f32)
+            .with_band(s.f64_or(BAND_HZ, 0.0), s.f64_or(BAND_OFFSET_HZ, 0.0))
+            .with_window(s.f64_or(PRE_MS, 500.0), s.f64_or(HANG_MS, 1_000.0)),
+    ))
 }
 
 #[cfg(test)]
@@ -969,7 +1013,7 @@ mod tests {
             .with_threshold(Reference::Floor, 10.0)
             .with_window(100.0, 40.0)
             .with_budget(1 << 30)
-            .with_name(&format!("armed{}", rate as u64))
+            .with_name(format!("armed{}", rate as u64))
     }
 
     fn files(d: &Path) -> Vec<PathBuf> {
@@ -1257,48 +1301,4 @@ mod tests {
         assert_eq!(meta.center, Some(Hz(433_475_000)));
         assert_eq!(meta.rate, Some(common::Sps(2_400_000)));
     }
-}
-
-/// The setting names this stage reads.
-const DIR: &str = "dir";
-const NAME: &str = "name";
-const FORMAT: &str = "format";
-const BUDGET_MB: &str = "budget_mb";
-const ENABLED: &str = "enabled";
-const TRIGGER: &str = "trigger";
-const REFERENCE: &str = "reference";
-const THRESHOLD_DB: &str = "threshold_db";
-pub const BAND_HZ: &str = "band_hz";
-pub const BAND_OFFSET_HZ: &str = "band_offset_hz";
-const PRE_MS: &str = "pre_ms";
-const HANG_MS: &str = "hang_ms";
-
-pub const DESC: StageDesc = StageDesc {
-    name: "iq_capture",
-    summary: "Write the span to a file as it arrives, or a file per burst \
-              when armed on energy, so a signal nothing decodes can be \
-              worked on off the air",
-    category: Category::Sink,
-    feeds_bus: false,
-};
-
-pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let default = SampleFormat::Cu8;
-    let format =
-        SampleFormat::from_extension(s.str_or(FORMAT, default.extension())).unwrap_or(default);
-    let mb = s.f64_or(BUDGET_MB, 0.0);
-    let budget = if mb > 0.0 { (mb * (1u64 << 20) as f64) as u64 } else { DEFAULT_BUDGET };
-    let trigger = Trigger::parse(s.str_or(TRIGGER, "switch")).unwrap_or_default();
-    let reference = Reference::parse(s.str_or(REFERENCE, "floor")).unwrap_or_default();
-    Ok(Box::new(
-        IqCaptureNode::new(s.str_or(DIR, "."))
-            .with_name(s.str_or(NAME, "capture"))
-            .with_format(format)
-            .with_budget(budget)
-            .with_enabled(s.bool_or(ENABLED, true))
-            .with_trigger(trigger)
-            .with_threshold(reference, s.f64_or(THRESHOLD_DB, 10.0) as f32)
-            .with_band(s.f64_or(BAND_HZ, 0.0), s.f64_or(BAND_OFFSET_HZ, 0.0))
-            .with_window(s.f64_or(PRE_MS, 500.0), s.f64_or(HANG_MS, 1_000.0)),
-    ))
 }

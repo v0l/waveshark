@@ -470,6 +470,18 @@ fn short(args: &str) -> String {
     }
 }
 
+/// The first sentence of a fault, for a line in a log. A gateway's answer
+/// wraps a provider's answer wraps a JSON body, and the first clause is
+/// the one that says what happened.
+fn short_fault(e: &str) -> String {
+    let first = e.lines().next().unwrap_or(e).trim();
+    let cut = first.find(": {").map(|i| &first[..i]).unwrap_or(first);
+    match cut.char_indices().nth(120) {
+        Some((i, _)) => format!("{}…", &cut[..i]),
+        None => cut.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,17 +492,5 @@ mod tests {
         let long = format!("{{\"text\":\"{}\"}}", "x".repeat(200));
         assert!(short(&long).ends_with('…'));
         assert!(short(&long).chars().count() <= 81);
-    }
-}
-
-/// The first sentence of a fault, for a line in a log. A gateway's answer
-/// wraps a provider's answer wraps a JSON body, and the first clause is
-/// the one that says what happened.
-fn short_fault(e: &str) -> String {
-    let first = e.lines().next().unwrap_or(e).trim();
-    let cut = first.find(": {").map(|i| &first[..i]).unwrap_or(first);
-    match cut.char_indices().nth(120) {
-        Some((i, _)) => format!("{}…", &cut[..i]),
-        None => cut.to_string(),
     }
 }

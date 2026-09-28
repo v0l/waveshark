@@ -868,10 +868,9 @@ impl Session {
         // written. Give it to that one rather than to all of them.
         if let (true, Some(dev), Some(v)) =
             (ppm.is_empty(), device.as_deref(), kv.get("ppm").and_then(|v| v.parse::<f64>().ok()))
+            && v != 0.0
         {
-            if v != 0.0 {
-                ppm.insert(dev.to_string(), v);
-            }
+            ppm.insert(dev.to_string(), v);
         }
         Session {
             device: device.clone(),
@@ -1672,8 +1671,8 @@ mod tests {
         let d = Session::default();
         assert!(!d.packet_log_on);
         assert!(!d.survey_on);
-        assert_eq!(Session::parse("center = 433920000").packet_log_on, false);
-        assert_eq!(Session::parse("center = 433920000").survey_on, false);
+        assert!(!Session::parse("center = 433920000").packet_log_on);
+        assert!(!Session::parse("center = 433920000").survey_on);
 
         let on = Session { packet_log_on: true, survey_on: true, ..Session::default() };
         let back = Session::parse(&on.render());

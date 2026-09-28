@@ -91,12 +91,12 @@ fn main() -> common::Result<()> {
     let id = g.order().last().map(|(id, _)| id).unwrap();
     let mut sent = 0;
     let mut idle = 0;
-    if let Some(n) = g.node_mut(id) {
-        if let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>() {
-            tx.finish(std::time::Duration::from_secs(2));
-            sent = tx.written();
-            idle = tx.underruns();
-        }
+    if let Some(n) = g.node_mut(id)
+        && let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>()
+    {
+        tx.finish(std::time::Duration::from_secs(2));
+        sent = tx.written();
+        idle = tx.underruns();
     }
     println!(
         "sent {sent} samples in {:.2} s, {idle} unfilled transfers",

@@ -394,12 +394,11 @@ mod imp {
             // stays right between the SYSINFO broadcasts that seed it. Only
             // when it is known: a guessed hyperframe manufactures re-use that
             // is not real.
-            if let Some(prev) = self.crypto.last_multiframe {
-                if time.multiframe < prev {
-                    if let Some(hn) = self.crypto.hyperframe.as_mut() {
-                        *hn = hn.wrapping_add(1);
-                    }
-                }
+            if let Some(prev) = self.crypto.last_multiframe
+                && time.multiframe < prev
+                && let Some(hn) = self.crypto.hyperframe.as_mut()
+            {
+                *hn = hn.wrapping_add(1);
             }
             self.crypto.last_multiframe = Some(time.multiframe);
 
@@ -552,11 +551,8 @@ mod imp {
                         Some((_, _, RecoveryJob::Gpu(frames, _))) => Some(std::mem::take(frames)),
                         _ => None,
                     };
-                    match frames {
-                        Some(frames) => {
-                            self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames)))
-                        }
-                        None => {}
+                    if let Some(frames) = frames {
+                        self.crypto.recovery = Some((colour, sig, Self::cpu_search(frames)))
                     }
                     None
                 }
@@ -580,13 +576,12 @@ mod imp {
                         return None;
                     }
                     // Hand the search slot to the next message at quorum.
-                    if let Some(cell) = self.rx.cell {
-                        if let Some((&next, frames)) =
+                    if let Some(cell) = self.rx.cell
+                        && let Some((&next, frames)) =
                             self.crypto.collisions.iter().find(|(_, f)| f.len() >= COLLISION_QUORUM)
-                        {
-                            let frames = frames.clone();
-                            self.start_recovery(cell.colour, next, frames);
-                        }
+                    {
+                        let frames = frames.clone();
+                        self.start_recovery(cell.colour, next, frames);
                     }
                     None
                 }

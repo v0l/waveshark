@@ -56,13 +56,13 @@ fn dirs_home() -> std::path::PathBuf {
 /// multiplication.
 pub fn best_device() -> candle_core::Device {
     #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
-    if devices().iter().any(|d| matches!(d.choice, DeviceChoice::Cuda(_))) {
-        if let Ok(d) = open_cuda(0) {
-            if runs(&d) {
-                return d;
-            }
-            tracing::warn!("CUDA opened but cannot run kernels; transcribing on the CPU");
+    if devices().iter().any(|d| matches!(d.choice, DeviceChoice::Cuda(_)))
+        && let Ok(d) = open_cuda(0)
+    {
+        if runs(&d) {
+            return d;
         }
+        tracing::warn!("CUDA opened but cannot run kernels; transcribing on the CPU");
     }
     #[cfg(target_vendor = "apple")]
     if let Ok(d) = candle_core::Device::new_metal(0) {
@@ -104,11 +104,11 @@ pub fn device_label(d: &candle_core::Device) -> String {
             #[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
             {
                 let k = c.cuda_stream().context().ordinal();
-                return devices()
+                devices()
                     .into_iter()
                     .find(|e| e.choice == DeviceChoice::Cuda(k))
                     .map(|e| e.label)
-                    .unwrap_or_else(|| format!("CUDA {k}"));
+                    .unwrap_or_else(|| format!("CUDA {k}"))
             }
             #[cfg(not(all(feature = "cuda", not(target_vendor = "apple"))))]
             {

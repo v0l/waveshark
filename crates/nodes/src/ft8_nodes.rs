@@ -510,7 +510,7 @@ mod tests {
         let mut node = tuned(FT4_DEFAULT_HZ, Mode::Ft4);
         let frames = run(&mut node, &iq, AUDIO_HZ, FT4_DEFAULT_HZ);
         assert_eq!(frames.len(), 1, "{} transmissions", frames.len());
-        let d = read(&frames[0].bytes()).expect("a decode");
+        let d = read(frames[0].bytes()).expect("a decode");
         assert_eq!((d.id, d.kind), ("ft4", "message"));
         assert_eq!(d.wrote(), Some("G4XYZ MI0ABC R+05"));
         // A report is a signal report, and says nothing about where either

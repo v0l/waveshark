@@ -403,14 +403,14 @@ impl AsrInferenceInner {
         }
 
         // Append prefix text tokens (for streaming rollback)
-        if let Some(prefix) = prefix_text {
-            if !prefix.is_empty() {
-                let enc = self
-                    .tokenizer
-                    .encode(prefix, false)
-                    .map_err(|e| anyhow::anyhow!("encode prefix: {}", e))?;
-                tokens.extend(enc.get_ids().iter().map(|&id| id as i64));
-            }
+        if let Some(prefix) = prefix_text
+            && !prefix.is_empty()
+        {
+            let enc = self
+                .tokenizer
+                .encode(prefix, false)
+                .map_err(|e| anyhow::anyhow!("encode prefix: {}", e))?;
+            tokens.extend(enc.get_ids().iter().map(|&id| id as i64));
         }
 
         Ok((tokens, audio_start_pos))

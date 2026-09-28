@@ -224,7 +224,6 @@ mod tests {
     /// A position report becomes a row with the fields a map reads.
     #[test]
     fn a_position_becomes_a_decode_with_a_position_in_it() {
-        use common::Value;
         // The Le Havre report, the payload both other crates are tested on.
         let bytes = vec![
             0x04, 0x36, 0x1f, 0x64, 0xa0, 0x20, 0x00, 0x00, 0x00, 0x99, 0xf6, 0x1c, 0x4f, 0x66,

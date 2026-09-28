@@ -702,7 +702,7 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 2_000.0, 0.0, 1.0, 0.02);
         let (bursts, _) = detect(&iq, cfg());
         assert_eq!(bursts.len(), 1);
-        assert!(agreement(&sent, &bursts[0].hard()) > 0.95, "the offset moved the fit");
+        assert!(agreement(&sent, bursts[0].hard()) > 0.95, "the offset moved the fit");
     }
 
     #[test]
@@ -715,11 +715,11 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 0.0, 2_000.0, 1.0, 0.02);
         let (tracked, _) = detect(&iq, cfg());
         assert_eq!(tracked.len(), 1);
-        let got = agreement(&sent, &tracked[0].hard());
+        let got = agreement(&sent, tracked[0].hard());
         assert!(got > 0.99, "the clock error was not tracked: {:.0}%", got * 100.0);
 
         let (fixed, _) = detect(&iq, C4fmConfig { loop_gain: 0.0, ..cfg() });
-        let without = fixed.first().map(|b| agreement(&sent, &b.hard())).unwrap_or(0.0);
+        let without = fixed.first().map(|b| agreement(&sent, b.hard())).unwrap_or(0.0);
         assert!(without < 0.8, "a fixed phase read {without:.0}%, so the loop is untested here");
     }
 
@@ -731,7 +731,7 @@ mod tests {
         let iq = burst(&sent, STEP_HZ, 0.0, 0.0, 1.0, 0.02);
         let (bursts, _) = detect(&iq, cfg());
         assert_eq!(bursts.len(), 1);
-        assert!(agreement(&sent, &bursts[0].hard()) > 0.95);
+        assert!(agreement(&sent, bursts[0].hard()) > 0.95);
     }
 
     #[test]

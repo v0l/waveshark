@@ -152,12 +152,10 @@ impl Node for FaderNode {
         outputs: &mut [Payload],
         ctx: &mut NodeCtx<'_>,
     ) -> Result<()> {
-        self.offers = match ctx.meta(0) {
-            Some(pipeline::Published { from, meta: pipeline::Meta::Programmes(p) }) => {
-                Some((*from, p.clone()))
-            }
-            None => None,
-        };
+        self.offers =
+            ctx.meta(0).map(|pipeline::Published { from, meta: pipeline::Meta::Programmes(p) }| {
+                (*from, p.clone())
+            });
         let gain = self.gain();
         let (out, tap) = match outputs {
             [out, tap, ..] => (out, tap),

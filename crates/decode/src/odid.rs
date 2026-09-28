@@ -483,7 +483,7 @@ pub fn fields(messages: &[Parsed]) -> Vec<(String, Value)> {
 /// height without a place is still a height, which is what an aircraft on a
 /// Bluetooth advert usually sends first.
 pub fn facts(messages: &[Parsed]) -> Vec<common::packet::Fact> {
-    use common::packet::{Fact, Fix, Motion, Named, Quantity, ThingKind};
+    use common::packet::{Fact, Fix, Motion, Quantity};
     let mut out = Vec::new();
     // What it is, before where it is: an aircraft that says nothing but its
     // serial still belongs on the map as an aircraft rather than as whatever

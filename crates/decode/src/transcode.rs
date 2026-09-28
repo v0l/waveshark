@@ -305,36 +305,35 @@ unsafe fn pass(
             };
             let index = (*stream).index;
             for (frame, _) in decoder.decode_pkt(Some(&pkt))? {
-                if let Some((at, enc, scaler, w, h, count)) = picture.as_mut() {
-                    if index == *at {
-                        let mut frame =
-                            scaler.process_frame(&frame, *w, *h, AVPixelFormat::YUV420P)?;
-                        // Counted, not carried: the encoder's clock is one
-                        // tick a frame, and a timestamp in the input's own
-                        // units reads as a picture hours into the
-                        // transmission, which the receiver holds back for
-                        // ever rather than showing.
-                        frame.pts = *count;
-                        *count += 1;
-                        for out in enc.encode_frame(Some(&frame))? {
-                            muxer.write_packet(&out)?;
-                        }
-                        continue;
+                if let Some((at, enc, scaler, w, h, count)) = picture.as_mut()
+                    && index == *at
+                {
+                    let mut frame = scaler.process_frame(&frame, *w, *h, AVPixelFormat::YUV420P)?;
+                    // Counted, not carried: the encoder's clock is one
+                    // tick a frame, and a timestamp in the input's own
+                    // units reads as a picture hours into the
+                    // transmission, which the receiver holds back for
+                    // ever rather than showing.
+                    frame.pts = *count;
+                    *count += 1;
+                    for out in enc.encode_frame(Some(&frame))? {
+                        muxer.write_packet(&out)?;
                     }
+                    continue;
                 }
-                if let Some((at, enc, resample, fifo, samples, pts)) = audio.as_mut() {
-                    if index == *at {
-                        fifo.buffer_frame(&resample.process_frame(&frame)?)?;
-                        while let Some(mut whole) = fifo.get_frame(*samples)? {
-                            // Counted here rather than carried from the
-                            // input: what the FIFO holds is a different
-                            // cut of the sound from what arrived, and the
-                            // encoder's clock is samples.
-                            whole.pts = *pts;
-                            *pts += *samples as i64;
-                            for out in enc.encode_frame(Some(&whole))? {
-                                muxer.write_packet(&out)?;
-                            }
+                if let Some((at, enc, resample, fifo, samples, pts)) = audio.as_mut()
+                    && index == *at
+                {
+                    fifo.buffer_frame(&resample.process_frame(&frame)?)?;
+                    while let Some(mut whole) = fifo.get_frame(*samples)? {
+                        // Counted here rather than carried from the
+                        // input: what the FIFO holds is a different
+                        // cut of the sound from what arrived, and the
+                        // encoder's clock is samples.
+                        whole.pts = *pts;
+                        *pts += *samples as i64;
+                        for out in enc.encode_frame(Some(&whole))? {
+                            muxer.write_packet(&out)?;
                         }
                     }
                 }
@@ -582,10 +581,7 @@ fn mpeg2_framerate(fps: f32) -> (i32, i32) {
 /// them, a packet apart, is what every demuxer looks for.
 pub fn is_transport_stream(head: &[u8]) -> bool {
     let packet = crate::mpegts::PACKET;
-    head.len() >= 2 * packet + 1
-        && head[0] == 0x47
-        && head[packet] == 0x47
-        && head[2 * packet] == 0x47
+    head.len() > 2 * packet && head[0] == 0x47 && head[packet] == 0x47 && head[2 * packet] == 0x47
 }
 
 #[cfg(test)]

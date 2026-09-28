@@ -191,12 +191,11 @@ async fn load(
     id: TileId,
     path: Option<PathBuf>,
 ) -> Result<ColorImage, String> {
-    if let Some(p) = path.as_deref() {
-        if let Ok(bytes) = tokio::fs::read(p).await {
-            if let Ok(img) = decode_off_thread(bytes).await {
-                return Ok(img);
-            }
-        }
+    if let Some(p) = path.as_deref()
+        && let Ok(bytes) = tokio::fs::read(p).await
+        && let Ok(img) = decode_off_thread(bytes).await
+    {
+        return Ok(img);
     }
     let url = format!("{URL}/{}/{}/{}.png", id.z, id.x, id.y);
     let bytes = {

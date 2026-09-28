@@ -402,7 +402,7 @@ mod tests {
 
         let frames = output.as_packets().expect("packets");
         assert_eq!(frames.len(), 1);
-        let r = mac::Received::parse(&frames[0].bytes()).expect("an envelope");
+        let r = mac::Received::parse(frames[0].bytes()).expect("an envelope");
         assert_eq!(r.mpdu, want);
         assert_eq!(r.mbps, 6);
         assert!(frames[0].carrier.rssi_dbfs.is_finite() && frames[0].carrier.snr_db.is_finite());

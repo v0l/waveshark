@@ -255,11 +255,11 @@ fn read_stream(
             // position in `TPV`, so a fix from it arrives with the quality
             // fields empty. They are the same second's measurement of the
             // same constellation, so the last `SKY` fills them in.
-            if let Ok(g) = sky.lock() {
-                if let Some(s) = *g {
-                    f.sats = f.sats.or(Some(s.used));
-                    f.hdop = f.hdop.or(s.hdop);
-                }
+            if let Ok(g) = sky.lock()
+                && let Some(s) = *g
+            {
+                f.sats = f.sats.or(Some(s.used));
+                f.hdop = f.hdop.or(s.hdop);
             }
             fixes.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut g) = state.lock() {

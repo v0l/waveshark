@@ -196,27 +196,28 @@ impl Scope<'_> {
             self.cursor(&p, &full, &resp, shift);
         }
 
-        if resp.clicked() && self.st.drag.is_none() {
-            if let Some(pos) = resp.interact_pointer_pos() {
-                // Cogs sit inside the pane, so they get first refusal on a
-                // click; otherwise opening settings would also drop a channel.
-                if plot_cog.contains(pos) {
-                    self.acts.push(Action::Open(Settings::Spectrum));
-                } else if fall_cog.contains(pos) {
-                    self.acts.push(Action::Open(Settings::Waterfall));
-                } else if grip.contains(pos) {
-                    // Dropping a channel on the divider is never what was
-                    // meant; a double click there restores the default split.
-                } else {
-                    // Hit testing uses the true position; only the frequency a
-                    // new channel lands on is snapped, so shift-clicking an
-                    // existing channel still selects it.
-                    match self.channel_at(&full, pos.x) {
-                        Some(i) => self.acts.push(Action::Listen(i)),
-                        None => {
-                            let hz = self.hz_at_snapped(&full, pos.x, ui);
-                            self.acts.push(Action::Add(hz));
-                        }
+        if resp.clicked()
+            && self.st.drag.is_none()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            // Cogs sit inside the pane, so they get first refusal on a
+            // click; otherwise opening settings would also drop a channel.
+            if plot_cog.contains(pos) {
+                self.acts.push(Action::Open(Settings::Spectrum));
+            } else if fall_cog.contains(pos) {
+                self.acts.push(Action::Open(Settings::Waterfall));
+            } else if grip.contains(pos) {
+                // Dropping a channel on the divider is never what was
+                // meant; a double click there restores the default split.
+            } else {
+                // Hit testing uses the true position; only the frequency a
+                // new channel lands on is snapped, so shift-clicking an
+                // existing channel still selects it.
+                match self.channel_at(&full, pos.x) {
+                    Some(i) => self.acts.push(Action::Listen(i)),
+                    None => {
+                        let hz = self.hz_at_snapped(&full, pos.x, ui);
+                        self.acts.push(Action::Add(hz));
                     }
                 }
             }
@@ -290,10 +291,10 @@ impl Scope<'_> {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         } else if let Some(grab) = self.st.drag {
             ui.ctx().set_cursor_icon(grab_icon(grab));
-        } else if let Some(h) = hover {
-            if let Some(grab) = self.grab_at(&full, h.x).filter(|_| !plot_hot && !fall_hot) {
-                ui.ctx().set_cursor_icon(grab_icon(grab));
-            }
+        } else if let Some(h) = hover
+            && let Some(grab) = self.grab_at(&full, h.x).filter(|_| !plot_hot && !fall_hot)
+        {
+            ui.ctx().set_cursor_icon(grab_icon(grab));
         }
 
         // Wheel over the pane scrubs the centre frequency. A notch moves a

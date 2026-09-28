@@ -170,11 +170,12 @@ impl TranscriptLog {
     /// left behind is never going to be replaced and a view that draws
     /// partials differently should stop waiting for one.
     pub fn settle(&mut self, key: &common::ConversationKey, at: Instant) {
-        if let Some(u) = self.by_key.get_mut(key).and_then(|v| v.last_mut()) {
-            if u.at == at && !u.settled {
-                u.settled = true;
-                self.seq += 1;
-            }
+        if let Some(u) = self.by_key.get_mut(key).and_then(|v| v.last_mut())
+            && u.at == at
+            && !u.settled
+        {
+            u.settled = true;
+            self.seq += 1;
         }
     }
 
@@ -917,16 +918,16 @@ mod work {
             let tail: Vec<f32> = t.pcm[at..].to_vec();
             let job =
                 Job { key: key.clone(), at: t.started, pcm: head, rate: t.rate, settled: true };
-            if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
-                if let Some(t) = self.talking.get_mut(key) {
-                    // The tail is a new utterance, with its own start time,
-                    // and it waits for the head to come back rather than
-                    // queueing a second window behind it.
-                    t.pcm = tail;
-                    t.started = Instant::now();
-                    t.asked_at_s = 0.0;
-                    t.waiting = true;
-                }
+            if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok())
+                && let Some(t) = self.talking.get_mut(key)
+            {
+                // The tail is a new utterance, with its own start time,
+                // and it waits for the head to come back rather than
+                // queueing a second window behind it.
+                t.pcm = tail;
+                t.started = Instant::now();
+                t.asked_at_s = 0.0;
+                t.waiting = true;
             }
         }
 
@@ -941,11 +942,11 @@ mod work {
             let job =
                 Job { key: key.clone(), at: t.started, pcm: t.pcm.clone(), rate: t.rate, settled };
             let asked = t.seconds();
-            if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok()) {
-                if let Some(t) = self.talking.get_mut(key) {
-                    t.waiting = true;
-                    t.asked_at_s = asked;
-                }
+            if self.worker().is_some_and(|w| w.jobs.try_send(job).is_ok())
+                && let Some(t) = self.talking.get_mut(key)
+            {
+                t.waiting = true;
+                t.asked_at_s = asked;
             }
         }
     }
@@ -1103,11 +1104,10 @@ mod work {
                 files: p.files,
             };
         })
-        .map(|f| {
+        .inspect(|f| {
             let mut h = health.lock();
-            h.describe(Some(&f));
+            h.describe(Some(f));
             h.state = ModelState::Loading;
-            f
         });
         let loaded = files.and_then(|f| {
             stt::Engine::load_on(&f, choice, None).map(|(m, on, why)| {
@@ -1220,7 +1220,7 @@ impl Simple for LiveTranscribeNode {
         if i.spec.kind != PortKind::Voice {
             return Err(common::Error::other("the live transcriber reads the audio bus tap"));
         }
-        Ok(i.spec.clone())
+        Ok(i.spec)
     }
 
     fn process(&mut self, i: &Payload, _o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
@@ -1252,10 +1252,10 @@ impl Simple for LiveTranscribeNode {
         let mut seen: Vec<common::ConversationKey> = Vec::new();
         for v in i.as_voice().unwrap_or(&[]).iter().filter(|v| v.called().is_some()) {
             let key = common::ConversationKey::of(v);
-            if self.collect(key.clone(), v, block_s, at) {
-                if let Some(t) = self.talking.get_mut(&key) {
-                    t.finished = true;
-                }
+            if self.collect(key.clone(), v, block_s, at)
+                && let Some(t) = self.talking.get_mut(&key)
+            {
+                t.finished = true;
             }
             if !seen.contains(&key) {
                 seen.push(key);

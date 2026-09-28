@@ -592,11 +592,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // synthesiser, so keying moved it to the transmit frequency; leaving
         // it there means the waterfall comes back tuned to wherever the
         // channel transmits, which looks like reception never resumed at all.
-        if self.dev.dial() != self.plan.center {
-            if let Err(e) = self.dev.set_dial(self.plan.center) {
-                *self.status.error.lock() =
-                    Some(format!("could not retune after transmitting: {e}"));
-            }
+        if self.dev.dial() != self.plan.center
+            && let Err(e) = self.dev.set_dial(self.plan.center)
+        {
+            *self.status.error.lock() = Some(format!("could not retune after transmitting: {e}"));
         }
         self.status.set_radio(RadioControls::read(self.dev.as_ref()));
     }
@@ -688,15 +687,15 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // Said once a second while keyed, because a transmission that stops is
         // the hardest thing here to see after the fact: the carrier is gone
         // and nothing on screen says why.
-        if let (Some(tx), 0) = (keyed_now, self.tx.blocks_since_key % 50) {
-            if self.rx.keyed() {
-                tracing::info!(
-                    "on air: {} samples, {} unfilled, mic {peak:.2}",
-                    tx.written,
-                    tx.underruns
-                );
-                self.status.tx_underruns.store(tx.underruns, Ordering::Relaxed);
-            }
+        if let (Some(tx), 0) = (keyed_now, self.tx.blocks_since_key % 50)
+            && self.rx.keyed()
+        {
+            tracing::info!(
+                "on air: {} samples, {} unfilled, mic {peak:.2}",
+                tx.written,
+                tx.underruns
+            );
+            self.status.tx_underruns.store(tx.underruns, Ordering::Relaxed);
         }
         self.tx.blocks_since_key = self.tx.blocks_since_key.wrapping_add(1);
         self.status.mic_level.store(peak.to_bits(), Ordering::Relaxed);

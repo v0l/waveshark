@@ -605,7 +605,6 @@ TE: 400
     /// CAME decoder cannot yet be used to check it.
     #[test]
     fn came_is_written_as_a_key_the_encoder_reads_back() {
-        use crate::protocol::Value;
         for (name, bit, code) in [("CAME-12bit", 12u32, 0xabc_u64), ("CAME-24bit", 24, 0xab_cd_ef)]
         {
             let body = key_of_decode(name, code).unwrap();

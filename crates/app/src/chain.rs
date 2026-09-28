@@ -1565,10 +1565,9 @@ impl Receiver {
                 .node_mut(*id)
                 .map(|n| n.as_any_mut())
                 .and_then(|a| a.downcast_mut::<nodes::PacketBusNode>())
+                && want != n.has_sink()
             {
-                if want != n.has_sink() {
-                    n.set_sink(self.new_sink());
-                }
+                n.set_sink(self.new_sink());
             }
         }
 
@@ -2439,12 +2438,12 @@ impl Receiver {
         self.set_derived_param(
             derived::SPECTRUM,
             "trace",
-            pipeline::ParamValue::Text(trace.label().into()),
+            pipeline::ParamValue::Text(trace.label()),
         );
         self.set_derived_param(
             derived::SPECTRUM,
             "waterfall",
-            pipeline::ParamValue::Text(wf.label().into()),
+            pipeline::ParamValue::Text(wf.label()),
         );
     }
 
@@ -3247,9 +3246,8 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // node held came back at its default every time the dial moved.
     spectrum.insert("refresh".into(), pipeline::ParamValue::Float(plan.refresh_hz as f64));
     spectrum.insert("smoothing".into(), pipeline::ParamValue::Float(plan.smoothing as f64));
-    spectrum.insert("trace".into(), pipeline::ParamValue::Text(plan.trace.label().into()));
-    spectrum
-        .insert("waterfall".into(), pipeline::ParamValue::Text(plan.wf_detector.label().into()));
+    spectrum.insert("trace".into(), pipeline::ParamValue::Text(plan.trace.label()));
+    spectrum.insert("waterfall".into(), pipeline::ParamValue::Text(plan.wf_detector.label()));
     p.add_derived(derived::SPECTRUM, "spectrum", spectrum);
     p.connect(head, (derived::SPECTRUM, 0));
 
@@ -5248,10 +5246,10 @@ fn add_patch(
             continue;
         };
         for l in patch.links().iter().filter(|l| l.to.0 == st.id) {
-            if let Source::Stage(f, port) = l.from {
-                if let Some(from) = ids.get(&f) {
-                    b.connect(from.out(port), nid.input(l.to.1));
-                }
+            if let Source::Stage(f, port) = l.from
+                && let Some(from) = ids.get(&f)
+            {
+                b.connect(from.out(port), nid.input(l.to.1));
             }
         }
     }
@@ -8492,10 +8490,10 @@ mod tx_tests {
             g.run().unwrap();
         }
         let id = g.order().last().map(|(id, _)| id).unwrap();
-        if let Some(n) = g.node_mut(id) {
-            if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
-                s.finish(std::time::Duration::from_millis(50));
-            }
+        if let Some(n) = g.node_mut(id)
+            && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
+        {
+            s.finish(std::time::Duration::from_millis(50));
         }
         let mut iq = Vec::new();
         SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
@@ -8610,10 +8608,10 @@ mod tx_tests {
             g.run().unwrap();
         }
         let id = g.order().last().map(|(id, _)| id).unwrap();
-        if let Some(n) = g.node_mut(id) {
-            if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
-                s.finish(std::time::Duration::from_millis(50));
-            }
+        if let Some(n) = g.node_mut(id)
+            && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
+        {
+            s.finish(std::time::Duration::from_millis(50));
         }
         let mut iq = Vec::new();
         SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
@@ -8682,10 +8680,10 @@ mod tx_tests {
             g.run().unwrap();
         }
         let id = g.order().last().map(|(i, _)| i).unwrap();
-        if let Some(n) = g.node_mut(id) {
-            if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
-                s.finish(std::time::Duration::from_millis(50));
-            }
+        if let Some(n) = g.node_mut(id)
+            && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
+        {
+            s.finish(std::time::Duration::from_millis(50));
         }
         let mut iq = Vec::new();
         common::SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
@@ -9722,7 +9720,7 @@ vectors:
         }];
         let mode = crate::radio::tx_mode_for(&plan.channels[0].mode, TxSource::Tone)
             .expect("a described protocol can be keyed");
-        assert_eq!(mode, TxMode::Digital("chain-link".into()));
+        assert_eq!(mode, TxMode::Digital("chain-link"));
         plan.tx = Some(TxPlan { spec: TxSpec::default(), mode, on_air: Hz(hz as u64) });
 
         let rx = Receiver::build(&plan, Sinks::default()).unwrap();

@@ -1000,16 +1000,15 @@ impl Strip<'_> {
                     }
                     Line::new().value(name).size(11.0).elided(ui);
                 });
-                if let Some(f) = sub_file {
-                    if f.file.frequency != (ch.freq + tx.shift_hz) as u64
-                        && ui
-                            .button("TUNE")
-                            .on_hover_text("Move the dial to the file's own frequency")
-                            .clicked()
-                    {
-                        cmds.push(Cmd::Center(common::Hz(f.file.frequency)));
-                        changed = true;
-                    }
+                if let Some(f) = sub_file
+                    && f.file.frequency != (ch.freq + tx.shift_hz) as u64
+                    && ui
+                        .button("TUNE")
+                        .on_hover_text("Move the dial to the file's own frequency")
+                        .clicked()
+                {
+                    cmds.push(Cmd::Center(common::Hz(f.file.frequency)));
+                    changed = true;
                 }
             }
             TxSource::Capture => {
@@ -1693,11 +1692,10 @@ impl Strip<'_> {
                                     let last = heard_since(&mut self.st.heard_at, ch.id, d.heard);
                                     Self::channel_decoding(ui, &d, last);
                                 }
-                                if let Some(st) = st {
-                                    if Self::channel_audio(ui, ch, st) {
+                                if let Some(st) = st
+                                    && Self::channel_audio(ui, ch, st) {
                                         tune = Some(i);
                                     }
-                                }
                             }
                             let sub_file = self.st.sub_pick.file.clone();
                             let capture = self.st.capture_pick.file.clone();

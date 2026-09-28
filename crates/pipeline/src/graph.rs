@@ -666,13 +666,14 @@ impl Graph {
             // direction. The transmit monitor is the one node that means it.
             let joins = self.entries[k].node.joins_flows();
             let mut flows = ins.iter().filter(|p| !p.spec.is_silence()).map(|p| p.spec.flow);
-            if let Some(first) = flows.next() {
-                if !joins && flows.any(|f| f != first) {
-                    return Err(Error::other(format!(
-                        "node {k} ({}) is fed by both a receive and a transmit stream",
-                        self.entries[k].label
-                    )));
-                }
+            if let Some(first) = flows.next()
+                && !joins
+                && flows.any(|f| f != first)
+            {
+                return Err(Error::other(format!(
+                    "node {k} ({}) is fed by both a receive and a transmit stream",
+                    self.entries[k].label
+                )));
             }
 
             let outs = self.entries[k].node.negotiate(&ins).map_err(|e| Error::Refused {
@@ -1715,11 +1716,10 @@ mod tests {
         let mut g =
             chain(spec(), vec![Box::new(Gain(1.0)), Box::new(Offers(2)), Box::new(Gain(2.0))])
                 .unwrap();
-        let label = |g: &Graph| match g.output_meta() {
-            Some(Published { from, meta: Meta::Programmes(p) }) => {
-                Some((*from, p.list[0].label.clone()))
-            }
-            None => None,
+        let label = |g: &Graph| {
+            g.output_meta().map(|Published { from, meta: Meta::Programmes(p) }| {
+                (*from, p.list[0].label.clone())
+            })
         };
         let mut seen = Vec::new();
         for _ in 0..3 {

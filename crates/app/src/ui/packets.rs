@@ -110,10 +110,10 @@ impl Log<'_> {
                     self.inspector(ui, rec, inspect_h, avail);
                 }
             });
-        if let Some(rec) = self.st.sigid.clone() {
-            if sigid_modal(ui.ctx(), &rec) {
-                self.st.sigid = None;
-            }
+        if let Some(rec) = self.st.sigid.clone()
+            && sigid_modal(ui.ctx(), &rec)
+        {
+            self.st.sigid = None;
         }
         self.acts
     }
@@ -158,11 +158,11 @@ impl Log<'_> {
         if asked.sigid {
             self.st.sigid = Some(rec.clone());
         }
-        if asked.save_sub {
-            if let Some(save) = super::burst::sub_save(rec) {
-                let stem = save.file_stem(rec.protocol(), std::time::SystemTime::now());
-                self.st.sub_save.ask(ui.ctx(), save.text(), stem);
-            }
+        if asked.save_sub
+            && let Some(save) = super::burst::sub_save(rec)
+        {
+            let stem = save.file_stem(rec.protocol(), std::time::SystemTime::now());
+            self.st.sub_save.ask(ui.ctx(), save.text(), stem);
         }
         if let Some(said) = &self.st.sub_save.said {
             Line::new().legend("sub").note(said).size(11.0).show(&mut child);

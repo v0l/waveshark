@@ -929,6 +929,84 @@ impl Simple for FmModNode {
         Ok(())
     }
 }
+
+pub const OOK_MOD: StageDesc = StageDesc {
+    name: "ook_mod",
+    summary: "Key a carrier on and off from pulse timings, with shaped edges",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_ook_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(OokModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+        s.f64_or(RAMP_US, DEFAULT_RAMP_US as f64) as f32,
+    )))
+}
+
+pub const FSK_MOD: StageDesc = StageDesc {
+    name: "fsk_mod",
+    summary: "Key two tones from pulse timings, continuous phase",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_fsk_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(
+        FskModNode::new(
+            s.f64_or(OFFSET_HZ, 0.0),
+            s.f64_or(SHIFT_HZ, DEFAULT_FSK_SHIFT_HZ),
+            s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+        )
+        .resting(Rest::parse(s.str_or(REST, "tone")).unwrap_or_default()),
+    ))
+}
+
+pub const ASK_MOD: StageDesc = StageDesc {
+    name: "ask_mod",
+    summary: "Amplitude modulate a carrier with one level per symbol",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_ask_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AskModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+        s.i64_or(SPS, DEFAULT_SPS as i64).max(1) as usize,
+    )))
+}
+
+pub const AM_MOD: StageDesc = StageDesc {
+    name: "am_mod",
+    summary: "Amplitude modulate a carrier with audio, carrier left in",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_am_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(AmModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(DEPTH, DEFAULT_DEPTH as f64) as f32,
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+    )))
+}
+
+pub const FM_MOD: StageDesc = StageDesc {
+    name: "fm_mod",
+    summary: "Frequency modulate a carrier with audio, narrowband to broadcast",
+    category: Category::Transmit,
+    feeds_bus: false,
+};
+
+pub fn build_fm_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
+    Ok(Box::new(FmModNode::new(
+        s.f64_or(OFFSET_HZ, 0.0),
+        s.f64_or(DEVIATION_HZ, FM_DEVIATION_HZ),
+        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
+    )))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1342,82 +1420,4 @@ mod tests {
         let err = n.negotiate(&PortSpec { spec, latency: 0 }).unwrap_err().to_string();
         assert!(err.contains("deviation"), "unhelpful: {err}");
     }
-}
-
-pub const OOK_MOD: StageDesc = StageDesc {
-    name: "ook_mod",
-    summary: "Key a carrier on and off from pulse timings, with shaped edges",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_ook_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(OokModNode::new(
-        s.f64_or(OFFSET_HZ, 0.0),
-        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
-        s.f64_or(RAMP_US, DEFAULT_RAMP_US as f64) as f32,
-    )))
-}
-
-pub const FSK_MOD: StageDesc = StageDesc {
-    name: "fsk_mod",
-    summary: "Key two tones from pulse timings, continuous phase",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_fsk_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(
-        FskModNode::new(
-            s.f64_or(OFFSET_HZ, 0.0),
-            s.f64_or(SHIFT_HZ, DEFAULT_FSK_SHIFT_HZ),
-            s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
-        )
-        .resting(Rest::parse(s.str_or(REST, "tone")).unwrap_or_default()),
-    ))
-}
-
-pub const ASK_MOD: StageDesc = StageDesc {
-    name: "ask_mod",
-    summary: "Amplitude modulate a carrier with one level per symbol",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_ask_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(AskModNode::new(
-        s.f64_or(OFFSET_HZ, 0.0),
-        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
-        s.i64_or(SPS, DEFAULT_SPS as i64).max(1) as usize,
-    )))
-}
-
-pub const AM_MOD: StageDesc = StageDesc {
-    name: "am_mod",
-    summary: "Amplitude modulate a carrier with audio, carrier left in",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_am_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(AmModNode::new(
-        s.f64_or(OFFSET_HZ, 0.0),
-        s.f64_or(DEPTH, DEFAULT_DEPTH as f64) as f32,
-        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
-    )))
-}
-
-pub const FM_MOD: StageDesc = StageDesc {
-    name: "fm_mod",
-    summary: "Frequency modulate a carrier with audio, narrowband to broadcast",
-    category: Category::Transmit,
-    feeds_bus: false,
-};
-
-pub fn build_fm_mod(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    Ok(Box::new(FmModNode::new(
-        s.f64_or(OFFSET_HZ, 0.0),
-        s.f64_or(DEVIATION_HZ, FM_DEVIATION_HZ),
-        s.f64_or(AMPLITUDE, DEFAULT_AMPLITUDE as f64) as f32,
-    )))
 }

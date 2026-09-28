@@ -37,10 +37,10 @@ where
     }
 
     fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
-        if let Some(s) = ctx.span(id) {
-            if let Some(e) = s.extensions_mut().get_mut::<Entered>() {
-                e.0 = Some(Instant::now());
-            }
+        if let Some(s) = ctx.span(id)
+            && let Some(e) = s.extensions_mut().get_mut::<Entered>()
+        {
+            e.0 = Some(Instant::now());
         }
     }
 
@@ -54,13 +54,13 @@ where
 }
 
 pub fn record(name: &'static str, d: Duration) {
-    if let Ok(mut g) = ACC.lock() {
-        if let Some(map) = g.as_mut() {
-            let e = map.entry(name).or_default();
-            e.total += d;
-            e.calls += 1;
-            e.max = e.max.max(d);
-        }
+    if let Ok(mut g) = ACC.lock()
+        && let Some(map) = g.as_mut()
+    {
+        let e = map.entry(name).or_default();
+        e.total += d;
+        e.calls += 1;
+        e.max = e.max.max(d);
     }
 }
 

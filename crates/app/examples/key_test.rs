@@ -97,10 +97,10 @@ fn main() -> common::Result<()> {
     // real samples rather than the noise floor it stands in with.
     println!("--- unkeying ---");
     let id = g.order().last().map(|(i, _)| i).unwrap();
-    if let Some(n) = g.node_mut(id) {
-        if let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>() {
-            s.finish(std::time::Duration::from_secs(1));
-        }
+    if let Some(n) = g.node_mut(id)
+        && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
+    {
+        s.finish(std::time::Duration::from_secs(1));
     }
     drop(g);
 

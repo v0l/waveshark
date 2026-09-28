@@ -360,11 +360,7 @@ pub fn read(frame: &Frame) -> Proto {
                 p = p.saying(Fact::Destination(d));
             }
             if let Some(d) = s.draught_m {
-                p = p.saying(Fact::sensed(
-                    common::packet::Quantity::Depth,
-                    f64::from(d),
-                    common::Unit::Metre,
-                ));
+                p = p.saying(Fact::sensed(common::packet::Quantity::Depth, d, common::Unit::Metre));
             }
         }
         Message::BaseStation { position, .. } => {

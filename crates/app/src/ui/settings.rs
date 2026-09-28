@@ -2123,10 +2123,10 @@ impl App {
         let Some(scan) = self.survey.gps_scan.as_mut() else {
             return;
         };
-        if scan.found.is_none() {
-            if let Ok(found) = scan.done.try_recv() {
-                scan.found = Some(found);
-            }
+        if scan.found.is_none()
+            && let Ok(found) = scan.done.try_recv()
+        {
+            scan.found = Some(found);
         }
         let Some(found) = scan.found.clone() else {
             hint(ui, "asking the serial ports for a modem");

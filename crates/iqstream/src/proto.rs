@@ -394,7 +394,7 @@ impl BitDepth {
 
     pub fn packed_len(&self, samples: usize) -> usize {
         // Two values per complex sample.
-        (samples * 2 * self.0 as usize + 7) / 8
+        (samples * 2 * self.0 as usize).div_ceil(8)
     }
 }
 
@@ -924,7 +924,7 @@ pub fn pack(uc8: &[u8], bits: u8, out: &mut Vec<u8>) {
         out.extend_from_slice(uc8);
         return;
     }
-    out.reserve((uc8.len() * bits as usize + 7) / 8);
+    out.reserve((uc8.len() * bits as usize).div_ceil(8));
     let shift = 8 - bits;
     let mut acc: u32 = 0;
     let mut held = 0u32;
@@ -982,7 +982,7 @@ mod tests {
         for bits in BitDepth::SUPPORTED {
             let mut packed = Vec::new();
             pack(&src, bits, &mut packed);
-            assert_eq!(packed.len(), (src.len() * bits as usize + 7) / 8);
+            assert_eq!(packed.len(), (src.len() * bits as usize).div_ceil(8));
             let mut back = Vec::new();
             unpack(&packed, bits, src.len(), &mut back);
             assert_eq!(back.len(), src.len());

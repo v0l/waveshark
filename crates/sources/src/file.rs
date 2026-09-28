@@ -517,7 +517,7 @@ mod tests {
     fn what_a_name_carries_is_completed_by_what_it_is_told() {
         let named = parse_filename(Path::new("sdr_868.3M_recording.cf32"));
         assert_eq!(named.rate, None);
-        assert_eq!(named.complete(), false);
+        assert!(!named.complete());
         let full = named.under(FileMeta::rate(Sps(2_400_000)));
         assert_eq!(full.rate, Sps(2_400_000).into());
         assert_eq!(full.center, Some(Hz(868_300_000)));

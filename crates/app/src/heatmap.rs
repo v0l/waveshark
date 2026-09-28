@@ -682,7 +682,7 @@ pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::C32;
+
     use pipeline::node::Node;
 
     fn luma(c: [u8; 3]) -> f32 {

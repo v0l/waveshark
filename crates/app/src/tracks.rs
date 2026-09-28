@@ -942,13 +942,12 @@ fn place_aircraft(
     // rather than first because its two halves are up to ten seconds apart
     // and an airliner covers a mile and a half in that: preferring it would
     // make every fix wobble between where the aircraft is and where it was.
-    if let (Some((even, te)), Some((odd_cpr, to))) = (e.cpr.even, e.cpr.odd) {
-        if te.max(to).saturating_duration_since(te.min(to)) <= PAIR_WINDOW {
-            if let Some(p) = adsb::cpr_global(even, odd_cpr, to > te) {
-                e.track.set_position(p, at, true);
-                return;
-            }
-        }
+    if let (Some((even, te)), Some((odd_cpr, to))) = (e.cpr.even, e.cpr.odd)
+        && te.max(to).saturating_duration_since(te.min(to)) <= PAIR_WINDOW
+        && let Some(p) = adsb::cpr_global(even, odd_cpr, to > te)
+    {
+        e.track.set_position(p, at, true);
+        return;
     }
 
     // Nothing to refine from, so the receiver's own position gives a

@@ -14,7 +14,7 @@
 #[path = "../../decode/tests/corpus/mod.rs"]
 mod corpus;
 
-use common::{C32, Package};
+use common::C32;
 use corpus::{Fixture, fixtures};
 use decode::Protocols;
 use decode::protocol::Report;

@@ -179,7 +179,7 @@ fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
 fn a_local_capture_names_no_place_it_was_published() {
     let local = manifest("local.toml");
     let entries = local.lines().filter(|l| l.trim() == "[[capture]]").count();
-    assert_eq!(entries, 15, "captures in local.toml");
+    assert_eq!(entries, 17, "captures in local.toml");
     let keys: std::collections::BTreeSet<&str> =
         local.lines().filter_map(|l| l.split_once(" = ").map(|(k, _)| k.trim())).collect();
     assert_eq!(keys, ["name", "sha256", "size"].into_iter().collect());

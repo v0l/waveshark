@@ -947,7 +947,7 @@ mod tests {
         let frame =
             [0x8d, 0x40, 0x7c, 0xaf, 0x99, 0x88, 0x68, 0x37, 0xb8, 0x08, 0x2d, 0xd0, 0xde, 0x39];
         let read = |port: &net::Fanout| {
-            let mut c = std::net::TcpStream::connect(port.addr()).expect("connect");
+            let c = std::net::TcpStream::connect(port.addr()).expect("connect");
             c.set_read_timeout(Some(std::time::Duration::from_millis(250))).unwrap();
             c
         };
