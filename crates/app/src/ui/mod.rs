@@ -1513,6 +1513,11 @@ impl App {
 
     fn drain(&mut self) {
         self.follow_gps();
+        if let Some(c) = self.radio.as_ref().map(|r| r.status.radio()) {
+            self.tx_reach = c.tx_reach;
+            self.tunable = c.tunable;
+            self.follow_reach(c.reach);
+        }
         let Some(radio) = &self.radio else { return };
         // The flight tracker lives in the graph; this is the table it
         // published on the last frame.
@@ -1570,12 +1575,6 @@ impl App {
         // dragged would label every frequency on screen wrongly.
         if let Some(f) = self.device.as_ref().and_then(|d| d.pinned) {
             self.center = f.as_f64();
-        }
-        {
-            let c = radio.status.radio();
-            self.reach = c.reach;
-            self.tx_reach = c.tx_reach;
-            self.tunable = c.tunable;
         }
         // Every frame is peak-held into the pending row, not just the one that
         // happens to be last in the queue. Folding only the last of each batch
@@ -2785,6 +2784,15 @@ impl App {
                 scope::Action::Resized => self.send_channels(),
                 scope::Action::Open(w) => self.open = Some(w),
             }
+        }
+    }
+
+    fn follow_reach(&mut self, reach: (f64, f64)) {
+        let changed = reach != self.reach;
+        self.reach = reach;
+        if changed && self.tunable && !(reach.0..=reach.1).contains(&self.center) {
+            self.center = self.center.clamp(reach.0, reach.1);
+            self.cmds.push(Cmd::Center(Hz(self.center as u64)));
         }
     }
 
@@ -4788,6 +4796,21 @@ mod tests {
     /// The clamp follows the radio that is connected, not the dongle the
     /// numbers were written for: a HackRF reaches 6 GHz and 1 MHz, and both
     /// were unreachable while this was the RTL-SDR's range.
+    #[test]
+    fn a_dial_past_a_new_radios_reach_is_brought_inside_it() {
+        let mut a = app();
+        a.tunable = true;
+        a.reach = (70e6, 6e9);
+        a.center = 5_805e6;
+        a.follow_reach((70e6, 6e9));
+        assert_eq!(a.center, 5_805e6, "the same radio again moves nothing");
+        assert!(a.cmds.is_empty());
+
+        a.follow_reach((100e3, 3_800e6));
+        assert_eq!(a.center, 3_800e6, "a LimeSDR-USB tops out at 3.8 GHz");
+        assert!(matches!(a.cmds.as_slice(), [Cmd::Center(Hz(3_800_000_000))]));
+    }
+
     #[test]
     fn retuning_stays_inside_what_the_tuner_can_reach() {
         let mut a = app();

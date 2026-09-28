@@ -67,6 +67,7 @@ the code is in the commit log.
 - Chain view text settings dropping what was typed, and Backspace in one deleting the stage.
 - 802.15.4 beacons read out of frames too short for their own address lists.
 - Inmarsat STD-C decoding nothing off the air.
+- Spectrum trace missing after switching to a radio that cannot reach the dial's frequency.
 - Aero satellite ACARS messages never read off the air.
 - DRM service labels missing from transmissions that send them in 16-QAM.
 - Bluetooth LE and 802.15.4 frames a few megahertz apart dropped as one burst.
