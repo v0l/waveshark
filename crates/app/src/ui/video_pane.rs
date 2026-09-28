@@ -63,6 +63,34 @@ pub(super) struct VideoState {
     splitting: bool,
     osd_until: Option<std::time::Instant>,
     osd_title: String,
+    rate: FrameRate,
+}
+
+const RATE_WINDOW_S: f32 = 2.0;
+
+#[derive(Default)]
+struct FrameRate {
+    from: Option<(std::time::Instant, u64)>,
+    fps: Option<f32>,
+}
+
+impl FrameRate {
+    fn saw(&mut self, f: &VideoFrame, at: std::time::Instant) {
+        if f.update != common::Update::Whole || f.cadence != common::Cadence::Live {
+            *self = Self::default();
+            return;
+        }
+        match self.from {
+            Some((t0, s0)) if f.sequence > s0 => {
+                let secs = at.duration_since(t0).as_secs_f32();
+                if secs >= RATE_WINDOW_S {
+                    self.fps = Some((f.sequence - s0) as f32 / secs);
+                    self.from = Some((at, f.sequence));
+                }
+            }
+            _ => *self = Self { from: Some((at, f.sequence)), fps: None },
+        }
+    }
 }
 
 impl VideoState {
@@ -116,8 +144,10 @@ impl VideoPane<'_> {
         if let Some(f) = self.frame
             && is_new(st.shown.as_ref(), &f)
         {
+            let now = std::time::Instant::now();
             st.texture = Some(upload(ui.ctx(), &f, st.texture.take()));
-            st.last = Some(std::time::Instant::now());
+            st.rate.saw(&f, now);
+            st.last = Some(now);
             st.shown = Some(f);
         }
         let hold = st
@@ -129,6 +159,7 @@ impl VideoPane<'_> {
             st.texture = None;
             st.shown = None;
             st.last = None;
+            st.rate = FrameRate::default();
         }
 
         let top = ui.cursor().top();
@@ -231,6 +262,7 @@ struct Osd {
     title: String,
     number: Option<u16>,
     facts: Vec<(&'static str, String, Color32)>,
+    guide: Vec<(&'static str, String, String)>,
     saved: Option<(String, String)>,
 }
 
@@ -290,10 +322,23 @@ impl Osd {
             facts.push(("tuned", format!("{:.3} MHz", f.channel_hz / 1e6), theme::READOUT));
             facts.push(("system", f.system.to_string(), theme::VALUE));
             facts.push(("picture", format!("{}x{}", f.width, f.height), theme::TRACE));
-            let lines = format!("{} of {}", f.lines_seen, f.height);
-            let tint = if f.completeness() > 0.9 { theme::TRACE } else { theme::FAULT };
-            facts.push(("lines", lines, tint));
+            if let Some(fps) = st.rate.fps {
+                facts.push(("rate", format!("{fps:.0} fps"), theme::TRACE));
+            }
+            if f.lines_seen < f.height {
+                let lines = format!("{} of {}", f.lines_seen, f.height);
+                let tint = if f.completeness() > 0.9 { theme::TRACE } else { theme::FAULT };
+                facts.push(("lines", lines, tint));
+            }
         }
+        let guide = service
+            .and_then(|p| p.service.as_ref())
+            .map(|s| {
+                let now = s.now.as_ref().map(|n| ("now", n.title.clone(), on_air(n)));
+                let next = s.next.as_ref().map(|n| ("next", n.title.clone(), starts(n)));
+                now.into_iter().chain(next).filter(|(_, t, _)| !t.is_empty()).collect()
+            })
+            .unwrap_or_default();
         let saved = saved.last().map(|last| {
             let what = match saved.len() {
                 1 => "1 picture saved".to_string(),
@@ -301,7 +346,8 @@ impl Osd {
             };
             (what, last.parent().unwrap_or(last).display().to_string())
         });
-        Self { title, number: service.and_then(|p| p.service.as_ref()).map(|s| s.id), facts, saved }
+        let number = service.and_then(|p| p.service.as_ref()).map(|s| s.id);
+        Self { title, number, facts, guide, saved }
     }
 
     fn show(&self, ui: &mut egui::Ui, over: Rect, alpha: f32) {
@@ -326,6 +372,13 @@ impl Osd {
                 title = title.gap(16.0).legend("service").value(n.to_string());
             }
             title.show(ui);
+        }
+        for (legend, title, when) in &self.guide {
+            let mut line = Line::new().legend(legend).value(title);
+            if !when.is_empty() {
+                line = line.gap(12.0).legend(when);
+            }
+            line.elided(ui);
         }
         ui.horizontal_wrapped(|ui| {
             for (legend, value, tint) in &self.facts {
@@ -352,6 +405,24 @@ struct Row {
 
 fn blank_cells() -> [(String, Color32); COLS.len()] {
     std::array::from_fn(|_| (String::new(), theme::LEGEND))
+}
+
+fn utc(t: Option<i64>) -> Option<String> {
+    let at = t.and_then(|t| chrono::DateTime::from_timestamp(t, 0))?;
+    Some(at.format("%H:%M").to_string())
+}
+
+fn on_air(s: &pipeline::Showing) -> String {
+    let end = s.start_utc.filter(|_| s.duration_s > 0).map(|t| t + i64::from(s.duration_s));
+    match (utc(s.start_utc), utc(end)) {
+        (Some(a), Some(b)) => format!("{a}-{b} UTC"),
+        (Some(a), None) => format!("from {a} UTC"),
+        _ => String::new(),
+    }
+}
+
+fn starts(s: &pipeline::Showing) -> String {
+    utc(s.start_utc).map(|a| format!("{a} UTC")).unwrap_or_default()
 }
 
 fn clock(start_utc: Option<i64>) -> String {
@@ -662,6 +733,17 @@ mod tests {
             provider: Some("BSkyB".into()),
             video: Some("H.264 video"),
             audio: Some("MPEG-2 audio"),
+            now: Some(pipeline::Showing {
+                title: "Newsnight".into(),
+                start_utc: Some(1_790_373_600),
+                duration_s: 2700,
+                ..Default::default()
+            }),
+            next: Some(pipeline::Showing {
+                title: "The Weather".into(),
+                start_utc: Some(1_790_376_300),
+                ..Default::default()
+            }),
             ..Default::default()
         });
         std::sync::Arc::get_mut(&mut mux.programmes).expect("one owner").on = Some(6940);
@@ -669,7 +751,8 @@ mod tests {
         let mut shown = frame(1, 1080);
         (shown.system, shown.channel_hz, shown.width, shown.height) =
             ("DVB-S2", 1_097e6, 1920, 1080);
-        let st = VideoState { shown: Some(shown.clone()), ..Default::default() };
+        let mut st = VideoState { shown: Some(shown.clone()), ..Default::default() };
+        st.rate.fps = Some(25.02);
         let on = playing(&Pick::First, Some(&shown), &muxes);
         let osd = Osd::of(&on, &st, &[], &muxes, &[]);
         assert_eq!((osd.title.as_str(), osd.number), ("BBC Two HD", Some(6940)));
@@ -682,12 +765,42 @@ mod tests {
                 ("tuned", "1097.000 MHz"),
                 ("system", "DVB-S2"),
                 ("picture", "1920x1080"),
-                ("lines", "1080 of 1080"),
+                ("rate", "25 fps"),
             ]
         );
+        let guide: Vec<(&str, &str, &str)> =
+            osd.guide.iter().map(|(l, t, w)| (*l, t.as_str(), w.as_str())).collect();
+        assert_eq!(
+            guide,
+            [("now", "Newsnight", "22:00-22:45 UTC"), ("next", "The Weather", "22:45 UTC")]
+        );
+
+        let mut torn = shown.clone();
+        torn.lines_seen = 700;
+        let st = VideoState { shown: Some(torn), ..Default::default() };
+        let osd = Osd::of(&Pick::First, &st, &[], &[], &[]);
+        let lines = osd.facts.iter().find(|(l, _, _)| *l == "lines").map(|(_, v, _)| v.as_str());
+        assert_eq!(lines, Some("700 of 1080"), "only a picture short of lines says how many");
 
         let idle = Osd::of(&Pick::First, &VideoState::default(), &[], &[], &[]);
         assert_eq!((idle.title.as_str(), idle.facts.len()), ("", 0));
+    }
+
+    #[test]
+    fn the_frame_rate_counts_every_picture_the_decoder_numbered() {
+        let t0 = std::time::Instant::now();
+        let at = |s: f32| t0 + std::time::Duration::from_secs_f32(s);
+        let live = |sequence| VideoFrame { cadence: common::Cadence::Live, ..frame(sequence, 4) };
+        let mut rate = FrameRate::default();
+        rate.saw(&live(1), at(0.0));
+        rate.saw(&live(26), at(1.0));
+        assert_eq!(rate.fps, None, "not yet a window's worth");
+        rate.saw(&live(51), at(2.0));
+        assert_eq!(rate.fps, Some(25.0), "a repaint that missed pictures still counts them");
+        rate.saw(&live(3), at(2.5));
+        assert_eq!(rate.fps, None, "a new source starts again");
+        rate.saw(&frame(4, 4), at(3.0));
+        assert_eq!(rate.fps, None, "a still has no rate");
     }
 
     #[test]
