@@ -83,6 +83,9 @@ pub enum Icon {
     Scripts,
     /// Put a panel away, and bring it back: a column folding to the side.
     Hide,
+    Folded,
+    Unfolded,
+    More,
 }
 
 /// Side of the clickable square, in points.
@@ -141,6 +144,9 @@ impl Icon {
             Icon::Agent => ph::ROBOT,
             Icon::Scripts => ph::FILE_CODE,
             Icon::Hide => ph::SIDEBAR_SIMPLE,
+            Icon::Folded => ph::CARET_CIRCLE_RIGHT,
+            Icon::Unfolded => ph::CARET_CIRCLE_DOWN,
+            Icon::More => ph::DOTS_THREE_CIRCLE,
         }
     }
 
@@ -287,7 +293,7 @@ mod tests {
     /// Every icon in the top bar and the view strip, in the order they are
     /// drawn. Listed rather than derived so a new variant has to be added
     /// here, which is where the tests below then check it.
-    const ALL: [Icon; 26] = [
+    const ALL: [Icon; 29] = [
         Icon::Play,
         Icon::Stop,
         Icon::Sliders,
@@ -314,6 +320,9 @@ mod tests {
         Icon::Key,
         Icon::Agent,
         Icon::Scripts,
+        Icon::Folded,
+        Icon::Unfolded,
+        Icon::More,
     ];
 
     #[test]

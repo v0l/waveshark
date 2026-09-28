@@ -650,6 +650,30 @@ impl SsbDemodNode {
 /// How much gain the control will apply before it stops, in dB.
 const DEFAULT_MAX_GAIN_DB: f64 = 60.0;
 
+pub const AGC_DECAY_RANGE_MS: std::ops::RangeInclusive<f64> = 50.0..=5_000.0;
+pub const AGC_MAX_GAIN_RANGE_DB: std::ops::RangeInclusive<f64> = 0.0..=90.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AgcTune {
+    pub decay_ms: Option<f64>,
+    pub max_gain_db: f64,
+}
+
+impl Default for AgcTune {
+    fn default() -> Self {
+        Self { decay_ms: None, max_gain_db: DEFAULT_MAX_GAIN_DB }
+    }
+}
+
+impl AgcTune {
+    pub fn settings(self, s: &mut Settings) {
+        if let Some(ms) = self.decay_ms {
+            s.insert(RELEASE_MS.into(), ParamValue::Float(ms));
+        }
+        s.insert(MAX_GAIN_DB.into(), ParamValue::Float(self.max_gain_db));
+    }
+}
+
 /// Automatic gain control on an audio stream.
 pub struct AgcNode {
     attack_ms: f64,
@@ -1452,15 +1476,13 @@ pub const AGC: StageDesc = StageDesc {
 };
 
 pub fn build_agc(s: &Settings) -> Result<Box<dyn Node>> {
-    let (attack, release, hang) = AgcPreset::Voice.times();
-    let mut n = match s.str_or(PRESET, "").parse::<AgcPreset>() {
-        Ok(p) => AgcNode::preset(p),
-        Err(_) => AgcNode::new(
-            s.f64_or(ATTACK_MS, attack),
-            s.f64_or(RELEASE_MS, release),
-            s.f64_or(HANG_MS, hang),
-        ),
-    };
+    let preset = s.str_or(PRESET, "").parse::<AgcPreset>().unwrap_or(AgcPreset::Voice);
+    let (attack, release, hang) = preset.times();
+    let mut n = AgcNode::new(
+        s.f64_or(ATTACK_MS, attack),
+        s.f64_or(RELEASE_MS, release),
+        s.f64_or(HANG_MS, hang),
+    );
     if let Some(v) = s.get(MAX_GAIN_DB) {
         Node::set_param(&mut n, MAX_GAIN_DB, v.clone())?;
     }

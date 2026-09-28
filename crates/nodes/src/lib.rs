@@ -108,9 +108,9 @@ pub use decode_nodes::{
 pub use dfm_nodes::DfmNode;
 pub use dmr_nodes::DmrNode;
 pub use dsp_nodes::{
-    AgcNode, AgcPreset, DecimateNode, DeemphasisNode, DenoiseNode, EnvelopeNode, FmDemodNode,
-    HighBlendNode, MixerNode, NoiseBlankerNode, RealDecimateNode, SquelchKind, SquelchNode,
-    SsbDemodNode,
+    AGC_DECAY_RANGE_MS, AGC_MAX_GAIN_RANGE_DB, AgcNode, AgcPreset, AgcTune, DecimateNode,
+    DeemphasisNode, DenoiseNode, EnvelopeNode, FmDemodNode, HighBlendNode, MixerNode,
+    NoiseBlankerNode, RealDecimateNode, SquelchKind, SquelchNode, SsbDemodNode,
 };
 pub use elrs_nodes::ElrsNode;
 pub use feed_nodes::{FEED_KINDS, FeedKind, FeedNode, FeedSpec, feed_kind};

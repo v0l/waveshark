@@ -221,6 +221,7 @@ impl Audio {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             tx: None,
             tone: None,
@@ -344,6 +345,7 @@ fn pull_levels(rx: &crate::chain::Receiver, plan: &mut Plan, status: &Status) {
             have.blanker = c.blanker;
             have.denoise = c.denoise;
             have.denoise_db = c.denoise_db;
+            have.agc_tune = c.agc_tune;
             have.notch = c.notch;
         }
     }

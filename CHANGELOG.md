@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- AGC decay and maximum gain, set per channel on the strip.
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
 - LimeSDR on Windows, with LimeSuite installed.
 - Airspy R2, Mini, HF+ and HF+ Discovery as local radios, with no libairspy needed.
@@ -32,6 +33,7 @@ the code is in the commit log.
 
 ### Changed
 
+- Channel strip cards fold their settings away, and the channel list scrolls.
 - DVB-T and DVB-S2 pictures decoded on the graphics card where FFmpeg can, and colour converted there.
 - Video pane programme table across every multiplex, with scrambling, codecs and now and next, only the watched one decoded.
 - Video pane overlay with the service, now and next, frame rate and decoder, shown on hover, tap or a change of channel.

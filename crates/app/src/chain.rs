@@ -636,6 +636,7 @@ pub struct ChannelLevels {
     pub blanker: Option<f32>,
     pub denoise: bool,
     pub denoise_db: f32,
+    pub agc_tune: nodes::AgcTune,
     pub notch: bool,
 }
 
@@ -2353,6 +2354,7 @@ impl Receiver {
                     blanker: c.spec.blanker,
                     denoise: c.spec.denoise,
                     denoise_db: c.spec.denoise_db,
+                    agc_tune: c.spec.agc_tune,
                     notch: c.spec.notch,
                 };
                 if let Some(f) = self.fader(c.spec.id) {
@@ -4653,7 +4655,7 @@ fn audio_channel_stages(
     // gain that clips, and what is heard is then the tone with the voice
     // buried under it.
     if let Some(preset) = agc_preset(mode) {
-        let agc = at(p, "chan_agc", "agc", agc_settings(preset, spec.agc));
+        let agc = at(p, "chan_agc", "agc", agc_settings(preset, spec.agc, spec.agc_tune));
         p.connect(tail, (agc, 0));
         tail = Source::Stage(agc, 0);
     }
@@ -4664,7 +4666,7 @@ fn audio_channel_stages(
 }
 
 /// The gain behaviour a mode wants, or nothing for one that manages its own.
-fn agc_preset(mode: Demod) -> Option<nodes::AgcPreset> {
+pub(crate) fn agc_preset(mode: Demod) -> Option<nodes::AgcPreset> {
     match mode {
         Demod::Cw => Some(nodes::AgcPreset::Cw),
         Demod::Nfm | Demod::Am | Demod::Usb | Demod::Lsb => Some(nodes::AgcPreset::Voice),
@@ -4672,11 +4674,16 @@ fn agc_preset(mode: Demod) -> Option<nodes::AgcPreset> {
     }
 }
 
-fn agc_settings(preset: nodes::AgcPreset, on: bool) -> pipeline::registry::Settings {
+fn agc_settings(
+    preset: nodes::AgcPreset,
+    on: bool,
+    tune: nodes::AgcTune,
+) -> pipeline::registry::Settings {
     use pipeline::ParamValue as V;
     let mut a = pipeline::registry::Settings::new();
     a.insert("preset".into(), V::Text(preset.to_string()));
     a.insert("enabled".into(), V::Bool(on));
+    tune.settings(&mut a);
     a
 }
 
@@ -6232,6 +6239,7 @@ pub(crate) mod tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -7481,6 +7489,34 @@ pub(crate) mod tests {
         open.channels = vec![chan(1, 200_000.0, Demod::Nfm)];
         rx.apply_params(&open);
         assert_eq!(code(&rx), "");
+    }
+
+    #[test]
+    fn a_channels_agc_decay_and_ceiling_reach_its_gain_stage_without_a_rebuild() {
+        let agc = |rx: &Receiver, p: &Plan| -> (f64, f64) {
+            let id = rx
+                .node_of_stage(chan_stage_id("chan_agc", &p.channels[0], p.eff_rate()))
+                .expect("an SSB channel has a gain control");
+            let params = rx.graph.node(id).expect("the stage").params();
+            let get = |name: &str| {
+                params.iter().find(|q| q.name == name).and_then(|q| q.value.as_f64()).unwrap()
+            };
+            (get("release_ms"), get("max_gain_db"))
+        };
+        let mut p = plan(240_000.0, Hz::mhz(14));
+        p.fronts.clear();
+        let mut spec = chan(1, 20_000.0, Demod::Usb);
+        p.channels = vec![spec.clone()];
+        let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
+        assert_eq!(agc(&rx, &p), (500.0, 60.0), "the voice preset and the default ceiling");
+
+        spec.agc_tune = nodes::AgcTune { decay_ms: Some(2_000.0), max_gain_db: 30.0 };
+        let mut tuned = plan(240_000.0, Hz::mhz(14));
+        tuned.fronts.clear();
+        tuned.channels = vec![spec];
+        assert!(rx.params_only(&tuned), "tuning the gain control rebuilt the chain");
+        rx.apply_params(&tuned);
+        assert_eq!(agc(&rx, &tuned), (2_000.0, 30.0));
     }
 
     #[test]
@@ -8938,6 +8974,7 @@ mod refusal_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9001,6 +9038,7 @@ mod refusal_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9048,6 +9086,7 @@ mod refusal_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9092,6 +9131,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9173,6 +9213,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9511,6 +9552,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9583,6 +9625,7 @@ mod tx_in_graph_tests {
                 blanker: None,
                 denoise: false,
                 denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+                agc_tune: nodes::AgcTune::default(),
                 notch: false,
                 voice: false,
                 reads: None,
@@ -9625,6 +9668,7 @@ mod tx_in_graph_tests {
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9712,6 +9756,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9814,6 +9859,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -9921,6 +9967,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -10041,6 +10088,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,
@@ -10554,6 +10602,7 @@ vectors:
             blanker: None,
             denoise: false,
             denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+            agc_tune: nodes::AgcTune::default(),
             notch: false,
             voice: false,
             reads: None,

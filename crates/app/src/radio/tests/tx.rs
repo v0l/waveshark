@@ -22,6 +22,7 @@ fn the_transmit_chain_follows_the_channel_going_on_air() {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        agc_tune: nodes::AgcTune::default(),
         notch: false,
         tx: Some(TxSpec { source, ..Default::default() }),
         tone: None,

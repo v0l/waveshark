@@ -46,6 +46,7 @@ pub struct Channel {
     pub(super) blanker: Option<f32>,
     pub(super) denoise: bool,
     pub(super) denoise_db: f32,
+    pub(super) agc_tune: nodes::AgcTune,
     pub(super) notch: bool,
     /// Treat what is heard here as speech: calls on the bus, a row in the
     /// call list, and a transcript where a model is installed.
@@ -1225,6 +1226,7 @@ pub(super) struct AudioState {
     /// The capture the IQ transmit source replays.
     pub capture_pick: CapturePick,
     pub heard_at: std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
+    pub unfolded: std::collections::HashSet<u64>,
 }
 
 /// What the transmit key is doing: which channel it is keying, and whether it
@@ -1369,6 +1371,7 @@ impl Default for AudioState {
             sub_pick: SubPick::default(),
             capture_pick: CapturePick::default(),
             heard_at: std::collections::HashMap::new(),
+            unfolded: std::collections::HashSet::new(),
         }
     }
 }

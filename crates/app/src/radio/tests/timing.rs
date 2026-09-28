@@ -18,6 +18,7 @@ fn widest_chain() -> crate::chain::Receiver {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        agc_tune: nodes::AgcTune::default(),
         notch: false,
         voice: false,
         reads: None,

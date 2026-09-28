@@ -98,7 +98,7 @@ impl Strip<'_> {
                 let Some(st) = st else { return };
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    Line::new().legend("vol").show(ui);
+                    legend_col(ui, "vol");
                     let mut v = st.volume;
                     if ui.add(Fader::new(&mut v, st.level).width(VU_W)).changed() {
                         cmds.push(Cmd::StageParam(
@@ -130,7 +130,7 @@ impl Strip<'_> {
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            Line::new().legend("station").show(ui);
+            legend_col(ui, "station");
             let mut picked = p.wanted.clone();
             let options = std::iter::once((p.any.clone(), "first".to_string()))
                 .chain(p.list.iter().map(|x| (x.setting.clone(), x.label.clone())))
@@ -141,133 +141,156 @@ impl Strip<'_> {
         });
     }
 
-    /// Gain and squelch, for the modes that have them.
-    ///
-    /// Worth a line of its own because on a weak signal these two are the
-    /// difference between a band that is dead and a receiver that is muted,
-    /// and without them both look and sound identical.
-    fn channel_audio(ui: &mut egui::Ui, ch: &mut Channel, st: ChannelState) -> bool {
-        let (gain_db, open, measured) = (st.agc_gain_db, st.squelch_open, st.squelch_db);
+    fn channel_squelch(ui: &mut egui::Ui, ch: &mut Channel, st: ChannelState) -> bool {
         let mut changed = false;
-        // A decode channel has neither: its front end sets its own levels and
-        // decides for itself whether a burst is a transmission.
         let Some(demod) = ch.mode.demod() else {
             return false;
         };
-        ui.add_space(4.0);
-        if demod != Demod::Wfm {
-            ui.horizontal(|ui| {
-                Line::new().legend("agc").show(ui);
-                if ui.selectable_label(ch.agc, if ch.agc { "ON" } else { "OFF" }).clicked() {
+        let Some(default) = demod.default_squelch_db() else {
+            return false;
+        };
+        let (lo, hi, ratio) = demod.squelch_range();
+        let mut db = ch.squelch_db.unwrap_or(default);
+        ui.horizontal(|ui| {
+            legend_col(ui, "sql");
+            if ui.add(Threshold::new(&mut db, lo, hi, st.squelch_db, st.squelch_open)).changed() {
+                ch.squelch_db = Some(db);
+                changed = true;
+            }
+            let set = if db <= lo + 0.5 {
+                "off".to_string()
+            } else {
+                format!("{db:.0}{}", if ratio { "" } else { " dBFS" })
+            };
+            Line::new()
+                .set(set)
+                .size(11.0)
+                .gap(6.0)
+                .legend("now")
+                .measured(format!("{:.0}", st.squelch_db))
+                .size(11.0)
+                .show(ui);
+        });
+        changed
+    }
+
+    fn channel_receive(ui: &mut egui::Ui, ch: &mut Channel, st: ChannelState) -> bool {
+        let mut changed = false;
+        section(ui, "receive");
+        changed |= Self::channel_bandwidth(ui, ch);
+        let Some(demod) = ch.mode.demod() else {
+            return changed;
+        };
+        let wfm = demod == Demod::Wfm;
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            let flip = |ui: &mut egui::Ui, text: &str, on: bool, tip: &str| {
+                egui_bench::panel::toggle(ui, text, on).on_hover_text(tip).clicked()
+            };
+            if !wfm {
+                if flip(ui, "agc", ch.agc, "Hold the audio level steady") {
                     ch.agc = !ch.agc;
                     changed = true;
                 }
-                if ch.agc {
-                    Line::new().value(format!("{gain_db:+.0} dB")).size(11.0).show(ui);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if !open {
-                        Line::new().legend("muted").show(ui);
-                    }
-                });
-            });
-            changed |= Self::channel_denoise(ui, ch);
-        }
-        if demod != Demod::Wfm {
-            changed |= Self::channel_blanker(ui, ch, st.blanked);
-        }
-        if demod.has_auto_notch() {
-            ui.horizontal(|ui| {
-                Line::new().legend("notch").show(ui);
-                let label = if ch.notch { "ON" } else { "OFF" };
-                if ui
-                    .selectable_label(ch.notch, label)
-                    .on_hover_text("Find and remove steady tones, such as a heterodyne")
-                    .clicked()
-                {
-                    ch.notch = !ch.notch;
+                if flip(ui, "nr", ch.denoise, "Take the steady hiss out of the audio") {
+                    ch.denoise = !ch.denoise;
                     changed = true;
                 }
-            });
-        }
-        // What the channel carries, which the mode cannot say: the same NFM
-        // channel holds a repeater, a telemetry link and a paging tone. Told
-        // that it is speech, the channel puts each over on the packet bus
-        // with its audio, so it appears in the call list, is recorded, and is
-        // transcribed. On by default for the modes people talk on, so this is
-        // a switch for turning off a channel that turned out to be data.
-        ui.horizontal(|ui| {
-            Line::new().legend("voice").show(ui);
-            let label = if ch.voice { "ON" } else { "OFF" };
-            if ui
-                .selectable_label(ch.voice, label)
-                .on_hover_text("List what is heard here as calls, with what was said")
-                .clicked()
+                let blanking = ch.blanker.is_some();
+                if flip(ui, "nb", blanking, "Cut ignition, power line and switching supply clicks")
+                {
+                    ch.blanker = (!blanking).then_some(dsp::blanker::DEFAULT_THRESHOLD_DB);
+                    changed = true;
+                }
+            }
+            if demod.has_auto_notch()
+                && flip(ui, "notch", ch.notch, "Find and remove steady tones, such as a heterodyne")
             {
+                ch.notch = !ch.notch;
+                changed = true;
+            }
+            if flip(
+                ui,
+                "voice",
+                ch.voice,
+                "Channel audio is voice and can be recorded and transcribed",
+            ) {
                 ch.voice = !ch.voice;
                 changed = true;
             }
         });
-        changed |= Self::channel_reads(ui, ch);
-        if let Some(default) = demod.default_squelch_db() {
-            let (lo, hi, ratio) = demod.squelch_range();
-            let mut db = ch.squelch_db.unwrap_or(default);
-            ui.horizontal(|ui| {
-                Line::new().legend("sql").show(ui);
-                if ui.add(Threshold::new(&mut db, lo, hi, measured, open)).changed() {
-                    ch.squelch_db = Some(db);
-                    changed = true;
-                }
-                // At the bottom of its range the squelch passes everything,
-                // and saying so is more use than printing the number that
-                // happens to be there.
-                let text = if db <= lo + 0.5 {
-                    "off".to_string()
-                } else {
-                    format!("{db:.0}{}", if ratio { "" } else { " dBFS" })
-                };
-                Line::new().value(text).size(11.0).show(ui);
-            });
-            // The reading the threshold is being set against. Without it the
-            // control is a number to guess at, and the right number differs
-            // by mode and moves with the RF gain.
-            ui.horizontal(|ui| {
-                ui.add_space(28.0);
-                Line::new().note(format!("now {measured:.0} dB")).show(ui);
-            });
+        ui.add_space(2.0);
+        if !wfm && ch.agc {
+            changed |= Self::channel_agc(ui, ch, demod, st.agc_gain_db);
         }
-        // The coded squelch, which is the half of the decision a level
-        // cannot make: two groups share the channel and only one of them is
-        // this one's. FM alone, because that is what sends one.
+        if !wfm && ch.denoise {
+            changed |= Self::channel_denoise(ui, ch);
+        }
+        if !wfm && ch.blanker.is_some() {
+            changed |= Self::channel_blanker(ui, ch, st.blanked);
+        }
+        changed |= Self::channel_reads(ui, ch);
         if demod == Demod::Nfm {
             changed |= Self::channel_tone(ui, ch, st.code);
         }
         changed
     }
 
+    fn channel_agc(ui: &mut egui::Ui, ch: &mut Channel, demod: Demod, gain_db: f32) -> bool {
+        let mut changed = false;
+        let preset = crate::chain::agc_preset(demod).unwrap_or(nodes::AgcPreset::Voice);
+        ui.horizontal(|ui| {
+            legend_col(ui, "agc");
+            Line::new().legend("gain").measured(format!("{gain_db:+.0} dB")).show(ui);
+        });
+        ui.horizontal(|ui| {
+            legend_col(ui, "decay");
+            let mut ms = ch.agc_tune.decay_ms.unwrap_or(preset.times().1);
+            let r = ui
+                .add(
+                    egui::DragValue::new(&mut ms)
+                        .speed(10.0)
+                        .range(nodes::AGC_DECAY_RANGE_MS)
+                        .max_decimals(0)
+                        .suffix(" ms"),
+                )
+                .on_hover_text("How quickly the gain climbs back after a loud signal");
+            if r.changed() {
+                ch.agc_tune.decay_ms = Some(ms);
+            }
+            changed |= settled(&r);
+            Line::new().legend("max").show(ui);
+            let r = ui
+                .add(
+                    egui::DragValue::new(&mut ch.agc_tune.max_gain_db)
+                        .speed(0.5)
+                        .range(nodes::AGC_MAX_GAIN_RANGE_DB)
+                        .max_decimals(0)
+                        .suffix(" dB"),
+                )
+                .on_hover_text(
+                    "The most gain it will apply, so a dead channel is not lifted into a roar",
+                );
+            changed |= settled(&r);
+        });
+        changed
+    }
+
     fn channel_denoise(ui: &mut egui::Ui, ch: &mut Channel) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            Line::new().legend("nr").show(ui);
+            legend_col(ui, "nr");
+            let (lo, hi) = dsp::denoise::DEPTH_RANGE_DB.into_inner();
+            let mut db = ch.denoise_db;
+            Line::new().legend("depth").show(ui);
             if ui
-                .selectable_label(ch.denoise, if ch.denoise { "ON" } else { "OFF" })
-                .on_hover_text("Take the steady hiss out of the audio")
-                .clicked()
+                .add(egui::DragValue::new(&mut db).speed(0.5).range(lo..=hi).suffix(" dB"))
+                .on_hover_text("How far the hiss is taken down")
+                .changed()
             {
-                ch.denoise = !ch.denoise;
+                ch.denoise_db = db;
                 changed = true;
-            }
-            if ch.denoise {
-                let (lo, hi) = dsp::denoise::DEPTH_RANGE_DB.into_inner();
-                let mut db = ch.denoise_db;
-                if ui
-                    .add(egui::DragValue::new(&mut db).speed(0.5).range(lo..=hi).suffix(" dB"))
-                    .on_hover_text("How far the hiss is taken down")
-                    .changed()
-                {
-                    ch.denoise_db = db;
-                    changed = true;
-                }
             }
         });
         changed
@@ -281,7 +304,7 @@ impl Strip<'_> {
     fn channel_tone(ui: &mut egui::Ui, ch: &mut Channel, heard: Option<Coded>) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            Line::new().legend("sql code").show(ui);
+            legend_col(ui, "code");
             let set = ch.tone;
             let mut picked = set;
             let list = egui::ComboBox::from_id_salt(("chan-tone", ch.id))
@@ -326,7 +349,7 @@ impl Strip<'_> {
     ) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            Line::new().legend("tx code").show(ui);
+            legend_col(ui, "code");
             let set = tx.tone;
             let mut picked = set;
             let list = egui::ComboBox::from_id_salt(("chan-tx-tone", id))
@@ -375,7 +398,7 @@ impl Strip<'_> {
             .map(|p| p.label().to_uppercase())
             .unwrap_or_else(|| "OFF".into());
         ui.horizontal(|ui| {
-            Line::new().legend("read").show(ui);
+            legend_col(ui, "read");
             egui::ComboBox::from_id_salt(("chan-reads", ch.id))
                 .selected_text(selected)
                 .width(120.0)
@@ -415,7 +438,7 @@ impl Strip<'_> {
         let mut changed = false;
         let mut khz = ch.passband().width() / 1e3;
         ui.horizontal(|ui| {
-            Line::new().legend("bw").show(ui);
+            legend_col(ui, "bw");
             // Proportional, so the same drag is a few hundred hertz on a CW
             // filter and a few kilohertz on a broadcast channel.
             let speed = (khz / 200.0).max(0.01);
@@ -460,32 +483,23 @@ impl Strip<'_> {
     fn channel_blanker(ui: &mut egui::Ui, ch: &mut Channel, blanked: f32) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            Line::new().legend("nb").show(ui);
-            let on = ch.blanker.is_some();
-            if ui
-                .selectable_label(on, if on { "ON" } else { "OFF" })
-                .on_hover_text("Cut ignition, power line and switching supply clicks")
-                .clicked()
-            {
-                ch.blanker = (!on).then_some(dsp::blanker::DEFAULT_THRESHOLD_DB);
+            legend_col(ui, "nb");
+            let Some(db) = &mut ch.blanker else { return };
+            let (lo, hi) = dsp::blanker::THRESHOLD_RANGE_DB;
+            Line::new().legend("over").show(ui);
+            let r = ui
+                .add(
+                    egui::DragValue::new(db)
+                        .speed(0.2)
+                        .range(lo..=hi)
+                        .max_decimals(0)
+                        .suffix(" dB"),
+                )
+                .on_hover_text("How far over the average a click stands to be cut");
+            if settled(&r) {
                 changed = true;
             }
-            if let Some(db) = &mut ch.blanker {
-                let (lo, hi) = dsp::blanker::THRESHOLD_RANGE_DB;
-                let r = ui
-                    .add(
-                        egui::DragValue::new(db)
-                            .speed(0.2)
-                            .range(lo..=hi)
-                            .max_decimals(0)
-                            .suffix(" dB"),
-                    )
-                    .on_hover_text("How far over the average a click stands to be cut");
-                if settled(&r) {
-                    changed = true;
-                }
-                Line::new().value(format!("{:.1}% cut", blanked * 100.0)).size(11.0).show(ui);
-            }
+            Line::new().measured(format!("{:.1}% cut", blanked * 100.0)).size(11.0).show(ui);
         });
         changed
     }
@@ -494,7 +508,7 @@ impl Strip<'_> {
         let mut changed = false;
         let (mut low, mut high) = d.audio_edges(ch.bandwidth_hz, ch.audio_low_hz);
         ui.horizontal(|ui| {
-            Line::new().legend("pass").show(ui);
+            legend_col(ui, "pass");
             let edge = |ui: &mut egui::Ui, hz: &mut f64| {
                 ui.add(
                     egui::DragValue::new(hz)
@@ -723,10 +737,8 @@ impl Strip<'_> {
     ) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            Line::new().legend("vox").show(ui);
-            let text = if tx.vox.on { "ON" } else { "OFF" };
-            if ui
-                .selectable_label(tx.vox.on, text)
+            legend_col(ui, "vox");
+            if egui_bench::panel::toggle(ui, "on", tx.vox.on)
                 .on_hover_text("Let speech key the channel instead of a hand")
                 .clicked()
             {
@@ -737,7 +749,7 @@ impl Strip<'_> {
                 return;
             }
             let mut t = tx.vox.threshold;
-            if ui.add(Fader::new(&mut t, level).width(VU_W)).changed() {
+            if ui.add(Fader::new(&mut t, level).width(VU_W - 40.0)).changed() {
                 tx.vox.threshold = t.clamp(0.0, 1.0);
                 changed = true;
             }
@@ -750,7 +762,7 @@ impl Strip<'_> {
         // listened to looks broken.
         if held {
             ui.horizontal(|ui| {
-                ui.add_space(28.0);
+                ui.add_space(LEGEND_W);
                 Line::new()
                     .value("held up while the receiver is playing")
                     .size(11.0)
@@ -759,7 +771,7 @@ impl Strip<'_> {
             });
         }
         ui.horizontal(|ui| {
-            Line::new().legend("tail").show(ui);
+            legend_col(ui, "tail");
             let mut ms = tx.vox.tail_ms;
             if ui
                 .add(egui::DragValue::new(&mut ms).speed(10.0).range(0.0..=5_000.0).suffix(" ms"))
@@ -769,9 +781,7 @@ impl Strip<'_> {
                 tx.vox.tail_ms = ms;
                 changed = true;
             }
-            let text = if tx.vox.anti_trip { "SPKR" } else { "OPEN" };
-            if ui
-                .selectable_label(tx.vox.anti_trip, text)
+            if egui_bench::panel::toggle(ui, "anti-trip", tx.vox.anti_trip)
                 .on_hover_text("Ignore what the speaker is playing; turn it off for a headset")
                 .clicked()
             {
@@ -785,72 +795,79 @@ impl Strip<'_> {
     /// The courtesy tone that ends an over, on every channel that transmits
     /// audio rather than only on one with a vox: the key comes up by hand,
     /// by voice or by the agent, and all three end the same over.
-    fn channel_roger(ui: &mut egui::Ui, tx: &mut crate::radio::TxSpec) -> bool {
+    fn channel_roger(ui: &mut egui::Ui, id: u64, tx: &mut crate::radio::TxSpec) -> bool {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Roger {
+            Off,
+            Beep,
+            Quindar,
+        }
         let mut changed = false;
+        let was = match (tx.roger_style, tx.roger_ms > 0.0) {
+            (nodes::RogerStyle::Quindar, _) => Roger::Quindar,
+            (nodes::RogerStyle::Tone, true) => Roger::Beep,
+            (nodes::RogerStyle::Tone, false) => Roger::Off,
+        };
+        let mut roger = was;
         ui.horizontal(|ui| {
-            Line::new().legend("roger").show(ui);
-            for style in nodes::RogerStyle::ALL {
-                if ui
-                    .selectable_label(tx.roger_style == style, style.label().to_uppercase())
-                    .on_hover_text(match style {
-                        nodes::RogerStyle::Tone => "One tone as the key comes up",
-                        nodes::RogerStyle::Quindar => {
-                            "NASA's Quindar tones: 2525 Hz before the speech, 2475 Hz after it"
-                        }
-                    })
-                    .clicked()
-                {
-                    tx.roger_style = style;
-                    changed = true;
-                }
-            }
-            if tx.roger_style == nodes::RogerStyle::Quindar {
-                let mut lead = tx.roger_lead_ms;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut lead)
-                            .speed(10.0)
-                            .range(0.0..=nodes::QUINDAR_LEAD_MAX_MS)
-                            .suffix(" ms"),
-                    )
-                    .on_hover_text(
-                        "Carrier alone before the opening tone, so the far radio's squelch \
-                         is open when it arrives",
-                    )
-                    .changed()
-                {
-                    tx.roger_lead_ms = lead;
-                    changed = true;
-                }
-                return;
-            }
-            let mut ms = tx.roger_ms;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut ms)
-                        .speed(5.0)
-                        .range(0.0..=nodes::ROGER_MAX_MS)
-                        .suffix(" ms"),
-                )
-                .on_hover_text("A courtesy tone at the end of an over, or zero for none")
-                .changed()
-            {
-                tx.roger_ms = ms;
-                changed = true;
-            }
-            if tx.roger_ms <= 0.0 {
-                return;
-            }
-            let mut hz = tx.roger_hz;
-            if ui
-                .add(egui::DragValue::new(&mut hz).speed(10.0).range(300.0..=3_000.0).suffix(" Hz"))
-                .on_hover_text("What pitch the courtesy tone is sent at")
-                .changed()
-            {
-                tx.roger_hz = hz;
-                changed = true;
-            }
+            legend_col(ui, "roger");
+            pick(
+                ui,
+                ("roger", id),
+                &mut roger,
+                &[
+                    (Roger::Off, "OFF", "Nothing at the end of an over"),
+                    (Roger::Beep, "TONE", "One tone as the key comes up"),
+                    (
+                        Roger::Quindar,
+                        "QUINDAR",
+                        "NASA's Quindar tones: 2525 Hz before the speech, 2475 Hz after it",
+                    ),
+                ],
+            );
         });
+        if roger != was {
+            (tx.roger_style, tx.roger_ms) = match roger {
+                Roger::Off => (nodes::RogerStyle::Tone, 0.0),
+                Roger::Beep => (nodes::RogerStyle::Tone, ROGER_BEEP_MS),
+                Roger::Quindar => (nodes::RogerStyle::Quindar, tx.roger_ms),
+            };
+            changed = true;
+        }
+        match roger {
+            Roger::Off => {}
+            Roger::Beep => {
+                changed |= number(
+                    ui,
+                    "beep",
+                    &mut tx.roger_ms,
+                    5.0,
+                    0.0..=nodes::ROGER_MAX_MS,
+                    " ms",
+                    "How long the courtesy tone lasts",
+                );
+                changed |= number(
+                    ui,
+                    "pitch",
+                    &mut tx.roger_hz,
+                    10.0,
+                    300.0..=3_000.0,
+                    " Hz",
+                    "What pitch the courtesy tone is sent at",
+                );
+            }
+            Roger::Quindar => {
+                changed |= number(
+                    ui,
+                    "lead",
+                    &mut tx.roger_lead_ms,
+                    10.0,
+                    0.0..=nodes::QUINDAR_LEAD_MAX_MS,
+                    " ms",
+                    "Carrier alone before the opening tone, so the far radio's squelch is open when it arrives",
+                );
+            }
+        }
         changed
     }
 
@@ -878,6 +895,7 @@ impl Strip<'_> {
         files: &mut super::state::FilePick,
         air: &crate::agent::channel::AgentChannel,
         air_fault: Option<&'static str>,
+        open: bool,
     ) -> bool {
         let mut changed = false;
         // Nothing to draw for a mode with no modulator behind it. A dead key
@@ -890,315 +908,293 @@ impl Strip<'_> {
         };
         let (id, opens_on) = (ch.id, ch.tone);
         let tx = ch.tx.get_or_insert_with(crate::radio::TxSpec::default);
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            // One line, not a legend beside a value: two `Line`s in a row
-            // sit on two baselines, and the mode read a pixel or two under
-            // its caption.
-            Line::new().legend("tx").value(mode.label()).show(ui);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                Line::new()
-                    .value(format!("{:.4} MHz", (ch.freq + tx.shift_hz) / 1e6))
-                    .size(11.0)
-                    .show(ui);
-            });
-        });
-
-        // A data mode has no microphone and no test tone: what it sends is
-        // whatever the operator put on the stage that holds it, and there is
-        // nothing to draw until that stage has been found.
         let digital = matches!(mode, crate::radio::TxMode::Digital(_));
         let controls = TxControls::of(mode, chain);
-        if !digital {
-            ui.horizontal(|ui| {
-                Line::new().legend("src").show(ui);
-                for src in [
-                    TxSource::Mic,
-                    TxSource::Tone,
-                    TxSource::Agent,
-                    TxSource::Sub,
-                    TxSource::Capture,
-                ] {
-                    if ui.selectable_label(tx.source == src, src.label()).clicked() {
-                        tx.source = src;
-                        changed = true;
-                    }
-                }
-            });
-        }
-        // Its own row. Right-aligned beside the source buttons it was drawn
-        // over them at the strip's default width, and the buttons underneath
-        // could not be pressed.
-        ui.horizontal(|ui| {
-            Line::new().legend("shift").show(ui);
+
+        if open {
+            let sends_on = format!("{} {:.4} MHz", mode.label(), (ch.freq + tx.shift_hz) / 1e6);
+            section_at(ui, "transmit", Some(sends_on));
+
+            // A data mode has no microphone and no test tone: what it sends is
+            // whatever the operator put on the stage that holds it, and there is
+            // nothing to draw until that stage has been found.
+            if !digital {
+                ui.horizontal(|ui| {
+                    legend_col(ui, "send");
+                    changed |= pick(
+                        ui,
+                        ("tx-source", id),
+                        &mut tx.source,
+                        &[
+                            (TxSource::Mic, "MIC", "What the microphone hears"),
+                            (TxSource::Tone, "TONE", "A steady test tone"),
+                            (TxSource::Agent, "AGENT", "The agent's own voice, when it answers"),
+                            (TxSource::Sub, "SUB", "A Flipper .sub file, replayed"),
+                            (TxSource::Capture, "IQ", "A recorded span, sent back out"),
+                        ],
+                    );
+                });
+            }
+            // Its own row. Right-aligned beside the source buttons it was drawn
+            // over them at the strip's default width, and the buttons underneath
+            // could not be pressed.
             let mut khz = tx.shift_hz / 1e3;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut khz)
-                        .speed(0.1)
-                        .range(-10_000.0..=10_000.0)
-                        .suffix(" kHz"),
-                )
-                .changed()
-            {
+            if number(
+                ui,
+                "shift",
+                &mut khz,
+                0.1,
+                -10_000.0..=10_000.0,
+                " kHz",
+                "Transmit this far off the channel, for a repeater",
+            ) {
                 tx.shift_hz = khz * 1e3;
                 changed = true;
             }
-        });
-        if matches!(mode, crate::radio::TxMode::Nfm | crate::radio::TxMode::Fm)
-            && matches!(tx.source, TxSource::Mic | TxSource::Tone | TxSource::Agent)
-        {
-            changed |= Self::channel_tx_code(ui, id, tx, opens_on);
-        }
+            if matches!(mode, crate::radio::TxMode::Nfm | crate::radio::TxMode::Fm)
+                && matches!(tx.source, TxSource::Mic | TxSource::Tone | TxSource::Agent)
+            {
+                changed |= Self::channel_tx_code(ui, id, tx, opens_on);
+            }
 
-        match tx.source {
-            // Nothing but the tone that ends its overs: the panel where the
-            // key would be says what the agent is doing, which is the same
-            // thing said better.
-            TxSource::Agent => {
-                changed |= Self::channel_roger(ui, tx);
-            }
-            TxSource::Sub => {
-                // The file is parsed on the interface and handed to the
-                // radio thread whole (`Cmd::SubFile`), so the chain reads
-                // what was checked rather than re-reading a path mid-over.
-                let name = sub_file.map_or_else(
-                    || "nothing: choose a .sub".to_string(),
-                    |f| {
-                        std::path::Path::new(&f.path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| f.path.clone())
-                    },
-                );
-                ui.horizontal(|ui| {
-                    Line::new().legend("file").show(ui);
-                    if ui
-                        .button("OPEN")
-                        .on_hover_text("Choose a Flipper .sub file to replay")
-                        .clicked()
-                    {
-                        sub_pick.ask(ui.ctx());
-                    }
-                    if let Some(f) = sub_file {
-                        if ui.button("CLEAR").on_hover_text("Transmit nothing").clicked() {
-                            cmds.push(Cmd::SubFile(None));
-                            sub_pick.file = None;
-                            changed = true;
-                        }
-                        Line::new()
-                            .value(format!(
-                                "{} {:.4} MHz {}",
-                                f.label(),
-                                f.file.frequency as f64 / 1e6,
-                                f.file.preset.label()
-                            ))
-                            .size(11.0)
-                            .show(ui);
-                    }
-                    Line::new().value(name).size(11.0).elided(ui);
-                });
-                if let Some(f) = sub_file
-                    && f.file.frequency != (ch.freq + tx.shift_hz) as u64
-                    && ui
-                        .button("TUNE")
-                        .on_hover_text("Move the dial to the file's own frequency")
-                        .clicked()
-                {
-                    cmds.push(Cmd::Center(common::Hz(f.file.frequency)));
-                    changed = true;
+            match tx.source {
+                // Nothing but the tone that ends its overs: the panel where the
+                // key would be says what the agent is doing, which is the same
+                // thing said better.
+                TxSource::Agent => {
+                    changed |= Self::channel_roger(ui, id, tx);
                 }
-            }
-            TxSource::Capture => {
-                ui.horizontal(|ui| {
-                    Line::new().legend("iq").show(ui);
-                    if ui
-                        .button("OPEN")
-                        .on_hover_text("Choose a recorded span to send back out")
-                        .clicked()
-                    {
-                        capture_pick.ask(ui.ctx());
-                    }
-                    if capture.is_some()
-                        && ui.button("CLEAR").on_hover_text("Transmit nothing").clicked()
-                    {
-                        cmds.push(Cmd::TxCapture(None));
-                        capture_pick.file = None;
-                        changed = true;
-                    }
-                    let name = capture.map_or_else(
-                        || "nothing: choose a capture".to_string(),
-                        |c| format!("{} ({:.1}s)", c.label(), c.seconds),
+                TxSource::Sub => {
+                    // The file is parsed on the interface and handed to the
+                    // radio thread whole (`Cmd::SubFile`), so the chain reads
+                    // what was checked rather than re-reading a path mid-over.
+                    let name = sub_file.map_or_else(
+                        || "nothing: choose a .sub".to_string(),
+                        |f| {
+                            std::path::Path::new(&f.path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| f.path.clone())
+                        },
                     );
-                    Line::new().value(name).size(11.0).elided(ui);
-                });
-                // What is about to be radiated, said before the key is
-                // pressed: a recording is somebody else's transmission, and
-                // in most places sending it back out is an offence.
-                if let Some(c) = capture {
-                    let where_at = match c.center {
-                        Some(hz) => format!("recorded at {:.4} MHz", hz.as_f64() / 1e6),
-                        None => "recorded at an unknown frequency".to_string(),
-                    };
                     ui.horizontal(|ui| {
-                        ui.add_space(28.0);
-                        Line::new()
-                            .value(format!(
-                                "{where_at}, sending on {:.4} MHz",
-                                (ch.freq + tx.shift_hz) / 1e6
-                            ))
-                            .size(11.0)
-                            .show(ui);
+                        legend_col(ui, "file");
+                        if ui
+                            .button("OPEN")
+                            .on_hover_text("Choose a Flipper .sub file to replay")
+                            .clicked()
+                        {
+                            sub_pick.ask(ui.ctx());
+                        }
+                        if let Some(f) = sub_file {
+                            if ui.button("CLEAR").on_hover_text("Transmit nothing").clicked() {
+                                cmds.push(Cmd::SubFile(None));
+                                sub_pick.file = None;
+                                changed = true;
+                            }
+                            Line::new()
+                                .value(format!(
+                                    "{} {:.4} MHz {}",
+                                    f.label(),
+                                    f.file.frequency as f64 / 1e6,
+                                    f.file.preset.label()
+                                ))
+                                .size(11.0)
+                                .show(ui);
+                        }
+                        Line::new().value(name).size(11.0).elided(ui);
                     });
-                    ui.horizontal(|ui| {
-                        ui.add_space(28.0);
-                        Line::new()
-                            .value("this puts somebody else's signal on the air")
-                            .size(11.0)
-                            .tint(theme::FAULT)
-                            .show(ui);
-                    });
-                    if c.center.is_some_and(|hz| hz.as_f64() != ch.freq + tx.shift_hz)
+                    if let Some(f) = sub_file
+                        && f.file.frequency != (ch.freq + tx.shift_hz) as u64
                         && ui
                             .button("TUNE")
-                            .on_hover_text("Move the dial to where the capture was made")
+                            .on_hover_text("Move the dial to the file's own frequency")
                             .clicked()
                     {
-                        cmds.push(Cmd::Center(c.center.expect("checked just above")));
+                        cmds.push(Cmd::Center(common::Hz(f.file.frequency)));
                         changed = true;
                     }
                 }
-            }
-            // A data mode that sends a file gets a picker for it and its
-            // remaining fields underneath: a picture has a mode and a pause
-            // as well as a picture.
-            _ if digital && controls.as_ref().is_some_and(|c| c.file().is_some()) => {
-                let controls = controls.as_ref().expect("the arm matched on it");
-                let carries = controls.file().expect("the arm matched on it");
-                let node = controls.node;
-                let field = controls.param(carries);
-                let path =
-                    field.and_then(|p| p.value.as_str().map(str::to_string)).unwrap_or_default();
-                // What the stage calls what it sends, so a multiplex asks
-                // for a stream and a picture asks for a picture.
-                let what = match field.map(|p| p.label.as_str()).unwrap_or_default() {
-                    "" => "file".to_string(),
-                    label => label.to_lowercase(),
-                };
-                ui.horizontal(|ui| {
-                    Line::new().legend(&what).show(ui);
-                    let chosen = std::path::Path::new(&path);
-                    let name = match path.is_empty() {
-                        true => "nothing: the test card".to_string(),
-                        false => chosen
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or(path.clone()),
-                    };
-                    let open = ui.button("OPEN").on_hover_text(format!("Choose the {what}"));
-                    if open.clicked() {
-                        files.ask(ui.ctx(), node, carries, "Choose what to transmit");
-                    }
-                    // Putting it back to nothing is a transmission too: the
-                    // test card, which is what an empty setting means.
-                    if !path.is_empty()
-                        && ui
-                            .button("CLEAR")
-                            .on_hover_text("Transmit the test card instead")
+                TxSource::Capture => {
+                    ui.horizontal(|ui| {
+                        legend_col(ui, "iq");
+                        if ui
+                            .button("OPEN")
+                            .on_hover_text("Choose a recorded span to send back out")
                             .clicked()
-                    {
-                        cmds.push(Cmd::NodeParam(
-                            node,
-                            carries.into(),
-                            pipeline::param::ParamValue::Text(String::new()),
-                        ));
-                    }
-                    // Cut short: a file name is as long as somebody else
-                    // made it, and a strip as wide as the longest one is a
-                    // strip nobody can use.
-                    Line::new().value(name).size(11.0).elided(ui);
-                });
-                for prm in controls.params.iter().filter(|p| p.name != carries) {
-                    if let Some(cmd) = tx_field(ui, node, prm, keying) {
-                        cmds.push(cmd);
+                        {
+                            capture_pick.ask(ui.ctx());
+                        }
+                        if capture.is_some()
+                            && ui.button("CLEAR").on_hover_text("Transmit nothing").clicked()
+                        {
+                            cmds.push(Cmd::TxCapture(None));
+                            capture_pick.file = None;
+                            changed = true;
+                        }
+                        let name = capture.map_or_else(
+                            || "nothing: choose a capture".to_string(),
+                            |c| format!("{} ({:.1}s)", c.label(), c.seconds),
+                        );
+                        Line::new().value(name).size(11.0).elided(ui);
+                    });
+                    // What is about to be radiated, said before the key is
+                    // pressed: a recording is somebody else's transmission, and
+                    // in most places sending it back out is an offence.
+                    if let Some(c) = capture {
+                        let where_at = match c.center {
+                            Some(hz) => format!("recorded at {:.4} MHz", hz.as_f64() / 1e6),
+                            None => "recorded at an unknown frequency".to_string(),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.add_space(28.0);
+                            Line::new()
+                                .value(format!(
+                                    "{where_at}, sending on {:.4} MHz",
+                                    (ch.freq + tx.shift_hz) / 1e6
+                                ))
+                                .size(11.0)
+                                .show(ui);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.add_space(28.0);
+                            Line::new()
+                                .value("this puts somebody else's signal on the air")
+                                .size(11.0)
+                                .tint(theme::FAULT)
+                                .show(ui);
+                        });
+                        if c.center.is_some_and(|hz| hz.as_f64() != ch.freq + tx.shift_hz)
+                            && ui
+                                .button("TUNE")
+                                .on_hover_text("Move the dial to where the capture was made")
+                                .clicked()
+                        {
+                            cmds.push(Cmd::Center(c.center.expect("checked just above")));
+                            changed = true;
+                        }
                     }
                 }
-            }
-            // What a page, a beacon or an over says. The stage describes its
-            // own fields, so a protocol added later is drawn here without
-            // this knowing anything about it, exactly as the chain view
-            // renders a stage it has never heard of.
-            _ if digital => {
-                if let Some(controls) = &controls {
-                    for prm in &controls.params {
-                        if let Some(cmd) = tx_field(ui, controls.node, prm, keying) {
+                // A data mode that sends a file gets a picker for it and its
+                // remaining fields underneath: a picture has a mode and a pause
+                // as well as a picture.
+                _ if digital && controls.as_ref().is_some_and(|c| c.file().is_some()) => {
+                    let controls = controls.as_ref().expect("the arm matched on it");
+                    let carries = controls.file().expect("the arm matched on it");
+                    let node = controls.node;
+                    let field = controls.param(carries);
+                    let path = field
+                        .and_then(|p| p.value.as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    // What the stage calls what it sends, so a multiplex asks
+                    // for a stream and a picture asks for a picture.
+                    let what = match field.map(|p| p.label.as_str()).unwrap_or_default() {
+                        "" => "file".to_string(),
+                        label => label.to_lowercase(),
+                    };
+                    ui.horizontal(|ui| {
+                        Line::new().legend(&what).show(ui);
+                        let chosen = std::path::Path::new(&path);
+                        let name = match path.is_empty() {
+                            true => "nothing: the test card".to_string(),
+                            false => chosen
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or(path.clone()),
+                        };
+                        let open = ui.button("OPEN").on_hover_text(format!("Choose the {what}"));
+                        if open.clicked() {
+                            files.ask(ui.ctx(), node, carries, "Choose what to transmit");
+                        }
+                        // Putting it back to nothing is a transmission too: the
+                        // test card, which is what an empty setting means.
+                        if !path.is_empty()
+                            && ui
+                                .button("CLEAR")
+                                .on_hover_text("Transmit the test card instead")
+                                .clicked()
+                        {
+                            cmds.push(Cmd::NodeParam(
+                                node,
+                                carries.into(),
+                                pipeline::param::ParamValue::Text(String::new()),
+                            ));
+                        }
+                        // Cut short: a file name is as long as somebody else
+                        // made it, and a strip as wide as the longest one is a
+                        // strip nobody can use.
+                        Line::new().value(name).size(11.0).elided(ui);
+                    });
+                    for prm in controls.params.iter().filter(|p| p.name != carries) {
+                        if let Some(cmd) = tx_field(ui, node, prm, keying) {
                             cmds.push(cmd);
                         }
                     }
                 }
-            }
-            TxSource::Mic => {
-                // The microphone's own fader and meter, read the way the
-                // channel's audio is: the level beside the control that sets
-                // it, so an operator can see they are being heard.
-                ui.horizontal(|ui| {
-                    Line::new().legend("mic").show(ui);
-                    let mut g = tx.mic_gain / nodes::MIC_GAIN_MAX;
-                    if ui.add(Fader::new(&mut g, mic).width(VU_W)).changed() {
-                        tx.mic_gain = (g * nodes::MIC_GAIN_MAX).clamp(0.0, nodes::MIC_GAIN_MAX);
-                        changed = true;
+                // What a page, a beacon or an over says. The stage describes its
+                // own fields, so a protocol added later is drawn here without
+                // this knowing anything about it, exactly as the chain view
+                // renders a stage it has never heard of.
+                _ if digital => {
+                    if let Some(controls) = &controls {
+                        for prm in &controls.params {
+                            if let Some(cmd) = tx_field(ui, controls.node, prm, keying) {
+                                cmds.push(cmd);
+                            }
+                        }
                     }
-                    Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
-                });
-                if mic_clipped {
-                    ui.horizontal(|ui| {
-                        ui.add_space(28.0);
-                        Line::new()
-                            .value("input clipping: lower the microphone boost")
-                            .size(11.0)
-                            .tint(theme::FAULT)
-                            .show(ui);
-                    });
                 }
-                changed |= Self::channel_vox(ui, tx, vox);
-                changed |= Self::channel_roger(ui, tx);
-            }
-            TxSource::Tone => {
-                ui.horizontal(|ui| {
-                    Line::new().legend("tone").show(ui);
-                    let mut hz = tx.tone_hz;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut hz)
-                                .speed(10.0)
-                                .range(100.0..=5_000.0)
-                                .suffix(" Hz"),
-                        )
-                        .changed()
-                    {
-                        tx.tone_hz = hz;
-                        changed = true;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        Line::new().legend("trim").show(ui);
-                        let mut db = tx.trim_db;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut db)
-                                    .speed(0.5)
-                                    .range(0.0..=20.0)
-                                    .suffix(" dB"),
-                            )
-                            .changed()
-                        {
-                            tx.trim_db = db;
+                TxSource::Mic => {
+                    // The microphone's own fader and meter, read the way the
+                    // channel's audio is: the level beside the control that sets
+                    // it, so an operator can see they are being heard.
+                    ui.horizontal(|ui| {
+                        legend_col(ui, "mic");
+                        let mut g = tx.mic_gain / nodes::MIC_GAIN_MAX;
+                        if ui.add(Fader::new(&mut g, mic).width(VU_W)).changed() {
+                            tx.mic_gain = (g * nodes::MIC_GAIN_MAX).clamp(0.0, nodes::MIC_GAIN_MAX);
                             changed = true;
                         }
+                        Line::new().value(format!("{:.1}x", tx.mic_gain)).size(11.0).show(ui);
                     });
-                });
-                changed |= Self::channel_roger(ui, tx);
+                    if mic_clipped {
+                        ui.horizontal(|ui| {
+                            ui.add_space(28.0);
+                            Line::new()
+                                .value("input clipping: lower the microphone boost")
+                                .size(11.0)
+                                .tint(theme::FAULT)
+                                .show(ui);
+                        });
+                    }
+                    changed |= Self::channel_vox(ui, tx, vox);
+                    changed |= Self::channel_roger(ui, id, tx);
+                }
+                TxSource::Tone => {
+                    changed |= number(
+                        ui,
+                        "tone",
+                        &mut tx.tone_hz,
+                        10.0,
+                        100.0..=5_000.0,
+                        " Hz",
+                        "The pitch of the test tone",
+                    );
+                    let mut trim = f64::from(tx.trim_db);
+                    if number(
+                        ui,
+                        "trim",
+                        &mut trim,
+                        0.5,
+                        0.0..=20.0,
+                        " dB",
+                        "How far under full deviation the tone is sent",
+                    ) {
+                        tx.trim_db = trim as f32;
+                        changed = true;
+                    }
+                    changed |= Self::channel_roger(ui, id, tx);
+                }
             }
         }
 
@@ -1437,8 +1433,13 @@ impl Strip<'_> {
                     .unwrap_or((0.0, false));
                 let mut remove = None;
                 let mut tune = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("strip-channels")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 for (i, ch) in self.st.channels.iter_mut().enumerate() {
                     let active = self.st.listening == Some(i);
+                    let open = self.st.unfolded.contains(&ch.id);
                     // Both strips take the panel fill. The selected one used a
                     // lighter wash, which was the exact colour of a slider's
                     // handle and trough, so the volume control disappeared
@@ -1466,7 +1467,7 @@ impl Strip<'_> {
                                 // buttons on the right: a satellite channel
                                 // is named after its transmitter, and ninety
                                 // points cut that off mid-callsign.
-                                let room = (ui.available_width() - 130.0).max(90.0);
+                                let room = (ui.available_width() - 60.0).max(90.0);
                                 egui_bench::form::clipboard_menu(ui.add(
                                     egui::TextEdit::singleline(&mut ch.label)
                                         .desired_width(room)
@@ -1475,24 +1476,17 @@ impl Strip<'_> {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui.small_button("REMOVE").clicked() {
-                                            remove = Some(i);
-                                        }
-                                        // Into the bank, under a group named
-                                        // here. The last group used is
-                                        // offered, since channels are saved
-                                        // in runs.
-                                        // The same button as REMOVE beside
-                                        // it: `menu_button` is a full-sized
-                                        // one, and two buttons of different
-                                        // heights in a row read as two
-                                        // different kinds of control.
-                                        egui::containers::menu::MenuButton::from_button(
-                                            egui::Button::new("SAVE").small(),
-                                        )
-                                        .ui(ui, |ui| {
+                                        let more = crate::icons::icon_button_sized(
+                                            ui,
+                                            crate::icons::Icon::More,
+                                            "Save or remove this channel",
+                                            true,
+                                            false,
+                                            18.0,
+                                        );
+                                        egui::Popup::menu(&more).show(|ui| {
                                             ui.set_min_width(180.0);
-                                            Line::new().legend("group").show(ui);
+                                            Line::new().legend("save to group").show(ui);
                                             let r = ui.text_edit_singleline(self.memory_group);
                                             let enter = r.lost_focus()
                                                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1510,7 +1504,25 @@ impl Strip<'_> {
                                                 let _ = self.memory.save();
                                                 ui.close();
                                             }
+                                            ui.add_space(6.0);
+                                            if ui.button("REMOVE").clicked() {
+                                                remove = Some(i);
+                                                ui.close();
+                                            }
                                         });
+                                        let (icon, tip) = match open {
+                                            true => (crate::icons::Icon::Unfolded, "Fold this channel's settings away"),
+                                            false => (crate::icons::Icon::Folded, "Show this channel's settings"),
+                                        };
+                                        if crate::icons::icon_button_sized(ui, icon, tip, true, open, 18.0)
+                                            .clicked()
+                                        {
+                                            if open {
+                                                self.st.unfolded.remove(&ch.id);
+                                            } else {
+                                                self.st.unfolded.insert(ch.id);
+                                            }
+                                        }
                                     },
                                 );
                             });
@@ -1636,10 +1648,6 @@ impl Strip<'_> {
                                 );
                             });
                             if ch.on {
-                                ui.add_space(4.0);
-                                if Self::channel_bandwidth(ui, ch) {
-                                    tune = Some(i);
-                                }
                                 // Its own level, which runs into the master,
                                 // read against what it is contributing. The
                                 // level is the fader stage's, set by the
@@ -1648,7 +1656,7 @@ impl Strip<'_> {
                                 let st = states.iter().find(|s| s.id == ch.id).copied();
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    Line::new().legend("vol").show(ui);
+                                    legend_col(ui, "vol");
                                     let level = st.map(|s| s.level).unwrap_or(0.0);
                                     let fader = crate::chain::fader_id(ch.id);
                                     if ui.add(Fader::new(&mut ch.volume, level).width(VU_W)).changed() {
@@ -1667,6 +1675,11 @@ impl Strip<'_> {
                                         ));
                                     }
                                 });
+                                if let Some(st) = st
+                                    && Self::channel_squelch(ui, ch, st)
+                                {
+                                    tune = Some(i);
+                                }
                                 if let Some(offer) = strips
                                     .inputs
                                     .iter()
@@ -1692,10 +1705,12 @@ impl Strip<'_> {
                                     let last = heard_since(&mut self.st.heard_at, ch.id, d.heard);
                                     Self::channel_decoding(ui, &d, last);
                                 }
-                                if let Some(st) = st
-                                    && Self::channel_audio(ui, ch, st) {
-                                        tune = Some(i);
-                                    }
+                                if open
+                                    && let Some(st) = st
+                                    && Self::channel_receive(ui, ch, st)
+                                {
+                                    tune = Some(i);
+                                }
                             }
                             let sub_file = self.st.sub_pick.file.clone();
                             let capture = self.st.capture_pick.file.clone();
@@ -1717,6 +1732,7 @@ impl Strip<'_> {
                                     self.files,
                                     self.air,
                                     self.air_fault,
+                                    open,
                                 )
                             {
                                 tune = Some(i);
@@ -1756,7 +1772,7 @@ impl Strip<'_> {
                                 });
                                 ui.add_space(4.0);
                                 ui.horizontal(|ui| {
-                                    Line::new().legend("vol").show(ui);
+                                    legend_col(ui, "vol");
                                     let mut v = s.volume;
                                     if ui.add(Fader::new(&mut v, s.level).width(VU_W)).changed() {
                                         self.cmds.push(Cmd::StageParam(
@@ -1780,6 +1796,7 @@ impl Strip<'_> {
                         ui.add_space(6.0);
                     }
                 }
+                    });
 
                 if let Some(i) = remove {
                     self.st.channels.remove(i);
@@ -1800,6 +1817,72 @@ impl Strip<'_> {
             });
         self.acts
     }
+}
+
+const LEGEND_W: f32 = 44.0;
+
+fn legend_col(ui: &mut egui::Ui, text: &str) {
+    let w = Line::new().legend(text).show(ui).rect.width();
+    ui.add_space((LEGEND_W - w - ui.spacing().item_spacing.x).max(0.0));
+}
+
+fn section(ui: &mut egui::Ui, text: &str) {
+    section_at(ui, text, None);
+}
+
+fn section_at(ui: &mut egui::Ui, text: &str, reading: Option<String>) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        Line::new().legend(text).show(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(reading) = reading {
+                Line::new().value(reading).size(11.0).show(ui);
+            }
+            let (r, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 12.0), Sense::hover());
+            ui.painter().hline(r.x_range(), r.center().y, Stroke::new(1.0, theme::ETCH));
+        });
+    });
+}
+
+const ROGER_BEEP_MS: f64 = 150.0;
+
+fn pick<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    picked: &mut T,
+    options: &[(T, &str, &str)],
+) -> bool {
+    let mut changed = false;
+    let shown = options.iter().find(|(v, _, _)| v == picked).map_or("", |(_, l, _)| *l);
+    egui::ComboBox::from_id_salt(id).selected_text(shown).width(120.0).show_ui(ui, |ui| {
+        for (v, label, tip) in options {
+            let on = picked == v;
+            if ui.selectable_label(on, *label).on_hover_text(*tip).clicked() && !on {
+                *picked = *v;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+fn number(
+    ui: &mut egui::Ui,
+    legend: &str,
+    value: &mut f64,
+    speed: f64,
+    range: std::ops::RangeInclusive<f64>,
+    suffix: &str,
+    tip: &str,
+) -> bool {
+    ui.horizontal(|ui| {
+        legend_col(ui, legend);
+        ui.add(egui::DragValue::new(value).speed(speed).range(range).suffix(suffix))
+            .on_hover_text(tip)
+            .changed()
+    })
+    .inner
 }
 
 /// One of a data mode's fields on the strip, sent to the stage when it is
@@ -2004,6 +2087,7 @@ mod tests {
                 blanker: None,
                 denoise: false,
                 denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+                agc_tune: nodes::AgcTune::default(),
                 notch: false,
                 voice: false,
                 reads: None,

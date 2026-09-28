@@ -298,6 +298,7 @@ fn a_channel_outside_the_span_is_refused_rather_than_demodulated() {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        agc_tune: nodes::AgcTune::default(),
         notch: false,
         tx: None,
         tone: None,

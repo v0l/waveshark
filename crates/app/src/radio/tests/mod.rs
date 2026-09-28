@@ -85,6 +85,7 @@ fn strip_channel(id: u64, offset: f64) -> ChannelSpec {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        agc_tune: nodes::AgcTune::default(),
         notch: false,
         voice: false,
         reads: None,

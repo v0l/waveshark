@@ -105,6 +105,7 @@ fn what_survives_the_narrowing_is_what_was_inside_it() {
         blanker: None,
         denoise: false,
         denoise_db: dsp::denoise::DEFAULT_DEPTH_DB,
+        agc_tune: nodes::AgcTune::default(),
         notch: false,
         voice: false,
         reads: None,
